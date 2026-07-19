@@ -1,0 +1,56 @@
+name: Release Obsidian plugin
+
+# Tag with the plain manifest version (e.g. `0.1.0`, no `v` prefix).
+# BRAT and the Obsidian directory both resolve releases by that tag and
+# expect main.js / manifest.json / styles.css as release-level assets.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/obsidian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/obsidian/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Verify tag matches manifest version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          manifest=$(node -p "require('./manifest.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$manifest" ] || [ "$tag" != "$pkg" ]; then
+            echo "tag=$tag manifest=$manifest package=$pkg mismatch" >&2
+            exit 1
+          fi
+      - name: Verify GPL banner survived bundling
+        run: head -20 main.js | grep -q "GNU General Public License"
+      - name: Create release with plugin assets
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "kwir-search ${GITHUB_REF_NAME}" \
+            --notes "Kwir Search Obsidian plugin ${GITHUB_REF_NAME} (GPL-3.0-only).
+
+Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy the attached main.js, manifest.json, and styles.css into \`.obsidian/plugins/kwir-search/\`.
+
+Corresponding source for this build: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/clients/obsidian" \
+            main.js manifest.json styles.css LICENSE
+        env:
+          GH_TOKEN: ${{ github.token }}

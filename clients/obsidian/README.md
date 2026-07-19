@@ -16,6 +16,14 @@ This plugin is a deliberately **dumb client**: a query modal, a results renderer
 - The daemon's bearer token is read on demand from the file path you configure and is **never** stored in plugin data, logged, or displayed.
 - No telemetry of any kind.
 
+## Install via BRAT
+
+1. Install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from Community plugins.
+2. Run **BRAT: Add a beta plugin** and enter `cybersader/kwir`.
+3. While this repository is private, add a fine-grained GitHub personal access token (read-only Contents on this repo) in BRAT's settings first.
+
+BRAT installs from GitHub release assets (`main.js`, `manifest.json`, `styles.css`), which the release workflow publishes on every version tag. Use **Add a beta plugin with frozen version** to pin a specific release.
+
 ## Setup
 
 1. Start the daemon; it prints its bearer-token file path.
