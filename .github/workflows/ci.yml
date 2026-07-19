@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  daemon:
+    name: Daemon (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: Format
+        run: cargo fmt --all --check
+        working-directory: daemon
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        working-directory: daemon
+      - name: Tests
+        run: cargo test --workspace
+        working-directory: daemon
+
+  rebuild-determinism:
+    name: Rebuild-from-nothing determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: Build
+        run: cargo build -p kwir
+        working-directory: daemon
+      - name: Index, record, destroy, rebuild, compare
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          bin="$PWD/daemon/target/debug/kwir"
+          "$bin" --config "$work/config.toml" --data-dir "$work/data" vault add --id fixture --path "$PWD/fixtures/vault"
+          "$bin" --config "$work/config.toml" --data-dir "$work/data" index
+          for q in phosphorescent welcome "vocabulary mismatch"; do
+            "$bin" --config "$work/config.toml" --data-dir "$work/data" search "$q" --json >> "$work/first.json"
+          done
+          rm -rf "$work/data"
+          "$bin" --config "$work/config.toml" --data-dir "$work/data" index
+          for q in phosphorescent welcome "vocabulary mismatch"; do
+            "$bin" --config "$work/config.toml" --data-dir "$work/data" search "$q" --json >> "$work/second.json"
+          done
+          cmp "$work/first.json" "$work/second.json"
+          echo "lexical results identical across rebuild-from-nothing"
+
+  obsidian-plugin:
+    name: Obsidian plugin (typecheck, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/obsidian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/obsidian/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Tests
+        run: npm test
+      - name: Build (typecheck + bundle)
+        run: npm run build
+      - name: Verify release artifacts and license banner
+        run: |
+          test -f main.js && test -f manifest.json && test -f styles.css
+          head -20 main.js | grep -q "GNU General Public License"
+          node -e "const m=require('./manifest.json'),p=require('./package.json'); if(m.version!==p.version){console.error('manifest/package version mismatch');process.exit(1)}"

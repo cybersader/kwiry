@@ -4,6 +4,8 @@
 /bench/vector/target/
 /.kwir/
 .fastembed_cache/
+/clients/obsidian/node_modules/
+/clients/obsidian/main.js
 *.tmp
 *.log
 

@@ -1,0 +1,10 @@
+{
+  "id": "kwir-search",
+  "name": "Kwir Search",
+  "version": "0.1.0",
+  "minAppVersion": "1.7.2",
+  "description": "Search your notes through a local kwir daemon with lexical, semantic, and hybrid ranking.",
+  "author": "cybersader",
+  "authorUrl": "https://github.com/cybersader/kwir",
+  "isDesktopOnly": true
+}
