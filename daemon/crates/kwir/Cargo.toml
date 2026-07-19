@@ -1,0 +1,29 @@
+[package]
+name = "kwir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["semantic-onnx"]
+semantic-onnx = ["kwir-core/semantic-onnx"]
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+kwir-core = { path = "../kwir-core" }
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+http-body-util.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
+tower.workspace = true

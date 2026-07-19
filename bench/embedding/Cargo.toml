@@ -1,0 +1,26 @@
+[package]
+name = "kwir-embed-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace: heavyweight ML runtimes stay out of the daemon
+# workspace and its lockfile until Vertical 3 picks a winner.
+[workspace]
+
+[dependencies]
+kwir-core = { path = "../../daemon/crates/kwir-core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Exactly one runtime feature is enabled per benchmark run.
+# rustls features avoid a system OpenSSL dependency on WSL.
+fastembed = { version = "5", optional = true, default-features = false, features = [
+    "ort-download-binaries-rustls-tls",
+    "hf-hub-rustls-tls",
+] }
+
+[features]
+default = []
+bench-fastembed = ["dep:fastembed"]

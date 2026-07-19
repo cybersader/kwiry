@@ -1,0 +1,36 @@
+[package]
+name = "kwir-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arc-swap.workspace = true
+base64.workspace = true
+directories.workspace = true
+fs2.workspace = true
+getrandom.workspace = true
+ignore.workspace = true
+pulldown-cmark.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde-saphyr.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlite-vec.workspace = true
+subtle.workspace = true
+tantivy.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+zerocopy.workspace = true
+fastembed = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables the fastembed/ONNX embedder. The sqlite-vec store, RRF fusion, and
+# semantic state compile unconditionally so tests cover them without ONNX.
+semantic-onnx = ["dep:fastembed"]

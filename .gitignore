@@ -1,0 +1,16 @@
+# Build and runtime artifacts
+/daemon/target/
+/bench/embedding/target/
+/bench/vector/target/
+/.kwir/
+.fastembed_cache/
+*.tmp
+*.log
+
+# Private / machine-specific — never publish (owner rule 2026-07-20)
+/.claude/
+/knowledge-base/
+/HANDOFF.md
+/CLAUDE.local.md
+/kwir.portagenty.toml
+/tests/
