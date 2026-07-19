@@ -43,14 +43,17 @@ jobs:
         run: head -20 main.js | grep -q "GNU General Public License"
       - name: Create release with plugin assets
         run: |
+          {
+            echo "Kwir Search Obsidian plugin ${GITHUB_REF_NAME} (GPL-3.0-only)."
+            echo
+            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy the attached main.js, manifest.json, and styles.css into \`.obsidian/plugins/kwir-search/\`."
+            echo
+            echo "Corresponding source for this build: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/clients/obsidian"
+          } > /tmp/release-notes.md
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "kwir-search ${GITHUB_REF_NAME}" \
-            --notes "Kwir Search Obsidian plugin ${GITHUB_REF_NAME} (GPL-3.0-only).
-
-Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy the attached main.js, manifest.json, and styles.css into \`.obsidian/plugins/kwir-search/\`.
-
-Corresponding source for this build: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/clients/obsidian" \
+            --notes-file /tmp/release-notes.md \
             main.js manifest.json styles.css LICENSE
         env:
           GH_TOKEN: ${{ github.token }}
