@@ -1,9 +1,12 @@
 <p align="center">
-  <img src="docs/logo/kwiry-banner.svg" width="480" alt="kwiry — pixel magnifying-glass logo and wordmark">
+  <img src="docs/logo/kwiry.svg" width="120" alt="kwiry logo">
 </p>
 
+<h1 align="center">kwiry</h1>
+
 <p align="center">
-  <strong>“query” — knowledge-work IR, Yours</strong>
+  <strong>K</strong>nowledge <strong>W</strong>orkspace <strong>I</strong>nformation <strong>R</strong>etrieval <strong>Y</strong>eoman<br>
+  <em>pronounced “query” — the trusty clerk who keeps your records searchable</em>
 </p>
 
 <p align="center">
@@ -69,6 +72,8 @@ curl -X POST http://127.0.0.1:32189/v0/search \
 | `bench/` | Standalone benchmark crates (embedding runtime, vector store) | MIT OR Apache-2.0 |
 
 Everything outside `clients/obsidian/` is dual-licensed under MIT or Apache-2.0 at your option (the Rust convention; Apache-2.0 adds an express patent grant). Unless you state otherwise, any contribution you submit to those paths is dual-licensed the same way, per Apache-2.0 §5.
+
+Logo alternates live in [`docs/logo/minimal/`](docs/logo/minimal/).
 
 The Obsidian plugin is GPL-3.0-only and may port code from [Omnisearch](https://github.com/scambier/obsidian-omnisearch) by Simon Cambier. The plugin talks to the daemon only over localhost HTTP; the daemon and core contain no GPL code.
 

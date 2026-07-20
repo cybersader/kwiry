@@ -1,6 +1,6 @@
 # kwiry logo concepts
 
-The canonical mark is [`kwiry.svg`](kwiry.svg) (badge) with [`kwiry-banner.svg`](kwiry-banner.svg) for the README header — refined from the "Rounded Pixel Lens" concept below. The other concepts are kept for reference.
+The canonical mark is [`kwiry.svg`](kwiry.svg) — the minimalist "Rounded Search Badge" from [`minimal/`](minimal/). Three alternates sit beside it; the earlier pixel-grid concepts below are retained for history.
 
 ## Rounded Pixel Search
 
