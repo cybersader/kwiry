@@ -154,7 +154,7 @@ pub(crate) fn open_index(data_dir: &Path) -> Result<(Index, Fields)> {
 pub(crate) fn open_index_dir(index_dir: &Path) -> Result<(Index, Fields)> {
     if !index_dir.join("meta.json").is_file() {
         return Err(Error::Index(format!(
-            "no index found at {}; run `kwir index` first",
+            "no index found at {}; run `kwiry index` first",
             index_dir.display()
         )));
     }

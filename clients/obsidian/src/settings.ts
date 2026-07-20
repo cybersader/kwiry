@@ -3,7 +3,7 @@
 
 import type { SearchMode } from "./api";
 
-export interface KwirPluginSettings {
+export interface KwiryPluginSettings {
   daemonUrl: string;
   /** Absolute path to the daemon's bearer-token file. The token itself is
    * never persisted in plugin data. */
@@ -15,7 +15,7 @@ export interface KwirPluginSettings {
   showRibbonIcon: boolean;
 }
 
-export const DEFAULT_SETTINGS: KwirPluginSettings = {
+export const DEFAULT_SETTINGS: KwiryPluginSettings = {
   daemonUrl: "http://127.0.0.1:32189",
   tokenFilePath: "",
   defaultMode: "hybrid",
@@ -25,7 +25,7 @@ export const DEFAULT_SETTINGS: KwirPluginSettings = {
 };
 
 /** Merges stored data over defaults, discarding unknown keys. */
-export function loadSettings(stored: unknown): KwirPluginSettings {
+export function loadSettings(stored: unknown): KwiryPluginSettings {
   const settings = { ...DEFAULT_SETTINGS };
   if (typeof stored !== "object" || stored === null) {
     return settings;

@@ -9,15 +9,15 @@ Semantic/vector search, hybrid RRF, cursors, signed claim tokens, HTTP vault adm
 Run from `daemon/`:
 
 ```bash
-cargo run -p kwir -- vault add --id notes --path /absolute/path/to/tree
-cargo run -p kwir -- index
-cargo run -p kwir -- serve
+cargo run -p kwiry -- vault add --id notes --path /absolute/path/to/tree
+cargo run -p kwiry -- index
+cargo run -p kwiry -- serve
 ```
 
 The default listener is `127.0.0.1:32189`. Override it for an isolated run:
 
 ```bash
-cargo run -p kwir -- --config /tmp/kwir.toml --data-dir /tmp/kwir-data serve --bind 127.0.0.1:0
+cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data serve --bind 127.0.0.1:0
 ```
 
 Vertical 2 accepts loopback addresses only.
@@ -29,7 +29,7 @@ The daemon stores only the token-file path in config. On first serve it creates 
 The daemon prints the token-file path but never prints the token. Read it locally when calling protected endpoints:
 
 ```bash
-token=$(tr -d '\n' < ~/.config/kwir/config.token)
+token=$(tr -d '\n' < ~/.config/kwiry/config.token)
 ```
 
 `GET /v0/health` is public. Search and status require:
@@ -93,8 +93,8 @@ Omitted/hybrid/semantic mode returns `501 mode_unavailable`. A non-null cursor r
 The existing direct CLI remains compatible and does not require the bearer token:
 
 ```bash
-kwir search "query"
-kwir search "query" --json
+kwiry search "query"
+kwiry search "query" --json
 ```
 
 ## Data layout
@@ -111,9 +111,9 @@ kwir search "query" --json
       manifest.json
 ```
 
-Each generation contains a Tantivy index and a derived per-file manifest. `current.json` atomically selects the active generation. `kwir index` builds aside and publishes only after the candidate index and manifest validate, so a failed rebuild leaves prior results active.
+Each generation contains a Tantivy index and a derived per-file manifest. `current.json` atomically selects the active generation. `kwiry index` builds aside and publishes only after the candidate index and manifest validate, so a failed rebuild leaves prior results active.
 
-A Vertical 1 root-level Tantivy index remains readable. The next `kwir index` or first daemon start builds and activates a Vertical 2 generation without treating the old index as source data.
+A Vertical 1 root-level Tantivy index remains readable. The next `kwiry index` or first daemon start builds and activates a Vertical 2 generation without treating the old index as source data.
 
 Files and registration config remain the sole source of truth. The generations, manifest, locks, and token can be recreated or rotated as appropriate.
 
@@ -136,7 +136,7 @@ Watch events are hints. The daemon debounces bursts, reconciles final state, per
 
 ## Live config reload
 
-`kwir vault add` remains usable while the daemon runs. Config writes are lock-serialized and atomic. The daemon watches the config and applies registration diffs:
+`kwiry vault add` remains usable while the daemon runs. Config writes are lock-serialized and atomic. The daemon watches the config and applies registration diffs:
 
 - Added vault: start watching and reconcile it.
 - Removed vault: stop watching and remove its indexed sources.

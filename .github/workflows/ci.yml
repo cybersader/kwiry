@@ -41,13 +41,13 @@ jobs:
         with:
           workspaces: daemon
       - name: Build
-        run: cargo build -p kwir
+        run: cargo build -p kwiry
         working-directory: daemon
       - name: Index, record, destroy, rebuild, compare
         run: |
           set -euo pipefail
           work=$(mktemp -d)
-          bin="$PWD/daemon/target/debug/kwir"
+          bin="$PWD/daemon/target/debug/kwiry"
           "$bin" --config "$work/config.toml" --data-dir "$work/data" vault add --id fixture --path "$PWD/fixtures/vault"
           "$bin" --config "$work/config.toml" --data-dir "$work/data" index
           for q in phosphorescent welcome "vocabulary mismatch"; do

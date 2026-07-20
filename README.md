@@ -1,6 +1,6 @@
-# kwir
+# kwiry
 
-**kwir** ("knowledge-work IR", pronounced "quire" — a gathering of pages) is a standalone, self-contained search daemon for knowledge workspaces: any registered tree of markdown/text files — Obsidian vaults, project repos, docs trees. Obsidian is one client among several, not the definition.
+**kwiry** ("knowledge-work IR", pronounced "quire" — a gathering of pages) is a standalone, self-contained search daemon for knowledge workspaces: any registered tree of markdown/text files — Obsidian vaults, project repos, docs trees. Obsidian is one client among several, not the definition.
 
 A single Rust binary provides:
 
@@ -17,19 +17,19 @@ cd daemon
 cargo build --workspace
 
 # Register a tree and search it from the CLI
-cargo run -p kwir -- --config /tmp/kwir.toml --data-dir /tmp/kwir-data vault add --id notes --path /absolute/path/to/notes
-cargo run -p kwir -- --config /tmp/kwir.toml --data-dir /tmp/kwir-data index
-cargo run -p kwir -- --config /tmp/kwir.toml --data-dir /tmp/kwir-data search "your query"
+cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data vault add --id notes --path /absolute/path/to/notes
+cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data index
+cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data search "your query"
 
 # Run the daemon (add --semantic for semantic/hybrid modes)
-cargo run -p kwir -- --config /tmp/kwir.toml --data-dir /tmp/kwir-data serve --semantic
+cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data serve --semantic
 ```
 
 The daemon prints its bearer-token file path on startup. Search over HTTP:
 
 ```bash
 curl -X POST http://127.0.0.1:32189/v0/search \
-  -H "Authorization: Bearer $(cat /tmp/kwir.token)" \
+  -H "Authorization: Bearer $(cat /tmp/kwiry.token)" \
   -H 'Content-Type: application/json' \
   -d '{"q":"your query","mode":"hybrid","limit":20}'
 ```
@@ -45,7 +45,7 @@ curl -X POST http://127.0.0.1:32189/v0/search \
 
 | Path | Contents | License |
 |---|---|---|
-| `daemon/` | Rust workspace: `kwir-core` library + `kwir` binary | TBD (permissive) |
+| `daemon/` | Rust workspace: `kwiry-core` library + `kwiry` binary | TBD (permissive) |
 | `clients/obsidian/` | Obsidian plugin (dumb client: query box + renderer + status light) | GPL-3.0 |
 | `fixtures/vault/` | CI fixture vault for determinism tests | — |
 | `bench/` | Standalone benchmark crates (embedding runtime, vector store) | — |

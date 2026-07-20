@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { describe, expect, it } from "vitest";
 
-import { KwirApiError, KwirClient, type Transport } from "../src/api";
+import { KwiryApiError, KwiryClient, type Transport } from "../src/api";
 
 interface Call {
   url: string;
@@ -33,10 +33,10 @@ const HIT = {
   frontmatter: {},
 };
 
-describe("KwirClient.search", () => {
+describe("KwiryClient.search", () => {
   it("sends an authenticated POST with mode and limit", async () => {
     const { transport, calls } = mockTransport(200, { hits: [HIT], next_cursor: null });
-    const client = new KwirClient({
+    const client = new KwiryClient({
       baseUrl: "http://127.0.0.1:32189/",
       token: "secret\n",
       transport,
@@ -55,7 +55,7 @@ describe("KwirClient.search", () => {
 
   it("includes filters only when non-empty", async () => {
     const { transport, calls } = mockTransport(200, { hits: [], next_cursor: null });
-    const client = new KwirClient({ baseUrl: "http://x.local", token: "t", transport });
+    const client = new KwiryClient({ baseUrl: "http://x.local", token: "t", transport });
     await client.search({ q: "a", mode: "lexical", filters: {} });
     await client.search({ q: "a", mode: "lexical", filters: { vault_id: "notes" } });
     expect(JSON.parse(calls[0]!.body!)).not.toHaveProperty("filters");
@@ -66,9 +66,9 @@ describe("KwirClient.search", () => {
     const { transport } = mockTransport(501, {
       error: { code: "mode_unavailable", message: "needs --semantic" },
     });
-    const client = new KwirClient({ baseUrl: "http://x.local", token: "t", transport });
+    const client = new KwiryClient({ baseUrl: "http://x.local", token: "t", transport });
     const error = await client.search({ q: "a", mode: "semantic" }).catch((e) => e);
-    expect(error).toBeInstanceOf(KwirApiError);
+    expect(error).toBeInstanceOf(KwiryApiError);
     expect(error.status).toBe(501);
     expect(error.code).toBe("mode_unavailable");
   });
@@ -77,16 +77,16 @@ describe("KwirClient.search", () => {
     const transport: Transport = async () => {
       throw new Error("ECONNREFUSED");
     };
-    const client = new KwirClient({ baseUrl: "http://x.local", token: "t", transport });
+    const client = new KwiryClient({ baseUrl: "http://x.local", token: "t", transport });
     const error = await client.search({ q: "a", mode: "lexical" }).catch((e) => e);
-    expect(error).toBeInstanceOf(KwirApiError);
+    expect(error).toBeInstanceOf(KwiryApiError);
     expect(error.code).toBe("daemon_unreachable");
   });
 
   it("rejects non-http base URLs", () => {
     const { transport } = mockTransport(200, {});
     expect(
-      () => new KwirClient({ baseUrl: "file:///etc", token: "t", transport }),
+      () => new KwiryClient({ baseUrl: "file:///etc", token: "t", transport }),
     ).toThrow(/http/);
   });
 
@@ -94,7 +94,7 @@ describe("KwirClient.search", () => {
     const transport: Transport = async () => {
       throw new Error("down");
     };
-    const client = new KwirClient({ baseUrl: "http://x.local", token: "t", transport });
+    const client = new KwiryClient({ baseUrl: "http://x.local", token: "t", transport });
     expect(await client.health()).toBe(false);
   });
 });

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::cargo::cargo_bin_cmd;
-use kwir_core::SearchHit;
+use kwiry_core::SearchHit;
 use tempfile::tempdir;
 
 fn fixture_vault() -> PathBuf {
@@ -19,7 +19,7 @@ fn lifecycle_indexes_and_searches_fixture() {
     let data = temporary.path().join("data");
     let fixture = fixture_vault();
 
-    cargo_bin_cmd!("kwir")
+    cargo_bin_cmd!("kwiry")
         .args([
             "--config",
             config.to_str().unwrap(),
@@ -36,7 +36,7 @@ fn lifecycle_indexes_and_searches_fixture() {
         .success()
         .stdout(predicates::str::contains("Registered vault 'fixture'"));
 
-    cargo_bin_cmd!("kwir")
+    cargo_bin_cmd!("kwiry")
         .args([
             "--config",
             config.to_str().unwrap(),
@@ -61,7 +61,7 @@ fn lifecycle_indexes_and_searches_fixture() {
     assert!(hidden.is_empty());
 
     fs::remove_dir_all(&data).unwrap();
-    cargo_bin_cmd!("kwir")
+    cargo_bin_cmd!("kwiry")
         .args([
             "--config",
             config.to_str().unwrap(),
@@ -76,7 +76,7 @@ fn lifecycle_indexes_and_searches_fixture() {
 }
 
 fn search_json(config: &Path, data: &Path, query: &str, vault: Option<&str>) -> Vec<SearchHit> {
-    let mut command = cargo_bin_cmd!("kwir");
+    let mut command = cargo_bin_cmd!("kwiry");
     command.args([
         "--config",
         config.to_str().unwrap(),

@@ -7,12 +7,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use kwir_core::{
+use kwiry_core::{
     Paths, SearchRequest, add_vault, build_index, load_config, search_index, update_config,
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "kwir", version, about = "Knowledge-work lexical search")]
+#[command(name = "kwiry", version, about = "Knowledge-work lexical search")]
 struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,

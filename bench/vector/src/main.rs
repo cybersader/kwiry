@@ -1,10 +1,10 @@
-//! sqlite-vec acceptance gate for kwir Vertical 3.
+//! sqlite-vec acceptance gate for kwiry Vertical 3.
 //!
 //! Proves: (1) sqlite-vec registers against current rusqlite, (2) delete +
 //! reinsert works transactionally alongside a chunk-mapping table, and
 //! (3) exact-KNN latency over 384-dim vectors at vault-realistic sizes.
 //!
-//! Usage: kwir-vector-bench [sizes...]   (default: 25000 50000 100000)
+//! Usage: kwiry-vector-bench [sizes...]   (default: 25000 50000 100000)
 
 use std::time::Instant;
 
@@ -42,7 +42,7 @@ fn vector_for(seed: u64) -> Vec<f32> {
 }
 
 fn bench_size(count: usize) -> Result<SizeReport> {
-    let dir = std::env::temp_dir().join(format!("kwir-vec-bench-{count}"));
+    let dir = std::env::temp_dir().join(format!("kwiry-vec-bench-{count}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
     let db_path = dir.join("vectors.db");

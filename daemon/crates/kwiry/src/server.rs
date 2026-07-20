@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
-use kwir_core::{
+use kwiry_core::{
     ApiErrorEnvelope, ApiSearchRequest, ApiSearchResponse, Config, DaemonState, DaemonStatus,
     DataRoot, HealthResponse, IndexManager, Manifest, ManifestFileOutcome, ModelStatus, Paths,
     SearchMode, SearchRuntime, VaultStatus, build_index, load_config, load_or_create_token,
@@ -94,7 +94,7 @@ pub(crate) async fn serve(
     let router = build_router(state, AuthState::new(token));
     let local_address = listener.local_addr()?;
     println!(
-        "kwir listening on http://{local_address}; bearer token file: {}",
+        "kwiry listening on http://{local_address}; bearer token file: {}",
         token_path.display()
     );
 
@@ -118,9 +118,9 @@ fn install_semantic(paths: &Paths, runtime: &SearchRuntime) -> Result<()> {
         "loading embedding model (cache: {}; first run downloads ~130 MB)",
         cache_dir.display()
     );
-    let embedder = kwir_core::FastembedEmbedder::new(&cache_dir)
+    let embedder = kwiry_core::FastembedEmbedder::new(&cache_dir)
         .context("failed to load the embedding model")?;
-    let semantic = kwir_core::SemanticRuntime::open(&store_path, Box::new(embedder))
+    let semantic = kwiry_core::SemanticRuntime::open(&store_path, Box::new(embedder))
         .context("failed to open the semantic store")?;
     runtime.install_semantic(Arc::new(semantic));
     Ok(())
@@ -210,15 +210,15 @@ async fn search(
     }))
 }
 
-fn map_core_error(error: kwir_core::Error) -> HttpError {
+fn map_core_error(error: kwiry_core::Error) -> HttpError {
     match error {
-        kwir_core::Error::Query(message) => {
+        kwiry_core::Error::Query(message) => {
             HttpError::new(StatusCode::BAD_REQUEST, "invalid_query", message)
         }
-        kwir_core::Error::Index(message) if message == "index is not ready" => {
+        kwiry_core::Error::Index(message) if message == "index is not ready" => {
             HttpError::new(StatusCode::SERVICE_UNAVAILABLE, "index_not_ready", message)
         }
-        kwir_core::Error::SemanticUnavailable(message) => {
+        kwiry_core::Error::SemanticUnavailable(message) => {
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "mode_unavailable", message)
         }
         _ => HttpError::new(
@@ -271,7 +271,7 @@ pub(crate) fn status_from_manifest(
         },
         version: env!("CARGO_PKG_VERSION").to_owned(),
         generation,
-        chunking_version: kwir_core::CHUNKING_VERSION,
+        chunking_version: kwiry_core::CHUNKING_VERSION,
         documents: manifest.document_count(),
         chunks: manifest.chunk_count(),
         last_sync: manifest.last_sync.clone(),

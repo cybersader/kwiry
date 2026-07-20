@@ -93,7 +93,7 @@ impl DataRoot {
             return Ok(self.root.clone());
         }
         Err(Error::Index(format!(
-            "no index found at {}; run `kwir index` first",
+            "no index found at {}; run `kwiry index` first",
             self.root.display()
         )))
     }

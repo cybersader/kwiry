@@ -19,7 +19,7 @@ pub struct Paths {
 
 impl Paths {
     pub fn resolve(config: Option<PathBuf>, data_dir: Option<PathBuf>) -> Result<Self> {
-        let project = ProjectDirs::from("", "", "kwir").ok_or_else(|| Error::InvalidConfig {
+        let project = ProjectDirs::from("", "", "kwiry").ok_or_else(|| Error::InvalidConfig {
             path: PathBuf::from("<platform>"),
             message: "could not resolve platform config and data directories".to_owned(),
         })?;

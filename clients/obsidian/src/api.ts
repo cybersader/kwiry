@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Typed client for the kwir daemon HTTP contract (CONTRACT.md §4).
+// Typed client for the kwiry daemon HTTP contract (CONTRACT.md §4).
 // Pure module: the HTTP transport is injected so this is testable
 // outside Obsidian; production wires Obsidian's requestUrl.
 
@@ -58,14 +58,14 @@ export interface ApiErrorBody {
   message: string;
 }
 
-export class KwirApiError extends Error {
+export class KwiryApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly code: string,
     message: string,
   ) {
     super(message);
-    this.name = "KwirApiError";
+    this.name = "KwiryApiError";
   }
 }
 
@@ -79,7 +79,7 @@ export interface Transport {
   }): Promise<{ status: number; text: string }>;
 }
 
-export interface KwirClientOptions {
+export interface KwiryClientOptions {
   baseUrl: string;
   token: string;
   transport: Transport;
@@ -93,12 +93,12 @@ function normalizeBaseUrl(raw: string): string {
   return trimmed;
 }
 
-export class KwirClient {
+export class KwiryClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly transport: Transport;
 
-  constructor(options: KwirClientOptions) {
+  constructor(options: KwiryClientOptions) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.token = options.token.trim();
     this.transport = options.transport;
@@ -151,10 +151,10 @@ export class KwirClient {
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (error) {
-      throw new KwirApiError(
+      throw new KwiryApiError(
         0,
         "daemon_unreachable",
-        `kwir daemon is unreachable at ${this.baseUrl}: ${String(error)}`,
+        `kwiry daemon is unreachable at ${this.baseUrl}: ${String(error)}`,
       );
     }
     let parsed: unknown;
@@ -167,11 +167,11 @@ export class KwirClient {
       const envelope = parsed as { error?: ApiErrorBody } | undefined;
       const code = envelope?.error?.code ?? `http_${response.status}`;
       const message =
-        envelope?.error?.message ?? `kwir daemon returned HTTP ${response.status}`;
-      throw new KwirApiError(response.status, code, message);
+        envelope?.error?.message ?? `kwiry daemon returned HTTP ${response.status}`;
+      throw new KwiryApiError(response.status, code, message);
     }
     if (parsed === undefined) {
-      throw new KwirApiError(response.status, "invalid_response", "daemon returned non-JSON body");
+      throw new KwiryApiError(response.status, "invalid_response", "daemon returned non-JSON body");
     }
     return parsed;
   }

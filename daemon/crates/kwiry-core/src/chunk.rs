@@ -331,7 +331,7 @@ fn find_split(source: &str, boundaries: &[usize], start: usize, target: usize) -
 fn chunk_id(vault_id: &str, path: &str, heading_path: &[String], chunk_ix: u64) -> String {
     let heading_json = serde_json::to_vec(heading_path).expect("heading paths serialize");
     let mut digest = Sha256::new();
-    digest.update(b"kwir-chunk-v1\0");
+    digest.update(b"kwiry-chunk-v1\0");
     update_component(&mut digest, vault_id.as_bytes());
     update_component(&mut digest, path.as_bytes());
     update_component(&mut digest, &heading_json);

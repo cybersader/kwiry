@@ -5,7 +5,7 @@ import process from "process";
 import builtins from "builtin-modules";
 
 const banner = `/*
-Kwir Search — Obsidian client for the kwir search daemon.
+Kwiry Search — Obsidian client for the kwiry search daemon.
 Copyright (C) 2026 cybersader
 
 This program is free software: you can redistribute it and/or modify
@@ -19,7 +19,7 @@ General Public License for more details: https://www.gnu.org/licenses/gpl-3.0.ht
 
 Portions adapted from Omnisearch (https://github.com/scambier/obsidian-omnisearch),
 Copyright Simon Cambier and contributors, GPL-3.0.
-Source for this build: https://github.com/cybersader/kwir (clients/obsidian).
+Source for this build: https://github.com/cybersader/kwiry (clients/obsidian).
 */`;
 
 const production = process.argv[2] === "production";

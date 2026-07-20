@@ -1,5 +1,5 @@
 [package]
-name = "kwir"
+name = "kwiry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,13 +7,13 @@ license.workspace = true
 
 [features]
 default = ["semantic-onnx"]
-semantic-onnx = ["kwir-core/semantic-onnx"]
+semantic-onnx = ["kwiry-core/semantic-onnx"]
 
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
-kwir-core = { path = "../kwir-core" }
+kwiry-core = { path = "../kwiry-core" }
 notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true

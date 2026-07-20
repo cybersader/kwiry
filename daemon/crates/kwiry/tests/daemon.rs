@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
-use kwir_core::{ApiSearchResponse, DaemonState, DaemonStatus};
+use kwiry_core::{ApiSearchResponse, DaemonState, DaemonStatus};
 use tempfile::tempdir;
 
 struct Daemon {
@@ -20,7 +20,7 @@ struct Daemon {
 
 impl Daemon {
     fn start(config: &Path, data: &Path) -> Self {
-        let mut child = Command::new(cargo_bin("kwir"))
+        let mut child = Command::new(cargo_bin("kwiry"))
             .args([
                 "--config",
                 config.to_str().unwrap(),
@@ -37,7 +37,7 @@ impl Daemon {
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         stdout.read_line(&mut line).unwrap();
-        assert!(line.starts_with("kwir listening on http://"), "{line}");
+        assert!(line.starts_with("kwiry listening on http://"), "{line}");
         let address = line
             .split("http://")
             .nth(1)
@@ -125,7 +125,7 @@ fn daemon_watches_files_reloads_config_and_reconciles_offline_changes() {
 }
 
 fn vault_add(config: &Path, data: &Path, id: &str, vault: &Path) {
-    let status = Command::new(cargo_bin("kwir"))
+    let status = Command::new(cargo_bin("kwiry"))
         .args([
             "--config",
             config.to_str().unwrap(),
@@ -143,7 +143,7 @@ fn vault_add(config: &Path, data: &Path, id: &str, vault: &Path) {
     assert!(status.success());
 }
 
-fn search(address: &str, token: &str, query: &str) -> Vec<kwir_core::SearchHit> {
+fn search(address: &str, token: &str, query: &str) -> Vec<kwiry_core::SearchHit> {
     let body = serde_json::json!({
         "q": query,
         "mode": "lexical",

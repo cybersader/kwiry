@@ -1,21 +1,21 @@
-/* Kwir Search — GPL-3.0-only */
+/* Kwiry Search — GPL-3.0-only */
 
-.kwir-result {
+.kwiry-result {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.kwir-result-title {
+.kwiry-result-title {
   font-weight: var(--font-semibold);
 }
 
-.kwir-result-meta {
+.kwiry-result-meta {
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
 }
 
-.kwir-result-excerpt {
+.kwiry-result-excerpt {
   font-size: var(--font-ui-small);
   color: var(--text-normal);
   overflow: hidden;
@@ -25,7 +25,7 @@
   -webkit-box-orient: vertical;
 }
 
-.kwir-result-excerpt mark {
+.kwiry-result-excerpt mark {
   background-color: var(--text-highlight-bg);
   color: inherit;
 }

@@ -1,6 +1,6 @@
 use tokio::sync::{mpsc, oneshot};
 
-use kwir_core::{Config, IndexManager, ReconcileReport, Result};
+use kwiry_core::{Config, IndexManager, ReconcileReport, Result};
 
 #[derive(Clone)]
 pub(crate) struct ManagerHandle {
@@ -13,10 +13,10 @@ impl ManagerHandle {
         self.sender
             .send(ManagerCommand::Reconcile { config, reply })
             .await
-            .map_err(|_| kwir_core::Error::State("index manager stopped".to_owned()))?;
+            .map_err(|_| kwiry_core::Error::State("index manager stopped".to_owned()))?;
         response
             .await
-            .map_err(|_| kwir_core::Error::State("index manager dropped response".to_owned()))?
+            .map_err(|_| kwiry_core::Error::State("index manager dropped response".to_owned()))?
     }
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
@@ -24,10 +24,10 @@ impl ManagerHandle {
         self.sender
             .send(ManagerCommand::Shutdown { reply })
             .await
-            .map_err(|_| kwir_core::Error::State("index manager stopped".to_owned()))?;
+            .map_err(|_| kwiry_core::Error::State("index manager stopped".to_owned()))?;
         response
             .await
-            .map_err(|_| kwir_core::Error::State("index manager dropped response".to_owned()))?
+            .map_err(|_| kwiry_core::Error::State("index manager dropped response".to_owned()))?
     }
 }
 

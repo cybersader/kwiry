@@ -1465,7 +1465,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kwir"
+name = "kwiry"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1473,7 +1473,7 @@ dependencies = [
  "axum",
  "clap",
  "http-body-util",
- "kwir-core",
+ "kwiry-core",
  "notify",
  "predicates",
  "serde",
@@ -1486,7 +1486,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kwir-core"
+name = "kwiry-core"
 version = "0.1.0"
 dependencies = [
  "arc-swap",

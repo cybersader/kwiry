@@ -3,13 +3,13 @@
 
 import { App, PluginSettingTab, Setting } from "obsidian";
 
-import type KwirPlugin from "./main";
+import type KwiryPlugin from "./main";
 import type { SearchMode } from "./api";
 
-export class KwirSettingTab extends PluginSettingTab {
+export class KwirySettingTab extends PluginSettingTab {
   constructor(
     app: App,
-    private readonly plugin: KwirPlugin,
+    private readonly plugin: KwiryPlugin,
   ) {
     super(app, plugin);
   }
@@ -22,7 +22,7 @@ export class KwirSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Daemon URL")
-      .setDesc("Local kwir daemon address. The plugin only talks to this URL.")
+      .setDesc("Local kwiry daemon address. The plugin only talks to this URL.")
       .addText((text) =>
         text
           .setPlaceholder("http://127.0.0.1:32189")
@@ -80,7 +80,7 @@ export class KwirSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Vault ID filter")
-      .setDesc("Restrict searches to one registered kwir vault. Empty searches all.")
+      .setDesc("Restrict searches to one registered kwiry vault. Empty searches all.")
       .addText((text) =>
         text.setValue(this.plugin.settings.vaultId).onChange(async (value) => {
           this.plugin.settings.vaultId = value.trim();

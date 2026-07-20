@@ -44,15 +44,15 @@ jobs:
       - name: Create release with plugin assets
         run: |
           {
-            echo "Kwir Search Obsidian plugin ${GITHUB_REF_NAME} (GPL-3.0-only)."
+            echo "Kwiry Search Obsidian plugin ${GITHUB_REF_NAME} (GPL-3.0-only)."
             echo
-            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy the attached main.js, manifest.json, and styles.css into \`.obsidian/plugins/kwir-search/\`."
+            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy the attached main.js, manifest.json, and styles.css into \`.obsidian/plugins/kwiry-search/\`."
             echo
             echo "Corresponding source for this build: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/clients/obsidian"
           } > /tmp/release-notes.md
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "kwir-search ${GITHUB_REF_NAME}" \
+            --title "kwiry-search ${GITHUB_REF_NAME}" \
             --notes-file /tmp/release-notes.md \
             main.js manifest.json styles.css LICENSE
         env:

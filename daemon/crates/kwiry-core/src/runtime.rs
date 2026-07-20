@@ -221,7 +221,7 @@ impl IndexManager {
         let data_root = DataRoot::new(data_dir);
         let lock = data_root.acquire_writer_lock()?;
         let active = data_root.active()?.ok_or_else(|| {
-            Error::State("Vertical 2 generation is missing; run `kwir index` first".to_owned())
+            Error::State("Vertical 2 generation is missing; run `kwiry index` first".to_owned())
         })?;
         let manifest = Manifest::load(&active.manifest_path)?;
         let search = Arc::new(SearchIndex::open(active.id, &active.index_dir)?);

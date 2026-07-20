@@ -7,7 +7,7 @@ per daemon run and can never take lexical search down.
 ## Running
 
 ```bash
-cargo run -p kwir -- --config /tmp/kwir-config.toml --data-dir /tmp/kwir-data serve --bind 127.0.0.1:32189 --semantic
+cargo run -p kwiry -- --config /tmp/kwiry-config.toml --data-dir /tmp/kwiry-data serve --bind 127.0.0.1:32189 --semantic
 ```
 
 `--semantic` loads the embedding model at startup. The first run downloads
@@ -47,7 +47,7 @@ unavailable.
   Measured exact-KNN latency: ~11 ms at 25k chunks, ~39 ms at 100k
   (k=40, 384-dim), leaving usearch as an escape hatch only for far larger
   corpora.
-- **Fusion:** `rrf_fuse` in `kwir-core` — a formula over two ranked ID
+- **Fusion:** `rrf_fuse` in `kwiry-core` — a formula over two ranked ID
   lists, no tuning surface beyond the constant.
 
 ## Model identity and reindexing

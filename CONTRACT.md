@@ -122,7 +122,7 @@ The repo ships a fixture vault and a CI job: index it → record query results f
   docs/
 ```
 
-Working name: **kwir** ("knowledge-work IR", pronounced "quire" — a gathering of pages). Scope note: "vault" in this document means any registered tree of markdown/text (workspaces, repos, docs), not specifically an Obsidian vault — Obsidian is one client among several. Owner may still rename at repo creation.
+Working name: **kwiry** ("knowledge-work IR", pronounced "quire" — a gathering of pages). Scope note: "vault" in this document means any registered tree of markdown/text (workspaces, repos, docs), not specifically an Obsidian vault — Obsidian is one client among several. Owner may still rename at repo creation.
 
 ## 10. Open questions for the review
 

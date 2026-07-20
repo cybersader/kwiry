@@ -6,7 +6,7 @@ use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use kwir_core::{ApiErrorEnvelope, Principal, token_matches};
+use kwiry_core::{ApiErrorEnvelope, Principal, token_matches};
 
 #[derive(Clone)]
 pub(crate) struct AuthState {

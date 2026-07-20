@@ -9,7 +9,7 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{RwLock, mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use kwir_core::{Config, DaemonState, DaemonStatus, Paths, load_config};
+use kwiry_core::{Config, DaemonState, DaemonStatus, Paths, load_config};
 
 use crate::runtime::ManagerHandle;
 use crate::server::status_from_manifest;

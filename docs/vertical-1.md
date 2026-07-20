@@ -1,6 +1,6 @@
 # Vertical 1: lexical index and query core
 
-Vertical 1 registers one or more Markdown/text trees, rebuilds a disposable Tantivy index, and searches it through the `kwir` binary. It deliberately has no watcher or daemon process yet.
+Vertical 1 registers one or more Markdown/text trees, rebuilds a disposable Tantivy index, and searches it through the `kwiry` binary. It deliberately has no watcher or daemon process yet.
 
 ## Ingestion policy (`chunking_version = 1`)
 
@@ -18,9 +18,9 @@ Vertical 1 registers one or more Markdown/text trees, rebuilds a disposable Tant
 From `daemon/`:
 
 ```bash
-cargo run -p kwir -- --config /tmp/kwir-config.toml --data-dir /tmp/kwir-data vault add --id my-notes --path /absolute/path/to/tree
-cargo run -p kwir -- --config /tmp/kwir-config.toml --data-dir /tmp/kwir-data index
-cargo run -p kwir -- --config /tmp/kwir-config.toml --data-dir /tmp/kwir-data search "your vocabulary"
+cargo run -p kwiry -- --config /tmp/kwiry-config.toml --data-dir /tmp/kwiry-data vault add --id my-notes --path /absolute/path/to/tree
+cargo run -p kwiry -- --config /tmp/kwiry-config.toml --data-dir /tmp/kwiry-data index
+cargo run -p kwiry -- --config /tmp/kwiry-config.toml --data-dir /tmp/kwiry-data search "your vocabulary"
 ```
 
-Use `--json` on `search` for stable machine-readable output. Delete `/tmp/kwir-data` at any time; `index` reconstructs it from registered files.
+Use `--json` on `search` for stable machine-readable output. Delete `/tmp/kwiry-data` at any time; `index` reconstructs it from registered files.

@@ -1,4 +1,4 @@
-//! Embedding-runtime micro-benchmark for kwir Vertical 3.
+//! Embedding-runtime micro-benchmark for kwiry Vertical 3.
 //!
 //! Measures cold start (model load), throughput (chunks/sec), and peak RSS
 //! against real chunker output from a vault tree. One runtime per build via
@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use kwir_core::VaultRegistration;
+use kwiry_core::VaultRegistration;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -54,7 +54,7 @@ fn load_chunks(vault_path: &PathBuf) -> Result<(usize, Vec<String>)> {
         path: vault_path.clone(),
         room: None,
     };
-    let report = kwir_core::ingest_vault(&registration);
+    let report = kwiry_core::ingest_vault(&registration);
     if report.chunks.is_empty() {
         bail!("no chunks produced from {}", vault_path.display());
     }
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let vault = PathBuf::from(
         args.next()
-            .context("usage: kwir-embed-bench <vault-path> [repeat]")?,
+            .context("usage: kwiry-embed-bench <vault-path> [repeat]")?,
     );
     let repeat: usize = args.next().map(|r| r.parse()).transpose()?.unwrap_or(1);
     let batch: usize = args.next().map(|b| b.parse()).transpose()?.unwrap_or(32);
