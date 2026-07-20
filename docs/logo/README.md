@@ -1,6 +1,6 @@
 # kwiry logo concepts
 
-Three two-tone rounded-pixel magnifying-glass concepts. Pick one (or direct changes) and it becomes the repo/plugin icon.
+The canonical mark is [`kwiry.svg`](kwiry.svg) (badge) with [`kwiry-banner.svg`](kwiry-banner.svg) for the README header — refined from the "Rounded Pixel Lens" concept below. The other concepts are kept for reference.
 
 ## Rounded Pixel Search
 

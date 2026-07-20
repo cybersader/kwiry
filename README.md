@@ -1,6 +1,24 @@
-# kwiry
+<p align="center">
+  <img src="docs/logo/kwiry-banner.svg" width="480" alt="kwiry — pixel magnifying-glass logo and wordmark">
+</p>
 
-**kwiry** ("knowledge-work IR", pronounced "quire" — a gathering of pages) is a standalone, self-contained search daemon for knowledge workspaces: any registered tree of markdown/text files — Obsidian vaults, project repos, docs trees. Obsidian is one client among several, not the definition.
+<p align="center">
+  <strong>“query” — knowledge-work IR, Yours</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/cybersader/kwiry/actions/workflows/ci.yml"><img src="https://github.com/cybersader/kwiry/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="MIT or Apache-2.0 license">
+  <img src="https://img.shields.io/badge/Obsidian%20plugin-GPL--3.0--only-7c3aed.svg" alt="Obsidian plugin: GPL-3.0-only">
+  <img src="https://img.shields.io/badge/Rust-000000.svg?logo=rust&logoColor=white" alt="Rust">
+</p>
+
+<p align="center">
+  <strong>Local-first search for the knowledge you already own.</strong><br>
+  kwiry combines Tantivy BM25, fully offline ONNX embeddings, and RRF hybrid ranking in one Rust binary — nothing leaves your machine, and no cloud API is required. Point it at any Markdown or text tree, not just an Obsidian vault, then search through its watching daemon, authenticated HTTP API, or BRAT-installable Obsidian client.
+</p>
+
+---
 
 A single Rust binary provides:
 
