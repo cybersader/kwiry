@@ -45,12 +45,14 @@ curl -X POST http://127.0.0.1:32189/v0/search \
 
 | Path | Contents | License |
 |---|---|---|
-| `daemon/` | Rust workspace: `kwiry-core` library + `kwiry` binary | TBD (permissive) |
-| `clients/obsidian/` | Obsidian plugin (dumb client: query box + renderer + status light) | GPL-3.0 |
-| `fixtures/vault/` | CI fixture vault for determinism tests | — |
-| `bench/` | Standalone benchmark crates (embedding runtime, vector store) | — |
+| `daemon/` | Rust workspace: `kwiry-core` library + `kwiry` binary | [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) |
+| `clients/obsidian/` | Obsidian plugin (dumb client: query box + renderer + status light) | [GPL-3.0-only](clients/obsidian/LICENSE) |
+| `fixtures/vault/` | CI fixture vault for determinism tests | MIT OR Apache-2.0 |
+| `bench/` | Standalone benchmark crates (embedding runtime, vector store) | MIT OR Apache-2.0 |
 
-The Obsidian plugin is GPL-3.0 and ports code from [Omnisearch](https://github.com/scambier/obsidian-omnisearch) by Simon Cambier. The plugin talks to the daemon only over localhost HTTP; the daemon and core carry their own (permissive) license and contain no GPL code.
+Everything outside `clients/obsidian/` is dual-licensed under MIT or Apache-2.0 at your option (the Rust convention; Apache-2.0 adds an express patent grant). Unless you state otherwise, any contribution you submit to those paths is dual-licensed the same way, per Apache-2.0 §5.
+
+The Obsidian plugin is GPL-3.0-only and may port code from [Omnisearch](https://github.com/scambier/obsidian-omnisearch) by Simon Cambier. The plugin talks to the daemon only over localhost HTTP; the daemon and core contain no GPL code.
 
 ## Design invariants
 

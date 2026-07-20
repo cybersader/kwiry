@@ -3,6 +3,7 @@ name = "kwiry-embed-bench"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT OR Apache-2.0"
 
 # Standalone workspace: heavyweight ML runtimes stay out of the daemon
 # workspace and its lockfile until Vertical 3 picks a winner.
