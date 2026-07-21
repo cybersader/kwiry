@@ -39,6 +39,7 @@ impl Principal {
 
 pub fn load_or_create_token(path: &Path) -> Result<String> {
     if path.exists() {
+        set_owner_only(path)?;
         return load_token(path);
     }
 
@@ -103,7 +104,57 @@ fn set_owner_only(path: &Path) -> Result<()> {
         .map_err(|error| io_error(path, error))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_owner_only(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        SetFileSecurityW,
+    };
+
+    let descriptor_text: Vec<u16> = "D:P(A;;FA;;;OW)\0".encode_utf16().collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: The SDDL string is NUL-terminated and `descriptor` receives a LocalAlloc allocation.
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            descriptor_text.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            ptr::null_mut(),
+        )
+    };
+    if converted == 0 {
+        return Err(io_error(path, std::io::Error::last_os_error()));
+    }
+
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: Both pointers remain valid for the duration of this call.
+    let applied = unsafe {
+        SetFileSecurityW(
+            path_wide.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    let error = (applied == 0).then(std::io::Error::last_os_error);
+    // SAFETY: `descriptor` was allocated by the conversion function above.
+    unsafe {
+        LocalFree(descriptor);
+    }
+
+    match error {
+        Some(error) => Err(io_error(path, error)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn set_owner_only(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -150,5 +201,91 @@ mod tests {
 
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_token_permissions_are_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempdir().unwrap();
+        let path = temporary.path().join("token");
+        fs::write(&path, "existing-token\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(load_or_create_token(&path).unwrap(), "existing-token");
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn token_file_has_a_protected_owner_only_dacl() {
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetFileSecurityW, PSECURITY_DESCRIPTOR,
+        };
+
+        let temporary = tempdir().unwrap();
+        let path = temporary.path().join("token");
+        fs::write(&path, "existing-token\n").unwrap();
+        assert_eq!(load_or_create_token(&path).unwrap(), "existing-token");
+        let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+
+        let mut needed = 0_u32;
+        // SAFETY: This first call intentionally queries the required buffer size.
+        unsafe {
+            GetFileSecurityW(
+                path_wide.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                0,
+                &mut needed,
+            );
+        }
+        assert!(needed > 0);
+        let mut descriptor = vec![0_u8; needed as usize];
+        // SAFETY: The buffer has the size returned by `GetFileSecurityW`.
+        let loaded = unsafe {
+            GetFileSecurityW(
+                path_wide.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                descriptor.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        };
+        assert_ne!(loaded, 0);
+
+        let mut text = ptr::null_mut();
+        let mut text_length = 0_u32;
+        // SAFETY: The descriptor buffer is initialized by `GetFileSecurityW`.
+        let converted = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor.as_mut_ptr().cast::<core::ffi::c_void>() as PSECURITY_DESCRIPTOR,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                &mut text_length,
+            )
+        };
+        assert_ne!(converted, 0);
+        // SAFETY: The conversion call returned a UTF-16 allocation of `text_length` units.
+        let sddl = unsafe {
+            String::from_utf16_lossy(std::slice::from_raw_parts(text, text_length as usize))
+        };
+        // SAFETY: `text` was allocated by the conversion function.
+        unsafe {
+            LocalFree(text.cast());
+        }
+
+        assert!(sddl.starts_with("D:P"), "unexpected DACL: {sddl}");
+        assert!(sddl.contains("(A;;FA;;;OW)"), "unexpected DACL: {sddl}");
     }
 }

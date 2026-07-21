@@ -7,8 +7,9 @@ use tantivy::schema::{FAST, Field, INDEXED, STORED, STRING, Schema, TEXT, Tantiv
 use crate::chunk::ingest_vault_files;
 use crate::error::{Error, Result};
 use crate::generation::DataRoot;
+use crate::lexical::{normalize_raw, technical_identifiers};
 use crate::manifest::{Manifest, registration_fingerprint, source_key};
-use crate::model::{Chunk, Config, FileOutcomeKind, IndexStats};
+use crate::model::{Chunk, Config, FileOutcomeKind, IndexStats, RetrievalMetadata};
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
@@ -19,14 +20,23 @@ pub(crate) struct Fields {
     pub vault_id: Field,
     pub room: Field,
     pub path: Field,
+    pub filename: Field,
+    pub stem: Field,
+    pub aliases: Field,
+    pub filename_raw: Field,
+    pub stem_raw: Field,
+    pub aliases_raw: Field,
     pub heading_path: Field,
     pub heading_text: Field,
+    pub heading_raw: Field,
     pub title: Field,
+    pub title_raw: Field,
     pub title_exact: Option<Field>,
     pub description_exact: Option<Field>,
     pub status_exact: Option<Field>,
     pub date_exact: Option<Field>,
     pub content: Field,
+    pub content_identifiers: Field,
     pub frontmatter: Field,
     pub tags: Field,
     pub links_out: Field,
@@ -43,14 +53,23 @@ impl Fields {
             vault_id: field(schema, "vault_id")?,
             room: field(schema, "room")?,
             path: field(schema, "path")?,
+            filename: field(schema, "filename")?,
+            stem: field(schema, "stem")?,
+            aliases: field(schema, "aliases")?,
+            filename_raw: field(schema, "filename_raw")?,
+            stem_raw: field(schema, "stem_raw")?,
+            aliases_raw: field(schema, "aliases_raw")?,
             heading_path: field(schema, "heading_path")?,
             heading_text: field(schema, "heading_text")?,
+            heading_raw: field(schema, "heading_raw")?,
             title: field(schema, "title")?,
+            title_raw: field(schema, "title_raw")?,
             title_exact: schema.get_field("title_exact").ok(),
             description_exact: schema.get_field("description_exact").ok(),
             status_exact: schema.get_field("status_exact").ok(),
             date_exact: schema.get_field("date_exact").ok(),
             content: field(schema, "content")?,
+            content_identifiers: field(schema, "content_identifiers")?,
             frontmatter: field(schema, "frontmatter")?,
             tags: field(schema, "tags")?,
             links_out: field(schema, "links_out")?,
@@ -108,7 +127,7 @@ fn build_candidate(config: &Config, index_dir: &Path, manifest_path: &Path) -> R
             }
             for chunk in &outcome.chunks {
                 writer
-                    .add_document(chunk_document(&fields, chunk)?)
+                    .add_document(chunk_document(&fields, chunk, &outcome.retrieval)?)
                     .map_err(|error| Error::Index(error.to_string()))?;
                 stats.chunks += 1;
             }
@@ -170,14 +189,23 @@ pub(crate) fn build_schema() -> Schema {
     builder.add_text_field("vault_id", STRING | STORED);
     builder.add_text_field("room", STRING | STORED);
     builder.add_text_field("path", STRING | STORED);
+    builder.add_text_field("filename", TEXT);
+    builder.add_text_field("stem", TEXT);
+    builder.add_text_field("aliases", TEXT);
+    builder.add_text_field("filename_raw", STRING);
+    builder.add_text_field("stem_raw", STRING);
+    builder.add_text_field("aliases_raw", STRING);
     builder.add_text_field("heading_path", STORED);
     builder.add_text_field("heading_text", TEXT | STORED);
+    builder.add_text_field("heading_raw", STRING);
     builder.add_text_field("title", TEXT | STORED);
+    builder.add_text_field("title_raw", STRING);
     builder.add_text_field("title_exact", STRING | STORED);
     builder.add_text_field("description_exact", STRING | STORED);
     builder.add_text_field("status_exact", STRING | STORED);
     builder.add_text_field("date_exact", STRING | STORED);
     builder.add_text_field("content", TEXT | STORED);
+    builder.add_text_field("content_identifiers", STRING);
     builder.add_text_field("frontmatter", STORED);
     builder.add_text_field("tags", STRING | STORED);
     builder.add_text_field("links_out", STORED);
@@ -187,7 +215,11 @@ pub(crate) fn build_schema() -> Schema {
     builder.build()
 }
 
-pub(crate) fn chunk_document(fields: &Fields, chunk: &Chunk) -> Result<TantivyDocument> {
+pub(crate) fn chunk_document(
+    fields: &Fields,
+    chunk: &Chunk,
+    retrieval: &RetrievalMetadata,
+) -> Result<TantivyDocument> {
     let mut document = TantivyDocument::default();
     document.add_text(
         required_optional_field(fields.source_key, "source_key")?,
@@ -197,16 +229,25 @@ pub(crate) fn chunk_document(fields: &Fields, chunk: &Chunk) -> Result<TantivyDo
     document.add_text(fields.vault_id, &chunk.vault_id);
     document.add_text(fields.room, chunk.room.as_deref().unwrap_or_default());
     document.add_text(fields.path, &chunk.path);
+    document.add_text(fields.filename, &retrieval.filename);
+    document.add_text(fields.stem, &retrieval.stem);
+    add_raw(&mut document, fields.filename_raw, &retrieval.filename);
+    add_raw(&mut document, fields.stem_raw, &retrieval.stem);
+    for alias in &retrieval.aliases {
+        document.add_text(fields.aliases, alias);
+        add_raw(&mut document, fields.aliases_raw, alias);
+    }
     document.add_text(
         fields.heading_path,
         serde_json::to_string(&chunk.heading_path)
             .map_err(|error| Error::Index(error.to_string()))?,
     );
-    document.add_text(fields.heading_text, chunk.heading_path.join(" "));
-    document.add_text(
-        fields.title,
-        chunk.frontmatter.title.as_deref().unwrap_or_default(),
-    );
+    let heading_text = chunk.heading_path.join(" ");
+    document.add_text(fields.heading_text, &heading_text);
+    add_raw(&mut document, fields.heading_raw, &heading_text);
+    let title = chunk.frontmatter.title.as_deref().unwrap_or_default();
+    document.add_text(fields.title, title);
+    add_raw(&mut document, fields.title_raw, title);
     document.add_text(
         required_optional_field(fields.title_exact, "title_exact")?,
         chunk.frontmatter.title.as_deref().unwrap_or_default(),
@@ -224,6 +265,9 @@ pub(crate) fn chunk_document(fields: &Fields, chunk: &Chunk) -> Result<TantivyDo
         chunk.frontmatter.date.as_deref().unwrap_or_default(),
     );
     document.add_text(fields.content, &chunk.content);
+    for identifier in technical_identifiers(&chunk.content) {
+        document.add_text(fields.content_identifiers, identifier);
+    }
     document.add_text(
         fields.frontmatter,
         serde_json::to_string(&chunk.frontmatter)
@@ -240,6 +284,12 @@ pub(crate) fn chunk_document(fields: &Fields, chunk: &Chunk) -> Result<TantivyDo
     document.add_text(fields.content_hash, &chunk.content_hash);
     document.add_u64(fields.chunking_version, chunk.chunking_version);
     Ok(document)
+}
+
+fn add_raw(document: &mut TantivyDocument, field: Field, value: &str) {
+    if let Some(value) = normalize_raw(value) {
+        document.add_text(field, value);
+    }
 }
 
 fn required_optional_field(field: Option<Field>, name: &str) -> Result<Field> {
@@ -298,6 +348,51 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].path, "note.md");
+    }
+
+    #[test]
+    fn explicit_rebuild_replaces_an_incompatible_generation_pointer() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        fs::create_dir(&data_root).unwrap();
+        fs::write(vault_path.join("note.md"), "# Retrieval\nrebuildterm").unwrap();
+        fs::write(
+            data_root.join("current.json"),
+            r#"{"layout_version":1,"index_format_version":2,"generation":"old"}"#,
+        )
+        .unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+
+        build_index(&config, &data_root).unwrap();
+        let current: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(data_root.join("current.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            current["index_format_version"],
+            crate::manifest::INDEX_FORMAT_VERSION
+        );
+        assert_eq!(
+            search_index(
+                &data_root,
+                &SearchRequest {
+                    query: "rebuildterm".into(),
+                    limit: 20,
+                    vault_id: None,
+                }
+            )
+            .unwrap()
+            .len(),
+            1
+        );
     }
 
     #[test]

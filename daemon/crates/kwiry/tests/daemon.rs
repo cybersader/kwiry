@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
-use kwiry_core::{ApiSearchResponse, DaemonState, DaemonStatus};
+use kwiry_core::{ApiSearchResponse, DaemonState, DaemonStatus, load_connection_descriptor};
 use tempfile::tempdir;
 
 struct Daemon {
@@ -84,10 +84,11 @@ fn daemon_watches_files_reloads_config_and_reconciles_offline_changes() {
 
     vault_add(&config, &data, "first", &first_vault);
     let daemon = Daemon::start(&config, &data);
-    let token = fs::read_to_string(config.with_extension("token"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let token_path = config.with_extension("token");
+    let token = fs::read_to_string(&token_path).unwrap().trim().to_owned();
+    let descriptor = load_connection_descriptor(&data.join("connection.json")).unwrap();
+    assert_eq!(descriptor.url, format!("http://{}", daemon.address));
+    assert_eq!(descriptor.token_file, token_path);
     assert_eq!(search(&daemon.address, &token, "initialterm").len(), 1);
 
     let valid_config = fs::read_to_string(&config).unwrap();
@@ -117,6 +118,13 @@ fn daemon_watches_files_reloads_config_and_reconciles_offline_changes() {
     wait_for(|| search(&daemon.address, &token, "liveupdatedterm").is_empty());
 
     daemon.stop();
+    let logs = fs::read_dir(data.join("logs"))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(logs.contains("\"kwiry daemon ready\""), "{logs}");
+    assert!(!logs.contains(&token));
+
     fs::write(second_vault.join("second.md"), "# Second\nofflineterm").unwrap();
     let restarted = Daemon::start(&config, &data);
     wait_for(|| search(&restarted.address, &token, "offlineterm").len() == 1);

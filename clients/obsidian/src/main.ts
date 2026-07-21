@@ -16,6 +16,7 @@ import * as fs from "fs";
 
 import { KwiryApiError, KwiryClient, type SearchHit, type SearchMode, type Transport } from "./api";
 import { flattenExcerpt, parseExcerpt } from "./excerpt";
+import { nextSearchMode, selectedSearchModeOptions } from "./search-mode";
 import { DEFAULT_SETTINGS, loadSettings, type KwiryPluginSettings } from "./settings";
 import { KwirySettingTab } from "./settings-tab";
 
@@ -99,6 +100,7 @@ interface ModalResult {
 class KwirySearchModal extends SuggestModal<ModalResult> {
   private mode: SearchMode;
   private generation = 0;
+  private readonly modeButtons = new Map<SearchMode, HTMLButtonElement>();
 
   constructor(
     private readonly plugin: KwiryPlugin,
@@ -107,19 +109,60 @@ class KwirySearchModal extends SuggestModal<ModalResult> {
     super(plugin.app);
     this.mode = plugin.settings.defaultMode;
     this.setPlaceholder("Search your notes with kwiry…");
+    this.createModeControl();
     this.setInstructions([
       { command: "↵", purpose: "open" },
       { command: "ctrl ↵", purpose: "open in new tab" },
-      { command: "tab", purpose: "cycle mode (lexical/semantic/hybrid)" },
+      { command: "tab", purpose: "cycle requested mode" },
     ]);
     this.scope.register([], "Tab", (event) => {
       event.preventDefault();
-      this.mode = this.mode === "lexical" ? "semantic" : this.mode === "semantic" ? "hybrid" : "lexical";
-      this.setPlaceholder(`Search (${this.mode})…`);
-      // Re-trigger the current query under the new mode.
-      this.inputEl.dispatchEvent(new Event("input"));
+      this.selectMode(nextSearchMode(this.mode));
       return false;
     });
+  }
+
+  private createModeControl(): void {
+    const control = this.contentEl.createDiv({ cls: "kwiry-mode-control" });
+    control.createSpan({ cls: "kwiry-mode-label", text: "Requested mode" });
+    const segments = control.createDiv({ cls: "kwiry-mode-segments" });
+    segments.setAttribute("role", "group");
+    segments.setAttribute("aria-label", "Requested search mode");
+
+    for (const option of selectedSearchModeOptions(this.mode)) {
+      const button = segments.createEl("button", {
+        cls: "kwiry-mode-segment",
+        text: option.label,
+        attr: {
+          type: "button",
+          "aria-pressed": String(option.selected),
+        },
+      });
+      button.addEventListener("click", () => {
+        this.selectMode(option.mode);
+        this.inputEl.focus();
+      });
+      this.modeButtons.set(option.mode, button);
+    }
+
+    this.resultContainerEl.before(control);
+    this.syncModeControl();
+  }
+
+  private selectMode(mode: SearchMode): void {
+    this.mode = mode;
+    this.syncModeControl();
+    // Re-trigger the current query under the newly requested mode.
+    this.inputEl.dispatchEvent(new Event("input"));
+  }
+
+  private syncModeControl(): void {
+    for (const option of selectedSearchModeOptions(this.mode)) {
+      const button = this.modeButtons.get(option.mode);
+      if (!button) continue;
+      button.classList.toggle("is-selected", option.selected);
+      button.setAttribute("aria-pressed", String(option.selected));
+    }
   }
 
   async getSuggestions(query: string): Promise<ModalResult[]> {

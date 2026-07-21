@@ -4,14 +4,15 @@ use crate::model::Frontmatter;
 
 const MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
 
-pub(crate) fn parse_frontmatter(source: &str) -> (Frontmatter, &str, Option<String>) {
+pub(crate) fn parse_frontmatter(source: &str) -> (Frontmatter, Vec<String>, &str, Option<String>) {
     let Some((yaml, body)) = split_frontmatter(source) else {
-        return (Frontmatter::default(), source, None);
+        return (Frontmatter::default(), Vec::new(), source, None);
     };
 
     if yaml.len() > MAX_FRONTMATTER_BYTES {
         return (
             Frontmatter::default(),
+            Vec::new(),
             body,
             Some(format!(
                 "frontmatter exceeds {} bytes and was ignored",
@@ -21,9 +22,10 @@ pub(crate) fn parse_frontmatter(source: &str) -> (Frontmatter, &str, Option<Stri
     }
 
     match serde_saphyr::from_str::<Value>(yaml) {
-        Ok(value) => (select_fields(&value), body, None),
+        Ok(value) => (select_fields(&value), select_aliases(&value), body, None),
         Err(error) => (
             Frontmatter::default(),
+            Vec::new(),
             body,
             Some(format!("invalid YAML frontmatter: {error}")),
         ),
@@ -63,6 +65,24 @@ fn select_fields(value: &Value) -> Frontmatter {
     }
 }
 
+fn select_aliases(value: &Value) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    let Some(value) = object.get("aliases") else {
+        return Vec::new();
+    };
+
+    let mut aliases = Vec::new();
+    for alias in string_list(value) {
+        let alias = alias.trim();
+        if !alias.is_empty() && !aliases.iter().any(|existing| existing == alias) {
+            aliases.push(alias.to_owned());
+        }
+    }
+    aliases
+}
+
 fn string_list(value: &Value) -> Vec<String> {
     match value {
         Value::Array(values) => values.iter().filter_map(string_value).collect(),
@@ -87,11 +107,12 @@ mod tests {
     fn selects_only_default_fields() {
         let source =
             "---\ntitle: Note\ntags: [one, two]\nstatus: active\nignored: value\n---\n# Body\n";
-        let (frontmatter, body, warning) = parse_frontmatter(source);
+        let (frontmatter, aliases, body, warning) = parse_frontmatter(source);
 
         assert_eq!(frontmatter.title.as_deref(), Some("Note"));
         assert_eq!(frontmatter.tags, ["one", "two"]);
         assert_eq!(frontmatter.status.as_deref(), Some("active"));
+        assert!(aliases.is_empty());
         assert_eq!(body, "# Body\n");
         assert!(warning.is_none());
     }
@@ -99,10 +120,32 @@ mod tests {
     #[test]
     fn malformed_frontmatter_warns_but_keeps_body() {
         let source = "---\ntags: [broken\n---\nBody\n";
-        let (frontmatter, body, warning) = parse_frontmatter(source);
+        let (frontmatter, aliases, body, warning) = parse_frontmatter(source);
 
         assert_eq!(frontmatter, Frontmatter::default());
+        assert!(aliases.is_empty());
         assert_eq!(body, "Body\n");
         assert!(warning.unwrap().contains("invalid YAML"));
+    }
+
+    #[test]
+    fn selects_trimmed_unique_aliases_without_exposing_them_as_frontmatter() {
+        let source =
+            "---\ntitle: Note\naliases: [IIA 2 line, ' IIA 2 line ', Second Line, '']\n---\nBody\n";
+        let (frontmatter, aliases, body, warning) = parse_frontmatter(source);
+
+        assert_eq!(frontmatter.title.as_deref(), Some("Note"));
+        assert_eq!(aliases, ["IIA 2 line", "Second Line"]);
+        assert_eq!(body, "Body\n");
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn accepts_scalar_alias() {
+        let source = "---\naliases: IIA 2 line\n---\nBody\n";
+        let (_, aliases, _, warning) = parse_frontmatter(source);
+
+        assert_eq!(aliases, ["IIA 2 line"]);
+        assert!(warning.is_none());
     }
 }

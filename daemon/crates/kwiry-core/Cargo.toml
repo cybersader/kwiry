@@ -29,6 +29,9 @@ toml.workspace = true
 zerocopy.workspace = true
 fastembed = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [features]
 default = []
 # Enables the fastembed/ONNX embedder. The sqlite-vec store, RRF fusion, and

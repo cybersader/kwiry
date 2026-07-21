@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "index_format_version": 2,
+  "query": "IIA 2 line",
+  "ordered_hits": [
+    {
+      "rank": 1,
+      "vault_id": "technical-a",
+      "path": "heading-guidance.md",
+      "chunk_id": "fef35dca42cbdb49c1be92c56be1f213699bd8a614495ff3eb72c208673742a3",
+      "score": 10.455991
+    },
+    {
+      "rank": 2,
+      "vault_id": "technical-a",
+      "path": "missing-iia-2.md",
+      "chunk_id": "37bd856d286b73542ba34aaf5d41b555aff724c927a8937d5ba3b01ef6280e9d",
+      "score": 3.4826021
+    },
+    {
+      "rank": 3,
+      "vault_id": "technical-a",
+      "path": "body-guidance.md",
+      "chunk_id": "bca5b7750ae1ac553e6a7e1d9e2a9246de38f0c61e52287086aa4ea67eeab192",
+      "score": 3.2693124
+    },
+    {
+      "rank": 4,
+      "vault_id": "technical-a",
+      "path": "missing-iia-line.md",
+      "chunk_id": "56af2b2a18ec3131f9f56364b45f5f0c57cd27cff0ce397f28e2db9b609f4dcf",
+      "score": 3.2400045
+    },
+    {
+      "rank": 5,
+      "vault_id": "technical-a",
+      "path": "missing-2-line.md",
+      "chunk_id": "76d964b2c89d59b014fb958d7937dd43f632acee3495d00aef5ade485993bce8",
+      "score": 3.2400045
+    },
+    {
+      "rank": 6,
+      "vault_id": "technical-a",
+      "path": "title-guidance.md",
+      "chunk_id": "f5adb51ea90d115ee73d4befc7e331c2f8757286f00876b90c525faac28689e6",
+      "score": 2.6302252
+    },
+    {
+      "rank": 7,
+      "vault_id": "technical-a",
+      "path": "line-frequency.md",
+      "chunk_id": "4cbe5df4a348a238946b938ea45d1c5a5223f462c1d21dd23043fd6c4d2b9059",
+      "score": 2.4433756
+    },
+    {
+      "rank": 8,
+      "vault_id": "technical-a",
+      "path": "multi-section.md",
+      "chunk_id": "ca9e759a597afdc41681ad2066dc99fa436805134e05d08efa7ceb8948807f60",
+      "score": 1.8433435
+    },
+    {
+      "rank": 9,
+      "vault_id": "technical-a",
+      "path": "multi-section.md",
+      "chunk_id": "e0b55e0b06cefa2f73e2186d249ae4b854a31dff64a842cfdf43f67ef4248fa8",
+      "score": 1.8433435
+    },
+    {
+      "rank": 10,
+      "vault_id": "technical-a",
+      "path": "multi-section.md",
+      "chunk_id": "ef905c148a1207d134998bc1164e1fba3d6e59104832ce2a178736bb481deedc",
+      "score": 1.8433435
+    }
+  ],
+  "metrics": {
+    "success_at_1": false,
+    "reciprocal_rank_first_grade_3": 0.16666666666666666,
+    "recall_at_10": 0.6666666666666666,
+    "candidate_recall_at_100": 0.6666666666666666,
+    "hard_negatives_in_top_10": 4,
+    "distinct_sources_top_10": 8,
+    "max_chunks_per_source_top_10": 3,
+    "total_hits": 10
+  },
+  "ordinary_query": {
+    "query": "dungeons and dragons",
+    "ordered_sources": [
+      { "rank": 1, "vault_id": "technical-a", "path": "dragons.md" },
+      { "rank": 2, "vault_id": "technical-a", "path": "dungeons.md" },
+      { "rank": 3, "vault_id": "technical-a", "path": "alias-guidance.md" },
+      { "rank": 4, "vault_id": "technical-a", "path": "multi-section.md" },
+      { "rank": 5, "vault_id": "technical-a", "path": "IIA-2-line.md" },
+      { "rank": 6, "vault_id": "technical-a", "path": "title-guidance.md" },
+      { "rank": 7, "vault_id": "technical-a", "path": "heading-guidance.md" },
+      { "rank": 8, "vault_id": "technical-a", "path": "identifiers.md" }
+    ]
+  }
+}

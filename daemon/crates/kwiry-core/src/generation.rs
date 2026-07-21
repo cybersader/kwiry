@@ -90,7 +90,10 @@ impl DataRoot {
             return Ok(active.index_dir);
         }
         if self.root.join("meta.json").is_file() {
-            return Ok(self.root.clone());
+            return Err(Error::State(format!(
+                "unsupported legacy index layout at {}; expected index format {INDEX_FORMAT_VERSION}; run `kwiry index` to rebuild the disposable index",
+                self.root.display()
+            )));
         }
         Err(Error::Index(format!(
             "no index found at {}; run `kwiry index` first",
@@ -155,7 +158,7 @@ impl CurrentGeneration {
             || self.index_format_version != INDEX_FORMAT_VERSION
         {
             return Err(Error::State(format!(
-                "unsupported data layout: layout={}, index={}",
+                "unsupported data layout: found layout={}, index={}; expected layout={LAYOUT_VERSION}, index={INDEX_FORMAT_VERSION}; run `kwiry index` to rebuild the disposable index",
                 self.layout_version, self.index_format_version
             )));
         }
@@ -196,10 +199,31 @@ mod tests {
     }
 
     #[test]
-    fn legacy_index_is_resolved_without_current_pointer() {
+    fn incompatible_index_pointer_is_rejected_without_mutation() {
         let temporary = tempdir().unwrap();
-        fs::write(temporary.path().join("meta.json"), "{}").unwrap();
+        let current_path = temporary.path().join("current.json");
+        let source = r#"{"layout_version":1,"index_format_version":2,"generation":"old"}"#;
+        fs::write(&current_path, source).unwrap();
         let root = DataRoot::new(temporary.path());
-        assert_eq!(root.active_or_legacy_index().unwrap(), temporary.path());
+
+        let error = root.active().unwrap_err();
+        assert!(error.to_string().contains("found layout=1, index=2"));
+        assert!(error.to_string().contains("expected layout=1, index=3"));
+        assert!(error.to_string().contains("kwiry index"));
+        assert_eq!(fs::read_to_string(current_path).unwrap(), source);
+    }
+
+    #[test]
+    fn legacy_index_requires_an_explicit_rebuild() {
+        let temporary = tempdir().unwrap();
+        let meta_path = temporary.path().join("meta.json");
+        fs::write(&meta_path, "{}").unwrap();
+        let root = DataRoot::new(temporary.path());
+
+        let error = root.active_or_legacy_index().unwrap_err();
+        assert!(error.to_string().contains("legacy index layout"));
+        assert!(error.to_string().contains("expected index format 3"));
+        assert!(error.to_string().contains("kwiry index"));
+        assert_eq!(fs::read_to_string(meta_path).unwrap(), "{}");
     }
 }

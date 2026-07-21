@@ -75,6 +75,107 @@ fn lifecycle_indexes_and_searches_fixture() {
     assert_eq!(first, rebuilt);
 }
 
+#[test]
+fn setup_dry_run_json_is_versioned_and_mutation_free() {
+    let temporary = tempdir().unwrap();
+    let config = temporary.path().join("config.toml");
+    let data = temporary.path().join("data");
+    let vault = temporary.path().join("Project Notes Ω");
+    fs::create_dir(&vault).unwrap();
+    fs::write(vault.join("welcome.md"), "# Welcome\n\nhello").unwrap();
+
+    let output = cargo_bin_cmd!("kwiry")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "setup",
+            vault.to_str().unwrap(),
+            "--id",
+            "project-notes",
+            "--no-semantic",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["vault_id"], "project-notes");
+    assert_eq!(report["semantic_enabled"], false);
+    assert!(!config.exists());
+    assert!(!data.exists());
+}
+
+#[test]
+fn service_install_dry_run_json_is_mutation_free() {
+    let temporary = tempdir().unwrap();
+    let config = temporary.path().join("config.toml");
+    let data = temporary.path().join("data");
+
+    let output = cargo_bin_cmd!("kwiry")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "service",
+            "install",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["command"], "install");
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["dry_run"], true);
+    assert!(!config.exists());
+    assert!(!data.exists());
+}
+
+#[test]
+fn setup_json_missing_input_returns_stable_error_document() {
+    let temporary = tempdir().unwrap();
+    let config = temporary.path().join("config.toml");
+    let data = temporary.path().join("data");
+
+    let output = cargo_bin_cmd!("kwiry")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "setup",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["issues"][0]["code"], "prompt_required");
+    assert!(!config.exists());
+    assert!(!data.exists());
+}
+
 fn search_json(config: &Path, data: &Path, query: &str, vault: Option<&str>) -> Vec<SearchHit> {
     let mut command = cargo_bin_cmd!("kwiry");
     command.args([

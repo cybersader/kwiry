@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "queries": [
+    {
+      "id": "iia-2-line",
+      "text": "IIA 2 line",
+      "known_item": true,
+      "judgments": [
+        { "vault_id": "technical-a", "path": "IIA-2-line.md", "grade": 3, "rationale": "filename_exact" },
+        { "vault_id": "technical-a", "path": "alias-guidance.md", "grade": 3, "rationale": "alias_exact" },
+        { "vault_id": "technical-a", "path": "title-guidance.md", "grade": 3, "rationale": "title_exact" },
+        { "vault_id": "technical-a", "path": "heading-guidance.md", "grade": 2, "rationale": "heading_exact" },
+        { "vault_id": "technical-a", "path": "body-guidance.md", "grade": 2, "rationale": "body_exact" },
+        { "vault_id": "technical-a", "path": "multi-section.md", "grade": 2, "rationale": "title_exact_multiple_chunks" },
+        { "vault_id": "technical-a", "path": "line-frequency.md", "grade": 0, "hard_negative": true, "rationale": "generic_line_only" },
+        { "vault_id": "technical-a", "path": "missing-iia-2.md", "grade": 0, "hard_negative": true, "rationale": "missing_line" },
+        { "vault_id": "technical-a", "path": "missing-iia-line.md", "grade": 0, "hard_negative": true, "rationale": "missing_2" },
+        { "vault_id": "technical-a", "path": "missing-2-line.md", "grade": 0, "hard_negative": true, "rationale": "missing_iia" },
+        { "vault_id": "technical-a", "path": "partial-tokens.md", "grade": 0, "hard_negative": true, "rationale": "partial_tokens_only" }
+      ]
+    }
+  ]
+}

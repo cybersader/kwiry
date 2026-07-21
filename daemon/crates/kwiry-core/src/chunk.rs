@@ -8,7 +8,8 @@ use crate::frontmatter::parse_frontmatter;
 use crate::links::extract_wikilinks;
 use crate::model::{
     CHUNK_OVERLAP_CHARS, CHUNKING_VERSION, Chunk, DiscoveredFile, FileIngestOutcome,
-    FileOutcomeKind, IngestReport, IngestWarning, MAX_CHUNK_CHARS, VaultRegistration,
+    FileOutcomeKind, IngestReport, IngestWarning, MAX_CHUNK_CHARS, RetrievalMetadata,
+    VaultRegistration,
 };
 use crate::walk::discover_vault;
 
@@ -59,6 +60,7 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
                 file,
                 None,
                 Vec::new(),
+                Vec::new(),
                 FileOutcomeKind::TransientError,
                 Some(error.to_string()),
             );
@@ -73,6 +75,7 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
                 file,
                 Some(content_hash),
                 Vec::new(),
+                Vec::new(),
                 FileOutcomeKind::Skipped,
                 Some(format!("skipped non-UTF-8 file: {error}")),
             );
@@ -84,17 +87,20 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
             file,
             Some(content_hash),
             Vec::new(),
+            Vec::new(),
             FileOutcomeKind::Skipped,
             Some("skipped binary file containing NUL bytes".to_owned()),
         );
     }
 
-    let (chunks, warning) = chunk_source_hashed(vault, file, &source, content_hash.clone());
+    let (chunks, aliases, warning) =
+        chunk_source_hashed(vault, file, &source, content_hash.clone());
     file_outcome(
         vault,
         file,
         Some(content_hash),
         chunks,
+        aliases,
         FileOutcomeKind::Indexed,
         warning,
     )
@@ -105,6 +111,7 @@ fn file_outcome(
     file: &DiscoveredFile,
     content_hash: Option<String>,
     chunks: Vec<Chunk>,
+    aliases: Vec<String>,
     kind: FileOutcomeKind,
     warning: Option<String>,
 ) -> FileIngestOutcome {
@@ -116,11 +123,25 @@ fn file_outcome(
         mtime: file.mtime,
         mtime_nanos: file.mtime_nanos,
         chunks,
+        retrieval: retrieval_metadata(&file.relative_path, aliases),
         kind,
         warning: warning.map(|message| IngestWarning {
             path: file.absolute_path.clone(),
             message,
         }),
+    }
+}
+
+fn retrieval_metadata(path: &str, aliases: Vec<String>) -> RetrievalMetadata {
+    let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
+    let stem = filename
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map_or_else(|| filename.clone(), |(stem, _)| stem.to_owned());
+    RetrievalMetadata {
+        filename,
+        stem,
+        aliases,
     }
 }
 
@@ -130,7 +151,9 @@ fn chunk_source(
     file: &DiscoveredFile,
     source: &str,
 ) -> (Vec<Chunk>, Option<String>) {
-    chunk_source_hashed(vault, file, source, hex_digest(source.as_bytes()))
+    let (chunks, _, warning) =
+        chunk_source_hashed(vault, file, source, hex_digest(source.as_bytes()));
+    (chunks, warning)
 }
 
 fn chunk_source_hashed(
@@ -138,9 +161,9 @@ fn chunk_source_hashed(
     file: &DiscoveredFile,
     source: &str,
     content_hash: String,
-) -> (Vec<Chunk>, Option<String>) {
-    let (frontmatter, body, frontmatter_warning) = if file.extension == "txt" {
-        (Default::default(), source, None)
+) -> (Vec<Chunk>, Vec<String>, Option<String>) {
+    let (frontmatter, aliases, body, frontmatter_warning) = if file.extension == "txt" {
+        (Default::default(), Vec::new(), source, None)
     } else {
         parse_frontmatter(source)
     };
@@ -184,7 +207,7 @@ fn chunk_source_hashed(
         }
     }
 
-    (chunks, frontmatter_warning)
+    (chunks, aliases, frontmatter_warning)
 }
 
 fn markdown_sections(source: &str) -> Vec<Section<'_>> {

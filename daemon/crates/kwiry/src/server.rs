@@ -14,13 +14,14 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use kwiry_core::{
-    ApiErrorEnvelope, ApiSearchRequest, ApiSearchResponse, Config, DaemonState, DaemonStatus,
-    DataRoot, HealthResponse, IndexManager, Manifest, ManifestFileOutcome, ModelStatus, Paths,
-    SearchMode, SearchRuntime, VaultStatus, build_index, load_config, load_or_create_token,
-    update_config,
+    ApiErrorEnvelope, ApiSearchRequest, ApiSearchResponse, Config, ConnectionDescriptor,
+    DaemonState, DaemonStatus, DataRoot, HealthResponse, IndexManager, Manifest,
+    ManifestFileOutcome, ModelStatus, Paths, SearchMode, SearchRuntime, VaultStatus,
+    bootstrap_desktop, build_index, write_connection_descriptor,
 };
 
 use crate::auth::{AuthState, require_auth};
+use crate::logging::Redacted;
 use crate::runtime::{ManagerHandle, spawn_manager};
 use crate::watcher::spawn_watcher;
 
@@ -35,24 +36,24 @@ pub(crate) async fn serve(
     bind_override: Option<String>,
     semantic: bool,
 ) -> Result<()> {
-    let mut config = load_config(&paths.config)?;
-    if config.auth.token_file.is_none() {
-        let token_path = paths.config.with_extension("token");
-        update_config(&paths.config, |config| {
-            config.auth.token_file = Some(token_path.clone());
-            Ok(())
-        })?;
-        config = load_config(&paths.config)?;
-    }
-    let token_path = paths.token_path(&config);
-    let token = load_or_create_token(&token_path)?;
+    let _logging = crate::logging::init(&paths.logs_dir())?;
+    tracing::info!(
+        config = %paths.config.display(),
+        data_dir = %paths.data_dir.display(),
+        "starting kwiry daemon"
+    );
+    let bootstrap = bootstrap_desktop(&paths)?;
+    tracing::debug!(token = %Redacted::new(bootstrap.token()), "authentication initialized");
+    let token = bootstrap.token().to_owned();
+    let token_path = bootstrap.token_path;
+    let config = bootstrap.config;
     let bind = bind_override.unwrap_or_else(|| config.server.bind.clone());
     let address: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid bind address: {bind}"))?;
     if !address.ip().is_loopback() {
         return Err(anyhow!(
-            "Vertical 2 accepts loopback bind addresses only: {address}"
+            "kwiry accepts loopback bind addresses only: {address}"
         ));
     }
     let listener = TcpListener::bind(address)
@@ -65,7 +66,7 @@ pub(crate) async fn serve(
     }
 
     let runtime = SearchRuntime::new();
-    if semantic {
+    if semantic || config.semantic.enabled {
         install_semantic(&paths, &runtime)?;
     }
     let mut manager = IndexManager::open(config.clone(), &paths.data_dir, runtime.clone())?;
@@ -93,6 +94,16 @@ pub(crate) async fn serve(
     )?;
     let router = build_router(state, AuthState::new(token));
     let local_address = listener.local_addr()?;
+    let connection_path = paths.connection_path();
+    let descriptor =
+        ConnectionDescriptor::new(local_address, token_path.clone(), env!("CARGO_PKG_VERSION"));
+    write_connection_descriptor(&connection_path, &descriptor)?;
+    tracing::info!(
+        url = %descriptor.url,
+        token_file = %token_path.display(),
+        connection_file = %connection_path.display(),
+        "kwiry daemon ready"
+    );
     println!(
         "kwiry listening on http://{local_address}; bearer token file: {}",
         token_path.display()
@@ -105,6 +116,7 @@ pub(crate) async fn serve(
     let shutdown_result = shutdown_manager(manager_handle, manager_task).await;
     server_result.context("HTTP server failed")?;
     shutdown_result?;
+    tracing::info!("kwiry daemon stopped");
     Ok(())
 }
 
@@ -334,10 +346,15 @@ impl IntoResponse for HttpError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
     use http_body_util::BodyExt;
+    use kwiry_core::VaultRegistration;
+    use tempfile::tempdir;
     use tower::ServiceExt;
 
     use super::*;
@@ -409,6 +426,77 @@ mod tests {
         let body = wrong_method.into_body().collect().await.unwrap().to_bytes();
         let error: ApiErrorEnvelope = serde_json::from_slice(&body).unwrap();
         assert_eq!(error.error.code, "method_not_allowed");
+    }
+
+    #[tokio::test]
+    async fn lexical_search_keeps_the_frozen_success_shape() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("note.md"), "# Search\nshapeprobe").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data).unwrap();
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config, &data, runtime.clone()).unwrap();
+        let app = build_router(
+            AppState {
+                runtime,
+                status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
+            },
+            AuthState::new("secret".to_owned()),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v0/search")
+                    .header(AUTHORIZATION, "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"q":"shapeprobe","mode":"lexical","limit":20}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let response_keys: BTreeSet<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(response_keys, BTreeSet::from(["hits", "next_cursor"]));
+        let hit_keys: BTreeSet<_> = value["hits"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            hit_keys,
+            BTreeSet::from([
+                "chunk_id",
+                "excerpt",
+                "frontmatter",
+                "heading_path",
+                "path",
+                "score",
+                "vault_id",
+            ])
+        );
+        manager.shutdown().unwrap();
     }
 
     #[tokio::test]

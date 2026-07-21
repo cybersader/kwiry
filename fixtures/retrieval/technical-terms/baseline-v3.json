@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "index_format_version": 3,
+  "query": "IIA 2 line",
+  "ordered_hits": [
+    {
+      "rank": 1,
+      "vault_id": "technical-a",
+      "path": "IIA-2-line.md",
+      "chunk_id": "3dc6afef6bc08660c0d81d0fda1e86e8deb232d0a5b6c2136773f306a719cef2",
+      "score": 223.58345
+    },
+    {
+      "rank": 2,
+      "vault_id": "technical-a",
+      "path": "heading-guidance.md",
+      "chunk_id": "fef35dca42cbdb49c1be92c56be1f213699bd8a614495ff3eb72c208673742a3",
+      "score": 125.710754
+    },
+    {
+      "rank": 3,
+      "vault_id": "technical-a",
+      "path": "title-guidance.md",
+      "chunk_id": "f5adb51ea90d115ee73d4befc7e331c2f8757286f00876b90c525faac28689e6",
+      "score": 93.67084
+    },
+    {
+      "rank": 4,
+      "vault_id": "technical-a",
+      "path": "multi-section.md",
+      "chunk_id": "ca9e759a597afdc41681ad2066dc99fa436805134e05d08efa7ceb8948807f60",
+      "score": 55.30031
+    },
+    {
+      "rank": 5,
+      "vault_id": "technical-a",
+      "path": "multi-section.md",
+      "chunk_id": "e0b55e0b06cefa2f73e2186d249ae4b854a31dff64a842cfdf43f67ef4248fa8",
+      "score": 55.30031
+    },
+    {
+      "rank": 6,
+      "vault_id": "technical-a",
+      "path": "multi-section.md",
+      "chunk_id": "ef905c148a1207d134998bc1164e1fba3d6e59104832ce2a178736bb481deedc",
+      "score": 55.30031
+    },
+    {
+      "rank": 7,
+      "vault_id": "technical-a",
+      "path": "alias-guidance.md",
+      "chunk_id": "8cd86b5d58f01d67a40c9c10abcd7916066b8027c89464ed1b72d1dabe0e6dc9",
+      "score": 32.5569
+    },
+    {
+      "rank": 8,
+      "vault_id": "technical-a",
+      "path": "body-guidance.md",
+      "chunk_id": "bca5b7750ae1ac553e6a7e1d9e2a9246de38f0c61e52287086aa4ea67eeab192",
+      "score": 16.346563
+    }
+  ],
+  "metrics": {
+    "success_at_1": true,
+    "reciprocal_rank_first_grade_3": 1.0,
+    "recall_at_10": 1.0,
+    "candidate_recall_at_100": 1.0,
+    "hard_negatives_in_top_10": 0,
+    "distinct_sources_top_10": 6,
+    "max_chunks_per_source_top_10": 3,
+    "total_hits": 8
+  },
+  "ordinary_query": {
+    "query": "dungeons and dragons",
+    "ordered_sources": [
+      { "rank": 1, "vault_id": "technical-a", "path": "dragons.md" },
+      { "rank": 2, "vault_id": "technical-a", "path": "dungeons.md" },
+      { "rank": 3, "vault_id": "technical-a", "path": "alias-guidance.md" },
+      { "rank": 4, "vault_id": "technical-a", "path": "multi-section.md" },
+      { "rank": 5, "vault_id": "technical-a", "path": "IIA-2-line.md" },
+      { "rank": 6, "vault_id": "technical-a", "path": "title-guidance.md" },
+      { "rank": 7, "vault_id": "technical-a", "path": "heading-guidance.md" },
+      { "rank": 8, "vault_id": "technical-a", "path": "identifiers.md" }
+    ]
+  }
+}

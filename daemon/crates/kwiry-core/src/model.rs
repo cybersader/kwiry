@@ -17,6 +17,8 @@ pub struct Config {
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default)]
+    pub semantic: SemanticConfig,
+    #[serde(default)]
     pub vaults: Vec<VaultRegistration>,
 }
 
@@ -26,6 +28,7 @@ impl Default for Config {
             version: default_config_version(),
             server: ServerConfig::default(),
             auth: AuthConfig::default(),
+            semantic: SemanticConfig::default(),
             vaults: Vec::new(),
         }
     }
@@ -57,6 +60,12 @@ fn default_bind() -> String {
 pub struct AuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SemanticConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,6 +161,13 @@ pub(crate) enum FileOutcomeKind {
     TransientError,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RetrievalMetadata {
+    pub filename: String,
+    pub stem: String,
+    pub aliases: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileIngestOutcome {
     pub vault_id: String,
@@ -161,6 +177,7 @@ pub(crate) struct FileIngestOutcome {
     pub mtime: u64,
     pub mtime_nanos: u128,
     pub chunks: Vec<Chunk>,
+    pub retrieval: RetrievalMetadata,
     pub kind: FileOutcomeKind,
     pub warning: Option<IngestWarning>,
 }

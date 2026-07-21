@@ -6,7 +6,8 @@ use tantivy::Index;
 use tantivy::Term;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
-    BooleanQuery, ConstScoreQuery, Occur, Query, QueryParser, RegexQuery, TermQuery,
+    BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, Occur, Query, QueryParser,
+    RegexQuery, TermQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Value};
 use tantivy::snippet::SnippetGenerator;
@@ -15,9 +16,26 @@ use tantivy::{IndexReader, Searcher};
 use crate::api::SearchFilters;
 use crate::error::{Error, Result};
 use crate::index::{Fields, open_index};
+use crate::lexical::{normalize_raw, technical_identifiers};
 use crate::model::{SearchHit, SearchRequest};
 
 const MAX_RESULTS: usize = 100;
+const BOOST_FILENAME: f32 = 5.0;
+const BOOST_STEM: f32 = 6.0;
+const BOOST_ALIAS: f32 = 6.0;
+const BOOST_TITLE: f32 = 6.0;
+const BOOST_HEADING: f32 = 3.0;
+const BOOST_CONTENT: f32 = 1.0;
+const BOOST_EXACT_METADATA: f32 = 12.0;
+const BOOST_PHRASE: f32 = 4.0;
+const BOOST_CONTENT_IDENTIFIER: f32 = 5.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryPlanKind {
+    Explicit,
+    Ordinary,
+    Identifier,
+}
 
 pub fn search_index(data_dir: &Path, request: &SearchRequest) -> Result<Vec<SearchHit>> {
     let (index, fields) = open_index(data_dir)?;
@@ -51,15 +69,272 @@ pub(crate) fn search_reader(
     }
 
     let searcher = reader.searcher();
-    let parser = QueryParser::for_index(
-        index,
-        vec![fields.title, fields.heading_text, fields.content],
-    );
-    let parsed = parser
-        .parse_query(query_text)
-        .map_err(|error| Error::Query(error.to_string()))?;
-    let query = filtered_query(parsed, filters, fields)?;
+    let (_, ranked) = build_lexical_query(index, fields, &searcher, query_text)?;
+    let query = filtered_query(ranked, filters, fields)?;
     collect_hits(&searcher, query, fields, limit)
+}
+
+fn build_lexical_query(
+    index: &Index,
+    fields: &Fields,
+    searcher: &Searcher,
+    query_text: &str,
+) -> Result<(QueryPlanKind, Box<dyn Query>)> {
+    let parser = lexical_parser(index, fields);
+    let kind = resolve_query_plan_kind(index, fields, searcher, query_text)?;
+    let query = match kind {
+        QueryPlanKind::Explicit => parser
+            .parse_query(query_text)
+            .map_err(|error| Error::Query(error.to_string()))?,
+        QueryPlanKind::Ordinary => {
+            let parsed = parser
+                .parse_query(query_text)
+                .map_err(|error| Error::Query(error.to_string()))?;
+            let mut clauses = vec![(Occur::Should, parsed)];
+            add_ordering_boosters(&mut clauses, &parser, fields, query_text)?;
+            Box::new(BooleanQuery::new(clauses))
+        }
+        QueryPlanKind::Identifier => {
+            let terms = identifier_query_terms(query_text);
+            let mut clauses = Vec::with_capacity(terms.len() + 2);
+            if terms.len() == 1 {
+                let parsed = parser
+                    .parse_query(query_text)
+                    .map_err(|error| Error::Query(error.to_string()))?;
+                let mut alternatives = vec![parsed];
+                if let Some(exact) = exact_query(fields, query_text) {
+                    alternatives.push(exact);
+                }
+                clauses.push((
+                    Occur::Must,
+                    Box::new(DisjunctionMaxQuery::new(alternatives)) as Box<dyn Query>,
+                ));
+            } else {
+                for term in terms {
+                    let parsed = parser
+                        .parse_query(&term)
+                        .map_err(|error| Error::Query(error.to_string()))?;
+                    clauses.push((Occur::Must, parsed));
+                }
+            }
+            add_ordering_boosters(&mut clauses, &parser, fields, query_text)?;
+            Box::new(BooleanQuery::new(clauses))
+        }
+    };
+    Ok((kind, query))
+}
+
+fn lexical_parser(index: &Index, fields: &Fields) -> QueryParser {
+    let mut parser = QueryParser::for_index(
+        index,
+        vec![
+            fields.filename,
+            fields.stem,
+            fields.aliases,
+            fields.title,
+            fields.heading_text,
+            fields.content,
+        ],
+    );
+    parser.set_field_boost(fields.filename, BOOST_FILENAME);
+    parser.set_field_boost(fields.stem, BOOST_STEM);
+    parser.set_field_boost(fields.aliases, BOOST_ALIAS);
+    parser.set_field_boost(fields.title, BOOST_TITLE);
+    parser.set_field_boost(fields.heading_text, BOOST_HEADING);
+    parser.set_field_boost(fields.content, BOOST_CONTENT);
+    parser
+}
+
+fn classify_query(query: &str) -> QueryPlanKind {
+    if has_explicit_syntax(query) {
+        QueryPlanKind::Explicit
+    } else if is_identifier_like(query) {
+        QueryPlanKind::Identifier
+    } else {
+        QueryPlanKind::Ordinary
+    }
+}
+
+fn resolve_query_plan_kind(
+    index: &Index,
+    fields: &Fields,
+    searcher: &Searcher,
+    query: &str,
+) -> Result<QueryPlanKind> {
+    let kind = classify_query(query);
+    if kind != QueryPlanKind::Ordinary || !is_lowercase_identifier_candidate(query) {
+        return Ok(kind);
+    }
+
+    let mut parser = QueryParser::for_index(
+        index,
+        vec![
+            fields.filename,
+            fields.stem,
+            fields.aliases,
+            fields.title,
+            fields.heading_text,
+        ],
+    );
+    parser.set_conjunction_by_default();
+    let metadata_query = parser
+        .parse_query(query)
+        .map_err(|error| Error::Query(error.to_string()))?;
+    let matches = searcher
+        .search(&metadata_query, &TopDocs::with_limit(1).order_by_score())
+        .map_err(|error| Error::Index(error.to_string()))?;
+    Ok(if matches.is_empty() {
+        QueryPlanKind::Ordinary
+    } else {
+        QueryPlanKind::Identifier
+    })
+}
+
+fn is_lowercase_identifier_candidate(query: &str) -> bool {
+    const ORDINARY_NUMBER_PREFIXES: &[&str] = &[
+        "best", "chapter", "episode", "first", "last", "level", "page", "part", "section", "step",
+        "top", "volume",
+    ];
+
+    let tokens: Vec<_> = query.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() > 6 {
+        return false;
+    }
+    let Some(number_index) = tokens
+        .iter()
+        .position(|token| token.chars().all(|character| character.is_ascii_digit()))
+    else {
+        return false;
+    };
+    tokens[..number_index].iter().any(|token| {
+        (2..=4).contains(&token.chars().count())
+            && token.chars().all(|character| character.is_alphabetic())
+            && !ORDINARY_NUMBER_PREFIXES.contains(&token.to_ascii_lowercase().as_str())
+    })
+}
+
+fn has_explicit_syntax(query: &str) -> bool {
+    if query.chars().any(|character| {
+        matches!(
+            character,
+            '"' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '~' | '*' | '?'
+        )
+    }) {
+        return true;
+    }
+    const FIELDS: &[&str] = &[
+        "filename",
+        "stem",
+        "aliases",
+        "title",
+        "heading_text",
+        "content",
+        "path",
+        "vault_id",
+        "room",
+        "tags",
+    ];
+    query.split_whitespace().any(|token| {
+        matches!(token, "AND" | "OR" | "NOT")
+            || token.starts_with('+')
+            || token.starts_with('-')
+            || FIELDS
+                .iter()
+                .any(|field| token.starts_with(&format!("{field}:")))
+    })
+}
+
+fn is_identifier_like(query: &str) -> bool {
+    let tokens: Vec<_> = query.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() > 6 {
+        return false;
+    }
+    if !technical_identifiers(query).is_empty() {
+        return true;
+    }
+    let has_number = tokens
+        .iter()
+        .any(|token| token.chars().all(|character| character.is_ascii_digit()));
+    let has_acronym = tokens.iter().any(|token| {
+        (2..=8).contains(&token.chars().count())
+            && token.chars().all(|character| character.is_alphabetic())
+            && token.chars().any(|character| character.is_uppercase())
+            && token.chars().all(|character| !character.is_lowercase())
+    });
+    let has_mixed_alphanumeric = tokens.iter().any(|token| {
+        token.chars().any(char::is_alphabetic)
+            && token.chars().any(|character| character.is_ascii_digit())
+    });
+    has_mixed_alphanumeric || (has_number && has_acronym)
+}
+
+fn identifier_query_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .filter_map(|term| {
+            let term = term.trim_matches(|character: char| !character.is_alphanumeric());
+            normalize_raw(term)
+        })
+        .collect()
+}
+
+fn add_ordering_boosters(
+    clauses: &mut Vec<(Occur, Box<dyn Query>)>,
+    parser: &QueryParser,
+    fields: &Fields,
+    query_text: &str,
+) -> Result<()> {
+    if let Some(exact) = exact_query(fields, query_text) {
+        clauses.push((Occur::Should, exact));
+    }
+    if query_text.split_whitespace().count() > 1 {
+        let escaped = query_text.replace('\\', "\\\\").replace('"', "\\\"");
+        let phrase = parser
+            .parse_query(&format!("\"{escaped}\""))
+            .map_err(|error| Error::Query(error.to_string()))?;
+        clauses.push((
+            Occur::Should,
+            Box::new(BoostQuery::new(phrase, BOOST_PHRASE)),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_query(fields: &Fields, query_text: &str) -> Option<Box<dyn Query>> {
+    let normalized = normalize_raw(query_text)?;
+    let high_fields = [
+        fields.filename_raw,
+        fields.stem_raw,
+        fields.aliases_raw,
+        fields.title_raw,
+    ];
+    let mut queries: Vec<Box<dyn Query>> = high_fields
+        .into_iter()
+        .map(|field| {
+            Box::new(BoostQuery::new(
+                Box::new(TermQuery::new(
+                    Term::from_field_text(field, &normalized),
+                    IndexRecordOption::Basic,
+                )),
+                BOOST_EXACT_METADATA,
+            )) as Box<dyn Query>
+        })
+        .collect();
+    queries.push(Box::new(BoostQuery::new(
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.heading_raw, &normalized),
+            IndexRecordOption::Basic,
+        )),
+        BOOST_HEADING,
+    )));
+    queries.push(Box::new(BoostQuery::new(
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.content_identifiers, &normalized),
+            IndexRecordOption::Basic,
+        )),
+        BOOST_CONTENT_IDENTIFIER,
+    )));
+    Some(Box::new(DisjunctionMaxQuery::new(queries)))
 }
 
 fn filtered_query(
@@ -227,10 +502,7 @@ pub(crate) fn hydrate_ordered(
         .map_err(|error| Error::Query(error.to_string()))?;
 
     let snippets = snippet_source.and_then(|source| {
-        let parser = QueryParser::for_index(
-            index,
-            vec![fields.title, fields.heading_text, fields.content],
-        );
+        let parser = lexical_parser(index, fields);
         let parsed = parser.parse_query(source).ok()?;
         SnippetGenerator::create(&searcher, parsed.as_ref(), fields.content).ok()
     });
@@ -272,4 +544,241 @@ fn fallback_excerpt(content: &str) -> String {
         excerpt.push('…');
     }
     excerpt
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::index::build_index;
+    use crate::model::{Config, VaultRegistration};
+
+    fn matching_paths_for_field(
+        index: &Index,
+        fields: &Fields,
+        reader: &IndexReader,
+        field: Field,
+        query: &str,
+    ) -> HashSet<String> {
+        let mut parser = QueryParser::for_index(index, vec![field]);
+        parser.set_conjunction_by_default();
+        let query = parser.parse_query(query).unwrap();
+        let searcher = reader.searcher();
+        searcher
+            .search(&query, &TopDocs::with_limit(100).order_by_score())
+            .unwrap()
+            .into_iter()
+            .map(|(_, address)| {
+                let document = searcher.doc::<TantivyDocument>(address).unwrap();
+                text(&document, fields.path).unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn query_classifier_is_conservative_and_preserves_explicit_syntax() {
+        assert_eq!(classify_query("IIA 2 line"), QueryPlanKind::Identifier);
+        assert_eq!(classify_query("iia 2 line"), QueryPlanKind::Ordinary);
+        assert_eq!(
+            classify_query("RFC 9110 caching"),
+            QueryPlanKind::Identifier
+        );
+        assert_eq!(classify_query("CVE-2026-1234"), QueryPlanKind::Identifier);
+        assert_eq!(
+            classify_query("dungeons and dragons"),
+            QueryPlanKind::Ordinary
+        );
+        assert_eq!(classify_query("top 10 books"), QueryPlanKind::Ordinary);
+        assert_eq!(classify_query("\"IIA 2 line\""), QueryPlanKind::Explicit);
+        assert_eq!(classify_query("IIA OR line"), QueryPlanKind::Explicit);
+        assert_eq!(classify_query("title:IIA"), QueryPlanKind::Explicit);
+        assert_eq!(classify_query("CVE-*"), QueryPlanKind::Explicit);
+    }
+
+    #[test]
+    fn identifier_plan_recalls_metadata_and_rejects_missing_components() {
+        let temporary = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/retrieval/technical-terms");
+        let config = Config {
+            vaults: vec![
+                VaultRegistration {
+                    id: "technical-a".into(),
+                    path: fixture.join("vault-a"),
+                    room: None,
+                },
+                VaultRegistration {
+                    id: "technical-b".into(),
+                    path: fixture.join("vault-b"),
+                    room: None,
+                },
+            ],
+            ..Config::default()
+        };
+        build_index(&config, temporary.path()).unwrap();
+        let (index, fields) = open_index(temporary.path()).unwrap();
+        let reader = index.reader().unwrap();
+        let filename_matches =
+            matching_paths_for_field(&index, &fields, &reader, fields.filename, "IIA 2 line");
+        let alias_matches =
+            matching_paths_for_field(&index, &fields, &reader, fields.aliases, "IIA 2 line");
+        assert!(filename_matches.contains("IIA-2-line.md"));
+        assert!(alias_matches.contains("alias-guidance.md"));
+        let searcher = reader.searcher();
+        let (lowercase_kind, _) =
+            build_lexical_query(&index, &fields, &searcher, "iia 2 line").unwrap();
+        assert_eq!(lowercase_kind, QueryPlanKind::Identifier);
+
+        let hits = search_index(
+            temporary.path(),
+            &SearchRequest {
+                query: "IIA 2 line".into(),
+                limit: 100,
+                vault_id: None,
+            },
+        )
+        .unwrap();
+        let paths: HashSet<_> = hits.iter().map(|hit| hit.path.as_str()).collect();
+
+        assert_eq!(hits[0].path, "IIA-2-line.md");
+        for expected in [
+            "IIA-2-line.md",
+            "alias-guidance.md",
+            "title-guidance.md",
+            "heading-guidance.md",
+            "body-guidance.md",
+            "multi-section.md",
+        ] {
+            assert!(paths.contains(expected), "missing expected path {expected}");
+        }
+        for rejected in [
+            "line-frequency.md",
+            "missing-iia-2.md",
+            "missing-iia-line.md",
+            "missing-2-line.md",
+            "partial-tokens.md",
+        ] {
+            assert!(
+                !paths.contains(rejected),
+                "unexpected hard negative {rejected}"
+            );
+        }
+        let lowercase_hits = search_index(
+            temporary.path(),
+            &SearchRequest {
+                query: "iia 2 line".into(),
+                limit: 100,
+                vault_id: None,
+            },
+        )
+        .unwrap();
+        let lowercase_paths: HashSet<_> =
+            lowercase_hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(lowercase_hits[0].path, "IIA-2-line.md");
+        for expected in [
+            "IIA-2-line.md",
+            "alias-guidance.md",
+            "title-guidance.md",
+            "heading-guidance.md",
+            "body-guidance.md",
+            "multi-section.md",
+        ] {
+            assert!(
+                lowercase_paths.contains(expected),
+                "lowercase query is missing expected path {expected}"
+            );
+        }
+        for rejected in [
+            "line-frequency.md",
+            "missing-iia-2.md",
+            "missing-iia-line.md",
+            "missing-2-line.md",
+            "partial-tokens.md",
+        ] {
+            assert!(
+                !lowercase_paths.contains(rejected),
+                "lowercase query admitted hard negative {rejected}"
+            );
+        }
+
+        let alias_rank = hits
+            .iter()
+            .position(|hit| hit.path == "alias-guidance.md")
+            .unwrap();
+        let body_rank = hits
+            .iter()
+            .position(|hit| hit.path == "body-guidance.md")
+            .unwrap();
+        assert!(alias_rank < body_rank);
+    }
+
+    #[test]
+    fn ordinary_plan_preserves_or_eligibility() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("top-10-books.md"),
+            "# Reading list\ncurated titles",
+        )
+        .unwrap();
+        fs::write(vault.join("dungeons.md"), "underground dungeons").unwrap();
+        fs::write(vault.join("dragons.md"), "flying dragons").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "technical-a".into(),
+                path: vault,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data).unwrap();
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let (list_kind, _) =
+            build_lexical_query(&index, &fields, &searcher, "top 10 books").unwrap();
+        assert_eq!(list_kind, QueryPlanKind::Ordinary);
+
+        let hits = search_index(
+            &data,
+            &SearchRequest {
+                query: "dungeons and dragons".into(),
+                limit: 20,
+                vault_id: None,
+            },
+        )
+        .unwrap();
+        let paths: HashSet<_> = hits.iter().map(|hit| hit.path.as_str()).collect();
+
+        assert!(paths.contains("dungeons.md"));
+        assert!(paths.contains("dragons.md"));
+
+        let explicit_or = search_index(
+            &data,
+            &SearchRequest {
+                query: "dungeons OR dragons".into(),
+                limit: 20,
+                vault_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(explicit_or.len(), 2);
+        let explicit_and = search_index(
+            &data,
+            &SearchRequest {
+                query: "dungeons AND dragons".into(),
+                limit: 20,
+                vault_id: None,
+            },
+        )
+        .unwrap();
+        assert!(explicit_and.is_empty());
+    }
 }

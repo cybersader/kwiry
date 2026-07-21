@@ -1,0 +1,1630 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kwiry responsive logo system and design archive</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --orange-top: #fa7826;
+      --orange-face: #f66b0b;
+      --orange-low: #df5902;
+      --slate-face: #2a3140;
+      --slate-stud: #1d232d;
+      --slate-low: #060b13;
+      --paper: #f6f4ef;
+      --panel: #fff;
+      --ink: #171b24;
+      --muted: #626977;
+      --line: #d9d5ce;
+      --night: #10151e;
+      --night-panel: #1b2230;
+      --night-line: #323c4e;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 50% -20%, rgb(255 255 255 / .92), transparent 34rem),
+        var(--paper);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+
+    header,
+    main,
+    footer {
+      width: min(76rem, calc(100% - 2rem));
+      margin-inline: auto;
+    }
+
+    header { padding-block: clamp(2.5rem, 8vw, 5.5rem) 2rem; }
+    h1, h2, h3, p, pre { margin-block: 0; }
+
+    h1 {
+      max-width: 16ch;
+      font-size: clamp(2.25rem, 7vw, 5rem);
+      line-height: .98;
+      letter-spacing: -.055em;
+    }
+
+    h2 {
+      font-size: .78rem;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    h3 { font-size: 1rem; }
+
+    header p {
+      max-width: 51rem;
+      margin-top: 1rem;
+      color: var(--muted);
+      font-size: clamp(1rem, 2vw, 1.15rem);
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: .55rem;
+      margin-bottom: 1rem;
+      padding: .4rem .7rem;
+      border: 1px solid #f2b58f;
+      border-radius: 999px;
+      background: #fff3ea;
+      color: #8a3b08;
+      font-size: .75rem;
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .status::before {
+      width: .55rem;
+      height: .55rem;
+      border-radius: 50%;
+      background: var(--orange-face);
+      content: "";
+      box-shadow: 0 0 0 .2rem rgb(246 107 11 / .14);
+    }
+
+    main {
+      display: grid;
+      gap: 1.25rem;
+      padding-bottom: 2rem;
+    }
+
+    section {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 1.25rem;
+      background: rgb(255 255 255 / .84);
+      box-shadow: 0 1rem 3rem rgb(33 29 22 / .05);
+    }
+
+    .section-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: .65rem 2rem;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section-head p {
+      max-width: 48rem;
+      color: var(--muted);
+      font-size: .86rem;
+    }
+
+    .hero-compare {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .hero-card {
+      display: grid;
+      place-items: center;
+      min-height: 29rem;
+      padding: clamp(1.25rem, 5vw, 3rem);
+      background:
+        linear-gradient(45deg, #ece9e2 25%, transparent 25%) 0 0 / 1rem 1rem,
+        linear-gradient(-45deg, #ece9e2 25%, transparent 25%) 0 0 / 1rem 1rem,
+        linear-gradient(45deg, transparent 75%, #ece9e2 75%) 0 0 / 1rem 1rem,
+        linear-gradient(-45deg, transparent 75%, #ece9e2 75%) 0 0 / 1rem 1rem,
+        #f8f7f3;
+    }
+
+    .hero-card + .hero-card { border-left: 1px solid var(--line); }
+    figure { margin: 0; text-align: center; }
+
+    .requested-section figcaption,
+    .final-section figcaption {
+      padding: .7rem .9rem;
+      border: 1px solid rgb(29 35 45 / .1);
+      border-radius: .75rem;
+      background: rgb(255 255 255 / .94);
+      color: #4d5564;
+    }
+
+    .requested-section figcaption strong,
+    .final-section figcaption strong { color: var(--ink); }
+
+    figcaption {
+      margin-top: 1rem;
+      color: var(--muted);
+      font-size: .8rem;
+    }
+
+    .logo-frame {
+      display: grid;
+      place-items: center;
+      width: calc(var(--size) + 2rem);
+      height: calc(var(--size) + 2rem);
+      border: 1px solid rgb(29 35 45 / .1);
+      border-radius: 1rem;
+      background: white;
+      box-shadow: 0 .8rem 2.5rem rgb(29 35 45 / .1);
+    }
+
+    .final-asset-row {
+      display: flex;
+      align-items: end;
+      justify-content: center;
+      gap: 1.25rem;
+      min-height: 16rem;
+    }
+
+    .final-asset-row img {
+      display: block;
+      width: var(--asset-size);
+      height: var(--asset-size);
+    }
+
+    .final-rule {
+      display: inline-block;
+      margin-top: .7rem;
+      padding: .35rem .6rem;
+      border-radius: 999px;
+      background: #fff0e5;
+      color: #8d3a06;
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .source-crop,
+    .pixel-mark {
+      --size: 256px;
+      position: relative;
+      width: var(--size);
+      height: var(--size);
+      flex: none;
+    }
+
+    .source-crop {
+      overflow: hidden;
+      background: white;
+    }
+
+    .source-crop img {
+      position: absolute;
+      top: calc(var(--size) * -.375);
+      left: calc(var(--size) * -.5);
+      display: block;
+      width: calc(var(--size) * 2);
+      max-width: none;
+      height: calc(var(--size) * 2);
+    }
+
+    /*
+      Exact logical occupancy from the owner-supplied reference.
+      Its 512×512 mark starts at x=256, y=192 on a 1024×1024 canvas,
+      making every logical cell exactly 64×64 source units.
+
+          1 2 3 4 5 6 7 8
+        1 . . O O O . . .
+        2 . O D D D O . .
+        3 O D D D D D O .
+        4 O D D D D D O .
+        5 O D D D D D O .
+        6 . O D D D O . .
+        7 . . O O O . O .
+        8 . . . . . . . O
+
+      O = orange perimeter / handle; D = dark search field.
+    */
+    .pixel-mark {
+      --u: calc(var(--size) / 8);
+      display: grid;
+      grid-template: repeat(8, 1fr) / repeat(8, 1fr);
+      isolation: isolate;
+    }
+
+    .body-grid,
+    .orange-grid,
+    .audit-grid {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      grid-template: repeat(8, 1fr) / repeat(8, 1fr);
+    }
+
+    .body-grid {
+      z-index: 1;
+      filter: drop-shadow(0 calc(var(--u) * .055) calc(var(--u) * .055) rgb(6 11 19 / .34));
+    }
+
+    .core {
+      background: var(--slate-face);
+    }
+
+    .core-v {
+      grid-column: 4;
+      grid-row: 2 / 7;
+      border-radius: calc(var(--u) * .22);
+    }
+
+    .core-mid {
+      grid-column: 3 / 6;
+      grid-row: 3 / 6;
+      border-radius: calc(var(--u) * .22);
+    }
+
+    .core-wide {
+      grid-column: 2 / 7;
+      grid-row: 4;
+      border-radius: calc(var(--u) * .22);
+    }
+
+    .dark-stud {
+      border-radius: calc(var(--u) * .225);
+      background: linear-gradient(145deg, #252c39 0%, var(--slate-stud) 64%, #151c27 100%);
+      box-shadow:
+        inset calc(var(--u) * .025) calc(var(--u) * .035) 0 rgb(255 255 255 / .035),
+        inset calc(var(--u) * -.035) calc(var(--u) * -.055) calc(var(--u) * .05) rgb(6 11 19 / .48),
+        0 calc(var(--u) * .03) calc(var(--u) * .03) rgb(6 11 19 / .34);
+    }
+
+    .d-nw { grid-area: 2 / 3; }
+    .d-ne { grid-area: 2 / 5; }
+    .d-w1 { grid-area: 3 / 2; }
+    .d-e1 { grid-area: 3 / 6; }
+    .d-w2 { grid-area: 5 / 2; }
+    .d-e2 { grid-area: 5 / 6; }
+    .d-sw { grid-area: 6 / 3; }
+    .d-se { grid-area: 6 / 5; }
+
+    .orange-grid { z-index: 2; }
+
+    .orange-piece {
+      position: relative;
+      overflow: hidden;
+      border-radius: calc(var(--u) * .235);
+      background: var(--piece-shell, linear-gradient(155deg, var(--orange-top) 0%, #ed650e 47%, var(--orange-low) 100%));
+      box-shadow:
+        0 calc(var(--u) * .035) calc(var(--u) * .055) rgb(110 42 3 / .2),
+        inset 0 calc(var(--u) * .045) 0 rgb(255 255 255 / .14),
+        inset calc(var(--u) * .055) calc(var(--u) * -.075) calc(var(--u) * .04) rgb(149 50 0 / .28);
+    }
+
+    .orange-piece::after {
+      position: absolute;
+      inset: calc(var(--u) * .13) calc(var(--u) * .14) calc(var(--u) * .17);
+      border-radius: calc(var(--u) * .145);
+      background: var(--piece-face, linear-gradient(180deg, #ff7416 0%, var(--orange-face) 100%));
+      box-shadow:
+        inset 0 calc(var(--u) * .025) 0 rgb(255 255 255 / .12),
+        0 calc(var(--u) * .025) calc(var(--u) * .02) rgb(136 43 0 / .14);
+      content: "";
+    }
+
+    .o-top    { grid-area: 1 / 3 / 2 / 6; }
+    .o-nw     { grid-area: 2 / 2; }
+    .o-ne     { grid-area: 2 / 6; }
+    .o-left   { grid-area: 3 / 1 / 6 / 2; }
+    .o-right  { grid-area: 3 / 7 / 6 / 8; }
+    .o-sw     { grid-area: 6 / 2; }
+    .o-se     { grid-area: 6 / 6; }
+    .o-bottom { grid-area: 7 / 3 / 8 / 6; }
+    .o-h1     { grid-area: 7 / 7; }
+    .o-h2     { grid-area: 8 / 8; }
+
+    /*
+      Optional five-dot K experiment inside the 3×3 inner field:
+
+        K . K
+        K . .
+        K . K
+
+      The three left dots form the stem; the two right dots imply the arms.
+      It is hidden on the exact reconstruction and enabled only in variants.
+    */
+    .k-grid {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      display: none;
+      grid-template: repeat(8, 1fr) / repeat(8, 1fr);
+      pointer-events: none;
+    }
+
+    .variant-k-orange .k-grid,
+    .variant-k-ink .k-grid,
+    .variant-k-tricolor .k-grid,
+    .variant-k-connected .k-grid,
+    .variant-k-centered .k-grid,
+    .variant-k-merged .k-grid,
+    .variant-k-dotted .k-grid,
+    .variant-k-linked .k-grid,
+    .variant-k-three-only .k-grid {
+      display: grid;
+    }
+
+    .k-dot {
+      width: calc(var(--u) * .54);
+      height: calc(var(--u) * .54);
+      place-self: center;
+      border-radius: calc(var(--u) * .17);
+      background: linear-gradient(155deg, var(--orange-top), var(--orange-face) 52%, var(--orange-low));
+      box-shadow:
+        inset 0 calc(var(--u) * .035) 0 rgb(255 255 255 / .16),
+        inset calc(var(--u) * -.035) calc(var(--u) * -.05) calc(var(--u) * .035) rgb(142 46 0 / .24),
+        0 calc(var(--u) * .04) calc(var(--u) * .05) rgb(6 11 19 / .3);
+    }
+
+    .k-stem-top    { grid-area: 3 / 3; }
+    .k-stem-middle { grid-area: 4 / 3; }
+    .k-stem-bottom { grid-area: 5 / 3; }
+    .k-tip-top     { grid-area: 3 / 5; }
+    .k-tip-bottom  { grid-area: 5 / 5; }
+
+    .variant-k-ink .core {
+      background: #4d586a;
+    }
+
+    .variant-k-ink .k-dot {
+      background: linear-gradient(145deg, #202938, #0c1119 72%);
+      box-shadow:
+        inset 0 calc(var(--u) * .035) 0 rgb(255 255 255 / .07),
+        0 calc(var(--u) * .04) calc(var(--u) * .05) rgb(6 11 19 / .42);
+    }
+
+    .variant-k-tricolor .k-tip-top,
+    .variant-k-tricolor .k-tip-bottom {
+      background: linear-gradient(155deg, #78ead9, #2fc4b2 58%, #168f86);
+      box-shadow:
+        inset 0 calc(var(--u) * .035) 0 rgb(255 255 255 / .2),
+        inset calc(var(--u) * -.035) calc(var(--u) * -.05) calc(var(--u) * .035) rgb(0 79 75 / .2),
+        0 calc(var(--u) * .04) calc(var(--u) * .05) rgb(6 11 19 / .3);
+    }
+
+    .variant-k-connected,
+    .variant-k-centered {
+      --k-dot-scale: .78;
+      --k-connector-scale: .44;
+    }
+
+    .variant-k-connected .k-dot,
+    .variant-k-centered .k-dot {
+      width: calc(var(--u) * var(--k-dot-scale));
+      height: calc(var(--u) * var(--k-dot-scale));
+      border-radius: calc(var(--u) * .22);
+    }
+
+    .variant-k-connected .k-grid::before,
+    .variant-k-centered .k-grid::before {
+      z-index: -1;
+      grid-column: 3;
+      grid-row: 3 / 6;
+      place-self: center;
+      width: calc(var(--u) * var(--k-connector-scale));
+      height: calc(var(--u) * 2.2);
+      border-radius: 999px;
+      background: linear-gradient(155deg, var(--orange-top), var(--orange-face) 52%, var(--orange-low));
+      box-shadow:
+        inset 0 calc(var(--u) * .035) 0 rgb(255 255 255 / .14),
+        0 calc(var(--u) * .03) calc(var(--u) * .04) rgb(6 11 19 / .22);
+      content: "";
+    }
+
+    .k-size-small {
+      --k-dot-scale: .64;
+      --k-connector-scale: .3;
+    }
+
+    .k-size-medium {
+      --k-dot-scale: .78;
+      --k-connector-scale: .44;
+    }
+
+    .k-size-large {
+      --k-dot-scale: .94;
+      --k-connector-scale: .62;
+    }
+
+    .variant-k-centered .k-grid::before {
+      grid-column: 4;
+    }
+
+    .variant-k-centered .k-stem-top,
+    .variant-k-centered .k-stem-middle,
+    .variant-k-centered .k-stem-bottom {
+      grid-column: 4;
+    }
+
+    .k-color-ink .core {
+      background: #505c6f;
+    }
+
+    .k-color-ink .k-dot,
+    .k-color-ink .k-grid::before {
+      background: linear-gradient(145deg, #263142, #0b1018 72%);
+      box-shadow:
+        inset 0 calc(var(--u) * .035) 0 rgb(255 255 255 / .07),
+        0 calc(var(--u) * .04) calc(var(--u) * .05) rgb(6 11 19 / .42);
+    }
+
+    .k-color-amber .k-dot,
+    .k-color-amber .k-grid::before {
+      background: linear-gradient(155deg, #ffe08a, #ffc247 52%, #db8415);
+      box-shadow:
+        inset 0 calc(var(--u) * .035) 0 rgb(255 255 255 / .2),
+        inset calc(var(--u) * -.035) calc(var(--u) * -.05) calc(var(--u) * .035) rgb(126 67 0 / .2),
+        0 calc(var(--u) * .04) calc(var(--u) * .05) rgb(6 11 19 / .28);
+    }
+
+    .k-color-aqua .k-dot,
+    .k-color-aqua .k-grid::before {
+      background: linear-gradient(155deg, #83eddf, #38c9b8 55%, #138c84);
+      box-shadow:
+        inset 0 calc(var(--u) * .035) 0 rgb(255 255 255 / .2),
+        inset calc(var(--u) * -.035) calc(var(--u) * -.05) calc(var(--u) * .035) rgb(0 79 75 / .2),
+        0 calc(var(--u) * .04) calc(var(--u) * .05) rgb(6 11 19 / .28);
+    }
+
+    /* Expanded K studies: merged/dotted stem + solitary center joint + two tips. */
+    .k-merged-stem {
+      display: none;
+      grid-area: 3 / 3 / 6 / 4;
+      width: var(--k-stem-width, 100%);
+      justify-self: center;
+    }
+
+    .k-joint {
+      display: none;
+      grid-area: 4 / 4;
+    }
+
+    .variant-k-jointed .k-joint { display: block; }
+    .variant-k-merged .k-merged-stem { display: block; }
+
+    .variant-k-three-only .k-joint,
+    .variant-k-three-only .k-tip-top,
+    .variant-k-three-only .k-tip-bottom {
+      display: block;
+    }
+
+    .variant-k-three-only .k-merged-stem,
+    .variant-k-three-only .k-stem-top,
+    .variant-k-three-only .k-stem-middle,
+    .variant-k-three-only .k-stem-bottom {
+      display: none;
+    }
+
+    .variant-k-merged .k-stem-top,
+    .variant-k-merged .k-stem-middle,
+    .variant-k-merged .k-stem-bottom {
+      display: none;
+    }
+
+    .k-geometry-merged {
+      --k-stem-width: 100%;
+      --k-dot-scale: .7;
+    }
+
+    .k-geometry-narrow {
+      --k-stem-width: 68%;
+      --k-dot-scale: .62;
+    }
+
+    .k-geometry-pixel-large {
+      --k-dot-scale: .82;
+    }
+
+    .k-geometry-pixel-small {
+      --k-dot-scale: .54;
+    }
+
+    .k-geometry-linked-small {
+      --k-dot-scale: .56;
+      --k-connector-scale: .26;
+    }
+
+    .k-geometry-centered {
+      --k-stem-width: 100%;
+      --k-dot-scale: .68;
+    }
+
+    .k-geometry-full-dots,
+    .k-geometry-three-full {
+      --k-stem-width: 100%;
+      --k-dot-scale: 1;
+    }
+
+    .variant-k-merged.k-geometry-full-dots .k-dot,
+    .variant-k-three-only.k-geometry-three-full .k-dot {
+      position: relative;
+      overflow: hidden;
+      width: var(--u);
+      height: var(--u);
+      border-radius: calc(var(--u) * .235);
+      background: var(--k-block-shell, linear-gradient(155deg, var(--orange-top) 0%, #ed650e 47%, var(--orange-low) 100%));
+      box-shadow:
+        0 calc(var(--u) * .035) calc(var(--u) * .055) rgb(110 42 3 / .2),
+        inset 0 calc(var(--u) * .045) 0 rgb(255 255 255 / .14),
+        inset calc(var(--u) * .055) calc(var(--u) * -.075) calc(var(--u) * .04) rgb(149 50 0 / .28);
+    }
+
+    .k-geometry-full-dots .k-dot::after,
+    .k-geometry-three-full .k-dot::after {
+      position: absolute;
+      inset: calc(var(--u) * .13) calc(var(--u) * .14) calc(var(--u) * .17);
+      border-radius: calc(var(--u) * .145);
+      background: var(--k-block-face, linear-gradient(180deg, #ff7416 0%, var(--orange-face) 100%));
+      box-shadow:
+        inset 0 calc(var(--u) * .025) 0 rgb(255 255 255 / .12),
+        0 calc(var(--u) * .025) calc(var(--u) * .02) rgb(136 43 0 / .14);
+      content: "";
+    }
+
+    .k-spacing-balanced .k-merged-stem { transform: translateX(calc(var(--u) * -.06)); }
+    .k-spacing-balanced .k-joint,
+    .k-spacing-balanced .k-tip-top,
+    .k-spacing-balanced .k-tip-bottom { transform: translateX(calc(var(--u) * .06)); }
+    .variant-k-three-only.k-spacing-balanced .k-joint { transform: translateX(calc(var(--u) * -.04)); }
+
+    .k-spacing-open .k-merged-stem { transform: translateX(calc(var(--u) * -.12)); }
+    .k-spacing-open .k-joint,
+    .k-spacing-open .k-tip-top,
+    .k-spacing-open .k-tip-bottom { transform: translateX(calc(var(--u) * .12)); }
+    .variant-k-three-only.k-spacing-open .k-joint { transform: translateX(calc(var(--u) * -.08)); }
+
+    .k-exact-soft-gray .k-merged-stem {
+      --piece-shell: linear-gradient(155deg, #697382, #4b5564 55%, #343c48);
+      --piece-face: linear-gradient(180deg, #737e8e, #4d5867);
+    }
+    .k-exact-soft-gray .k-dot {
+      --k-block-shell: linear-gradient(155deg, #697382, #4b5564 55%, #343c48);
+      --k-block-face: linear-gradient(180deg, #737e8e, #4d5867);
+    }
+
+    .k-exact-graphite .k-merged-stem {
+      --piece-shell: linear-gradient(155deg, #3b4554, #252d39 58%, #151b24);
+      --piece-face: linear-gradient(180deg, #465162, #28313e);
+    }
+    .k-exact-graphite .k-dot {
+      --k-block-shell: linear-gradient(155deg, #3b4554, #252d39 58%, #151b24);
+      --k-block-face: linear-gradient(180deg, #465162, #28313e);
+    }
+
+    .k-exact-warm-gray .k-merged-stem {
+      --piece-shell: linear-gradient(155deg, #8b8379, #6d665e 58%, #4e4944);
+      --piece-face: linear-gradient(180deg, #958d83, #706960);
+    }
+    .k-exact-warm-gray .k-dot {
+      --k-block-shell: linear-gradient(155deg, #8b8379, #6d665e 58%, #4e4944);
+      --k-block-face: linear-gradient(180deg, #958d83, #706960);
+    }
+
+    .k-exact-orange-gray .k-joint,
+    .k-exact-orange-gray .k-tip-top,
+    .k-exact-orange-gray .k-tip-bottom {
+      --k-block-shell: linear-gradient(155deg, #697382, #4b5564 55%, #343c48);
+      --k-block-face: linear-gradient(180deg, #737e8e, #4d5867);
+    }
+    .variant-k-three-only.k-exact-orange-gray .k-joint {
+      --k-block-shell: linear-gradient(155deg, var(--orange-top) 0%, #ed650e 47%, var(--orange-low) 100%);
+      --k-block-face: linear-gradient(180deg, #ff7416 0%, var(--orange-face) 100%);
+    }
+
+    .k-exact-gray-orange .k-merged-stem {
+      --piece-shell: linear-gradient(155deg, #697382, #4b5564 55%, #343c48);
+      --piece-face: linear-gradient(180deg, #737e8e, #4d5867);
+    }
+    .variant-k-three-only.k-exact-gray-orange .k-joint {
+      --k-block-shell: linear-gradient(155deg, #697382, #4b5564 55%, #343c48);
+      --k-block-face: linear-gradient(180deg, #737e8e, #4d5867);
+    }
+
+    .variant-k-merged .k-dot,
+    .variant-k-dotted .k-dot,
+    .variant-k-linked .k-dot {
+      width: calc(var(--u) * var(--k-dot-scale, .7));
+      height: calc(var(--u) * var(--k-dot-scale, .7));
+      border-radius: calc(var(--u) * .21);
+    }
+
+    .variant-k-linked .k-grid::before {
+      z-index: -1;
+      grid-column: 3;
+      grid-row: 3 / 6;
+      place-self: center;
+      width: calc(var(--u) * var(--k-connector-scale, .26));
+      height: calc(var(--u) * 2.12);
+      border-radius: 999px;
+      background: linear-gradient(155deg, var(--orange-top), var(--orange-face) 52%, var(--orange-low));
+      content: "";
+    }
+
+    .k-position-center .k-merged-stem {
+      grid-column: 4;
+    }
+
+    .k-position-center .k-stem-top,
+    .k-position-center .k-stem-middle,
+    .k-position-center .k-stem-bottom {
+      grid-column: 4;
+    }
+
+    .k-position-center .k-joint { grid-column: 5; }
+    .k-position-center .k-tip-top { grid-column: 6; }
+    .k-position-center .k-tip-bottom { grid-column: 6; }
+
+    .k-scheme-ink .core { background: #505c6f; }
+
+    .k-scheme-ink .k-dot,
+    .k-scheme-ink .k-grid::before {
+      background: linear-gradient(145deg, #263142, #0b1018 72%);
+    }
+
+    .k-scheme-ink .k-merged-stem {
+      --piece-shell: linear-gradient(145deg, #263142, #0b1018 72%);
+      --piece-face: linear-gradient(180deg, #202938, #0b1018);
+    }
+
+    .k-scheme-orange-aqua .k-joint,
+    .k-scheme-orange-aqua .k-tip-top,
+    .k-scheme-orange-aqua .k-tip-bottom {
+      background: linear-gradient(155deg, #83eddf, #38c9b8 55%, #138c84);
+    }
+
+    .k-scheme-orange-amber .k-joint,
+    .k-scheme-orange-amber .k-tip-top,
+    .k-scheme-orange-amber .k-tip-bottom {
+      background: linear-gradient(155deg, #ffe08a, #ffc247 52%, #db8415);
+    }
+
+    .k-scheme-amber-orange .k-merged-stem {
+      --piece-shell: linear-gradient(155deg, #ffe08a, #ffc247 52%, #db8415);
+      --piece-face: linear-gradient(180deg, #ffe39a, #ffbd38);
+    }
+
+    .k-scheme-amber-orange .k-stem-top,
+    .k-scheme-amber-orange .k-stem-middle,
+    .k-scheme-amber-orange .k-stem-bottom,
+    .k-scheme-amber-orange .k-grid::before {
+      background: linear-gradient(155deg, #ffe08a, #ffc247 52%, #db8415);
+    }
+
+    .k-scheme-aqua-orange .k-merged-stem {
+      --piece-shell: linear-gradient(155deg, #83eddf, #38c9b8 55%, #138c84);
+      --piece-face: linear-gradient(180deg, #8cf3e5, #2fc4b2);
+    }
+
+    .k-scheme-aqua-orange .k-stem-top,
+    .k-scheme-aqua-orange .k-stem-middle,
+    .k-scheme-aqua-orange .k-stem-bottom,
+    .k-scheme-aqua-orange .k-grid::before {
+      background: linear-gradient(155deg, #83eddf, #38c9b8 55%, #138c84);
+    }
+
+    .audit-grid {
+      z-index: 4;
+      pointer-events: none;
+      opacity: 0;
+      background-image:
+        linear-gradient(to right, rgb(25 105 255 / .52) 1px, transparent 1px),
+        linear-gradient(to bottom, rgb(25 105 255 / .52) 1px, transparent 1px);
+      background-size: var(--u) var(--u);
+      box-shadow: inset -1px -1px 0 rgb(25 105 255 / .52);
+      transition: opacity .16s ease;
+    }
+
+    .comparison-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: .75rem 1rem;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--line);
+      background: #faf8f4;
+    }
+
+    .comparison-controls label {
+      font-size: .8rem;
+      font-weight: 700;
+    }
+
+    .comparison-controls input[type="range"] {
+      width: min(18rem, 65vw);
+      accent-color: var(--orange-face);
+    }
+
+    .control-button {
+      padding: .5rem .75rem;
+      border: 1px solid #cfc9bf;
+      border-radius: 999px;
+      background: white;
+      color: #4d5564;
+      cursor: pointer;
+      font: inherit;
+      font-size: .8rem;
+      font-weight: 700;
+    }
+
+    .control-button[aria-pressed="true"] {
+      border-color: var(--orange-face);
+      background: #fff0e5;
+      color: #8d3a06;
+    }
+
+    .overlay-wrap {
+      display: grid;
+      place-items: center;
+      min-height: 25rem;
+      padding: 2rem;
+      background: #f5f3ee;
+    }
+
+    .overlay-stage {
+      --mark-size: min(72vw, 320px);
+      position: relative;
+      width: var(--mark-size);
+      height: var(--mark-size);
+      background: white;
+      box-shadow: 0 1rem 3rem rgb(29 35 45 / .12);
+    }
+
+    .overlay-stage .source-crop,
+    .overlay-stage .pixel-mark {
+      --size: var(--mark-size);
+      position: absolute;
+      inset: 0;
+    }
+
+    .reference-layer { opacity: 0; }
+    .construction-layer { opacity: 1; }
+    .grid-on .audit-grid { opacity: 1; }
+
+    .sizes {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+
+    .size-pair {
+      display: grid;
+      place-items: center;
+      min-height: 18rem;
+      padding: 1.25rem;
+      background: var(--panel);
+    }
+
+    .pair-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      min-height: 10rem;
+    }
+
+    .pair-row > div {
+      outline: 1px solid rgb(29 35 45 / .08);
+      background: white;
+    }
+
+    .s32  { --size: 32px; }
+    .s64  { --size: 64px; }
+    .s96  { --size: 96px; }
+    .s120 { --size: 120px; }
+    .s160 { --size: 160px; }
+    .s256 { --size: 256px; }
+
+    .variants {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+
+    .variant-card {
+      display: grid;
+      grid-template-rows: 1fr auto;
+      gap: 1.25rem;
+      min-height: 23rem;
+      padding: 2rem 1.25rem 1.25rem;
+      background: var(--panel);
+      color: var(--ink);
+    }
+
+    .variant-stage {
+      display: grid;
+      place-items: center;
+      min-height: 13rem;
+      border-radius: 1rem;
+      background:
+        radial-gradient(circle, rgb(255 255 255 / .95), rgb(244 241 235 / .9) 64%, rgb(234 230 221 / .8));
+    }
+
+    .variant-copy {
+      padding-top: 1rem;
+      border-top: 1px solid var(--line);
+    }
+
+    .variant-copy p {
+      margin-top: .4rem;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+
+    .variant-map {
+      display: inline-block;
+      margin-top: .7rem;
+      color: #8a3b08;
+      font: 750 .68rem/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: .16em;
+      white-space: pre;
+    }
+
+    .variant-card.ink .variant-map { color: #283243; }
+    .variant-card.tricolor .variant-map { color: #168f86; }
+
+    .matrix-key {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 1px;
+      border-bottom: 1px solid var(--line);
+      background: var(--line);
+    }
+
+    .matrix-key span {
+      padding: .7rem .9rem;
+      background: #f8f5ef;
+      color: #4f5867;
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .1em;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .variation-matrix {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+
+    .matrix-card {
+      display: grid;
+      gap: .8rem;
+      min-height: 15rem;
+      padding: 1rem;
+      background: var(--panel);
+      color: var(--ink);
+    }
+
+    .matrix-stage {
+      display: grid;
+      place-items: center;
+      min-height: 10.5rem;
+      border-radius: .85rem;
+      background:
+        radial-gradient(circle, rgb(255 255 255 / .98), rgb(244 241 235 / .92) 65%, rgb(234 230 221 / .82));
+    }
+
+    .matrix-label {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: .75rem;
+      border-top: 1px solid var(--line);
+      padding-top: .65rem;
+    }
+
+    .matrix-label strong { font-size: .82rem; }
+
+    .matrix-label span {
+      color: var(--muted);
+      font-size: .7rem;
+      white-space: nowrap;
+    }
+
+    .audit-layout {
+      display: grid;
+      grid-template-columns: minmax(18rem, .8fr) minmax(0, 1.2fr);
+    }
+
+    .cell-map,
+    .geometry-notes {
+      padding: clamp(1.25rem, 4vw, 2.25rem);
+    }
+
+    .cell-map { background: #111722; color: #f8f5ef; }
+
+    .cell-map pre {
+      margin-top: 1.2rem;
+      color: #dce3ef;
+      font: 700 clamp(.82rem, 2.2vw, 1.1rem)/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: .12em;
+    }
+
+    .orange-letter { color: #ff7923; }
+    .dark-letter { color: #778397; }
+
+    .geometry-notes ul {
+      display: grid;
+      gap: .75rem;
+      margin: 1.2rem 0 0;
+      padding-left: 1.2rem;
+      color: #4d5564;
+    }
+
+    .night {
+      border-color: var(--night-line);
+      background: var(--night);
+      color: #f7f4ed;
+    }
+
+    .night .section-head { border-color: var(--night-line); }
+    .night .section-head p, .night figcaption { color: #aeb7c7; }
+    .night .sizes { background: var(--night-line); }
+    .night .size-pair { background: var(--night-panel); }
+
+    .palette {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .swatch {
+      min-height: 9rem;
+      padding: 1.1rem;
+      background: var(--swatch);
+      color: var(--label, white);
+    }
+
+    .swatch strong, .swatch code { display: block; }
+    .swatch code { margin-top: .25rem; font-size: .76rem; opacity: .75; }
+
+    footer {
+      padding-block: 1rem 3rem;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+
+    @media (max-width: 1000px) {
+      .sizes { grid-template-columns: 1fr; }
+      .variants, .variation-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .matrix-key { display: none; }
+    }
+
+    @media (max-width: 820px) {
+      .hero-compare, .audit-layout { grid-template-columns: 1fr; }
+      .hero-card + .hero-card { border-top: 1px solid var(--line); border-left: 0; }
+      .palette { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .hero-card { min-height: 23rem; }
+    }
+
+    @media (max-width: 520px) {
+      .source-crop, .pixel-mark { --size: 220px; }
+      .sizes, .variants, .variation-matrix, .palette { grid-template-columns: 1fr; }
+      .size-pair { min-height: 14rem; }
+      .section-head { align-items: flex-start; flex-direction: column; }
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body {
+        background:
+          radial-gradient(circle at 50% -20%, rgb(49 59 76 / .45), transparent 34rem),
+          #0d121a;
+        color: #f7f4ed;
+      }
+
+      header p, footer { color: #aeb7c7; }
+      .status { border-color: #8a4217; background: #2b1b12; color: #ffb681; }
+      section { border-color: var(--night-line); background: rgb(24 30 41 / .9); }
+      .section-head, .hero-card + .hero-card, .comparison-controls { border-color: var(--night-line); }
+      .section-head p, figcaption { color: #aeb7c7; }
+      .hero-card, .overlay-wrap { background-color: #171d27; }
+      .comparison-controls { background: #151b25; }
+      .control-button { border-color: #465166; background: #222a38; color: #d4dbe7; }
+      .control-button[aria-pressed="true"] { border-color: var(--orange-face); background: #352115; color: #ffc69f; }
+      .sizes { background: var(--night-line); }
+      .size-pair { background: var(--night-panel); }
+      .geometry-notes ul { color: #b6bfce; }
+    }
+  </style>
+</head>
+<body>
+  <template id="kwiry-mark-template">
+    <div class="body-grid" aria-hidden="true">
+      <span class="core core-v"></span><span class="core core-mid"></span><span class="core core-wide"></span>
+      <span class="dark-stud d-nw"></span><span class="dark-stud d-ne"></span><span class="dark-stud d-w1"></span><span class="dark-stud d-e1"></span>
+      <span class="dark-stud d-w2"></span><span class="dark-stud d-e2"></span><span class="dark-stud d-sw"></span><span class="dark-stud d-se"></span>
+    </div>
+    <div class="orange-grid" aria-hidden="true">
+      <span class="orange-piece o-top"></span><span class="orange-piece o-nw"></span><span class="orange-piece o-ne"></span>
+      <span class="orange-piece o-left"></span><span class="orange-piece o-right"></span><span class="orange-piece o-sw"></span>
+      <span class="orange-piece o-se"></span><span class="orange-piece o-bottom"></span><span class="orange-piece o-h1"></span><span class="orange-piece o-h2"></span>
+    </div>
+    <div class="k-grid" aria-hidden="true">
+      <span class="orange-piece k-merged-stem"></span>
+      <span class="k-dot k-stem-top"></span><span class="k-dot k-stem-middle"></span><span class="k-dot k-stem-bottom"></span>
+      <span class="k-dot k-joint"></span><span class="k-dot k-tip-top"></span><span class="k-dot k-tip-bottom"></span>
+    </div>
+    <span class="audit-grid" aria-hidden="true"></span>
+  </template>
+
+  <header>
+    <span class="status">Accepted responsive system</span>
+    <h1>The Kwiry mark.</h1>
+    <p>The compact mark keeps the accepted 8×8 source geometry untouched. Large-format branding adds the balanced merged-full graphite K. The comparison tools and experimental walls remain below as the design archive.</p>
+  </header>
+
+  <main>
+    <section class="final-section" aria-labelledby="final-system-title">
+      <div class="section-head">
+        <div><h2 id="final-system-title">Accepted responsive logo system</h2></div>
+        <p>One silhouette, two optical treatments selected by rendered size and context.</p>
+      </div>
+      <div class="hero-compare">
+        <div class="hero-card">
+          <figure>
+            <div class="final-asset-row">
+              <img style="--asset-size: 32px" src="kwiry.svg" width="32" height="32" alt="Untouched compact Kwiry mark at 32 pixels">
+              <img style="--asset-size: 64px" src="kwiry.svg" width="64" height="64" alt="Untouched compact Kwiry mark at 64 pixels">
+            </div>
+            <figcaption><strong>Compact · untouched</strong><br>App icons, tray icons, favicons, result rows, and UI marks.<br><span class="final-rule">Default at 64px and below</span></figcaption>
+          </figure>
+        </div>
+        <div class="hero-card">
+          <figure>
+            <div class="final-asset-row">
+              <img style="--asset-size: 120px" src="kwiry-graphite.svg" width="120" height="120" alt="Large-format Kwiry mark with a graphite K at 120 pixels">
+              <img style="--asset-size: 256px" src="kwiry-graphite.svg" width="256" height="256" alt="Large-format Kwiry mark with a graphite K at 256 pixels">
+            </div>
+            <figcaption><strong>Large format · graphite K</strong><br>README headers, splash screens, setup, websites, and documentation heroes.<br><span class="final-rule">Default at 96px and above</span></figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="hero-title">
+      <div class="section-head">
+        <div><h2 id="hero-title">Source / reconstruction</h2></div>
+        <p>The source is cropped to its exact 512×512 logical mark. Both sides use the same visual box.</p>
+      </div>
+      <div class="hero-compare">
+        <div class="hero-card">
+          <figure>
+            <div class="logo-frame" style="--size: 256px">
+              <div class="source-crop s256"><img src="kwiry-owner-reference.svg" alt="Owner-supplied rounded-pixel Kwiry logo reference"></div>
+            </div>
+            <figcaption>Owner-supplied SVG · source of truth</figcaption>
+          </figure>
+        </div>
+        <div class="hero-card">
+          <figure>
+            <div class="logo-frame" style="--size: 256px">
+              <div class="pixel-mark s256" data-mark role="img" aria-label="HTML and CSS reconstruction of the supplied 8 by 8 rounded-pixel logo"></div>
+            </div>
+            <figcaption>Semantic HTML · CSS Grid · no SVG geometry</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="requested-section" aria-labelledby="requested-title">
+      <div class="section-head">
+        <div><h2 id="requested-title">Exact requested all-orange variants</h2></div>
+        <p>Both use full-cell rounded orange blocks identical in size and treatment to the logo’s existing orange squares.</p>
+      </div>
+      <div class="hero-compare">
+        <div class="hero-card">
+          <figure>
+            <div class="logo-frame" style="--size: 256px">
+              <div class="pixel-mark s256 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-balanced k-scheme-orange" data-mark role="img" aria-label="All-orange K with a full merged three-cell stem and full-size center, top-right, and bottom-right blocks"></div>
+            </div>
+            <figcaption><strong>Merged full + full blocks</strong><br>Full three-cell stem; full center, top-right, and bottom-right blocks.</figcaption>
+          </figure>
+        </div>
+        <div class="hero-card">
+          <figure>
+            <div class="logo-frame" style="--size: 256px">
+              <div class="pixel-mark s256 variant-k-three-only k-geometry-three-full k-spacing-balanced k-scheme-orange" data-mark role="img" aria-label="All-orange inner three-by-three treatment with only full-size center, top-right, and bottom-right blocks"></div>
+            </div>
+            <figcaption><strong>Three full blocks only</strong><br>Center, top-right, and bottom-right—no stem or additional marks.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="exact-wall-title">
+      <div class="section-head">
+        <div><h2 id="exact-wall-title">Exact-shape spacing and color wall · 6×6</h2></div>
+        <p>All blocks stay full-cell size. Rows change optical spacing only; columns compare orange, subtle dark grays, warm gray, and two mixed treatments.</p>
+      </div>
+      <div class="matrix-key" aria-hidden="true">
+        <span>Orange</span><span>Soft gray</span><span>Graphite</span><span>Warm gray</span><span>Orange / gray</span><span>Gray / orange</span>
+      </div>
+      <div class="variation-matrix">
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-tight k-scheme-orange" data-mark role="img" aria-label="Merged tight, orange, merged stem, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged tight</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-tight k-exact-soft-gray" data-mark role="img" aria-label="Merged tight, soft gray, merged stem, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged tight</strong><span>Soft gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-tight k-exact-graphite" data-mark role="img" aria-label="Merged tight, graphite, merged stem, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged tight</strong><span>Graphite</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-tight k-exact-warm-gray" data-mark role="img" aria-label="Merged tight, warm gray, merged stem, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged tight</strong><span>Warm gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-tight k-exact-orange-gray" data-mark role="img" aria-label="Merged tight, orange / gray, merged stem, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged tight</strong><span>Orange / gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-tight k-exact-gray-orange" data-mark role="img" aria-label="Merged tight, gray / orange, merged stem, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged tight</strong><span>Gray / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-balanced k-scheme-orange" data-mark role="img" aria-label="Merged balanced, orange, merged stem, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged balanced</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-balanced k-exact-soft-gray" data-mark role="img" aria-label="Merged balanced, soft gray, merged stem, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged balanced</strong><span>Soft gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-balanced k-exact-graphite" data-mark role="img" aria-label="Merged balanced, graphite, merged stem, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged balanced</strong><span>Graphite</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-balanced k-exact-warm-gray" data-mark role="img" aria-label="Merged balanced, warm gray, merged stem, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged balanced</strong><span>Warm gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-balanced k-exact-orange-gray" data-mark role="img" aria-label="Merged balanced, orange / gray, merged stem, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged balanced</strong><span>Orange / gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-balanced k-exact-gray-orange" data-mark role="img" aria-label="Merged balanced, gray / orange, merged stem, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged balanced</strong><span>Gray / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-open k-scheme-orange" data-mark role="img" aria-label="Merged open, orange, merged stem, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged open</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-open k-exact-soft-gray" data-mark role="img" aria-label="Merged open, soft gray, merged stem, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged open</strong><span>Soft gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-open k-exact-graphite" data-mark role="img" aria-label="Merged open, graphite, merged stem, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged open</strong><span>Graphite</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-open k-exact-warm-gray" data-mark role="img" aria-label="Merged open, warm gray, merged stem, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged open</strong><span>Warm gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-open k-exact-orange-gray" data-mark role="img" aria-label="Merged open, orange / gray, merged stem, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged open</strong><span>Orange / gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-full-dots k-spacing-open k-exact-gray-orange" data-mark role="img" aria-label="Merged open, gray / orange, merged stem, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Merged open</strong><span>Gray / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-tight k-scheme-orange" data-mark role="img" aria-label="Three tight, orange, three blocks only, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three tight</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-tight k-exact-soft-gray" data-mark role="img" aria-label="Three tight, soft gray, three blocks only, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three tight</strong><span>Soft gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-tight k-exact-graphite" data-mark role="img" aria-label="Three tight, graphite, three blocks only, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three tight</strong><span>Graphite</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-tight k-exact-warm-gray" data-mark role="img" aria-label="Three tight, warm gray, three blocks only, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three tight</strong><span>Warm gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-tight k-exact-orange-gray" data-mark role="img" aria-label="Three tight, orange / gray, three blocks only, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three tight</strong><span>Orange / gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-tight k-exact-gray-orange" data-mark role="img" aria-label="Three tight, gray / orange, three blocks only, tight spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three tight</strong><span>Gray / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-balanced k-scheme-orange" data-mark role="img" aria-label="Three balanced, orange, three blocks only, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three balanced</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-balanced k-exact-soft-gray" data-mark role="img" aria-label="Three balanced, soft gray, three blocks only, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three balanced</strong><span>Soft gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-balanced k-exact-graphite" data-mark role="img" aria-label="Three balanced, graphite, three blocks only, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three balanced</strong><span>Graphite</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-balanced k-exact-warm-gray" data-mark role="img" aria-label="Three balanced, warm gray, three blocks only, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three balanced</strong><span>Warm gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-balanced k-exact-orange-gray" data-mark role="img" aria-label="Three balanced, orange / gray, three blocks only, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three balanced</strong><span>Orange / gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-balanced k-exact-gray-orange" data-mark role="img" aria-label="Three balanced, gray / orange, three blocks only, balanced spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three balanced</strong><span>Gray / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-open k-scheme-orange" data-mark role="img" aria-label="Three open, orange, three blocks only, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three open</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-open k-exact-soft-gray" data-mark role="img" aria-label="Three open, soft gray, three blocks only, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three open</strong><span>Soft gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-open k-exact-graphite" data-mark role="img" aria-label="Three open, graphite, three blocks only, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three open</strong><span>Graphite</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-open k-exact-warm-gray" data-mark role="img" aria-label="Three open, warm gray, three blocks only, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three open</strong><span>Warm gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-open k-exact-orange-gray" data-mark role="img" aria-label="Three open, orange / gray, three blocks only, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three open</strong><span>Orange / gray</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-three-only k-geometry-three-full k-spacing-open k-exact-gray-orange" data-mark role="img" aria-label="Three open, gray / orange, three blocks only, open spacing, full-size blocks"></div></div>
+          <div class="matrix-label"><strong>Three open</strong><span>Gray / orange</span></div>
+        </article>
+      </div>
+    </section>
+    <section aria-labelledby="variants-title">
+      <div class="section-head">
+        <div><h2 id="variants-title">Five-dot K experiments</h2></div>
+        <p>Three dots form the vertical stem. Top-right and bottom-right dots imply the two arms without drawing diagonal bars.</p>
+      </div>
+      <div class="variants">
+        <article class="variant-card">
+          <div class="variant-stage">
+            <div class="pixel-mark s160" data-mark role="img" aria-label="Exact source reconstruction without an inner K"></div>
+          </div>
+          <div class="variant-copy">
+            <h3>Source geometry</h3>
+            <p>The untouched 8×8 reconstruction, retained as the comparison baseline.</p>
+            <span class="variant-map" aria-label="No K dots">· · ·<br>· · ·<br>· · ·</span>
+          </div>
+        </article>
+        <article class="variant-card">
+          <div class="variant-stage">
+            <div class="pixel-mark s160 variant-k-orange" data-mark role="img" aria-label="Kwiry mark with five orange dots forming a K"></div>
+          </div>
+          <div class="variant-copy">
+            <h3>Orange five-dot K</h3>
+            <p>Brand-orange stem and tips. This is the direct version of the requested construction.</p>
+            <span class="variant-map" aria-label="Five-dot K map">● · ●<br>● · ·<br>● · ●</span>
+          </div>
+        </article>
+        <article class="variant-card ink">
+          <div class="variant-stage">
+            <div class="pixel-mark s160 variant-k-ink" data-mark role="img" aria-label="Kwiry mark with five deep-ink dots forming a K on a lighter slate center"></div>
+          </div>
+          <div class="variant-copy">
+            <h3>Dark-square K</h3>
+            <p>Deep ink dots over a lighter slate center for a quieter, embossed-looking monogram.</p>
+            <span class="variant-map" aria-label="Dark five-dot K map">■ · ■<br>■ · ·<br>■ · ■</span>
+          </div>
+        </article>
+        <article class="variant-card tricolor">
+          <div class="variant-stage">
+            <div class="pixel-mark s160 variant-k-tricolor" data-mark role="img" aria-label="Kwiry mark with orange stem dots and aqua K tips"></div>
+          </div>
+          <div class="variant-copy">
+            <h3>Three-color K</h3>
+            <p>Orange stem, aqua arm tips, and the existing slate field—an intentionally more expressive option.</p>
+            <span class="variant-map" aria-label="Tri-color five-dot K map">● · ◆<br>● · ·<br>● · ◆</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="matrix-title">
+      <div class="section-head">
+        <div><h2 id="matrix-title">K construction wall · 6×6</h2></div>
+        <p>Every treatment includes the solitary center joint. Rows compare merged and pixel stems; columns restore monochrome and explicit three-color combinations.</p>
+      </div>
+      <div class="matrix-key" aria-hidden="true">
+        <span>Orange</span><span>Deep ink</span><span>Orange / aqua</span><span>Orange / amber</span><span>Amber / orange</span><span>Aqua / orange</span>
+      </div>
+      <div class="variation-matrix">
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-merged k-scheme-orange" data-mark role="img" aria-label="Merged full K, orange treatment, left full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged full</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-merged k-scheme-ink" data-mark role="img" aria-label="Merged full K, deep ink treatment, left full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged full</strong><span>Deep ink</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-merged k-scheme-orange-aqua" data-mark role="img" aria-label="Merged full K, orange / aqua treatment, left full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged full</strong><span>Orange / aqua</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-merged k-scheme-orange-amber" data-mark role="img" aria-label="Merged full K, orange / amber treatment, left full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged full</strong><span>Orange / amber</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-merged k-scheme-amber-orange" data-mark role="img" aria-label="Merged full K, amber / orange treatment, left full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged full</strong><span>Amber / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-merged k-scheme-aqua-orange" data-mark role="img" aria-label="Merged full K, aqua / orange treatment, left full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged full</strong><span>Aqua / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-narrow k-scheme-orange" data-mark role="img" aria-label="Merged narrow K, orange treatment, left narrow pill"></div></div>
+          <div class="matrix-label"><strong>Merged narrow</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-narrow k-scheme-ink" data-mark role="img" aria-label="Merged narrow K, deep ink treatment, left narrow pill"></div></div>
+          <div class="matrix-label"><strong>Merged narrow</strong><span>Deep ink</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-narrow k-scheme-orange-aqua" data-mark role="img" aria-label="Merged narrow K, orange / aqua treatment, left narrow pill"></div></div>
+          <div class="matrix-label"><strong>Merged narrow</strong><span>Orange / aqua</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-narrow k-scheme-orange-amber" data-mark role="img" aria-label="Merged narrow K, orange / amber treatment, left narrow pill"></div></div>
+          <div class="matrix-label"><strong>Merged narrow</strong><span>Orange / amber</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-narrow k-scheme-amber-orange" data-mark role="img" aria-label="Merged narrow K, amber / orange treatment, left narrow pill"></div></div>
+          <div class="matrix-label"><strong>Merged narrow</strong><span>Amber / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-narrow k-scheme-aqua-orange" data-mark role="img" aria-label="Merged narrow K, aqua / orange treatment, left narrow pill"></div></div>
+          <div class="matrix-label"><strong>Merged narrow</strong><span>Aqua / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-large k-scheme-orange" data-mark role="img" aria-label="Pixels large K, orange treatment, left large pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels large</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-large k-scheme-ink" data-mark role="img" aria-label="Pixels large K, deep ink treatment, left large pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels large</strong><span>Deep ink</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-large k-scheme-orange-aqua" data-mark role="img" aria-label="Pixels large K, orange / aqua treatment, left large pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels large</strong><span>Orange / aqua</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-large k-scheme-orange-amber" data-mark role="img" aria-label="Pixels large K, orange / amber treatment, left large pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels large</strong><span>Orange / amber</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-large k-scheme-amber-orange" data-mark role="img" aria-label="Pixels large K, amber / orange treatment, left large pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels large</strong><span>Amber / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-large k-scheme-aqua-orange" data-mark role="img" aria-label="Pixels large K, aqua / orange treatment, left large pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels large</strong><span>Aqua / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-small k-scheme-orange" data-mark role="img" aria-label="Pixels small K, orange treatment, left small pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels small</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-small k-scheme-ink" data-mark role="img" aria-label="Pixels small K, deep ink treatment, left small pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels small</strong><span>Deep ink</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-small k-scheme-orange-aqua" data-mark role="img" aria-label="Pixels small K, orange / aqua treatment, left small pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels small</strong><span>Orange / aqua</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-small k-scheme-orange-amber" data-mark role="img" aria-label="Pixels small K, orange / amber treatment, left small pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels small</strong><span>Orange / amber</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-small k-scheme-amber-orange" data-mark role="img" aria-label="Pixels small K, amber / orange treatment, left small pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels small</strong><span>Amber / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-dotted variant-k-jointed k-geometry-pixel-small k-scheme-aqua-orange" data-mark role="img" aria-label="Pixels small K, aqua / orange treatment, left small pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels small</strong><span>Aqua / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-linked variant-k-jointed k-geometry-linked-small k-scheme-orange" data-mark role="img" aria-label="Pixels linked K, orange treatment, left lightly linked pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels linked</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-linked variant-k-jointed k-geometry-linked-small k-scheme-ink" data-mark role="img" aria-label="Pixels linked K, deep ink treatment, left lightly linked pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels linked</strong><span>Deep ink</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-linked variant-k-jointed k-geometry-linked-small k-scheme-orange-aqua" data-mark role="img" aria-label="Pixels linked K, orange / aqua treatment, left lightly linked pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels linked</strong><span>Orange / aqua</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-linked variant-k-jointed k-geometry-linked-small k-scheme-orange-amber" data-mark role="img" aria-label="Pixels linked K, orange / amber treatment, left lightly linked pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels linked</strong><span>Orange / amber</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-linked variant-k-jointed k-geometry-linked-small k-scheme-amber-orange" data-mark role="img" aria-label="Pixels linked K, amber / orange treatment, left lightly linked pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels linked</strong><span>Amber / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-linked variant-k-jointed k-geometry-linked-small k-scheme-aqua-orange" data-mark role="img" aria-label="Pixels linked K, aqua / orange treatment, left lightly linked pixels"></div></div>
+          <div class="matrix-label"><strong>Pixels linked</strong><span>Aqua / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-centered k-position-center k-scheme-orange" data-mark role="img" aria-label="Merged centered K, orange treatment, middle full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged centered</strong><span>Orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-centered k-position-center k-scheme-ink" data-mark role="img" aria-label="Merged centered K, deep ink treatment, middle full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged centered</strong><span>Deep ink</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-centered k-position-center k-scheme-orange-aqua" data-mark role="img" aria-label="Merged centered K, orange / aqua treatment, middle full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged centered</strong><span>Orange / aqua</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-centered k-position-center k-scheme-orange-amber" data-mark role="img" aria-label="Merged centered K, orange / amber treatment, middle full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged centered</strong><span>Orange / amber</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-centered k-position-center k-scheme-amber-orange" data-mark role="img" aria-label="Merged centered K, amber / orange treatment, middle full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged centered</strong><span>Amber / orange</span></div>
+        </article>
+        <article class="matrix-card">
+          <div class="matrix-stage"><div class="pixel-mark s96 variant-k-merged variant-k-jointed k-geometry-centered k-position-center k-scheme-aqua-orange" data-mark role="img" aria-label="Merged centered K, aqua / orange treatment, middle full-cell pill"></div></div>
+          <div class="matrix-label"><strong>Merged centered</strong><span>Aqua / orange</span></div>
+        </article>
+      </div>
+    </section>
+    <section aria-labelledby="overlay-title">
+      <div class="section-head">
+        <div><h2 id="overlay-title">Alignment audit</h2></div>
+        <p>Blend the source beneath the CSS reconstruction or expose the exact 8×8 grid.</p>
+      </div>
+      <div class="comparison-controls">
+        <label for="source-opacity">Source overlay</label>
+        <input id="source-opacity" type="range" min="0" max="100" value="0">
+        <button class="control-button" id="grid-toggle" type="button" aria-pressed="false">Show 8×8 grid</button>
+      </div>
+      <div class="overlay-wrap">
+        <div class="overlay-stage" id="overlay-stage">
+          <div class="source-crop reference-layer" id="reference-layer" aria-hidden="true"><img src="kwiry-owner-reference.svg" alt=""></div>
+          <div class="pixel-mark construction-layer" id="construction-layer" data-mark role="img" aria-label="Overlay-ready HTML and CSS logo reconstruction"></div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="sizes-title">
+      <div class="section-head">
+        <div><h2 id="sizes-title">Light-context size test</h2></div>
+        <p>Reference on the left; HTML/CSS on the right at every size.</p>
+      </div>
+      <div class="sizes">
+        <figure class="size-pair"><div class="pair-row"><div class="source-crop s32"><img src="kwiry-owner-reference.svg" alt="Reference at 32 pixels"></div><div class="pixel-mark s32" data-mark role="img" aria-label="CSS reconstruction at 32 pixels"></div></div><figcaption>32 px · reference / CSS</figcaption></figure>
+        <figure class="size-pair"><div class="pair-row"><div class="source-crop s64"><img src="kwiry-owner-reference.svg" alt="Reference at 64 pixels"></div><div class="pixel-mark s64" data-mark role="img" aria-label="CSS reconstruction at 64 pixels"></div></div><figcaption>64 px · reference / CSS</figcaption></figure>
+        <figure class="size-pair"><div class="pair-row"><div class="source-crop s120"><img src="kwiry-owner-reference.svg" alt="Reference at 120 pixels"></div><div class="pixel-mark s120" data-mark role="img" aria-label="CSS reconstruction at 120 pixels"></div></div><figcaption>120 px · reference / CSS</figcaption></figure>
+        <figure class="size-pair"><div class="pair-row"><div class="source-crop s256"><img src="kwiry-owner-reference.svg" alt="Reference at 256 pixels"></div><div class="pixel-mark s256" data-mark role="img" aria-label="CSS reconstruction at 256 pixels"></div></div><figcaption>256 px · reference / CSS</figcaption></figure>
+      </div>
+    </section>
+
+    <section class="night" aria-labelledby="night-title">
+      <div class="section-head">
+        <div><h2 id="night-title">Dark-context size test</h2></div>
+        <p>The white square belongs to the supplied presentation; the reconstructed product mark remains transparent.</p>
+      </div>
+      <div class="sizes">
+        <figure class="size-pair"><div class="pair-row"><div class="source-crop s32"><img src="kwiry-owner-reference.svg" alt="Reference at 32 pixels on dark context"></div><div class="pixel-mark s32" data-mark role="img" aria-label="CSS reconstruction at 32 pixels on dark context"></div></div><figcaption>32 px</figcaption></figure>
+        <figure class="size-pair"><div class="pair-row"><div class="source-crop s64"><img src="kwiry-owner-reference.svg" alt="Reference at 64 pixels on dark context"></div><div class="pixel-mark s64" data-mark role="img" aria-label="CSS reconstruction at 64 pixels on dark context"></div></div><figcaption>64 px</figcaption></figure>
+        <figure class="size-pair"><div class="pair-row"><div class="source-crop s120"><img src="kwiry-owner-reference.svg" alt="Reference at 120 pixels on dark context"></div><div class="pixel-mark s120" data-mark role="img" aria-label="CSS reconstruction at 120 pixels on dark context"></div></div><figcaption>120 px</figcaption></figure>
+        <figure class="size-pair"><div class="pair-row"><div class="source-crop s256"><img src="kwiry-owner-reference.svg" alt="Reference at 256 pixels on dark context"></div><div class="pixel-mark s256" data-mark role="img" aria-label="CSS reconstruction at 256 pixels on dark context"></div></div><figcaption>256 px</figcaption></figure>
+      </div>
+    </section>
+
+    <section aria-labelledby="geometry-title">
+      <div class="section-head"><div><h2 id="geometry-title">Construction record</h2></div></div>
+      <div class="audit-layout">
+        <div class="cell-map">
+          <h3>Exact occupancy</h3>
+          <pre aria-label="Eight by eight logo occupancy map">  1 2 3 4 5 6 7 8
+1 · · <span class="orange-letter">O O O</span> · · ·
+2 · <span class="orange-letter">O</span> <span class="dark-letter">D D D</span> <span class="orange-letter">O</span> · ·
+3 <span class="orange-letter">O</span> <span class="dark-letter">D D D D D</span> <span class="orange-letter">O</span> ·
+4 <span class="orange-letter">O</span> <span class="dark-letter">D D D D D</span> <span class="orange-letter">O</span> ·
+5 <span class="orange-letter">O</span> <span class="dark-letter">D D D D D</span> <span class="orange-letter">O</span> ·
+6 · <span class="orange-letter">O</span> <span class="dark-letter">D D D</span> <span class="orange-letter">O</span> · ·
+7 · · <span class="orange-letter">O O O</span> · <span class="orange-letter">O</span> ·
+8 · · · · · · · <span class="orange-letter">O</span></pre>
+        </div>
+        <div class="geometry-notes">
+          <h3>What is matched</h3>
+          <ul>
+            <li>The logo occupies an exact 8×8 square with no fractional cell placement.</li>
+            <li>Top and bottom orange bars are three-cell pills; left and right bars are three-cell vertical pills.</li>
+            <li>The dark center is a merged pixel-circle: a five-cell middle bar, three-cell shoulders/body, and one-cell top/bottom spine.</li>
+            <li>Eight darker rounded studs sit at the diagonal transitions around the center.</li>
+            <li>The handle is exactly two orange square cells at row 7 / column 7 and row 8 / column 8.</li>
+            <li>Orange pieces use an outer beveled shell and inset face; dark pieces use shallow top light and lower-right depth.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="palette-title">
+      <div class="section-head"><div><h2 id="palette-title">Sampled palette</h2></div></div>
+      <div class="palette">
+        <div class="swatch" style="--swatch: #fa7826; --label: #241007"><strong>Orange highlight</strong><code>#FA7826</code></div>
+        <div class="swatch" style="--swatch: #f66b0b; --label: #241007"><strong>Orange face</strong><code>#F66B0B</code></div>
+        <div class="swatch" style="--swatch: #df5902"><strong>Orange lower edge</strong><code>#DF5902</code></div>
+        <div class="swatch" style="--swatch: #2a3140"><strong>Slate field</strong><code>#2A3140</code></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>Accepted system: <code>kwiry.svg</code> for compact use and <code>kwiry-graphite.svg</code> for large-format branding.</footer>
+
+  <script>
+    const template = document.querySelector("#kwiry-mark-template");
+    document.querySelectorAll("[data-mark]").forEach((mark) => {
+      mark.append(template.content.cloneNode(true));
+    });
+
+    const sourceOpacity = document.querySelector("#source-opacity");
+    const referenceLayer = document.querySelector("#reference-layer");
+    const constructionLayer = document.querySelector("#construction-layer");
+    sourceOpacity.addEventListener("input", () => {
+      const mix = Number(sourceOpacity.value) / 100;
+      referenceLayer.style.opacity = mix;
+      constructionLayer.style.opacity = 1 - (mix * .45);
+    });
+
+    const gridToggle = document.querySelector("#grid-toggle");
+    const overlayStage = document.querySelector("#overlay-stage");
+    gridToggle.addEventListener("click", () => {
+      const pressed = gridToggle.getAttribute("aria-pressed") === "true";
+      gridToggle.setAttribute("aria-pressed", String(!pressed));
+      gridToggle.textContent = pressed ? "Show 8×8 grid" : "Hide 8×8 grid";
+      overlayStage.classList.toggle("grid-on", !pressed);
+    });
+  </script>
+</body>
+</html>

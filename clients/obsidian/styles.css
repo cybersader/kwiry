@@ -1,5 +1,59 @@
 /* Kwiry Search — GPL-3.0-only */
 
+.kwiry-mode-control {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  padding: var(--size-4-2) var(--size-4-3);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.kwiry-mode-label {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+}
+
+.kwiry-mode-segments {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+
+.kwiry-mode-segment {
+  min-width: 0;
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.kwiry-mode-segment + .kwiry-mode-segment {
+  border-inline-start: 1px solid var(--background-modifier-border);
+}
+
+.kwiry-mode-segment:hover,
+.kwiry-mode-segment:focus-visible {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.kwiry-mode-segment.is-selected {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.kwiry-mode-segment.is-selected:hover,
+.kwiry-mode-segment.is-selected:focus-visible {
+  background: var(--interactive-accent-hover);
+  color: var(--text-on-accent);
+}
+
 .kwiry-result {
   display: flex;
   flex-direction: column;

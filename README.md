@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo/kwiry.svg" width="120" alt="kwiry logo">
+  <img src="docs/logo/kwiry-graphite.svg" width="120" alt="Kwiry rounded-pixel search logo with graphite K">
 </p>
 
 <h1 align="center">kwiry</h1>
@@ -33,34 +33,51 @@ A single Rust binary provides:
 
 ## Quick start
 
+Native installers are not published yet. Build the binary from source, then use the guided setup on native Windows or Linux:
+
 ```bash
 cd daemon
-cargo build --workspace
-
-# Register a tree and search it from the CLI
-cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data vault add --id notes --path /absolute/path/to/notes
-cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data index
-cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data search "your query"
-
-# Run the daemon (add --semantic for semantic/hybrid modes)
-cargo run -p kwiry -- --config /tmp/kwiry.toml --data-dir /tmp/kwiry-data serve --semantic
+cargo build --release -p kwiry
+./target/release/kwiry setup
 ```
 
-The daemon prints its bearer-token file path on startup. Search over HTTP:
+On Windows, run `target\release\kwiry.exe setup`. The wizard asks for a tree, a stable ID, whether to enable semantic search, and final confirmation. It prepares the index, installs a least-privilege per-user background service, starts it, and verifies authenticated readiness. WSL lifecycle setup is intentionally rejected; manual development commands remain available there.
+
+Preview an automation-safe plan without changing anything:
 
 ```bash
-curl -X POST http://127.0.0.1:32189/v0/search \
-  -H "Authorization: Bearer $(cat /tmp/kwiry.token)" \
-  -H 'Content-Type: application/json' \
-  -d '{"q":"your query","mode":"hybrid","limit":20}'
+./target/release/kwiry setup /absolute/path/to/notes --id notes --no-semantic --dry-run --json
+```
+
+See [the setup guide](docs/setup.md) for Windows Task Scheduler behavior, Linux `systemd --user`, semantic first-run costs, JSON automation, service lifecycle commands, readiness checks, and recovery.
+
+For development or unsupported lifecycle environments, the original explicit flow remains available:
+
+```bash
+cargo run -p kwiry -- vault add --id notes --path /absolute/path/to/notes
+cargo run -p kwiry -- index
+cargo run -p kwiry -- search "your query"
+cargo run -p kwiry -- serve --semantic
 ```
 
 ## Documentation
 
+- [`docs/setup.md`](docs/setup.md) — guided setup, automation, per-user service lifecycle, and recovery
 - [`CONTRACT.md`](CONTRACT.md) — the frozen product contract: invariants, HTTP/MCP surface, host profiles
 - [`docs/vertical-1.md`](docs/vertical-1.md) — index + query core
 - [`docs/vertical-2.md`](docs/vertical-2.md) — daemon, watcher, auth, incremental correctness
 - [`docs/vertical-3.md`](docs/vertical-3.md) — semantic + hybrid search
+
+Serve the repository documentation and logo previews without GitHub:
+
+```bash
+./scripts/serve-docs.sh local      # localhost only
+./scripts/serve-docs.sh tailnet    # direct tailnet HTTP on port 32190
+./scripts/serve-docs.sh tailscale  # tailnet HTTPS mounted at /kwiry
+./scripts/serve-docs.sh unmount    # remove only the /kwiry HTTPS mount
+```
+
+The HTTPS mode preserves any existing Tailscale Serve root proxy and removes its `/kwiry` mount when the session exits.
 
 ## Repository layout
 
@@ -73,7 +90,7 @@ curl -X POST http://127.0.0.1:32189/v0/search \
 
 Everything outside `clients/obsidian/` is dual-licensed under MIT or Apache-2.0 at your option (the Rust convention; Apache-2.0 adds an express patent grant). Unless you state otherwise, any contribution you submit to those paths is dual-licensed the same way, per Apache-2.0 §5.
 
-Logo alternates live in [`docs/logo/minimal/`](docs/logo/minimal/).
+The accepted responsive logo system and preserved design archive live in [`docs/logo/`](docs/logo/README.md): the untouched mark is used at 64px and below, while the graphite-K mark is used at 96px and above.
 
 The Obsidian plugin is GPL-3.0-only and may port code from [Omnisearch](https://github.com/scambier/obsidian-omnisearch) by Simon Cambier. The plugin talks to the daemon only over localhost HTTP; the daemon and core contain no GPL code.
 

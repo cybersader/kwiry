@@ -356,26 +356,63 @@ pub struct SemanticHit {
     pub distance: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RrfTrace {
+    pub chunk_id: String,
+    pub lexical_rank: Option<usize>,
+    pub semantic_rank: Option<usize>,
+    pub lexical_contribution: f64,
+    pub semantic_contribution: f64,
+    pub fused_score: f64,
+}
+
 /// Reciprocal-rank fusion over two ranked chunk-ID lists (the contract's one
 /// permitted formula). Deterministic: ties break on chunk_id.
 pub fn rrf_fuse(lexical: &[String], semantic: &[String], k: f64) -> Vec<(String, f64)> {
+    rrf_fuse_traced(lexical, semantic, k)
+        .into_iter()
+        .map(|trace| (trace.chunk_id, trace.fused_score))
+        .collect()
+}
+
+pub(crate) fn rrf_fuse_traced(lexical: &[String], semantic: &[String], k: f64) -> Vec<RrfTrace> {
     use std::collections::BTreeMap;
-    let mut scores: BTreeMap<&str, f64> = BTreeMap::new();
+
+    let mut traces: BTreeMap<&str, RrfTrace> = BTreeMap::new();
     for (rank, chunk_id) in lexical.iter().enumerate() {
-        *scores.entry(chunk_id).or_default() += 1.0 / (k + rank as f64 + 1.0);
+        let contribution = 1.0 / (k + rank as f64 + 1.0);
+        let trace = traces.entry(chunk_id).or_insert_with(|| RrfTrace {
+            chunk_id: chunk_id.clone(),
+            lexical_rank: None,
+            semantic_rank: None,
+            lexical_contribution: 0.0,
+            semantic_contribution: 0.0,
+            fused_score: 0.0,
+        });
+        trace.lexical_rank = Some(rank + 1);
+        trace.lexical_contribution = contribution;
+        trace.fused_score += contribution;
     }
     for (rank, chunk_id) in semantic.iter().enumerate() {
-        *scores.entry(chunk_id).or_default() += 1.0 / (k + rank as f64 + 1.0);
+        let contribution = 1.0 / (k + rank as f64 + 1.0);
+        let trace = traces.entry(chunk_id).or_insert_with(|| RrfTrace {
+            chunk_id: chunk_id.clone(),
+            lexical_rank: None,
+            semantic_rank: None,
+            lexical_contribution: 0.0,
+            semantic_contribution: 0.0,
+            fused_score: 0.0,
+        });
+        trace.semantic_rank = Some(rank + 1);
+        trace.semantic_contribution = contribution;
+        trace.fused_score += contribution;
     }
-    let mut fused: Vec<(String, f64)> = scores
-        .into_iter()
-        .map(|(chunk_id, score)| (chunk_id.to_owned(), score))
-        .collect();
+    let mut fused: Vec<_> = traces.into_values().collect();
     fused.sort_by(|left, right| {
         right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
+            .fused_score
+            .total_cmp(&left.fused_score)
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
     });
     fused
 }
@@ -659,6 +696,17 @@ mod tests {
         assert_eq!(fused[1].0, "a");
         let again = rrf_fuse(&lexical, &semantic, 60.0);
         assert_eq!(fused, again);
+
+        let traced = rrf_fuse_traced(&lexical, &semantic, 60.0);
+        assert_eq!(traced[0].chunk_id, "b");
+        assert_eq!(traced[0].lexical_rank, Some(2));
+        assert_eq!(traced[0].semantic_rank, Some(1));
+        assert!(traced[0].lexical_contribution > 0.0);
+        assert!(traced[0].semantic_contribution > 0.0);
+        assert_eq!(
+            traced[0].fused_score,
+            traced[0].lexical_contribution + traced[0].semantic_contribution
+        );
     }
 
     #[test]

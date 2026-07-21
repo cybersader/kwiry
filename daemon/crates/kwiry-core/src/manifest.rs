@@ -11,7 +11,7 @@ use crate::model::{CHUNKING_VERSION, FileIngestOutcome, FileOutcomeKind, VaultRe
 use crate::state::{read_json, write_json_atomic};
 
 pub const MANIFEST_VERSION: u32 = 1;
-pub const INDEX_FORMAT_VERSION: u32 = 2;
+pub const INDEX_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
@@ -54,7 +54,7 @@ impl Manifest {
             || self.chunking_version != CHUNKING_VERSION
         {
             return Err(Error::State(format!(
-                "unsupported manifest versions: manifest={}, index={}, chunking={}",
+                "unsupported manifest versions: found manifest={}, index={}, chunking={}; expected manifest={MANIFEST_VERSION}, index={INDEX_FORMAT_VERSION}, chunking={CHUNKING_VERSION}; run `kwiry index` to rebuild the disposable index",
                 self.manifest_version, self.index_format_version, self.chunking_version
             )));
         }
@@ -184,6 +184,19 @@ mod tests {
         assert_eq!(source_key("a", "note.md"), source_key("a", "note.md"));
         assert_ne!(source_key("a", "note.md"), source_key("b", "note.md"));
         assert_ne!(source_key("a", "note.md"), source_key("a", "moved.md"));
+    }
+
+    #[test]
+    fn incompatible_index_manifest_requires_an_explicit_rebuild() {
+        let manifest = Manifest {
+            index_format_version: 2,
+            ..Manifest::default()
+        };
+
+        let error = manifest.validate().unwrap_err();
+        assert!(error.to_string().contains("found manifest=1, index=2"));
+        assert!(error.to_string().contains("expected manifest=1, index=3"));
+        assert!(error.to_string().contains("kwiry index"));
     }
 
     #[test]

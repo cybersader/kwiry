@@ -244,6 +244,38 @@ mod tests {
     }
 
     #[test]
+    fn search_response_shape_excludes_internal_retrieval_metadata() {
+        let response = ApiSearchResponse {
+            hits: vec![SearchHit {
+                chunk_id: "chunk-1".into(),
+                vault_id: "notes".into(),
+                path: "folder/note.md".into(),
+                heading_path: vec!["Heading".into()],
+                score: 1.5,
+                excerpt: "excerpt".into(),
+                frontmatter: crate::model::Frontmatter::default(),
+            }],
+            next_cursor: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "hits": [{
+                    "chunk_id": "chunk-1",
+                    "vault_id": "notes",
+                    "path": "folder/note.md",
+                    "heading_path": ["Heading"],
+                    "score": 1.5,
+                    "excerpt": "excerpt",
+                    "frontmatter": {}
+                }],
+                "next_cursor": null
+            })
+        );
+    }
+
+    #[test]
     fn semantic_and_hybrid_validate_only_with_a_model() {
         for mode in ["semantic", "hybrid"] {
             let request: ApiSearchRequest =

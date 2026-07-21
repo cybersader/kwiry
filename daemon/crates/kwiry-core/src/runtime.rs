@@ -12,9 +12,11 @@ use crate::error::{Error, Result};
 use crate::generation::{DataRoot, DataRootLock};
 use crate::index::{Fields, chunk_document, open_index_dir};
 use crate::manifest::{Manifest, ManifestFile, registration_fingerprint, source_key};
-use crate::model::{Chunk, Config, FileOutcomeKind, IngestWarning, SearchHit, SearchRequest};
+use crate::model::{
+    Chunk, Config, FileOutcomeKind, IngestWarning, RetrievalMetadata, SearchHit, SearchRequest,
+};
 use crate::search::search_reader;
-use crate::semantic::{SemanticRuntime, embedding_text, rrf_fuse};
+use crate::semantic::{SemanticRuntime, embedding_text, rrf_fuse_traced};
 
 /// Candidate depth fetched from each leg before RRF fusion.
 const HYBRID_CANDIDATES: usize = 100;
@@ -106,10 +108,10 @@ impl SearchRuntime {
 
         let lexical_ids: Vec<String> = lexical.iter().map(|hit| hit.chunk_id.clone()).collect();
         let semantic_ids: Vec<String> = neighbors.into_iter().map(|hit| hit.chunk_id).collect();
-        let fused = rrf_fuse(&lexical_ids, &semantic_ids, RRF_K);
+        let fused = rrf_fuse_traced(&lexical_ids, &semantic_ids, RRF_K);
         let ordered: Vec<(String, f32)> = fused
             .into_iter()
-            .map(|(chunk_id, score)| (chunk_id, score as f32))
+            .map(|trace| (trace.chunk_id, trace.fused_score as f32))
             .collect();
         let mut hits = active.hydrate(&ordered, filters, Some(query))?;
         hits.truncate(limit);
@@ -253,7 +255,7 @@ impl IndexManager {
     pub fn reconcile(&mut self, config: Config) -> Result<ReconcileReport> {
         let mut next_manifest = self.manifest.clone();
         let mut delete_keys = BTreeSet::new();
-        let mut replacement_chunks = Vec::<Chunk>::new();
+        let mut replacement_chunks = Vec::<(Chunk, RetrievalMetadata)>::new();
         // Semantic state reconciles by its own stored hashes, so every
         // discovered source is offered; unchanged ones short-circuit.
         let mut semantic_sources =
@@ -340,7 +342,13 @@ impl IndexManager {
                 });
                 if index_changed {
                     delete_keys.insert(key.clone());
-                    replacement_chunks.extend(outcome.chunks);
+                    let retrieval = outcome.retrieval;
+                    replacement_chunks.extend(
+                        outcome
+                            .chunks
+                            .into_iter()
+                            .map(|chunk| (chunk, retrieval.clone())),
+                    );
                 }
                 next_manifest.files.insert(key, next_file);
             }
@@ -364,9 +372,9 @@ impl IndexManager {
                 self.writer
                     .delete_term(Term::from_field_text(source_key_field, key));
             }
-            for chunk in &replacement_chunks {
+            for (chunk, retrieval) in &replacement_chunks {
                 self.writer
-                    .add_document(chunk_document(&self.search.fields, chunk)?)
+                    .add_document(chunk_document(&self.search.fields, chunk, retrieval)?)
                     .map_err(|error| Error::Index(error.to_string()))?;
             }
             self.writer
@@ -508,6 +516,49 @@ mod tests {
         fs::remove_file(moved).unwrap();
         manager.reconcile(config).unwrap();
         assert!(runtime.search(&request("newterm")).unwrap().is_empty());
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn reconcile_refreshes_alias_and_filename_evidence() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let note = vault_path.join("note.md");
+        fs::write(
+            &note,
+            "---\naliases: [OLD 2 line]\n---\n# Governance\nspecialist oversight",
+        )
+        .unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        assert_eq!(runtime.search(&request("OLD 2 line")).unwrap().len(), 1);
+        fs::write(
+            &note,
+            "---\naliases: [NEW 2 line]\n---\n# Governance\nspecialist oversight",
+        )
+        .unwrap();
+        manager.reconcile(config.clone()).unwrap();
+        assert!(runtime.search(&request("OLD 2 line")).unwrap().is_empty());
+        assert_eq!(runtime.search(&request("NEW 2 line")).unwrap().len(), 1);
+
+        let renamed = vault_path.join("RENAMED-2-line.md");
+        fs::rename(note, &renamed).unwrap();
+        manager.reconcile(config).unwrap();
+        let hits = runtime.search(&request("RENAMED 2 line")).unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.path == "RENAMED-2-line.md"));
         manager.shutdown().unwrap();
     }
 

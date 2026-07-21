@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="kwiry-title kwiry-desc">
+  <title id="kwiry-title">Kwiry large-format graphite K search mark</title>
+  <desc id="kwiry-desc">An eight-by-eight rounded-pixel magnifying glass with orange perimeter pieces, a dark slate search field, and a balanced full-block graphite K for large-format branding.</desc>
+
+  <defs>
+    <linearGradient id="orange-shell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FA7826"/>
+      <stop offset="0.52" stop-color="#ED650E"/>
+      <stop offset="1" stop-color="#DF5902"/>
+    </linearGradient>
+    <linearGradient id="orange-face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF7416"/>
+      <stop offset="1" stop-color="#F66B0B"/>
+    </linearGradient>
+    <linearGradient id="dark-stud" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#252C39"/>
+      <stop offset="0.64" stop-color="#1D232D"/>
+      <stop offset="1" stop-color="#151C27"/>
+    </linearGradient>
+    <linearGradient id="graphite-shell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3B4554"/>
+      <stop offset="0.58" stop-color="#252D39"/>
+      <stop offset="1" stop-color="#151B24"/>
+    </linearGradient>
+    <linearGradient id="graphite-face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#465162"/>
+      <stop offset="1" stop-color="#28313E"/>
+    </linearGradient>
+  </defs>
+
+  <g aria-hidden="true">
+    <g fill="#2A3140">
+      <rect x="192" y="64" width="64" height="320" rx="14"/>
+      <rect x="128" y="128" width="192" height="192" rx="14"/>
+      <rect x="64" y="192" width="320" height="64" rx="14"/>
+    </g>
+
+    <g fill="url(#dark-stud)">
+      <rect x="128" y="64" width="64" height="64" rx="14"/>
+      <rect x="256" y="64" width="64" height="64" rx="14"/>
+      <rect x="64" y="128" width="64" height="64" rx="14"/>
+      <rect x="320" y="128" width="64" height="64" rx="14"/>
+      <rect x="64" y="256" width="64" height="64" rx="14"/>
+      <rect x="320" y="256" width="64" height="64" rx="14"/>
+      <rect x="128" y="320" width="64" height="64" rx="14"/>
+      <rect x="256" y="320" width="64" height="64" rx="14"/>
+    </g>
+
+    <g fill="url(#orange-shell)">
+      <rect x="128" y="0" width="192" height="64" rx="15"/>
+      <rect x="64" y="64" width="64" height="64" rx="15"/>
+      <rect x="320" y="64" width="64" height="64" rx="15"/>
+      <rect x="0" y="128" width="64" height="192" rx="15"/>
+      <rect x="384" y="128" width="64" height="192" rx="15"/>
+      <rect x="64" y="320" width="64" height="64" rx="15"/>
+      <rect x="320" y="320" width="64" height="64" rx="15"/>
+      <rect x="128" y="384" width="192" height="64" rx="15"/>
+      <rect x="384" y="384" width="64" height="64" rx="15"/>
+      <rect x="448" y="448" width="64" height="64" rx="15"/>
+    </g>
+
+    <g fill="url(#orange-face)">
+      <rect x="137" y="8" width="174" height="45" rx="10"/>
+      <rect x="73" y="72" width="46" height="45" rx="10"/>
+      <rect x="329" y="72" width="46" height="45" rx="10"/>
+      <rect x="9" y="136" width="46" height="173" rx="10"/>
+      <rect x="393" y="136" width="46" height="173" rx="10"/>
+      <rect x="73" y="328" width="46" height="45" rx="10"/>
+      <rect x="329" y="328" width="46" height="45" rx="10"/>
+      <rect x="137" y="392" width="174" height="45" rx="10"/>
+      <rect x="393" y="392" width="46" height="45" rx="10"/>
+      <rect x="457" y="456" width="46" height="45" rx="10"/>
+    </g>
+
+    <g fill="url(#graphite-shell)">
+      <rect x="124" y="128" width="64" height="192" rx="15"/>
+      <rect x="196" y="192" width="64" height="64" rx="15"/>
+      <rect x="260" y="128" width="64" height="64" rx="15"/>
+      <rect x="260" y="256" width="64" height="64" rx="15"/>
+    </g>
+
+    <g fill="url(#graphite-face)">
+      <rect x="133" y="136" width="46" height="173" rx="10"/>
+      <rect x="205" y="200" width="46" height="45" rx="10"/>
+      <rect x="269" y="136" width="46" height="45" rx="10"/>
+      <rect x="269" y="264" width="46" height="45" rx="10"/>
+    </g>
+  </g>
+</svg>
