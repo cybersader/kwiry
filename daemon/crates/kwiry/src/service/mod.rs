@@ -136,22 +136,14 @@ mod tests {
 
     #[test]
     fn service_spec_requires_absolute_paths() {
-        let spec = ServiceSpec::new(
-            PathBuf::from("/opt/Kwiry App/kwiry"),
-            PathBuf::from("/home/alice/.config/kwiry/config.toml"),
-            PathBuf::from("/home/alice/.local/share/kwiry/index"),
-        )
-        .unwrap();
+        let root = std::env::current_dir().unwrap();
+        let executable = root.join("Kwiry App").join("kwiry");
+        let config = root.join("config").join("config.toml");
+        let data_dir = root.join("data");
+        let spec = ServiceSpec::new(executable.clone(), config.clone(), data_dir.clone()).unwrap();
 
-        assert_eq!(spec.executable, Path::new("/opt/Kwiry App/kwiry"));
-        assert!(
-            ServiceSpec::new(
-                PathBuf::from("kwiry"),
-                PathBuf::from("/config.toml"),
-                PathBuf::from("/data"),
-            )
-            .is_err()
-        );
+        assert_eq!(spec.executable, executable);
+        assert!(ServiceSpec::new(PathBuf::from("kwiry"), config, data_dir).is_err());
     }
 
     #[test]
