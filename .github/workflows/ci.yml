@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -106,3 +109,71 @@ jobs:
           test -f main.js && test -f manifest.json && test -f styles.css
           head -20 main.js | grep -q "GNU General Public License"
           node -e "const m=require('./manifest.json'),p=require('./package.json'); if(m.version!==p.version){console.error('manifest/package version mismatch');process.exit(1)}"
+
+  obsidian-fts5-gate2:
+    name: Obsidian FTS5 Gate 2 (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: |
+            bench/fts5-wasm/package-lock.json
+            bench/fts5-wasm-obsidian-probe/package-lock.json
+      - name: Verify Gate 1 baseline
+        run: |
+          npm ci --prefix bench/fts5-wasm
+          npm test --prefix bench/fts5-wasm
+          npm run evidence --prefix bench/fts5-wasm
+      - name: Install Gate 2 probe
+        run: npm ci --prefix bench/fts5-wasm-obsidian-probe
+      - name: Typecheck Gate 2 probe
+        run: npm run typecheck --prefix bench/fts5-wasm-obsidian-probe
+      - name: Test Gate 2 protocol, artifact, and runtime
+        run: npm test --prefix bench/fts5-wasm-obsidian-probe
+      - name: Build one-file sideload artifact
+        run: npm run build --prefix bench/fts5-wasm-obsidian-probe
+      - name: Generate and validate sanitized evidence
+        working-directory: bench/fts5-wasm-obsidian-probe
+        run: |
+          node scripts/evidence.mjs > gate2.evidence.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const evidence = JSON.parse(readFileSync("gate2.evidence.json", "utf8"));
+            if (evidence.verdict !== "READY_FOR_FIELD_TEST") process.exit(1);
+            if (evidence.tests.failed !== 0 || evidence.bundle.loose_runtime_assets !== 0) process.exit(1);
+            if (evidence.tests.network_attempts !== 0 || evidence.tests.persistence_attempts !== 0) process.exit(1);
+          '
+      - name: Scan first-party source and artifacts
+        run: |
+          set -euo pipefail
+          ! rg -n -i '(/home/|/mnt/c/|[A-Z]:\\Users\\|api[_-]?key\s*[:=]|secret\s*[:=]|bearer\s+[A-Za-z0-9._~+/-]{12,})' \
+            bench/fts5-wasm-obsidian-probe \
+            --glob '!node_modules/**' --glob '!package-lock.json' --glob '!main.js'
+          ! rg -n -i '(https?://(cdn\.|unpkg\.|cdn\.jsdelivr\.)|requestUrl|app\.vault|loadData\(|saveData\(|node:fs)' \
+            bench/fts5-wasm-obsidian-probe/src
+          test "$(find bench/fts5-wasm-obsidian-probe -maxdepth 1 -type f \
+            \( -name '*.wasm' -o -name '*worker*.js' -o -name '*.map' -o -name '*.db' -o -name '*.sqlite' \) | wc -l)" -eq 0
+      - name: Prepare short-retention field-test artifact
+        if: matrix.node == 22
+        working-directory: bench/fts5-wasm-obsidian-probe
+        run: |
+          mkdir -p .tmp/sideload
+          cp main.js manifest.json styles.css LICENSE THIRD_PARTY_NOTICES.md .tmp/sideload/
+          sha256sum .tmp/sideload/* > .tmp/sideload/SHA256SUMS
+      - name: Upload sanitized evidence and sideload package
+        if: matrix.node == 22
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwiry-fts5-gate2-field-test
+          path: |
+            bench/fts5-wasm-obsidian-probe/gate2.evidence.json
+            bench/fts5-wasm-obsidian-probe/.tmp/sideload/
+          retention-days: 7
+          if-no-files-found: error

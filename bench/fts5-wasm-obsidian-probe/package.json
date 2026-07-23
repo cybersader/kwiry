@@ -1,0 +1,26 @@
+{
+  "name": "kwiry-fts5-wasm-obsidian-probe",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "main": "main.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node esbuild.config.mjs production",
+    "test": "vitest run",
+    "evidence": "node scripts/evidence.mjs"
+  },
+  "dependencies": {
+    "@sqlite.org/sqlite-wasm": "3.53.0-build1"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "builtin-modules": "4.0.0",
+    "esbuild": "0.25.12",
+    "obsidian": "1.13.1",
+    "tslib": "2.8.1",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  }
+}

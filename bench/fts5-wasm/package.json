@@ -1,0 +1,17 @@
+{
+  "name": "kwiry-fts5-wasm-probe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "test": "vitest run",
+    "evidence": "node scripts/evidence.mjs"
+  },
+  "dependencies": {
+    "@sqlite.org/sqlite-wasm": "3.53.0-build1"
+  },
+  "devDependencies": {
+    "vitest": "3.2.7"
+  }
+}

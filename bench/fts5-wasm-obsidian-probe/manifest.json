@@ -1,0 +1,10 @@
+{
+  "id": "kwiry-fts5-wasm-probe",
+  "name": "Kwiry FTS5-WASM Compatibility Probe",
+  "version": "0.0.1",
+  "minAppVersion": "1.7.2",
+  "description": "Synthetic one-file Worker and SQLite FTS5-WASM compatibility probe. Does not search or read the vault.",
+  "author": "cybersader",
+  "authorUrl": "https://github.com/cybersader/kwiry",
+  "isDesktopOnly": true
+}
