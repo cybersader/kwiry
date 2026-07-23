@@ -11,7 +11,10 @@ impl ManagerHandle {
     pub(crate) async fn reconcile(&self, config: Config) -> Result<ReconcileReport> {
         let (reply, response) = oneshot::channel();
         self.sender
-            .send(ManagerCommand::Reconcile { config, reply })
+            .send(ManagerCommand::Reconcile {
+                config: Box::new(config),
+                reply,
+            })
             .await
             .map_err(|_| kwiry_core::Error::State("index manager stopped".to_owned()))?;
         response
@@ -33,7 +36,7 @@ impl ManagerHandle {
 
 enum ManagerCommand {
     Reconcile {
-        config: Config,
+        config: Box<Config>,
         reply: oneshot::Sender<Result<ReconcileReport>>,
     },
     Shutdown {
@@ -49,7 +52,7 @@ pub(crate) fn spawn_manager(
         while let Some(command) = receiver.blocking_recv() {
             match command {
                 ManagerCommand::Reconcile { config, reply } => {
-                    let _ = reply.send(manager.reconcile(config));
+                    let _ = reply.send(manager.reconcile(*config));
                 }
                 ManagerCommand::Shutdown { reply } => {
                     let _ = reply.send(manager.shutdown());
