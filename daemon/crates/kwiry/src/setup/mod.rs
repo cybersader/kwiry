@@ -445,7 +445,7 @@ mod tests {
 
         let remote = ConnectionDescriptor::new(
             "192.0.2.10:32189".parse().unwrap(),
-            PathBuf::from("/state/token"),
+            state_dir.join("remote-token"),
             "1.2.3",
         );
         assert_eq!(
