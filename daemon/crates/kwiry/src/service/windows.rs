@@ -1,6 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tempfile::Builder;

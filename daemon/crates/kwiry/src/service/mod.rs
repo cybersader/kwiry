@@ -9,6 +9,7 @@ pub(crate) mod linux;
 #[cfg(any(windows, test))]
 pub(crate) mod windows;
 
+#[cfg(target_os = "linux")]
 pub(crate) const SERVICE_ID: &str = "kwiry";
 pub(crate) type ServiceResult<T> = Result<T>;
 
@@ -54,6 +55,7 @@ impl ServiceSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceManagerKind {
     #[cfg(any(target_os = "linux", test))]
+    #[cfg_attr(all(test, windows), allow(dead_code))]
     SystemdUser,
     #[cfg(any(windows, test))]
     TaskScheduler,
@@ -88,6 +90,7 @@ pub(crate) struct CommandOutput {
 }
 
 impl CommandOutput {
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn success(&self) -> bool {
         self.code == Some(0)
     }
