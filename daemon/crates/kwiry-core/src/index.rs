@@ -9,7 +9,11 @@ use crate::error::{Error, Result};
 use crate::generation::DataRoot;
 use crate::lexical::{normalize_raw, technical_identifiers};
 use crate::manifest::{Manifest, registration_fingerprint, source_key};
-use crate::model::{Chunk, Config, FileOutcomeKind, IndexStats, RetrievalMetadata};
+use crate::model::{
+    Chunk, Config, FileOutcomeKind, HostProfile, IndexStats, ResourceKey, RetrievalMetadata,
+    VaultRegistration,
+};
+use crate::partition::{GenerationLayout, partition_index_dir};
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
@@ -88,7 +92,17 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
     let data_root = DataRoot::new(data_dir);
     let _lock = data_root.acquire_writer_lock()?;
     let candidate = data_root.create_candidate()?;
-    let result = build_candidate(config, &candidate.index_dir, &candidate.manifest_path());
+    let result = match config.server.profile {
+        HostProfile::Desktop => {
+            build_desktop_candidate(config, &candidate.index_dir, &candidate.manifest_path())
+        }
+        HostProfile::OpenClast => build_openclast_candidate(
+            config,
+            &candidate.partitions_dir,
+            &candidate.manifest_path(),
+            &candidate.layout_path(),
+        ),
+    };
     let stats = match result {
         Ok(stats) => stats,
         Err(error) => {
@@ -100,7 +114,11 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
     Ok(stats)
 }
 
-fn build_candidate(config: &Config, index_dir: &Path, manifest_path: &Path) -> Result<IndexStats> {
+fn build_desktop_candidate(
+    config: &Config,
+    index_dir: &Path,
+    manifest_path: &Path,
+) -> Result<IndexStats> {
     let schema = build_schema();
     let fields = Fields::from_schema(&schema)?;
     let index =
@@ -163,6 +181,132 @@ fn build_candidate(config: &Config, index_dir: &Path, manifest_path: &Path) -> R
         )));
     }
     Ok(stats)
+}
+
+fn build_openclast_candidate(
+    config: &Config,
+    partitions_dir: &Path,
+    manifest_path: &Path,
+    layout_path: &Path,
+) -> Result<IndexStats> {
+    let resources: Vec<_> = config
+        .vaults
+        .iter()
+        .map(|vault| {
+            config.resource_key(vault).ok_or_else(|| {
+                Error::State(format!(
+                    "openclast vault {} is missing an exact resource classification",
+                    vault.id
+                ))
+            })
+        })
+        .collect::<Result<_>>()?;
+    let layout = GenerationLayout::openclast(resources)?;
+    let mut manifest = Manifest::default();
+    let mut stats = IndexStats::default();
+
+    for vault in &config.vaults {
+        let resource = config.resource_key(vault).ok_or_else(|| {
+            Error::State(format!(
+                "openclast vault {} is missing an exact resource classification",
+                vault.id
+            ))
+        })?;
+        let index_dir = partition_index_dir(partitions_dir, &resource);
+        fs::create_dir_all(&index_dir)
+            .map_err(|error| crate::error::io_error(&index_dir, error))?;
+        build_partition(vault, &resource, &index_dir, &mut manifest, &mut stats)?;
+    }
+
+    manifest.mark_synced()?;
+    manifest.save(manifest_path)?;
+    layout.save(layout_path)?;
+
+    let indexed_chunks = layout
+        .partitions
+        .iter()
+        .try_fold(0_u64, |total, partition| {
+            let index_dir = partition_index_dir(partitions_dir, &partition.resource);
+            let (index, _) = open_index_dir(&index_dir)?;
+            let reader = index
+                .reader()
+                .map_err(|error| Error::Index(error.to_string()))?;
+            Ok::<_, Error>(total + reader.searcher().num_docs())
+        })? as usize;
+    if indexed_chunks != stats.chunks || manifest.chunk_count() != stats.chunks {
+        return Err(Error::State(format!(
+            "candidate count mismatch: stats={}, manifest={}, partitions={indexed_chunks}",
+            stats.chunks,
+            manifest.chunk_count()
+        )));
+    }
+    if manifest.document_count() != stats.documents {
+        return Err(Error::State(format!(
+            "candidate document mismatch: stats={}, manifest={}",
+            stats.documents,
+            manifest.document_count()
+        )));
+    }
+    Ok(stats)
+}
+
+fn build_partition(
+    vault: &VaultRegistration,
+    resource: &ResourceKey,
+    index_dir: &Path,
+    manifest: &mut Manifest,
+    stats: &mut IndexStats,
+) -> Result<()> {
+    if !vault.path.is_dir() {
+        return Err(Error::InvalidVaultPath(vault.path.clone()));
+    }
+    if vault.id != resource.vault_id || vault.room.as_deref() != Some(resource.room_id.as_str()) {
+        return Err(Error::State(format!(
+            "vault {} does not match its resource partition",
+            vault.id
+        )));
+    }
+
+    let schema = build_schema();
+    let fields = Fields::from_schema(&schema)?;
+    let index =
+        Index::create_in_dir(index_dir, schema).map_err(|error| Error::Index(error.to_string()))?;
+    let mut writer = index
+        .writer(WRITER_MEMORY_BYTES)
+        .map_err(|error| Error::Index(error.to_string()))?;
+    let fingerprint = registration_fingerprint(vault);
+    let (outcomes, discovery_warnings) = ingest_vault_files(vault);
+    stats.warnings.extend(discovery_warnings);
+    for outcome in outcomes {
+        if let Some(warning) = outcome.warning.clone() {
+            stats.warnings.push(warning);
+        }
+        if outcome.kind == FileOutcomeKind::Indexed {
+            stats.documents += 1;
+        }
+        for chunk in &outcome.chunks {
+            if chunk.vault_id != resource.vault_id
+                || chunk.room.as_deref() != Some(resource.room_id.as_str())
+            {
+                return Err(Error::State(format!(
+                    "chunk {} does not match its resource partition",
+                    chunk.chunk_id
+                )));
+            }
+            writer
+                .add_document(chunk_document(&fields, chunk, &outcome.retrieval)?)
+                .map_err(|error| Error::Index(error.to_string()))?;
+            stats.chunks += 1;
+        }
+        manifest.insert_outcome_for_resource(&outcome, &fingerprint, Some(resource));
+    }
+    writer
+        .commit()
+        .map_err(|error| Error::Index(error.to_string()))?;
+    writer
+        .wait_merging_threads()
+        .map_err(|error| Error::Index(error.to_string()))?;
+    Ok(())
 }
 
 pub(crate) fn open_index(data_dir: &Path) -> Result<(Index, Fields)> {

@@ -7,11 +7,13 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::error::{Error, Result};
-use crate::model::{CHUNKING_VERSION, FileIngestOutcome, FileOutcomeKind, VaultRegistration};
+use crate::model::{
+    CHUNKING_VERSION, FileIngestOutcome, FileOutcomeKind, ResourceKey, VaultRegistration,
+};
 use crate::state::{read_json, write_json_atomic};
 
 pub const MANIFEST_VERSION: u32 = 1;
-pub const INDEX_FORMAT_VERSION: u32 = 3;
+pub const INDEX_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
@@ -66,8 +68,17 @@ impl Manifest {
         outcome: &FileIngestOutcome,
         registration_fingerprint: &str,
     ) -> bool {
+        self.insert_outcome_for_resource(outcome, registration_fingerprint, None)
+    }
+
+    pub(crate) fn insert_outcome_for_resource(
+        &mut self,
+        outcome: &FileIngestOutcome,
+        registration_fingerprint: &str,
+        resource: Option<&ResourceKey>,
+    ) -> bool {
         let Some((source_key, file)) =
-            ManifestFile::from_outcome(outcome, registration_fingerprint)
+            ManifestFile::from_outcome(outcome, registration_fingerprint, resource)
         else {
             return false;
         };
@@ -103,6 +114,8 @@ pub struct ManifestFile {
     pub path: String,
     pub content_hash: String,
     pub registration_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<ResourceKey>,
     pub byte_length: u64,
     pub mtime_nanos: u128,
     pub chunk_count: usize,
@@ -114,6 +127,7 @@ impl ManifestFile {
     pub(crate) fn from_outcome(
         outcome: &FileIngestOutcome,
         registration_fingerprint: &str,
+        resource: Option<&ResourceKey>,
     ) -> Option<(String, Self)> {
         let content_hash = outcome.content_hash.clone()?;
         let kind = match outcome.kind {
@@ -128,6 +142,7 @@ impl ManifestFile {
                 path: outcome.path.clone(),
                 content_hash,
                 registration_fingerprint: registration_fingerprint.to_owned(),
+                resource: resource.cloned(),
                 byte_length: outcome.byte_length,
                 mtime_nanos: outcome.mtime_nanos,
                 chunk_count: outcome.chunks.len(),
@@ -195,7 +210,7 @@ mod tests {
 
         let error = manifest.validate().unwrap_err();
         assert!(error.to_string().contains("found manifest=1, index=2"));
-        assert!(error.to_string().contains("expected manifest=1, index=3"));
+        assert!(error.to_string().contains("expected manifest=1, index=4"));
         assert!(error.to_string().contains("kwiry index"));
     }
 

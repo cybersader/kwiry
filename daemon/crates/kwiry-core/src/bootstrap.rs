@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use crate::auth::load_or_create_token;
 use crate::config::{Paths, load_config, update_config};
-use crate::error::Result;
-use crate::model::Config;
+use crate::error::{Error, Result};
+use crate::model::{Config, HostProfile};
 
 pub struct DesktopBootstrap {
     pub config: Config,
@@ -19,6 +19,11 @@ impl DesktopBootstrap {
 
 pub fn bootstrap_desktop(paths: &Paths) -> Result<DesktopBootstrap> {
     let config = load_config(&paths.config)?;
+    if config.server.profile != HostProfile::Desktop {
+        return Err(Error::Auth(
+            "desktop bootstrap is unavailable for the openclast profile".to_owned(),
+        ));
+    }
     let config = if config.auth.token_file.is_none() {
         let default_token_path = paths.default_token_path().to_path_buf();
         update_config(&paths.config, |config| {

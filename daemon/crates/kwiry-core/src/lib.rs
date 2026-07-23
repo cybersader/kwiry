@@ -12,6 +12,7 @@ mod lexical;
 mod links;
 mod manifest;
 mod model;
+mod partition;
 mod runtime;
 mod search;
 mod semantic;
@@ -42,9 +43,9 @@ pub use manifest::{
     registration_fingerprint, source_key,
 };
 pub use model::{
-    AuthConfig, CHUNKING_VERSION, Chunk, Config, DEFAULT_BIND, Frontmatter, IndexStats,
-    IngestReport, IngestWarning, SearchHit, SearchRequest, SemanticConfig, ServerConfig,
-    VaultRegistration,
+    AuthConfig, CHUNKING_VERSION, Chunk, Config, DEFAULT_BIND, Frontmatter, HostProfile,
+    IndexStats, IngestReport, IngestWarning, OpenClastAuthConfig, ResourceKey, SearchHit,
+    SearchRequest, SemanticConfig, ServerConfig, VaultRegistration,
 };
 pub use runtime::{IndexManager, ReconcileReport, SearchRuntime};
 pub use search::search_index;

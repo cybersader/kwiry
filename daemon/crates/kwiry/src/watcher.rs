@@ -81,6 +81,7 @@ async fn run_watcher(
         manager,
         status,
     } = context;
+    let startup_config = config.clone();
     let config_parent = paths
         .config
         .parent()
@@ -98,6 +99,7 @@ async fn run_watcher(
     let mut dirty = false;
     let mut config_dirty = false;
     let mut config_invalid = false;
+    let mut restart_required = false;
     let mut first_dirty: Option<Instant> = None;
     let mut last_dirty: Option<Instant> = None;
     let mut debounce = tokio::time::interval(Duration::from_millis(100));
@@ -144,9 +146,15 @@ async fn run_watcher(
                         match load_config(&paths.config) {
                             Ok(next) => {
                                 config_invalid = false;
-                                if next != config {
-                                    reconfigure_roots(&mut watcher, &next, &mut watched_roots);
-                                    config = next;
+                                if startup_config.requires_restart_for(&next) {
+                                    restart_required = true;
+                                    mark_degraded(&status).await;
+                                } else {
+                                    restart_required = false;
+                                    if next != config {
+                                        reconfigure_roots(&mut watcher, &next, &mut watched_roots);
+                                        config = next;
+                                    }
                                 }
                             }
                             Err(_) => {
@@ -161,7 +169,13 @@ async fn run_watcher(
                         }
                     }
                     add_roots(&mut watcher, &config, &mut watched_roots);
-                    reconcile_and_update(&manager, &config, &status, config_invalid).await;
+                    reconcile_and_update(
+                        &manager,
+                        &config,
+                        &status,
+                        config_invalid || restart_required,
+                    )
+                    .await;
                     dirty = false;
                     config_dirty = false;
                     first_dirty = None;
@@ -170,7 +184,13 @@ async fn run_watcher(
             }
             _ = safety.tick() => {
                 add_roots(&mut watcher, &config, &mut watched_roots);
-                reconcile_and_update(&manager, &config, &status, config_invalid).await;
+                reconcile_and_update(
+                    &manager,
+                    &config,
+                    &status,
+                    config_invalid || restart_required,
+                )
+                .await;
             }
         }
     }

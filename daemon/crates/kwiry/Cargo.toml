@@ -13,10 +13,12 @@ semantic-onnx = ["kwiry-core/semantic-onnx"]
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 kwiry-core = { path = "../kwiry-core" }
 notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true

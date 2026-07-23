@@ -8,7 +8,7 @@ use fs2::FileExt;
 use tempfile::NamedTempFile;
 
 use crate::error::{Error, Result, io_error};
-use crate::model::{Config, VaultRegistration};
+use crate::model::{Config, HostProfile, VaultRegistration};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
@@ -208,6 +208,65 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
         });
     }
 
+    match config.server.profile {
+        HostProfile::Desktop => {
+            if config.auth.openclast.is_some() {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message: "desktop profile must not configure auth.openclast".to_owned(),
+                });
+            }
+        }
+        HostProfile::OpenClast => {
+            if config.auth.token_file.is_some() {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message: "openclast profile must not configure a desktop token file".to_owned(),
+                });
+            }
+            if config.semantic.enabled {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message: "openclast profile does not serve semantic or hybrid search in IG-1"
+                        .to_owned(),
+                });
+            }
+            let auth = config
+                .auth
+                .openclast
+                .as_ref()
+                .ok_or_else(|| Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message: "openclast profile requires auth.openclast".to_owned(),
+                })?;
+            for (name, value) in [
+                ("tenant_id", auth.tenant_id.as_str()),
+                ("issuer", auth.issuer.as_str()),
+                ("audience", auth.audience.as_str()),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(Error::InvalidConfig {
+                        path: path.to_path_buf(),
+                        message: format!("auth.openclast.{name} must not be empty"),
+                    });
+                }
+            }
+            if !auth.jwks_file.is_absolute() {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message: "auth.openclast.jwks_file must be absolute".to_owned(),
+                });
+            }
+            if !(1..=60).contains(&auth.max_token_ttl_seconds) {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message: "auth.openclast.max_token_ttl_seconds must be between 1 and 60"
+                        .to_owned(),
+                });
+            }
+        }
+    }
+
     let mut ids = BTreeSet::new();
     for vault in &config.vaults {
         if vault.id.trim().is_empty() {
@@ -236,6 +295,15 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
                 message: format!("vault room must not be empty: {}", vault.id),
+            });
+        }
+        if config.server.profile == HostProfile::OpenClast && vault.room.is_none() {
+            return Err(Error::InvalidConfig {
+                path: path.to_path_buf(),
+                message: format!(
+                    "openclast profile requires a nonempty room for vault {}",
+                    vault.id
+                ),
             });
         }
     }
@@ -379,10 +447,60 @@ mod tests {
         .unwrap();
 
         let loaded = load_config(&config_path).unwrap();
+        assert_eq!(loaded.server.profile, HostProfile::Desktop);
         assert_eq!(loaded.server.bind, crate::model::DEFAULT_BIND);
         assert_eq!(loaded.auth.token_file, None);
+        assert_eq!(loaded.auth.openclast, None);
         assert!(!loaded.semantic.enabled);
         assert_eq!(loaded.vaults[0].id, "cynario");
+    }
+
+    #[test]
+    fn openclast_profile_requires_exact_enterprise_configuration() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        fs::create_dir(&vault).unwrap();
+        let config_path = temporary.path().join("config.toml");
+        let mut config = Config::default();
+        config.server.profile = HostProfile::OpenClast;
+        config.vaults.push(VaultRegistration {
+            id: "notes".into(),
+            path: vault,
+            room: None,
+        });
+
+        let error = save_config(&config_path, &config).unwrap_err();
+        assert!(error.to_string().contains("requires auth.openclast"));
+
+        config.auth.openclast = Some(crate::model::OpenClastAuthConfig {
+            tenant_id: "tenant-a".into(),
+            issuer: "openclast-search".into(),
+            audience: "kwiry-search".into(),
+            jwks_file: temporary.path().join("jwks.json"),
+            max_token_ttl_seconds: 60,
+        });
+        let error = save_config(&config_path, &config).unwrap_err();
+        assert!(error.to_string().contains("requires a nonempty room"));
+
+        config.vaults[0].room = Some("room-a".into());
+        save_config(&config_path, &config).unwrap();
+        assert!(
+            fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("profile = \"openclast\"")
+        );
+        assert_eq!(
+            load_config(&config_path).unwrap().server.profile,
+            HostProfile::OpenClast
+        );
+
+        config.auth.token_file = Some(temporary.path().join("desktop.token"));
+        let error = save_config(&config_path, &config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must not configure a desktop token")
+        );
     }
 
     #[test]

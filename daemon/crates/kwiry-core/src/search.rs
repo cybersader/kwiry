@@ -6,8 +6,8 @@ use tantivy::Index;
 use tantivy::Term;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
-    BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, Occur, Query, QueryParser,
-    RegexQuery, TermQuery,
+    Bm25StatisticsProvider, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, Occur,
+    Query, QueryParser, RegexQuery, TermQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption, TantivyDocument, Value};
 use tantivy::snippet::SnippetGenerator;
@@ -17,7 +17,7 @@ use crate::api::SearchFilters;
 use crate::error::{Error, Result};
 use crate::index::{Fields, open_index};
 use crate::lexical::{normalize_raw, technical_identifiers};
-use crate::model::{SearchHit, SearchRequest};
+use crate::model::{ResourceKey, SearchHit, SearchRequest};
 
 const MAX_RESULTS: usize = 100;
 const BOOST_FILENAME: f32 = 5.0;
@@ -74,14 +74,138 @@ pub(crate) fn search_reader(
     collect_hits(&searcher, query, fields, limit)
 }
 
+pub(crate) struct PartitionReader<'a> {
+    pub index: &'a Index,
+    pub fields: &'a Fields,
+    pub reader: &'a IndexReader,
+    pub resource: &'a ResourceKey,
+}
+
+struct AuthorizedStatistics {
+    searchers: Vec<Searcher>,
+}
+
+impl Bm25StatisticsProvider for AuthorizedStatistics {
+    fn total_num_tokens(&self, field: Field) -> tantivy::Result<u64> {
+        self.searchers.iter().try_fold(0_u64, |total, searcher| {
+            Ok(total + searcher.total_num_tokens(field)?)
+        })
+    }
+
+    fn total_num_docs(&self) -> tantivy::Result<u64> {
+        Ok(self.searchers.iter().map(Searcher::num_docs).sum())
+    }
+
+    fn doc_freq(&self, term: &Term) -> tantivy::Result<u64> {
+        self.searchers.iter().try_fold(
+            0_u64,
+            |total, searcher| Ok(total + searcher.doc_freq(term)?),
+        )
+    }
+}
+
+pub(crate) fn search_partitions(
+    partitions: &[PartitionReader<'_>],
+    query_text: &str,
+    limit: usize,
+    filters: &SearchFilters,
+) -> Result<Vec<SearchHit>> {
+    if query_text.trim().is_empty() {
+        return Err(Error::Query("query must not be empty".into()));
+    }
+    if partitions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let searchers: Vec<_> = partitions
+        .iter()
+        .map(|partition| partition.reader.searcher())
+        .collect();
+    let statistics = AuthorizedStatistics {
+        searchers: searchers.clone(),
+    };
+    let kind = resolve_partitioned_query_plan_kind(partitions, &searchers, query_text)?;
+    let mut hits = Vec::new();
+    for (partition, searcher) in partitions.iter().zip(&searchers) {
+        let ranked =
+            build_lexical_query_with_kind(partition.index, partition.fields, query_text, kind)?;
+        let query = filtered_query(ranked, filters, partition.fields)?;
+        hits.extend(collect_partition_hits(
+            searcher,
+            query,
+            partition.fields,
+            partition.resource,
+            limit,
+            &statistics,
+        )?);
+    }
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
+fn resolve_partitioned_query_plan_kind(
+    partitions: &[PartitionReader<'_>],
+    searchers: &[Searcher],
+    query: &str,
+) -> Result<QueryPlanKind> {
+    let kind = classify_query(query);
+    if kind != QueryPlanKind::Ordinary || !is_lowercase_identifier_candidate(query) {
+        return Ok(kind);
+    }
+
+    for (partition, searcher) in partitions.iter().zip(searchers) {
+        let mut parser = QueryParser::for_index(
+            partition.index,
+            vec![
+                partition.fields.filename,
+                partition.fields.stem,
+                partition.fields.aliases,
+                partition.fields.title,
+                partition.fields.heading_text,
+            ],
+        );
+        parser.set_conjunction_by_default();
+        let metadata_query = parser
+            .parse_query(query)
+            .map_err(|error| Error::Query(error.to_string()))?;
+        let matches = searcher
+            .search(&metadata_query, &TopDocs::with_limit(1).order_by_score())
+            .map_err(|error| Error::Index(error.to_string()))?;
+        if !matches.is_empty() {
+            return Ok(QueryPlanKind::Identifier);
+        }
+    }
+    Ok(QueryPlanKind::Ordinary)
+}
+
 fn build_lexical_query(
     index: &Index,
     fields: &Fields,
     searcher: &Searcher,
     query_text: &str,
 ) -> Result<(QueryPlanKind, Box<dyn Query>)> {
-    let parser = lexical_parser(index, fields);
     let kind = resolve_query_plan_kind(index, fields, searcher, query_text)?;
+    Ok((
+        kind,
+        build_lexical_query_with_kind(index, fields, query_text, kind)?,
+    ))
+}
+
+fn build_lexical_query_with_kind(
+    index: &Index,
+    fields: &Fields,
+    query_text: &str,
+    kind: QueryPlanKind,
+) -> Result<Box<dyn Query>> {
+    let parser = lexical_parser(index, fields);
     let query = match kind {
         QueryPlanKind::Explicit => parser
             .parse_query(query_text)
@@ -121,7 +245,7 @@ fn build_lexical_query(
             Box::new(BooleanQuery::new(clauses))
         }
     };
-    Ok((kind, query))
+    Ok(query)
 }
 
 fn lexical_parser(index: &Index, fields: &Fields) -> QueryParser {
@@ -401,6 +525,55 @@ fn exact_filter(field: Field, value: &str) -> (Occur, Box<dyn Query>) {
         Occur::Must,
         Box::new(ConstScoreQuery::new(Box::new(query), 0.0)),
     )
+}
+
+fn collect_partition_hits(
+    searcher: &Searcher,
+    query: Box<dyn Query>,
+    fields: &Fields,
+    resource: &ResourceKey,
+    limit: usize,
+    statistics: &dyn Bm25StatisticsProvider,
+) -> Result<Vec<SearchHit>> {
+    let top_docs = searcher
+        .search_with_statistics_provider(
+            query.as_ref(),
+            &TopDocs::with_limit(limit).order_by_score(),
+            statistics,
+        )
+        .map_err(|error| Error::Query(error.to_string()))?;
+    let snippet_generator = SnippetGenerator::create(searcher, query.as_ref(), fields.content)
+        .map_err(|error| Error::Query(error.to_string()))?;
+
+    let mut hits = Vec::with_capacity(top_docs.len());
+    for (score, address) in top_docs {
+        let document = searcher
+            .doc::<TantivyDocument>(address)
+            .map_err(|error| Error::Index(error.to_string()))?;
+        let vault_id = text(&document, fields.vault_id)?;
+        let room_id = text(&document, fields.room)?;
+        if vault_id != resource.vault_id || room_id != resource.room_id {
+            return Err(Error::Index(format!(
+                "document resource mismatch in partition {}/{}/{}",
+                resource.tenant_id, resource.vault_id, resource.room_id
+            )));
+        }
+        hits.push(hit_from_document(
+            &document,
+            fields,
+            score,
+            Some(&snippet_generator),
+        )?);
+    }
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(hits)
 }
 
 fn collect_hits(
