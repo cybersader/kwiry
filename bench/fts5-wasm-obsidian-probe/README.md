@@ -2,9 +2,9 @@
 
 ## Status
 
-**Automated verdict: `READY_FOR_FIELD_TEST`.** The clean automated checkpoint passed 18 tests and 15 aggregate evidence checks, including 25 exact generated-Worker lifecycle cycles. This isolated plugin exists only to test whether installed Obsidian Electron can run the exact official SQLite FTS5-WASM runtime from an application-owned Worker embedded inside one CommonJS `main.js`.
+**Automated verdict: `READY_FOR_FIELD_TEST`; owner field verdict: Gate 2 GO.** The clean automated checkpoint passed 18 tests and 15 aggregate evidence checks, including 25 exact generated-Worker lifecycle cycles. The owner then accepted installed desktop Obsidian and frozen-BRAT compatibility after `0.0.1` installation and ten runs, update to `0.0.2`, full restart/rerun, rollback to `0.0.1`, and final rerun all passed. This isolated plugin exists only to test whether installed Obsidian Electron can run the exact official SQLite FTS5-WASM runtime from an application-owned Worker embedded inside one CommonJS `main.js`.
 
-It is not a search plugin and does not read the vault. It does not alter the production `kwiry-search` plugin, daemon, Rust core, settings, release stream, or BRAT installation.
+It is not a search plugin and does not read the vault. It does not alter the production `kwiry-search` plugin, daemon, Rust core, settings, or release stream. Frozen releases use the isolated public [`cybersader/kwiry-fts5-wasm-probe`](https://github.com/cybersader/kwiry-fts5-wasm-probe) repository.
 
 The only command is:
 
@@ -89,13 +89,13 @@ Use an empty disposable vault. Do not install this probe into a vault containing
 
 A direct-sideload pass establishes local Electron/CSP compatibility only. It does not establish BRAT compatibility.
 
-## Frozen BRAT boundary
+## Frozen BRAT field record
 
-Do not publish this probe through the production repository's ordinary release stream. Plain SemVer tags currently publish the production `kwiry-search` assets.
+The probe was not published through the production repository's ordinary release stream. The isolated public [`cybersader/kwiry-fts5-wasm-probe`](https://github.com/cybersader/kwiry-fts5-wasm-probe) repository carries the unique `kwiry-fts5-wasm-probe` ID and frozen `0.0.1` and `0.0.2` prereleases.
 
-After direct sideload succeeds, a separately authorized field checkpoint should use an isolated probe repository with immutable releases of this unique plugin ID. Verify frozen-version install, downloaded/installed hashes, offline operation, update, rollback, and cleanup. Public versus private probe publication is an owner decision at that boundary.
+All six public assets for each release were independently downloaded without authentication and hash-verified. Both releases use the exact clean-CI `main.js`; `0.0.2` changes only the manifest version and checksum file. Under desktop Obsidian, frozen `0.0.1` installation and ten runs, update to `0.0.2`, full restart/rerun, rollback to `0.0.1`, and final rerun passed. BRAT's add-plugin modal remained open after successful installation; the owner accepted that as a non-blocking upstream completion-UI defect. Exact release hashes, matching manifest versions, public delivery, and execution were established, while a separate filesystem hash of the installed copies was not reported.
 
-Until the exact released artifact passes installed Obsidian and frozen BRAT, Gate 2 remains pending.
+Gate 2 GO authorizes portable Rust Gate 3. It does not make the production in-plugin lexical host delivered.
 
 ## Privacy and security claims
 
@@ -120,5 +120,5 @@ This checkpoint does not implement:
 - persistence;
 - recency, properties, or folder hierarchy relevance;
 - semantic or hybrid search;
-- production release or BRAT publication;
+- publication through the production `cybersader/kwiry` release or BRAT channel;
 - a delivered no-daemon profile.

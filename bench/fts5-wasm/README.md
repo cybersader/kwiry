@@ -4,7 +4,7 @@
 
 **GO for the standalone runtime only.** The exact official `@sqlite.org/sqlite-wasm` package initializes an in-memory SQLite database under Node, includes FTS5, and passes the required schema, query, ranking, excerpt, mutation, rollback, integrity, and lifecycle tests without a patch, custom SQLite build, persistence layer, network dependency, or production integration.
 
-This does **not** prove or authorize the no-daemon Obsidian profile. Obsidian Electron/CSP behavior, one-file Worker/WASM packaging, BRAT installation, portable Rust extraction, active-vault indexing, performance, and production integration remain separate gates.
+This Gate 1 result alone does **not** prove or authorize the no-daemon Obsidian profile. The separate one-file installed Obsidian/frozen-BRAT Gate 2 has since passed; portable Rust extraction, active-vault indexing, performance, production integration, and final acceptance remain separate gates.
 
 ## Pinned runtime
 
@@ -73,7 +73,7 @@ The evidence command reruns the Vitest suite and prints a machine-readable aggre
 
 ## Gate boundary
 
-A later Gate 2 may create a separate compatibility plugin that embeds an application-owned Worker and the official SQLite WASM bytes into one CommonJS `main.js`. It must not read the vault or alter production settings. Actual installed Obsidian Electron/CSP and frozen-release BRAT behavior require owner field testing.
+Gate 2 created a separate compatibility plugin that embeds an application-owned Worker and the official SQLite WASM bytes into one CommonJS `main.js`. It does not read the vault or alter production settings. Automated evidence and owner-accepted installed Obsidian/frozen-BRAT field testing are recorded in [`../fts5-wasm-obsidian-probe/README.md`](../fts5-wasm-obsidian-probe/README.md).
 
 Only after packaging proof may Gate 3 feature-gate portable Kwiry Rust preparation and query planning. Native desktop and OpenClast lexical retrieval remain on Tantivy. Cross-engine acceptance compares identical prepared chunks/metadata, deterministic behavior within each engine/profile/version, technical-identifier/filter behavior, and judged relevance floors—not raw score equality or exact total ordering.
 

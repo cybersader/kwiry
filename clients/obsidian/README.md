@@ -1,13 +1,28 @@
 # Kwiry Search (Obsidian plugin)
 
-Search your notes through a local [kwiry](https://github.com/cybersader/kwiry) daemon: lexical (BM25), semantic (local embeddings), and hybrid (RRF) ranking, over any registered tree — including trees outside this vault.
+The delivered beta searches through a local [kwiry](https://github.com/cybersader/kwiry) daemon: lexical (BM25), semantic (local embeddings), and hybrid (RRF) ranking over any registered tree, including trees outside this vault.
 
-This plugin is a deliberately **dumb client**: a query modal, a results renderer, and a status-bar light. All chunking, ranking, and index logic lives in the daemon.
+The presentation plugin does not own parsing, chunking, ranking, authorization, or index behavior. Today those capabilities live in the native daemon. D5B is evaluating a second explicit host for environments where Obsidian may run but a daemon may not: portable Kwiry Rust preprocessing/query planning plus official SQLite FTS5-WASM behind an application-owned worker.
 
-## Requirements
+## Current requirements
 
 - A running kwiry daemon (`kwiry serve`, add `--semantic` for semantic/hybrid modes)
-- Desktop only (the plugin reads the daemon's token file from disk)
+- Desktop only (the current profile reads the daemon's token file from disk)
+
+## No-daemon profile status
+
+The **In-plugin · Lexical** profile is contractual but not delivered in the current release. The Tantivy normal incremental writer reached a technical NO-GO, then the official SQLite FTS5-WASM runtime gate passed. A separate one-file CommonJS compatibility probe passed automated Worker, artifact, privacy, corruption, deterministic-build, and lifecycle checks; the owner then accepted installed desktop Obsidian/Electron and frozen BRAT install, update, restart, rollback, and rerun evidence as Gate 2 GO. Portable Rust extraction and production integration remain separate gates.
+
+Planned first scope:
+
+- current open vault and Markdown files only;
+- in-memory disposable index rebuilt from source files;
+- lexical mode only, with no semantic/hybrid fallback;
+- explicit backend selection rather than automatic daemon failover;
+- active-vault create/modify/delete/rename reconciliation;
+- future, separately reviewed relevance phases for recency, properties, folder hierarchy, and configurable profiles.
+
+See [`../../docs/design/obsidian-lite.md`](../../docs/design/obsidian-lite.md), [`../../docs/roadmap/desktop-obsidian.md`](../../docs/roadmap/desktop-obsidian.md), the Gate 1 [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md) evidence, and the Gate 2 [`../../bench/fts5-wasm-obsidian-probe/README.md`](../../bench/fts5-wasm-obsidian-probe/README.md) automation and field record.
 
 ## Network and privacy disclosure
 
@@ -19,10 +34,10 @@ This plugin is a deliberately **dumb client**: a query modal, a results renderer
 ## Install via BRAT
 
 1. Install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from Community plugins.
-2. Run **BRAT: Add a beta plugin** and enter `cybersader/kwiry`.
-3. While this repository is private, add a fine-grained GitHub personal access token (read-only Contents on this repo) in BRAT's settings first.
+2. Run **BRAT: Plugins: Add a beta plugin for testing (with or without version)** and enter `cybersader/kwiry`.
+3. Select the intended released version; no GitHub token is required for this public repository.
 
-BRAT installs from GitHub release assets (`main.js`, `manifest.json`, `styles.css`), which the release workflow publishes on every version tag. Use **Add a beta plugin with frozen version** to pin a specific release.
+BRAT installs `main.js`, `manifest.json`, and `styles.css` from each versioned GitHub release. Current `cybersader/kwiry` releases contain the daemon-backed production plugin. D5B's Worker/SQLite compatibility was tested through the isolated public `cybersader/kwiry-fts5-wasm-probe` repository and does not make in-plugin search available in the production plugin yet.
 
 ## Setup
 
