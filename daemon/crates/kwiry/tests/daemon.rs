@@ -9,7 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
-use kwiry_core::{ApiSearchResponse, DaemonState, DaemonStatus, load_connection_descriptor};
+use kwiry_core::{
+    ApiSearchResponse, Config, DaemonState, DaemonStatus, HostProfile, OpenClastAuthConfig,
+    VaultRegistration, load_config, load_connection_descriptor, save_config,
+};
 use tempfile::tempdir;
 
 struct Daemon {
@@ -20,6 +23,14 @@ struct Daemon {
 
 impl Daemon {
     fn start(config: &Path, data: &Path) -> Self {
+        Self::start_with_prefix(config, data, "kwiry listening on http://")
+    }
+
+    fn start_openclast(config: &Path, data: &Path) -> Self {
+        Self::start_with_prefix(config, data, "kwiry OpenClast sidecar listening on http://")
+    }
+
+    fn start_with_prefix(config: &Path, data: &Path, prefix: &str) -> Self {
         let mut child = Command::new(cargo_bin("kwiry"))
             .args([
                 "--config",
@@ -37,7 +48,7 @@ impl Daemon {
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         stdout.read_line(&mut line).unwrap();
-        assert!(line.starts_with("kwiry listening on http://"), "{line}");
+        assert!(line.starts_with(prefix), "{line}");
         let address = line
             .split("http://")
             .nth(1)
@@ -45,6 +56,7 @@ impl Daemon {
             .split(';')
             .next()
             .unwrap()
+            .trim()
             .to_owned();
         Self {
             child,
@@ -97,6 +109,16 @@ fn daemon_watches_files_reloads_config_and_reconciles_offline_changes() {
     fs::write(&config, valid_config).unwrap();
     wait_for(|| status(&daemon.address, &token).state == DaemonState::Ready);
 
+    let mut restart_config = load_config(&config).unwrap();
+    let original_bind = restart_config.server.bind.clone();
+    restart_config.server.bind = "127.0.0.1:40000".into();
+    save_config(&config, &restart_config).unwrap();
+    wait_for(|| status(&daemon.address, &token).state == DaemonState::Degraded);
+    assert_eq!(search(&daemon.address, &token, "initialterm").len(), 1);
+    restart_config.server.bind = original_bind;
+    save_config(&config, &restart_config).unwrap();
+    wait_for(|| status(&daemon.address, &token).state == DaemonState::Ready);
+
     fs::write(&first_note, "# First\nliveupdatedterm").unwrap();
     wait_for(|| {
         let hits = search(&daemon.address, &token, "liveupdatedterm");
@@ -130,6 +152,54 @@ fn daemon_watches_files_reloads_config_and_reconciles_offline_changes() {
     wait_for(|| search(&restarted.address, &token, "offlineterm").len() == 1);
     assert!(search(&restarted.address, &token, "addedvaultterm").is_empty());
     restarted.stop();
+}
+
+#[test]
+fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
+    let temporary = tempdir().unwrap();
+    let config_path = temporary.path().join("config.toml");
+    let data = temporary.path().join("data");
+    let vault = temporary.path().join("vault");
+    let jwks_file = temporary.path().join("search.jwks.json");
+    fs::create_dir(&vault).unwrap();
+    fs::write(vault.join("note.md"), "# Search\nopenclastprobe").unwrap();
+    fs::write(
+        &jwks_file,
+        r#"{"keys":[{"kty":"OKP","crv":"Ed25519","x":"2-Jj2UvNCvQiUPNYRgSi0cJSPiJI6Rs6D0UTeEpQVj8","use":"sig","key_ops":["verify"],"alg":"EdDSA","kid":"ed01"}]}"#,
+    )
+    .unwrap();
+
+    let mut config = Config::default();
+    config.server.profile = HostProfile::OpenClast;
+    config.semantic.enabled = false;
+    config.auth.token_file = None;
+    config.auth.openclast = Some(OpenClastAuthConfig {
+        tenant_id: "tenant-a".into(),
+        issuer: "issuer".into(),
+        audience: "kwiry-search".into(),
+        jwks_file,
+        max_token_ttl_seconds: 60,
+    });
+    config.vaults = vec![VaultRegistration {
+        id: "fixture".into(),
+        path: vault,
+        room: Some("room-a".into()),
+    }];
+    save_config(&config_path, &config).unwrap();
+
+    let daemon = Daemon::start_openclast(&config_path, &data);
+    assert!(!config_path.with_extension("token").exists());
+    assert!(!data.join("connection.json").exists());
+    let (status, _) = request(&daemon.address, "desktop-token", "GET", "/v0/status", None);
+    assert_eq!(status, 404);
+    daemon.stop();
+
+    let logs = fs::read_dir(data.join("logs"))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(logs.contains("kwiry OpenClast sidecar ready"), "{logs}");
+    assert!(!logs.contains("desktop-token"));
 }
 
 fn vault_add(config: &Path, data: &Path, id: &str, vault: &Path) {

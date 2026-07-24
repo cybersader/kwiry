@@ -8,15 +8,29 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use kwiry_core::{ApiErrorEnvelope, Principal, token_matches};
 
+use crate::capability::{CapabilityFailure, CapabilityVerifier};
+
 #[derive(Clone)]
 pub(crate) struct AuthState {
-    token: Arc<str>,
+    method: AuthMethod,
+}
+
+#[derive(Clone)]
+enum AuthMethod {
+    Desktop(Arc<str>),
+    OpenClast(Arc<CapabilityVerifier>),
 }
 
 impl AuthState {
-    pub(crate) fn new(token: String) -> Self {
+    pub(crate) fn desktop(token: String) -> Self {
         Self {
-            token: Arc::from(token),
+            method: AuthMethod::Desktop(Arc::from(token)),
+        }
+    }
+
+    pub(crate) fn openclast(verifier: CapabilityVerifier) -> Self {
+        Self {
+            method: AuthMethod::OpenClast(Arc::new(verifier)),
         }
     }
 }
@@ -31,21 +45,42 @@ pub(crate) async fn require_auth(
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if !supplied.is_some_and(|supplied| token_matches(&auth.token, supplied)) {
-        let mut response = (
-            StatusCode::UNAUTHORIZED,
+    let principal = match (&auth.method, supplied) {
+        (AuthMethod::Desktop(expected), Some(supplied)) if token_matches(expected, supplied) => {
+            Ok(Principal::desktop())
+        }
+        (AuthMethod::OpenClast(verifier), Some(supplied)) => verifier.verify(supplied),
+        _ => Err(CapabilityFailure::Unauthorized),
+    };
+
+    match principal {
+        Ok(principal) => {
+            request.extensions_mut().insert(principal);
+            next.run(request).await
+        }
+        Err(CapabilityFailure::Forbidden) => (
+            StatusCode::FORBIDDEN,
             Json(ApiErrorEnvelope::new(
-                "unauthorized",
-                "a valid bearer token is required",
+                "forbidden",
+                "the capability does not authorize this request",
             )),
         )
-            .into_response();
-        response
-            .headers_mut()
-            .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        return response;
+            .into_response(),
+        Err(CapabilityFailure::Unauthorized) => unauthorized(),
     }
+}
 
-    request.extensions_mut().insert(Principal::desktop());
-    next.run(request).await
+fn unauthorized() -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(ApiErrorEnvelope::new(
+            "unauthorized",
+            "a valid bearer token is required",
+        )),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
 }

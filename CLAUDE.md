@@ -47,7 +47,7 @@ The dependency flow is CLI → config/registration → walker → parser/chunker
 
 ## Binding constraints
 
-`CONTRACT.md` is Gate-1 approved and frozen; amend it only with owner sign-off. Implement in the small vertical order in `HANDOFF.md` and stop for owner approval at every vertical boundary. Vertical 3 adds semantic/hybrid search (opt-in via `serve --semantic`); MCP, the rebuild HTTP endpoint, cursor pagination, and the Obsidian client remain excluded until their verticals. Semantic failures must never degrade lexical search, and semantic/hybrid without a loaded model returns an explicit `mode_unavailable` — no silent fallback.
+`CONTRACT.md` is frozen except for owner-approved amendments. `ROADMAP.md` owns current sequencing and named review gates; `HANDOFF.md` is historical origin/provenance, not current implementation truth. Stop for owner review at every roadmap boundary. A capability existing in the desktop profile does not imply that its OpenClast authorization proof is complete. Semantic failures must never degrade lexical search, and unavailable modes return an explicit `mode_unavailable` — no silent fallback.
 
 Chunk IDs are deterministic and path-derived. A rename is an atomic orphan-free removal/reinsert, so IDs change when the path changes.
 
@@ -57,9 +57,10 @@ Do not add AI attribution, generated-by text, or AI co-author trailers to commit
 
 The knowledge-ops layer (`knowledge-base/`, `.claude/`, `tests/`) is local, untracked working infrastructure — present on the development machine but never published.
 
-`knowledge-base/` is durable project memory in five temperature zones (`00-inbox` → `01-working` → `02-learnings` → `03-reference` → `04-archive`). Capture is mandatory for owner decisions and contract amendments, vertical checkpoints, non-obvious verified behavior, reusable incidents or corrections, research outliving the session, and disproved assumptions. Skip formatting, lint, mechanical cleanup, resultless exploration, and facts a canonical source already fully owns.
+`knowledge-base/` is durable project memory in five maturity zones (`00-inbox` → `01-working` → `02-learnings` → `03-reference` → `04-archive`). Begin recovery at `knowledge-base/03-reference/recovery-index.md`; use `current-project-state.md` for volatile status and `question-decision-register.md` for stable owner questions and decisions. Capture is mandatory for owner direction, contract amendments, review checkpoints, non-obvious verified behavior, reusable incidents/corrections, research outliving the session, and disproved assumptions. Skip formatting, lint, mechanical cleanup, resultless exploration, and facts a canonical source already fully owns.
 
-- Use the `kwiry-knowledge-curator` agent for routine single-note capture; use the `knowledge-capture` workflow (three static agents, ≤12 validated repo-relative paths) for multi-source synthesis, promotion review, and vertical checkpoints.
+- Use the `kwiry-knowledge-curator` agent for routine single-note capture; use the `knowledge-capture` workflow (three static agents, ≤12 validated repo-relative paths) for multi-source synthesis, question/decision review, and checkpoints.
 - Link to canonical sources and tests instead of copying them; `CONTRACT.md` is never edited through curation.
+- Never infer owner approval from implementation, passing tests, silence, or research recommendations. Bubble contract, security, public-behavior, roadmap, acceptance, and cross-repository authority questions through the register.
 - Never capture conversation transcripts, secrets, tokens, temp paths, logs, or generated indexes; the ck/broad-scan prohibition applies to curation too.
-- Promotion and archival are evidence-gated and reviewed; hooks (`.claude/hooks/knowledge.py`, wired in `.claude/settings.json`) only remind and validate. Run `python3 .claude/hooks/knowledge.py validate --repo-root .` and `python3 -m unittest tests.test_knowledge_ops` to verify the layer.
+- Promotion, archival, supersession, and owner-boundary resolution are reviewed. Hooks (`.claude/hooks/knowledge.py`, wired in `.claude/settings.json`) remind and validate but never change authority. Run `python3 .claude/hooks/knowledge.py validate --repo-root .`, `python3 .claude/hooks/knowledge.py health --repo-root .`, and `python3 -m unittest tests.test_knowledge_ops` to verify the layer.

@@ -7,6 +7,7 @@ use subtle::ConstantTimeEq;
 use tempfile::NamedTempFile;
 
 use crate::error::{Error, Result, io_error};
+use crate::model::{HostProfile, ResourceKey};
 
 const TOKEN_BYTES: usize = 32;
 
@@ -18,17 +19,29 @@ pub enum Scope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
+    pub profile: HostProfile,
+    pub subject: String,
+    pub actor: String,
     pub scopes: Vec<Scope>,
-    pub pinned_vault_ids: Vec<String>,
-    pub pinned_rooms: Vec<String>,
+    pub resources: Vec<ResourceKey>,
+    pub jti: Option<String>,
+    pub policy_revision: Option<String>,
+    pub subject_revision: Option<String>,
+    pub max_limit: usize,
 }
 
 impl Principal {
     pub fn desktop() -> Self {
         Self {
+            profile: HostProfile::Desktop,
+            subject: "desktop-user".to_owned(),
+            actor: "kwiry-desktop".to_owned(),
             scopes: vec![Scope::Search, Scope::Admin],
-            pinned_vault_ids: Vec::new(),
-            pinned_rooms: Vec::new(),
+            resources: Vec::new(),
+            jti: None,
+            policy_revision: None,
+            subject_revision: None,
+            max_limit: 100,
         }
     }
 

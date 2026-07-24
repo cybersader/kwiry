@@ -5,22 +5,41 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, loadSettings } from "../src/settings";
 
 describe("loadSettings", () => {
-  it("returns defaults for missing or invalid data", () => {
+  it("returns daemon defaults for missing or invalid data", () => {
     expect(loadSettings(undefined)).toEqual(DEFAULT_SETTINGS);
     expect(loadSettings(null)).toEqual(DEFAULT_SETTINGS);
     expect(loadSettings("garbage")).toEqual(DEFAULT_SETTINGS);
+    expect(loadSettings({ backendProfile: "unknown" }).backendProfile).toBe("daemon");
   });
 
-  it("merges known keys and drops unknown ones", () => {
+  it("migrates existing daemon settings and drops unknown keys", () => {
     const loaded = loadSettings({
       daemonUrl: "http://127.0.0.1:9999",
       defaultMode: "lexical",
       surprise: true,
     });
+    expect(loaded.backendProfile).toBe("daemon");
     expect(loaded.daemonUrl).toBe("http://127.0.0.1:9999");
     expect(loaded.defaultMode).toBe("lexical");
     expect(loaded).not.toHaveProperty("surprise");
     expect(loaded.resultLimit).toBe(DEFAULT_SETTINGS.resultLimit);
+  });
+
+  it("preserves dormant daemon settings and explicit vault mapping", () => {
+    const loaded = loadSettings({
+      backendProfile: "in_plugin",
+      daemonUrl: "http://127.0.0.1:3333",
+      tokenFilePath: "/private/token",
+      vaultId: "search-scope",
+      daemonCurrentVaultId: "current-vault",
+      defaultMode: "hybrid",
+    });
+    expect(loaded.backendProfile).toBe("in_plugin");
+    expect(loaded.daemonUrl).toBe("http://127.0.0.1:3333");
+    expect(loaded.tokenFilePath).toBe("/private/token");
+    expect(loaded.vaultId).toBe("search-scope");
+    expect(loaded.daemonCurrentVaultId).toBe("current-vault");
+    expect(loaded.defaultMode).toBe("hybrid");
   });
 
   it("clamps result limit to the API contract range", () => {
@@ -35,11 +54,9 @@ describe("loadSettings", () => {
     );
   });
 
-  it("never contains a token field — tokens are read from disk on demand", () => {
+  it("never contains a token value field", () => {
     const keys = Object.keys(DEFAULT_SETTINGS);
-    expect(keys.some((key) => /token(?!FilePath)/i.test(key.replace("tokenFilePath", "")))).toBe(
-      false,
-    );
+    expect(keys.some((key) => key === "token" || key === "bearerToken")).toBe(false);
     expect(keys).toContain("tokenFilePath");
   });
 });

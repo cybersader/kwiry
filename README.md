@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>K</strong>nowledge <strong>W</strong>orkspace <strong>I</strong>nformation <strong>R</strong>etrieval <strong>Y</strong>oke — pronounced <em>“query”</em><br>
-  <em>one daemon yoking all your knowledge trees into a single search</em>
+  <em>one retrieval core yoking your knowledge into a truthful search experience</em>
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 <p align="center">
   <strong>Local-first search for the knowledge you already own.</strong><br>
-  kwiry combines Tantivy BM25, fully offline ONNX embeddings, and RRF hybrid ranking in one Rust binary — nothing leaves your machine, and no cloud API is required. Point it at any Markdown or text tree, not just an Obsidian vault, then search through its watching daemon, authenticated HTTP API, or BRAT-installable Obsidian client.
+  In the desktop sidecar profile, kwiry combines Tantivy BM25, fully offline ONNX embeddings, and RRF hybrid ranking in one Rust binary — nothing leaves your machine, and no cloud API is required. Point it at any Markdown or text tree, not just an Obsidian vault, then search through its watching daemon, authenticated HTTP API, or BRAT-installable Obsidian client. A contractual in-plugin lexical profile for desktops that cannot run a daemon remains urgent but is not delivered: after Tantivy's normal WASM writer hit its hard stop, the official SQLite FTS5-WASM runtime gate passed and the owner accepted the isolated one-file installed Obsidian/frozen-BRAT compatibility gate. Portable Rust extraction and production integration remain. Enterprise deployments use the separate OpenClast profile and its governed server-to-server boundary.
 </p>
 
 ---
@@ -30,6 +30,7 @@ A single Rust binary provides:
 - **Hybrid ranking** (reciprocal rank fusion over both legs)
 - A **watching daemon** with authenticated HTTP API, incremental hash-based updates, rename/delete correctness, and boot reconciliation for offline changes
 - A **disposable index**: files are the sole source of truth; all derived state rebuilds from nothing, deterministically
+- A **no-daemon Obsidian lexical** contract/design with verified FTS5 runtime and owner-accepted one-file installed Electron/frozen-BRAT compatibility—not a delivered plugin mode
 
 ## Quick start
 
@@ -62,11 +63,21 @@ cargo run -p kwiry -- serve --semantic
 
 ## Documentation
 
+Start with the orientation layer, then follow links to the canonical contract and delivered behavior:
+
+- [`docs/product-map.md`](docs/product-map.md) — product vision, component relationships, trust profiles, search modes, and intended end state
+- [`ROADMAP.md`](ROADMAP.md) — desktop and identity-governed delivery tracks, current review boundary, and planned sequencing
+- [`CONTRACT.md`](CONTRACT.md) — binding product invariants, interfaces, and authorization commitments
 - [`docs/setup.md`](docs/setup.md) — guided setup, automation, per-user service lifecycle, and recovery
-- [`CONTRACT.md`](CONTRACT.md) — the frozen product contract: invariants, HTTP/MCP surface, host profiles
-- [`docs/vertical-1.md`](docs/vertical-1.md) — index + query core
-- [`docs/vertical-2.md`](docs/vertical-2.md) — daemon, watcher, auth, incremental correctness
-- [`docs/vertical-3.md`](docs/vertical-3.md) — semantic + hybrid search
+- [`docs/vertical-1.md`](docs/vertical-1.md) — deterministic lexical index and query core
+- [`docs/vertical-2.md`](docs/vertical-2.md) — daemon, watcher, authentication, and incremental correctness
+- [`docs/vertical-3.md`](docs/vertical-3.md) — local semantic and hybrid search
+- [`docs/openclast-ig1.md`](docs/openclast-ig1.md) — identity-governed OpenClast lexical gateway and operator configuration
+- [`clients/obsidian/README.md`](clients/obsidian/README.md) — current daemon-backed Obsidian client behavior, installation, and privacy boundary
+- [`docs/design/obsidian-lite.md`](docs/design/obsidian-lite.md) — no-daemon design, measured Tantivy-WASM NO-GO, and staged FTS5-WASM feasibility gates
+- [`bench/fts5-wasm/README.md`](bench/fts5-wasm/README.md) — verified standalone official SQLite FTS5-WASM Gate 1 evidence and limitations
+- [`bench/fts5-wasm-obsidian-probe/README.md`](bench/fts5-wasm-obsidian-probe/README.md) — one-file Gate 2 automation, public frozen releases, field evidence, and accepted verdict
+- [`docs/roadmap/desktop-obsidian.md`](docs/roadmap/desktop-obsidian.md) — detailed desktop and Obsidian sequencing, including future recency/properties/folder relevance
 
 Serve the repository documentation and logo previews without GitHub:
 
@@ -84,20 +95,21 @@ The HTTPS mode preserves any existing Tailscale Serve root proxy and removes its
 | Path | Contents | License |
 |---|---|---|
 | `daemon/` | Rust workspace: `kwiry-core` library + `kwiry` binary | [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) |
-| `clients/obsidian/` | Obsidian plugin (dumb client: query box + renderer + status light) | [GPL-3.0-only](clients/obsidian/LICENSE) |
+| `clients/obsidian/` | Obsidian presentation client; currently daemon-backed, while D5B proceeds from accepted one-file compatibility into portable-core and production integration gates | [GPL-3.0-only](clients/obsidian/LICENSE) |
 | `fixtures/vault/` | CI fixture vault for determinism tests | MIT OR Apache-2.0 |
-| `bench/` | Standalone benchmark crates (embedding runtime, vector store) | MIT OR Apache-2.0 |
+| `bench/` | Standalone runtime, storage, WASM feasibility, and compatibility probes | Per-package license; see each benchmark or probe |
 
-Everything outside `clients/obsidian/` is dual-licensed under MIT or Apache-2.0 at your option (the Rust convention; Apache-2.0 adds an express patent grant). Unless you state otherwise, any contribution you submit to those paths is dual-licensed the same way, per Apache-2.0 §5.
+Unless a path contains its own license notice, repository content outside `clients/obsidian/` is dual-licensed under MIT or Apache-2.0 at your option (the Rust convention; Apache-2.0 adds an express patent grant). Compatibility probes that bundle GPL-covered plugin code carry their own license. Unless you state otherwise, any contribution you submit follows the license of its target path, per Apache-2.0 §5 where applicable.
 
 The accepted responsive logo system and preserved design archive live in [`docs/logo/`](docs/logo/README.md): the untouched mark is used at 64px and below, while the graphite-K mark is used at 96px and above.
 
-The Obsidian plugin is GPL-3.0-only and may port code from [Omnisearch](https://github.com/scambier/obsidian-omnisearch) by Simon Cambier. The plugin talks to the daemon only over localhost HTTP; the daemon and core contain no GPL code.
+The Obsidian plugin is GPL-3.0-only and may port code from [Omnisearch](https://github.com/scambier/obsidian-omnisearch) by Simon Cambier. The delivered profile currently talks to the daemon only over localhost HTTP. The selected D5B design may package portable dual-licensed Rust preparation code plus official SQLite FTS5-WASM behind the GPL plugin; no GPL code moves into the daemon or core.
 
 ## Design invariants
 
-1. Files are the sole source of truth — every byte of index state is derivable from the vault.
-2. One contract, many hosts — desktop sidecar today; container sidecar and WASM lite tier share the same surface later.
-3. Clients are dumb — no chunking, ranking, or index logic outside the daemon.
-4. The engine is an implementation detail — Tantivy, sqlite-vec, and fastembed live behind adapters.
-5. No algorithm authorship — scoring, ANN, tokenization, and embeddings are imported; RRF fusion is the one permitted formula.
+1. Authorization precedes retrieval — candidate generation, scoring statistics, hydration, and future fusion/traversal are constrained before results exist.
+2. Files are the sole source of truth — every byte of index state is derivable from the vault.
+3. Explicit host profiles never fall back into one another: the desktop sidecar uses its loopback token, in-plugin lite uses a direct project-owned worker interface, and OpenClast uses short-lived signed search capabilities.
+4. Presentation clients are dumb — project-owned hosts own retrieval. Native hosts use Rust adapters; constrained in-plugin mode uses portable Rust preparation/query planning plus an application-owned Worker binding fixed operations to official SQLite FTS5-WASM.
+5. The engine is an implementation detail — Tantivy, official SQLite FTS5-WASM, sqlite-vec, and fastembed live behind project-owned adapters and models.
+6. No algorithm authorship — scoring, ANN, tokenization, and embeddings are imported; RRF fusion is the one permitted formula.

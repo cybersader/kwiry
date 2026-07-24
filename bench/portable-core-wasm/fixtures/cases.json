@@ -1,0 +1,300 @@
+[
+  {
+    "operation": "prepare_source",
+    "name": "markdown-frontmatter-links-identifiers",
+    "descriptor": {
+      "vault_id": "notes",
+      "room": "engineering",
+      "path": "guides/rfc.md",
+      "format": "markdown",
+      "byte_length": 238,
+      "mtime": 1700000000,
+      "mtime_nanos": "1700000000123456789"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "---\ntitle: HTTP caching\naliases: [RFC cache, cache guide]\ntags: [web, standards]\nstatus: stable\n---\nPreamble links to [[Network Notes|networking]].\n\n# RFC 9110\nUse ETag and If-None-Match.\n\n## Unicode café\nSee [[HTTP caching#validators]]."
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "crlf-frontmatter",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "windows.md",
+      "format": "markdown",
+      "byte_length": 71,
+      "mtime": 1700000001,
+      "mtime_nanos": "1700000001000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "---\r\ntitle: Windows note\r\nalias: Win note\r\n---\r\n# Heading\r\nCRLF body.\r\n"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "malformed-frontmatter",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "malformed.md",
+      "format": "markdown",
+      "byte_length": 50,
+      "mtime": 1700000002,
+      "mtime_nanos": "1700000002000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "---\ntitle: [unterminated\n---\n# Kept\nBody survives."
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "plain-text",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "imports/readme.txt",
+      "format": "text",
+      "byte_length": 43,
+      "mtime": 1700000003,
+      "mtime_nanos": "1700000003000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "Plain text with CVE-2026-1234 and RFC 9110."
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "nul-source",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "binary.md",
+      "format": "markdown",
+      "byte_length": 3,
+      "mtime": 1700000004,
+      "mtime_nanos": "1700000004000000000"
+    },
+    "content": {
+      "encoding": "bytes",
+      "values": [97, 0, 98]
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "invalid-utf8",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "invalid.md",
+      "format": "markdown",
+      "byte_length": 2,
+      "mtime": 1700000005,
+      "mtime_nanos": "1700000005000000000"
+    },
+    "content": {
+      "encoding": "bytes",
+      "values": [255, 254]
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "empty-source",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "empty.md",
+      "format": "markdown",
+      "byte_length": 0,
+      "mtime": 1700000006,
+      "mtime_nanos": "1700000006000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": ""
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "heading-overlap",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "long.md",
+      "format": "markdown",
+      "byte_length": 5000,
+      "mtime": 1700000007,
+      "mtime_nanos": "1700000007000000000"
+    },
+    "content": {
+      "encoding": "repeat",
+      "text": "abcdefghij",
+      "count": 500
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "rename-before",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "old/name.md",
+      "format": "markdown",
+      "byte_length": 18,
+      "mtime": 1700000008,
+      "mtime_nanos": "1700000008000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "# Stable\nSame body"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "rename-after",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "new/name.md",
+      "format": "markdown",
+      "byte_length": 18,
+      "mtime": 1700000008,
+      "mtime_nanos": "1700000008000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "# Stable\nSame body"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "invalid-relative-path",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "../escape.md",
+      "format": "markdown",
+      "byte_length": 4,
+      "mtime": 1700000009,
+      "mtime_nanos": "1700000009000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "body"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "oversized-source",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "large.md",
+      "format": "markdown",
+      "byte_length": 10485761,
+      "mtime": 1700000010,
+      "mtime_nanos": "1700000010000000000"
+    },
+    "content": {
+      "encoding": "repeat",
+      "text": "x",
+      "count": 10485761
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "underreported-source-length",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "underreported.md",
+      "format": "markdown",
+      "byte_length": 3,
+      "mtime": 1700000011,
+      "mtime_nanos": "1700000011000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "body"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "overreported-source-length",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "overreported.md",
+      "format": "markdown",
+      "byte_length": 5,
+      "mtime": 1700000012,
+      "mtime_nanos": "1700000012000000000"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "body"
+    }
+  },
+  {
+    "operation": "prepare_query",
+    "name": "ordinary-query",
+    "query": "knowledge workspace search"
+  },
+  {
+    "operation": "prepare_query",
+    "name": "explicit-query",
+    "query": "title:notes AND cache*"
+  },
+  {
+    "operation": "prepare_query",
+    "name": "identifier-query",
+    "query": "IIA 2 line"
+  },
+  {
+    "operation": "prepare_query",
+    "name": "metadata-probe-unmatched",
+    "query": "iia 2 line",
+    "metadata_probe_match": false
+  },
+  {
+    "operation": "prepare_query",
+    "name": "metadata-probe-matched",
+    "query": "iia 2 line",
+    "metadata_probe_match": true
+  },
+  {
+    "operation": "prepare_query",
+    "name": "sql-looking-query",
+    "query": "title:notes OR '); DROP TABLE chunks; --"
+  },
+  {
+    "operation": "prepare_query",
+    "name": "empty-query",
+    "query": "   "
+  },
+  {
+    "operation": "api_request",
+    "name": "portable-api-request",
+    "request": {
+      "q": "knowledge workspace",
+      "mode": "lexical",
+      "filters": {
+        "vault_id": "fixture",
+        "path_prefix": "reference",
+        "tags": ["search"],
+        "frontmatter_equals": {
+          "status": "active"
+        }
+      },
+      "limit": 20
+    }
+  },
+  {
+    "operation": "daemon_status",
+    "name": "portable-daemon-status",
+    "status": {
+      "state": "ready",
+      "version": "0.1.0",
+      "generation": "generation-0001",
+      "chunking_version": 1,
+      "documents": 3,
+      "chunks": 7,
+      "last_sync": null,
+      "dirty": false,
+      "rebuilding": false,
+      "model": null,
+      "vaults": []
+    }
+  }
+]

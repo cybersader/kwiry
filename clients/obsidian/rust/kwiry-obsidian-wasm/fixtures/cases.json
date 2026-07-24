@@ -1,0 +1,134 @@
+[
+  {
+    "operation": "identity",
+    "name": "abi-identity"
+  },
+  {
+    "operation": "prepare_source",
+    "name": "markdown-source",
+    "request": {
+      "abi_version": 1,
+      "operation": "prepare_source",
+      "descriptor": {
+        "vault_id": "active-vault",
+        "path": "folder/note.md",
+        "format": "markdown",
+        "byte_length": 23,
+        "mtime": 10,
+        "mtime_nanos": "10000000001"
+      }
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "# Title\nportable source"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "invalid-source-envelope",
+    "request": {
+      "abi_version": 1,
+      "operation": "prepare_source",
+      "descriptor": {
+        "vault_id": "active-vault",
+        "path": "note.md",
+        "format": "markdown",
+        "byte_length": 1,
+        "mtime": 0,
+        "mtime_nanos": "0"
+      },
+      "unexpected": true
+    },
+    "content": {
+      "encoding": "bytes",
+      "values": [120]
+    }
+  },
+  {
+    "operation": "prepare_query",
+    "name": "ordinary-query",
+    "request": {
+      "abi_version": 1,
+      "operation": "prepare_query",
+      "query": "dungeons and dragons"
+    }
+  },
+  {
+    "operation": "prepare_query",
+    "name": "metadata-probe-query",
+    "request": {
+      "abi_version": 1,
+      "operation": "prepare_query",
+      "query": "iia 2 line"
+    }
+  },
+  {
+    "operation": "prepare_query",
+    "name": "invalid-query-envelope",
+    "request": {
+      "abi_version": 1,
+      "operation": "prepare_query",
+      "query": "query",
+      "unexpected": true
+    }
+  },
+  {
+    "operation": "finalize_query",
+    "name": "ordinary-any-match",
+    "request": {
+      "abi_version": 1,
+      "operation": "finalize_query",
+      "query": "dungeons and dragons",
+      "metadata_probe_matched": false
+    }
+  },
+  {
+    "operation": "finalize_query",
+    "name": "identifier-all-match",
+    "request": {
+      "abi_version": 1,
+      "operation": "finalize_query",
+      "query": "IIA 2 line",
+      "metadata_probe_matched": false
+    }
+  },
+  {
+    "operation": "finalize_query",
+    "name": "metadata-promoted-match",
+    "request": {
+      "abi_version": 1,
+      "operation": "finalize_query",
+      "query": "iia 2 line",
+      "metadata_probe_matched": true
+    }
+  },
+  {
+    "operation": "finalize_query",
+    "name": "allowlisted-explicit-match",
+    "request": {
+      "abi_version": 1,
+      "operation": "finalize_query",
+      "query": "title:\"IIA guide\" OR content:cache*",
+      "metadata_probe_matched": false
+    }
+  },
+  {
+    "operation": "finalize_query",
+    "name": "inert-sql-looking-query",
+    "request": {
+      "abi_version": 1,
+      "operation": "finalize_query",
+      "query": "title:notes OR '); DROP TABLE chunks; --",
+      "metadata_probe_matched": false
+    }
+  },
+  {
+    "operation": "prepare_query",
+    "name": "wrong-abi",
+    "request": {
+      "abi_version": 2,
+      "operation": "prepare_query",
+      "query": "query"
+    }
+  }
+]

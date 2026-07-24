@@ -1,0 +1,8 @@
+{
+  "name": "kwiry-portable-core-wasm-probe",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node scripts/test-parity.cjs"
+  }
+}

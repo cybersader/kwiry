@@ -46,11 +46,14 @@ impl DataRoot {
         fs::create_dir_all(&generations).map_err(|error| io_error(&generations, error))?;
         let staging_dir = generations.join(format!(".staging-{id}"));
         let index_dir = staging_dir.join("index");
+        let partitions_dir = staging_dir.join("partitions");
         fs::create_dir_all(&index_dir).map_err(|error| io_error(&index_dir, error))?;
+        fs::create_dir_all(&partitions_dir).map_err(|error| io_error(&partitions_dir, error))?;
         Ok(CandidateGeneration {
             id,
             staging_dir,
             index_dir,
+            partitions_dir,
         })
     }
 
@@ -76,7 +79,9 @@ impl DataRoot {
         current.validate()?;
         let generation_dir = self.root.join("generations").join(&current.generation);
         let paths = GenerationPaths::new(current.generation, generation_dir);
-        if !paths.index_dir.join("meta.json").is_file() || !paths.manifest_path.is_file() {
+        let has_desktop_index = paths.index_dir.join("meta.json").is_file();
+        let has_partition_layout = paths.layout_path.is_file();
+        if (!has_desktop_index && !has_partition_layout) || !paths.manifest_path.is_file() {
             return Err(Error::State(format!(
                 "active generation is incomplete: {}",
                 paths.root.display()
@@ -118,11 +123,16 @@ pub struct CandidateGeneration {
     pub id: String,
     pub staging_dir: PathBuf,
     pub index_dir: PathBuf,
+    pub partitions_dir: PathBuf,
 }
 
 impl CandidateGeneration {
     pub fn manifest_path(&self) -> PathBuf {
         self.staging_dir.join("manifest.json")
+    }
+
+    pub fn layout_path(&self) -> PathBuf {
+        self.staging_dir.join("layout.json")
     }
 }
 
@@ -131,7 +141,9 @@ pub struct GenerationPaths {
     pub id: String,
     pub root: PathBuf,
     pub index_dir: PathBuf,
+    pub partitions_dir: PathBuf,
     pub manifest_path: PathBuf,
+    pub layout_path: PathBuf,
 }
 
 impl GenerationPaths {
@@ -139,7 +151,9 @@ impl GenerationPaths {
         Self {
             id,
             index_dir: root.join("index"),
+            partitions_dir: root.join("partitions"),
             manifest_path: root.join("manifest.json"),
+            layout_path: root.join("layout.json"),
             root,
         }
     }
@@ -208,7 +222,7 @@ mod tests {
 
         let error = root.active().unwrap_err();
         assert!(error.to_string().contains("found layout=1, index=2"));
-        assert!(error.to_string().contains("expected layout=1, index=3"));
+        assert!(error.to_string().contains("expected layout=1, index=4"));
         assert!(error.to_string().contains("kwiry index"));
         assert_eq!(fs::read_to_string(current_path).unwrap(), source);
     }
@@ -222,7 +236,7 @@ mod tests {
 
         let error = root.active_or_legacy_index().unwrap_err();
         assert!(error.to_string().contains("legacy index layout"));
-        assert!(error.to_string().contains("expected index format 3"));
+        assert!(error.to_string().contains("expected index format 4"));
         assert!(error.to_string().contains("kwiry index"));
         assert_eq!(fs::read_to_string(meta_path).unwrap(), "{}");
     }

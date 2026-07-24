@@ -1,0 +1,9 @@
+{
+  "name": "kwiry-obsidian-wasm-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "test": "node scripts/test-adapter.cjs"
+  }
+}

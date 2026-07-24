@@ -1,6 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tempfile::Builder;
@@ -653,6 +655,9 @@ mod tests {
 
     #[test]
     fn task_definition_matching_detects_executable_drift() {
+        #[cfg(windows)]
+        let expected = sample_spec();
+        #[cfg(not(windows))]
         let expected = spec(
             PathBuf::from("/opt/kwiry.exe"),
             PathBuf::from("/config/config.toml"),
@@ -663,7 +668,14 @@ mod tests {
         assert!(matching.definition_matches(&expected).unwrap());
 
         let mut moved = expected.clone();
-        moved.executable = PathBuf::from("/opt/new/kwiry.exe");
+        #[cfg(windows)]
+        {
+            moved.executable = PathBuf::from(r"C:\Program Files\Kwiry\kwiry.exe");
+        }
+        #[cfg(not(windows))]
+        {
+            moved.executable = PathBuf::from("/opt/new/kwiry.exe");
+        }
         let drifted = WindowsTaskScheduler::new(FakeRunner::new([output(0, &xml, "")]));
         assert!(!drifted.definition_matches(&moved).unwrap());
     }

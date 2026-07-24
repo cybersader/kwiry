@@ -7,6 +7,7 @@ import {
   nextSearchMode,
   SEARCH_MODE_OPTIONS,
   selectedSearchModeOptions,
+  selectSupportedMode,
 } from "../src/search-mode";
 
 describe("search mode helpers", () => {
@@ -22,6 +23,24 @@ describe("search mode helpers", () => {
     expect(nextSearchMode("lexical")).toBe("semantic");
     expect(nextSearchMode("semantic")).toBe("hybrid");
     expect(nextSearchMode("hybrid")).toBe("lexical");
+  });
+
+  it("renders and cycles only modes supported by the active backend", () => {
+    expect(selectedSearchModeOptions("lexical", ["lexical"])).toEqual([
+      { mode: "lexical", label: "Lexical", selected: true },
+    ]);
+    expect(nextSearchMode("lexical", ["lexical"])).toBe("lexical");
+    expect(nextSearchMode("hybrid", ["lexical", "hybrid"])).toBe("lexical");
+  });
+
+  it("chooses a supported mode without rewriting the persisted preference", () => {
+    expect(selectSupportedMode("hybrid", ["lexical"])).toBe("lexical");
+    expect(selectSupportedMode("semantic", ["lexical", "semantic"])).toBe("semantic");
+  });
+
+  it("fails when a backend advertises no modes", () => {
+    expect(() => selectSupportedMode("lexical", [])).toThrow(/no search modes/);
+    expect(() => nextSearchMode("lexical", [])).toThrow(/no search modes/);
   });
 
   it.each(["lexical", "semantic", "hybrid"] as const)(

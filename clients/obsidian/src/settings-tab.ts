@@ -18,52 +18,32 @@ export class KwirySettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName("Daemon").setHeading();
-
     new Setting(containerEl)
-      .setName("Daemon URL")
-      .setDesc("Local kwiry daemon address. The plugin only talks to this URL.")
-      .addText((text) =>
-        text
-          .setPlaceholder("http://127.0.0.1:32189")
-          .setValue(this.plugin.settings.daemonUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.daemonUrl = value.trim();
-            await this.plugin.saveSettings();
-            void this.plugin.refreshStatus();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName("Token file path")
-      .setDesc(
-        "Absolute path to the daemon's bearer-token file (printed at daemon startup). The token is read from disk on demand and never stored by the plugin.",
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder("/path/to/config.token")
-          .setValue(this.plugin.settings.tokenFilePath)
-          .onChange(async (value) => {
-            this.plugin.settings.tokenFilePath = value.trim();
-            await this.plugin.saveSettings();
-            void this.plugin.refreshStatus();
-          }),
-      );
-
-    new Setting(containerEl).setName("Search").setHeading();
-
-    new Setting(containerEl)
-      .setName("Default mode")
-      .setDesc("Semantic and hybrid need the daemon running with --semantic.")
+      .setName("Search backend")
+      .setDesc("Backend selection is explicit. A daemon failure never activates in-plugin search.")
       .addDropdown((dropdown) =>
         dropdown
-          .addOptions({ lexical: "Lexical", semantic: "Semantic", hybrid: "Hybrid" })
-          .setValue(this.plugin.settings.defaultMode)
+          .addOptions({ daemon: "Daemon", in_plugin: "In-plugin · Lexical" })
+          .setValue(this.plugin.settings.backendProfile)
           .onChange(async (value) => {
-            this.plugin.settings.defaultMode = value as SearchMode;
+            this.plugin.settings.backendProfile = value === "in_plugin" ? "in_plugin" : "daemon";
             await this.plugin.saveSettings();
+            await this.plugin.activateBackendProfile();
+            this.display();
           }),
       );
+
+    if (this.plugin.settings.backendProfile === "daemon") {
+      this.renderDaemonSettings(containerEl);
+    } else {
+      new Setting(containerEl)
+        .setName("In-plugin · Lexical")
+        .setDesc(
+          "This profile is lexical-only and never reads the daemon token. Gate 4 integration is still building its in-memory Worker index.",
+        );
+    }
+
+    new Setting(containerEl).setName("Search").setHeading();
 
     new Setting(containerEl)
       .setName("Result limit")
@@ -79,16 +59,6 @@ export class KwirySettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Vault ID filter")
-      .setDesc("Restrict searches to one registered kwiry vault. Empty searches all.")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.vaultId).onChange(async (value) => {
-          this.plugin.settings.vaultId = value.trim();
-          await this.plugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
       .setName("Show ribbon icon")
       .setDesc("Takes effect after reloading the plugin.")
       .addToggle((toggle) =>
@@ -97,5 +67,77 @@ export class KwirySettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }),
       );
+  }
+
+  private renderDaemonSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Daemon").setHeading();
+
+    new Setting(containerEl)
+      .setName("Daemon URL")
+      .setDesc("Literal loopback HTTP origin with an explicit port.")
+      .addText((text) =>
+        text
+          .setPlaceholder("http://127.0.0.1:32189")
+          .setValue(this.plugin.settings.daemonUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.daemonUrl = value.trim();
+            await this.reconfigureDaemon();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Token file path")
+      .setDesc(
+        "Absolute path to the daemon token file. It is validated and read fresh for every authenticated request, never stored in plugin data.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("/path/to/config.token")
+          .setValue(this.plugin.settings.tokenFilePath)
+          .onChange(async (value) => {
+            this.plugin.settings.tokenFilePath = value.trim();
+            await this.reconfigureDaemon();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Default daemon mode")
+      .setDesc("Semantic and hybrid require a daemon running with semantic support.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({ lexical: "Lexical", semantic: "Semantic", hybrid: "Hybrid" })
+          .setValue(this.plugin.settings.defaultMode)
+          .onChange(async (value) => {
+            this.plugin.settings.defaultMode = value as SearchMode;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Search vault ID filter")
+      .setDesc("Restrict daemon searches to one registered tree. Empty searches all trees.")
+      .addText((text) =>
+        text.setValue(this.plugin.settings.vaultId).onChange(async (value) => {
+          this.plugin.settings.vaultId = value.trim();
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Current vault daemon ID")
+      .setDesc(
+        "Map this Obsidian vault to a daemon vault ID for local open actions. Results from other trees remain searchable but cannot be opened here.",
+      )
+      .addText((text) =>
+        text.setValue(this.plugin.settings.daemonCurrentVaultId).onChange(async (value) => {
+          this.plugin.settings.daemonCurrentVaultId = value.trim();
+          await this.reconfigureDaemon();
+        }),
+      );
+  }
+
+  private async reconfigureDaemon(): Promise<void> {
+    await this.plugin.saveSettings();
+    await this.plugin.activateBackendProfile();
   }
 }

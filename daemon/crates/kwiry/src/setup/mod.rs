@@ -410,9 +410,10 @@ mod tests {
 
     #[test]
     fn descriptor_and_status_validation_are_loopback_and_expectation_bound() {
+        let state_dir = std::env::current_dir().unwrap().join("state");
         let descriptor = ConnectionDescriptor::new(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 32189),
-            PathBuf::from("/state/token"),
+            state_dir.join("token"),
             "1.2.3",
         );
         assert_eq!(
@@ -420,7 +421,7 @@ mod tests {
             "127.0.0.1:32189".parse().unwrap()
         );
         let expectation = ReadinessExpectation {
-            connection_path: PathBuf::from("/state/connection.json"),
+            connection_path: state_dir.join("connection.json"),
             vault_id: "project-notes".into(),
             semantic_enabled: true,
         };
@@ -444,7 +445,7 @@ mod tests {
 
         let remote = ConnectionDescriptor::new(
             "192.0.2.10:32189".parse().unwrap(),
-            PathBuf::from("/state/token"),
+            state_dir.join("remote-token"),
             "1.2.3",
         );
         assert_eq!(

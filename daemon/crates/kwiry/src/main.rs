@@ -1,4 +1,5 @@
 mod auth;
+mod capability;
 mod logging;
 mod runtime;
 mod server;
@@ -13,8 +14,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use kwiry_core::{
-    DaemonState, DataRoot, Paths, SearchRequest, acquire_setup_lock, add_vault, build_index,
-    load_config, search_index, update_config,
+    DaemonState, DataRoot, HostProfile, LexicalSearchRequest, Paths, acquire_setup_lock, add_vault,
+    build_index, load_config, search_index, update_config,
 };
 use serde::Serialize;
 
@@ -202,8 +203,14 @@ async fn main() -> Result<()> {
     let paths = Paths::resolve(cli.config, cli.data_dir)?;
 
     match cli.command {
-        Command::Setup(args) => run_setup(&paths, args)?,
-        Command::Service { command } => run_service(&paths, command)?,
+        Command::Setup(args) => {
+            require_desktop_profile(&paths)?;
+            run_setup(&paths, args)?;
+        }
+        Command::Service { command } => {
+            require_desktop_profile(&paths)?;
+            run_service(&paths, command)?;
+        }
         Command::Vault {
             command: VaultCommand::Add { id, path, room },
         } => {
@@ -243,7 +250,7 @@ async fn main() -> Result<()> {
         } => {
             let hits = search_index(
                 &paths.data_dir,
-                &SearchRequest {
+                &LexicalSearchRequest {
                     query,
                     limit,
                     vault_id: vault,
@@ -274,6 +281,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn require_desktop_profile(paths: &Paths) -> Result<()> {
+    if load_config(&paths.config)?.server.profile != HostProfile::Desktop {
+        bail!("setup and per-user service commands are unavailable for the openclast profile");
+    }
     Ok(())
 }
 

@@ -1,61 +1,122 @@
+#[cfg(not(feature = "portable"))]
+compile_error!("kwiry-core requires either the `portable` or `native` feature");
+
+#[cfg(feature = "portable")]
 mod api;
+#[cfg(feature = "native")]
 mod auth;
+#[cfg(feature = "native")]
 mod bootstrap;
+#[cfg(feature = "native")]
 mod chunk;
+#[cfg(feature = "native")]
 mod config;
+#[cfg(feature = "native")]
 mod connection;
+#[cfg(feature = "native")]
 mod error;
+#[cfg(feature = "portable")]
 mod frontmatter;
+#[cfg(feature = "native")]
 mod generation;
+#[cfg(feature = "native")]
 mod index;
+#[cfg(feature = "portable")]
 mod lexical;
+#[cfg(feature = "portable")]
 mod links;
+#[cfg(feature = "native")]
 mod manifest;
+#[cfg(feature = "portable")]
 mod model;
+#[cfg(feature = "native")]
+mod partition;
+#[cfg(feature = "portable")]
+mod query;
+#[cfg(feature = "native")]
 mod runtime;
+#[cfg(feature = "native")]
 mod search;
+#[cfg(feature = "native")]
 mod semantic;
+#[cfg(feature = "portable")]
+mod source;
+#[cfg(feature = "native")]
 mod state;
+#[cfg(feature = "portable")]
 mod status;
+#[cfg(feature = "native")]
 mod walk;
 
+#[cfg(feature = "portable")]
 pub use api::{
     ApiErrorBody, ApiErrorEnvelope, ApiRequestError, ApiSearchRequest, ApiSearchResponse,
     HealthResponse, SearchFilters, SearchMode,
 };
+#[cfg(feature = "native")]
 pub use auth::{Principal, Scope, load_or_create_token, load_token, token_matches};
+#[cfg(feature = "native")]
 pub use bootstrap::{DesktopBootstrap, bootstrap_desktop};
+#[cfg(feature = "native")]
 pub use chunk::ingest_vault;
+#[cfg(feature = "native")]
 pub use config::{
     ConfigLock, Paths, VaultRegistrationDisposition, acquire_config_lock, acquire_setup_lock,
     add_vault, ensure_vault_registration, load_config, save_config, update_config,
 };
+#[cfg(feature = "native")]
 pub use connection::{
     CONNECTION_SCHEMA_VERSION, ConnectionDescriptor, load_connection_descriptor,
     write_connection_descriptor,
 };
+#[cfg(feature = "native")]
 pub use error::{Error, Result};
+#[cfg(feature = "native")]
 pub use generation::{DataRoot, DataRootLock, GenerationPaths};
+#[cfg(feature = "native")]
 pub use index::build_index;
+#[cfg(feature = "native")]
 pub use manifest::{
     INDEX_FORMAT_VERSION, MANIFEST_VERSION, Manifest, ManifestFile, ManifestFileOutcome,
-    registration_fingerprint, source_key,
+    registration_fingerprint,
 };
+#[cfg(feature = "native")]
 pub use model::{
-    AuthConfig, CHUNKING_VERSION, Chunk, Config, DEFAULT_BIND, Frontmatter, IndexStats,
-    IngestReport, IngestWarning, SearchHit, SearchRequest, SemanticConfig, ServerConfig,
+    AuthConfig, Config, DEFAULT_BIND, HostProfile, IndexStats, IngestReport, IngestWarning,
+    LexicalSearchRequest, OpenClastAuthConfig, ResourceKey, SemanticConfig, ServerConfig,
     VaultRegistration,
 };
+#[cfg(feature = "portable")]
+pub use model::{
+    CHUNKING_VERSION, Chunk, Frontmatter, MAX_FILE_BYTES, PreparedChunk, RetrievalMetadata,
+    SearchHit,
+};
+#[cfg(feature = "portable")]
+pub use query::{
+    LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_QUERY_BYTES, MAX_QUERY_TERMS,
+    QueryMatchOperator, QueryMetadataField, QueryMetadataProbe, QueryPlanError, QueryPlanKind,
+    prepare_lexical_query,
+};
+#[cfg(feature = "native")]
 pub use runtime::{IndexManager, ReconcileReport, SearchRuntime};
+#[cfg(feature = "native")]
 pub use search::search_index;
 #[cfg(feature = "semantic-onnx")]
 pub use semantic::FastembedEmbedder;
+#[cfg(feature = "native")]
 pub use semantic::{
     Embedder, EmbeddingProfile, SemanticHit, SemanticRuntime, SemanticStore, embedding_text,
     rrf_fuse,
 };
+#[cfg(feature = "portable")]
+pub use source::{
+    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourceFormat, SourcePreparation,
+    SourcePreparationError, SourcePreparationKind, prepare_source_buffer, source_key,
+};
+#[cfg(feature = "portable")]
 pub use status::{DaemonState, DaemonStatus, ModelStatus, VaultStatus};
 
+#[cfg(feature = "native")]
 pub fn ingest_config(config: &Config) -> Result<IngestReport> {
     if config.vaults.is_empty() {
         return Err(Error::NoVaults);
