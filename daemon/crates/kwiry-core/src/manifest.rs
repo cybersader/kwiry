@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 use crate::model::{
     CHUNKING_VERSION, FileIngestOutcome, FileOutcomeKind, ResourceKey, VaultRegistration,
 };
+pub use crate::source::source_key;
 use crate::state::{read_json, write_json_atomic};
 
 pub const MANIFEST_VERSION: u32 = 1;
@@ -161,14 +162,6 @@ impl ManifestFile {
 pub enum ManifestFileOutcome {
     Indexed,
     Skipped,
-}
-
-pub fn source_key(vault_id: &str, path: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"kwiry-source-v1\0");
-    update_component(&mut digest, vault_id.as_bytes());
-    update_component(&mut digest, path.as_bytes());
-    format!("{:x}", digest.finalize())
 }
 
 pub fn registration_fingerprint(vault: &VaultRegistration) -> String {

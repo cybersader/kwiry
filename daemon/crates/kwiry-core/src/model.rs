@@ -1,3 +1,4 @@
+#[cfg(feature = "native")]
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -6,8 +7,10 @@ pub const CHUNKING_VERSION: u64 = 1;
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_CHUNK_CHARS: usize = 4_000;
 pub const CHUNK_OVERLAP_CHARS: usize = 400;
+#[cfg(feature = "native")]
 pub const DEFAULT_BIND: &str = "127.0.0.1:32189";
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     #[serde(default = "default_config_version")]
@@ -22,6 +25,7 @@ pub struct Config {
     pub vaults: Vec<VaultRegistration>,
 }
 
+#[cfg(feature = "native")]
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -34,6 +38,7 @@ impl Default for Config {
     }
 }
 
+#[cfg(feature = "native")]
 impl Config {
     pub fn resource_key(&self, vault: &VaultRegistration) -> Option<ResourceKey> {
         let auth = self.auth.openclast.as_ref()?;
@@ -53,10 +58,12 @@ impl Config {
     }
 }
 
+#[cfg(feature = "native")]
 const fn default_config_version() -> u32 {
     1
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum HostProfile {
@@ -66,6 +73,7 @@ pub enum HostProfile {
     OpenClast,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerConfig {
     #[serde(default)]
@@ -74,6 +82,7 @@ pub struct ServerConfig {
     pub bind: String,
 }
 
+#[cfg(feature = "native")]
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -83,10 +92,12 @@ impl Default for ServerConfig {
     }
 }
 
+#[cfg(feature = "native")]
 fn default_bind() -> String {
     DEFAULT_BIND.to_owned()
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,6 +106,7 @@ pub struct AuthConfig {
     pub openclast: Option<OpenClastAuthConfig>,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenClastAuthConfig {
     pub tenant_id: String,
@@ -105,10 +117,12 @@ pub struct OpenClastAuthConfig {
     pub max_token_ttl_seconds: u64,
 }
 
+#[cfg(feature = "native")]
 const fn default_capability_ttl_seconds() -> u64 {
     60
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResourceKey {
     pub tenant_id: String,
@@ -116,6 +130,7 @@ pub struct ResourceKey {
     pub room_id: String,
 }
 
+#[cfg(feature = "native")]
 impl ResourceKey {
     pub fn new(
         tenant_id: impl Into<String>,
@@ -130,12 +145,14 @@ impl ResourceKey {
     }
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SemanticConfig {
     #[serde(default)]
     pub enabled: bool,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VaultRegistration {
     #[serde(rename = "vault_id")]
@@ -174,12 +191,36 @@ pub struct Chunk {
     pub chunking_version: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetrievalMetadata {
+    pub filename: String,
+    pub stem: String,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreparedChunk {
+    pub chunk: Chunk,
+    pub heading_text: String,
+    pub technical_identifiers: Vec<String>,
+}
+
+impl std::ops::Deref for PreparedChunk {
+    type Target = Chunk;
+
+    fn deref(&self) -> &Self::Target {
+        &self.chunk
+    }
+}
+
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestWarning {
     pub path: PathBuf,
     pub message: String,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestReport {
     pub documents: usize,
@@ -205,6 +246,7 @@ pub struct SearchHit {
     pub frontmatter: Frontmatter,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexStats {
     pub documents: usize,
@@ -212,6 +254,7 @@ pub struct IndexStats {
     pub warnings: Vec<IngestWarning>,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiscoveredFile {
     pub absolute_path: PathBuf,
@@ -222,6 +265,7 @@ pub(crate) struct DiscoveredFile {
     pub mtime_nanos: u128,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileOutcomeKind {
     Indexed,
@@ -229,13 +273,7 @@ pub(crate) enum FileOutcomeKind {
     TransientError,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct RetrievalMetadata {
-    pub filename: String,
-    pub stem: String,
-    pub aliases: Vec<String>,
-}
-
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileIngestOutcome {
     pub vault_id: String,
@@ -244,13 +282,13 @@ pub(crate) struct FileIngestOutcome {
     pub byte_length: u64,
     pub mtime: u64,
     pub mtime_nanos: u128,
-    pub chunks: Vec<Chunk>,
+    pub chunks: Vec<PreparedChunk>,
     pub retrieval: RetrievalMetadata,
     pub kind: FileOutcomeKind,
     pub warning: Option<IngestWarning>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 

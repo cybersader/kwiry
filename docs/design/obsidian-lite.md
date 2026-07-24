@@ -6,7 +6,7 @@ D5B remains the urgent desktop need. The first approved engine path reached a te
 
 The approved boundary prohibited a Tantivy fork or replacement writer, so broad plugin/core integration stopped before daemon behavior changed. The owner subsequently selected **official SQLite FTS5-WASM** as the next bounded feasibility path. Its isolated Gate 1 runtime checkpoint passed without a patch, custom build, persistence, network dependency, or production integration.
 
-The no-daemon host remains contractual but not delivered. The existing Obsidian plugin remains daemon-backed. Historical Tantivy evidence lives in [`../../bench/tantivy-wasm/README.md`](../../bench/tantivy-wasm/README.md); the verified FTS5 Gate 1 evidence lives in [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md).
+The no-daemon host remains contractual but not delivered. The existing released Obsidian plugin remains daemon-backed. Gates 1–3 are GO; Gate 4 backend-neutral integration is the current approved implementation boundary, while active-vault lifecycle and delivered-profile acceptance remain Gate 5. Historical Tantivy evidence lives in [`../../bench/tantivy-wasm/README.md`](../../bench/tantivy-wasm/README.md); the verified FTS5 Gate 1 evidence lives in [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md), and the Gate 3 native/WASM parity witness lives in [`../../bench/portable-core-wasm/README.md`](../../bench/portable-core-wasm/README.md).
 
 ## Problem
 
@@ -43,13 +43,13 @@ The isolated [`../../bench/fts5-wasm-obsidian-probe/`](../../bench/fts5-wasm-obs
 
 Automation reported **`READY_FOR_FIELD_TEST`** and could not issue GO. The owner then accepted Gate 2 after frozen BRAT `0.0.1` installation and ten runs, update to `0.0.2`, full restart/rerun, rollback to `0.0.1`, and final rerun passed under desktop Obsidian. BRAT's add-plugin modal remained open after successful installation and was accepted as a non-blocking upstream UI defect. Exact release hashes, matching versions, public delivery, and execution were verified; a separate filesystem hash of the installed copies was not recorded. The probe uses no runtime CDN, dynamic fetch, loose Worker/WASM asset, OPFS, vault access, settings, token, production plugin code, or Rust changes.
 
-### Gate 3 — portable Rust seam
+### Gate 3 — portable Rust seam — Completed GO
 
-Only after runtime and packaging proofs, feature-gate `kwiry-core` conservatively so portable Rust owns source validation, Markdown/frontmatter/wikilink parsing, heading-aware chunking, deterministic IDs, retrieval metadata, technical identifiers, and query classification/planning. Native desktop and OpenClast Tantivy behavior remains unchanged.
+`kwiry-core` now exposes a conservatively feature-gated portable boundary for source validation, Markdown/frontmatter/wikilink parsing, heading-aware chunking, deterministic IDs, retrieval metadata, technical identifiers, and query classification/planning. Native desktop and OpenClast Tantivy behavior remains unchanged. The full native regression matrix, portable-only native/WASM builds, and 21 byte-identical native/Node-WASM parity cases passed before the owner accepted Gate 3 as GO.
 
-### Gate 4 — backend-neutral plugin integration
+### Gate 4 — backend-neutral plugin integration — Current approved boundary
 
-Add explicit daemon/in-plugin selection and capability-aware status/mode behavior. Preserve fresh token-file reads in daemon mode and prohibit silent fallback.
+Add explicit daemon/in-plugin selection and capability-aware status/mode behavior. Preserve fresh token-file reads in daemon mode, harden daemon connection validation, bind Rust-owned plans to fixed parameterized FTS5 operations, and prohibit silent fallback. Stop before active-vault lifecycle work.
 
 ### Gate 5 — active-vault lifecycle and acceptance
 

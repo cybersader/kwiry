@@ -37,7 +37,7 @@ The current BRAT-installable plugin provides a query modal, result rendering, ex
 
 ## D5B — no-daemon in-plugin lexical host
 
-State: urgent need; FTS5 runtime Gate 1 and owner-accepted installed Obsidian/frozen-BRAT Gate 2 are GO, while the production host remains undelivered.
+State: urgent need; Gates 1–3 are GO and Gate 4 backend-neutral integration is the current approved implementation boundary, while the production host remains undelivered.
 
 ### Checkpoint B0 — Tantivy-WASM feasibility — Completed NO-GO for normal incremental writer
 
@@ -57,13 +57,13 @@ The isolated compatibility plugin embeds a classic application-owned Worker and 
 
 Automation reported `READY_FOR_FIELD_TEST`; the owner then accepted B2 after frozen BRAT `0.0.1` installation and ten runs, update to `0.0.2`, full restart/rerun, rollback to `0.0.1`, and final rerun passed under desktop Obsidian. The stuck BRAT add-plugin modal was accepted as a non-blocking upstream UI defect. Exact release hashes, matching versions, public delivery, and execution were verified; a separate filesystem hash of the installed copies was not recorded. See [`../../bench/fts5-wasm-obsidian-probe/README.md`](../../bench/fts5-wasm-obsidian-probe/README.md).
 
-### Checkpoint B3 — portable Rust seam
+### Checkpoint B3 — portable Rust seam — Completed GO
 
-After B1–B2 GO, feature-gate `kwiry-core` to expose source-buffer ingestion, project-owned models, parsing, heading-aware chunking, deterministic IDs/metadata, technical identifiers, and query classification/planning. Keep native/OpenClast Tantivy behavior unchanged.
+`kwiry-core` exposes source-buffer ingestion, project-owned models, parsing, heading-aware chunking, deterministic IDs/metadata, technical identifiers, and query classification/planning through a portable feature. Native/OpenClast Tantivy behavior remains unchanged, and the native/portable/WASM parity and daemon regression matrix passed before owner acceptance.
 
-### Checkpoint B4 — backend-neutral plugin
+### Checkpoint B4 — backend-neutral plugin — Current approved boundary
 
-Add explicit daemon/in-plugin selection and capability-aware mode/status handling. Preserve current daemon behavior and prevent silent fallback. The worker binds allowlisted Rust plans to fixed parameterized FTS5 SQL; TypeScript does not own Markdown parsing, IDs, tokenization, or scoring.
+Add explicit daemon/in-plugin selection and capability-aware mode/status handling. Preserve and harden current daemon behavior and prevent silent fallback. The worker binds allowlisted Rust plans to fixed parameterized FTS5 SQL; TypeScript does not own Markdown parsing, IDs, tokenization, or scoring. Stop before active-vault enumeration or events.
 
 ### Checkpoint B5 — active-vault lifecycle, package, and field-test
 

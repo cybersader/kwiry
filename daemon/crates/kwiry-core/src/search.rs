@@ -16,8 +16,12 @@ use tantivy::{IndexReader, Searcher};
 use crate::api::SearchFilters;
 use crate::error::{Error, Result};
 use crate::index::{Fields, open_index};
-use crate::lexical::{normalize_raw, technical_identifiers};
 use crate::model::{ResourceKey, SearchHit, SearchRequest};
+#[cfg(test)]
+use crate::query::classify_query;
+use crate::query::{
+    LexicalQueryPlan, QueryMetadataField, QueryMetadataProbe, QueryPlanKind, prepare_lexical_query,
+};
 
 const MAX_RESULTS: usize = 100;
 const BOOST_FILENAME: f32 = 5.0;
@@ -29,13 +33,6 @@ const BOOST_CONTENT: f32 = 1.0;
 const BOOST_EXACT_METADATA: f32 = 12.0;
 const BOOST_PHRASE: f32 = 4.0;
 const BOOST_CONTENT_IDENTIFIER: f32 = 5.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QueryPlanKind {
-    Explicit,
-    Ordinary,
-    Identifier,
-}
 
 pub fn search_index(data_dir: &Path, request: &SearchRequest) -> Result<Vec<SearchHit>> {
     let (index, fields) = open_index(data_dir)?;
@@ -124,11 +121,10 @@ pub(crate) fn search_partitions(
     let statistics = AuthorizedStatistics {
         searchers: searchers.clone(),
     };
-    let kind = resolve_partitioned_query_plan_kind(partitions, &searchers, query_text)?;
+    let plan = resolve_partitioned_query_plan(partitions, &searchers, query_text)?;
     let mut hits = Vec::new();
     for (partition, searcher) in partitions.iter().zip(&searchers) {
-        let ranked =
-            build_lexical_query_with_kind(partition.index, partition.fields, query_text, kind)?;
+        let ranked = build_lexical_query_from_plan(partition.index, partition.fields, &plan)?;
         let query = filtered_query(ranked, filters, partition.fields)?;
         hits.extend(collect_partition_hits(
             searcher,
@@ -151,39 +147,35 @@ pub(crate) fn search_partitions(
     Ok(hits)
 }
 
-fn resolve_partitioned_query_plan_kind(
+fn resolve_partitioned_query_plan(
     partitions: &[PartitionReader<'_>],
     searchers: &[Searcher],
     query: &str,
-) -> Result<QueryPlanKind> {
-    let kind = classify_query(query);
-    if kind != QueryPlanKind::Ordinary || !is_lowercase_identifier_candidate(query) {
-        return Ok(kind);
-    }
+) -> Result<LexicalQueryPlan> {
+    let plan = prepare_lexical_query(query).map_err(|error| Error::Query(error.to_string()))?;
+    let Some(probe) = plan.metadata_probe.as_ref() else {
+        return Ok(plan);
+    };
 
     for (partition, searcher) in partitions.iter().zip(searchers) {
         let mut parser = QueryParser::for_index(
             partition.index,
-            vec![
-                partition.fields.filename,
-                partition.fields.stem,
-                partition.fields.aliases,
-                partition.fields.title,
-                partition.fields.heading_text,
-            ],
+            metadata_probe_fields(partition.fields, probe),
         );
-        parser.set_conjunction_by_default();
+        if probe.conjunction {
+            parser.set_conjunction_by_default();
+        }
         let metadata_query = parser
-            .parse_query(query)
+            .parse_query(&probe.query)
             .map_err(|error| Error::Query(error.to_string()))?;
         let matches = searcher
             .search(&metadata_query, &TopDocs::with_limit(1).order_by_score())
             .map_err(|error| Error::Index(error.to_string()))?;
         if !matches.is_empty() {
-            return Ok(QueryPlanKind::Identifier);
+            return Ok(plan.finalize_metadata_probe(true));
         }
     }
-    Ok(QueryPlanKind::Ordinary)
+    Ok(plan.finalize_metadata_probe(false))
 }
 
 fn build_lexical_query(
@@ -192,41 +184,37 @@ fn build_lexical_query(
     searcher: &Searcher,
     query_text: &str,
 ) -> Result<(QueryPlanKind, Box<dyn Query>)> {
-    let kind = resolve_query_plan_kind(index, fields, searcher, query_text)?;
-    Ok((
-        kind,
-        build_lexical_query_with_kind(index, fields, query_text, kind)?,
-    ))
+    let plan = resolve_query_plan(index, fields, searcher, query_text)?;
+    let kind = plan.kind;
+    Ok((kind, build_lexical_query_from_plan(index, fields, &plan)?))
 }
 
-fn build_lexical_query_with_kind(
+fn build_lexical_query_from_plan(
     index: &Index,
     fields: &Fields,
-    query_text: &str,
-    kind: QueryPlanKind,
+    plan: &LexicalQueryPlan,
 ) -> Result<Box<dyn Query>> {
     let parser = lexical_parser(index, fields);
-    let query = match kind {
+    let query = match plan.kind {
         QueryPlanKind::Explicit => parser
-            .parse_query(query_text)
+            .parse_query(&plan.query)
             .map_err(|error| Error::Query(error.to_string()))?,
         QueryPlanKind::Ordinary => {
             let parsed = parser
-                .parse_query(query_text)
+                .parse_query(&plan.query)
                 .map_err(|error| Error::Query(error.to_string()))?;
             let mut clauses = vec![(Occur::Should, parsed)];
-            add_ordering_boosters(&mut clauses, &parser, fields, query_text)?;
+            add_ordering_boosters(&mut clauses, &parser, fields, plan)?;
             Box::new(BooleanQuery::new(clauses))
         }
         QueryPlanKind::Identifier => {
-            let terms = identifier_query_terms(query_text);
-            let mut clauses = Vec::with_capacity(terms.len() + 2);
-            if terms.len() == 1 {
+            let mut clauses = Vec::with_capacity(plan.identifier_terms.len() + 2);
+            if plan.identifier_terms.len() == 1 {
                 let parsed = parser
-                    .parse_query(query_text)
+                    .parse_query(&plan.query)
                     .map_err(|error| Error::Query(error.to_string()))?;
                 let mut alternatives = vec![parsed];
-                if let Some(exact) = exact_query(fields, query_text) {
+                if let Some(exact) = exact_query(fields, plan.normalized_exact.as_deref()) {
                     alternatives.push(exact);
                 }
                 clauses.push((
@@ -234,18 +222,32 @@ fn build_lexical_query_with_kind(
                     Box::new(DisjunctionMaxQuery::new(alternatives)) as Box<dyn Query>,
                 ));
             } else {
-                for term in terms {
+                for term in &plan.identifier_terms {
                     let parsed = parser
-                        .parse_query(&term)
+                        .parse_query(term)
                         .map_err(|error| Error::Query(error.to_string()))?;
                     clauses.push((Occur::Must, parsed));
                 }
             }
-            add_ordering_boosters(&mut clauses, &parser, fields, query_text)?;
+            add_ordering_boosters(&mut clauses, &parser, fields, plan)?;
             Box::new(BooleanQuery::new(clauses))
         }
     };
     Ok(query)
+}
+
+fn metadata_probe_fields(fields: &Fields, probe: &QueryMetadataProbe) -> Vec<Field> {
+    probe
+        .fields
+        .iter()
+        .map(|field| match field {
+            QueryMetadataField::Filename => fields.filename,
+            QueryMetadataField::Stem => fields.stem,
+            QueryMetadataField::Aliases => fields.aliases,
+            QueryMetadataField::Title => fields.title,
+            QueryMetadataField::Heading => fields.heading_text,
+        })
+        .collect()
 }
 
 fn lexical_parser(index: &Index, fields: &Fields) -> QueryParser {
@@ -269,150 +271,41 @@ fn lexical_parser(index: &Index, fields: &Fields) -> QueryParser {
     parser
 }
 
-fn classify_query(query: &str) -> QueryPlanKind {
-    if has_explicit_syntax(query) {
-        QueryPlanKind::Explicit
-    } else if is_identifier_like(query) {
-        QueryPlanKind::Identifier
-    } else {
-        QueryPlanKind::Ordinary
-    }
-}
-
-fn resolve_query_plan_kind(
+fn resolve_query_plan(
     index: &Index,
     fields: &Fields,
     searcher: &Searcher,
     query: &str,
-) -> Result<QueryPlanKind> {
-    let kind = classify_query(query);
-    if kind != QueryPlanKind::Ordinary || !is_lowercase_identifier_candidate(query) {
-        return Ok(kind);
-    }
+) -> Result<LexicalQueryPlan> {
+    let plan = prepare_lexical_query(query).map_err(|error| Error::Query(error.to_string()))?;
+    let Some(probe) = plan.metadata_probe.as_ref() else {
+        return Ok(plan);
+    };
 
-    let mut parser = QueryParser::for_index(
-        index,
-        vec![
-            fields.filename,
-            fields.stem,
-            fields.aliases,
-            fields.title,
-            fields.heading_text,
-        ],
-    );
-    parser.set_conjunction_by_default();
+    let mut parser = QueryParser::for_index(index, metadata_probe_fields(fields, probe));
+    if probe.conjunction {
+        parser.set_conjunction_by_default();
+    }
     let metadata_query = parser
-        .parse_query(query)
+        .parse_query(&probe.query)
         .map_err(|error| Error::Query(error.to_string()))?;
     let matches = searcher
         .search(&metadata_query, &TopDocs::with_limit(1).order_by_score())
         .map_err(|error| Error::Index(error.to_string()))?;
-    Ok(if matches.is_empty() {
-        QueryPlanKind::Ordinary
-    } else {
-        QueryPlanKind::Identifier
-    })
-}
-
-fn is_lowercase_identifier_candidate(query: &str) -> bool {
-    const ORDINARY_NUMBER_PREFIXES: &[&str] = &[
-        "best", "chapter", "episode", "first", "last", "level", "page", "part", "section", "step",
-        "top", "volume",
-    ];
-
-    let tokens: Vec<_> = query.split_whitespace().collect();
-    if tokens.is_empty() || tokens.len() > 6 {
-        return false;
-    }
-    let Some(number_index) = tokens
-        .iter()
-        .position(|token| token.chars().all(|character| character.is_ascii_digit()))
-    else {
-        return false;
-    };
-    tokens[..number_index].iter().any(|token| {
-        (2..=4).contains(&token.chars().count())
-            && token.chars().all(|character| character.is_alphabetic())
-            && !ORDINARY_NUMBER_PREFIXES.contains(&token.to_ascii_lowercase().as_str())
-    })
-}
-
-fn has_explicit_syntax(query: &str) -> bool {
-    if query.chars().any(|character| {
-        matches!(
-            character,
-            '"' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '~' | '*' | '?'
-        )
-    }) {
-        return true;
-    }
-    const FIELDS: &[&str] = &[
-        "filename",
-        "stem",
-        "aliases",
-        "title",
-        "heading_text",
-        "content",
-        "path",
-        "vault_id",
-        "room",
-        "tags",
-    ];
-    query.split_whitespace().any(|token| {
-        matches!(token, "AND" | "OR" | "NOT")
-            || token.starts_with('+')
-            || token.starts_with('-')
-            || FIELDS
-                .iter()
-                .any(|field| token.starts_with(&format!("{field}:")))
-    })
-}
-
-fn is_identifier_like(query: &str) -> bool {
-    let tokens: Vec<_> = query.split_whitespace().collect();
-    if tokens.is_empty() || tokens.len() > 6 {
-        return false;
-    }
-    if !technical_identifiers(query).is_empty() {
-        return true;
-    }
-    let has_number = tokens
-        .iter()
-        .any(|token| token.chars().all(|character| character.is_ascii_digit()));
-    let has_acronym = tokens.iter().any(|token| {
-        (2..=8).contains(&token.chars().count())
-            && token.chars().all(|character| character.is_alphabetic())
-            && token.chars().any(|character| character.is_uppercase())
-            && token.chars().all(|character| !character.is_lowercase())
-    });
-    let has_mixed_alphanumeric = tokens.iter().any(|token| {
-        token.chars().any(char::is_alphabetic)
-            && token.chars().any(|character| character.is_ascii_digit())
-    });
-    has_mixed_alphanumeric || (has_number && has_acronym)
-}
-
-fn identifier_query_terms(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .filter_map(|term| {
-            let term = term.trim_matches(|character: char| !character.is_alphanumeric());
-            normalize_raw(term)
-        })
-        .collect()
+    Ok(plan.finalize_metadata_probe(!matches.is_empty()))
 }
 
 fn add_ordering_boosters(
     clauses: &mut Vec<(Occur, Box<dyn Query>)>,
     parser: &QueryParser,
     fields: &Fields,
-    query_text: &str,
+    plan: &LexicalQueryPlan,
 ) -> Result<()> {
-    if let Some(exact) = exact_query(fields, query_text) {
+    if let Some(exact) = exact_query(fields, plan.normalized_exact.as_deref()) {
         clauses.push((Occur::Should, exact));
     }
-    if query_text.split_whitespace().count() > 1 {
-        let escaped = query_text.replace('\\', "\\\\").replace('"', "\\\"");
+    if plan.phrase_boost {
+        let escaped = plan.query.replace('\\', "\\\\").replace('"', "\\\"");
         let phrase = parser
             .parse_query(&format!("\"{escaped}\""))
             .map_err(|error| Error::Query(error.to_string()))?;
@@ -424,8 +317,8 @@ fn add_ordering_boosters(
     Ok(())
 }
 
-fn exact_query(fields: &Fields, query_text: &str) -> Option<Box<dyn Query>> {
-    let normalized = normalize_raw(query_text)?;
+fn exact_query(fields: &Fields, normalized: Option<&str>) -> Option<Box<dyn Query>> {
+    let normalized = normalized?;
     let high_fields = [
         fields.filename_raw,
         fields.stem_raw,
@@ -437,7 +330,7 @@ fn exact_query(fields: &Fields, query_text: &str) -> Option<Box<dyn Query>> {
         .map(|field| {
             Box::new(BoostQuery::new(
                 Box::new(TermQuery::new(
-                    Term::from_field_text(field, &normalized),
+                    Term::from_field_text(field, normalized),
                     IndexRecordOption::Basic,
                 )),
                 BOOST_EXACT_METADATA,
@@ -446,14 +339,14 @@ fn exact_query(fields: &Fields, query_text: &str) -> Option<Box<dyn Query>> {
         .collect();
     queries.push(Box::new(BoostQuery::new(
         Box::new(TermQuery::new(
-            Term::from_field_text(fields.heading_raw, &normalized),
+            Term::from_field_text(fields.heading_raw, normalized),
             IndexRecordOption::Basic,
         )),
         BOOST_HEADING,
     )));
     queries.push(Box::new(BoostQuery::new(
         Box::new(TermQuery::new(
-            Term::from_field_text(fields.content_identifiers, &normalized),
+            Term::from_field_text(fields.content_identifiers, normalized),
             IndexRecordOption::Basic,
         )),
         BOOST_CONTENT_IDENTIFIER,
@@ -771,6 +664,38 @@ mod tests {
         assert_eq!(classify_query("IIA OR line"), QueryPlanKind::Explicit);
         assert_eq!(classify_query("title:IIA"), QueryPlanKind::Explicit);
         assert_eq!(classify_query("CVE-*"), QueryPlanKind::Explicit);
+    }
+
+    #[test]
+    fn native_query_construction_consumes_prepared_identifier_terms() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("note.md"), "alpha beta").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data).unwrap();
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let mut plan = prepare_lexical_query("not-present").unwrap();
+        plan.kind = QueryPlanKind::Identifier;
+        plan.identifier_terms = vec!["alpha".into(), "beta".into()];
+        plan.normalized_exact = None;
+        plan.phrase_boost = false;
+
+        let query = build_lexical_query_from_plan(&index, &fields, &plan).unwrap();
+        let hits = searcher
+            .search(&query, &TopDocs::with_limit(10).order_by_score())
+            .unwrap();
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]

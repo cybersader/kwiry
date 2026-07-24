@@ -60,14 +60,14 @@ Native installers and packages are still planned. See [`docs/setup.md`](docs/set
 - Query modal, result rendering, status indication, and explicit lexical, semantic, and hybrid selection.
 - The token is read on demand and never persisted by the plugin.
 
-### D5B — no-daemon in-plugin lexical host — Gate 2 accepted; portable Rust Gate 3 next
+### D5B — no-daemon in-plugin lexical host — Gate 3 accepted; backend-neutral Gate 4 next
 
 - Active-vault Markdown search remains the urgent need where policy or device constraints prohibit a native daemon.
 - The first path proved thread-free fresh Tantivy indexes can run in WASM, but Tantivy 0.26.1's normal `IndexWriter` failed while spawning its segment-updater thread. The hard gate stopped before a fork or production integration.
 - The isolated official SQLite FTS5-WASM Gate 1 passed: the pinned runtime, FTS5 behavior, external-content synchronization, weighted BM25, query/excerpt behavior, transactional source replacement, rollback, integrity, and repeated close lifecycle were verified.
 - The separate one-file compatibility probe now passes automated packaging, protocol, real-Worker, privacy, corruption, deterministic-build, and 25-cycle lifecycle checks. CI enforces the Gate 1 baseline plus Gate 2 checks on Node 22 and 24. See [`bench/fts5-wasm-obsidian-probe/README.md`](bench/fts5-wasm-obsidian-probe/README.md).
 - Automation reported `READY_FOR_FIELD_TEST`; the owner then accepted Gate 2 after frozen BRAT `0.0.1` installation and ten runs, update to `0.0.2`, full restart/rerun, rollback to `0.0.1`, and final rerun all passed under desktop Obsidian. BRAT's add-plugin modal remained open after successful installation and was accepted as a non-blocking upstream UI defect. A separate filesystem hash of the installed copies was not recorded; exact release hashes, versions, public delivery, and execution were verified.
-- Later gates are a feature-gated portable Rust seam, backend-neutral plugin integration, active-vault lifecycle/measurement, packaging, and owner acceptance.
+- Portable Rust Gate 3 is implemented, verified, and owner-accepted GO. The next approved implementation boundary is Gate 4's backend-neutral plugin integration; active-vault lifecycle/measurement, packaging acceptance, and a delivered-profile claim remain later gates.
 
 See the historical Tantivy evidence in [`bench/tantivy-wasm/README.md`](bench/tantivy-wasm/README.md) and the selected sequence in [`docs/design/obsidian-lite.md`](docs/design/obsidian-lite.md).
 
@@ -170,7 +170,7 @@ These tracks continue across the numbered gates:
 
 ## Current implementation and review boundaries
 
-The D5B Tantivy-WASM checkpoint completed as a technical **NO-GO** for the normal incremental writer. The owner then selected official FTS5-WASM: Gate 1 is verified GO, and the owner accepted the isolated one-file installed Obsidian/frozen-BRAT Gate 2 as GO. Portable Rust Gate 3 is now authorized. This remains independent of the OpenClast profile.
+The D5B Tantivy-WASM checkpoint completed as a technical **NO-GO** for the normal incremental writer. The owner then selected official FTS5-WASM: Gate 1 is verified GO, the owner accepted the isolated one-file installed Obsidian/frozen-BRAT Gate 2 as GO, and portable Rust Gate 3 is implemented, verified, and owner-accepted GO. The next approved boundary is Gate 4 backend-neutral plugin integration. This remains independent of the OpenClast profile.
 
 The current enterprise owner checkpoint remains the **IG-1 foundation**. Acceptance means the enterprise lexical authorization model is suitable as the base for governed semantic/hybrid and read-only MCP work; it does **not** mean lexical-only enterprise search is the end state.
 
@@ -181,4 +181,4 @@ Before beginning the next governed enterprise gate, confirm:
 3. the separate search key and server-side capability boundary are operationally understandable;
 4. the next enterprise delivery lane is governed semantic/hybrid, followed closely by read-only governed MCP.
 
-D5B has passed the Gate 2 field boundary. Gate 2 authorizes portable Rust Gate 3 only; it does not authorize production plugin integration, active-vault indexing, production publication, or a delivered no-daemon profile. Stop again at Gate 3's native/portable parity and regression review boundary.
+D5B has passed the Gate 3 native/portable parity and regression boundary. Gate 3 GO authorizes the separately approved Gate 4 backend-neutral integration plan; it does not authorize active-vault indexing, production publication, Gate 5 work, or a delivered no-daemon profile. Stop again after Gate 4's integrated Worker, explicit backend/mode/status behavior, deterministic one-file artifact, daemon regressions, and disposable-vault UI-foundation review.

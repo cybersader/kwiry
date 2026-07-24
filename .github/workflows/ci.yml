@@ -56,6 +56,35 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-features
 
+  portable-core:
+    name: Portable core (native and WASM parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            daemon
+            bench/portable-core-wasm
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Format standalone adapter
+        run: cargo fmt --manifest-path bench/portable-core-wasm/Cargo.toml --all -- --check
+      - name: Check and test portable-only core
+        run: |
+          cargo clippy --manifest-path daemon/Cargo.toml -p kwiry-core --no-default-features --features portable --all-targets -- -D warnings
+          cargo test --manifest-path daemon/Cargo.toml -p kwiry-core --no-default-features --features portable
+          cargo check --manifest-path daemon/Cargo.toml -p kwiry-core --no-default-features --features portable --target wasm32-unknown-unknown
+      - name: Compare native and Node-loaded WASM output
+        run: npm test --prefix bench/portable-core-wasm
+
   rebuild-determinism:
     name: Rebuild-from-nothing determinism
     runs-on: ubuntu-latest

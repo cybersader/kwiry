@@ -11,7 +11,7 @@ The presentation plugin does not own parsing, chunking, ranking, authorization, 
 
 ## No-daemon profile status
 
-The **In-plugin · Lexical** profile is contractual but not delivered in the current release. The Tantivy normal incremental writer reached a technical NO-GO, then the official SQLite FTS5-WASM runtime gate passed. A separate one-file CommonJS compatibility probe passed automated Worker, artifact, privacy, corruption, deterministic-build, and lifecycle checks; the owner then accepted installed desktop Obsidian/Electron and frozen BRAT install, update, restart, rollback, and rerun evidence as Gate 2 GO. Portable Rust extraction and production integration remain separate gates.
+The **In-plugin · Lexical** profile is contractual but not delivered in the current release. The Tantivy normal incremental writer reached a technical NO-GO, then the official SQLite FTS5-WASM runtime and one-file installed Obsidian/frozen-BRAT gates passed. Portable Rust Gate 3 is implemented, verified, and owner-accepted GO. Gate 4 backend-neutral production integration is now the approved implementation boundary; active-vault lifecycle and delivered-profile acceptance remain Gate 5.
 
 Planned first scope:
 

@@ -7,11 +7,11 @@ use tantivy::schema::{FAST, Field, INDEXED, STORED, STRING, Schema, TEXT, Tantiv
 use crate::chunk::ingest_vault_files;
 use crate::error::{Error, Result};
 use crate::generation::DataRoot;
-use crate::lexical::{normalize_raw, technical_identifiers};
+use crate::lexical::normalize_raw;
 use crate::manifest::{Manifest, registration_fingerprint, source_key};
 use crate::model::{
-    Chunk, Config, FileOutcomeKind, HostProfile, IndexStats, ResourceKey, RetrievalMetadata,
-    VaultRegistration,
+    Config, FileOutcomeKind, HostProfile, IndexStats, PreparedChunk, ResourceKey,
+    RetrievalMetadata, VaultRegistration,
 };
 use crate::partition::{GenerationLayout, partition_index_dir};
 
@@ -361,9 +361,10 @@ pub(crate) fn build_schema() -> Schema {
 
 pub(crate) fn chunk_document(
     fields: &Fields,
-    chunk: &Chunk,
+    prepared: &PreparedChunk,
     retrieval: &RetrievalMetadata,
 ) -> Result<TantivyDocument> {
+    let chunk = &prepared.chunk;
     let mut document = TantivyDocument::default();
     document.add_text(
         required_optional_field(fields.source_key, "source_key")?,
@@ -386,9 +387,8 @@ pub(crate) fn chunk_document(
         serde_json::to_string(&chunk.heading_path)
             .map_err(|error| Error::Index(error.to_string()))?,
     );
-    let heading_text = chunk.heading_path.join(" ");
-    document.add_text(fields.heading_text, &heading_text);
-    add_raw(&mut document, fields.heading_raw, &heading_text);
+    document.add_text(fields.heading_text, &prepared.heading_text);
+    add_raw(&mut document, fields.heading_raw, &prepared.heading_text);
     let title = chunk.frontmatter.title.as_deref().unwrap_or_default();
     document.add_text(fields.title, title);
     add_raw(&mut document, fields.title_raw, title);
@@ -409,7 +409,7 @@ pub(crate) fn chunk_document(
         chunk.frontmatter.date.as_deref().unwrap_or_default(),
     );
     document.add_text(fields.content, &chunk.content);
-    for identifier in technical_identifiers(&chunk.content) {
+    for identifier in &prepared.technical_identifiers {
         document.add_text(fields.content_identifiers, identifier);
     }
     document.add_text(

@@ -6,34 +6,61 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-arc-swap.workspace = true
-base64.workspace = true
-directories.workspace = true
-fs2.workspace = true
-getrandom.workspace = true
-ignore.workspace = true
-pulldown-cmark.workspace = true
-regex.workspace = true
-rusqlite.workspace = true
-serde.workspace = true
-serde-saphyr.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-sqlite-vec.workspace = true
-subtle.workspace = true
-tantivy.workspace = true
-tempfile.workspace = true
-thiserror.workspace = true
-time.workspace = true
-toml.workspace = true
-zerocopy.workspace = true
+arc-swap = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+directories = { workspace = true, optional = true }
+fs2 = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+ignore = { workspace = true, optional = true }
+pulldown-cmark = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde-saphyr = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+sqlite-vec = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
+tantivy = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+zerocopy = { workspace = true, optional = true }
 fastembed = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true
+windows-sys = { workspace = true, optional = true }
 
 [features]
-default = []
-# Enables the fastembed/ONNX embedder. The sqlite-vec store, RRF fusion, and
-# semantic state compile unconditionally so tests cover them without ONNX.
-semantic-onnx = ["dep:fastembed"]
+default = ["native"]
+portable = [
+  "dep:pulldown-cmark",
+  "dep:regex",
+  "dep:serde",
+  "dep:serde-saphyr",
+  "dep:serde_json",
+  "dep:sha2",
+  "dep:thiserror",
+]
+native = [
+  "portable",
+  "dep:arc-swap",
+  "dep:base64",
+  "dep:directories",
+  "dep:fs2",
+  "dep:getrandom",
+  "dep:ignore",
+  "dep:rusqlite",
+  "dep:sqlite-vec",
+  "dep:subtle",
+  "dep:tantivy",
+  "dep:tempfile",
+  "dep:time",
+  "dep:toml",
+  "dep:windows-sys",
+  "dep:zerocopy",
+]
+# Enables the fastembed/ONNX embedder. Native sqlite-vec state and RRF remain
+# covered without ONNX so tests do not need to load the model.
+semantic-onnx = ["native", "dep:fastembed"]

@@ -18,8 +18,8 @@ use crate::manifest::{
     Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint, source_key,
 };
 use crate::model::{
-    Chunk, Config, FileOutcomeKind, HostProfile, IngestWarning, ResourceKey, RetrievalMetadata,
-    SearchHit, SearchRequest,
+    Config, FileOutcomeKind, HostProfile, IngestWarning, PreparedChunk, ResourceKey,
+    RetrievalMetadata, SearchHit, SearchRequest,
 };
 use crate::partition::{GenerationLayout, partition_index_dir};
 use crate::search::{PartitionReader, search_partitions, search_reader};
@@ -391,7 +391,7 @@ impl DesktopIndexManager {
     pub fn reconcile(&mut self, config: Config) -> Result<ReconcileReport> {
         let mut next_manifest = self.manifest.clone();
         let mut delete_keys = BTreeSet::new();
-        let mut replacement_chunks = Vec::<(Chunk, RetrievalMetadata)>::new();
+        let mut replacement_chunks = Vec::<(PreparedChunk, RetrievalMetadata)>::new();
         // Semantic state reconciles by its own stored hashes, so every
         // discovered source is offered; unchanged ones short-circuit.
         let mut semantic_sources =
@@ -442,17 +442,18 @@ impl DesktopIndexManager {
 
             for outcome in outcomes {
                 let key = source_key(&outcome.vault_id, &outcome.path);
-                seen_keys.insert(key.clone());
                 if let Some(warning) = outcome.warning.clone() {
                     warnings.push(warning);
                 }
                 if outcome.kind == FileOutcomeKind::TransientError {
+                    seen_keys.insert(key);
                     continue;
                 }
                 let Some((_, next_file)) = ManifestFile::from_outcome(&outcome, &fingerprint, None)
                 else {
                     continue;
                 };
+                seen_keys.insert(key.clone());
                 if !outcome.chunks.is_empty() {
                     semantic_sources.insert(
                         key.clone(),
@@ -629,7 +630,7 @@ impl OpenClastIndexManager {
             .map(|partition| partition.resource.clone())
             .collect();
         let mut deletes = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
-        let mut additions = BTreeMap::<ResourceKey, Vec<(Chunk, RetrievalMetadata)>>::new();
+        let mut additions = BTreeMap::<ResourceKey, Vec<(PreparedChunk, RetrievalMetadata)>>::new();
         let mut changed_keys = BTreeSet::new();
         let mut warnings = Vec::new();
         let mut unavailable_vaults = Vec::new();
@@ -718,11 +719,11 @@ impl OpenClastIndexManager {
 
             for outcome in outcomes {
                 let key = source_key(&outcome.vault_id, &outcome.path);
-                seen_keys.insert(key.clone());
                 if let Some(warning) = outcome.warning.clone() {
                     warnings.push(warning);
                 }
                 if outcome.kind == FileOutcomeKind::TransientError {
+                    seen_keys.insert(key);
                     continue;
                 }
                 let Some((_, next_file)) =
@@ -730,6 +731,7 @@ impl OpenClastIndexManager {
                 else {
                     continue;
                 };
+                seen_keys.insert(key.clone());
                 let previous_file = self.manifest.files.get(&key);
                 let previous_file_resource = previous_file
                     .and_then(|file| file.resource.clone().or_else(|| previous_resource.clone()));
