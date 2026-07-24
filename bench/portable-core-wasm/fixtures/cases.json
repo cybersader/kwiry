@@ -262,5 +262,39 @@
     "operation": "prepare_query",
     "name": "empty-query",
     "query": "   "
+  },
+  {
+    "operation": "api_request",
+    "name": "portable-api-request",
+    "request": {
+      "q": "knowledge workspace",
+      "mode": "lexical",
+      "filters": {
+        "vault_id": "fixture",
+        "path_prefix": "reference",
+        "tags": ["search"],
+        "frontmatter_equals": {
+          "status": "active"
+        }
+      },
+      "limit": 20
+    }
+  },
+  {
+    "operation": "daemon_status",
+    "name": "portable-daemon-status",
+    "status": {
+      "state": "ready",
+      "version": "0.1.0",
+      "generation": "generation-0001",
+      "chunking_version": 1,
+      "documents": 3,
+      "chunks": 7,
+      "last_sync": null,
+      "dirty": false,
+      "rebuilding": false,
+      "model": null,
+      "vaults": []
+    }
   }
 ]

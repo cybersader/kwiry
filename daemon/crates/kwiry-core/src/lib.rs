@@ -1,7 +1,7 @@
 #[cfg(not(feature = "portable"))]
 compile_error!("kwiry-core requires either the `portable` or `native` feature");
 
-#[cfg(feature = "native")]
+#[cfg(feature = "portable")]
 mod api;
 #[cfg(feature = "native")]
 mod auth;
@@ -43,12 +43,12 @@ mod semantic;
 mod source;
 #[cfg(feature = "native")]
 mod state;
-#[cfg(feature = "native")]
+#[cfg(feature = "portable")]
 mod status;
 #[cfg(feature = "native")]
 mod walk;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "portable")]
 pub use api::{
     ApiErrorBody, ApiErrorEnvelope, ApiRequestError, ApiSearchRequest, ApiSearchResponse,
     HealthResponse, SearchFilters, SearchMode,
@@ -83,17 +83,19 @@ pub use manifest::{
 #[cfg(feature = "native")]
 pub use model::{
     AuthConfig, Config, DEFAULT_BIND, HostProfile, IndexStats, IngestReport, IngestWarning,
-    OpenClastAuthConfig, ResourceKey, SemanticConfig, ServerConfig, VaultRegistration,
+    LexicalSearchRequest, OpenClastAuthConfig, ResourceKey, SemanticConfig, ServerConfig,
+    VaultRegistration,
 };
 #[cfg(feature = "portable")]
 pub use model::{
-    CHUNKING_VERSION, Chunk, Frontmatter, PreparedChunk, RetrievalMetadata, SearchHit,
-    SearchRequest,
+    CHUNKING_VERSION, Chunk, Frontmatter, MAX_FILE_BYTES, PreparedChunk, RetrievalMetadata,
+    SearchHit,
 };
 #[cfg(feature = "portable")]
 pub use query::{
     LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_QUERY_BYTES, MAX_QUERY_TERMS,
-    QueryMetadataField, QueryMetadataProbe, QueryPlanError, QueryPlanKind, prepare_lexical_query,
+    QueryMatchOperator, QueryMetadataField, QueryMetadataProbe, QueryPlanError, QueryPlanKind,
+    prepare_lexical_query,
 };
 #[cfg(feature = "native")]
 pub use runtime::{IndexManager, ReconcileReport, SearchRuntime};
@@ -111,7 +113,7 @@ pub use source::{
     SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourceFormat, SourcePreparation,
     SourcePreparationError, SourcePreparationKind, prepare_source_buffer, source_key,
 };
-#[cfg(feature = "native")]
+#[cfg(feature = "portable")]
 pub use status::{DaemonState, DaemonStatus, ModelStatus, VaultStatus};
 
 #[cfg(feature = "native")]

@@ -454,7 +454,7 @@ mod tests {
 
     use super::*;
     use crate::model::VaultRegistration;
-    use crate::{SearchRequest, search_index};
+    use crate::{LexicalSearchRequest, search_index};
 
     #[test]
     fn rebuild_produces_identical_lexical_results() {
@@ -475,7 +475,7 @@ mod tests {
             }],
             ..Config::default()
         };
-        let request = SearchRequest {
+        let request = LexicalSearchRequest {
             query: "phosphorescent".into(),
             limit: 20,
             vault_id: None,
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(
             search_index(
                 &data_root,
-                &SearchRequest {
+                &LexicalSearchRequest {
                     query: "rebuildterm".into(),
                     limit: 20,
                     vault_id: None,
@@ -557,7 +557,7 @@ mod tests {
         build_index(&config, &data_root).unwrap();
         let before = search_index(
             &data_root,
-            &SearchRequest {
+            &LexicalSearchRequest {
                 query: "phosphorescent".into(),
                 limit: 20,
                 vault_id: None,
@@ -577,7 +577,7 @@ mod tests {
         assert!(build_index(&broken, &data_root).is_err());
         let after = search_index(
             &data_root,
-            &SearchRequest {
+            &LexicalSearchRequest {
                 query: "phosphorescent".into(),
                 limit: 20,
                 vault_id: None,

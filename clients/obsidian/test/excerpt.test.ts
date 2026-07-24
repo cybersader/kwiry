@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { describe, expect, it } from "vitest";
 
-import { flattenExcerpt, parseExcerpt } from "../src/excerpt";
+import {
+  FTS_HIGHLIGHT_END,
+  FTS_HIGHLIGHT_START,
+  flattenExcerpt,
+  parseExcerpt,
+  parseFtsExcerpt,
+} from "../src/excerpt";
 
 describe("parseExcerpt", () => {
   it("splits daemon highlight tags into segments", () => {
@@ -34,6 +40,16 @@ describe("parseExcerpt", () => {
   it("handles plain semantic fallback excerpts", () => {
     expect(parseExcerpt("just plain text")).toEqual([
       { text: "just plain text", highlighted: false },
+    ]);
+  });
+
+  it("parses private FTS5 markers without treating markup as HTML", () => {
+    expect(parseFtsExcerpt(
+      `before ${FTS_HIGHLIGHT_START}<img>${FTS_HIGHLIGHT_END} after`,
+    )).toEqual([
+      { text: "before ", highlighted: false },
+      { text: "<img>", highlighted: true },
+      { text: " after", highlighted: false },
     ]);
   });
 });

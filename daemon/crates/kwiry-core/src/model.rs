@@ -228,8 +228,9 @@ pub struct IngestReport {
     pub warnings: Vec<IngestWarning>,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SearchRequest {
+pub struct LexicalSearchRequest {
     pub query: String,
     pub limit: usize,
     pub vault_id: Option<String>,

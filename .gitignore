@@ -6,6 +6,8 @@
 .fastembed_cache/
 /clients/obsidian/node_modules/
 /clients/obsidian/main.js
+/clients/obsidian/rust/kwiry-obsidian-wasm/target/
+/clients/obsidian/rust/kwiry-obsidian-wasm/pkg/
 *.tmp
 *.log
 

@@ -1,5 +1,12 @@
 /* Kwiry Search — GPL-3.0-only */
 
+.kwiry-profile-label {
+  padding: var(--size-4-2) var(--size-4-3) 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+}
+
 .kwiry-mode-control {
   display: flex;
   align-items: center;

@@ -18,8 +18,8 @@ use crate::manifest::{
     Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint, source_key,
 };
 use crate::model::{
-    Config, FileOutcomeKind, HostProfile, IngestWarning, PreparedChunk, ResourceKey,
-    RetrievalMetadata, SearchHit, SearchRequest,
+    Config, FileOutcomeKind, HostProfile, IngestWarning, LexicalSearchRequest, PreparedChunk,
+    ResourceKey, RetrievalMetadata, SearchHit,
 };
 use crate::partition::{GenerationLayout, partition_index_dir};
 use crate::search::{PartitionReader, search_partitions, search_reader};
@@ -52,7 +52,7 @@ impl SearchRuntime {
         }
     }
 
-    pub fn search(&self, request: &SearchRequest) -> Result<Vec<SearchHit>> {
+    pub fn search(&self, request: &LexicalSearchRequest) -> Result<Vec<SearchHit>> {
         let filters = SearchFilters {
             vault_id: request.vault_id.clone(),
             ..SearchFilters::default()
@@ -1043,8 +1043,8 @@ mod tests {
     use crate::index::build_index;
     use crate::model::VaultRegistration;
 
-    fn request(query: &str) -> SearchRequest {
-        SearchRequest {
+    fn request(query: &str) -> LexicalSearchRequest {
+        LexicalSearchRequest {
             query: query.into(),
             limit: 20,
             vault_id: None,

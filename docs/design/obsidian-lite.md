@@ -6,7 +6,7 @@ D5B remains the urgent desktop need. The first approved engine path reached a te
 
 The approved boundary prohibited a Tantivy fork or replacement writer, so broad plugin/core integration stopped before daemon behavior changed. The owner subsequently selected **official SQLite FTS5-WASM** as the next bounded feasibility path. Its isolated Gate 1 runtime checkpoint passed without a patch, custom build, persistence, network dependency, or production integration.
 
-The no-daemon host remains contractual but not delivered. The existing released Obsidian plugin remains daemon-backed. Gates 1–3 are GO; Gate 4 backend-neutral integration is the current approved implementation boundary, while active-vault lifecycle and delivered-profile acceptance remain Gate 5. Historical Tantivy evidence lives in [`../../bench/tantivy-wasm/README.md`](../../bench/tantivy-wasm/README.md); the verified FTS5 Gate 1 evidence lives in [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md), and the Gate 3 native/WASM parity witness lives in [`../../bench/portable-core-wasm/README.md`](../../bench/portable-core-wasm/README.md).
+The no-daemon host remains contractual but not delivered. The existing released Obsidian plugin remains daemon-backed. Gates 1–4 are owner-accepted GO. Gate 4's backend-neutral shell, credential boundary, production Rust adapter, fixed FTS5 Worker, generation isolation, deterministic two-WASM one-file artifact, complete automated matrix, and installed disposable-vault UI-foundation witness pass in the current Gate 4 baseline. Active-vault lifecycle, field performance, packaging/update acceptance, and a delivered-profile claim remain Gate 5. Historical Tantivy evidence lives in [`../../bench/tantivy-wasm/README.md`](../../bench/tantivy-wasm/README.md); the verified FTS5 Gate 1 evidence lives in [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md), and the Gate 3 native/WASM parity witness lives in [`../../bench/portable-core-wasm/README.md`](../../bench/portable-core-wasm/README.md).
 
 ## Problem
 
@@ -47,13 +47,15 @@ Automation reported **`READY_FOR_FIELD_TEST`** and could not issue GO. The owner
 
 `kwiry-core` now exposes a conservatively feature-gated portable boundary for source validation, Markdown/frontmatter/wikilink parsing, heading-aware chunking, deterministic IDs, retrieval metadata, technical identifiers, and query classification/planning. Native desktop and OpenClast Tantivy behavior remains unchanged. The full native regression matrix, portable-only native/WASM builds, and 21 byte-identical native/Node-WASM parity cases passed before the owner accepted Gate 3 as GO.
 
-### Gate 4 — backend-neutral plugin integration — Current approved boundary
+### Gate 4 — backend-neutral plugin integration — Completed GO
 
-Add explicit daemon/in-plugin selection and capability-aware status/mode behavior. Preserve fresh token-file reads in daemon mode, harden daemon connection validation, bind Rust-owned plans to fixed parameterized FTS5 operations, and prohibit silent fallback. Stop before active-vault lifecycle work.
+The Gate 4 production baseline has explicit daemon/in-plugin selection, capability-aware status/modes, fresh bounded no-follow token-file reads, literal-loopback daemon validation, safe exact response parsing, stale-session rejection, and identity-safe result opening with a separate daemon-to-current-vault mapping. A standalone production Rust adapter emits fixed metadata/search plan identities and opaque FTS5 MATCH values. One long-lived classic Worker embeds that Rust WASM plus the exact official SQLite WASM, owns fixed parameterized SQL and complete/staging generations, and denies network, persistence, and nested-Worker capabilities. Automated evidence reports `READY_FOR_OWNER_REVIEW`; the complete matrix and installed disposable-vault Obsidian UI-foundation witness passed before the owner accepted Gate 4 as GO.
+
+The in-plugin profile initializes both runtimes but remains `index_building`, because this gate deliberately stops before active-vault enumeration, file reads/events, reconciliation, or a delivered-profile claim.
 
 ### Gate 5 — active-vault lifecycle and acceptance
 
-Implement atomic initial build plus create/modify/delete/rename reconciliation, measure generated and real vaults, verify one-file packaging and BRAT upgrades/rollback, and obtain owner acceptance before calling the profile delivered.
+Implement atomic initial build plus create/modify/delete/rename reconciliation, measure generated and real vaults, field-test the exact one-file artifact through installed Obsidian and BRAT upgrades/rollback, and obtain owner acceptance before calling the profile delivered.
 
 ## Portable Rust boundary
 

@@ -1,0 +1,24 @@
+[package]
+name = "kwiry-obsidian-wasm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+license = "GPL-3.0-only"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "kwiry-obsidian-wasm-fixtures"
+path = "src/bin/fixtures.rs"
+
+[dependencies]
+kwiry-core = { path = "../../../../daemon/crates/kwiry-core", default-features = false, features = ["portable"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.126"

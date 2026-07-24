@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use kwiry_core::{
-    LexicalQueryPlan, SourceDescriptor, SourcePreparation, prepare_lexical_query,
-    prepare_source_buffer,
+    ApiSearchRequest, DaemonStatus, LexicalQueryPlan, SourceDescriptor, SourcePreparation,
+    prepare_lexical_query, prepare_source_buffer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,14 @@ enum FixtureCase {
         #[serde(default)]
         metadata_probe_match: Option<bool>,
     },
+    ApiRequest {
+        name: String,
+        request: ApiSearchRequest,
+    },
+    DaemonStatus {
+        name: String,
+        status: DaemonStatus,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -52,6 +60,8 @@ struct FixtureOutput {
 enum FixtureResult {
     PreparedSource { preparation: SourcePreparation },
     PreparedQuery { plan: LexicalQueryPlan },
+    ApiRequest { request: ApiSearchRequest },
+    DaemonStatus { daemon_status: DaemonStatus },
     Error { code: String, message: String },
 }
 
@@ -91,6 +101,16 @@ fn execute_case(case: FixtureCase) -> FixtureOutput {
             };
             FixtureOutput { name, result }
         }
+        FixtureCase::ApiRequest { name, request } => FixtureOutput {
+            name,
+            result: FixtureResult::ApiRequest { request },
+        },
+        FixtureCase::DaemonStatus { name, status } => FixtureOutput {
+            name,
+            result: FixtureResult::DaemonStatus {
+                daemon_status: status,
+            },
+        },
     }
 }
 
@@ -119,7 +139,7 @@ mod tests {
     fn adapter_returns_versioned_portable_data() {
         let input = r#"[{"operation":"prepare_query","name":"identifier","query":"IIA 2 line"}]"#;
         let output = run_cases_json(input).expect("fixture should execute");
-        assert!(output.contains("\"schema_version\":1"));
+        assert!(output.contains("\"schema_version\":2"));
         assert!(output.contains("\"kind\":\"identifier\""));
     }
 

@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use kwiry_core::{
-    DaemonState, DataRoot, HostProfile, Paths, SearchRequest, acquire_setup_lock, add_vault,
+    DaemonState, DataRoot, HostProfile, LexicalSearchRequest, Paths, acquire_setup_lock, add_vault,
     build_index, load_config, search_index, update_config,
 };
 use serde::Serialize;
@@ -250,7 +250,7 @@ async fn main() -> Result<()> {
         } => {
             let hits = search_index(
                 &paths.data_dir,
-                &SearchRequest {
+                &LexicalSearchRequest {
                     query,
                     limit,
                     vault_id: vault,

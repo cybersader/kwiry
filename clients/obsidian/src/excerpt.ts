@@ -13,6 +13,8 @@ export interface ExcerptSegment {
 
 const HIGHLIGHT_OPEN = "<b>";
 const HIGHLIGHT_CLOSE = "</b>";
+export const FTS_HIGHLIGHT_START = "";
+export const FTS_HIGHLIGHT_END = "";
 
 /**
  * Splits a daemon excerpt into plain and highlighted segments. Only the
@@ -20,27 +22,45 @@ const HIGHLIGHT_CLOSE = "</b>";
  * text is treated as literal content.
  */
 export function parseExcerpt(excerpt: string): ExcerptSegment[] {
+  return parseMarkedExcerpt(excerpt, HIGHLIGHT_OPEN, HIGHLIGHT_CLOSE, decodeEntities);
+}
+
+export function parseFtsExcerpt(excerpt: string): ExcerptSegment[] {
+  return parseMarkedExcerpt(
+    excerpt,
+    FTS_HIGHLIGHT_START,
+    FTS_HIGHLIGHT_END,
+    (text) => text,
+  );
+}
+
+function parseMarkedExcerpt(
+  excerpt: string,
+  startMarker: string,
+  endMarker: string,
+  normalize: (text: string) => string,
+): ExcerptSegment[] {
   const segments: ExcerptSegment[] = [];
   let rest = excerpt;
   while (rest.length > 0) {
-    const open = rest.indexOf(HIGHLIGHT_OPEN);
+    const open = rest.indexOf(startMarker);
     if (open < 0) {
-      segments.push({ text: decodeEntities(rest), highlighted: false });
+      segments.push({ text: normalize(rest), highlighted: false });
       break;
     }
-    const close = rest.indexOf(HIGHLIGHT_CLOSE, open + HIGHLIGHT_OPEN.length);
+    const close = rest.indexOf(endMarker, open + startMarker.length);
     if (close < 0) {
-      segments.push({ text: decodeEntities(rest), highlighted: false });
+      segments.push({ text: normalize(rest), highlighted: false });
       break;
     }
     if (open > 0) {
-      segments.push({ text: decodeEntities(rest.slice(0, open)), highlighted: false });
+      segments.push({ text: normalize(rest.slice(0, open)), highlighted: false });
     }
     segments.push({
-      text: decodeEntities(rest.slice(open + HIGHLIGHT_OPEN.length, close)),
+      text: normalize(rest.slice(open + startMarker.length, close)),
       highlighted: true,
     });
-    rest = rest.slice(close + HIGHLIGHT_CLOSE.length);
+    rest = rest.slice(close + endMarker.length);
   }
   return segments.filter((segment) => segment.text.length > 0);
 }

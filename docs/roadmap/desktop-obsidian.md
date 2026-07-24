@@ -37,7 +37,7 @@ The current BRAT-installable plugin provides a query modal, result rendering, ex
 
 ## D5B — no-daemon in-plugin lexical host
 
-State: urgent need; Gates 1–3 are GO and Gate 4 backend-neutral integration is the current approved implementation boundary, while the production host remains undelivered.
+State: urgent need; Gates 1–4 are owner-accepted GO, and the production host remains undelivered pending Gate 5 active-vault lifecycle, performance, packaging, and field acceptance.
 
 ### Checkpoint B0 — Tantivy-WASM feasibility — Completed NO-GO for normal incremental writer
 
@@ -61,13 +61,13 @@ Automation reported `READY_FOR_FIELD_TEST`; the owner then accepted B2 after fro
 
 `kwiry-core` exposes source-buffer ingestion, project-owned models, parsing, heading-aware chunking, deterministic IDs/metadata, technical identifiers, and query classification/planning through a portable feature. Native/OpenClast Tantivy behavior remains unchanged, and the native/portable/WASM parity and daemon regression matrix passed before owner acceptance.
 
-### Checkpoint B4 — backend-neutral plugin — Current approved boundary
+### Checkpoint B4 — backend-neutral plugin — Completed GO
 
-Add explicit daemon/in-plugin selection and capability-aware mode/status handling. Preserve and harden current daemon behavior and prevent silent fallback. The worker binds allowlisted Rust plans to fixed parameterized FTS5 SQL; TypeScript does not own Markdown parsing, IDs, tokenization, or scoring. Stop before active-vault enumeration or events.
+The Gate 4 production baseline has explicit daemon/in-plugin selection, hardened daemon credentials/responses, truthful capability/mode/status behavior, stale-result and result-origin enforcement, a strict portable Rust adapter, fixed parameterized FTS5 SQL, and a long-lived classic Worker with one complete plus at most one staging generation. The deterministic CommonJS artifact embeds exactly the portable Rust and official SQLite WASM payloads. The complete Rust/WASM/plugin matrix, corruption and denied-capability tests, Node 22/24 exact-Worker execution, deterministic artifact evidence, and installed disposable-vault Obsidian UI-foundation witness passed before the owner accepted B4 as GO. Active-vault enumeration/events and a delivered-profile claim remain excluded.
 
 ### Checkpoint B5 — active-vault lifecycle, package, and field-test
 
-Build an atomic initial in-memory index and reconcile create, modify, delete, and rename events. Measure generated and real vaults, verify one-file packaging, install through BRAT, test upgrades/rollback, and obtain owner acceptance before calling the profile delivered.
+Build an atomic initial in-memory index and reconcile create, modify, delete, and rename events. Measure generated and real vaults, install the exact one-file artifact through Obsidian/BRAT, test upgrades/rollback, and obtain owner acceptance before calling the profile delivered.
 
 ## D5C — relevance signals and configuration
 

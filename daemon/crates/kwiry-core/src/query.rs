@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lexical::{normalize_raw, technical_identifiers};
 
-pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 1;
+pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 2;
 pub const MAX_QUERY_BYTES: usize = 4_096;
 pub const MAX_QUERY_TERMS: usize = 128;
 
@@ -12,6 +12,14 @@ pub enum QueryPlanKind {
     Explicit,
     Ordinary,
     Identifier,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMatchOperator {
+    Explicit,
+    Any,
+    All,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,7 +44,8 @@ pub struct LexicalQueryPlan {
     pub schema_version: u32,
     pub query: String,
     pub kind: QueryPlanKind,
-    pub identifier_terms: Vec<String>,
+    pub match_operator: QueryMatchOperator,
+    pub terms: Vec<String>,
     pub normalized_exact: Option<String>,
     pub phrase_boost: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,6 +56,7 @@ impl LexicalQueryPlan {
     pub fn finalize_metadata_probe(mut self, matched: bool) -> Self {
         if self.metadata_probe.take().is_some() && matched {
             self.kind = QueryPlanKind::Identifier;
+            self.match_operator = QueryMatchOperator::All;
         }
         self
     }
@@ -89,16 +99,22 @@ pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanE
         conjunction: true,
     });
 
-    let identifier_terms = if kind == QueryPlanKind::Identifier || metadata_probe.is_some() {
-        identifier_query_terms(query)
-    } else {
+    let match_operator = match kind {
+        QueryPlanKind::Explicit => QueryMatchOperator::Explicit,
+        QueryPlanKind::Ordinary => QueryMatchOperator::Any,
+        QueryPlanKind::Identifier => QueryMatchOperator::All,
+    };
+    let terms = if kind == QueryPlanKind::Explicit {
         Vec::new()
+    } else {
+        query_terms(query)
     };
     Ok(LexicalQueryPlan {
         schema_version: LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
         query: query.to_owned(),
         kind,
-        identifier_terms,
+        match_operator,
+        terms,
         normalized_exact: normalize_raw(query),
         phrase_boost: query.split_whitespace().count() > 1,
         metadata_probe,
@@ -200,7 +216,7 @@ fn is_identifier_like(query: &str) -> bool {
     has_mixed_alphanumeric || (has_number && has_acronym)
 }
 
-pub(crate) fn identifier_query_terms(query: &str) -> Vec<String> {
+fn query_terms(query: &str) -> Vec<String> {
     query
         .split_whitespace()
         .filter_map(|term| {
@@ -235,20 +251,33 @@ mod tests {
     }
 
     #[test]
+    fn plan_exposes_backend_neutral_boolean_intent() {
+        let ordinary = prepare_lexical_query("dungeons and dragons").unwrap();
+        assert_eq!(ordinary.kind, QueryPlanKind::Ordinary);
+        assert_eq!(ordinary.match_operator, QueryMatchOperator::Any);
+        assert_eq!(ordinary.terms, ["dungeons", "and", "dragons"]);
+
+        let identifier = prepare_lexical_query("IIA 2 line").unwrap();
+        assert_eq!(identifier.kind, QueryPlanKind::Identifier);
+        assert_eq!(identifier.match_operator, QueryMatchOperator::All);
+        assert_eq!(identifier.terms, ["iia", "2", "line"]);
+    }
+
+    #[test]
     fn lowercase_identifier_candidate_emits_fixed_metadata_probe() {
         let plan = prepare_lexical_query("iia 2 line").unwrap();
         assert_eq!(plan.kind, QueryPlanKind::Ordinary);
+        assert_eq!(plan.match_operator, QueryMatchOperator::Any);
+        assert_eq!(plan.terms, ["iia", "2", "line"]);
         let probe = plan.metadata_probe.as_ref().unwrap();
         assert!(probe.conjunction);
         assert_eq!(probe.fields.len(), 5);
-        assert_eq!(
-            plan.clone().finalize_metadata_probe(false).kind,
-            QueryPlanKind::Ordinary
-        );
-        assert_eq!(
-            plan.finalize_metadata_probe(true).kind,
-            QueryPlanKind::Identifier
-        );
+        let unmatched = plan.clone().finalize_metadata_probe(false);
+        assert_eq!(unmatched.kind, QueryPlanKind::Ordinary);
+        assert_eq!(unmatched.match_operator, QueryMatchOperator::Any);
+        let matched = plan.finalize_metadata_probe(true);
+        assert_eq!(matched.kind, QueryPlanKind::Identifier);
+        assert_eq!(matched.match_operator, QueryMatchOperator::All);
     }
 
     #[test]
@@ -256,6 +285,8 @@ mod tests {
         let plan = prepare_lexical_query("title:notes OR '); DROP TABLE chunks; --").unwrap();
         assert_eq!(plan.schema_version, LEXICAL_QUERY_PLAN_SCHEMA_VERSION);
         assert_eq!(plan.kind, QueryPlanKind::Explicit);
+        assert_eq!(plan.match_operator, QueryMatchOperator::Explicit);
+        assert!(plan.terms.is_empty());
         assert!(plan.query.contains("DROP TABLE"));
     }
 

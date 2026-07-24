@@ -105,12 +105,23 @@ assert.equal(get("invalid-relative-path").status, "error");
 assert.equal(get("oversized-source").preparation.kind, "skipped");
 assert.equal(get("underreported-source-length").status, "error");
 assert.equal(get("overreported-source-length").status, "error");
+assert.equal(get("ordinary-query").plan.schema_version, 2);
 assert.equal(get("metadata-probe-unmatched").plan.kind, "ordinary");
+assert.equal(get("metadata-probe-unmatched").plan.match_operator, "any");
 assert.equal(get("metadata-probe-matched").plan.kind, "identifier");
+assert.equal(get("metadata-probe-matched").plan.match_operator, "all");
+assert.deepEqual(get("identifier-query").plan.terms, ["iia", "2", "line"]);
 assert.equal(get("identifier-query").plan.kind, "identifier");
+assert.equal(get("identifier-query").plan.match_operator, "all");
 assert.equal(get("explicit-query").plan.kind, "explicit");
+assert.equal(get("explicit-query").plan.match_operator, "explicit");
+assert.deepEqual(get("explicit-query").plan.terms, []);
 assert.match(get("sql-looking-query").plan.query, /DROP TABLE/);
 assert.equal(get("empty-query").status, "error");
+assert.equal(get("portable-api-request").request.mode, "lexical");
+assert.equal(get("portable-api-request").request.filters.vault_id, "fixture");
+assert.equal(get("portable-daemon-status").daemon_status.state, "ready");
+assert.equal(get("portable-daemon-status").daemon_status.generation, "generation-0001");
 assert.equal(
   typeof get("markdown-frontmatter-links-identifiers").preparation.mtime_nanos,
   "string",

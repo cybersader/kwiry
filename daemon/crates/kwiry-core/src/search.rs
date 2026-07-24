@@ -16,11 +16,12 @@ use tantivy::{IndexReader, Searcher};
 use crate::api::SearchFilters;
 use crate::error::{Error, Result};
 use crate::index::{Fields, open_index};
-use crate::model::{ResourceKey, SearchHit, SearchRequest};
+use crate::model::{LexicalSearchRequest, ResourceKey, SearchHit};
 #[cfg(test)]
 use crate::query::classify_query;
 use crate::query::{
-    LexicalQueryPlan, QueryMetadataField, QueryMetadataProbe, QueryPlanKind, prepare_lexical_query,
+    LexicalQueryPlan, QueryMatchOperator, QueryMetadataField, QueryMetadataProbe, QueryPlanKind,
+    prepare_lexical_query,
 };
 
 const MAX_RESULTS: usize = 100;
@@ -34,7 +35,7 @@ const BOOST_EXACT_METADATA: f32 = 12.0;
 const BOOST_PHRASE: f32 = 4.0;
 const BOOST_CONTENT_IDENTIFIER: f32 = 5.0;
 
-pub fn search_index(data_dir: &Path, request: &SearchRequest) -> Result<Vec<SearchHit>> {
+pub fn search_index(data_dir: &Path, request: &LexicalSearchRequest) -> Result<Vec<SearchHit>> {
     let (index, fields) = open_index(data_dir)?;
     let reader = index
         .reader()
@@ -194,6 +195,17 @@ fn build_lexical_query_from_plan(
     fields: &Fields,
     plan: &LexicalQueryPlan,
 ) -> Result<Box<dyn Query>> {
+    let expected_operator = match plan.kind {
+        QueryPlanKind::Explicit => QueryMatchOperator::Explicit,
+        QueryPlanKind::Ordinary => QueryMatchOperator::Any,
+        QueryPlanKind::Identifier => QueryMatchOperator::All,
+    };
+    if plan.match_operator != expected_operator {
+        return Err(Error::Query(
+            "query plan kind and match operator do not agree".to_owned(),
+        ));
+    }
+
     let parser = lexical_parser(index, fields);
     let query = match plan.kind {
         QueryPlanKind::Explicit => parser
@@ -208,8 +220,8 @@ fn build_lexical_query_from_plan(
             Box::new(BooleanQuery::new(clauses))
         }
         QueryPlanKind::Identifier => {
-            let mut clauses = Vec::with_capacity(plan.identifier_terms.len() + 2);
-            if plan.identifier_terms.len() == 1 {
+            let mut clauses = Vec::with_capacity(plan.terms.len() + 2);
+            if plan.terms.len() == 1 {
                 let parsed = parser
                     .parse_query(&plan.query)
                     .map_err(|error| Error::Query(error.to_string()))?;
@@ -222,7 +234,7 @@ fn build_lexical_query_from_plan(
                     Box::new(DisjunctionMaxQuery::new(alternatives)) as Box<dyn Query>,
                 ));
             } else {
-                for term in &plan.identifier_terms {
+                for term in &plan.terms {
                     let parsed = parser
                         .parse_query(term)
                         .map_err(|error| Error::Query(error.to_string()))?;
@@ -667,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn native_query_construction_consumes_prepared_identifier_terms() {
+    fn native_query_construction_consumes_prepared_terms() {
         let temporary = tempdir().unwrap();
         let vault = temporary.path().join("vault");
         let data = temporary.path().join("data");
@@ -687,7 +699,8 @@ mod tests {
         let searcher = reader.searcher();
         let mut plan = prepare_lexical_query("not-present").unwrap();
         plan.kind = QueryPlanKind::Identifier;
-        plan.identifier_terms = vec!["alpha".into(), "beta".into()];
+        plan.match_operator = QueryMatchOperator::All;
+        plan.terms = vec!["alpha".into(), "beta".into()];
         plan.normalized_exact = None;
         plan.phrase_boost = false;
 
@@ -696,6 +709,12 @@ mod tests {
             .search(&query, &TopDocs::with_limit(10).order_by_score())
             .unwrap();
         assert_eq!(hits.len(), 1);
+
+        plan.match_operator = QueryMatchOperator::Any;
+        let error = build_lexical_query_from_plan(&index, &fields, &plan)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("match operator"));
     }
 
     #[test]
@@ -734,7 +753,7 @@ mod tests {
 
         let hits = search_index(
             temporary.path(),
-            &SearchRequest {
+            &LexicalSearchRequest {
                 query: "IIA 2 line".into(),
                 limit: 100,
                 vault_id: None,
@@ -768,7 +787,7 @@ mod tests {
         }
         let lowercase_hits = search_index(
             temporary.path(),
-            &SearchRequest {
+            &LexicalSearchRequest {
                 query: "iia 2 line".into(),
                 limit: 100,
                 vault_id: None,
@@ -846,7 +865,7 @@ mod tests {
 
         let hits = search_index(
             &data,
-            &SearchRequest {
+            &LexicalSearchRequest {
                 query: "dungeons and dragons".into(),
                 limit: 20,
                 vault_id: None,
@@ -860,7 +879,7 @@ mod tests {
 
         let explicit_or = search_index(
             &data,
-            &SearchRequest {
+            &LexicalSearchRequest {
                 query: "dungeons OR dragons".into(),
                 limit: 20,
                 vault_id: None,
@@ -870,7 +889,7 @@ mod tests {
         assert_eq!(explicit_or.len(), 2);
         let explicit_and = search_index(
             &data,
-            &SearchRequest {
+            &LexicalSearchRequest {
                 query: "dungeons AND dragons".into(),
                 limit: 20,
                 vault_id: None,
