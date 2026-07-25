@@ -24,6 +24,7 @@ export interface DaemonBackendOptions {
 const LEXICAL_ONLY: BackendCapabilities = {
   supportedModes: ["lexical"],
   sourceScope: "registered_trees",
+  manualRebuild: false,
 };
 
 export class DaemonBackend implements SearchBackend {
@@ -59,6 +60,7 @@ export class DaemonBackend implements SearchBackend {
         ? {
             supportedModes: ["lexical", "semantic", "hybrid"],
             sourceScope: "registered_trees",
+            manualRebuild: false,
           }
         : LEXICAL_ONLY;
       const searchable = daemon.generation !== null && daemon.state !== "starting";

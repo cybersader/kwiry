@@ -39,7 +39,15 @@ export class KwirySettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setName("In-plugin · Lexical")
         .setDesc(
-          "This profile is lexical-only and never reads the daemon token. Gate 4 integration is still building its in-memory Worker index.",
+          "Indexes Markdown files from the active vault in memory. This profile is lexical-only and never reads the daemon token.",
+        );
+      new Setting(containerEl)
+        .setName("Rebuild in-plugin lexical index")
+        .setDesc("Build a complete replacement generation while the current index remains searchable.")
+        .addButton((button) =>
+          button
+            .setButtonText("Rebuild")
+            .onClick(() => void this.plugin.rebuildInPluginIndex()),
         );
     }
 

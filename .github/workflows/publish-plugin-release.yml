@@ -1,0 +1,84 @@
+name: Publish validated Obsidian plugin release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing validated plain semantic-version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    environment: obsidian-release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/obsidian
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/obsidian/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Install and independently verify candidate
+        run: |
+          npm ci
+          npm run verify
+      - name: Verify tag identity and package versions
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag=$RELEASE_TAG
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            printf 'Publication tag is not a plain semantic version.\n' >&2
+            exit 1
+          fi
+          tag_commit=$(git rev-parse -q --verify "refs/tags/$tag^{commit}")
+          test "$(git rev-parse HEAD)" = "$tag_commit"
+          manifest=$(node -p "require('./manifest.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$manifest" ] || [ "$tag" != "$pkg" ]; then
+            printf 'Publication tag does not match package versions.\n' >&2
+            exit 1
+          fi
+      - name: Prepare release assets and checksums
+        run: |
+          npm run --silent evidence > gate5.evidence.json
+          sha256sum LICENSE THIRD_PARTY_NOTICES.md gate5.evidence.json main.js manifest.json styles.css > SHA256SUMS
+      - name: Create explicitly authorized release
+        run: |
+          set -euo pipefail
+          {
+            echo "Kwiry Search Obsidian plugin ${RELEASE_TAG} (GPL-3.0-only)."
+            echo
+            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy main.js, manifest.json, and styles.css into the plugin directory."
+            echo
+            echo "Corresponding source: https://github.com/${GITHUB_REPOSITORY}/tree/${RELEASE_TAG}/clients/obsidian"
+            echo
+            echo "Gate 5 automation evidence requires separate owner field acceptance and does not itself declare the in-plugin profile delivered."
+          } > /tmp/release-notes.md
+          gh release create "$RELEASE_TAG" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "kwiry-search $RELEASE_TAG" \
+            --notes-file /tmp/release-notes.md \
+            main.js manifest.json styles.css LICENSE THIRD_PARTY_NOTICES.md SHA256SUMS gate5.evidence.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}

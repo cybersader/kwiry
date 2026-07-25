@@ -7,6 +7,7 @@ import type {
   InitializeResult,
   SearchResult,
   SourceInput,
+  SourceRemoval,
   StatusResult,
 } from "./protocol";
 import { WorkerRpcClient, type WorkerLike } from "./rpc-client";
@@ -37,6 +38,21 @@ export class InPluginWorkerSession {
       operation: "add_source_batch",
       generation,
       sources,
+    }) as Promise<BuildResult>;
+  }
+
+  applySourceChanges(
+    generation: string,
+    nextGeneration: string | null,
+    upserts: SourceInput[],
+    removals: SourceRemoval[],
+  ): Promise<BuildResult> {
+    return this.client.request({
+      operation: "apply_source_changes",
+      generation,
+      next_generation: nextGeneration,
+      upserts,
+      removals,
     }) as Promise<BuildResult>;
   }
 

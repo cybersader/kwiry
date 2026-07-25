@@ -12,7 +12,12 @@ import {
   SQLITE_WASM_SIZE,
 } from "virtual:kwiry-artifact-identities";
 
-import { openFts5Generation, type Fts5GenerationIndex, type SQLiteApi } from "./fts5-index";
+import {
+  IndexCapacityError,
+  openFts5Generation,
+  type Fts5GenerationIndex,
+  type SQLiteApi,
+} from "./fts5-index";
 import {
   WORKER_PROTOCOL_VERSION,
   type BuildResult,
@@ -61,6 +66,7 @@ let state: WorkerState = "cold";
 let sqlite: SQLiteApi | null = null;
 let active: Generation | null = null;
 let staging: Generation | null = null;
+const usedGenerations = new Set<string>();
 let lastRequestId = 0;
 let guards: GuardCounters | null = null;
 
@@ -161,15 +167,16 @@ async function initialize(): Promise<InitializeResult> {
 
 function beginBuild(generation: string): BuildResult {
   requireInitialized();
-  if (!sqlite || staging) {
+  if (!sqlite || staging || usedGenerations.has(generation)) {
     throw fixedWorkerError(
       "invalid_state",
       "index",
-      "A staging generation already exists.",
+      "Requested generation is unavailable.",
       true,
     );
   }
   staging = { id: generation, index: openFts5Generation(sqlite) };
+  usedGenerations.add(generation);
   state = "building";
   return generationResult(staging);
 }
@@ -180,13 +187,14 @@ function addSourceBatch(
 ): BuildResult {
   const target = requireStaging(generation);
   try {
-    for (const source of sources) {
-      const preparation = prepareSourceWithRust(source.descriptor, source.bytes);
-      target.index.replaceSource(preparation);
-    }
+    const preparations = sources.map((source) =>
+      prepareSourceWithRust(source.descriptor, source.bytes)
+    );
+    target.index.applySourceChanges(preparations, []);
     return generationResult(target);
   } catch (error) {
     abortStaging();
+    if (error instanceof IndexCapacityError) throw indexCapacityError();
     if (error instanceof RustAdapterError) {
       throw fixedWorkerError(
         "source_rejected",
@@ -201,6 +209,49 @@ function addSourceBatch(
       "In-plugin index rejected a source batch.",
       false,
     );
+  }
+}
+
+function applySourceChanges(
+  request: Extract<WorkerRequest, { operation: "apply_source_changes" }>,
+): BuildResult {
+  requireInitialized();
+  if (request.next_generation === null) {
+    const target = requireStaging(request.generation);
+    try {
+      const preparations = request.upserts.map((source) =>
+        prepareSourceWithRust(source.descriptor, source.bytes)
+      );
+      target.index.applySourceChanges(preparations, request.removals);
+      return generationResult(target);
+    } catch (error) {
+      abortStaging();
+      throw sourceChangeError(error);
+    }
+  }
+
+  if (staging
+    || !active
+    || active.id !== request.generation
+    || usedGenerations.has(request.next_generation)) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Requested active generation is unavailable.",
+      true,
+    );
+  }
+
+  try {
+    const preparations = request.upserts.map((source) =>
+      prepareSourceWithRust(source.descriptor, source.bytes)
+    );
+    active.index.applySourceChanges(preparations, request.removals);
+    active.id = request.next_generation;
+    usedGenerations.add(request.next_generation);
+    return generationResult(active);
+  } catch (error) {
+    throw sourceChangeError(error);
   }
 }
 
@@ -222,7 +273,16 @@ function commitBuild(generation: string): BuildResult {
   active = target;
   staging = null;
   state = "ready";
-  previous?.index.close();
+  try {
+    previous?.index.close();
+  } catch {
+    throw fixedWorkerError(
+      "worker_crashed",
+      "lifecycle",
+      "In-plugin search Worker failed.",
+      true,
+    );
+  }
   return generationResult(active);
 }
 
@@ -303,6 +363,7 @@ function dispose(): DisposeResult {
   active?.index.close();
   staging = null;
   active = null;
+  usedGenerations.clear();
   sqlite = null;
   state = "disposed";
   return { closed: true };
@@ -344,6 +405,33 @@ function generationResult(generation: Generation): BuildResult {
   };
 }
 
+function indexCapacityError(): WorkerError {
+  return fixedWorkerError(
+    "index_limit_exceeded",
+    "index",
+    "In-plugin index capacity was exceeded.",
+    false,
+  );
+}
+
+function sourceChangeError(error: unknown): WorkerError {
+  if (error instanceof IndexCapacityError) return indexCapacityError();
+  if (error instanceof RustAdapterError) {
+    return fixedWorkerError(
+      "source_rejected",
+      "rust",
+      "Portable Rust rejected a source batch.",
+      false,
+    );
+  }
+  return fixedWorkerError(
+    "source_rejected",
+    "index",
+    "In-plugin index rejected a source batch.",
+    false,
+  );
+}
+
 async function dispatch(request: WorkerRequest): Promise<unknown> {
   if (request.id <= lastRequestId) {
     throw fixedWorkerError(
@@ -361,6 +449,8 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       return beginBuild(request.generation);
     case "add_source_batch":
       return addSourceBatch(request.generation, request.sources);
+    case "apply_source_changes":
+      return applySourceChanges(request);
     case "commit_build":
       return commitBuild(request.generation);
     case "abort_build":
@@ -436,6 +526,7 @@ function isOperation(value: unknown): value is WorkerOperation {
   return value === "initialize"
     || value === "begin_build"
     || value === "add_source_batch"
+    || value === "apply_source_changes"
     || value === "commit_build"
     || value === "abort_build"
     || value === "search"

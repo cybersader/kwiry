@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { FTS_HIGHLIGHT_END, FTS_HIGHLIGHT_START } from "../excerpt";
-import type { WorkerSearchHit } from "./protocol";
+import type { SourceRemoval, WorkerSearchHit } from "./protocol";
 import { bindMetadataProbe, bindSearchPlan } from "./query-binder";
 import type {
   MatchPlan,
@@ -13,6 +13,23 @@ import type {
 
 const MAX_INDEX_CHUNKS = 100_000;
 const MAX_INDEXED_TEXT_BYTES = 256 * 1024 * 1024;
+
+export interface Fts5IndexLimits {
+  maxChunks: number;
+  maxIndexedTextBytes: number;
+}
+
+const DEFAULT_INDEX_LIMITS: Fts5IndexLimits = {
+  maxChunks: MAX_INDEX_CHUNKS,
+  maxIndexedTextBytes: MAX_INDEXED_TEXT_BYTES,
+};
+
+export class IndexCapacityError extends Error {
+  constructor() {
+    super("in-memory corpus limit exceeded");
+    this.name = "IndexCapacityError";
+  }
+}
 
 export interface SQLiteDatabase {
   readonly filename: string;
@@ -35,7 +52,10 @@ CREATE TABLE sources (
   source_key TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
-  byte_length INTEGER NOT NULL
+  byte_length INTEGER NOT NULL,
+  chunk_count INTEGER NOT NULL,
+  indexed_bytes INTEGER NOT NULL,
+  UNIQUE(vault_id, path)
 );
 
 CREATE TABLE chunks (
@@ -98,13 +118,22 @@ CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
 END;
 `;
 
+const SELECT_SOURCE_BY_KEY_SQL = `
+SELECT source_key, vault_id, path, chunk_count, indexed_bytes
+FROM sources
+WHERE source_key = ?
+`;
+
+const SELECT_SOURCE_BY_IDENTITY_SQL = `
+SELECT source_key, vault_id, path, chunk_count, indexed_bytes
+FROM sources
+WHERE vault_id = ? AND path = ?
+`;
+
 const INSERT_SOURCE_SQL = `
-INSERT INTO sources(source_key, vault_id, path, byte_length)
-VALUES(?, ?, ?, ?)
-ON CONFLICT(source_key) DO UPDATE SET
-  vault_id = excluded.vault_id,
-  path = excluded.path,
-  byte_length = excluded.byte_length
+INSERT INTO sources(
+  source_key, vault_id, path, byte_length, chunk_count, indexed_bytes
+) VALUES(?, ?, ?, ?, ?, ?)
 `;
 
 const INSERT_CHUNK_SQL = `
@@ -117,18 +146,22 @@ INSERT INTO chunks(
 `;
 
 export class Fts5GenerationIndex {
-  private readonly sourceBytes = new Map<string, number>();
+  private documentCount = 0;
   private corpusBytes = 0;
   private chunkCount = 0;
   private closed = false;
 
-  constructor(private readonly db: SQLiteDatabase) {
+  constructor(
+    private readonly db: SQLiteDatabase,
+    private readonly limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
+  ) {
     if (db.filename !== ":memory:") throw new Error("FTS5 generation is not in memory");
+    validateIndexLimits(limits);
     db.exec(SCHEMA_SQL);
   }
 
   get documents(): number {
-    return this.sourceBytes.size;
+    return this.documentCount;
   }
 
   get chunks(): number {
@@ -136,48 +169,84 @@ export class Fts5GenerationIndex {
   }
 
   replaceSource(preparation: SourcePreparation): void {
+    this.applySourceChanges([preparation], []);
+  }
+
+  applySourceChanges(
+    preparations: readonly SourcePreparation[],
+    removals: readonly SourceRemoval[],
+    verifyIntegrity = false,
+  ): void {
     this.requireOpen();
-    const indexed = preparation.kind === "indexed";
-    const projected = indexed
-      ? preparation.chunks.map((chunk) => projectChunk(preparation, chunk))
-      : [];
-    const replacementBytes = projected.reduce((total, row) => total + row.indexedBytes, 0);
-    const previousBytes = this.sourceBytes.get(preparation.source_key) ?? 0;
-    const previousChunks = Number(this.db.selectValue(
-      "SELECT count(*) FROM chunks WHERE source_key = ?",
-      [preparation.source_key],
-    ));
-    const nextChunks = this.chunkCount - previousChunks + projected.length;
-    const nextBytes = this.corpusBytes - previousBytes + replacementBytes;
-    if (nextChunks > MAX_INDEX_CHUNKS || nextBytes > MAX_INDEXED_TEXT_BYTES) {
-      throw new Error("in-memory corpus limit exceeded");
+    if (preparations.length === 0 && removals.length === 0) {
+      throw new Error("source change batch is empty");
     }
 
-    this.db.transaction("IMMEDIATE", () => {
-      this.db.exec("DELETE FROM chunks WHERE source_key = ?", {
-        bind: [preparation.source_key],
-      });
-      this.db.exec("DELETE FROM sources WHERE source_key = ?", {
-        bind: [preparation.source_key],
-      });
-      if (!indexed) return;
-      this.db.exec(INSERT_SOURCE_SQL, {
-        bind: [
-          preparation.source_key,
-          preparation.vault_id,
-          preparation.path,
-          preparation.byte_length,
-        ],
-      });
-      for (const row of projected) {
-        this.db.exec(INSERT_CHUNK_SQL, { bind: row.bind });
+    const projected = preparations.map(projectPreparation);
+    validateChangeIdentities(projected, removals);
+
+    const touched = new Map<string, StoredSource>();
+    for (const removal of removals) {
+      const stored = this.selectSourceByIdentity(removal.vault_id, removal.path);
+      if (stored) touched.set(stored.source_key, stored);
+    }
+    for (const change of projected) {
+      const byIdentity = this.selectSourceByIdentity(
+        change.preparation.vault_id,
+        change.preparation.path,
+      );
+      const byKey = this.selectSourceByKey(change.preparation.source_key);
+      if (byIdentity && byIdentity.source_key !== change.preparation.source_key) {
+        throw new Error("stored source identity does not match its prepared key");
       }
+      if (byKey && (byKey.vault_id !== change.preparation.vault_id
+        || byKey.path !== change.preparation.path)) {
+        throw new Error("stored source key does not match its prepared identity");
+      }
+      if (byIdentity) touched.set(byIdentity.source_key, byIdentity);
+      if (byKey) touched.set(byKey.source_key, byKey);
+    }
+
+    const indexed = projected.filter((change) => change.preparation.kind === "indexed");
+    const removedChunks = sumSafe([...touched.values()].map((source) => source.chunk_count));
+    const removedBytes = sumSafe([...touched.values()].map((source) => source.indexed_bytes));
+    const addedChunks = sumSafe(indexed.map((change) => change.rows.length));
+    const addedBytes = sumSafe(indexed.map((change) => change.indexedBytes));
+    const nextDocuments = this.documentCount - touched.size + indexed.length;
+    const nextChunks = this.chunkCount - removedChunks + addedChunks;
+    const nextBytes = this.corpusBytes - removedBytes + addedBytes;
+    requireProjectedCounts(nextDocuments, nextChunks, nextBytes, this.limits);
+
+    this.db.transaction("IMMEDIATE", () => {
+      for (const stored of touched.values()) {
+        this.db.exec("DELETE FROM chunks WHERE source_key = ?", {
+          bind: [stored.source_key],
+        });
+        this.db.exec("DELETE FROM sources WHERE source_key = ?", {
+          bind: [stored.source_key],
+        });
+      }
+      for (const change of indexed) {
+        this.db.exec(INSERT_SOURCE_SQL, {
+          bind: [
+            change.preparation.source_key,
+            change.preparation.vault_id,
+            change.preparation.path,
+            change.preparation.byte_length,
+            change.rows.length,
+            change.indexedBytes,
+          ],
+        });
+        for (const row of change.rows) {
+          this.db.exec(INSERT_CHUNK_SQL, { bind: row.bind });
+        }
+      }
+      if (verifyIntegrity) this.runIntegrityCheck();
     });
 
+    this.documentCount = nextDocuments;
     this.chunkCount = nextChunks;
     this.corpusBytes = nextBytes;
-    if (indexed) this.sourceBytes.set(preparation.source_key, replacementBytes);
-    else this.sourceBytes.delete(preparation.source_key);
   }
 
   metadataProbe(plan: MetadataProbePlan): boolean {
@@ -195,7 +264,7 @@ export class Fts5GenerationIndex {
   assertIntegrity(): void {
     this.requireOpen();
     try {
-      this.db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')");
+      this.runIntegrityCheck();
     } catch {
       throw new Error("FTS5 integrity check failed");
     }
@@ -206,9 +275,24 @@ export class Fts5GenerationIndex {
     this.closed = true;
     this.db.close();
     if (this.db.pointer !== undefined) throw new Error("SQLite database remained open");
-    this.sourceBytes.clear();
+    this.documentCount = 0;
     this.corpusBytes = 0;
     this.chunkCount = 0;
+  }
+
+  private selectSourceByKey(sourceKey: string): StoredSource | null {
+    return parseStoredSource(this.db.selectObjects(SELECT_SOURCE_BY_KEY_SQL, [sourceKey]));
+  }
+
+  private selectSourceByIdentity(vaultId: string, path: string): StoredSource | null {
+    return parseStoredSource(this.db.selectObjects(
+      SELECT_SOURCE_BY_IDENTITY_SQL,
+      [vaultId, path],
+    ));
+  }
+
+  private runIntegrityCheck(): void {
+    this.db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')");
   }
 
   private requireOpen(): void {
@@ -216,17 +300,84 @@ export class Fts5GenerationIndex {
   }
 }
 
-export function openFts5Generation(sqlite: SQLiteApi): Fts5GenerationIndex {
-  return new Fts5GenerationIndex(new sqlite.oo1.DB(":memory:", "c"));
+export function openFts5Generation(
+  sqlite: SQLiteApi,
+  limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
+): Fts5GenerationIndex {
+  return new Fts5GenerationIndex(new sqlite.oo1.DB(":memory:", "c"), limits);
 }
 
 interface ProjectedChunk {
   bind: readonly unknown[];
   indexedBytes: number;
+  chunkId: string;
+}
+
+interface ProjectedPreparation {
+  preparation: SourcePreparation;
+  rows: ProjectedChunk[];
+  indexedBytes: number;
+}
+
+interface StoredSource {
+  source_key: string;
+  vault_id: string;
+  path: string;
+  chunk_count: number;
+  indexed_bytes: number;
+}
+
+function projectPreparation(preparation: SourcePreparation): ProjectedPreparation {
+  const rows = preparation.kind === "indexed"
+    ? preparation.chunks.map((chunk) => projectChunk(preparation, chunk))
+    : [];
+  return {
+    preparation,
+    rows,
+    indexedBytes: sumSafe(rows.map((row) => row.indexedBytes)),
+  };
+}
+
+function validateChangeIdentities(
+  projected: readonly ProjectedPreparation[],
+  removals: readonly SourceRemoval[],
+): void {
+  const preparationIdentities = new Set<string>();
+  const preparationKeys = new Set<string>();
+  const chunkIds = new Set<string>();
+  for (const change of projected) {
+    const identity = sourceIdentity(change.preparation.vault_id, change.preparation.path);
+    if (preparationIdentities.has(identity) || preparationKeys.has(change.preparation.source_key)) {
+      throw new Error("source change batch contains duplicate preparations");
+    }
+    preparationIdentities.add(identity);
+    preparationKeys.add(change.preparation.source_key);
+    for (const row of change.rows) {
+      if (chunkIds.has(row.chunkId)) {
+        throw new Error("source change batch contains duplicate chunk IDs");
+      }
+      chunkIds.add(row.chunkId);
+    }
+  }
+
+  const removalIdentities = new Set<string>();
+  for (const removal of removals) {
+    const identity = sourceIdentity(removal.vault_id, removal.path);
+    if (removalIdentities.has(identity) || preparationIdentities.has(identity)) {
+      throw new Error("source change batch contains duplicate identities");
+    }
+    removalIdentities.add(identity);
+  }
 }
 
 function projectChunk(preparation: SourcePreparation, prepared: PreparedChunk): ProjectedChunk {
   const chunk = prepared.chunk;
+  if (chunk.vault_id !== preparation.vault_id
+    || chunk.path !== preparation.path
+    || chunk.mtime !== preparation.mtime
+    || chunk.content_hash !== preparation.content_hash) {
+    throw new Error("prepared chunk does not match its source");
+  }
   const aliases = preparation.retrieval.aliases.join(" ");
   const title = chunk.frontmatter.title ?? "";
   const tags = chunk.frontmatter.tags?.join(" ") ?? "";
@@ -259,7 +410,72 @@ function projectChunk(preparation: SourcePreparation, prepared: PreparedChunk): 
       ...fields,
     ],
     indexedBytes,
+    chunkId: chunk.chunk_id,
   };
+}
+
+function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null {
+  if (rows.length === 0) return null;
+  if (rows.length !== 1) throw new Error("stored source identity is ambiguous");
+  const row = rows[0];
+  if (!row
+    || typeof row.source_key !== "string"
+    || typeof row.vault_id !== "string"
+    || typeof row.path !== "string"
+    || !isNonNegativeSafeInteger(row.chunk_count)
+    || !isNonNegativeSafeInteger(row.indexed_bytes)) {
+    throw new Error("stored source metadata is invalid");
+  }
+  return {
+    source_key: row.source_key,
+    vault_id: row.vault_id,
+    path: row.path,
+    chunk_count: row.chunk_count,
+    indexed_bytes: row.indexed_bytes,
+  };
+}
+
+function requireProjectedCounts(
+  documents: number,
+  chunks: number,
+  bytes: number,
+  limits: Fts5IndexLimits,
+): void {
+  if (!isNonNegativeSafeInteger(documents)
+    || !isNonNegativeSafeInteger(chunks)
+    || !isNonNegativeSafeInteger(bytes)) {
+    throw new Error("source accounting is invalid");
+  }
+  if (chunks > limits.maxChunks || bytes > limits.maxIndexedTextBytes) {
+    throw new IndexCapacityError();
+  }
+}
+
+function validateIndexLimits(limits: Fts5IndexLimits): void {
+  if (!Number.isSafeInteger(limits.maxChunks)
+    || limits.maxChunks < 1
+    || !Number.isSafeInteger(limits.maxIndexedTextBytes)
+    || limits.maxIndexedTextBytes < 1) {
+    throw new Error("FTS5 index limits must be positive safe integers");
+  }
+}
+
+function sumSafe(values: readonly number[]): number {
+  let total = 0;
+  for (const value of values) {
+    if (!isNonNegativeSafeInteger(value)) throw new Error("source accounting is invalid");
+    total += value;
+    if (!Number.isSafeInteger(total)) throw new Error("source accounting exceeded its limit");
+  }
+  return total;
+}
+
+function sourceIdentity(vaultId: string, path: string): string {
+  return JSON.stringify([vaultId, path]);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function sanitizeIndexedText(value: string): string {

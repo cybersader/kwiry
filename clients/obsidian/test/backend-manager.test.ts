@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { SearchRequest } from "../src/api";
 import { BackendManager } from "../src/backend-manager";
@@ -15,6 +15,7 @@ import type {
 
 class RecordingBackend implements SearchBackend {
   readonly identity: BackendIdentity;
+  private disposed = false;
 
   constructor(
     profile: BackendProfile,
@@ -44,6 +45,8 @@ class RecordingBackend implements SearchBackend {
   }
 
   async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
     this.events.push(`dispose:${this.identity.instanceId}`);
   }
 }
@@ -57,7 +60,9 @@ describe("BackendManager", () => {
     });
 
     const first = await manager.activate("daemon");
-    const second = await manager.activate("in_plugin");
+    const secondActivation = manager.activate("in_plugin");
+    expect(events.at(-1)).toBe("dispose:daemon-1");
+    const second = await secondActivation;
 
     expect(first.identity.instanceId).toBe("daemon-1");
     expect(second.identity.instanceId).toBe("in_plugin-2");
@@ -85,7 +90,8 @@ describe("BackendManager", () => {
 
     await expect(manager.activate("daemon")).rejects.toThrow("initialization failed");
     expect(inPluginConstructions).toBe(0);
-    expect(events).toEqual(["initialize:daemon-1"]);
+    expect(events).toEqual(["initialize:daemon-1", "dispose:daemon-1"]);
+    await expect(manager.current()).rejects.toMatchObject({ code: "backend_not_selected" });
   });
 
   it("requires an explicit backend selection", async () => {
@@ -95,5 +101,33 @@ describe("BackendManager", () => {
     });
 
     await expect(manager.current()).rejects.toMatchObject({ code: "backend_not_selected" });
+  });
+
+  it("closes synchronously and rejects an activation that initializes late", async () => {
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    class LateBackend extends RecordingBackend {
+      override async initialize(): Promise<void> {
+        events.push(`initialize:${this.identity.instanceId}`);
+        await gate;
+      }
+    }
+    const manager = new BackendManager({
+      daemon: (instanceId) => new LateBackend("daemon", instanceId, events),
+      in_plugin: (instanceId) => new RecordingBackend("in_plugin", instanceId, events),
+    });
+
+    const activation = manager.activate("daemon");
+    await vi.waitFor(() => expect(events).toEqual(["initialize:daemon-1"]));
+    const disposal = manager.dispose();
+    release();
+
+    await expect(activation).rejects.toMatchObject({ code: "disposed" });
+    await disposal;
+    await expect(manager.current()).rejects.toMatchObject({ code: "disposed" });
+    expect(events).toEqual(["initialize:daemon-1", "dispose:daemon-1"]);
   });
 });

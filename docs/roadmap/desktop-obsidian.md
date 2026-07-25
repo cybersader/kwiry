@@ -37,7 +37,7 @@ The current BRAT-installable plugin provides a query modal, result rendering, ex
 
 ## D5B — no-daemon in-plugin lexical host
 
-State: urgent need; Gates 1–4 are owner-accepted GO, and the production host remains undelivered pending Gate 5 active-vault lifecycle, performance, packaging, and field acceptance.
+State: Gate 5 candidate implemented and under verification; Gates 1–4 are owner-accepted GO. The production host remains undelivered pending generated/reference-hardware performance, installed packaging/update/rollback evidence, private aggregate-only evidence, and explicit field acceptance.
 
 ### Checkpoint B0 — Tantivy-WASM feasibility — Completed NO-GO for normal incremental writer
 
@@ -65,9 +65,9 @@ Automation reported `READY_FOR_FIELD_TEST`; the owner then accepted B2 after fro
 
 The Gate 4 production baseline has explicit daemon/in-plugin selection, hardened daemon credentials/responses, truthful capability/mode/status behavior, stale-result and result-origin enforcement, a strict portable Rust adapter, fixed parameterized FTS5 SQL, and a long-lived classic Worker with one complete plus at most one staging generation. The deterministic CommonJS artifact embeds exactly the portable Rust and official SQLite WASM payloads. The complete Rust/WASM/plugin matrix, corruption and denied-capability tests, Node 22/24 exact-Worker execution, deterministic artifact evidence, and installed disposable-vault Obsidian UI-foundation witness passed before the owner accepted B4 as GO. Active-vault enumeration/events and a delivered-profile claim remain excluded.
 
-### Checkpoint B5 — active-vault lifecycle, package, and field-test
+### Checkpoint B5 — active-vault lifecycle, package, and field-test — Implemented, awaiting field acceptance
 
-Build an atomic initial in-memory index and reconcile create, modify, delete, and rename events. Measure generated and real vaults, install the exact one-file artifact through Obsidian/BRAT, test upgrades/rollback, and obtain owner acceptance before calling the profile delivered.
+The candidate builds an atomic initial in-memory index and reconciles create, modify, delete, and rename events. Its deterministic corpus, strict aggregate evidence schemas, lifecycle suite, exact generated Worker, disposable-vault smoke, one-file build, and candidate/publication workflow separation are implemented. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets but misses added memory; installed startup/progress and declared-reference-hardware measurements remain unavailable. Exact installed Obsidian/BRAT evidence, upgrades/rollback, private aggregate-only measurement, and explicit owner acceptance remain before calling the profile delivered.
 
 ## D5C — relevance signals and configuration
 

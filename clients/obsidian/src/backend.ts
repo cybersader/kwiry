@@ -25,6 +25,7 @@ export interface BackendIdentity {
 export interface BackendCapabilities {
   supportedModes: readonly SearchMode[];
   sourceScope: "registered_trees" | "active_vault";
+  manualRebuild: boolean;
 }
 
 export interface BackendIssue {
@@ -44,6 +45,11 @@ export interface BackendStatus {
   chunks: number;
   dirty: boolean;
   rebuilding: boolean;
+  progress?: {
+    stage: "snapshot" | "replay" | "rebuild";
+    completed: number;
+    total: number | null;
+  };
   issue?: BackendIssue;
 }
 
@@ -75,6 +81,8 @@ export interface SearchBackend {
   readonly identity: BackendIdentity;
   initialize(): Promise<void>;
   status(): Promise<BackendStatus>;
+  subscribeStatus?(listener: (status: BackendStatus) => void): () => void;
+  rebuild?(): Promise<void>;
   search(request: SearchRequest): Promise<SearchExecution>;
   dispose(): Promise<void>;
 }

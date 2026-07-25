@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import type { BackendIdentity, BackendSearchHit } from "./backend";
+import { isNormalizedMarkdownPath } from "./vault-path";
 
 export type OpenResultDecision =
   | { ok: true; path: string }
@@ -69,19 +70,4 @@ export function validateOpenResult(
   return { ok: true, path: hit.path };
 }
 
-export function isNormalizedMarkdownPath(value: string): boolean {
-  if (
-    value.length === 0
-    || value.length > 4_096
-    || value.startsWith("/")
-    || value.includes("\\")
-    || value.includes("\0")
-    || !value.toLowerCase().endsWith(".md")
-  ) {
-    return false;
-  }
-  const components = value.split("/");
-  return components.every(
-    (component) => component.length > 0 && component !== "." && component !== "..",
-  );
-}
+export { isNormalizedMarkdownPath } from "./vault-path";

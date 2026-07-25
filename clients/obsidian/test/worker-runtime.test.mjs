@@ -52,7 +52,7 @@ function request(worker, message, timeoutMs = 30_000) {
     };
     worker.on("message", onMessage);
     worker.on("error", onError);
-    worker.postMessage({ version: 1, ...message });
+    worker.postMessage({ version: 2, ...message });
   });
 }
 
@@ -214,6 +214,338 @@ describe("exact generated production Worker", () => {
       expect(rejected).toMatchObject({ ok: false, error: { code: "query_rejected" } });
       expect(JSON.stringify(rejected)).not.toContain("DROP TABLE");
       await request(worker, { id: 10, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("atomically renames active content and advances the generation once", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("alpha.md", "stableterm")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+
+      await expect(request(worker, {
+        id: 5,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: "g2",
+        upserts: [source("renamed.md", "newterm")],
+        removals: [{ vault_id: "active-vault", path: "alpha.md" }],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g2", documents: 1, chunks: 1 },
+      });
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g2", hits: [] } });
+      await expect(request(worker, {
+        id: 7,
+        operation: "search",
+        query: "newterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g2", hits: [{ path: "renamed.md" }] },
+      });
+      await expect(request(worker, {
+        id: 8,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: "g3",
+        upserts: [],
+        removals: [{ vault_id: "active-vault", path: "renamed.md" }],
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_state" } });
+      await expect(request(worker, {
+        id: 9,
+        operation: "apply_source_changes",
+        generation: "g2",
+        next_generation: "g1",
+        upserts: [],
+        removals: [{ vault_id: "active-vault", path: "renamed.md" }],
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_state" } });
+      await expect(request(worker, { id: 10, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: "g2", documents: 1, chunks: 1 },
+      });
+      await request(worker, { id: 11, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("replays staging changes without exposing them before commit", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("active.md", "activeterm")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+      await request(worker, { id: 5, operation: "begin_build", generation: "g2" });
+      await request(worker, {
+        id: 6,
+        operation: "add_source_batch",
+        generation: "g2",
+        sources: [source("snapshot.md", "snapshotterm")],
+      });
+      await expect(request(worker, {
+        id: 7,
+        operation: "apply_source_changes",
+        generation: "g2",
+        next_generation: null,
+        upserts: [source("replayed.md", "replayterm")],
+        removals: [{ vault_id: "active-vault", path: "snapshot.md" }],
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g2" } });
+      await expect(request(worker, {
+        id: 8,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: "g3",
+        upserts: [],
+        removals: [{ vault_id: "active-vault", path: "active.md" }],
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_state" } });
+      await expect(request(worker, {
+        id: 9,
+        operation: "search",
+        query: "replayterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g1", hits: [] } });
+      await expect(request(worker, {
+        id: 10,
+        operation: "search",
+        query: "activeterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "active.md" }] },
+      });
+      await request(worker, { id: 11, operation: "commit_build", generation: "g2" });
+      await expect(request(worker, {
+        id: 12,
+        operation: "search",
+        query: "replayterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g2", hits: [{ path: "replayed.md" }] },
+      });
+      await request(worker, { id: 13, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("preserves active content when any source in a mutation is rejected", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("stable.md", "stableterm")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+      await expect(request(worker, {
+        id: 5,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: "g2",
+        upserts: [
+          source("valid.md", "validterm"),
+          source("../invalid.md", "invalidterm"),
+        ],
+        removals: [{ vault_id: "active-vault", path: "stable.md" }],
+      })).resolves.toMatchObject({ ok: false, error: { code: "source_rejected" } });
+      await expect(request(worker, { id: 6, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: "g1", documents: 1, chunks: 1 },
+      });
+      await expect(request(worker, {
+        id: 7,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "stable.md" }] },
+      });
+      await expect(request(worker, {
+        id: 8,
+        operation: "search",
+        query: "validterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g1", hits: [] } });
+      await request(worker, { id: 9, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("drops a failed staging replay and preserves the active generation", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("active.md", "activeterm")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+      await request(worker, { id: 5, operation: "begin_build", generation: "bad-stage" });
+      await expect(request(worker, {
+        id: 6,
+        operation: "apply_source_changes",
+        generation: "bad-stage",
+        next_generation: null,
+        upserts: [source("../invalid.md", "invalidterm")],
+        removals: [],
+      })).resolves.toMatchObject({ ok: false, error: { code: "source_rejected" } });
+      await expect(request(worker, { id: 7, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          active_generation: "g1",
+          staging_generation: null,
+          searchable: true,
+        },
+      });
+      await expect(request(worker, {
+        id: 8,
+        operation: "abort_build",
+        generation: "bad-stage",
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_state" } });
+      await expect(request(worker, {
+        id: 9,
+        operation: "begin_build",
+        generation: "bad-stage",
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_state" } });
+      await expect(request(worker, {
+        id: 10,
+        operation: "search",
+        query: "activeterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "active.md" }] },
+      });
+      await request(worker, { id: 11, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("drops a staging generation that fails commit integrity and preserves active search", async () => {
+    const needle = "target.index.assertIntegrity();";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `globalThis.__kwiryIntegrityCalls = (globalThis.__kwiryIntegrityCalls ?? 0) + 1;\n      if (globalThis.__kwiryIntegrityCalls === 2) target.index.assertIntegrity = () => { throw new Error("integrity failed"); };\n      ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("stable.md", "stableterm")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+      await request(worker, { id: 5, operation: "begin_build", generation: "g2" });
+      await request(worker, {
+        id: 6,
+        operation: "add_source_batch",
+        generation: "g2",
+        sources: [source("replacement.md", "replacementterm")],
+      });
+
+      await expect(request(worker, {
+        id: 7,
+        operation: "commit_build",
+        generation: "g2",
+      })).resolves.toMatchObject({
+        ok: false,
+        error: { code: "integrity_failed" },
+      });
+      await expect(request(worker, { id: 8, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          active_generation: "g1",
+          staging_generation: null,
+          searchable: true,
+        },
+      });
+      await expect(request(worker, {
+        id: 9,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "stable.md" }] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("reports post-publication cleanup failure as uncertain Worker state", async () => {
+    const needle = "previous?.index.close();";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `if (previous) previous.index.close = () => { throw new Error("cleanup failed"); };\n  ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("old.md", "oldterm")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+      await request(worker, { id: 5, operation: "begin_build", generation: "g2" });
+      await request(worker, {
+        id: 6,
+        operation: "add_source_batch",
+        generation: "g2",
+        sources: [source("new.md", "newterm")],
+      });
+
+      await expect(request(worker, {
+        id: 7,
+        operation: "commit_build",
+        generation: "g2",
+      })).resolves.toMatchObject({
+        ok: false,
+        error: { code: "worker_crashed", stage: "lifecycle", retryable: true },
+      });
+      await expect(request(worker, { id: 8, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: "g2", searchable: true },
+      });
     } finally {
       await worker.terminate();
     }

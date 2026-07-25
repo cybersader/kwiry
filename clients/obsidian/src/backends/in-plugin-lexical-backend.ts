@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import type { ActiveVaultSource } from "../active-vault-source";
 import type { SearchRequest } from "../api";
 import {
   type BackendIdentity,
@@ -10,27 +11,47 @@ import {
   KwiryBackendError,
 } from "../backend";
 import { parseFtsExcerpt } from "../excerpt";
-import type { StatusResult } from "../worker/protocol";
 import { WorkerRpcError } from "../worker/rpc-client";
 import {
   InPluginWorkerSession,
   createBrowserWorkerSession,
 } from "../worker/session";
+import {
+  InPluginIndexController,
+  type IndexControllerStatus,
+} from "./in-plugin-index-controller";
 
 export interface InPluginLexicalBackendOptions {
   instanceId: string;
-  activeVaultId: string | null;
+  activeVaultId: string;
+  source: ActiveVaultSource;
   workerSource: string;
   createSession?: (workerSource: string) => InPluginWorkerSession;
+  nextGeneration?: () => string;
+  yieldControl?: () => Promise<void>;
 }
+
+const CAPABILITIES = {
+  supportedModes: ["lexical"] as const,
+  sourceScope: "active_vault" as const,
+  manualRebuild: true,
+};
 
 export class InPluginLexicalBackend implements SearchBackend {
   readonly identity: BackendIdentity;
+  private readonly source: ActiveVaultSource;
   private readonly workerSource: string;
   private readonly createSession: (workerSource: string) => InPluginWorkerSession;
+  private readonly nextGeneration: () => string;
+  private readonly yieldControl: () => Promise<void>;
+  private readonly statusListeners = new Set<(status: BackendStatus) => void>();
   private session: InPluginWorkerSession | null = null;
+  private controller: InPluginIndexController | null = null;
+  private cachedStatus: BackendStatus;
+  private epoch = 0;
   private disposed = false;
-  private issue: KwiryBackendError | null = null;
+  private recovering = false;
+  private automaticRecoveries = 0;
 
   constructor(options: InPluginLexicalBackendOptions) {
     this.identity = {
@@ -39,44 +60,49 @@ export class InPluginLexicalBackend implements SearchBackend {
       label: "In-plugin",
       boundVaultId: options.activeVaultId,
     };
+    this.source = options.source;
     this.workerSource = options.workerSource;
     this.createSession = options.createSession ?? createBrowserWorkerSession;
+    let generation = 0;
+    this.nextGeneration = options.nextGeneration
+      ?? (() => `${options.instanceId}-generation-${++generation}`);
+    this.yieldControl = options.yieldControl ?? yieldToBrowser;
+    this.cachedStatus = baseStatus(this.identity);
   }
 
   async initialize(): Promise<void> {
     this.requireActive();
-    if (this.session) return;
-    try {
-      const session = this.createSession(this.workerSource);
-      this.session = session;
-      await session.initialize();
-      this.issue = null;
-    } catch (error) {
-      this.session?.forceDispose();
-      this.session = null;
-      this.issue = workerBackendError(error);
-      throw this.issue;
-    }
+    if (this.controller) return;
+    this.startController(false);
   }
 
   async status(): Promise<BackendStatus> {
-    if (this.disposed) return this.disposedStatus();
-    if (this.issue) return this.unavailableStatus(this.issue);
-    if (!this.session) {
-      return this.unavailableStatus(new KwiryBackendError(
-        "worker_failed",
-        "in_plugin",
-        "lifecycle",
-        true,
-        "In-plugin search Worker is unavailable.",
-      ));
+    return this.cachedStatus;
+  }
+
+  subscribeStatus(listener: (status: BackendStatus) => void): () => void {
+    if (this.disposed) {
+      listener(this.cachedStatus);
+      return () => undefined;
     }
-    try {
-      return mapStatus(this.identity, await this.session.status());
-    } catch (error) {
-      this.issue = workerBackendError(error);
-      return this.unavailableStatus(this.issue);
+    this.statusListeners.add(listener);
+    listener(this.cachedStatus);
+    let stopped = false;
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      this.statusListeners.delete(listener);
+    };
+  }
+
+  async rebuild(): Promise<void> {
+    this.requireActive();
+    this.automaticRecoveries = 0;
+    if (!this.controller) {
+      this.startController(false);
+      return;
     }
+    this.controller.requestRebuild();
   }
 
   async search(request: SearchRequest): Promise<SearchExecution> {
@@ -90,9 +116,8 @@ export class InPluginLexicalBackend implements SearchBackend {
         "In-plugin search supports lexical mode only.",
       );
     }
-    if (!this.session) throw this.issue ?? workerBackendError(undefined);
 
-    const status = await this.status();
+    const status = this.cachedStatus;
     if (!status.searchable) {
       throw new KwiryBackendError(
         status.issue?.code ?? "index_building",
@@ -102,9 +127,16 @@ export class InPluginLexicalBackend implements SearchBackend {
         status.issue?.safeMessage ?? "In-plugin lexical index is still building.",
       );
     }
+
+    const session = this.session;
+    const epoch = this.epoch;
+    if (!session) throw workerBackendError(undefined);
     try {
-      const result = await this.session.search(request.q, request.limit ?? 20);
+      const result = await session.search(request.q, request.limit ?? 20);
       this.requireActive();
+      if (epoch !== this.epoch || session !== this.session) {
+        throw disposedBackendError();
+      }
       return {
         backend: this.identity,
         requestedMode: "lexical",
@@ -124,6 +156,13 @@ export class InPluginLexicalBackend implements SearchBackend {
         },
       };
     } catch (error) {
+      if (this.disposed || epoch !== this.epoch || session !== this.session) {
+        throw disposedBackendError();
+      }
+      if (isUncertainWorkerFailure(error)) {
+        this.handleUncertainWorkerFailure();
+        throw recoveringBackendError();
+      }
       throw workerBackendError(error);
     }
   }
@@ -131,101 +170,259 @@ export class InPluginLexicalBackend implements SearchBackend {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.epoch += 1;
+    this.controller?.dispose();
+    this.controller = null;
     const session = this.session;
     this.session = null;
-    if (!session) return;
+    this.recovering = false;
+    this.publish(disposedStatus(this.identity));
+    this.statusListeners.clear();
+    session?.forceDispose();
+  }
+
+  private startController(recovering: boolean): void {
+    this.requireActive();
+    this.stopCurrentSession();
+    const epoch = ++this.epoch;
+    this.recovering = recovering;
+    if (recovering) this.publish(recoveringStatus(this.identity));
+    else this.publish(baseStatus(this.identity));
+
     try {
-      await session.dispose();
+      const session = this.createSession(this.workerSource);
+      let latestStatus: IndexControllerStatus | null = null;
+      const controller = new InPluginIndexController({
+        source: this.source,
+        worker: session,
+        nextGeneration: this.nextGeneration,
+        onStatus: (status) => {
+          if (this.disposed || epoch !== this.epoch || controller !== this.controller) return;
+          latestStatus = status;
+          if (status.stage === "ready") {
+            this.recovering = false;
+            this.automaticRecoveries = 0;
+          }
+          this.publish(mapControllerStatus(this.identity, status, this.recovering));
+        },
+        onFailure: (error) => {
+          if (this.disposed || epoch !== this.epoch || controller !== this.controller) return;
+          if (isUncertainWorkerFailure(error)) {
+            this.handleUncertainWorkerFailure();
+          } else if (this.recovering && latestStatus) {
+            this.recovering = false;
+            this.publish(mapControllerStatus(this.identity, latestStatus, false));
+          }
+        },
+        yieldControl: this.yieldControl,
+      });
+      this.session = session;
+      this.controller = controller;
+      controller.start();
     } catch {
-      session.forceDispose();
+      this.stopCurrentSession();
+      this.recovering = false;
+      this.publish(unavailableStatus(this.identity, "worker_failed", "In-plugin search Worker failed."));
+    }
+  }
+
+  private handleUncertainWorkerFailure(): void {
+    if (this.disposed) return;
+    if (this.automaticRecoveries >= 1) {
+      this.stopCurrentSession();
+      this.recovering = false;
+      this.publish(unavailableStatus(
+        this.identity,
+        "worker_failed",
+        "In-plugin search Worker failed.",
+      ));
+      return;
+    }
+    this.automaticRecoveries += 1;
+    this.startController(true);
+  }
+
+  private stopCurrentSession(): void {
+    const controller = this.controller;
+    this.controller = null;
+    controller?.dispose();
+    const session = this.session;
+    this.session = null;
+    session?.forceDispose();
+  }
+
+  private publish(status: BackendStatus): void {
+    if (this.disposed && status.phase !== "disposed") return;
+    this.cachedStatus = status;
+    for (const listener of this.statusListeners) {
+      try {
+        listener(status);
+      } catch {
+        // Status observers cannot interrupt indexing or cleanup.
+      }
     }
   }
 
   private requireActive(): void {
-    if (this.disposed) {
-      throw new KwiryBackendError(
-        "disposed",
-        "in_plugin",
-        "lifecycle",
-        false,
-        "The in-plugin backend is disposed.",
-      );
-    }
-  }
-
-  private unavailableStatus(error: KwiryBackendError): BackendStatus {
-    return {
-      ...baseStatus(this.identity),
-      phase: "unavailable",
-      liveness: "terminated",
-      issue: {
-        code: error.code,
-        safeMessage: error.safeMessage,
-        recoverable: error.retryable,
-      },
-    };
-  }
-
-  private disposedStatus(): BackendStatus {
-    return {
-      ...baseStatus(this.identity),
-      phase: "disposed",
-      liveness: "terminated",
-      issue: {
-        code: "disposed",
-        safeMessage: "The in-plugin backend is disposed.",
-        recoverable: false,
-      },
-    };
+    if (this.disposed) throw disposedBackendError();
   }
 }
 
-function mapStatus(identity: BackendIdentity, status: StatusResult): BackendStatus {
-  const issue = status.searchable
-    ? undefined
-    : {
-        code: "index_building",
-        safeMessage: "In-plugin lexical index is still building.",
+function mapControllerStatus(
+  identity: BackendIdentity,
+  status: IndexControllerStatus,
+  recovering: boolean,
+): BackendStatus {
+  if (status.stage === "disposed") return disposedStatus(identity);
+  const issue = recovering && status.stage !== "ready"
+    ? {
+        code: "worker_recovering",
+        safeMessage: "In-plugin search Worker is recovering.",
         recoverable: true,
-      };
+      }
+    : status.issue
+      ? controllerIssue(status.issue)
+      : status.searchable
+        ? undefined
+        : {
+            code: "index_building",
+            safeMessage: "In-plugin lexical index is still building.",
+            recoverable: true,
+          };
+  const phase = status.stage === "ready"
+    ? "ready"
+    : status.stage === "degraded"
+      ? "degraded"
+      : status.stage === "failed"
+        ? "unavailable"
+        : status.stage === "starting"
+          ? "starting"
+          : "building";
+  const progress = status.progress && (
+    status.stage === "snapshot"
+    || status.stage === "replay"
+    || status.stage === "rebuild"
+  )
+    ? {
+        stage: status.stage,
+        completed: status.progress.completed,
+        total: status.progress.total,
+      }
+    : undefined;
   return {
     identity,
-    phase: status.phase === "failed"
-      ? "unavailable"
-      : status.phase,
-    liveness: status.phase === "disposed" || status.phase === "failed"
-      ? "terminated"
-      : "alive",
+    phase,
+    liveness: "alive",
     searchable: status.searchable,
-    generation: status.active_generation,
-    capabilities: {
-      supportedModes: ["lexical"],
-      sourceScope: "active_vault",
-    },
+    generation: status.generation,
+    capabilities: CAPABILITIES,
     documents: status.documents,
     chunks: status.chunks,
     dirty: status.dirty,
     rebuilding: status.rebuilding,
-    issue,
+    ...(progress ? { progress } : {}),
+    ...(issue ? { issue } : {}),
   };
+}
+
+function controllerIssue(issue: NonNullable<IndexControllerStatus["issue"]>) {
+  switch (issue) {
+    case "vault_read_failed":
+      return {
+        code: issue,
+        safeMessage: "The active vault could not be read completely.",
+        recoverable: true,
+      };
+    case "index_build_failed":
+      return {
+        code: issue,
+        safeMessage: "The in-plugin lexical index could not be built.",
+        recoverable: true,
+      };
+    case "index_update_failed":
+      return {
+        code: issue,
+        safeMessage: "The in-plugin lexical index could not be updated.",
+        recoverable: true,
+      };
+    case "index_limit_exceeded":
+      return {
+        code: issue,
+        safeMessage: "The in-plugin lexical index reached its capacity limit.",
+        recoverable: true,
+      };
+  }
 }
 
 function baseStatus(identity: BackendIdentity): BackendStatus {
   return {
     identity,
-    phase: "building",
+    phase: "starting",
     liveness: "unknown",
     searchable: false,
     generation: null,
-    capabilities: {
-      supportedModes: ["lexical"],
-      sourceScope: "active_vault",
-    },
+    capabilities: CAPABILITIES,
     documents: 0,
     chunks: 0,
     dirty: true,
     rebuilding: false,
+    issue: {
+      code: "index_building",
+      safeMessage: "In-plugin lexical index is still building.",
+      recoverable: true,
+    },
   };
+}
+
+function recoveringStatus(identity: BackendIdentity): BackendStatus {
+  return {
+    ...baseStatus(identity),
+    phase: "building",
+    liveness: "alive",
+    issue: {
+      code: "worker_recovering",
+      safeMessage: "In-plugin search Worker is recovering.",
+      recoverable: true,
+    },
+  };
+}
+
+function unavailableStatus(
+  identity: BackendIdentity,
+  code: string,
+  safeMessage: string,
+): BackendStatus {
+  return {
+    ...baseStatus(identity),
+    phase: "unavailable",
+    liveness: "terminated",
+    issue: { code, safeMessage, recoverable: true },
+  };
+}
+
+function disposedStatus(identity: BackendIdentity): BackendStatus {
+  return {
+    ...baseStatus(identity),
+    phase: "disposed",
+    liveness: "terminated",
+    issue: {
+      code: "disposed",
+      safeMessage: "The in-plugin backend is disposed.",
+      recoverable: false,
+    },
+  };
+}
+
+function isUncertainWorkerFailure(error: unknown): boolean {
+  if (error instanceof AggregateError) {
+    return error.errors.some((nested) => isUncertainWorkerFailure(nested));
+  }
+  return error instanceof WorkerRpcError && (
+    error.code === "timeout"
+    || error.code === "worker_crashed"
+    || error.code === "protocol_mismatch"
+    || (error.code === "invalid_request" && error.stage === "protocol")
+  );
 }
 
 function workerBackendError(error: unknown): KwiryBackendError {
@@ -255,4 +452,28 @@ function workerBackendError(error: unknown): KwiryBackendError {
     true,
     "In-plugin search Worker failed.",
   );
+}
+
+function recoveringBackendError(): KwiryBackendError {
+  return new KwiryBackendError(
+    "worker_recovering",
+    "in_plugin",
+    "lifecycle",
+    true,
+    "In-plugin search Worker is recovering.",
+  );
+}
+
+function disposedBackendError(): KwiryBackendError {
+  return new KwiryBackendError(
+    "disposed",
+    "in_plugin",
+    "lifecycle",
+    false,
+    "The in-plugin backend is disposed.",
+  );
+}
+
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }

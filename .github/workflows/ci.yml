@@ -116,7 +116,7 @@ jobs:
           echo "lexical results identical across rebuild-from-nothing"
 
   obsidian-plugin:
-    name: Obsidian plugin two-WASM Gate 4 (Node ${{ matrix.node }})
+    name: Obsidian plugin Gate 5 lifecycle (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -150,13 +150,17 @@ jobs:
           cargo test --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml
           cargo check --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --target wasm32-unknown-unknown
           npm test --prefix rust/kwiry-obsidian-wasm
-      - name: Tests
+      - name: Lifecycle, protocol, and exact-Worker tests
         run: npm test
+      - name: Moderate deterministic corpus smoke
+        run: npm run corpus:smoke
       - name: Build two-WASM one-file artifact
         run: npm run build
-      - name: Generate deterministic Gate 4 evidence
-        run: npm run --silent evidence > gate4.evidence.json
-      - name: Verify artifact policy, versions, and notices
+      - name: Verify disposable functional vault package
+        run: npm run test-vault:smoke
+      - name: Generate deterministic Gate 5 evidence
+        run: npm run --silent evidence > gate5.evidence.json
+      - name: Verify artifact policy, evidence privacy, versions, and notices
         run: |
           test -f main.js && test -f manifest.json && test -f styles.css
           test -f THIRD_PARTY_NOTICES.md && test -f licenses/Apache-2.0.txt
@@ -164,10 +168,12 @@ jobs:
           node -e "const m=require('./manifest.json'),p=require('./package.json'); if(m.version!==p.version){console.error('manifest/package version mismatch');process.exit(1)}"
           node --input-type=module -e '
             import { readFileSync } from "node:fs";
-            const evidence = JSON.parse(readFileSync("gate4.evidence.json", "utf8"));
-            if (evidence.verdict !== "READY_FOR_OWNER_REVIEW") process.exit(1);
-            if (evidence.checks.failed !== 0 || evidence.worker.wasm_inputs !== 2) process.exit(1);
+            const evidence = JSON.parse(readFileSync("gate5.evidence.json", "utf8"));
+            if (evidence.verdict !== "AUTOMATED_CHECKS_PASSED_OWNER_REVIEW_REQUIRED") process.exit(1);
+            if (evidence.checks.failed !== 0 || evidence.artifact.wasm_inputs !== 2) process.exit(1);
             if (evidence.artifact.loose_runtime_assets !== 0) process.exit(1);
+            if (evidence.corpus.kind !== "generated_functional" || evidence.targets.length !== 7) process.exit(1);
+            if (!evidence.privacy.aggregate_only || evidence.privacy.paths_emitted !== 0) process.exit(1);
           '
           test "$(find . -maxdepth 1 -type f \( -name '*.wasm' -o -name '*worker*.js' -o -name '*.map' -o -name '*.db' -o -name '*.sqlite' \) | wc -l)" -eq 0
       - name: Scan first-party source and artifact
@@ -177,6 +183,25 @@ jobs:
             src test esbuild.config.mjs main.js \
             --pcre2 --glob '!package-lock.json'
           ! rg -n '(requestUrl|readDaemonToken|Authorization|tokenProvider)' src/worker
+      - name: Prepare exact Gate 5 field package
+        if: matrix.node == 22
+        run: |
+          set -euo pipefail
+          package=.tmp/gate5-field-package
+          rm -rf "$package"
+          mkdir -p "$package"
+          cp main.js manifest.json styles.css LICENSE THIRD_PARTY_NOTICES.md gate5.evidence.json "$package/"
+          (cd "$package" && sha256sum LICENSE THIRD_PARTY_NOTICES.md gate5.evidence.json main.js manifest.json styles.css > SHA256SUMS)
+          test "$(find "$package" -maxdepth 1 -type f | wc -l)" -eq 7
+          test "$(find "$package" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0
+      - name: Upload sanitized Gate 5 evidence and field package
+        if: matrix.node == 22
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwiry-gate5-field-package
+          path: clients/obsidian/.tmp/gate5-field-package/
+          retention-days: 7
+          if-no-files-found: error
 
   obsidian-fts5-gate2:
     name: Obsidian FTS5 Gate 2 (Node ${{ matrix.node }})

@@ -2,18 +2,18 @@
 
 The delivered beta searches through a local [kwiry](https://github.com/cybersader/kwiry) daemon: lexical (BM25), semantic (local embeddings), and hybrid (RRF) ranking over any registered tree, including trees outside this vault.
 
-The presentation plugin does not own parsing, chunking, ranking, authorization, or index behavior. Today those capabilities live in the native daemon. D5B is evaluating a second explicit host for environments where Obsidian may run but a daemon may not: portable Kwiry Rust preprocessing/query planning plus official SQLite FTS5-WASM behind an application-owned worker.
+The presentation plugin does not own parsing, chunking, ranking, authorization, or index behavior. The released beta uses the native daemon. The current D5B candidate also implements a second explicit host for environments where Obsidian may run but a daemon may not: portable Kwiry Rust preprocessing/query planning plus official SQLite FTS5-WASM behind an application-owned worker. That candidate remains awaiting Gate 5 field acceptance and is not yet a delivered profile.
 
 ## Current requirements
 
-- A running kwiry daemon (`kwiry serve`, add `--semantic` for semantic/hybrid modes)
-- Desktop only (the current profile reads the daemon's token file from disk)
+- **Daemon** profile: a running kwiry daemon (`kwiry serve`, add `--semantic` for semantic/hybrid modes).
+- **In-plugin · Lexical** candidate: desktop Obsidian; no daemon or token file.
 
 ## No-daemon profile status
 
-The **In-plugin · Lexical** profile is contractual but not delivered in the current release. The Tantivy normal incremental writer reached a technical NO-GO, then the official SQLite FTS5-WASM runtime and one-file installed Obsidian/frozen-BRAT gates passed. Portable Rust Gate 3 and backend-neutral production integration Gate 4 are owner-accepted GO. Gate 4's explicit backend selection, credential hardening, portable Rust plus official SQLite in one Worker, fixed query binding, generation isolation, deterministic artifact, complete automated matrix, and installed disposable-vault UI-foundation witness all pass in the current Gate 4 baseline. The profile still reports `index_building` because active-vault lifecycle and delivered-profile acceptance remain Gate 5.
+The **In-plugin · Lexical** profile is contractual but not delivered in the current release. The Tantivy normal incremental writer reached a technical NO-GO, then the official SQLite FTS5-WASM runtime and one-file installed Obsidian/frozen-BRAT gates passed. Portable Rust Gate 3 and backend-neutral production integration Gate 4 are owner-accepted GO. The current Gate 5 candidate now implements active-vault snapshotting, atomic publication, live create/modify/delete/rename reconciliation, progress, manual rebuild, and bounded Worker recovery. Its expanded automated matrix passes. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets, but misses the provisional added-memory target; installed startup/progress and declared-reference-hardware measurements remain unavailable. Installed Obsidian, BRAT upgrade/rollback, private aggregate-only evidence, and explicit owner acceptance remain required before a delivered claim.
 
-Planned first scope:
+Candidate scope:
 
 - current open vault and Markdown files only;
 - in-memory disposable index rebuilt from source files;
@@ -47,7 +47,7 @@ BRAT installs `main.js`, `manifest.json`, and `styles.css` from each versioned G
 3. Run the **Kwiry Search: Search notes** command (or the ribbon icon).
 4. `Tab` cycles only modes supported by the selected backend; `Enter` opens, and `Ctrl+Enter` opens in a new tab.
 
-Daemon results from a different registered tree remain searchable but show a factual notice instead of opening in this vault. Selecting **In-plugin · Lexical** is explicit and never reads the daemon token; at the owner-accepted Gate 4 boundary it truthfully remains `index_building` until Gate 5 supplies active-vault indexing.
+Daemon results from a different registered tree remain searchable but show a factual notice instead of opening in this vault. Selecting **In-plugin · Lexical** is explicit and never reads the daemon token. In the current Gate 5 candidate it builds and reconciles the active Markdown vault in memory; the released profile status remains unchanged until field evidence and owner acceptance authorize delivery.
 
 ## Development
 
@@ -58,9 +58,12 @@ npm install
 npm run dev        # development two-WASM build
 npm test           # unit, real-FTS5, and exact generated-Worker tests
 npm run build      # typecheck + deterministic production main.js
-npm run evidence   # sanitized READY_FOR_OWNER_REVIEW evidence
-npm run test-vault -- /absolute/path/to/empty-vault
-npm run verify     # complete plugin verification sequence
+npm run evidence          # strict aggregate Gate 5 automation evidence
+npm run corpus:smoke       # deterministic moderate generated-corpus smoke
+npm run performance:gate5  # full 10k/~50 MiB generated Node-Worker capture
+npm run test-vault -- /absolute/path/to/empty-vault [--profile functional|performance]
+npm run test-vault:smoke    # functional package install/refusal/hash smoke
+npm run verify              # complete non-field plugin verification sequence
 ```
 
 Copy or symlink `main.js`, `manifest.json`, and `styles.css` into `<vault>/.obsidian/plugins/kwiry-search/`, then enable the plugin. The [Hot-Reload plugin](https://github.com/pjeby/hot-reload) makes iteration painless.

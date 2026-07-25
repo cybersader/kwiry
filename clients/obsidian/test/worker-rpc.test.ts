@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { WorkerRequest } from "../src/worker/protocol";
+import { WORKER_PROTOCOL_VERSION, type WorkerRequest } from "../src/worker/protocol";
 import { WorkerRpcClient, type WorkerLike } from "../src/worker/rpc-client";
 
 class MockWorker implements WorkerLike {
@@ -36,77 +36,126 @@ class MockWorker implements WorkerLike {
   }
 }
 
+function statusResponse(id: number): unknown {
+  return {
+    version: WORKER_PROTOCOL_VERSION,
+    id,
+    operation: "status",
+    ok: true,
+    result: {
+      phase: "building",
+      searchable: false,
+      active_generation: null,
+      staging_generation: null,
+      documents: 0,
+      chunks: 0,
+      dirty: true,
+      rebuilding: false,
+    },
+  };
+}
+
 describe("WorkerRpcClient", () => {
   it("correlates responses and removes completed requests", async () => {
     const worker = new MockWorker();
     const client = new WorkerRpcClient(worker, 1_000);
     const pending = client.request({ operation: "status" });
-    expect(worker.posted[0]).toEqual({ version: 1, id: 1, operation: "status" });
-    worker.emitMessage({
-      version: 1,
+    expect(worker.posted[0]).toEqual({
+      version: WORKER_PROTOCOL_VERSION,
       id: 1,
       operation: "status",
-      ok: true,
-      result: {
-        phase: "building",
-        searchable: false,
-        active_generation: null,
-        staging_generation: null,
-        documents: 0,
-        chunks: 0,
-        dirty: true,
-        rebuilding: false,
-      },
     });
+    worker.emitMessage(statusResponse(1));
     await expect(pending).resolves.toMatchObject({ phase: "building" });
     expect(client.pendingCount).toBe(0);
   });
 
-  it("rejects all pending requests on an uncorrelated response", async () => {
+  it("serializes source changes and correlates their published generation", async () => {
     const worker = new MockWorker();
     const client = new WorkerRpcClient(worker, 1_000);
-    const pending = client.request({ operation: "status" });
-    worker.emitMessage({
-      version: 1,
-      id: 2,
-      operation: "status",
-      ok: true,
-      result: {
-        phase: "building",
-        searchable: false,
-        active_generation: null,
-        staging_generation: null,
-        documents: 0,
-        chunks: 0,
-        dirty: true,
-        rebuilding: false,
-      },
+    const pending = client.request({
+      operation: "apply_source_changes",
+      generation: "g1",
+      next_generation: "g2",
+      upserts: [],
+      removals: [{ vault_id: "active", path: "old.md" }],
     });
-    await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
+    expect(worker.posted[0]).toEqual({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "apply_source_changes",
+      generation: "g1",
+      next_generation: "g2",
+      upserts: [],
+      removals: [{ vault_id: "active", path: "old.md" }],
+    });
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "apply_source_changes",
+      ok: true,
+      result: { generation: "g2", documents: 0, chunks: 0 },
+    });
+    await expect(pending).resolves.toMatchObject({ generation: "g2" });
   });
 
-  it("rejects pending work on crashes and all later work after stop", async () => {
+  it("poisons the client on an uncorrelated response", async () => {
     const worker = new MockWorker();
     const client = new WorkerRpcClient(worker, 1_000);
     const pending = client.request({ operation: "status" });
-    worker.emitError();
-    await expect(pending).rejects.toMatchObject({ code: "worker_crashed" });
-    client.stop();
+    worker.emitMessage(statusResponse(2));
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
     await expect(client.request({ operation: "status" })).rejects.toMatchObject({
       code: "disposed",
     });
   });
 
-  it("times out without retaining the pending request", async () => {
+  it("poisons the client on an uncorrelated build generation", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, 1_000);
+    const pending = client.request({
+      operation: "apply_source_changes",
+      generation: "g1",
+      next_generation: "g2",
+      upserts: [],
+      removals: [{ vault_id: "active", path: "old.md" }],
+    });
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "apply_source_changes",
+      ok: true,
+      result: { generation: "g3", documents: 0, chunks: 0 },
+    });
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
+  it("rejects pending work on crashes and all later work", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, 1_000);
+    const pending = client.request({ operation: "status" });
+    worker.emitError();
+    await expect(pending).rejects.toMatchObject({ code: "worker_crashed" });
+    await expect(client.request({ operation: "status" })).rejects.toMatchObject({
+      code: "disposed",
+    });
+  });
+
+  it("poisons every pending request on timeout", async () => {
     vi.useFakeTimers();
     try {
       const worker = new MockWorker();
       const client = new WorkerRpcClient(worker, 10);
-      const pending = client.request({ operation: "status" });
-      const rejected = expect(pending).rejects.toMatchObject({ code: "timeout" });
+      const first = client.request({ operation: "status" });
+      const second = client.request({ operation: "search", query: "query", limit: 20 });
+      const firstRejected = expect(first).rejects.toMatchObject({ code: "timeout" });
+      const secondRejected = expect(second).rejects.toMatchObject({ code: "timeout" });
       await vi.advanceTimersByTimeAsync(11);
-      await rejected;
+      await Promise.all([firstRejected, secondRejected]);
       expect(client.pendingCount).toBe(0);
+      await expect(client.request({ operation: "status" })).rejects.toMatchObject({
+        code: "disposed",
+      });
     } finally {
       vi.useRealTimers();
     }

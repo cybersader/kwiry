@@ -6,6 +6,7 @@ import {
   WORKER_PROTOCOL_VERSION,
   WORKER_REQUEST_TIMEOUT_MS,
   type SourceInput,
+  type SourceRemoval,
   type WorkerError,
   type WorkerOperation,
   type WorkerRequest,
@@ -18,6 +19,13 @@ export type WorkerCommand =
   | { operation: "initialize" }
   | { operation: "begin_build"; generation: string }
   | { operation: "add_source_batch"; generation: string; sources: SourceInput[] }
+  | {
+      operation: "apply_source_changes";
+      generation: string;
+      next_generation: string | null;
+      upserts: SourceInput[];
+      removals: SourceRemoval[];
+    }
   | { operation: "commit_build"; generation: string }
   | { operation: "abort_build"; generation: string }
   | { operation: "search"; query: string; limit: number }
@@ -35,6 +43,7 @@ export interface WorkerLike {
 
 interface PendingRequest {
   operation: WorkerOperation;
+  expectedGeneration: string | null;
   resolve: (result: WorkerResult) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
@@ -61,7 +70,7 @@ export class WorkerRpcClient {
 
   private readonly onMessage = (event: MessageEvent<unknown>): void => {
     if (!isWorkerResponse(event.data)) {
-      this.failAll(new WorkerRpcError(fixedWorkerError(
+      this.poison(new WorkerRpcError(fixedWorkerError(
         "invalid_request",
         "protocol",
         "Worker returned an invalid response.",
@@ -71,10 +80,21 @@ export class WorkerRpcClient {
     }
     const pending = this.pending.get(event.data.id);
     if (!pending || pending.operation !== event.data.operation) {
-      this.failAll(new WorkerRpcError(fixedWorkerError(
+      this.poison(new WorkerRpcError(fixedWorkerError(
         "invalid_request",
         "protocol",
         "Worker returned an uncorrelated response.",
+        false,
+      )));
+      return;
+    }
+    if (event.data.ok
+      && pending.expectedGeneration !== null
+      && resultGeneration(event.data.result) !== pending.expectedGeneration) {
+      this.poison(new WorkerRpcError(fixedWorkerError(
+        "invalid_request",
+        "protocol",
+        "Worker returned an uncorrelated generation.",
         false,
       )));
       return;
@@ -87,7 +107,7 @@ export class WorkerRpcClient {
   };
 
   private readonly onWorkerFailure = (): void => {
-    this.failAll(new WorkerRpcError(fixedWorkerError(
+    this.poison(new WorkerRpcError(fixedWorkerError(
       "worker_crashed",
       "lifecycle",
       "In-plugin search Worker failed.",
@@ -143,8 +163,7 @@ export class WorkerRpcClient {
     } as WorkerRequest;
     return new Promise<WorkerResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new WorkerRpcError(fixedWorkerError(
+        this.poison(new WorkerRpcError(fixedWorkerError(
           "timeout",
           "lifecycle",
           "In-plugin search Worker timed out.",
@@ -153,6 +172,7 @@ export class WorkerRpcClient {
       }, this.timeoutMs);
       this.pending.set(id, {
         operation: command.operation,
+        expectedGeneration: expectedGeneration(command),
         resolve,
         reject,
         timeout,
@@ -160,9 +180,7 @@ export class WorkerRpcClient {
       try {
         this.worker.postMessage(request);
       } catch {
-        clearTimeout(timeout);
-        this.pending.delete(id);
-        reject(new WorkerRpcError(fixedWorkerError(
+        this.poison(new WorkerRpcError(fixedWorkerError(
           "worker_crashed",
           "lifecycle",
           "In-plugin search Worker failed.",
@@ -178,6 +196,10 @@ export class WorkerRpcClient {
     "In-plugin search Worker is disposed.",
     false,
   ))): void {
+    this.poison(error);
+  }
+
+  private poison(error: Error): void {
     if (this.stopped) return;
     this.stopped = true;
     this.worker.removeEventListener("message", this.onMessage);
@@ -193,4 +215,26 @@ export class WorkerRpcClient {
     }
     this.pending.clear();
   }
+}
+
+function expectedGeneration(command: WorkerCommand): string | null {
+  switch (command.operation) {
+    case "begin_build":
+    case "add_source_batch":
+    case "commit_build":
+    case "abort_build":
+      return command.generation;
+    case "apply_source_changes":
+      return command.next_generation ?? command.generation;
+    case "initialize":
+    case "search":
+    case "status":
+    case "dispose":
+      return null;
+  }
+}
+
+function resultGeneration(result: WorkerResult): string | null {
+  if (typeof result !== "object" || result === null || !("generation" in result)) return null;
+  return typeof result.generation === "string" ? result.generation : null;
 }

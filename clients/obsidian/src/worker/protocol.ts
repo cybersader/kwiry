@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 1 as const;
+export const WORKER_PROTOCOL_VERSION = 2 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
+export const MAX_SOURCE_CHANGES = 16;
 export const MAX_SOURCE_BYTES = 10 * 1024 * 1024 + 1;
 export const MAX_BATCH_BYTES = 16 * 1024 * 1024;
 export const MAX_GENERATION_CHARACTERS = 128;
@@ -15,6 +16,7 @@ export type WorkerOperation =
   | "initialize"
   | "begin_build"
   | "add_source_batch"
+  | "apply_source_changes"
   | "commit_build"
   | "abort_build"
   | "search"
@@ -32,6 +34,7 @@ export type WorkerErrorCode =
   | "source_rejected"
   | "query_rejected"
   | "index_building"
+  | "index_limit_exceeded"
   | "integrity_failed"
   | "worker_crashed"
   | "timeout"
@@ -60,6 +63,11 @@ export interface SourceInput {
   bytes: Uint8Array;
 }
 
+export interface SourceRemoval {
+  vault_id: string;
+  path: string;
+}
+
 interface RequestBase {
   version: typeof WORKER_PROTOCOL_VERSION;
   id: number;
@@ -72,6 +80,13 @@ export type WorkerRequest =
       operation: "add_source_batch";
       generation: string;
       sources: SourceInput[];
+    })
+  | (RequestBase & {
+      operation: "apply_source_changes";
+      generation: string;
+      next_generation: string | null;
+      upserts: SourceInput[];
+      removals: SourceRemoval[];
     })
   | (RequestBase & { operation: "commit_build"; generation: string })
   | (RequestBase & { operation: "abort_build"; generation: string })
@@ -192,6 +207,20 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
         && isSourceBatch(value.sources)
         ? value as unknown as WorkerRequest
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
+    case "apply_source_changes":
+      return hasExactKeys(value, [
+        ...base,
+        "generation",
+        "next_generation",
+        "upserts",
+        "removals",
+      ])
+        && isGeneration(value.generation)
+        && (value.next_generation === null || isGeneration(value.next_generation))
+        && value.next_generation !== value.generation
+        && isSourceChanges(value.upserts, value.removals)
+        ? value as unknown as WorkerRequest
+        : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "search":
       return hasExactKeys(value, [...base, "query", "limit"])
         && typeof value.query === "string"
@@ -237,8 +266,12 @@ export function isGeneration(value: unknown): value is string {
     && /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value);
 }
 
-function isSourceBatch(value: unknown): value is SourceInput[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_BATCH_SOURCES) return false;
+function isSourceBatch(value: unknown, allowEmpty = false): value is SourceInput[] {
+  if (!Array.isArray(value)
+    || (!allowEmpty && value.length < 1)
+    || value.length > MAX_BATCH_SOURCES) {
+    return false;
+  }
   let totalBytes = 0;
   for (const source of value) {
     if (!isRecord(source)
@@ -253,6 +286,42 @@ function isSourceBatch(value: unknown): value is SourceInput[] {
     if (totalBytes > MAX_BATCH_BYTES) return false;
   }
   return true;
+}
+
+function isSourceChanges(upserts: unknown, removals: unknown): boolean {
+  if (!isSourceBatch(upserts, true)
+    || !Array.isArray(removals)
+    || !removals.every(isSourceRemoval)
+    || upserts.length + removals.length < 1
+    || upserts.length + removals.length > MAX_SOURCE_CHANGES) {
+    return false;
+  }
+
+  const upsertIdentities = new Set<string>();
+  for (const source of upserts) {
+    const identity = sourceIdentity(source.descriptor.vault_id, source.descriptor.path);
+    if (upsertIdentities.has(identity)) return false;
+    upsertIdentities.add(identity);
+  }
+  const removalIdentities = new Set<string>();
+  for (const removal of removals) {
+    const identity = sourceIdentity(removal.vault_id, removal.path);
+    if (removalIdentities.has(identity) || upsertIdentities.has(identity)) return false;
+    removalIdentities.add(identity);
+  }
+  return true;
+}
+
+function isSourceRemoval(value: unknown): value is SourceRemoval {
+  return isRecord(value)
+    && hasExactKeys(value, ["vault_id", "path"])
+    && isBoundedString(value.vault_id, 1_024)
+    && value.vault_id.trim().length > 0
+    && isNormalizedVaultRelativePath(value.path);
+}
+
+function sourceIdentity(vaultId: string, path: string): string {
+  return JSON.stringify([vaultId, path]);
 }
 
 function isSourceDescriptor(value: unknown): value is SourceDescriptorInput {
@@ -277,6 +346,7 @@ function isResultForOperation(operation: WorkerOperation, value: unknown): boole
       return isInitializeResult(value);
     case "begin_build":
     case "add_source_batch":
+    case "apply_source_changes":
     case "commit_build":
     case "abort_build":
       return isBuildResult(value);
@@ -407,6 +477,7 @@ function isWorkerError(value: unknown): value is WorkerError {
     "source_rejected",
     "query_rejected",
     "index_building",
+    "index_limit_exceeded",
     "integrity_failed",
     "worker_crashed",
     "timeout",
@@ -420,6 +491,7 @@ function isWorkerOperation(value: unknown): value is WorkerOperation {
   return value === "initialize"
     || value === "begin_build"
     || value === "add_source_batch"
+    || value === "apply_source_changes"
     || value === "commit_build"
     || value === "abort_build"
     || value === "search"
@@ -439,6 +511,19 @@ function isBoundedString(value: unknown, maximum: number, allowEmpty = false): v
   return typeof value === "string"
     && value.length <= maximum
     && (allowEmpty || value.length > 0);
+}
+
+function isNormalizedVaultRelativePath(value: unknown): value is string {
+  if (!isBoundedString(value, 4_096)
+    || value.startsWith("/")
+    || value.endsWith("/")
+    || value.includes("\\")
+    || value.includes("\0")) {
+    return false;
+  }
+  return value.split("/").every(
+    (component) => component.length > 0 && component !== "." && component !== "..",
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
