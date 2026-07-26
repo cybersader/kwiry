@@ -1,0 +1,4581 @@
+{
+  "runner": "experiments/matrix.mjs",
+  "verdict": "PASS",
+  "verdict_basis": {
+    "cells_total": 12,
+    "cells_failed": 0,
+    "negative_controls_total": 3,
+    "negative_controls_failed": 0,
+    "failing": []
+  },
+  "provenance": {
+    "started_at": "2026-07-26T02:15:02.390Z",
+    "finished_at": "2026-07-26T02:16:09.988Z",
+    "node": "v24.12.0",
+    "platform": "linux-x64",
+    "runtime_glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4",
+    "runtime_wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+    "runtime_pins_asserted_in_every_cell": {
+      "wasm": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+      "wasm_bytes": 864752,
+      "glue": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+    },
+    "mechanism_order": [
+      "deserialize",
+      "vfs-deflate",
+      "vfs-plain"
+    ],
+    "harness_sha256": {
+      "experiments/matrix.mjs": "9433e7934a66d24a055d8a095fbdf270605956b670062a8a0545b7d8c647c45f",
+      "src/corpus.mjs": "346a032e1c1d9ce8d110b919e31529feae9f3d700c30e3e87f4c666ea06f88db",
+      "experiments/build.mjs": "cecfb825f35d962420354875ebce78c844a29e016ceb03c94d3e4ae5cf26ec27",
+      "experiments/build-baseline.mjs": "e104da36a0a7ad4735778c0c079507bb153e7989154e4409d7e524ce66c5a8a2",
+      "mechanisms/_block-file.mjs": "ebf41a37e3fe4452f02eaa47c2aefbbd0d9896a80b2df273ad9921d96bd2cfe5",
+      "mechanisms/_block-vfs.mjs": "3eca7f9e4de636bacc054fda1c8ee8f0f1b71170703e008fe139f6d606970d7c",
+      "mechanisms/_image-header.mjs": "eb2d37fc574f4e815170a652c914b05dde242fba596d1282db7f7fa0a6f8cbf9",
+      "mechanisms/deserialize.mjs": "383217a70b3d15145077124c09efb4519ded441918e3ab0e107d2000a144bdbb",
+      "mechanisms/vfs-deflate.mjs": "1ea2f1cd3c0bcdf9808aaf371e5ac9ff9c975d48300e84c11bb71fd994cac8b2",
+      "mechanisms/vfs-plain.mjs": "c83da84c258e7be60972e06c37b58046bed11569b6e454b4360e1e7a3a2eaede"
+    }
+  },
+  "options": {
+    "mechanisms_dir": "bench/fts5-export-restore/experiments/mechanisms",
+    "query_count": 200,
+    "lossless_probe": true,
+    "negative_control": true,
+    "compressed_sizes_measured": true,
+    "reversed_mechanism_order": false
+  },
+  "skipped_modules": [
+    {
+      "path": "bench/fts5-export-restore/experiments/mechanisms/_block-file.mjs",
+      "reason": "underscore-prefixed helper module"
+    },
+    {
+      "path": "bench/fts5-export-restore/experiments/mechanisms/_block-vfs.mjs",
+      "reason": "underscore-prefixed helper module"
+    },
+    {
+      "path": "bench/fts5-export-restore/experiments/mechanisms/_image-header.mjs",
+      "reason": "underscore-prefixed helper module"
+    }
+  ],
+  "notes": [
+    "One cell = one mechanism x one image in its own child process, killed before the next cell, so neither wasm growth nor host RSS leaks across cells.",
+    "Host RSS is sampled every 10 ms from OUTSIDE the measured process (/proc/<pid>/statm); rss_added is peak minus the floor of that same process.",
+    "stored_MiB is what the mechanism keeps resident: stats().resident_bytes / compressed_bytes for the block VFSes, measured wasm growth across open() for the deserialize family, null when neither is available. deflate64k_MiB is what a 64 KiB-block deflate cache format would cost for that image, measured here, independent of any mechanism.",
+    "wasm_peak_MiB is max(after_open, after_workload, after_export) — the export step is where sqlite3_js_db_export makes its second full in-wasm copy, so a floor taken before it understates the deserialize family.",
+    "A capability flag is Y only when a measured, non-vacuous property held (nonzero expected hits; snippet text CONTAINED; a present marker became absent; BM25 scores that both separate documents and reorder them). \"!\" marks a result that disagrees with what the schema shape should support.",
+    "The negative controls gate several corruption classes. Interior page damage in a right-length image is NOT detectable by the O(1) header guard and is recorded as a documented limitation, not a pass; the gated proof for that class is the opt-in { validate: \"quick\" } path."
+  ],
+  "builds": [],
+  "images": [
+    {
+      "name": "baseline",
+      "file": "baseline.db",
+      "builder": "build-baseline.mjs",
+      "path": "bench/fts5-export-restore/experiments/baseline.db",
+      "bytes": 104538112,
+      "MiB": 99.7,
+      "deflate64k_bytes": 53605058,
+      "deflate64k_MiB": 51.1
+    },
+    {
+      "name": "contentless",
+      "file": "contentless-8192.db",
+      "builder": "build.mjs",
+      "path": "bench/fts5-export-restore/experiments/contentless-8192.db",
+      "bytes": 48201728,
+      "MiB": 46,
+      "deflate64k_bytes": 24440754,
+      "deflate64k_MiB": 23.3
+    },
+    {
+      "name": "contentless-opt",
+      "file": "contentless-opt.db",
+      "builder": "build.mjs",
+      "path": "bench/fts5-export-restore/experiments/contentless-opt.db",
+      "bytes": 44023808,
+      "MiB": 42,
+      "deflate64k_bytes": 20691805,
+      "deflate64k_MiB": 19.7
+    },
+    {
+      "name": "slim",
+      "file": "slim.db",
+      "builder": "build.mjs",
+      "path": "bench/fts5-export-restore/experiments/slim.db",
+      "bytes": 37617664,
+      "MiB": 35.9,
+      "deflate64k_bytes": 19480602,
+      "deflate64k_MiB": 18.6
+    }
+  ],
+  "table": [
+    {
+      "mechanism": "deserialize",
+      "image": "baseline",
+      "image_MiB": 99.7,
+      "stored_MiB": 112.7,
+      "deflate64k_MiB": 51.1,
+      "open_ms": 52,
+      "queries_ms": 602.2,
+      "wasm_peak_MiB": 259.8,
+      "wasm_export_MiB": 259.8,
+      "export_ms": 40.1,
+      "rss_peak_MiB": 600.9,
+      "rss_added_MiB": 589.5,
+      "caps": "phrase:Y col:Y bm25:Y snip:Y del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "deserialize",
+      "image": "contentless",
+      "image_MiB": 46,
+      "stored_MiB": 48.2,
+      "deflate64k_MiB": 23.3,
+      "open_ms": 29.6,
+      "queries_ms": 603.8,
+      "wasm_peak_MiB": 113.4,
+      "wasm_export_MiB": 113.4,
+      "export_ms": 23,
+      "rss_peak_MiB": 333.9,
+      "rss_added_MiB": 333.1,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "deserialize",
+      "image": "contentless-opt",
+      "image_MiB": 42,
+      "stored_MiB": 43.4,
+      "deflate64k_MiB": 19.7,
+      "open_ms": 27.1,
+      "queries_ms": 593.9,
+      "wasm_peak_MiB": 170.1,
+      "wasm_export_MiB": 170.1,
+      "export_ms": 29.6,
+      "rss_peak_MiB": 334.2,
+      "rss_added_MiB": 333.5,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "deserialize",
+      "image": "slim",
+      "image_MiB": 35.9,
+      "stored_MiB": 36.1,
+      "deflate64k_MiB": 18.6,
+      "open_ms": 26.4,
+      "queries_ms": 600.1,
+      "wasm_peak_MiB": 145.6,
+      "wasm_export_MiB": 145.6,
+      "export_ms": 25.2,
+      "rss_peak_MiB": 300.9,
+      "rss_added_MiB": 299.9,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "image": "baseline",
+      "image_MiB": 99.7,
+      "stored_MiB": 55.5,
+      "deflate64k_MiB": 51.1,
+      "open_ms": 2491.9,
+      "queries_ms": 581.2,
+      "wasm_peak_MiB": 20.1,
+      "wasm_export_MiB": 20.1,
+      "export_ms": 352.2,
+      "rss_peak_MiB": 533.2,
+      "rss_added_MiB": 532.5,
+      "caps": "phrase:Y col:Y bm25:Y snip:Y del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "image": "contentless",
+      "image_MiB": 46,
+      "stored_MiB": 27.7,
+      "deflate64k_MiB": 23.3,
+      "open_ms": 1417.6,
+      "queries_ms": 607.1,
+      "wasm_peak_MiB": 20.1,
+      "wasm_export_MiB": 20.1,
+      "export_ms": 163.3,
+      "rss_peak_MiB": 335,
+      "rss_added_MiB": 334.3,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "image": "contentless-opt",
+      "image_MiB": 42,
+      "stored_MiB": 23.9,
+      "deflate64k_MiB": 19.7,
+      "open_ms": 1396.5,
+      "queries_ms": 605.3,
+      "wasm_peak_MiB": 20.1,
+      "wasm_export_MiB": 20.1,
+      "export_ms": 143,
+      "rss_peak_MiB": 320.2,
+      "rss_added_MiB": 319.2,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "image": "slim",
+      "image_MiB": 35.9,
+      "stored_MiB": 22.8,
+      "deflate64k_MiB": 18.6,
+      "open_ms": 1329.5,
+      "queries_ms": 616.8,
+      "wasm_peak_MiB": 20.1,
+      "wasm_export_MiB": 20.1,
+      "export_ms": 127.9,
+      "rss_peak_MiB": 300.3,
+      "rss_added_MiB": 298.9,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "image": "baseline",
+      "image_MiB": 99.7,
+      "stored_MiB": 99.7,
+      "deflate64k_MiB": 51.1,
+      "open_ms": 59.5,
+      "queries_ms": 607.2,
+      "wasm_peak_MiB": 20.1,
+      "wasm_export_MiB": 20.1,
+      "export_ms": 36.8,
+      "rss_peak_MiB": 568.3,
+      "rss_added_MiB": 567.5,
+      "caps": "phrase:Y col:Y bm25:Y snip:Y del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "image": "contentless",
+      "image_MiB": 46,
+      "stored_MiB": 46,
+      "deflate64k_MiB": 23.3,
+      "open_ms": 34.1,
+      "queries_ms": 607.8,
+      "wasm_peak_MiB": 20.1,
+      "wasm_export_MiB": 20.1,
+      "export_ms": 19.9,
+      "rss_peak_MiB": 331.1,
+      "rss_added_MiB": 330.4,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "image": "contentless-opt",
+      "image_MiB": 42,
+      "stored_MiB": 42,
+      "deflate64k_MiB": 19.7,
+      "open_ms": 31.4,
+      "queries_ms": 602.8,
+      "wasm_peak_MiB": 20.1,
+      "wasm_export_MiB": 20.1,
+      "export_ms": 15.7,
+      "rss_peak_MiB": 293.6,
+      "rss_added_MiB": 292.9,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "image": "slim",
+      "image_MiB": 35.9,
+      "stored_MiB": 35.9,
+      "deflate64k_MiB": 18.6,
+      "open_ms": 29.2,
+      "queries_ms": 611.8,
+      "wasm_peak_MiB": 20.1,
+      "wasm_export_MiB": 20.1,
+      "export_ms": 13.1,
+      "rss_peak_MiB": 253.3,
+      "rss_added_MiB": 252.5,
+      "caps": "phrase:Y col:Y bm25:Y snip:N del:Y ins:Y",
+      "verdict": "PASS"
+    }
+  ],
+  "negative_table": [
+    {
+      "mechanism": "deserialize",
+      "control": "intact_image",
+      "expect": "accept",
+      "outcome": "opened, rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "intact_image_quick_validate",
+      "expect": "accept",
+      "outcome": "opened, rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "unaligned_truncation",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "truncated SQLite image: 12539221 bytes is not a multiple of page size "
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "page_aligned_truncation",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "truncated SQLite image: header declares 4592 pages x 8192 = 37617664 b"
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "header_magic_flip",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "not a SQLite image: header magic mismatch at byte 3"
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "illegal_page_size",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: illegal page size 3"
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "midfile_pages_zeroed",
+      "expect": "documented-limitation",
+      "outcome": "opened, rows=20166",
+      "gated": "not gated",
+      "detail": "right length, intact header, 16 interior pages zeroed"
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "midfile_pages_zeroed_quick_validate",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: PRAGMA quick_check reported *** in database main"
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "midfile_pages_garbage",
+      "expect": "documented-limitation",
+      "outcome": "opened, rows=20166",
+      "gated": "not gated",
+      "detail": "right length, intact header, 16 interior pages overwritten"
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "midfile_pages_garbage_quick_validate",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: PRAGMA quick_check reported *** in database main"
+    },
+    {
+      "mechanism": "deserialize",
+      "control": "reopen_after_failures",
+      "expect": "accept",
+      "outcome": "rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "intact_image",
+      "expect": "accept",
+      "outcome": "opened, rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "intact_image_quick_validate",
+      "expect": "accept",
+      "outcome": "opened, rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "unaligned_truncation",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "truncated SQLite image: 12539221 bytes is not a multiple of page size "
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "page_aligned_truncation",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "truncated SQLite image: header declares 4592 pages x 8192 = 37617664 b"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "header_magic_flip",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "not a SQLite image: header magic mismatch at byte 3"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "illegal_page_size",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: illegal page size 3"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "midfile_pages_zeroed",
+      "expect": "documented-limitation",
+      "outcome": "opened, rows=20166",
+      "gated": "not gated",
+      "detail": "right length, intact header, 16 interior pages zeroed"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "midfile_pages_zeroed_quick_validate",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: PRAGMA quick_check reported *** in database main"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "midfile_pages_garbage",
+      "expect": "documented-limitation",
+      "outcome": "opened, rows=20166",
+      "gated": "not gated",
+      "detail": "right length, intact header, 16 interior pages overwritten"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "midfile_pages_garbage_quick_validate",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: PRAGMA quick_check reported *** in database main"
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "control": "reopen_after_failures",
+      "expect": "accept",
+      "outcome": "rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "intact_image",
+      "expect": "accept",
+      "outcome": "opened, rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "intact_image_quick_validate",
+      "expect": "accept",
+      "outcome": "opened, rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "unaligned_truncation",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "truncated SQLite image: 12539221 bytes is not a multiple of page size "
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "page_aligned_truncation",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "truncated SQLite image: header declares 4592 pages x 8192 = 37617664 b"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "header_magic_flip",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "not a SQLite image: header magic mismatch at byte 3"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "illegal_page_size",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: illegal page size 3"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "midfile_pages_zeroed",
+      "expect": "documented-limitation",
+      "outcome": "opened, rows=20166",
+      "gated": "not gated",
+      "detail": "right length, intact header, 16 interior pages zeroed"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "midfile_pages_zeroed_quick_validate",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: PRAGMA quick_check reported *** in database main"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "midfile_pages_garbage",
+      "expect": "documented-limitation",
+      "outcome": "opened, rows=20166",
+      "gated": "not gated",
+      "detail": "right length, intact header, 16 interior pages overwritten"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "midfile_pages_garbage_quick_validate",
+      "expect": "reject",
+      "outcome": "open() threw",
+      "gated": "PASS",
+      "detail": "corrupt SQLite image: PRAGMA quick_check reported *** in database main"
+    },
+    {
+      "mechanism": "vfs-plain",
+      "control": "reopen_after_failures",
+      "expect": "accept",
+      "outcome": "rows=20166",
+      "gated": "PASS",
+      "detail": ""
+    }
+  ],
+  "cells": [
+    {
+      "mechanism": "deserialize",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/deserialize.mjs",
+      "image": "baseline",
+      "image_file": "baseline.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "deserialize",
+          "family": "deserialize",
+          "notes": "sqlite3_deserialize(FREEONCLOSE|RESIZEABLE) on an :memory: handle, as in src/worker.mjs deserializeInto. Image lives inside wasm linear memory; exportBlob() uses sqlite3_js_db_export, which allocates a second full copy inside wasm before slicing to JS. No pragmas are applied, so the handle matches the production restore worker byte for byte. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 104538112,
+        "image_sha256": "693216d0e7be67c08c728707ca05e5985c895111ff8800ad75261b4123d867fb",
+        "stored_bytes": 118161408,
+        "stored_source": "measured wasm growth across open() (after_open - after_init)",
+        "mechanism_stats": {
+          "mechanism": "deserialize",
+          "image_bytes": 104538112,
+          "page_size": 8192,
+          "page_count": 12761,
+          "wal": false
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='chunks', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2')",
+          "contentless": false,
+          "external_content": true,
+          "contentless_delete": false,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": [
+            "chunks_ai"
+          ]
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": true,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 22.7,
+          "open_ms": 52,
+          "queries_ms": 602.2,
+          "export_ms": 40.1
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 126550016,
+          "after_workload_bytes": 227016704,
+          "after_export_bytes": 272433152,
+          "peak_bytes": 272433152,
+          "after_close_bytes": 272433152,
+          "after_reopen_probe_bytes": 272433152
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.011
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": true,
+            "detail": {
+              "snippet": "…lcnk jcpongv lkbylgx pepahi nydarijqpwh\n\nzeta0term [appears exactly here]\n\ntracked as CVE-2026-1000\n\nsee [[note…"
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "external-content-delete-command"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "content-table-insert-via-trigger"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 69.9,
+          "bytes": 104538112,
+          "byte_identical_to_input": true,
+          "sha256": "693216d0e7be67c08c728707ca05e5985c895111ff8800ad75261b4123d867fb",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 104538112,
+          "sha256": "4aed44c801a8c4d50e9c9ea813586106a664813a1d1edb8b10fa929be91b4da7",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 2669,
+      "rss": {
+        "floor": 11907072,
+        "peak": 630038528,
+        "samples": 264,
+        "source": "/proc/1464611/statm",
+        "added": 618131456
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "deserialize",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/deserialize.mjs",
+      "image": "contentless",
+      "image_file": "contentless-8192.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "deserialize",
+          "family": "deserialize",
+          "notes": "sqlite3_deserialize(FREEONCLOSE|RESIZEABLE) on an :memory: handle, as in src/worker.mjs deserializeInto. Image lives inside wasm linear memory; exportBlob() uses sqlite3_js_db_export, which allocates a second full copy inside wasm before slicing to JS. No pragmas are applied, so the handle matches the production restore worker byte for byte. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 48201728,
+        "image_sha256": "849012036b722ccfa6052a2002d391656a70b2c109c7e9e54c622a8d81958363",
+        "stored_bytes": 50528256,
+        "stored_source": "measured wasm growth across open() (after_open - after_init)",
+        "mechanism_stats": {
+          "mechanism": "deserialize",
+          "image_bytes": 48201728,
+          "page_size": 8192,
+          "page_count": 5884,
+          "wal": false
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 18.8,
+          "open_ms": 29.6,
+          "queries_ms": 603.8,
+          "export_ms": 23
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 58916864,
+          "after_workload_bytes": 99024896,
+          "after_export_bytes": 118882304,
+          "peak_bytes": 118882304,
+          "after_close_bytes": 118882304,
+          "after_reopen_probe_bytes": 118882304
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.019
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 33.4,
+          "bytes": 48201728,
+          "byte_identical_to_input": true,
+          "sha256": "849012036b722ccfa6052a2002d391656a70b2c109c7e9e54c622a8d81958363",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 48201728,
+          "sha256": "649d6eed6a7e142c28ef61b15c8b82316054f5b93d19e150e86bd97d226ca4ec",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 2211,
+      "rss": {
+        "floor": 802816,
+        "peak": 350134272,
+        "samples": 219,
+        "source": "/proc/1464662/statm",
+        "added": 349331456
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "deserialize",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/deserialize.mjs",
+      "image": "contentless-opt",
+      "image_file": "contentless-opt.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "deserialize",
+          "family": "deserialize",
+          "notes": "sqlite3_deserialize(FREEONCLOSE|RESIZEABLE) on an :memory: handle, as in src/worker.mjs deserializeInto. Image lives inside wasm linear memory; exportBlob() uses sqlite3_js_db_export, which allocates a second full copy inside wasm before slicing to JS. No pragmas are applied, so the handle matches the production restore worker byte for byte. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 44023808,
+        "image_sha256": "21bf1012b8bfe3d4c68a04ad2cee900610a6bf290e6237e0a8e9588b74da26cc",
+        "stored_bytes": 45481984,
+        "stored_source": "measured wasm growth across open() (after_open - after_init)",
+        "mechanism_stats": {
+          "mechanism": "deserialize",
+          "image_bytes": 44023808,
+          "page_size": 8192,
+          "page_count": 5374,
+          "wal": false
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 20.4,
+          "open_ms": 27.1,
+          "queries_ms": 593.9,
+          "export_ms": 29.6
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 53870592,
+          "after_workload_bytes": 134283264,
+          "after_export_bytes": 178323456,
+          "peak_bytes": 178323456,
+          "after_close_bytes": 178323456,
+          "after_reopen_probe_bytes": 178323456
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 2.97
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 31.6,
+          "bytes": 44023808,
+          "byte_identical_to_input": true,
+          "sha256": "21bf1012b8bfe3d4c68a04ad2cee900610a6bf290e6237e0a8e9588b74da26cc",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 44032000,
+          "sha256": "6b628ebf85173e3706370ed0bf1f8c59bd16c2353e674ea227dad9d3ce055203",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 2115,
+      "rss": {
+        "floor": 765952,
+        "peak": 350420992,
+        "samples": 209,
+        "source": "/proc/1464680/statm",
+        "added": 349655040
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "deserialize",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/deserialize.mjs",
+      "image": "slim",
+      "image_file": "slim.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "deserialize",
+          "family": "deserialize",
+          "notes": "sqlite3_deserialize(FREEONCLOSE|RESIZEABLE) on an :memory: handle, as in src/worker.mjs deserializeInto. Image lives inside wasm linear memory; exportBlob() uses sqlite3_js_db_export, which allocates a second full copy inside wasm before slicing to JS. No pragmas are applied, so the handle matches the production restore worker byte for byte. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 37617664,
+        "image_sha256": "385480ff8a3516d49b4c952194bf7b15915c0898afbbeabbefe38cc40588d749",
+        "stored_bytes": 37814272,
+        "stored_source": "measured wasm growth across open() (after_open - after_init)",
+        "mechanism_stats": {
+          "mechanism": "deserialize",
+          "image_bytes": 37617664,
+          "page_size": 8192,
+          "page_count": 4592,
+          "wal": false
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 22.2,
+          "open_ms": 26.4,
+          "queries_ms": 600.1,
+          "export_ms": 25.2
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 46202880,
+          "after_workload_bytes": 115081216,
+          "after_export_bytes": 152698880,
+          "peak_bytes": 152698880,
+          "after_close_bytes": 152698880,
+          "after_reopen_probe_bytes": 152698880
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.001
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 26,
+          "bytes": 37617664,
+          "byte_identical_to_input": true,
+          "sha256": "385480ff8a3516d49b4c952194bf7b15915c0898afbbeabbefe38cc40588d749",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 37625856,
+          "sha256": "fd4ee8c6691ba8c74c06d0f6c194ff7a9b257123183a476e2c792f3acef3d9b9",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 2057,
+      "rss": {
+        "floor": 1040384,
+        "peak": 315478016,
+        "samples": 205,
+        "source": "/proc/1464695/statm",
+        "added": 314437632
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-deflate.mjs",
+      "image": "baseline",
+      "image_file": "baseline.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "vfs-deflate",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by deflateRawSync-compressed JS-side blocks (default 64 KiB, level 6) with an LRU of inflated blocks (default 64). Dirty blocks are stored uncompressed via copy-on-write. Applies PRAGMA journal_mode=MEMORY. exportBlob() reassembles from JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. Node-only (node:zlib). WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 104538112,
+        "image_sha256": "693216d0e7be67c08c728707ca05e5985c895111ff8800ad75261b4123d867fb",
+        "stored_bytes": 58162496,
+        "stored_source": "mechanism stats().resident_bytes",
+        "mechanism_stats": {
+          "mechanism": "vfs-deflate",
+          "block_size": 65536,
+          "lru_blocks": 64,
+          "level": 6,
+          "compressed_blocks": 1584,
+          "dirty_blocks": 12,
+          "lru_resident": 64,
+          "compressed_bytes": 53239104,
+          "resident_bytes": 58162496,
+          "file_bytes": 104538112,
+          "block_reads": 66030,
+          "block_writes": 22,
+          "inflates": 21418,
+          "lru_hits": 47461,
+          "vfs_name": "kwir-blk-zip-1-eqllqc"
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='chunks', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2')",
+          "contentless": false,
+          "external_content": true,
+          "contentless_delete": false,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": [
+            "chunks_ai"
+          ]
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": true,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 18.8,
+          "open_ms": 2491.9,
+          "queries_ms": 581.2,
+          "export_ms": 352.2
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 8388608,
+          "after_workload_bytes": 21037056,
+          "after_export_bytes": 21037056,
+          "peak_bytes": 21037056,
+          "after_close_bytes": 21037056,
+          "after_reopen_probe_bytes": 21037056
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 2.906
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": true,
+            "detail": {
+              "snippet": "…lcnk jcpongv lkbylgx pepahi nydarijqpwh\n\nzeta0term [appears exactly here]\n\ntracked as CVE-2026-1000\n\nsee [[note…"
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "external-content-delete-command"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "content-table-insert-via-trigger"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 354.2,
+          "bytes": 104538112,
+          "byte_identical_to_input": true,
+          "sha256": "693216d0e7be67c08c728707ca05e5985c895111ff8800ad75261b4123d867fb",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 104538112,
+          "sha256": "4aed44c801a8c4d50e9c9ea813586106a664813a1d1edb8b10fa929be91b4da7",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 12393,
+      "rss": {
+        "floor": 790528,
+        "peak": 559132672,
+        "samples": 1230,
+        "source": "/proc/1464876/statm",
+        "added": 558342144
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-deflate.mjs",
+      "image": "contentless",
+      "image_file": "contentless-8192.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "vfs-deflate",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by deflateRawSync-compressed JS-side blocks (default 64 KiB, level 6) with an LRU of inflated blocks (default 64). Dirty blocks are stored uncompressed via copy-on-write. Applies PRAGMA journal_mode=MEMORY. exportBlob() reassembles from JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. Node-only (node:zlib). WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 48201728,
+        "image_sha256": "849012036b722ccfa6052a2002d391656a70b2c109c7e9e54c622a8d81958363",
+        "stored_bytes": 29083601,
+        "stored_source": "mechanism stats().resident_bytes",
+        "mechanism_stats": {
+          "mechanism": "vfs-deflate",
+          "block_size": 65536,
+          "lru_blocks": 64,
+          "level": 6,
+          "compressed_blocks": 724,
+          "dirty_blocks": 12,
+          "lru_resident": 64,
+          "compressed_bytes": 24102865,
+          "resident_bytes": 29083601,
+          "file_bytes": 48201728,
+          "block_reads": 36205,
+          "block_writes": 14,
+          "inflates": 9186,
+          "lru_hits": 28108,
+          "vfs_name": "kwir-blk-zip-1-ei3h21"
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 21.8,
+          "open_ms": 1417.6,
+          "queries_ms": 607.1,
+          "export_ms": 163.3
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 8388608,
+          "after_workload_bytes": 21037056,
+          "after_export_bytes": 21037056,
+          "peak_bytes": 21037056,
+          "after_close_bytes": 21037056,
+          "after_reopen_probe_bytes": 21037056
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.036
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 174.4,
+          "bytes": 48201728,
+          "byte_identical_to_input": true,
+          "sha256": "849012036b722ccfa6052a2002d391656a70b2c109c7e9e54c622a8d81958363",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 48201728,
+          "sha256": "649d6eed6a7e142c28ef61b15c8b82316054f5b93d19e150e86bd97d226ca4ec",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 6877,
+      "rss": {
+        "floor": 806912,
+        "peak": 351318016,
+        "samples": 680,
+        "source": "/proc/1464953/statm",
+        "added": 350511104
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-deflate.mjs",
+      "image": "contentless-opt",
+      "image_file": "contentless-opt.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "vfs-deflate",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by deflateRawSync-compressed JS-side blocks (default 64 KiB, level 6) with an LRU of inflated blocks (default 64). Dirty blocks are stored uncompressed via copy-on-write. Applies PRAGMA journal_mode=MEMORY. exportBlob() reassembles from JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. Node-only (node:zlib). WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 44023808,
+        "image_sha256": "21bf1012b8bfe3d4c68a04ad2cee900610a6bf290e6237e0a8e9588b74da26cc",
+        "stored_bytes": 25105709,
+        "stored_source": "mechanism stats().resident_bytes",
+        "mechanism_stats": {
+          "mechanism": "vfs-deflate",
+          "block_size": 65536,
+          "lru_blocks": 64,
+          "level": 6,
+          "compressed_blocks": 667,
+          "dirty_blocks": 5,
+          "lru_resident": 64,
+          "compressed_bytes": 20583725,
+          "resident_bytes": 25105709,
+          "file_bytes": 44032000,
+          "block_reads": 34328,
+          "block_writes": 12,
+          "inflates": 5618,
+          "lru_hits": 29930,
+          "vfs_name": "kwir-blk-zip-1-2d3ou5"
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 20.9,
+          "open_ms": 1396.5,
+          "queries_ms": 605.3,
+          "export_ms": 143
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 8388608,
+          "after_workload_bytes": 21037056,
+          "after_export_bytes": 21037056,
+          "peak_bytes": 21037056,
+          "after_close_bytes": 21037056,
+          "after_reopen_probe_bytes": 21037056
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.026
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 158.3,
+          "bytes": 44023808,
+          "byte_identical_to_input": true,
+          "sha256": "21bf1012b8bfe3d4c68a04ad2cee900610a6bf290e6237e0a8e9588b74da26cc",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 44032000,
+          "sha256": "6b628ebf85173e3706370ed0bf1f8c59bd16c2353e674ea227dad9d3ce055203",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 6014,
+      "rss": {
+        "floor": 1060864,
+        "peak": 335798272,
+        "samples": 594,
+        "source": "/proc/1465071/statm",
+        "added": 334737408
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-deflate.mjs",
+      "image": "slim",
+      "image_file": "slim.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "vfs-deflate",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by deflateRawSync-compressed JS-side blocks (default 64 KiB, level 6) with an LRU of inflated blocks (default 64). Dirty blocks are stored uncompressed via copy-on-write. Applies PRAGMA journal_mode=MEMORY. exportBlob() reassembles from JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. Node-only (node:zlib). WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 37617664,
+        "image_sha256": "385480ff8a3516d49b4c952194bf7b15915c0898afbbeabbefe38cc40588d749",
+        "stored_bytes": 23949422,
+        "stored_source": "mechanism stats().resident_bytes",
+        "mechanism_stats": {
+          "mechanism": "vfs-deflate",
+          "block_size": 65536,
+          "lru_blocks": 64,
+          "level": 6,
+          "compressed_blocks": 569,
+          "dirty_blocks": 6,
+          "lru_resident": 64,
+          "compressed_bytes": 19361902,
+          "resident_bytes": 23949422,
+          "file_bytes": 37625856,
+          "block_reads": 31200,
+          "block_writes": 12,
+          "inflates": 5026,
+          "lru_hits": 27194,
+          "vfs_name": "kwir-blk-zip-1-uphofx"
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 21.1,
+          "open_ms": 1329.5,
+          "queries_ms": 616.8,
+          "export_ms": 127.9
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 8388608,
+          "after_workload_bytes": 21037056,
+          "after_export_bytes": 21037056,
+          "peak_bytes": 21037056,
+          "after_close_bytes": 21037056,
+          "after_reopen_probe_bytes": 21037056
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.084
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 143.9,
+          "bytes": 37617664,
+          "byte_identical_to_input": true,
+          "sha256": "385480ff8a3516d49b4c952194bf7b15915c0898afbbeabbefe38cc40588d749",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 37625856,
+          "sha256": "fd4ee8c6691ba8c74c06d0f6c194ff7a9b257123183a476e2c792f3acef3d9b9",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 5780,
+      "rss": {
+        "floor": 1449984,
+        "peak": 314867712,
+        "samples": 572,
+        "source": "/proc/1465121/statm",
+        "added": 313417728
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-plain",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-plain.mjs",
+      "image": "baseline",
+      "image_file": "baseline.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "vfs-plain",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by uncompressed JS-side blocks (default 64 KiB) held outside wasm linear memory. Applies PRAGMA journal_mode=MEMORY (as in experiments/vfs.mjs) so rollback journals never round-trip through the block store. exportBlob() concatenates the JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 104538112,
+        "image_sha256": "693216d0e7be67c08c728707ca05e5985c895111ff8800ad75261b4123d867fb",
+        "stored_bytes": 104538112,
+        "stored_source": "mechanism stats().resident_bytes",
+        "mechanism_stats": {
+          "mechanism": "vfs-plain",
+          "block_size": 65536,
+          "blocks": 1596,
+          "resident_bytes": 104538112,
+          "file_bytes": 104538112,
+          "block_reads": 66030,
+          "block_writes": 22,
+          "vfs_name": "kwir-blk-plain-1-kvzxbk"
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='chunks', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2')",
+          "contentless": false,
+          "external_content": true,
+          "contentless_delete": false,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": [
+            "chunks_ai"
+          ]
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": true,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 18.6,
+          "open_ms": 59.5,
+          "queries_ms": 607.2,
+          "export_ms": 36.8
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 8388608,
+          "after_workload_bytes": 21037056,
+          "after_export_bytes": 21037056,
+          "peak_bytes": 21037056,
+          "after_close_bytes": 21037056,
+          "after_reopen_probe_bytes": 21037056
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.036
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": true,
+            "detail": {
+              "snippet": "…lcnk jcpongv lkbylgx pepahi nydarijqpwh\n\nzeta0term [appears exactly here]\n\ntracked as CVE-2026-1000\n\nsee [[note…"
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "external-content-delete-command"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "content-table-insert-via-trigger"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 36.7,
+          "bytes": 104538112,
+          "byte_identical_to_input": true,
+          "sha256": "693216d0e7be67c08c728707ca05e5985c895111ff8800ad75261b4123d867fb",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 104538112,
+          "sha256": "4aed44c801a8c4d50e9c9ea813586106a664813a1d1edb8b10fa929be91b4da7",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 2761,
+      "rss": {
+        "floor": 806912,
+        "peak": 595865600,
+        "samples": 275,
+        "source": "/proc/1465278/statm",
+        "added": 595058688
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-plain",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-plain.mjs",
+      "image": "contentless",
+      "image_file": "contentless-8192.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "vfs-plain",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by uncompressed JS-side blocks (default 64 KiB) held outside wasm linear memory. Applies PRAGMA journal_mode=MEMORY (as in experiments/vfs.mjs) so rollback journals never round-trip through the block store. exportBlob() concatenates the JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 48201728,
+        "image_sha256": "849012036b722ccfa6052a2002d391656a70b2c109c7e9e54c622a8d81958363",
+        "stored_bytes": 48234496,
+        "stored_source": "mechanism stats().resident_bytes",
+        "mechanism_stats": {
+          "mechanism": "vfs-plain",
+          "block_size": 65536,
+          "blocks": 736,
+          "resident_bytes": 48234496,
+          "file_bytes": 48201728,
+          "block_reads": 36205,
+          "block_writes": 14,
+          "vfs_name": "kwir-blk-plain-1-ca4zmu"
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 23.7,
+          "open_ms": 34.1,
+          "queries_ms": 607.8,
+          "export_ms": 19.9
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 8388608,
+          "after_workload_bytes": 21037056,
+          "after_export_bytes": 21037056,
+          "peak_bytes": 21037056,
+          "after_close_bytes": 21037056,
+          "after_reopen_probe_bytes": 21037056
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.039
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 18.7,
+          "bytes": 48201728,
+          "byte_identical_to_input": true,
+          "sha256": "849012036b722ccfa6052a2002d391656a70b2c109c7e9e54c622a8d81958363",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 48201728,
+          "sha256": "649d6eed6a7e142c28ef61b15c8b82316054f5b93d19e150e86bd97d226ca4ec",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 2245,
+      "rss": {
+        "floor": 802816,
+        "peak": 347234304,
+        "samples": 224,
+        "source": "/proc/1465305/statm",
+        "added": 346431488
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-plain",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-plain.mjs",
+      "image": "contentless-opt",
+      "image_file": "contentless-opt.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "vfs-plain",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by uncompressed JS-side blocks (default 64 KiB) held outside wasm linear memory. Applies PRAGMA journal_mode=MEMORY (as in experiments/vfs.mjs) so rollback journals never round-trip through the block store. exportBlob() concatenates the JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 44023808,
+        "image_sha256": "21bf1012b8bfe3d4c68a04ad2cee900610a6bf290e6237e0a8e9588b74da26cc",
+        "stored_bytes": 44040192,
+        "stored_source": "mechanism stats().resident_bytes",
+        "mechanism_stats": {
+          "mechanism": "vfs-plain",
+          "block_size": 65536,
+          "blocks": 672,
+          "resident_bytes": 44040192,
+          "file_bytes": 44032000,
+          "block_reads": 34328,
+          "block_writes": 12,
+          "vfs_name": "kwir-blk-plain-1-ch8vy7"
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "vault_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_path_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "frontmatter_json",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunking_version",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "filename",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "stem",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "aliases",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "title",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "heading_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path_text",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "tags",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "identifiers",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 19.8,
+          "open_ms": 31.4,
+          "queries_ms": 602.8,
+          "export_ms": 15.7
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 8388608,
+          "after_workload_bytes": 21037056,
+          "after_export_bytes": 21037056,
+          "peak_bytes": 21037056,
+          "after_close_bytes": 21037056,
+          "after_reopen_probe_bytes": 21037056
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.014
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 18.5,
+          "bytes": 44023808,
+          "byte_identical_to_input": true,
+          "sha256": "21bf1012b8bfe3d4c68a04ad2cee900610a6bf290e6237e0a8e9588b74da26cc",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 44032000,
+          "sha256": "6b628ebf85173e3706370ed0bf1f8c59bd16c2353e674ea227dad9d3ce055203",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 2142,
+      "rss": {
+        "floor": 765952,
+        "peak": 307859456,
+        "samples": 212,
+        "source": "/proc/1465330/statm",
+        "added": 307093504
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-plain",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-plain.mjs",
+      "image": "slim",
+      "image_file": "slim.db",
+      "result": {
+        "kind": "standard",
+        "mechanism": {
+          "name": "vfs-plain",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by uncompressed JS-side blocks (default 64 KiB) held outside wasm linear memory. Applies PRAGMA journal_mode=MEMORY (as in experiments/vfs.mjs) so rollback journals never round-trip through the block store. exportBlob() concatenates the JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "runtime_pins": {
+          "wasm_sha256": "02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312",
+          "glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+        },
+        "image_bytes": 37617664,
+        "image_sha256": "385480ff8a3516d49b4c952194bf7b15915c0898afbbeabbefe38cc40588d749",
+        "stored_bytes": 37683200,
+        "stored_source": "mechanism stats().resident_bytes",
+        "mechanism_stats": {
+          "mechanism": "vfs-plain",
+          "block_size": 65536,
+          "blocks": 575,
+          "resident_bytes": 37683200,
+          "file_bytes": 37625856,
+          "block_reads": 31200,
+          "block_writes": 12,
+          "vfs_name": "kwir-blk-plain-1-weiof2"
+        },
+        "row_count": 20166,
+        "schema": {
+          "fts_sql": "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename, stem, aliases, title, heading_text, path_text, tags, content, identifiers, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2')",
+          "contentless": true,
+          "external_content": false,
+          "contentless_delete": true,
+          "detail": "full",
+          "fts_columns": [
+            "filename",
+            "stem",
+            "aliases",
+            "title",
+            "heading_text",
+            "path_text",
+            "tags",
+            "content",
+            "identifiers"
+          ],
+          "content_column_index": 7,
+          "meta_columns": [
+            {
+              "name": "rowid",
+              "type": "INTEGER",
+              "notnull": false,
+              "pk": true
+            },
+            {
+              "name": "source_key",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "chunk_id",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "path",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "mtime",
+              "type": "INTEGER",
+              "notnull": true,
+              "pk": false
+            },
+            {
+              "name": "content_hash",
+              "type": "TEXT",
+              "notnull": true,
+              "pk": false
+            }
+          ],
+          "triggers": []
+        },
+        "expected_capabilities": {
+          "phrase": true,
+          "column_filter": true,
+          "bm25_rank": true,
+          "snippet": false,
+          "delete_then_absent": true,
+          "insert_then_visible": true
+        },
+        "unexpected_capability_passes": [],
+        "timings": {
+          "runtime_init_ms": 21,
+          "open_ms": 29.2,
+          "queries_ms": 611.8,
+          "export_ms": 13.1
+        },
+        "wasm": {
+          "after_init_bytes": 8388608,
+          "after_open_bytes": 8388608,
+          "after_workload_bytes": 21037056,
+          "after_export_bytes": 21037056,
+          "peak_bytes": 21037056,
+          "after_close_bytes": 21037056,
+          "after_reopen_probe_bytes": 21037056
+        },
+        "queries": {
+          "count": 200,
+          "hits": 2500,
+          "per_query_ms": 3.059
+        },
+        "queries_non_vacuous": true,
+        "checks": [
+          {
+            "name": "phrase",
+            "pass": true,
+            "detail": {
+              "hits": 40
+            },
+            "error": null
+          },
+          {
+            "name": "column_filter",
+            "pass": true,
+            "detail": {
+              "hits": 1981
+            },
+            "error": null
+          },
+          {
+            "name": "bm25_rank",
+            "pass": true,
+            "detail": {
+              "rows": 20,
+              "best": -4.408570775428119,
+              "worst": -4.403043622073948,
+              "distinct_scores": 2,
+              "reorders_vs_natural": true
+            },
+            "error": null
+          },
+          {
+            "name": "snippet",
+            "pass": false,
+            "detail": {
+              "snippet": null
+            },
+            "error": null
+          },
+          {
+            "name": "delete_then_absent",
+            "pass": true,
+            "detail": {
+              "before": 1,
+              "after": 0,
+              "rowid": 1,
+              "via": "contentless-delete"
+            },
+            "error": null
+          },
+          {
+            "name": "insert_then_visible",
+            "pass": true,
+            "detail": {
+              "before": 0,
+              "after": 1,
+              "via": "contentless-fts-insert"
+            },
+            "error": null
+          }
+        ],
+        "checks_derived": {
+          "interface_conforms": true,
+          "runtime_pinned": true,
+          "rows_present": true,
+          "queries_non_vacuous": true,
+          "capabilities_match_expectation": true,
+          "lossless_export_byte_identical": true,
+          "autocommit_before_lossless_export": true,
+          "autocommit_before_export": true,
+          "export_differs_after_mutation": true,
+          "reopen_exported_ok": true,
+          "integrity_strong_ok": true,
+          "integrity_plain_ok": true,
+          "integrity_pragma_ok": true,
+          "stored_bytes_measured": true
+        },
+        "failed_checks": [],
+        "pass": true,
+        "lossless_export_probe": {
+          "export_ms": 14,
+          "bytes": 37617664,
+          "byte_identical_to_input": true,
+          "sha256": "385480ff8a3516d49b4c952194bf7b15915c0898afbbeabbefe38cc40588d749",
+          "autocommit_at_export": true
+        },
+        "export": {
+          "bytes": 37625856,
+          "sha256": "fd4ee8c6691ba8c74c06d0f6c194ff7a9b257123183a476e2c792f3acef3d9b9",
+          "differs_from_input": true,
+          "autocommit_at_export": true
+        },
+        "reopen_exported": {
+          "rows": 20166,
+          "mutation_visible": true,
+          "pass": true
+        },
+        "integrity": {
+          "strong": "ok",
+          "plain": "ok",
+          "pragma": "ok"
+        }
+      },
+      "error": null,
+      "wall_ms": 2137,
+      "rss": {
+        "floor": 835584,
+        "peak": 265650176,
+        "samples": 212,
+        "source": "/proc/1465447/statm",
+        "added": 264814592
+      },
+      "stderr_tail": null
+    }
+  ],
+  "negative_controls": [
+    {
+      "mechanism": "deserialize",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/deserialize.mjs",
+      "image": "slim",
+      "result": {
+        "kind": "negative",
+        "mechanism": {
+          "name": "deserialize",
+          "family": "deserialize",
+          "notes": "sqlite3_deserialize(FREEONCLOSE|RESIZEABLE) on an :memory: handle, as in src/worker.mjs deserializeInto. Image lives inside wasm linear memory; exportBlob() uses sqlite3_js_db_export, which allocates a second full copy inside wasm before slicing to JS. No pragmas are applied, so the handle matches the production restore worker byte for byte. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "image_bytes": 37617664,
+        "page_size": 8192,
+        "controls": [
+          {
+            "name": "intact_image",
+            "expect": "accept",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 29.1,
+            "pass": true
+          },
+          {
+            "name": "intact_image_quick_validate",
+            "expect": "accept",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 416.2,
+            "pass": true
+          },
+          {
+            "name": "unaligned_truncation",
+            "expect": "reject",
+            "note": null,
+            "bytes": 12539221,
+            "options": {},
+            "open_threw": true,
+            "open_error": "truncated SQLite image: 12539221 bytes is not a multiple of page size 8192",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0.2,
+            "pass": true
+          },
+          {
+            "name": "page_aligned_truncation",
+            "expect": "reject",
+            "note": null,
+            "bytes": 12533760,
+            "options": {},
+            "open_threw": true,
+            "open_error": "truncated SQLite image: header declares 4592 pages x 8192 = 37617664 bytes, blob has 12533760",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 2.1,
+            "pass": true
+          },
+          {
+            "name": "header_magic_flip",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": true,
+            "open_error": "not a SQLite image: header magic mismatch at byte 3",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0,
+            "pass": true
+          },
+          {
+            "name": "illegal_page_size",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: illegal page size 3",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0,
+            "pass": true
+          },
+          {
+            "name": "midfile_pages_zeroed",
+            "expect": "documented-limitation",
+            "note": "right length, intact header, 16 interior pages zeroed",
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 3.7,
+            "pass": null
+          },
+          {
+            "name": "midfile_pages_zeroed_quick_validate",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: PRAGMA quick_check reported *** in database main *** Tree 4 page 2312: btreeInitPage() returns error code 11 Tree 4 page 2311: btreeInitPage() returns error code 11 Tree 4 page 2310: btreeInitPage() returns error code ",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 9.6,
+            "pass": true
+          },
+          {
+            "name": "midfile_pages_garbage",
+            "expect": "documented-limitation",
+            "note": "right length, intact header, 16 interior pages overwritten",
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 3.7,
+            "pass": null
+          },
+          {
+            "name": "midfile_pages_garbage_quick_validate",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: PRAGMA quick_check reported *** in database main *** Tree 4 page 2312: btreeInitPage() returns error code 11 Tree 4 page 2311: btreeInitPage() returns error code 11 Tree 4 page 2310: btreeInitPage() returns error code ",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 9.8,
+            "pass": true
+          }
+        ],
+        "reopen_after_failure_rows": 20166,
+        "reopen_error": null,
+        "checks_derived": {
+          "all_gated_controls_pass": true,
+          "reopen_after_failure_ok": true
+        },
+        "failed_checks": [],
+        "pass": true
+      },
+      "error": null,
+      "wall_ms": 612,
+      "rss": {
+        "floor": 1060864,
+        "peak": 356900864,
+        "samples": 62,
+        "source": "/proc/1464774/statm",
+        "added": 355840000
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-deflate",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-deflate.mjs",
+      "image": "slim",
+      "result": {
+        "kind": "negative",
+        "mechanism": {
+          "name": "vfs-deflate",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by deflateRawSync-compressed JS-side blocks (default 64 KiB, level 6) with an LRU of inflated blocks (default 64). Dirty blocks are stored uncompressed via copy-on-write. Applies PRAGMA journal_mode=MEMORY. exportBlob() reassembles from JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. Node-only (node:zlib). WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "image_bytes": 37617664,
+        "page_size": 8192,
+        "controls": [
+          {
+            "name": "intact_image",
+            "expect": "accept",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 1295.1,
+            "pass": true
+          },
+          {
+            "name": "intact_image_quick_validate",
+            "expect": "accept",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 2112.8,
+            "pass": true
+          },
+          {
+            "name": "unaligned_truncation",
+            "expect": "reject",
+            "note": null,
+            "bytes": 12539221,
+            "options": {},
+            "open_threw": true,
+            "open_error": "truncated SQLite image: 12539221 bytes is not a multiple of page size 8192",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0.3,
+            "pass": true
+          },
+          {
+            "name": "page_aligned_truncation",
+            "expect": "reject",
+            "note": null,
+            "bytes": 12533760,
+            "options": {},
+            "open_threw": true,
+            "open_error": "truncated SQLite image: header declares 4592 pages x 8192 = 37617664 bytes, blob has 12533760",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0.1,
+            "pass": true
+          },
+          {
+            "name": "header_magic_flip",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": true,
+            "open_error": "not a SQLite image: header magic mismatch at byte 3",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0,
+            "pass": true
+          },
+          {
+            "name": "illegal_page_size",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: illegal page size 3",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0,
+            "pass": true
+          },
+          {
+            "name": "midfile_pages_zeroed",
+            "expect": "documented-limitation",
+            "note": "right length, intact header, 16 interior pages zeroed",
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 1263.7,
+            "pass": null
+          },
+          {
+            "name": "midfile_pages_zeroed_quick_validate",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: PRAGMA quick_check reported *** in database main *** Tree 4 page 2312: btreeInitPage() returns error code 11 Tree 4 page 2311: btreeInitPage() returns error code 11 Tree 4 page 2310: btreeInitPage() returns error code ",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 1383,
+            "pass": true
+          },
+          {
+            "name": "midfile_pages_garbage",
+            "expect": "documented-limitation",
+            "note": "right length, intact header, 16 interior pages overwritten",
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 1265.8,
+            "pass": null
+          },
+          {
+            "name": "midfile_pages_garbage_quick_validate",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: PRAGMA quick_check reported *** in database main *** Tree 4 page 2312: btreeInitPage() returns error code 11 Tree 4 page 2311: btreeInitPage() returns error code 11 Tree 4 page 2310: btreeInitPage() returns error code ",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 1402.6,
+            "pass": true
+          }
+        ],
+        "reopen_after_failure_rows": 20166,
+        "reopen_error": null,
+        "checks_derived": {
+          "all_gated_controls_pass": true,
+          "reopen_after_failure_ok": true
+        },
+        "failed_checks": [],
+        "pass": true
+      },
+      "error": null,
+      "wall_ms": 10131,
+      "rss": {
+        "floor": 692224,
+        "peak": 418623488,
+        "samples": 1007,
+        "source": "/proc/1465178/statm",
+        "added": 417931264
+      },
+      "stderr_tail": null
+    },
+    {
+      "mechanism": "vfs-plain",
+      "mechanism_file": "bench/fts5-export-restore/experiments/mechanisms/vfs-plain.mjs",
+      "image": "slim",
+      "result": {
+        "kind": "negative",
+        "mechanism": {
+          "name": "vfs-plain",
+          "family": "vfs",
+          "notes": "Custom sqlite3_vfs backed by uncompressed JS-side blocks (default 64 KiB) held outside wasm linear memory. Applies PRAGMA journal_mode=MEMORY (as in experiments/vfs.mjs) so rollback journals never round-trip through the block store. exportBlob() concatenates the JS blocks — no wasm copy — and is only consistent when no transaction is open. Lossless: an unmutated image exports byte-identical to its input. WAL-mode images are rejected: these io methods are iVersion 1 with no xShmMap. open() validates the image header only (magic, page size, page-count vs length, file-format versions), which rejects truncation and non-SQLite blobs but ACCEPTS a right-length image whose interior pages are damaged; pass { validate: \"quick\" } to additionally run PRAGMA quick_check (a full scan) when that guarantee is required."
+        },
+        "image_bytes": 37617664,
+        "page_size": 8192,
+        "controls": [
+          {
+            "name": "intact_image",
+            "expect": "accept",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 33.7,
+            "pass": true
+          },
+          {
+            "name": "intact_image_quick_validate",
+            "expect": "accept",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 451.4,
+            "pass": true
+          },
+          {
+            "name": "unaligned_truncation",
+            "expect": "reject",
+            "note": null,
+            "bytes": 12539221,
+            "options": {},
+            "open_threw": true,
+            "open_error": "truncated SQLite image: 12539221 bytes is not a multiple of page size 8192",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0.3,
+            "pass": true
+          },
+          {
+            "name": "page_aligned_truncation",
+            "expect": "reject",
+            "note": null,
+            "bytes": 12533760,
+            "options": {},
+            "open_threw": true,
+            "open_error": "truncated SQLite image: header declares 4592 pages x 8192 = 37617664 bytes, blob has 12533760",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0.1,
+            "pass": true
+          },
+          {
+            "name": "header_magic_flip",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": true,
+            "open_error": "not a SQLite image: header magic mismatch at byte 3",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0,
+            "pass": true
+          },
+          {
+            "name": "illegal_page_size",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: illegal page size 3",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 0,
+            "pass": true
+          },
+          {
+            "name": "midfile_pages_zeroed",
+            "expect": "documented-limitation",
+            "note": "right length, intact header, 16 interior pages zeroed",
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 12.2,
+            "pass": null
+          },
+          {
+            "name": "midfile_pages_zeroed_quick_validate",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: PRAGMA quick_check reported *** in database main *** Tree 4 page 2312: btreeInitPage() returns error code 11 Tree 4 page 2311: btreeInitPage() returns error code 11 Tree 4 page 2310: btreeInitPage() returns error code ",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 12.1,
+            "pass": true
+          },
+          {
+            "name": "midfile_pages_garbage",
+            "expect": "documented-limitation",
+            "note": "right length, intact header, 16 interior pages overwritten",
+            "bytes": 37617664,
+            "options": {},
+            "open_threw": false,
+            "open_error": null,
+            "error_names_defect": null,
+            "accepted_rows": 20166,
+            "accepted_query_error": null,
+            "ms": 9.3,
+            "pass": null
+          },
+          {
+            "name": "midfile_pages_garbage_quick_validate",
+            "expect": "reject",
+            "note": null,
+            "bytes": 37617664,
+            "options": {
+              "validate": "quick"
+            },
+            "open_threw": true,
+            "open_error": "corrupt SQLite image: PRAGMA quick_check reported *** in database main *** Tree 4 page 2312: btreeInitPage() returns error code 11 Tree 4 page 2311: btreeInitPage() returns error code 11 Tree 4 page 2310: btreeInitPage() returns error code ",
+            "error_names_defect": true,
+            "accepted_rows": null,
+            "accepted_query_error": null,
+            "ms": 12.9,
+            "pass": true
+          }
+        ],
+        "reopen_after_failure_rows": 20166,
+        "reopen_error": null,
+        "checks_derived": {
+          "all_gated_controls_pass": true,
+          "reopen_after_failure_ok": true
+        },
+        "failed_checks": [],
+        "pass": true
+      },
+      "error": null,
+      "wall_ms": 674,
+      "rss": {
+        "floor": 1126400,
+        "peak": 399831040,
+        "samples": 68,
+        "source": "/proc/1465455/statm",
+        "added": 398704640
+      },
+      "stderr_tail": null
+    }
+  ]
+}
