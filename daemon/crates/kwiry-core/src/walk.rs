@@ -5,6 +5,7 @@ use std::time::UNIX_EPOCH;
 use ignore::{DirEntry, WalkBuilder};
 
 use crate::model::{DiscoveredFile, IngestWarning, MAX_FILE_BYTES, VaultRegistration};
+use crate::reconcile::EnumerationCompleteness;
 
 const EXTENSIONS: &[&str] = &["md", "markdown", "mdx", "txt"];
 const SKIPPED_DIRECTORIES: &[&str] = &[
@@ -17,9 +18,14 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "target",
 ];
 
-pub(crate) fn discover_vault(
-    vault: &VaultRegistration,
-) -> (Vec<DiscoveredFile>, Vec<IngestWarning>) {
+#[derive(Debug)]
+pub(crate) struct EnumerationResult {
+    pub files: Vec<DiscoveredFile>,
+    pub warnings: Vec<IngestWarning>,
+    pub completeness: EnumerationCompleteness,
+}
+
+pub(crate) fn discover_vault(vault: &VaultRegistration) -> EnumerationResult {
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let root = vault.path.clone();
@@ -121,7 +127,16 @@ pub(crate) fn discover_vault(
     }
 
     files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    (files, warnings)
+    let completeness = if warnings.is_empty() {
+        EnumerationCompleteness::Complete
+    } else {
+        EnumerationCompleteness::Defective
+    };
+    EnumerationResult {
+        files,
+        warnings,
+        completeness,
+    }
 }
 
 fn keep_entry(entry: &DirEntry) -> bool {
@@ -166,12 +181,34 @@ mod tests {
             room: None,
         };
 
-        let (files, warnings) = discover_vault(&vault);
-        let paths: Vec<_> = files
+        let result = discover_vault(&vault);
+        let paths: Vec<_> = result
+            .files
             .iter()
             .map(|file| file.relative_path.as_str())
             .collect();
         assert_eq!(paths, ["a.TXT", "z.md"]);
-        assert!(warnings.is_empty());
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.completeness, EnumerationCompleteness::Complete);
+    }
+
+    #[test]
+    fn warning_marks_enumeration_defective() {
+        let temporary = tempdir().unwrap();
+        fs::File::create(temporary.path().join("oversized.md"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        let vault = VaultRegistration {
+            id: "fixture".into(),
+            path: temporary.path().to_path_buf(),
+            room: None,
+        };
+
+        let result = discover_vault(&vault);
+
+        assert!(result.files.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.completeness, EnumerationCompleteness::Defective);
     }
 }

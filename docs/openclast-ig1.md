@@ -4,7 +4,7 @@ IG-1 connects an OpenClast control plane to a Kwiry sidecar without giving brows
 
 ## Status
 
-The Kwiry-side capability, profile, partition, and authorized-BM25 enforcement checkpoint is committed. The companion OpenClast gateway changes and cross-repository witness described below remain pending in the sibling project, so this page is the integration/operator target rather than a claim that the complete cross-repository path is published and deployable today.
+The Kwiry-side capability, profile, partition, and authorized-BM25 enforcement checkpoint is committed. The companion OpenClast gateway and real-process two-user/two-room witness are implemented and verified in the sibling project's pending review work; owner acceptance and publication remain pending. This page is the integration/operator target, not a claim that the complete cross-repository path is released today.
 
 ```text
 authenticated OpenClast request
@@ -80,7 +80,7 @@ kwiry --config /etc/kwiry/config.toml --data-dir /var/lib/kwiry index
 kwiry --config /etc/kwiry/config.toml --data-dir /var/lib/kwiry serve
 ```
 
-IG-1 introduces index format 4. Existing data roots created by an earlier Kwiry format require a one-time `kwiry index` rebuild before `serve`; the index is disposable and source files remain authoritative.
+IG-1 originally introduced index format 4. The durable-generation checkpoint advances the manifest to version 2, the generation layout to version 2, and the index format to version 5. Existing data roots require a one-time `kwiry index` rebuild before `serve`; the index is disposable and source files remain authoritative.
 
 OpenClast mode:
 
@@ -92,6 +92,20 @@ OpenClast mode:
 - exposes public `GET /v0/health` and capability-protected `POST /v0/search` only.
 
 Keep the Kwiry listener on an internal network reachable by OpenClast, not by browsers or the public internet.
+
+## Derived-state storage and freshness
+
+Source roots may be read-only local mounts or SMB/NFS-backed materialized trees. The Kwiry `--data-dir` must be a separate machine-local/local-block path with reliable exclusive locking, atomic rename, and durable flush semantics. Do not place it under the network source root and do not share one data root between sidecar replicas.
+
+The approved durability model keeps strong content hashes authoritative while allowing three explicit reconciliation bases:
+
+- `strict_hash`: verify every source byte before declaring the generation current;
+- `metadata_audit`: use size/mtime as a fast path, immediately hash changed/racy entries, and continuously verify bounded deterministic audit batches;
+- `producer_manifest`: use a complete versioned SHA-256 manifest emitted beside an already-approved materialized root.
+
+A previous complete generation may answer authorized searches while reconciliation runs. Successful Kwiry responses disclose `X-Kwiry-Index-Freshness: <state>; basis=strict_hash` and the exact immutable `X-Kwiry-Generation`; the OpenClast gateway may forward equivalent safe headers. `stale` or `reconciling` never widens the signed resource set, opens an unauthorized partition, or implies that search is current.
+
+The current implementation checkpoint includes crash-consistent candidate publication, startup recovery, bounded retention, immutable reconciliation generations, the local data-root suitability probe, and a shared reconciliation plan used by desktop and OpenClast partitions. The default `strict_hash` basis reads and hashes every discovered source; the optional `[indexing] basis = "metadata_audit"` configuration reuses settled metadata-equal sources without byte reads while immediately hashing new, changed, reclassified, or racy entries and continuously re-verifying a bounded deterministic audit batch. Authorized partition readers are opened lazily on first authorized use and cached for the lifetime of the immutable generation; unauthorized partitions are never preloaded, and a generation swap discards the cache. The daemon still performs eager startup reconciliation when a generation pre-exists (a freshly built first generation skips the redundant boot pass); path-scoped watching and bind-first service remain later checkpoints. Neither branch implementation nor passing tests is a delivered or owner-accepted claim.
 
 ## Configure OpenClast companion integration
 
@@ -126,7 +140,7 @@ Content-Type: application/json
 }
 ```
 
-The gateway requires explicit `mode: "lexical"`, re-resolves grants on every request, mints a short-lived internal capability, and proxies the safe Kwiry response.
+The gateway requires explicit `mode: "lexical"`, re-resolves grants on every request, mints a short-lived internal capability, and proxies the safe Kwiry response. The approved durability follow-on also forwards only the safe freshness/generation response headers; it never exposes index paths, global counts, or the internal capability.
 
 ## Audit and privacy
 
@@ -150,13 +164,15 @@ The gateway and Kwiry enforcement logs do **not** record:
 | Invalid request or filters | `400` |
 | Kwiry unavailable | `502 backend_unavailable` |
 | Kwiry timeout | `504 backend_timeout` |
+| No complete generation yet | nonrevealing gateway failure until Kwiry can serve; no partial corpus |
+| Previous complete generation reconciling | successful authorized response with explicit stale/reconciling freshness header |
 | Invalid/expired internal capability at Kwiry | nonrevealing gateway failure; never desktop fallback |
 
 ## Verification
 
-The committed Kwiry repository tests cover capability key/claim validation, profile separation, no desktop credential artifacts, exact resource partitions, and authorized-only BM25 statistics. Live grant resolution, gateway token non-disclosure, audit privacy, and the gated real-process two-user/two-room witness belong to the pending companion OpenClast integration and are not part of the committed C1 baseline.
+The committed Kwiry repository tests cover capability key/claim validation, profile separation, no desktop credential artifacts, exact resource partitions, and authorized-only BM25 statistics. The sibling integration tests cover live grant resolution, gateway token non-disclosure, audit privacy, and the gated real-process two-user/two-room witness. Passing both establishes implementation verification, not owner acceptance.
 
-After those companion changes are committed, run the cross-repository witness against a built Kwiry binary:
+Run the cross-repository witness against a built Kwiry binary:
 
 ```bash
 KWIRY_BIN=/path/to/kwiry \

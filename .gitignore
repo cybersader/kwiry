@@ -18,3 +18,7 @@
 /CLAUDE.local.md
 /kwir.portagenty.toml
 /tests/
+
+# Regenerable feasibility-gate artifacts
+/bench/fts5-export-restore/experiments/*.db
+/bench/fts5-export-restore/experiments/sizes.json

@@ -13,8 +13,8 @@ use crate::model::{
 pub use crate::source::source_key;
 use crate::state::{read_json, write_json_atomic};
 
-pub const MANIFEST_VERSION: u32 = 1;
-pub const INDEX_FORMAT_VERSION: u32 = 4;
+pub const MANIFEST_VERSION: u32 = 2;
+pub const INDEX_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
@@ -125,6 +125,10 @@ pub struct ManifestFile {
 }
 
 impl ManifestFile {
+    pub(crate) fn retained(previous: &Self) -> Self {
+        previous.clone()
+    }
+
     pub(crate) fn from_outcome(
         outcome: &FileIngestOutcome,
         registration_fingerprint: &str,
@@ -202,9 +206,27 @@ mod tests {
         };
 
         let error = manifest.validate().unwrap_err();
-        assert!(error.to_string().contains("found manifest=1, index=2"));
-        assert!(error.to_string().contains("expected manifest=1, index=4"));
+        assert!(error.to_string().contains("found manifest=2, index=2"));
+        assert!(error.to_string().contains("expected manifest=2, index=5"));
         assert!(error.to_string().contains("kwiry index"));
+    }
+
+    #[test]
+    fn retained_manifest_file_preserves_content_evidence() {
+        let previous = ManifestFile {
+            vault_id: "vault".to_owned(),
+            path: "note.md".to_owned(),
+            content_hash: "hash".to_owned(),
+            registration_fingerprint: "fingerprint".to_owned(),
+            resource: Some(ResourceKey::new("tenant", "vault", "room")),
+            byte_length: 42,
+            mtime_nanos: 123,
+            chunk_count: 7,
+            outcome: ManifestFileOutcome::Indexed,
+            warning: None,
+        };
+
+        assert_eq!(ManifestFile::retained(&previous), previous);
     }
 
     #[test]

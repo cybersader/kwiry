@@ -373,6 +373,7 @@ function safeApiMessage(code: string): string {
     case "mode_unavailable":
       return "The selected search mode is unavailable for this backend.";
     case "index_not_ready":
+    case "index_building":
       return "The selected backend does not have a ready index.";
     case "invalid_query":
       return "The query is not valid for the selected backend.";

@@ -10,6 +10,15 @@ pub const CHUNK_OVERLAP_CHARS: usize = 400;
 #[cfg(feature = "native")]
 pub const DEFAULT_BIND: &str = "127.0.0.1:32189";
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexFreshnessBasis {
+    #[default]
+    StrictHash,
+    MetadataAudit,
+    ProducerManifest,
+}
+
 #[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -22,6 +31,8 @@ pub struct Config {
     #[serde(default)]
     pub semantic: SemanticConfig,
     #[serde(default)]
+    pub indexing: IndexingConfig,
+    #[serde(default)]
     pub vaults: Vec<VaultRegistration>,
 }
 
@@ -33,6 +44,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             auth: AuthConfig::default(),
             semantic: SemanticConfig::default(),
+            indexing: IndexingConfig::default(),
             vaults: Vec::new(),
         }
     }
@@ -150,6 +162,46 @@ impl ResourceKey {
 pub struct SemanticConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexingConfig {
+    #[serde(default)]
+    pub basis: IndexFreshnessBasis,
+    #[serde(default = "default_audit_sources_per_pass")]
+    pub audit_sources_per_pass: usize,
+    #[serde(default = "default_audit_bytes_per_pass")]
+    pub audit_bytes_per_pass: u64,
+    #[serde(default = "default_racy_window_millis")]
+    pub racy_window_millis: u64,
+}
+
+#[cfg(feature = "native")]
+impl Default for IndexingConfig {
+    fn default() -> Self {
+        Self {
+            basis: IndexFreshnessBasis::StrictHash,
+            audit_sources_per_pass: default_audit_sources_per_pass(),
+            audit_bytes_per_pass: default_audit_bytes_per_pass(),
+            racy_window_millis: default_racy_window_millis(),
+        }
+    }
+}
+
+#[cfg(feature = "native")]
+const fn default_audit_sources_per_pass() -> usize {
+    16
+}
+
+#[cfg(feature = "native")]
+const fn default_audit_bytes_per_pass() -> u64 {
+    64 * 1024 * 1024
+}
+
+#[cfg(feature = "native")]
+const fn default_racy_window_millis() -> u64 {
+    2_000
 }
 
 #[cfg(feature = "native")]

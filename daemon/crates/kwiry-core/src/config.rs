@@ -8,7 +8,7 @@ use fs2::FileExt;
 use tempfile::NamedTempFile;
 
 use crate::error::{Error, Result, io_error};
-use crate::model::{Config, HostProfile, VaultRegistration};
+use crate::model::{Config, HostProfile, IndexFreshnessBasis, MAX_FILE_BYTES, VaultRegistration};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
@@ -205,6 +205,33 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
         return Err(Error::InvalidConfig {
             path: path.to_path_buf(),
             message: "server bind must not be empty".to_owned(),
+        });
+    }
+    if config.indexing.basis == IndexFreshnessBasis::ProducerManifest {
+        return Err(Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: "indexing.basis producer_manifest is not available yet".to_owned(),
+        });
+    }
+    if !(1..=256).contains(&config.indexing.audit_sources_per_pass) {
+        return Err(Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: "indexing.audit_sources_per_pass must be between 1 and 256".to_owned(),
+        });
+    }
+    if !(MAX_FILE_BYTES..=64 * 1024 * 1024).contains(&config.indexing.audit_bytes_per_pass) {
+        return Err(Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: format!(
+                "indexing.audit_bytes_per_pass must be between {MAX_FILE_BYTES} and {}",
+                64 * 1024 * 1024
+            ),
+        });
+    }
+    if config.indexing.racy_window_millis > 60_000 {
+        return Err(Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: "indexing.racy_window_millis must not exceed 60000".to_owned(),
         });
     }
 

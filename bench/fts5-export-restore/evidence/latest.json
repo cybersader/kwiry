@@ -1,0 +1,94 @@
+{
+  "gate": "sqlite-wasm-export-restore-feasibility",
+  "question": "KWIRY-Q-0017",
+  "verdict": "GO",
+  "provenance": {
+    "started_at": "2026-07-25T22:55:50.893Z",
+    "node": "v24.12.0",
+    "platform": "linux-x64",
+    "harness_sha256": {
+      "scripts/gate.mjs": "93f4612747bc79143b3c94ce16cc99c51bc6603239eff87706dfbeacc91e42c2",
+      "src/worker.mjs": "6fee91f3296e8458f5b254a8ba3910d566f772d73e8492a30b9191710c2f7788",
+      "src/corpus.mjs": "346a032e1c1d9ce8d110b919e31529feae9f3d700c30e3e87f4c666ea06f88db"
+    },
+    "runtime_glue_sha256": "d74e4b74920d1499b0bf349ced70372c55ac9a9ea72af718e5f6b23b0c1b29c4"
+  },
+  "kill_limits": {
+    "blob_cap_bytes": 402653184,
+    "restore_max_ms": 5000,
+    "restore_vs_build_max_ratio": 0.5,
+    "host_stall_max_ms": 100,
+    "restore_peak_rss_max_ratio": 1.25,
+    "steady_state_added_rss_target_bytes": 314572800
+  },
+  "checks": {
+    "corpus_meets_scale": true,
+    "byte_exact_restore": true,
+    "evidence_exact": true,
+    "post_restore_mutation_full_loop": true,
+    "negative_control_integrity_can_fail": true,
+    "negative_control_truncated_blob_rejected": true,
+    "one_worker_at_a_time": true,
+    "guards_never_tripped": true,
+    "blob_within_cap": true,
+    "restore_under_5s": true,
+    "restore_materially_faster_than_build": true,
+    "host_stall_under_100ms_all_phases": true,
+    "restore_rss_measured_and_bounded": true
+  },
+  "informational": {
+    "steady_state_added_rss_within_300mib_target": false,
+    "markdown_mib_at_blob_cap": 195.99635730938013,
+    "scope": "Standalone Node bench: proves official export/deserialize API feasibility at corpus scale. It does not exercise the production worker protocol, export from a live serving worker, staging-restore beside a resident generation, Rust-WASM co-residency, Electron, or cap-scale blobs."
+  },
+  "guard_counters": {
+    "network_attempts": 0,
+    "helper_worker_attempts": 0,
+    "persistence_attempts": 0
+  },
+  "measurements": {
+    "corpus": {
+      "noteCount": 10000,
+      "chunkCount": 20166,
+      "totalMarkdownBytes": 53357003,
+      "targetBytes": 52428800
+    },
+    "clean_build_ms": 5518.570189,
+    "build_validate_ms": 1253.8936439999998,
+    "export_ms": 71.92907600000035,
+    "blob_bytes": 104538112,
+    "blob_sha256": "f012acb7d9836248d210a2b1f16cfbcfd79d860acd4cc8edf12edda738cd283f",
+    "blob_bytes_per_markdown_byte": 1.9592200858807607,
+    "disk_write_ms": 83.69373900000028,
+    "disk_read_ms": 82.69506499999989,
+    "worker_init_ms": {
+      "build": 18.739871,
+      "restore": 14.718267999999625
+    },
+    "restore_verify_blob_ms": 45.257674999999836,
+    "restore_deserialize_ms": 42.69907899999998,
+    "byte_exact_proof_ms": 185.3777570000002,
+    "restore_validate_ms": 1286.4383960000005,
+    "restore_ready_ms": 1374.3951500000003,
+    "cold_restore_wall_ms": 1471.8084829999998,
+    "restore_mutation_ms": 817.9605240000001,
+    "host_stall_max_ms_all_phases": 2.5440850000004502,
+    "rss_clean_build": {
+      "peak": 555941888,
+      "floor": 80363520,
+      "added": 475578368,
+      "samples": 691
+    },
+    "rss_restore": {
+      "peak": 881627136,
+      "floor": 446267392,
+      "added": 435359744,
+      "samples": 222
+    },
+    "steady_state_rss_live_index": 672706560,
+    "baseline_rss": 54001664,
+    "steady_state_added_rss": 618704896,
+    "max_concurrent_workers": 1
+  },
+  "note": "Automated feasibility evidence only; the owner GO/NO-GO decision is separate."
+}

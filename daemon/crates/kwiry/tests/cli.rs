@@ -176,6 +176,98 @@ fn setup_json_missing_input_returns_stable_error_document() {
     assert!(!data.exists());
 }
 
+#[test]
+fn config_set_indexing_round_trips_and_rejects_invalid_values() {
+    let temporary = tempdir().unwrap();
+    let config = temporary.path().join("config.toml");
+    let data = temporary.path().join("data");
+
+    cargo_bin_cmd!("kwiry")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "config",
+            "set-indexing",
+            "--basis",
+            "metadata-audit",
+            "--audit-sources",
+            "8",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("basis=metadata_audit"));
+
+    let shown = cargo_bin_cmd!("kwiry")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "config",
+            "show",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let effective: serde_json::Value = serde_json::from_slice(&shown).unwrap();
+    assert_eq!(effective["indexing"]["basis"], "metadata_audit");
+    assert_eq!(effective["indexing"]["audit_sources_per_pass"], 8);
+
+    cargo_bin_cmd!("kwiry")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "config",
+            "set-indexing",
+            "--audit-sources",
+            "999",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "audit_sources_per_pass must be between 1 and 256",
+        ));
+
+    // The rejected update must not have modified the stored configuration.
+    let unchanged = cargo_bin_cmd!("kwiry")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "config",
+            "show",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let effective: serde_json::Value = serde_json::from_slice(&unchanged).unwrap();
+    assert_eq!(effective["indexing"]["audit_sources_per_pass"], 8);
+
+    cargo_bin_cmd!("kwiry")
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+            "config",
+            "set-indexing",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("nothing to change"));
+}
+
 fn search_json(config: &Path, data: &Path, query: &str, vault: Option<&str>) -> Vec<SearchHit> {
     let mut command = cargo_bin_cmd!("kwiry");
     command.args([

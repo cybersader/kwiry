@@ -34,6 +34,8 @@ mod partition;
 #[cfg(feature = "portable")]
 mod query;
 #[cfg(feature = "native")]
+mod reconcile;
+#[cfg(feature = "native")]
 mod runtime;
 #[cfg(feature = "native")]
 mod search;
@@ -82,14 +84,14 @@ pub use manifest::{
 };
 #[cfg(feature = "native")]
 pub use model::{
-    AuthConfig, Config, DEFAULT_BIND, HostProfile, IndexStats, IngestReport, IngestWarning,
-    LexicalSearchRequest, OpenClastAuthConfig, ResourceKey, SemanticConfig, ServerConfig,
-    VaultRegistration,
+    AuthConfig, Config, DEFAULT_BIND, HostProfile, IndexStats, IndexingConfig, IngestReport,
+    IngestWarning, LexicalSearchRequest, OpenClastAuthConfig, ResourceKey, SemanticConfig,
+    ServerConfig, VaultRegistration,
 };
 #[cfg(feature = "portable")]
 pub use model::{
-    CHUNKING_VERSION, Chunk, Frontmatter, MAX_FILE_BYTES, PreparedChunk, RetrievalMetadata,
-    SearchHit,
+    CHUNKING_VERSION, Chunk, Frontmatter, IndexFreshnessBasis, MAX_FILE_BYTES, PreparedChunk,
+    RetrievalMetadata, SearchHit,
 };
 #[cfg(feature = "portable")]
 pub use query::{
@@ -98,7 +100,9 @@ pub use query::{
     prepare_lexical_query,
 };
 #[cfg(feature = "native")]
-pub use runtime::{IndexManager, ReconcileReport, SearchRuntime};
+pub use reconcile::ReconcileScope;
+#[cfg(feature = "native")]
+pub use runtime::{GenerationSearchResult, IndexManager, ReconcileReport, SearchRuntime};
 #[cfg(feature = "native")]
 pub use search::search_index;
 #[cfg(feature = "semantic-onnx")]
@@ -114,7 +118,9 @@ pub use source::{
     SourcePreparationError, SourcePreparationKind, prepare_source_buffer, source_key,
 };
 #[cfg(feature = "portable")]
-pub use status::{DaemonState, DaemonStatus, ModelStatus, VaultStatus};
+pub use status::{
+    DaemonState, DaemonStatus, IndexFreshness, IndexFreshnessState, ModelStatus, VaultStatus,
+};
 
 #[cfg(feature = "native")]
 pub fn ingest_config(config: &Config) -> Result<IngestReport> {

@@ -37,7 +37,7 @@ The current BRAT-installable plugin provides a query modal, result rendering, ex
 
 ## D5B — no-daemon in-plugin lexical host
 
-State: Gate 5 candidate implemented and under verification; Gates 1–4 are owner-accepted GO. The production host remains undelivered pending generated/reference-hardware performance, installed packaging/update/rollback evidence, private aggregate-only evidence, and explicit field acceptance.
+State: Gate 5 candidate implemented and under the owner's field-first acceptance sequence; Gates 1–4 are owner-accepted GO. The production host remains undelivered pending generated/reference-hardware performance, installed packaging/update/rollback evidence, private aggregate-only evidence, and explicit field acceptance. Durable machine-local warm start is an approved separate checkpoint, now in implementation.
 
 ### Checkpoint B0 — Tantivy-WASM feasibility — Completed NO-GO for normal incremental writer
 
@@ -67,7 +67,13 @@ The Gate 4 production baseline has explicit daemon/in-plugin selection, hardened
 
 ### Checkpoint B5 — active-vault lifecycle, package, and field-test — Implemented, awaiting field acceptance
 
-The candidate builds an atomic initial in-memory index and reconciles create, modify, delete, and rename events. Its deterministic corpus, strict aggregate evidence schemas, lifecycle suite, exact generated Worker, disposable-vault smoke, one-file build, and candidate/publication workflow separation are implemented. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets but misses added memory; installed startup/progress and declared-reference-hardware measurements remain unavailable. Exact installed Obsidian/BRAT evidence, upgrades/rollback, private aggregate-only measurement, and explicit owner acceptance remain before calling the profile delivered.
+The candidate builds an atomic initial in-memory index and reconciles create, modify, delete, and rename events with bounded reads/queues and no partial-corpus publication. Its deterministic functional and 10,000-note/50-MiB corpora, strict aggregate evidence schemas, lifecycle suite, exact generated Worker, disposable-vault smoke, one-file build, and candidate/publication workflow separation are implemented and pass. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional 300 MiB added-memory target; installed startup/progress and declared-reference-hardware measurements remain unavailable. Exact installed Obsidian/BRAT evidence, upgrades/rollback, private aggregate-only measurement, and explicit owner acceptance remain before calling the profile delivered.
+
+### Checkpoint B6 — durable differential warm start — Approved, feasibility proven, integration in progress
+
+Permit a versioned disposable cache only on machine-local storage outside the vault. Restore the previous complete generation as searchable but `stale`/`reconciling`, compare current vault metadata under an explicit freshness policy, read/hash only changed/racy/audit-selected sources, and persist a new cache only after a complete clean generation exists. The Worker remains unable to access persistence APIs; a main-thread cache port owns bounded atomic storage.
+
+The feasibility gate ran before protocol integration and passed: the exact official SQLite WASM proved export/deserialize integrity, restore speed, event-loop behavior, and bounded memory on the generated corpus, and a comparison matrix measured the cache mechanism and schema variants now in use. See [`../../bench/fts5-export-restore/README.md`](../../bench/fts5-export-restore/README.md). A failed gate would have returned to owner review rather than authorizing OPFS, a helper Worker, an extra WASM payload, or vault-relative cache storage.
 
 ## D5C — relevance signals and configuration
 
@@ -104,3 +110,5 @@ Ship named, versioned, judged profiles before exposing arbitrary sliders. Requir
 - Gate B1 GO proves runtime viability only; B2 packaging, B3 core extraction, and production integration remain separately gated.
 - D5C scoring changes require judged evidence and owner review of public behavior.
 - Passing tests do not establish owner daily-drive or distribution acceptance.
+- The B6 cache remains disposable and machine-local; cache corruption/version mismatch must discard and rebuild within In-plugin · Lexical, never switch profiles.
+- Strong hashes remain authoritative. Metadata-audit fast paths require racy-file checks and bounded rolling verification; a complete producer manifest may be authoritative only for an already-approved materialized root.

@@ -2,15 +2,19 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
+#[cfg(test)]
+use tantivy::IndexWriter;
 use tantivy::collector::DocSetCollector;
 use tantivy::query::AllQuery;
 use tantivy::schema::{Field, Value};
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
 
 use crate::api::SearchFilters;
-use crate::chunk::ingest_vault_files;
+use crate::chunk::ingest_file;
 use crate::error::{Error, Result};
 use crate::generation::{DataRoot, DataRootLock};
 use crate::index::{Fields, build_schema, chunk_document, open_index_dir};
@@ -18,12 +22,17 @@ use crate::manifest::{
     Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint, source_key,
 };
 use crate::model::{
-    Config, FileOutcomeKind, HostProfile, IngestWarning, LexicalSearchRequest, PreparedChunk,
-    ResourceKey, RetrievalMetadata, SearchHit,
+    Config, FileIngestOutcome, FileOutcomeKind, HostProfile, IndexFreshnessBasis, IngestWarning,
+    LexicalSearchRequest, PreparedChunk, ResourceKey, RetrievalMetadata, SearchHit,
 };
 use crate::partition::{GenerationLayout, partition_index_dir};
+use crate::reconcile::{
+    AuditBudget, ObservationDecision, ObservationPolicy, PartitionScope, ReadReason, ReconcilePlan,
+    ReconcileScope, RetentionReason, SourceSignals, plan_observation,
+};
 use crate::search::{PartitionReader, search_partitions, search_reader};
 use crate::semantic::{SemanticRuntime, embedding_text, rrf_fuse_traced};
+use crate::walk::{EnumerationResult, discover_vault};
 
 /// Candidate depth fetched from each leg before RRF fusion.
 const HYBRID_CANDIDATES: usize = 100;
@@ -32,10 +41,17 @@ const RRF_K: f64 = 60.0;
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenerationSearchResult {
+    pub generation: String,
+    pub hits: Vec<SearchHit>,
+}
+
 #[derive(Clone)]
 pub struct SearchRuntime {
     active: Arc<ArcSwapOption<ActiveSearchIndex>>,
     semantic: Arc<ArcSwapOption<SemanticRuntime>>,
+    freshness_basis: Arc<AtomicU8>,
 }
 
 impl Default for SearchRuntime {
@@ -49,6 +65,7 @@ impl SearchRuntime {
         Self {
             active: Arc::new(ArcSwapOption::empty()),
             semantic: Arc::new(ArcSwapOption::empty()),
+            freshness_basis: Arc::new(AtomicU8::new(0)),
         }
     }
 
@@ -66,12 +83,23 @@ impl SearchRuntime {
         limit: usize,
         filters: &SearchFilters,
     ) -> Result<Vec<SearchHit>> {
-        let active = self
-            .active
-            .load_full()
-            .ok_or_else(|| Error::Index("index is not ready".to_owned()))?;
+        Ok(self
+            .search_filtered_with_generation(query, limit, filters)?
+            .hits)
+    }
+
+    pub fn search_filtered_with_generation(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+    ) -> Result<GenerationSearchResult> {
+        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
         match active.as_ref() {
-            ActiveSearchIndex::Desktop(index) => index.search(query, limit, filters),
+            ActiveSearchIndex::Desktop(index) => Ok(GenerationSearchResult {
+                generation: index.generation.clone(),
+                hits: index.search(query, limit, filters)?,
+            }),
             ActiveSearchIndex::OpenClast(_) => Err(Error::Auth(
                 "openclast search requires an explicit authorized resource set".to_owned(),
             )),
@@ -85,15 +113,27 @@ impl SearchRuntime {
         filters: &SearchFilters,
         resources: &[ResourceKey],
     ) -> Result<Vec<SearchHit>> {
-        let active = self
-            .active
-            .load_full()
-            .ok_or_else(|| Error::Index("index is not ready".to_owned()))?;
+        Ok(self
+            .search_authorized_with_generation(query, limit, filters, resources)?
+            .hits)
+    }
+
+    pub fn search_authorized_with_generation(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+    ) -> Result<GenerationSearchResult> {
+        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
         match active.as_ref() {
             ActiveSearchIndex::Desktop(_) => Err(Error::Auth(
                 "authorized resource search is unavailable in the desktop profile".to_owned(),
             )),
-            ActiveSearchIndex::OpenClast(index) => index.search(query, limit, filters, resources),
+            ActiveSearchIndex::OpenClast(index) => Ok(GenerationSearchResult {
+                generation: index.generation.clone(),
+                hits: index.search(query, limit, filters, resources)?,
+            }),
         }
     }
 
@@ -105,6 +145,17 @@ impl SearchRuntime {
         limit: usize,
         filters: &SearchFilters,
     ) -> Result<Vec<SearchHit>> {
+        Ok(self
+            .search_semantic_with_generation(query, limit, filters)?
+            .hits)
+    }
+
+    pub fn search_semantic_with_generation(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+    ) -> Result<GenerationSearchResult> {
         let active = self.require_desktop_index()?;
         let semantic = self.require_semantic()?;
         // Over-fetch so filter-excluded neighbors don't shrink the page.
@@ -116,7 +167,10 @@ impl SearchRuntime {
             .collect();
         let mut hits = active.hydrate(&ordered, filters, Some(query))?;
         hits.truncate(limit);
-        Ok(hits)
+        Ok(GenerationSearchResult {
+            generation: active.generation.clone(),
+            hits,
+        })
     }
 
     /// Hybrid search: RRF fusion of the lexical and semantic rankings.
@@ -126,6 +180,17 @@ impl SearchRuntime {
         limit: usize,
         filters: &SearchFilters,
     ) -> Result<Vec<SearchHit>> {
+        Ok(self
+            .search_hybrid_with_generation(query, limit, filters)?
+            .hits)
+    }
+
+    pub fn search_hybrid_with_generation(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+    ) -> Result<GenerationSearchResult> {
         let active = self.require_desktop_index()?;
         let semantic = self.require_semantic()?;
         let lexical = active.search(query, HYBRID_CANDIDATES, filters)?;
@@ -140,7 +205,10 @@ impl SearchRuntime {
             .collect();
         let mut hits = active.hydrate(&ordered, filters, Some(query))?;
         hits.truncate(limit);
-        Ok(hits)
+        Ok(GenerationSearchResult {
+            generation: active.generation.clone(),
+            hits,
+        })
     }
 
     pub fn semantic_profile(&self) -> Option<crate::semantic::EmbeddingProfile> {
@@ -153,6 +221,23 @@ impl SearchRuntime {
         self.semantic.load_full().is_some()
     }
 
+    pub fn freshness_basis(&self) -> IndexFreshnessBasis {
+        match self.freshness_basis.load(Ordering::Acquire) {
+            1 => IndexFreshnessBasis::MetadataAudit,
+            2 => IndexFreshnessBasis::ProducerManifest,
+            _ => IndexFreshnessBasis::StrictHash,
+        }
+    }
+
+    fn set_freshness_basis(&self, basis: IndexFreshnessBasis) {
+        let value = match basis {
+            IndexFreshnessBasis::StrictHash => 0,
+            IndexFreshnessBasis::MetadataAudit => 1,
+            IndexFreshnessBasis::ProducerManifest => 2,
+        };
+        self.freshness_basis.store(value, Ordering::Release);
+    }
+
     pub fn generation(&self) -> Option<String> {
         self.active.load_full().map(|active| match active.as_ref() {
             ActiveSearchIndex::Desktop(index) => index.generation.clone(),
@@ -161,10 +246,7 @@ impl SearchRuntime {
     }
 
     fn require_desktop_index(&self) -> Result<Arc<SearchIndex>> {
-        let active = self
-            .active
-            .load_full()
-            .ok_or_else(|| Error::Index("index is not ready".to_owned()))?;
+        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
         match active.as_ref() {
             ActiveSearchIndex::Desktop(index) => Ok(index.clone()),
             ActiveSearchIndex::OpenClast(_) => Err(Error::SemanticUnavailable(
@@ -204,6 +286,13 @@ enum ActiveSearchIndex {
 struct PartitionedSearchIndex {
     generation: String,
     partition_dirs: BTreeMap<ResourceKey, PathBuf>,
+    /// Lazy per-resource readers. A partition is opened only after a
+    /// request's authorized resource intersection selects it, then cached
+    /// for the lifetime of this immutable generation; a generation swap
+    /// replaces the whole value, discarding every cached reader. The
+    /// authorized-only physical baseline is preserved: unauthorized
+    /// partitions are never preloaded.
+    readers: std::sync::Mutex<BTreeMap<ResourceKey, Arc<SearchIndex>>>,
 }
 
 impl PartitionedSearchIndex {
@@ -233,7 +322,36 @@ impl PartitionedSearchIndex {
         Ok(Self {
             generation: active.id.clone(),
             partition_dirs,
+            readers: std::sync::Mutex::new(BTreeMap::new()),
         })
+    }
+
+    fn authorized_reader(
+        &self,
+        resource: &ResourceKey,
+        index_dir: &Path,
+    ) -> Result<Arc<SearchIndex>> {
+        let mut readers = self
+            .readers
+            .lock()
+            .map_err(|_| Error::Index("partition reader cache mutex poisoned".to_owned()))?;
+        if let Some(reader) = readers.get(resource) {
+            return Ok(reader.clone());
+        }
+        let partition = match SearchIndex::open(self.generation.clone(), index_dir) {
+            Ok(partition) => partition,
+            // The generation directory was pruned while this stale reader
+            // was still installed: a typed retriable state, not an
+            // internal error. The next generation swap resolves it.
+            Err(_) if !index_dir.join("meta.json").is_file() => {
+                return Err(Error::IndexBuilding);
+            }
+            Err(error) => return Err(error),
+        };
+        partition.source_key_field()?;
+        let partition = Arc::new(partition);
+        readers.insert(resource.clone(), partition.clone());
+        Ok(partition)
     }
 
     fn search(
@@ -269,9 +387,7 @@ impl PartitionedSearchIndex {
         let opened = selected
             .into_iter()
             .map(|(resource, index_dir)| {
-                let partition = SearchIndex::open(self.generation.clone(), index_dir)?;
-                partition.source_key_field()?;
-                Ok((resource, partition))
+                Ok((resource, self.authorized_reader(resource, index_dir)?))
             })
             .collect::<Result<Vec<_>>>()?;
         let readers = opened
@@ -344,14 +460,143 @@ impl SearchIndex {
     }
 }
 
+struct VaultObservations {
+    outcomes: Vec<FileIngestOutcome>,
+    reused_keys: BTreeSet<String>,
+    enumeration: EnumerationResult,
+    source_files_read: usize,
+    source_bytes_read: u64,
+    audited_sources: usize,
+    audit_pending: bool,
+}
+
+struct VaultObservationContext<'a> {
+    registration_fingerprint: &'a str,
+    scope: &'a PartitionScope,
+    previous_resource: Option<&'a ResourceKey>,
+    policy: ObservationPolicy,
+    semantic: Option<&'a SemanticRuntime>,
+    /// Watcher-evidence relative paths for this vault. Forces byte reads
+    /// for matching sources; never restricts enumeration or deletion.
+    read_scope: Option<&'a BTreeSet<String>>,
+}
+
+fn observe_vault(
+    vault: &crate::model::VaultRegistration,
+    previous: &Manifest,
+    context: &VaultObservationContext<'_>,
+    audit: &mut AuditBudget,
+) -> VaultObservations {
+    let enumeration = discover_vault(vault);
+    let mut decisions = Vec::with_capacity(enumeration.files.len());
+    let mut audit_candidates = Vec::new();
+
+    for file in &enumeration.files {
+        let key = source_key(&vault.id, &file.relative_path);
+        let previous_file = previous.files.get(&key);
+        let previous_scope = previous_file.map(|file| match context.scope {
+            PartitionScope::Whole => PartitionScope::Whole,
+            PartitionScope::Resource(current) => PartitionScope::Resource(
+                file.resource
+                    .clone()
+                    .or_else(|| context.previous_resource.cloned())
+                    .unwrap_or_else(|| current.clone()),
+            ),
+        });
+        // A source whose chunks are missing from the semantic store (boot
+        // backfill, semantic newly enabled) needs its bytes even when the
+        // lexical metadata is reusable.
+        let semantic_backfill = context.policy.basis != IndexFreshnessBasis::StrictHash
+            && match (context.semantic, previous_file) {
+                (Some(runtime), Some(previous_file)) if previous_file.chunk_count > 0 => {
+                    runtime.source_hash(&key).ok().flatten().as_deref()
+                        != Some(previous_file.content_hash.as_str())
+                }
+                _ => false,
+            };
+        let forced_read = context
+            .read_scope
+            .is_some_and(|paths| paths.contains(&file.relative_path));
+        let decision = plan_observation(
+            previous_file,
+            file,
+            context.registration_fingerprint,
+            context.scope,
+            previous_scope.as_ref(),
+            context.policy,
+            SourceSignals {
+                forced_read,
+                semantic_backfill,
+            },
+        );
+        if decision == ObservationDecision::ReuseMetadata {
+            audit_candidates.push((key.clone(), file.byte_length));
+        }
+        decisions.push((file, key, decision));
+    }
+
+    let audited = audit.select(&audit_candidates);
+    let mut outcomes = Vec::new();
+    let mut reused_keys = BTreeSet::new();
+    let mut source_files_read = 0;
+    let mut source_bytes_read = 0;
+    for (file, key, decision) in decisions {
+        let read_reason = match decision {
+            ObservationDecision::ReadHash(reason) => Some(reason),
+            ObservationDecision::ReuseMetadata if audited.contains(&key) => Some(ReadReason::Audit),
+            ObservationDecision::ReuseMetadata => None,
+        };
+        if read_reason.is_some() {
+            let outcome = ingest_file(vault, file);
+            source_files_read += 1;
+            if outcome.content_hash.is_some() {
+                source_bytes_read += outcome.byte_length;
+            }
+            outcomes.push(outcome);
+        } else {
+            reused_keys.insert(key);
+        }
+    }
+
+    VaultObservations {
+        outcomes,
+        reused_keys,
+        enumeration,
+        source_files_read,
+        source_bytes_read,
+        audited_sources: audited.len(),
+        audit_pending: audit_candidates.len() > audited.len(),
+    }
+}
+
+fn system_time_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos())
+}
+
+fn vault_read_scope(scope: &ReconcileScope, vault_id: &str) -> Option<BTreeSet<String>> {
+    match scope {
+        ReconcileScope::Full => None,
+        ReconcileScope::Paths(paths) => Some(
+            paths
+                .iter()
+                .filter(|(scoped_vault, _)| scoped_vault == vault_id)
+                .map(|(_, path)| path.clone())
+                .collect(),
+        ),
+    }
+}
+
 struct DesktopIndexManager {
     _lock: DataRootLock,
+    data_root: DataRoot,
+    active: crate::generation::GenerationPaths,
     search: Arc<SearchIndex>,
     runtime: SearchRuntime,
-    writer: IndexWriter,
     manifest: Manifest,
-    manifest_path: std::path::PathBuf,
     config: Config,
+    audit_cursor: usize,
 }
 
 impl DesktopIndexManager {
@@ -362,21 +607,20 @@ impl DesktopIndexManager {
             Error::State("Vertical 2 generation is missing; run `kwiry index` first".to_owned())
         })?;
         let manifest = Manifest::load(&active.manifest_path)?;
-        let search = Arc::new(SearchIndex::open(active.id, &active.index_dir)?);
+        let audit_cursor = manifest.state_revision as usize;
+        let search = Arc::new(SearchIndex::open(active.id.clone(), &active.index_dir)?);
         search.source_key_field()?;
-        let writer = search
-            .index
-            .writer(WRITER_MEMORY_BYTES)
-            .map_err(|error| Error::Index(error.to_string()))?;
+        runtime.set_freshness_basis(config.indexing.basis);
         runtime.install_desktop(search.clone());
         Ok(Self {
             _lock: lock,
+            data_root,
+            active,
             search,
             runtime,
-            writer,
             manifest,
-            manifest_path: active.manifest_path,
             config,
+            audit_cursor,
         })
     }
 
@@ -388,16 +632,35 @@ impl DesktopIndexManager {
         &self.config
     }
 
-    pub fn reconcile(&mut self, config: Config) -> Result<ReconcileReport> {
-        let mut next_manifest = self.manifest.clone();
-        let mut delete_keys = BTreeSet::new();
-        let mut replacement_chunks = Vec::<(PreparedChunk, RetrievalMetadata)>::new();
+    pub fn reconcile(&mut self, config: Config, scope: &ReconcileScope) -> Result<ReconcileReport> {
+        let mut plan = ReconcilePlan::new(&self.manifest);
         // Semantic state reconciles by its own stored hashes, so every
         // discovered source is offered; unchanged ones short-circuit.
         let mut semantic_sources =
             std::collections::BTreeMap::<String, (String, Vec<(String, String)>)>::new();
         let mut warnings = Vec::new();
         let mut unavailable_vaults = Vec::new();
+        let mut source_files_read = 0;
+        let mut source_bytes_read = 0;
+        let mut audited_sources = 0;
+        let mut audit_pending = false;
+        let observation_policy = ObservationPolicy {
+            basis: config.indexing.basis,
+            now_nanos: system_time_nanos(),
+            racy_window_nanos: u128::from(config.indexing.racy_window_millis) * 1_000_000,
+        };
+        // The rolling audit belongs to full passes only: a scoped candidate
+        // set would rotate the cursor over a shrunken list and quietly stop
+        // covering the vault.
+        let mut audit = match scope {
+            ReconcileScope::Full => AuditBudget::new(
+                self.audit_cursor,
+                config.indexing.audit_sources_per_pass,
+                config.indexing.audit_bytes_per_pass,
+            ),
+            ReconcileScope::Paths(_) => AuditBudget::new(self.audit_cursor, 0, 0),
+        };
+        self.runtime.set_freshness_basis(config.indexing.basis);
         let configured_ids: HashSet<_> = config
             .vaults
             .iter()
@@ -412,13 +675,17 @@ impl DesktopIndexManager {
             .map(|(key, _)| key.clone())
             .collect();
         for key in removed_keys {
-            delete_keys.insert(key.clone());
-            next_manifest.files.remove(&key);
+            plan.remove_source(key, PartitionScope::Whole);
         }
 
         for vault in &config.vaults {
             if !vault.path.is_dir() {
                 unavailable_vaults.push(vault.id.clone());
+                for (key, file) in &self.manifest.files {
+                    if file.vault_id == vault.id {
+                        plan.retain_source(key, file, RetentionReason::VaultUnavailable);
+                    }
+                }
                 warnings.push(IngestWarning {
                     path: vault.path.clone(),
                     message: "vault root is unavailable; retained last committed content"
@@ -435,17 +702,38 @@ impl DesktopIndexManager {
                 .filter(|(_, file)| file.vault_id == vault.id)
                 .map(|(key, _)| key.clone())
                 .collect();
-            let (outcomes, discovery_warnings) = ingest_vault_files(vault);
-            let discovery_incomplete = !discovery_warnings.is_empty();
-            warnings.extend(discovery_warnings);
-            let mut seen_keys = BTreeSet::new();
+            let semantic_runtime = self.runtime.semantic.load_full();
+            let vault_read_scope = vault_read_scope(scope, &vault.id);
+            let observed = observe_vault(
+                vault,
+                &self.manifest,
+                &VaultObservationContext {
+                    registration_fingerprint: &fingerprint,
+                    scope: &PartitionScope::Whole,
+                    previous_resource: None,
+                    policy: observation_policy,
+                    semantic: semantic_runtime.as_deref(),
+                    read_scope: vault_read_scope.as_ref(),
+                },
+                &mut audit,
+            );
+            let discovery_incomplete = !observed.enumeration.completeness.may_infer_deletions();
+            warnings.extend(observed.enumeration.warnings);
+            source_files_read += observed.source_files_read;
+            source_bytes_read += observed.source_bytes_read;
+            audited_sources += observed.audited_sources;
+            audit_pending |= observed.audit_pending;
+            let mut seen_keys = observed.reused_keys;
 
-            for outcome in outcomes {
+            for outcome in observed.outcomes {
                 let key = source_key(&outcome.vault_id, &outcome.path);
                 if let Some(warning) = outcome.warning.clone() {
                     warnings.push(warning);
                 }
                 if outcome.kind == FileOutcomeKind::TransientError {
+                    if let Some(previous) = self.manifest.files.get(&key) {
+                        plan.retain_source(&key, previous, RetentionReason::TransientReadError);
+                    }
                     seen_keys.insert(key);
                     continue;
                 }
@@ -472,55 +760,68 @@ impl DesktopIndexManager {
                         ),
                     );
                 }
-                let index_changed = self.manifest.files.get(&key).is_none_or(|previous| {
-                    previous.content_hash != next_file.content_hash
-                        || previous.registration_fingerprint != next_file.registration_fingerprint
-                        || previous.outcome != next_file.outcome
-                });
-                if index_changed {
-                    delete_keys.insert(key.clone());
-                    let retrieval = outcome.retrieval;
-                    replacement_chunks.extend(
-                        outcome
-                            .chunks
-                            .into_iter()
-                            .map(|chunk| (chunk, retrieval.clone())),
-                    );
-                }
-                next_manifest.files.insert(key, next_file);
+                let previous = self.manifest.files.get(&key);
+                let retrieval = outcome.retrieval;
+                let chunks = outcome
+                    .chunks
+                    .into_iter()
+                    .map(|chunk| (chunk, retrieval.clone()))
+                    .collect();
+                plan.reconcile_source(
+                    key,
+                    previous,
+                    next_file,
+                    PartitionScope::Whole,
+                    None,
+                    chunks,
+                );
             }
 
-            if !discovery_incomplete {
-                for key in previous_keys {
-                    if !seen_keys.contains(&key) {
-                        delete_keys.insert(key.clone());
-                        next_manifest.files.remove(&key);
-                    }
+            for key in previous_keys {
+                if seen_keys.contains(&key) {
+                    continue;
+                }
+                if discovery_incomplete {
+                    let previous = &self.manifest.files[&key];
+                    plan.retain_source(&key, previous, RetentionReason::IncompleteEnumeration);
+                } else {
+                    plan.remove_source(key, PartitionScope::Whole);
                 }
             }
         }
 
-        let manifest_changed = next_manifest != self.manifest;
-        let changed_sources = delete_keys.len();
-        let added_chunks = replacement_chunks.len();
-        if changed_sources > 0 || added_chunks > 0 {
-            let source_key_field = self.search.source_key_field()?;
-            for key in &delete_keys {
-                self.writer
-                    .delete_term(Term::from_field_text(source_key_field, key));
+        plan.validate_retention()?;
+        let manifest_changed = plan.next_manifest != self.manifest;
+        let changed_sources = plan.changed_source_count();
+        let added_chunks = plan.added_chunk_count();
+        let publish_generation = manifest_changed || changed_sources > 0 || added_chunks > 0;
+        if publish_generation {
+            plan.next_manifest.mark_synced()?;
+            let candidate = self.data_root.create_candidate_from(&self.active)?;
+            let staging_dir = candidate.staging_dir.clone();
+            let update_result = (|| -> Result<()> {
+                let candidate_search =
+                    SearchIndex::open(candidate.id.clone(), &candidate.index_dir)?;
+                apply_index_updates(
+                    &candidate_search.index,
+                    &candidate_search.fields,
+                    plan.deletes(&PartitionScope::Whole),
+                    plan.additions(&PartitionScope::Whole),
+                    None,
+                )?;
+                plan.next_manifest.save(&candidate.manifest_path())?;
+                Ok(())
+            })();
+            if let Err(error) = update_result {
+                let _ = fs::remove_dir_all(staging_dir);
+                return Err(error);
             }
-            for (chunk, retrieval) in &replacement_chunks {
-                self.writer
-                    .add_document(chunk_document(&self.search.fields, chunk, retrieval)?)
-                    .map_err(|error| Error::Index(error.to_string()))?;
-            }
-            self.writer
-                .commit()
-                .map_err(|error| Error::Index(error.to_string()))?;
-            self.search
-                .reader
-                .reload()
-                .map_err(|error| Error::Index(format!("could not reload index reader: {error}")))?;
+            let active = self.data_root.publish(candidate)?;
+            let search = Arc::new(SearchIndex::open(active.id.clone(), &active.index_dir)?);
+            search.source_key_field()?;
+            self.runtime.install_desktop(search.clone());
+            self.active = active;
+            self.search = search;
         }
 
         // Semantic updates follow the committed lexical state and reconcile
@@ -536,18 +837,20 @@ impl DesktopIndexManager {
                     });
                 }
             }
-            for key in &delete_keys {
-                if semantic_sources.contains_key(key) {
-                    continue;
-                }
-                if let Err(error) = semantic.delete_source(key) {
-                    warnings.push(IngestWarning {
-                        path: PathBuf::from(key.clone()),
-                        message: format!("semantic delete failed; lexical unaffected: {error}"),
-                    });
+            if let Some(delete_keys) = plan.deletes(&PartitionScope::Whole) {
+                for key in delete_keys {
+                    if semantic_sources.contains_key(key) {
+                        continue;
+                    }
+                    if let Err(error) = semantic.delete_source(key) {
+                        warnings.push(IngestWarning {
+                            path: PathBuf::from(key.clone()),
+                            message: format!("semantic delete failed; lexical unaffected: {error}"),
+                        });
+                    }
                 }
             }
-            let keep: BTreeSet<String> = next_manifest.files.keys().cloned().collect();
+            let keep: BTreeSet<String> = plan.next_manifest.files.keys().cloned().collect();
             if let Err(error) = semantic.retain_sources(&keep) {
                 warnings.push(IngestWarning {
                     path: PathBuf::from("semantic"),
@@ -556,16 +859,23 @@ impl DesktopIndexManager {
             }
         }
 
-        if manifest_changed || changed_sources > 0 || added_chunks > 0 {
-            next_manifest.mark_synced()?;
-            next_manifest.save(&self.manifest_path)?;
-            self.manifest = next_manifest;
+        if publish_generation {
+            self.manifest = plan.next_manifest;
         }
+        if matches!(scope, ReconcileScope::Full) {
+            self.audit_cursor = audit.cursor();
+        }
+        let freshness_basis = config.indexing.basis;
         self.config = config;
 
         Ok(ReconcileReport {
             changed_sources,
             added_chunks,
+            source_files_read,
+            source_bytes_read,
+            audited_sources,
+            audit_pending,
+            freshness_basis,
             documents: self.manifest.document_count(),
             chunks: self.manifest.chunk_count(),
             last_sync: self.manifest.last_sync.clone(),
@@ -577,19 +887,19 @@ impl DesktopIndexManager {
     }
 
     pub fn shutdown(self) -> Result<()> {
-        self.writer
-            .wait_merging_threads()
-            .map_err(|error| Error::Index(error.to_string()))
+        Ok(())
     }
 }
 
 struct OpenClastIndexManager {
     _lock: DataRootLock,
+    data_root: DataRoot,
     active: crate::generation::GenerationPaths,
     layout: GenerationLayout,
     runtime: SearchRuntime,
     manifest: Manifest,
     config: Config,
+    audit_cursor: usize,
 }
 
 impl OpenClastIndexManager {
@@ -600,16 +910,20 @@ impl OpenClastIndexManager {
             Error::State("IG-1 generation is missing; run `kwiry index` first".to_owned())
         })?;
         let manifest = Manifest::load(&active.manifest_path)?;
+        let audit_cursor = manifest.state_revision as usize;
         let layout = GenerationLayout::load(&active.layout_path)?;
         let search = Arc::new(PartitionedSearchIndex::open(&active)?);
+        runtime.set_freshness_basis(config.indexing.basis);
         runtime.install_openclast(search);
         Ok(Self {
             _lock: lock,
+            data_root,
             active,
             layout,
             runtime,
             manifest,
             config,
+            audit_cursor,
         })
     }
 
@@ -621,19 +935,37 @@ impl OpenClastIndexManager {
         &self.config
     }
 
-    fn reconcile(&mut self, config: Config) -> Result<ReconcileReport> {
-        let mut next_manifest = self.manifest.clone();
+    fn reconcile(&mut self, config: Config, scope: &ReconcileScope) -> Result<ReconcileReport> {
+        let mut plan = ReconcilePlan::new(&self.manifest);
         let mut next_resources: BTreeSet<_> = self
             .layout
             .partitions
             .iter()
             .map(|partition| partition.resource.clone())
             .collect();
-        let mut deletes = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
-        let mut additions = BTreeMap::<ResourceKey, Vec<(PreparedChunk, RetrievalMetadata)>>::new();
-        let mut changed_keys = BTreeSet::new();
         let mut warnings = Vec::new();
         let mut unavailable_vaults = Vec::new();
+        let mut source_files_read = 0;
+        let mut source_bytes_read = 0;
+        let mut audited_sources = 0;
+        let mut audit_pending = false;
+        let observation_policy = ObservationPolicy {
+            basis: config.indexing.basis,
+            now_nanos: system_time_nanos(),
+            racy_window_nanos: u128::from(config.indexing.racy_window_millis) * 1_000_000,
+        };
+        // The rolling audit belongs to full passes only: a scoped candidate
+        // set would rotate the cursor over a shrunken list and quietly stop
+        // covering the vault.
+        let mut audit = match scope {
+            ReconcileScope::Full => AuditBudget::new(
+                self.audit_cursor,
+                config.indexing.audit_sources_per_pass,
+                config.indexing.audit_bytes_per_pass,
+            ),
+            ReconcileScope::Paths(_) => AuditBudget::new(self.audit_cursor, 0, 0),
+        };
+        self.runtime.set_freshness_basis(config.indexing.basis);
         let configured_ids: HashSet<_> = config
             .vaults
             .iter()
@@ -655,14 +987,13 @@ impl OpenClastIndexManager {
             .collect();
         for key in removed_keys {
             let previous_file = &self.manifest.files[&key];
+            plan.remove_manifest_source(&key);
             if let Some(resource) = previous_file.resource.clone() {
-                deletes.entry(resource).or_default().insert(key.clone());
+                plan.remove_index_source(key.clone(), PartitionScope::Resource(resource));
             }
             if let Some(resource) = previous_resources.get(&previous_file.vault_id).cloned() {
-                deletes.entry(resource).or_default().insert(key.clone());
+                plan.remove_index_source(key.clone(), PartitionScope::Resource(resource));
             }
-            changed_keys.insert(key.clone());
-            next_manifest.files.remove(&key);
         }
         next_resources.retain(|resource| configured_ids.contains(resource.vault_id.as_str()));
 
@@ -693,6 +1024,11 @@ impl OpenClastIndexManager {
             }
             if !vault.path.is_dir() {
                 unavailable_vaults.push(vault.id.clone());
+                for (key, file) in &self.manifest.files {
+                    if file.vault_id == vault.id {
+                        plan.retain_source(key, file, RetentionReason::VaultUnavailable);
+                    }
+                }
                 warnings.push(IngestWarning {
                     path: vault.path.clone(),
                     message: if vault_reclassified {
@@ -712,17 +1048,37 @@ impl OpenClastIndexManager {
                 .filter(|(_, file)| file.vault_id == vault.id)
                 .map(|(key, _)| key.clone())
                 .collect();
-            let (outcomes, discovery_warnings) = ingest_vault_files(vault);
-            let discovery_incomplete = !discovery_warnings.is_empty();
-            warnings.extend(discovery_warnings);
-            let mut seen_keys = BTreeSet::new();
+            let vault_read_scope = vault_read_scope(scope, &vault.id);
+            let observed = observe_vault(
+                vault,
+                &self.manifest,
+                &VaultObservationContext {
+                    registration_fingerprint: fingerprint,
+                    scope: &PartitionScope::Resource(resource.clone()),
+                    previous_resource: previous_resource.as_ref(),
+                    policy: observation_policy,
+                    semantic: None,
+                    read_scope: vault_read_scope.as_ref(),
+                },
+                &mut audit,
+            );
+            let discovery_incomplete = !observed.enumeration.completeness.may_infer_deletions();
+            warnings.extend(observed.enumeration.warnings);
+            source_files_read += observed.source_files_read;
+            source_bytes_read += observed.source_bytes_read;
+            audited_sources += observed.audited_sources;
+            audit_pending |= observed.audit_pending;
+            let mut seen_keys = observed.reused_keys;
 
-            for outcome in outcomes {
+            for outcome in observed.outcomes {
                 let key = source_key(&outcome.vault_id, &outcome.path);
                 if let Some(warning) = outcome.warning.clone() {
                     warnings.push(warning);
                 }
                 if outcome.kind == FileOutcomeKind::TransientError {
+                    if let Some(previous) = self.manifest.files.get(&key) {
+                        plan.retain_source(&key, previous, RetentionReason::TransientReadError);
+                    }
                     seen_keys.insert(key);
                     continue;
                 }
@@ -733,65 +1089,50 @@ impl OpenClastIndexManager {
                 };
                 seen_keys.insert(key.clone());
                 let previous_file = self.manifest.files.get(&key);
-                let previous_file_resource = previous_file
-                    .and_then(|file| file.resource.clone().or_else(|| previous_resource.clone()));
-                let resource_changed =
-                    previous_file.is_some_and(|file| file.resource.as_ref() != Some(&resource));
-                let index_changed = resource_changed
-                    || previous_file.is_none_or(|previous| {
-                        previous.content_hash != next_file.content_hash
-                            || previous.registration_fingerprint
-                                != next_file.registration_fingerprint
-                            || previous.outcome != next_file.outcome
-                    });
-                if index_changed {
-                    let delete_resource =
-                        previous_file_resource.unwrap_or_else(|| resource.clone());
-                    let resource_moved = delete_resource != resource;
-                    deletes
-                        .entry(delete_resource)
-                        .or_default()
-                        .insert(key.clone());
-                    if resource_moved {
-                        deletes
-                            .entry(resource.clone())
-                            .or_default()
-                            .insert(key.clone());
-                    }
-                    changed_keys.insert(key.clone());
-                    let retrieval = outcome.retrieval;
-                    additions.entry(resource.clone()).or_default().extend(
-                        outcome
-                            .chunks
-                            .into_iter()
-                            .map(|chunk| (chunk, retrieval.clone())),
-                    );
-                }
-                next_manifest.files.insert(key, next_file);
-            }
-
-            if !discovery_incomplete {
-                for key in previous_keys {
-                    if !seen_keys.contains(&key) {
-                        let delete_resource = self.manifest.files[&key]
-                            .resource
+                let previous_scope = previous_file.map(|file| {
+                    PartitionScope::Resource(
+                        file.resource
                             .clone()
                             .or_else(|| previous_resource.clone())
-                            .unwrap_or_else(|| resource.clone());
-                        let resource_moved = delete_resource != resource;
-                        deletes
-                            .entry(delete_resource)
-                            .or_default()
-                            .insert(key.clone());
-                        if resource_moved {
-                            deletes
-                                .entry(resource.clone())
-                                .or_default()
-                                .insert(key.clone());
-                        }
-                        changed_keys.insert(key.clone());
-                        next_manifest.files.remove(&key);
-                    }
+                            .unwrap_or_else(|| resource.clone()),
+                    )
+                });
+                let retrieval = outcome.retrieval;
+                let chunks = outcome
+                    .chunks
+                    .into_iter()
+                    .map(|chunk| (chunk, retrieval.clone()))
+                    .collect();
+                plan.reconcile_source(
+                    key,
+                    previous_file,
+                    next_file,
+                    PartitionScope::Resource(resource.clone()),
+                    previous_scope,
+                    chunks,
+                );
+            }
+
+            for key in previous_keys {
+                if seen_keys.contains(&key) {
+                    continue;
+                }
+                let previous_file = &self.manifest.files[&key];
+                if discovery_incomplete {
+                    plan.retain_source(&key, previous_file, RetentionReason::IncompleteEnumeration);
+                    continue;
+                }
+                let delete_resource = previous_file
+                    .resource
+                    .clone()
+                    .or_else(|| previous_resource.clone())
+                    .unwrap_or_else(|| resource.clone());
+                plan.remove_source(
+                    key.clone(),
+                    PartitionScope::Resource(delete_resource.clone()),
+                );
+                if delete_resource != resource {
+                    plan.remove_index_source(key, PartitionScope::Resource(resource.clone()));
                 }
             }
         }
@@ -799,7 +1140,7 @@ impl OpenClastIndexManager {
         let next_layout = GenerationLayout::openclast(next_resources)?;
         let layout_changed = next_layout != self.layout;
         let mut expected_source_keys = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
-        for (key, file) in &next_manifest.files {
+        for (key, file) in &plan.next_manifest.files {
             let Some(resource) = file.resource.as_ref() else {
                 continue;
             };
@@ -827,75 +1168,115 @@ impl OpenClastIndexManager {
                 .unwrap_or_default();
             for key in partition_source_keys(&index, source_key_field)? {
                 if !expected.contains(&key) {
-                    deletes
-                        .entry(partition.resource.clone())
-                        .or_default()
-                        .insert(key.clone());
-                    changed_keys.insert(key);
+                    plan.remove_index_source(
+                        key,
+                        PartitionScope::Resource(partition.resource.clone()),
+                    );
                 }
             }
         }
-        let added_chunks = additions.values().map(Vec::len).sum();
-        let mut resources_to_update: BTreeSet<_> =
-            deletes.keys().chain(additions.keys()).cloned().collect();
+        let added_chunks = plan.added_chunk_count();
+        let mut resources_to_update: BTreeSet<_> = plan
+            .update_scopes()
+            .into_iter()
+            .filter_map(|scope| match scope {
+                PartitionScope::Resource(resource) => Some(resource),
+                PartitionScope::Whole => None,
+            })
+            .collect();
         for partition in &next_layout.partitions {
             let index_dir = partition_index_dir(&self.active.partitions_dir, &partition.resource);
             if !index_dir.join("meta.json").is_file() {
                 resources_to_update.insert(partition.resource.clone());
             }
         }
-        for resource in resources_to_update {
-            let index_dir = partition_index_dir(&self.active.partitions_dir, &resource);
-            let (index, fields) = ensure_partition_index(&index_dir)?;
-            let source_key_field = fields.source_key.ok_or_else(|| {
-                Error::Index("resource partition is missing the source_key field".to_owned())
-            })?;
-            let mut writer = index
-                .writer(WRITER_MEMORY_BYTES)
-                .map_err(|error| Error::Index(error.to_string()))?;
-            if let Some(keys) = deletes.get(&resource) {
-                for key in keys {
-                    writer.delete_term(Term::from_field_text(source_key_field, key));
-                }
-            }
-            if let Some(chunks) = additions.get(&resource) {
-                for (chunk, retrieval) in chunks {
-                    if chunk.vault_id != resource.vault_id
-                        || chunk.room.as_deref() != Some(resource.room_id.as_str())
-                    {
-                        return Err(Error::State(format!(
-                            "chunk {} does not match its resource partition",
-                            chunk.chunk_id
-                        )));
+        plan.validate_retention()?;
+        let manifest_changed = plan.next_manifest != self.manifest;
+        let changed_sources = plan.changed_source_count();
+        let publish_generation =
+            manifest_changed || layout_changed || changed_sources > 0 || added_chunks > 0;
+        if publish_generation {
+            plan.next_manifest.mark_synced()?;
+            let candidate = self.data_root.create_candidate_from(&self.active)?;
+            let staging_dir = candidate.staging_dir.clone();
+            let next_resource_set: BTreeSet<_> = next_layout
+                .partitions
+                .iter()
+                .map(|partition| partition.resource.clone())
+                .collect();
+            let next_partition_ids: BTreeSet<_> = next_layout
+                .partitions
+                .iter()
+                .map(|partition| partition.partition_id.as_str())
+                .collect();
+            let update_result = (|| -> Result<()> {
+                for entry in fs::read_dir(&candidate.partitions_dir)
+                    .map_err(|error| crate::error::io_error(&candidate.partitions_dir, error))?
+                {
+                    let entry = entry.map_err(|error| {
+                        crate::error::io_error(&candidate.partitions_dir, error)
+                    })?;
+                    if !next_partition_ids.contains(entry.file_name().to_string_lossy().as_ref()) {
+                        let path = entry.path();
+                        if entry
+                            .file_type()
+                            .map_err(|error| crate::error::io_error(&path, error))?
+                            .is_dir()
+                        {
+                            fs::remove_dir_all(&path)
+                                .map_err(|error| crate::error::io_error(&path, error))?;
+                        } else {
+                            fs::remove_file(&path)
+                                .map_err(|error| crate::error::io_error(&path, error))?;
+                        }
                     }
-                    writer
-                        .add_document(chunk_document(&fields, chunk, retrieval)?)
-                        .map_err(|error| Error::Index(error.to_string()))?;
                 }
-            }
-            writer
-                .commit()
-                .map_err(|error| Error::Index(error.to_string()))?;
-            writer
-                .wait_merging_threads()
-                .map_err(|error| Error::Index(error.to_string()))?;
-        }
 
-        let manifest_changed = next_manifest != self.manifest;
-        if manifest_changed || layout_changed || !changed_keys.is_empty() || added_chunks > 0 {
-            next_manifest.mark_synced()?;
-            next_layout.save(&self.active.layout_path)?;
-            next_manifest.save(&self.active.manifest_path)?;
-            self.layout = next_layout;
-            self.manifest = next_manifest;
-            let search = Arc::new(PartitionedSearchIndex::open(&self.active)?);
+                for resource in &resources_to_update {
+                    if !next_resource_set.contains(resource) {
+                        continue;
+                    }
+                    let index_dir = partition_index_dir(&candidate.partitions_dir, resource);
+                    let (index, fields) = ensure_partition_index(&index_dir)?;
+                    let scope = PartitionScope::Resource(resource.clone());
+                    apply_index_updates(
+                        &index,
+                        &fields,
+                        plan.deletes(&scope),
+                        plan.additions(&scope),
+                        Some(resource),
+                    )?;
+                }
+
+                next_layout.save(&candidate.layout_path())?;
+                plan.next_manifest.save(&candidate.manifest_path())?;
+                Ok(())
+            })();
+            if let Err(error) = update_result {
+                let _ = fs::remove_dir_all(staging_dir);
+                return Err(error);
+            }
+            let active = self.data_root.publish(candidate)?;
+            let search = Arc::new(PartitionedSearchIndex::open(&active)?);
             self.runtime.install_openclast(search);
+            self.active = active;
+            self.layout = next_layout;
+            self.manifest = plan.next_manifest;
         }
+        if matches!(scope, ReconcileScope::Full) {
+            self.audit_cursor = audit.cursor();
+        }
+        let freshness_basis = config.indexing.basis;
         self.config = config;
 
         Ok(ReconcileReport {
-            changed_sources: changed_keys.len(),
+            changed_sources,
             added_chunks,
+            source_files_read,
+            source_bytes_read,
+            audited_sources,
+            audit_pending,
+            freshness_basis,
             documents: self.manifest.document_count(),
             chunks: self.manifest.chunk_count(),
             last_sync: self.manifest.last_sync.clone(),
@@ -909,6 +1290,55 @@ impl OpenClastIndexManager {
     fn shutdown(self) -> Result<()> {
         Ok(())
     }
+}
+
+fn apply_index_updates(
+    index: &Index,
+    fields: &Fields,
+    deletes: Option<&BTreeSet<String>>,
+    additions: Option<&[(PreparedChunk, RetrievalMetadata)]>,
+    expected_resource: Option<&ResourceKey>,
+) -> Result<()> {
+    let deletes_empty = deletes.map(BTreeSet::is_empty).unwrap_or(true);
+    let additions_empty = additions.map(<[_]>::is_empty).unwrap_or(true);
+    if deletes_empty && additions_empty {
+        return Ok(());
+    }
+
+    let source_key_field = fields
+        .source_key
+        .ok_or_else(|| Error::Index("index is missing the source_key field".to_owned()))?;
+    let mut writer = index
+        .writer(WRITER_MEMORY_BYTES)
+        .map_err(|error| Error::Index(error.to_string()))?;
+    if let Some(keys) = deletes {
+        for key in keys {
+            writer.delete_term(Term::from_field_text(source_key_field, key));
+        }
+    }
+    if let Some(chunks) = additions {
+        for (chunk, retrieval) in chunks {
+            if let Some(resource) = expected_resource
+                && (chunk.vault_id != resource.vault_id
+                    || chunk.room.as_deref() != Some(resource.room_id.as_str()))
+            {
+                return Err(Error::State(format!(
+                    "chunk {} does not match its resource partition",
+                    chunk.chunk_id
+                )));
+            }
+            writer
+                .add_document(chunk_document(fields, chunk, retrieval)?)
+                .map_err(|error| Error::Index(error.to_string()))?;
+        }
+    }
+    writer
+        .commit()
+        .map_err(|error| Error::Index(error.to_string()))?;
+    writer
+        .wait_merging_threads()
+        .map_err(|error| Error::Index(error.to_string()))?;
+    Ok(())
 }
 
 fn resources_by_vault(layout: &GenerationLayout) -> Result<BTreeMap<String, ResourceKey>> {
@@ -1000,14 +1430,22 @@ impl IndexManager {
     }
 
     pub fn reconcile(&mut self, config: Config) -> Result<ReconcileReport> {
+        self.reconcile_scoped(config, &ReconcileScope::Full)
+    }
+
+    pub fn reconcile_scoped(
+        &mut self,
+        config: Config,
+        scope: &ReconcileScope,
+    ) -> Result<ReconcileReport> {
         if self.config().requires_restart_for(&config) {
             return Err(Error::State(
                 "startup configuration changed; restart the daemon to apply it".to_owned(),
             ));
         }
         match &mut self.inner {
-            IndexManagerInner::Desktop(manager) => manager.reconcile(config),
-            IndexManagerInner::OpenClast(manager) => manager.reconcile(config),
+            IndexManagerInner::Desktop(manager) => manager.reconcile(config, scope),
+            IndexManagerInner::OpenClast(manager) => manager.reconcile(config, scope),
         }
     }
 
@@ -1023,6 +1461,11 @@ impl IndexManager {
 pub struct ReconcileReport {
     pub changed_sources: usize,
     pub added_chunks: usize,
+    pub source_files_read: usize,
+    pub source_bytes_read: u64,
+    pub audited_sources: usize,
+    pub audit_pending: bool,
+    pub freshness_basis: IndexFreshnessBasis,
     pub documents: usize,
     pub chunks: usize,
     pub last_sync: Option<String>,
@@ -1036,10 +1479,14 @@ pub struct ReconcileReport {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
+    use filetime::{FileTime, set_file_mtime};
     use tempfile::tempdir;
 
     use super::*;
+    use crate::chunk::ingest_vault_files;
     use crate::index::build_index;
     use crate::model::VaultRegistration;
 
@@ -1049,6 +1496,31 @@ mod tests {
             limit: 20,
             vault_id: None,
         }
+    }
+
+    fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            let mut entries: Vec<_> = fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    visit(root, &path, snapshot);
+                } else {
+                    snapshot.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
     }
 
     #[test]
@@ -1073,9 +1545,14 @@ mod tests {
         let old_id = runtime.search(&request("oldterm")).unwrap()[0]
             .chunk_id
             .clone();
+        let previous_generation = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let previous_snapshot = snapshot_tree(&previous_generation.root);
 
         fs::write(&note, "# One\nnewterm").unwrap();
         manager.reconcile(config.clone()).unwrap();
+        let current_generation = DataRoot::new(&data_root).active().unwrap().unwrap();
+        assert_ne!(current_generation.id, previous_generation.id);
+        assert_eq!(snapshot_tree(&previous_generation.root), previous_snapshot);
         assert!(runtime.search(&request("oldterm")).unwrap().is_empty());
         assert_eq!(runtime.search(&request("newterm")).unwrap().len(), 1);
 
@@ -1089,6 +1566,500 @@ mod tests {
         fs::remove_file(moved).unwrap();
         manager.reconcile(config).unwrap();
         assert!(runtime.search(&request("newterm")).unwrap().is_empty());
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn reconcile_detects_same_size_same_mtime_content_changes() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let note = vault_path.join("note.md");
+        let fixed_mtime = FileTime::from_unix_time(1_700_000_000, 123_456_789);
+        fs::write(&note, "oldterm").unwrap();
+        set_file_mtime(&note, fixed_mtime).unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        fs::write(&note, "newterm").unwrap();
+        set_file_mtime(&note, fixed_mtime).unwrap();
+        manager.reconcile(config).unwrap();
+
+        assert!(runtime.search(&request("oldterm")).unwrap().is_empty());
+        assert_eq!(runtime.search(&request("newterm")).unwrap().len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn reconcile_detects_content_changes_when_mtime_moves_backwards() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let note = vault_path.join("note.md");
+        fs::write(&note, "forward").unwrap();
+        set_file_mtime(&note, FileTime::from_unix_time(1_700_000_100, 0)).unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        fs::write(&note, "backward").unwrap();
+        set_file_mtime(&note, FileTime::from_unix_time(1_700_000_000, 0)).unwrap();
+        manager.reconcile(config).unwrap();
+
+        assert!(runtime.search(&request("forward")).unwrap().is_empty());
+        assert_eq!(runtime.search(&request("backward")).unwrap().len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn oversized_warning_suppresses_unrelated_deletion_inference() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let retained = vault_path.join("retained.md");
+        fs::write(&retained, "retainedterm").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        fs::remove_file(retained).unwrap();
+        fs::write(
+            vault_path.join("oversized.md"),
+            vec![b'x'; crate::model::MAX_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let report = manager.reconcile(config).unwrap();
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("skipped file larger"))
+        );
+        assert_eq!(runtime.search(&request("retainedterm")).unwrap().len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transient_read_error_retains_previous_manifest_and_chunks() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let note = vault_path.join("note.md");
+        fs::write(&note, "transientterm").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        let previous_manifest = manager.manifest().clone();
+
+        let mut permissions = fs::metadata(&note).unwrap().permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&note, permissions).unwrap();
+        let report = manager.reconcile(config).unwrap();
+
+        let mut permissions = fs::metadata(&note).unwrap().permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&note, permissions).unwrap();
+        assert!(!report.warnings.is_empty());
+        assert_eq!(manager.manifest(), &previous_manifest);
+        assert_eq!(runtime.search(&request("transientterm")).unwrap().len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn metadata_audit_reuses_settled_unchanged_sources_without_reading_bytes() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let settled = FileTime::from_unix_time(1_700_000_000, 0);
+        for index in 0..3 {
+            let note = vault_path.join(format!("note-{index}.md"));
+            fs::write(&note, format!("settledterm {index}")).unwrap();
+            set_file_mtime(&note, settled).unwrap();
+        }
+        let mut config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+        config.indexing.audit_sources_per_pass = 1;
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        let generation_before = runtime.generation();
+
+        let report = manager.reconcile(config).unwrap();
+
+        assert_eq!(report.freshness_basis, IndexFreshnessBasis::MetadataAudit);
+        assert_eq!(report.changed_sources, 0);
+        assert_eq!(report.source_files_read, 1);
+        assert_eq!(report.audited_sources, 1);
+        assert!(report.audit_pending);
+        assert_eq!(runtime.generation(), generation_before);
+        assert_eq!(runtime.search(&request("settledterm")).unwrap().len(), 3);
+        assert_eq!(
+            runtime.freshness_basis(),
+            IndexFreshnessBasis::MetadataAudit
+        );
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn metadata_audit_rolling_audit_catches_metadata_equal_content_change() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let settled = FileTime::from_unix_time(1_700_000_000, 0);
+        let note = vault_path.join("note.md");
+        fs::write(&note, "oldterm").unwrap();
+        set_file_mtime(&note, settled).unwrap();
+        let mut config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        // Same byte length and restored mtime: only the rolling audit can
+        // observe this change without a watcher hint.
+        fs::write(&note, "newterm").unwrap();
+        set_file_mtime(&note, settled).unwrap();
+        let report = manager.reconcile(config).unwrap();
+
+        assert_eq!(report.audited_sources, 1);
+        assert!(!report.audit_pending);
+        assert_eq!(report.changed_sources, 1);
+        assert!(runtime.search(&request("oldterm")).unwrap().is_empty());
+        assert_eq!(runtime.search(&request("newterm")).unwrap().len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn metadata_audit_reads_size_changed_sources_outside_the_audit_budget() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let settled = FileTime::from_unix_time(1_700_000_000, 0);
+        let changed = vault_path.join("changed.md");
+        let untouched = vault_path.join("untouched.md");
+        fs::write(&changed, "before").unwrap();
+        fs::write(&untouched, "untouchedterm").unwrap();
+        set_file_mtime(&changed, settled).unwrap();
+        set_file_mtime(&untouched, settled).unwrap();
+        let mut config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+        config.indexing.audit_sources_per_pass = 1;
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        fs::write(&changed, "after grew larger").unwrap();
+        set_file_mtime(&changed, settled).unwrap();
+        let report = manager.reconcile(config).unwrap();
+
+        // The changed source is read because its size changed; the audit
+        // budget is spent on the remaining metadata-equal candidate.
+        assert_eq!(report.source_files_read, 2);
+        assert_eq!(report.audited_sources, 1);
+        assert_eq!(report.changed_sources, 1);
+        assert_eq!(runtime.search(&request("larger")).unwrap().len(), 1);
+        assert_eq!(runtime.search(&request("untouchedterm")).unwrap().len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn watch_event_forces_a_read_for_a_same_size_same_mtime_edit() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let settled = FileTime::from_unix_time(1_700_000_000, 0);
+        let edited = vault_path.join("edited.md");
+        let untouched = vault_path.join("untouched.md");
+        fs::write(&edited, "oldterm").unwrap();
+        fs::write(&untouched, "untouchedterm").unwrap();
+        set_file_mtime(&edited, settled).unwrap();
+        set_file_mtime(&untouched, settled).unwrap();
+        let mut config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        // Same byte length, restored mtime: without the watcher evidence a
+        // scoped metadata pass could not see this change.
+        fs::write(&edited, "newterm").unwrap();
+        set_file_mtime(&edited, settled).unwrap();
+        let scope = ReconcileScope::Paths(BTreeSet::from([(
+            "fixture".to_owned(),
+            "edited.md".to_owned(),
+        )]));
+        let report = manager.reconcile_scoped(config, &scope).unwrap();
+
+        // Exactly one read (the forced event path); the audit is parked on
+        // scoped passes and the untouched source is reused.
+        assert_eq!(report.source_files_read, 1);
+        assert_eq!(report.audited_sources, 0);
+        assert_eq!(report.changed_sources, 1);
+        assert!(runtime.search(&request("oldterm")).unwrap().is_empty());
+        assert_eq!(runtime.search(&request("newterm")).unwrap().len(), 1);
+        assert_eq!(runtime.search(&request("untouchedterm")).unwrap().len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn scoped_pass_still_detects_deletions_from_complete_enumeration() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let settled = FileTime::from_unix_time(1_700_000_000, 0);
+        let doomed = vault_path.join("doomed.md");
+        fs::write(&doomed, "doomedterm").unwrap();
+        set_file_mtime(&doomed, settled).unwrap();
+        let mut config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        // The deletion is NOT in the scope set: enumeration completeness,
+        // not the watcher evidence, is what authorizes removal.
+        fs::remove_file(&doomed).unwrap();
+        let scope = ReconcileScope::Paths(BTreeSet::from([(
+            "fixture".to_owned(),
+            "unrelated.md".to_owned(),
+        )]));
+        manager.reconcile_scoped(config, &scope).unwrap();
+
+        assert!(runtime.search(&request("doomedterm")).unwrap().is_empty());
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn scoped_reconciliation_converges_to_a_full_rebuild() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        let fresh_root = temporary.path().join("fresh");
+        fs::create_dir(&vault_path).unwrap();
+        let settled = FileTime::from_unix_time(1_700_000_000, 0);
+        for index in 0..4 {
+            let note = vault_path.join(format!("note-{index}.md"));
+            fs::write(&note, format!("# Note {index}\nseedterm {index}")).unwrap();
+            set_file_mtime(&note, settled).unwrap();
+        }
+        let mut config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        let scoped = |paths: &[&str]| {
+            ReconcileScope::Paths(
+                paths
+                    .iter()
+                    .map(|path| ("fixture".to_owned(), (*path).to_owned()))
+                    .collect(),
+            )
+        };
+
+        // Edit, rename, delete, and create, each through a scoped pass.
+        fs::write(vault_path.join("note-0.md"), "# Note 0\neditedterm").unwrap();
+        manager
+            .reconcile_scoped(config.clone(), &scoped(&["note-0.md"]))
+            .unwrap();
+        fs::rename(vault_path.join("note-1.md"), vault_path.join("moved.md")).unwrap();
+        manager
+            .reconcile_scoped(config.clone(), &scoped(&["note-1.md", "moved.md"]))
+            .unwrap();
+        fs::remove_file(vault_path.join("note-2.md")).unwrap();
+        manager
+            .reconcile_scoped(config.clone(), &scoped(&["note-2.md"]))
+            .unwrap();
+        fs::write(vault_path.join("created.md"), "# Created\ncreatedterm").unwrap();
+        manager
+            .reconcile_scoped(config.clone(), &scoped(&["created.md"]))
+            .unwrap();
+        let final_report = manager.reconcile(config.clone()).unwrap();
+
+        // A fresh authoritative rebuild over the same bytes must agree on
+        // the manifest key set and every query.
+        let mut fresh_config = config.clone();
+        fresh_config.indexing.basis = IndexFreshnessBasis::StrictHash;
+        build_index(&fresh_config, &fresh_root).unwrap();
+        let fresh_runtime = SearchRuntime::new();
+        let fresh_manager =
+            IndexManager::open(fresh_config, &fresh_root, fresh_runtime.clone()).unwrap();
+        let fresh_keys: BTreeSet<_> = fresh_manager.manifest().files.keys().cloned().collect();
+        let scoped_keys: BTreeSet<_> = final_report.manifest.files.keys().cloned().collect();
+        assert_eq!(scoped_keys, fresh_keys);
+        for query in ["seedterm", "editedterm", "createdterm", "moved", "note"] {
+            let scoped_hits: Vec<_> = runtime
+                .search(&request(query))
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.chunk_id, hit.path))
+                .collect();
+            let fresh_hits: Vec<_> = fresh_runtime
+                .search(&request(query))
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.chunk_id, hit.path))
+                .collect();
+            assert_eq!(scoped_hits, fresh_hits, "query {query} diverged");
+        }
+        manager.shutdown().unwrap();
+        fresh_manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_vanished_partition_returns_a_typed_retriable_state() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        fs::write(vault_path.join("note.md"), "vanishterm").unwrap();
+        let config = openclast_config(vec![VaultRegistration {
+            id: "vault-a".into(),
+            path: vault_path,
+            room: Some("room-a".into()),
+        }]);
+        build_index(&config, &data).unwrap();
+        let active = DataRoot::new(&data).active().unwrap().unwrap();
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        let partitions = PartitionedSearchIndex::open(&active).unwrap();
+
+        // Simulate the generation being pruned while this stale reader is
+        // still installed, before any request opened the partition.
+        fs::remove_dir_all(partition_index_dir(&active.partitions_dir, &resource)).unwrap();
+        let error = partitions
+            .search(
+                "vanishterm",
+                20,
+                &SearchFilters::default(),
+                std::slice::from_ref(&resource),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::IndexBuilding));
+    }
+
+    #[test]
+    fn openclast_metadata_audit_reuses_unchanged_partition_sources() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        let settled = FileTime::from_unix_time(1_700_000_000, 0);
+        let note = vault_path.join("note.md");
+        fs::write(&note, "partitionterm").unwrap();
+        set_file_mtime(&note, settled).unwrap();
+        let mut config = openclast_config(vec![VaultRegistration {
+            id: "vault-a".into(),
+            path: vault_path,
+            room: Some("room-a".into()),
+        }]);
+        build_index(&config, &data_root).unwrap();
+        config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+        config.indexing.audit_sources_per_pass = 1;
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        let generation_before = runtime.generation();
+
+        let report = manager.reconcile(config.clone()).unwrap();
+
+        // The single source is metadata-equal, so the only read is its audit.
+        assert_eq!(report.changed_sources, 0);
+        assert_eq!(report.source_files_read, 1);
+        assert_eq!(report.audited_sources, 1);
+        assert!(!report.audit_pending);
+        assert_eq!(runtime.generation(), generation_before);
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        assert_eq!(
+            runtime
+                .search_authorized("partitionterm", 20, &SearchFilters::default(), &[resource],)
+                .unwrap()
+                .len(),
+            1
+        );
         manager.shutdown().unwrap();
     }
 
@@ -1443,6 +2414,49 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn authorized_partition_readers_are_cached_for_the_generation() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        fs::write(vault_path.join("note.md"), "cachedneedle").unwrap();
+        let config = openclast_config(vec![VaultRegistration {
+            id: "vault-a".into(),
+            path: vault_path,
+            room: Some("room-a".into()),
+        }]);
+        build_index(&config, &data).unwrap();
+        let active = DataRoot::new(&data).active().unwrap().unwrap();
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        let partitions = PartitionedSearchIndex::open(&active).unwrap();
+
+        let first = partitions
+            .search(
+                "cachedneedle",
+                20,
+                &SearchFilters::default(),
+                std::slice::from_ref(&resource),
+            )
+            .unwrap();
+        assert_eq!(first.len(), 1);
+
+        // Removing the on-disk partition proves reuse: a cached reader keeps
+        // serving through its open handles, while a per-request reopen would
+        // fail on the missing meta.json.
+        fs::remove_dir_all(partition_index_dir(&active.partitions_dir, &resource)).unwrap();
+        let second = partitions
+            .search(
+                "cachedneedle",
+                20,
+                &SearchFilters::default(),
+                std::slice::from_ref(&resource),
+            )
+            .unwrap();
+        assert_eq!(second, first);
+    }
+
     #[test]
     fn openclast_reconcile_edits_renames_and_deletes_within_one_partition() {
         let temporary = tempdir().unwrap();
@@ -1460,9 +2474,14 @@ mod tests {
         let runtime = SearchRuntime::new();
         let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
         let resource = config.resource_key(&config.vaults[0]).unwrap();
+        let previous_generation = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let previous_snapshot = snapshot_tree(&previous_generation.root);
 
         fs::write(&note, "# One\nnewterm").unwrap();
         manager.reconcile(config.clone()).unwrap();
+        let current_generation = DataRoot::new(&data_root).active().unwrap().unwrap();
+        assert_ne!(current_generation.id, previous_generation.id);
+        assert_eq!(snapshot_tree(&previous_generation.root), previous_snapshot);
         assert!(
             runtime
                 .search_authorized(
@@ -1629,8 +2648,8 @@ mod tests {
         let (new_index, fields) = ensure_partition_index(&new_index_dir).unwrap();
         let mut writer: IndexWriter<tantivy::TantivyDocument> =
             new_index.writer(WRITER_MEMORY_BYTES).unwrap();
-        let (outcomes, warnings) = ingest_vault_files(&new_config.vaults[0]);
-        assert!(warnings.is_empty());
+        let (outcomes, enumeration) = ingest_vault_files(&new_config.vaults[0]);
+        assert!(enumeration.warnings.is_empty());
         for outcome in outcomes {
             if matches!(outcome.path.as_str(), "duplicate.md" | "deleted.md") {
                 for chunk in &outcome.chunks {
@@ -1793,8 +2812,8 @@ mod tests {
         let index_dir = partition_index_dir(&active.partitions_dir, &resource);
         let (index, fields) = ensure_partition_index(&index_dir).unwrap();
         let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
-        let (outcomes, warnings) = ingest_vault_files(&new_config.vaults[1]);
-        assert!(warnings.is_empty());
+        let (outcomes, enumeration) = ingest_vault_files(&new_config.vaults[1]);
+        assert!(enumeration.warnings.is_empty());
         for outcome in outcomes {
             for chunk in &outcome.chunks {
                 writer
@@ -1890,8 +2909,8 @@ mod tests {
         let index_dir = partition_index_dir(&active.partitions_dir, &new_resource);
         let (index, fields) = ensure_partition_index(&index_dir).unwrap();
         let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
-        let (outcomes, warnings) = ingest_vault_files(&new_config.vaults[0]);
-        assert!(warnings.is_empty());
+        let (outcomes, enumeration) = ingest_vault_files(&new_config.vaults[0]);
+        assert!(enumeration.warnings.is_empty());
         for outcome in outcomes {
             for chunk in &outcome.chunks {
                 writer

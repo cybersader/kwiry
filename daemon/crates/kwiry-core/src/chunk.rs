@@ -8,10 +8,11 @@ use crate::source::{
     SourceDescriptor, SourceFormat, SourcePreparation, SourcePreparationKind,
     prepare_source_buffer, retrieval_metadata,
 };
-use crate::walk::discover_vault;
+use crate::walk::{EnumerationResult, discover_vault};
 
 pub fn ingest_vault(vault: &VaultRegistration) -> IngestReport {
-    let (outcomes, mut warnings) = ingest_vault_files(vault);
+    let (outcomes, enumeration) = ingest_vault_files(vault);
+    let mut warnings = enumeration.warnings;
     let mut report = IngestReport::default();
 
     for outcome in outcomes {
@@ -32,10 +33,14 @@ pub fn ingest_vault(vault: &VaultRegistration) -> IngestReport {
 
 pub(crate) fn ingest_vault_files(
     vault: &VaultRegistration,
-) -> (Vec<FileIngestOutcome>, Vec<IngestWarning>) {
-    let (files, warnings) = discover_vault(vault);
-    let outcomes = files.iter().map(|file| ingest_file(vault, file)).collect();
-    (outcomes, warnings)
+) -> (Vec<FileIngestOutcome>, EnumerationResult) {
+    let enumeration = discover_vault(vault);
+    let outcomes = enumeration
+        .files
+        .iter()
+        .map(|file| ingest_file(vault, file))
+        .collect();
+    (outcomes, enumeration)
 }
 
 pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> FileIngestOutcome {
