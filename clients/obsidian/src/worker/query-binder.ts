@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { FTS_HIGHLIGHT_END, FTS_HIGHLIGHT_START } from "../excerpt";
 import type { MatchPlan, MetadataProbePlan } from "./rust-adapter";
 
 export const FTS5_PROFILE_ID = "lexical-v1" as const;
@@ -14,8 +13,7 @@ SELECT
   c.path,
   c.heading_path_json,
   c.frontmatter_json,
-  -bm25(chunks_fts, ${FTS5_WEIGHTS.join(", ")}) AS score,
-  snippet(chunks_fts, 7, '${FTS_HIGHLIGHT_START}', '${FTS_HIGHLIGHT_END}', '…', 24) AS excerpt
+  -bm25(chunks_fts, ${FTS5_WEIGHTS.join(", ")}) AS score
 FROM chunks_fts
 JOIN chunks AS c ON c.rowid = chunks_fts.rowid
 WHERE chunks_fts MATCH ?

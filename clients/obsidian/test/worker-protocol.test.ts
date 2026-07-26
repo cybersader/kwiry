@@ -172,4 +172,51 @@ describe("Worker protocol", () => {
       result: { closed: true },
     })).toBe(true);
   });
+
+  // The hit shape is frozen. Slimming the index changed how the excerpt text
+  // is produced, not the transported fields, so the exact key set must still
+  // be enforced in both directions.
+  it("holds the search hit shape exactly, including the excerpt field", () => {
+    const hit = {
+      chunk_id: "chunk-1",
+      vault_id: "active-vault",
+      path: "note.md",
+      heading_path: ["Heading"],
+      score: 1.5,
+      excerpt: "",
+      frontmatter: { title: "Note" },
+    };
+    const response = (result: unknown) => ({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "search" as const,
+      ok: true as const,
+      result,
+    });
+
+    expect(isWorkerResponse(response({ generation: "g1", hits: [hit] }))).toBe(true);
+    expect(isWorkerResponse(response({ generation: "g1", hits: [] }))).toBe(true);
+
+    const { excerpt: _excerpt, ...withoutExcerpt } = hit;
+    expect(isWorkerResponse(response({ generation: "g1", hits: [withoutExcerpt] }))).toBe(false);
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...hit, match_terms: ["quasar"] }],
+    }))).toBe(false);
+    // Contentless index: the Worker has no text to snippet, so the empty
+    // string is enforced rather than merely bounded. A Worker that regressed
+    // to emitting snippet text would be rejected here.
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...hit, excerpt: "portable <b>quasar</b> cache" }],
+    }))).toBe(false);
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...hit, excerpt: "x".repeat(262_145) }],
+    }))).toBe(false);
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...hit, excerpt: null }],
+    }))).toBe(false);
+  });
 });

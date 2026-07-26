@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ACTIVE_VAULT_ID,
   type ActiveVaultSource,
+  type ExcerptRead,
   type SourceInspection,
   type StableSourceRead,
   type VaultSourceEvent,
@@ -42,6 +43,11 @@ class FakeSource implements ActiveVaultSource {
   listMarkdownPaths(): readonly string[] {
     this.log.push("list");
     return [...this.records.keys()].reverse();
+  }
+
+  // Indexing never hydrates excerpts; this exists only to satisfy the port.
+  async readExcerptText(path: string): Promise<ExcerptRead> {
+    return { kind: "missing", path };
   }
 
   inspectMarkdown(path: string): SourceInspection {

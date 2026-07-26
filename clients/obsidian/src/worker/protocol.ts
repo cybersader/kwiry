@@ -438,8 +438,11 @@ function isSearchHit(value: unknown): value is WorkerSearchHit {
     && value.heading_path.every((heading) => isBoundedString(heading, 1_024))
     && typeof value.score === "number"
     && Number.isFinite(value.score)
-    && typeof value.excerpt === "string"
-    && value.excerpt.length <= 262_144
+    // The index is contentless, so the Worker has no text to snippet and the
+    // host hydrates the excerpt from the vault file. The frozen hit shape keeps
+    // the field; a Worker that filled it again would be regressing the ruling,
+    // so the empty string is enforced rather than merely length-bounded.
+    && value.excerpt === ""
     && isFrontmatter(value.frontmatter);
 }
 

@@ -4,9 +4,12 @@
 import { createHash } from "node:crypto";
 import { readFile, rm, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve, join } from "node:path";
+import { dirname, resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { performance } from "node:perf_hooks";
+
+import esbuild from "esbuild";
 
 import { buildPlugin } from "../esbuild.config.mjs";
 import {
@@ -19,6 +22,11 @@ import {
   generatePerformanceCorpus,
   performanceNotePath,
 } from "./gate5-corpus.mjs";
+
+const scriptRoot = dirname(fileURLToPath(import.meta.url));
+/** Occurs in the beacon line of every generated note, so it fills a result page. */
+const HYDRATION_QUERY = "synthetic";
+const HYDRATION_SAMPLES = 20;
 
 main().catch(() => {
   process.stderr.write("Gate 5 generated performance capture failed.\n");
@@ -85,6 +93,34 @@ async function main() {
       searchSamples.push(performance.now() - started);
     }
 
+    // Everything above stops at the Worker RPC boundary. Excerpt text is no
+    // longer produced there, so the host-side read-and-hydrate step is timed
+    // separately over a full result page; without it a generated evidence file
+    // would certify a search target that omits most of a search's real cost.
+    const hydration = await loadExcerptHydration();
+    const hydrationSamples = [];
+    for (let index = 0; index < HYDRATION_SAMPLES; index += 1) {
+      const page = await send({
+        operation: "search",
+        query: HYDRATION_QUERY,
+        limit: 20,
+      });
+      requireOk(page);
+      if (page.result.hits.length === 0) throw new Error("hydration probe returned no hits");
+      const started = performance.now();
+      const hydrate = hydration.createExcerptHydrator(
+        hydration.extractHighlightTerms(HYDRATION_QUERY),
+      );
+      const sources = new Map();
+      for (const path of new Set(page.result.hits.map((hit) => hit.path))) {
+        sources.set(path, { kind: "text", text: await readFile(join(corpusRoot, path), "utf8") });
+      }
+      for (const hit of page.result.hits) {
+        hydrate(hit.path, sources.get(hit.path), hit.heading_path);
+      }
+      hydrationSamples.push(performance.now() - started);
+    }
+
     let generation = "generation-0";
     const updateSamples = [];
     for (let index = 0; index < 20; index += 1) {
@@ -123,6 +159,7 @@ async function main() {
       first_batch_ms: round(firstBatchMs ?? 0),
       build_duration_ms: round(buildDurationMs),
       warm_search_p95_ms: round(percentile95(searchSamples)),
+      hydration_p95_ms: round(percentile95(hydrationSamples)),
       update_visibility_p95_ms: round(percentile95(updateSamples)),
       max_event_loop_delay_ms: round(loopDelay.max()),
       added_rss_mib: round(addedRssMiB),
@@ -153,6 +190,7 @@ async function main() {
       measurements,
       samples: {
         warm_search: searchSamples.length,
+        hydration: hydrationSamples.length,
         update_visibility: updateSamples.length,
       },
       targets: generatedTargets(measurements),
@@ -288,10 +326,30 @@ function requireOk(response) {
   if (!response?.ok) throw new Error("Worker operation failed");
 }
 
+/**
+ * Loads the shipped excerpt hydration module so the measurement runs the same
+ * code the plugin runs, not a re-implementation of it.
+ */
+async function loadExcerptHydration() {
+  const bundled = await esbuild.build({
+    entryPoints: [resolve(scriptRoot, "../src/hydrate-excerpt.ts")],
+    bundle: true,
+    write: false,
+    format: "esm",
+    platform: "neutral",
+    target: "es2022",
+  });
+  const output = bundled.outputFiles?.[0];
+  if (!output) throw new Error("excerpt hydration bundle is empty");
+  const encoded = Buffer.from(output.text, "utf8").toString("base64");
+  return import(`data:text/javascript;base64,${encoded}`);
+}
+
 function generatedTargets(measurements) {
   const measurementKeys = new Map([
     ["build_duration", "build_duration_ms"],
     ["warm_search_p95", "warm_search_p95_ms"],
+    ["hydration_p95", "hydration_p95_ms"],
     ["update_visibility_p95", "update_visibility_p95_ms"],
     ["max_event_loop_delay", "max_event_loop_delay_ms"],
     ["added_steady_state_memory", "added_rss_mib"],

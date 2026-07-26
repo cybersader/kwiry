@@ -10,7 +10,11 @@ import {
   type SearchExecution,
   KwiryBackendError,
 } from "../backend";
-import { parseFtsExcerpt } from "../excerpt";
+import {
+  type ExcerptSource,
+  createExcerptHydrator,
+  extractHighlightTerms,
+} from "../hydrate-excerpt";
 import { WorkerRpcError } from "../worker/rpc-client";
 import {
   InPluginWorkerSession,
@@ -30,6 +34,12 @@ export interface InPluginLexicalBackendOptions {
   nextGeneration?: () => string;
   yieldControl?: () => Promise<void>;
 }
+
+const MAX_CONCURRENT_EXCERPT_READS = 4;
+const UNREADABLE_EXCERPT_SOURCE: ExcerptSource = {
+  kind: "unavailable",
+  reason: "unreadable",
+};
 
 const CAPABILITIES = {
   supportedModes: ["lexical"] as const,
@@ -137,6 +147,19 @@ export class InPluginLexicalBackend implements SearchBackend {
       if (epoch !== this.epoch || session !== this.session) {
         throw disposedBackendError();
       }
+
+      // The contentless index stores no text, so excerpts are hydrated here
+      // from the authoritative vault files. This is a second await: the epoch
+      // guard has to be repeated afterwards.
+      // One memo per search: several chunks of one note share a heading path
+      // and therefore share an excerpt, so the file is located and folded once.
+      const hydrate = createExcerptHydrator(extractHighlightTerms(request.q));
+      const sources = await this.readExcerptSources(result.hits.map((hit) => hit.path));
+      this.requireActive();
+      if (epoch !== this.epoch || session !== this.session) {
+        throw disposedBackendError();
+      }
+
       return {
         backend: this.identity,
         requestedMode: "lexical",
@@ -145,7 +168,11 @@ export class InPluginLexicalBackend implements SearchBackend {
         response: {
           hits: result.hits.map((hit) => ({
             ...hit,
-            excerpt: parseFtsExcerpt(hit.excerpt),
+            excerpt: hydrate(
+              hit.path,
+              sources.get(hit.path) ?? UNREADABLE_EXCERPT_SOURCE,
+              hit.heading_path,
+            ),
             origin: {
               profile: "in_plugin",
               backendInstanceId: this.identity.instanceId,
@@ -179,6 +206,42 @@ export class InPluginLexicalBackend implements SearchBackend {
     this.publish(disposedStatus(this.identity));
     this.statusListeners.clear();
     session?.forceDispose();
+  }
+
+  /**
+   * Reads each distinct hit path at most once, with bounded concurrency. A
+   * single unreadable file degrades only its own excerpt; it never fails the
+   * search, and it never yields invented text.
+   */
+  private async readExcerptSources(
+    paths: readonly string[],
+  ): Promise<Map<string, ExcerptSource>> {
+    const distinct = [...new Set(paths)];
+    const sources = new Map<string, ExcerptSource>();
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(MAX_CONCURRENT_EXCERPT_READS, distinct.length) },
+      async () => {
+        for (;;) {
+          const index = cursor++;
+          if (index >= distinct.length) return;
+          const path = distinct[index]!;
+          try {
+            const read = await this.source.readExcerptText(path);
+            sources.set(path, read.kind === "text"
+              ? { kind: "text", text: read.text }
+              : {
+                  kind: "unavailable",
+                  reason: read.kind === "stale" ? "unstable" : read.kind,
+                });
+          } catch {
+            sources.set(path, UNREADABLE_EXCERPT_SOURCE);
+          }
+        }
+      },
+    );
+    await Promise.all(workers);
+    return sources;
   }
 
   private startController(recovering: boolean): void {

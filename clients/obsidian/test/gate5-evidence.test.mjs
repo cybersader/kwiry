@@ -67,6 +67,7 @@ function validPerformanceEvidence() {
     first_batch_ms: 50,
     build_duration_ms: 20_000,
     warm_search_p95_ms: 10,
+    hydration_p95_ms: 15,
     update_visibility_p95_ms: 20,
     max_event_loop_delay_ms: 5,
     added_rss_mib: 350,
@@ -74,6 +75,7 @@ function validPerformanceEvidence() {
   const measurementKeys = new Map([
     ["build_duration", "build_duration_ms"],
     ["warm_search_p95", "warm_search_p95_ms"],
+    ["hydration_p95", "hydration_p95_ms"],
     ["update_visibility_p95", "update_visibility_p95_ms"],
     ["max_event_loop_delay", "max_event_loop_delay_ms"],
     ["added_steady_state_memory", "added_rss_mib"],
@@ -99,7 +101,7 @@ function validPerformanceEvidence() {
     },
     index: { documents: 10_000, chunks: 50_000 },
     measurements,
-    samples: { warm_search: 40, update_visibility: 20 },
+    samples: { warm_search: 40, hydration: 20, update_visibility: 20 },
     targets: GATE5_TARGETS.map(([id, threshold, unit]) => {
       const measurementKey = measurementKeys.get(id);
       const value = measurementKey ? measurements[measurementKey] : null;
@@ -145,7 +147,7 @@ describe("Gate 5 evidence schema", () => {
 
     const missingTarget = validEvidence();
     missingTarget.targets.pop();
-    expect(() => validateGate5AutomatedEvidence(missingTarget)).toThrow("seven Gate 5 targets");
+    expect(() => validateGate5AutomatedEvidence(missingTarget)).toThrow("every Gate 5 target");
   });
 
   it("rejects owner-decision wording and inconsistent verdicts", () => {
@@ -215,6 +217,6 @@ describe("Gate 5 evidence schema", () => {
     );
     memory.status = "met";
     expect(() => validateGate5GeneratedPerformanceEvidence(inconsistent))
-      .toThrow("targets.6.status");
+      .toThrow("targets.7.status");
   });
 });

@@ -14,6 +14,7 @@ import {
 
 import {
   IndexCapacityError,
+  IndexIntegrityError,
   openFts5Generation,
   type Fts5GenerationIndex,
   type SQLiteApi,
@@ -246,7 +247,10 @@ function applySourceChanges(
     const preparations = request.upserts.map((source) =>
       prepareSourceWithRust(source.descriptor, source.bytes)
     );
-    active.index.applySourceChanges(preparations, request.removals);
+    // In place on a published generation: there is no later commit gate, so
+    // the reconciliation runs inside this transaction. A divergence rolls the
+    // batch back and is reported instead of quietly living in the active index.
+    active.index.applySourceChanges(preparations, request.removals, true);
     active.id = request.next_generation;
     usedGenerations.add(request.next_generation);
     return generationResult(active);
@@ -265,6 +269,33 @@ function commitBuild(generation: string): BuildResult {
       "integrity_failed",
       "index",
       "Staging generation failed its integrity check.",
+      false,
+    );
+  }
+
+  try {
+    target.index.compact();
+  } catch {
+    abortStaging();
+    throw fixedWorkerError(
+      "integrity_failed",
+      "index",
+      "Staging generation failed its pre-publication compaction.",
+      false,
+    );
+  }
+
+  // The image that ships must be the image that passed the gate. `compact()`
+  // rewrites the whole database after the gate above ran, so the gate is run
+  // again on the artifact that is actually about to be published.
+  try {
+    target.index.assertIntegrity();
+  } catch {
+    abortStaging();
+    throw fixedWorkerError(
+      "integrity_failed",
+      "index",
+      "Compacted staging generation failed its integrity check.",
       false,
     );
   }
@@ -416,6 +447,14 @@ function indexCapacityError(): WorkerError {
 
 function sourceChangeError(error: unknown): WorkerError {
   if (error instanceof IndexCapacityError) return indexCapacityError();
+  if (error instanceof IndexIntegrityError) {
+    return fixedWorkerError(
+      "integrity_failed",
+      "index",
+      "In-plugin index failed its integrity check.",
+      false,
+    );
+  }
   if (error instanceof RustAdapterError) {
     return fixedWorkerError(
       "source_rejected",

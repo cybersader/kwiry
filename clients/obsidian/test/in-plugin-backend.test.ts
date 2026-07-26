@@ -5,12 +5,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   type ActiveVaultSource,
+  type ExcerptRead,
   type SourceInspection,
   type StableSourceRead,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
 import { InPluginLexicalBackend } from "../src/backends/in-plugin-lexical-backend";
-import { FTS_HIGHLIGHT_END, FTS_HIGHLIGHT_START } from "../src/excerpt";
 import { WorkerRpcError } from "../src/worker/rpc-client";
 import type { InPluginWorkerSession } from "../src/worker/session";
 
@@ -18,6 +18,9 @@ class FakeSource implements ActiveVaultSource {
   listener: ((event: VaultSourceEvent) => void) | null = null;
   subscriptions = 0;
   unsubscriptions = 0;
+  readonly excerptTexts = new Map<string, string>();
+  readonly excerptReads: string[] = [];
+  excerptFailures = new Set<string>();
 
   subscribe(listener: (event: VaultSourceEvent) => void): () => void {
     if (this.listener) throw new Error("already subscribed");
@@ -42,6 +45,14 @@ class FakeSource implements ActiveVaultSource {
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
   ): Promise<StableSourceRead> {
     return { kind: "missing", path: inspection.path };
+  }
+
+  async readExcerptText(path: string): Promise<ExcerptRead> {
+    this.excerptReads.push(path);
+    if (this.excerptFailures.has(path)) throw new Error("vault read failed");
+    const text = this.excerptTexts.get(path);
+    if (text === undefined) return { kind: "missing", path };
+    return { kind: "text", path, text };
   }
 
   emit(event: VaultSourceEvent): void {
@@ -91,7 +102,7 @@ function fakeSession(options: {
         path: "note.md",
         heading_path: ["Heading"],
         score: 1,
-        excerpt: `before ${FTS_HIGHLIGHT_START}match${FTS_HIGHLIGHT_END}`,
+        excerpt: "",
         frontmatter: {},
       }],
     }))),
@@ -230,15 +241,16 @@ describe("InPluginLexicalBackend", () => {
     });
   });
 
-  it("normalizes Worker excerpts and attaches in-plugin result origin", async () => {
+  it("hydrates excerpts from the vault file and attaches in-plugin result origin", async () => {
     const source = new FakeSource();
+    source.excerptTexts.set("note.md", "# Heading\nbefore match after");
     const inPlugin = backend(source, [fakeSession()]);
     await inPlugin.initialize();
     await vi.waitFor(async () => {
       await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
     });
 
-    const execution = await inPlugin.search({ q: "query", mode: "lexical", limit: 10 });
+    const execution = await inPlugin.search({ q: "match", mode: "lexical", limit: 10 });
     expect(execution).toMatchObject({
       requestedMode: "lexical",
       effectiveMode: "lexical",
@@ -248,6 +260,7 @@ describe("InPluginLexicalBackend", () => {
           excerpt: [
             { text: "before ", highlighted: false },
             { text: "match", highlighted: true },
+            { text: " after", highlighted: false },
           ],
           origin: {
             profile: "in_plugin",
@@ -257,6 +270,126 @@ describe("InPluginLexicalBackend", () => {
         }],
       },
     });
+    expect(source.excerptReads).toEqual(["note.md"]);
+  });
+
+  it("reads each hit path once even when several chunks of a note match", async () => {
+    const source = new FakeSource();
+    source.excerptTexts.set("note.md", "alpha match beta");
+    const session = fakeSession({
+      search: async () => ({
+        generation: "generation-1",
+        hits: [1, 2, 3].map((index) => ({
+          chunk_id: `chunk-${index}`,
+          vault_id: "active-vault",
+          path: "note.md",
+          heading_path: [],
+          score: index,
+          excerpt: "",
+          frontmatter: {},
+        })),
+      }),
+    });
+    const inPlugin = backend(source, [session]);
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
+    });
+
+    const execution = await inPlugin.search({ q: "match", mode: "lexical" });
+    expect(source.excerptReads).toEqual(["note.md"]);
+    expect(execution.response.hits).toHaveLength(3);
+    for (const hit of execution.response.hits) {
+      expect(hit.excerpt.filter((segment) => segment.highlighted)).toEqual([
+        { text: "match", highlighted: true },
+      ]);
+    }
+    // Reading once is not enough: the file must also be located and folded
+    // once. Hits sharing a path and heading path share the hydrated result.
+    const [first, second, third] = execution.response.hits;
+    expect(second!.excerpt).toBe(first!.excerpt);
+    expect(third!.excerpt).toBe(first!.excerpt);
+  });
+
+  // Files are authoritative. If the file behind a hit cannot be read, the hit
+  // stays — with an empty excerpt — rather than the search failing or the
+  // excerpt being invented.
+  it("degrades a single unreadable or missing file to an empty excerpt", async () => {
+    const source = new FakeSource();
+    source.excerptTexts.set("readable.md", "readable match here");
+    source.excerptFailures.add("broken.md");
+    const session = fakeSession({
+      search: async () => ({
+        generation: "generation-1",
+        hits: [
+          {
+            chunk_id: "chunk-broken",
+            vault_id: "active-vault",
+            path: "broken.md",
+            heading_path: [],
+            score: 3,
+            excerpt: "",
+            frontmatter: {},
+          },
+          {
+            chunk_id: "chunk-gone",
+            vault_id: "active-vault",
+            path: "deleted.md",
+            heading_path: [],
+            score: 2,
+            excerpt: "",
+            frontmatter: {},
+          },
+          {
+            chunk_id: "chunk-ok",
+            vault_id: "active-vault",
+            path: "readable.md",
+            heading_path: [],
+            score: 1,
+            excerpt: "",
+            frontmatter: {},
+          },
+        ],
+      }),
+    });
+    const inPlugin = backend(source, [session]);
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
+    });
+
+    const execution = await inPlugin.search({ q: "match", mode: "lexical" });
+    const hits = execution.response.hits;
+    expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-broken", "chunk-gone", "chunk-ok"]);
+    expect(hits[0]!.excerpt).toEqual([]);
+    expect(hits[1]!.excerpt).toEqual([]);
+    expect(hits[2]!.excerpt).toEqual([
+      { text: "readable ", highlighted: false },
+      { text: "match", highlighted: true },
+      { text: " here", highlighted: false },
+    ]);
+  });
+
+  it("rejects a search whose hydration finishes after disposal", async () => {
+    const source = new FakeSource();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const inPlugin = backend(source, [fakeSession()]);
+    source.readExcerptText = async (path: string) => {
+      await gate;
+      return { kind: "missing", path };
+    };
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
+    });
+
+    const pending = inPlugin.search({ q: "match", mode: "lexical" });
+    await inPlugin.dispose();
+    release();
+    await expect(pending).rejects.toMatchObject({ code: "disposed" });
   });
 
   it("keeps the active generation searchable after a definitive live update failure", async () => {

@@ -6,6 +6,12 @@ export const GATE5_TARGETS = [
   ["first_progress", 500, "ms"],
   ["build_duration", 30_000, "ms"],
   ["warm_search_p95", 100, "ms"],
+  // `warm_search_p95` stops at the Worker RPC boundary. Since the index became
+  // contentless, excerpt text is produced on the host instead, so that boundary
+  // is no longer the whole cost of a search: this target covers the host-side
+  // read-and-hydrate step. The user-visible figure is the sum of the two, and
+  // the owner owns that combined number.
+  ["hydration_p95", 100, "ms"],
   ["update_visibility_p95", 300, "ms"],
   ["max_event_loop_delay", 100, "ms"],
   ["added_steady_state_memory", 300, "mib"],
@@ -85,11 +91,14 @@ const PERFORMANCE_MEASUREMENT_KEYS = [
   "first_batch_ms",
   "build_duration_ms",
   "warm_search_p95_ms",
+  // Named `hydration_*`, not `excerpt_*`: the privacy key filter rejects any
+  // key mentioning excerpts, and this is a duration, never excerpt text.
+  "hydration_p95_ms",
   "update_visibility_p95_ms",
   "max_event_loop_delay_ms",
   "added_rss_mib",
 ];
-const PERFORMANCE_SAMPLE_KEYS = ["warm_search", "update_visibility"];
+const PERFORMANCE_SAMPLE_KEYS = ["warm_search", "hydration", "update_visibility"];
 
 const FORBIDDEN_KEY = /(?:^|_)(?:path|query|token|secret|authorization|content|excerpt|stack|sql|vault_name|note_name|error|message)(?:_|$)/iu;
 const PRIVATE_PATH = /(?:\/home\/|\/Users\/|\/mnt\/[a-z]\/|[A-Z]:\\Users\\|\\\\|file:\/\/|(?:^|\s)~\/|(?:^|[\\/])\.\.(?:[\\/]|$)|\.obsidian[\\/])/u;
@@ -224,7 +233,7 @@ export function assertPrivacySafeEvidence(value, options = {}) {
 
 function validateTargets(targets) {
   if (!Array.isArray(targets) || targets.length !== GATE5_TARGETS.length) {
-    throw new Error("all seven Gate 5 targets are required");
+    throw new Error("every Gate 5 target is required");
   }
   const seen = new Set();
   for (let index = 0; index < GATE5_TARGETS.length; index += 1) {
@@ -252,11 +261,12 @@ function validateTargets(targets) {
 
 function validateGeneratedPerformanceTargets(targets, measurements) {
   if (!Array.isArray(targets) || targets.length !== GATE5_TARGETS.length) {
-    throw new Error("all seven Gate 5 targets are required");
+    throw new Error("every Gate 5 target is required");
   }
   const measurementKeys = new Map([
     ["build_duration", "build_duration_ms"],
     ["warm_search_p95", "warm_search_p95_ms"],
+    ["hydration_p95", "hydration_p95_ms"],
     ["update_visibility_p95", "update_visibility_p95_ms"],
     ["max_event_loop_delay", "max_event_loop_delay_ms"],
     ["added_steady_state_memory", "added_rss_mib"],

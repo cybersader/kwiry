@@ -8,6 +8,14 @@ import { isNormalizedMarkdownPath } from "./vault-path";
 
 export const ACTIVE_VAULT_ID = "active-vault";
 export const MAX_INDEXABLE_SOURCE_BYTES = 10 * 1024 * 1024;
+/**
+ * Excerpt hydration runs on the Obsidian main thread, once per distinct hit
+ * note, so its input bound is far tighter than the indexing bound: a note may
+ * be indexed up to `MAX_INDEXABLE_SOURCE_BYTES` and still be too large to fold
+ * interactively. Past this bound the excerpt is reported `oversized` and
+ * rendered empty — the hit itself is unaffected.
+ */
+export const MAX_EXCERPT_SOURCE_BYTES = 1024 * 1024;
 
 export type VaultSourceEvent =
   | { kind: "upsert"; path: string }
@@ -26,11 +34,24 @@ export type StableSourceRead =
   | { kind: "oversized"; path: string }
   | { kind: "stale"; path: string };
 
+/**
+ * Result of a presentation-only text read used for excerpt hydration. It is
+ * deliberately distinct from `StableSourceRead`: nothing indexed is derived
+ * from it, and every non-`text` outcome must degrade to an empty excerpt
+ * rather than to guessed content.
+ */
+export type ExcerptRead =
+  | { kind: "text"; path: string; text: string }
+  | { kind: "missing"; path: string }
+  | { kind: "oversized"; path: string }
+  | { kind: "stale"; path: string };
+
 export interface ActiveVaultSource {
   subscribe(listener: (event: VaultSourceEvent) => void): () => void;
   listMarkdownPaths(): readonly string[];
   inspectMarkdown(path: string): SourceInspection;
   readMarkdown(inspection: Extract<SourceInspection, { kind: "candidate" }>): Promise<StableSourceRead>;
+  readExcerptText(path: string): Promise<ExcerptRead>;
 }
 
 export class ObsidianActiveVaultSource implements ActiveVaultSource {
@@ -110,6 +131,29 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
         bytes,
       },
     };
+  }
+
+  /**
+   * Reads current file text for excerpt display only. `cachedRead` is the
+   * documented API for "content you only want to display", but it carries no
+   * staleness guarantee of its own, so the same before/after stat sandwich
+   * `readMarkdown` uses is repeated here.
+   */
+  async readExcerptText(path: string): Promise<ExcerptRead> {
+    const inspection = this.inspectMarkdown(path);
+    if (inspection.kind !== "candidate") return { kind: inspection.kind, path };
+    if (inspection.size > MAX_EXCERPT_SOURCE_BYTES) return { kind: "oversized", path };
+
+    const before = this.vault.getFileByPath(path);
+    if (!before || !isMarkdownFile(before)) return { kind: "missing", path };
+    if (!matchesInspection(before, inspection)) return { kind: "stale", path };
+
+    const text = await this.vault.cachedRead(before);
+    const after = this.vault.getFileByPath(path);
+    if (!after || !isMarkdownFile(after)) return { kind: "missing", path };
+    if (!matchesInspection(after, inspection)) return { kind: "stale", path };
+
+    return { kind: "text", path, text };
   }
 
   private handleCreate(

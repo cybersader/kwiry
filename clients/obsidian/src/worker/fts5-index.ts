@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { FTS_HIGHLIGHT_END, FTS_HIGHLIGHT_START } from "../excerpt";
 import type { SourceRemoval, WorkerSearchHit } from "./protocol";
 import { bindMetadataProbe, bindSearchPlan } from "./query-binder";
 import type {
@@ -28,6 +27,18 @@ export class IndexCapacityError extends Error {
   constructor() {
     super("in-memory corpus limit exceeded");
     this.name = "IndexCapacityError";
+  }
+}
+
+/**
+ * Raised when `chunks` and `chunks_fts` disagree. Distinct from a rejected
+ * source so the Worker can report a divergence as `integrity_failed` instead
+ * of blaming the batch that merely revealed it.
+ */
+export class IndexIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IndexIntegrityError";
   }
 }
 
@@ -58,6 +69,10 @@ CREATE TABLE sources (
   UNIQUE(vault_id, path)
 );
 
+-- Slim metadata table: exactly the columns reconciliation (source_key) and
+-- result identity (chunk_id, vault_id, path, heading_path, frontmatter) need.
+-- Indexed field text is NOT stored here; it lives only in the contentless
+-- FTS index, and excerpt text is hydrated from the vault file by the host.
 CREATE TABLE chunks (
   rowid INTEGER PRIMARY KEY,
   source_key TEXT NOT NULL,
@@ -65,23 +80,16 @@ CREATE TABLE chunks (
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
   heading_path_json TEXT NOT NULL,
-  frontmatter_json TEXT NOT NULL,
-  mtime INTEGER NOT NULL,
-  content_hash TEXT NOT NULL,
-  chunking_version INTEGER NOT NULL,
-  filename TEXT NOT NULL,
-  stem TEXT NOT NULL,
-  aliases TEXT NOT NULL,
-  title TEXT NOT NULL,
-  heading_text TEXT NOT NULL,
-  path_text TEXT NOT NULL,
-  tags TEXT NOT NULL,
-  content TEXT NOT NULL,
-  identifiers TEXT NOT NULL
+  frontmatter_json TEXT NOT NULL
 );
 
 CREATE INDEX chunks_by_source ON chunks(source_key);
 
+-- content='' + contentless_delete=1: no stored column text, but deletes are
+-- supported by rowid. detail stays at the default 'full' so phrase queries,
+-- column filters and NEAR() keep working. columnsize is NOT disabled:
+-- columnsize=0 is rejected outright with contentless_delete=1, and bm25()
+-- needs the column sizes anyway.
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
   filename,
   stem,
@@ -92,30 +100,10 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
   tags,
   content,
   identifiers,
-  content='chunks',
-  content_rowid='rowid',
+  content='',
+  contentless_delete=1,
   tokenize='unicode61 remove_diacritics 2'
 );
-
-CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
-  INSERT INTO chunks_fts(
-    rowid, filename, stem, aliases, title, heading_text,
-    path_text, tags, content, identifiers
-  ) VALUES (
-    new.rowid, new.filename, new.stem, new.aliases, new.title,
-    new.heading_text, new.path_text, new.tags, new.content, new.identifiers
-  );
-END;
-
-CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
-  INSERT INTO chunks_fts(
-    chunks_fts, rowid, filename, stem, aliases, title, heading_text,
-    path_text, tags, content, identifiers
-  ) VALUES (
-    'delete', old.rowid, old.filename, old.stem, old.aliases, old.title,
-    old.heading_text, old.path_text, old.tags, old.content, old.identifiers
-  );
-END;
 `;
 
 const SELECT_SOURCE_BY_KEY_SQL = `
@@ -138,11 +126,55 @@ INSERT INTO sources(
 
 const INSERT_CHUNK_SQL = `
 INSERT INTO chunks(
-  source_key, chunk_id, vault_id, path, heading_path_json,
-  frontmatter_json, mtime, content_hash, chunking_version,
-  filename, stem, aliases, title, heading_text, path_text,
-  tags, content, identifiers
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  rowid, source_key, chunk_id, vault_id, path, heading_path_json, frontmatter_json
+) VALUES(?, ?, ?, ?, ?, ?, ?)
+`;
+
+const INSERT_CHUNK_FTS_SQL = `
+INSERT INTO chunks_fts(
+  rowid, filename, stem, aliases, title, heading_text,
+  path_text, tags, content, identifiers
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+// Must run BEFORE the matching DELETE FROM chunks: the subquery reads the
+// rowids out of `chunks`, so deleting the metadata rows first would silently
+// orphan every FTS posting for that source.
+const DELETE_SOURCE_FTS_SQL = `
+DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE source_key = ?)
+`;
+
+const DELETE_SOURCE_CHUNKS_SQL = "DELETE FROM chunks WHERE source_key = ?";
+
+const DELETE_SOURCE_SQL = "DELETE FROM sources WHERE source_key = ?";
+
+// Seeded from BOTH tables. `chunks` alone is not enough: a posting that exists
+// in `chunks_fts` without a matching metadata row is exactly the state the
+// allocator has to route around, and such a posting is invisible to
+// `MAX(rowid) FROM chunks`. Reusing its rowid would shadow it — the contentless
+// index accepts the duplicate silently, keeps the shadowed posting alive across
+// the next delete, and reconciliation would then see matching counts and no
+// orphan. Allocating above both tables keeps any such posting visible as an
+// orphan, which `runReconciliationCheck` does fail on.
+const SELECT_MAX_ROWID_SQL = `
+SELECT MAX(
+  (SELECT COALESCE(MAX(rowid), 0) FROM chunks),
+  (SELECT COALESCE(MAX(rowid), 0) FROM chunks_fts)
+)
+`;
+
+// A contentless FTS5 index accepts a duplicate rowid without complaint and
+// keeps the shadowed posting alive across the next delete, and no
+// integrity check can see it. Reconciling `chunks` against `chunks_fts` is
+// the only check that can fail once the external-content cross-check is gone.
+const RECONCILE_SQL = `
+SELECT
+  (SELECT count(*) FROM chunks) AS chunks,
+  (SELECT count(*) FROM chunks_fts) AS fts,
+  (SELECT count(*) FROM chunks_fts f LEFT JOIN chunks c ON c.rowid = f.rowid
+     WHERE c.rowid IS NULL) AS orphan_fts,
+  (SELECT count(*) FROM chunks c LEFT JOIN chunks_fts f ON f.rowid = c.rowid
+     WHERE f.rowid IS NULL) AS missing_fts
 `;
 
 export class Fts5GenerationIndex {
@@ -172,6 +204,12 @@ export class Fts5GenerationIndex {
     this.applySourceChanges([preparation], []);
   }
 
+  /**
+   * `verifyIntegrity` reconciles `chunks` against `chunks_fts` inside the same
+   * transaction. It defaults to off because a staging build runs many batches
+   * and is gated once at `commitBuild`; callers that mutate a generation which
+   * is already published have no later gate and must pass `true`.
+   */
   applySourceChanges(
     preparations: readonly SourcePreparation[],
     removals: readonly SourceRemoval[],
@@ -218,13 +256,19 @@ export class Fts5GenerationIndex {
     requireProjectedCounts(nextDocuments, nextChunks, nextBytes, this.limits);
 
     this.db.transaction("IMMEDIATE", () => {
+      // Seeded from both tables before any delete, so every rowid allocated in
+      // this transaction is strictly greater than any rowid present in either
+      // `chunks` or `chunks_fts` when the transaction opened. A plain INTEGER
+      // PRIMARY KEY reuses freed rowids, and a reused rowid inserted into the
+      // contentless index on top of a surviving posting shadows it
+      // undetectably.
+      let nextRowid = requireRowidSeed(this.db.selectValue(SELECT_MAX_ROWID_SQL));
       for (const stored of touched.values()) {
-        this.db.exec("DELETE FROM chunks WHERE source_key = ?", {
-          bind: [stored.source_key],
-        });
-        this.db.exec("DELETE FROM sources WHERE source_key = ?", {
-          bind: [stored.source_key],
-        });
+        // Order is load-bearing: FTS postings first (they are located through
+        // `chunks`), then the metadata rows, then the source row.
+        this.db.exec(DELETE_SOURCE_FTS_SQL, { bind: [stored.source_key] });
+        this.db.exec(DELETE_SOURCE_CHUNKS_SQL, { bind: [stored.source_key] });
+        this.db.exec(DELETE_SOURCE_SQL, { bind: [stored.source_key] });
       }
       for (const change of indexed) {
         this.db.exec(INSERT_SOURCE_SQL, {
@@ -238,10 +282,20 @@ export class Fts5GenerationIndex {
           ],
         });
         for (const row of change.rows) {
-          this.db.exec(INSERT_CHUNK_SQL, { bind: row.bind });
+          const rowid = ++nextRowid;
+          if (!Number.isSafeInteger(rowid)) throw new Error("chunk rowid space exhausted");
+          this.db.exec(INSERT_CHUNK_SQL, {
+            bind: [rowid, change.preparation.source_key, ...row.metadataBind],
+          });
+          this.db.exec(INSERT_CHUNK_FTS_SQL, { bind: [rowid, ...row.ftsBind] });
         }
       }
-      if (verifyIntegrity) this.runIntegrityCheck();
+      // Reconciliation, not the FTS structure check: the structure check
+      // provably cannot observe a `chunks` / `chunks_fts` divergence, which is
+      // the only failure this ordering of raw statements can introduce. Run
+      // inside the transaction so a divergence rolls the whole batch back
+      // instead of publishing a half-applied change.
+      if (verifyIntegrity) this.runReconciliationCheck(nextChunks);
     });
 
     this.documentCount = nextDocuments;
@@ -265,9 +319,22 @@ export class Fts5GenerationIndex {
     this.requireOpen();
     try {
       this.runIntegrityCheck();
+      this.runReconciliationCheck(this.chunkCount);
     } catch {
       throw new Error("FTS5 integrity check failed");
     }
+  }
+
+  /**
+   * Pre-publication compaction. `optimize` merges the FTS b-tree segments and
+   * `VACUUM` rebuilds the image without the freed pages. `VACUUM` cannot run
+   * inside a transaction, so this must never be called from
+   * `applySourceChanges`.
+   */
+  compact(): void {
+    this.requireOpen();
+    this.db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')");
+    this.db.exec("VACUUM");
   }
 
   close(): void {
@@ -291,8 +358,38 @@ export class Fts5GenerationIndex {
     ));
   }
 
+  /**
+   * Internal FTS5 structure check only. On a contentless table there is no
+   * content table to compare against, so this can never observe a `chunks` /
+   * `chunks_fts` divergence — `runReconciliationCheck` is what can fail.
+   */
   private runIntegrityCheck(): void {
-    this.db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')");
+    this.db.exec("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)");
+  }
+
+  /**
+   * `expectedChunks` is passed in rather than read from `this.chunkCount`: the
+   * in-transaction caller runs before the counters are advanced, and comparing
+   * against the projected count also checks the projection arithmetic itself.
+   */
+  private runReconciliationCheck(expectedChunks: number): void {
+    const rows = this.db.selectObjects(RECONCILE_SQL);
+    if (rows.length !== 1) {
+      throw new IndexIntegrityError("FTS5 reconciliation query returned no row");
+    }
+    const row = rows[0]!;
+    if (!isNonNegativeSafeInteger(row.chunks)
+      || !isNonNegativeSafeInteger(row.fts)
+      || !isNonNegativeSafeInteger(row.orphan_fts)
+      || !isNonNegativeSafeInteger(row.missing_fts)) {
+      throw new IndexIntegrityError("FTS5 reconciliation query returned invalid counts");
+    }
+    if (row.orphan_fts !== 0
+      || row.missing_fts !== 0
+      || row.chunks !== row.fts
+      || row.chunks !== expectedChunks) {
+      throw new IndexIntegrityError("FTS5 index and chunk metadata disagree");
+    }
   }
 
   private requireOpen(): void {
@@ -308,7 +405,10 @@ export function openFts5Generation(
 }
 
 interface ProjectedChunk {
-  bind: readonly unknown[];
+  /** chunk_id, vault_id, path, heading_path_json, frontmatter_json. */
+  metadataBind: readonly unknown[];
+  /** The nine FTS field values, in declared column order. */
+  ftsBind: readonly string[];
   indexedBytes: number;
   chunkId: string;
 }
@@ -391,27 +491,29 @@ function projectChunk(preparation: SourcePreparation, prepared: PreparedChunk): 
     tags,
     chunk.content,
     prepared.technical_identifiers.join(" "),
-  ].map(sanitizeIndexedText);
+  ];
   const indexedBytes = fields.reduce(
     (total, value) => total + new TextEncoder().encode(value).byteLength,
     0,
   );
   return {
-    bind: [
-      preparation.source_key,
+    metadataBind: [
       chunk.chunk_id,
       chunk.vault_id,
       chunk.path,
       JSON.stringify(chunk.heading_path),
       JSON.stringify(chunk.frontmatter),
-      chunk.mtime,
-      chunk.content_hash,
-      chunk.chunking_version,
-      ...fields,
     ],
+    ftsBind: fields,
     indexedBytes,
     chunkId: chunk.chunk_id,
   };
+}
+
+function requireRowidSeed(value: unknown): number {
+  const seed = Number(value);
+  if (!Number.isSafeInteger(seed) || seed < 0) throw new Error("chunk rowid seed is invalid");
+  return seed;
 }
 
 function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null {
@@ -478,12 +580,6 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function sanitizeIndexedText(value: string): string {
-  return value
-    .replaceAll(FTS_HIGHLIGHT_START, "�")
-    .replaceAll(FTS_HIGHLIGHT_END, "�");
-}
-
 function parseSearchRow(row: Record<string, unknown>): WorkerSearchHit {
   if (typeof row.chunk_id !== "string"
     || typeof row.vault_id !== "string"
@@ -491,8 +587,7 @@ function parseSearchRow(row: Record<string, unknown>): WorkerSearchHit {
     || typeof row.heading_path_json !== "string"
     || typeof row.frontmatter_json !== "string"
     || typeof row.score !== "number"
-    || !Number.isFinite(row.score)
-    || typeof row.excerpt !== "string") {
+    || !Number.isFinite(row.score)) {
     throw new Error("SQLite returned an invalid search row");
   }
   const headingPath = JSON.parse(row.heading_path_json) as unknown;
@@ -510,7 +605,10 @@ function parseSearchRow(row: Record<string, unknown>): WorkerSearchHit {
     path: row.path,
     heading_path: headingPath,
     score: row.score,
-    excerpt: row.excerpt,
+    // The contentless index stores no text, so the Worker cannot produce
+    // excerpt text. The frozen hit shape keeps the field; the host fills it
+    // by hydrating a bounded window from the authoritative vault file.
+    excerpt: "",
     frontmatter,
   } as WorkerSearchHit;
 }

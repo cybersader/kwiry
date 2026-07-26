@@ -128,7 +128,10 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: {
           generation: "generation-1",
-          hits: [{ chunk_id: expect.any(String), path: "alpha.md" }],
+          // The index is contentless: the Worker returns identity and ranking
+          // and never index-derived excerpt text. The host hydrates excerpts
+          // from the vault file.
+          hits: [{ chunk_id: expect.any(String), path: "alpha.md", excerpt: "" }],
         },
       });
 
@@ -496,6 +499,233 @@ describe("exact generated production Worker", () => {
       });
       await expect(request(worker, {
         id: 9,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "stable.md" }] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  // contentless_delete=1 replaces the removed external-content triggers: a
+  // removal must drop the postings, and the rowid freed by that removal must
+  // not resurrect them when the same path is indexed again.
+  it("removes contentless postings on delete and never resurrects them", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("alpha.md", "removableterm"), source("keep.md", "keepterm")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+
+      await expect(request(worker, {
+        id: 5,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: "g2",
+        upserts: [],
+        removals: [{ vault_id: "active-vault", path: "alpha.md" }],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g2", documents: 1, chunks: 1 },
+      });
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "removableterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [] } });
+
+      await expect(request(worker, {
+        id: 7,
+        operation: "apply_source_changes",
+        generation: "g2",
+        next_generation: "g3",
+        upserts: [source("alpha.md", "replacementterm")],
+        removals: [],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g3", documents: 2, chunks: 2 },
+      });
+      await expect(request(worker, {
+        id: 8,
+        operation: "search",
+        query: "removableterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [] } });
+      await expect(request(worker, {
+        id: 9,
+        operation: "search",
+        query: "replacementterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "alpha.md" }] } });
+      await expect(request(worker, {
+        id: 10,
+        operation: "search",
+        query: "keepterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "keep.md" }] } });
+
+      await request(worker, { id: 11, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("compacts a staging generation before publication and never publishes an uncompacted one", async () => {
+    const needle = "target.index.compact();";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `globalThis.__kwiryCompactCalls = (globalThis.__kwiryCompactCalls ?? 0) + 1;\n    if (globalThis.__kwiryCompactCalls === 2) target.index.compact = () => { throw new Error("compaction failed"); };\n    ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("stable.md", "stableterm")],
+      });
+      await expect(request(worker, {
+        id: 4,
+        operation: "commit_build",
+        generation: "g1",
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g1" } });
+
+      await request(worker, { id: 5, operation: "begin_build", generation: "g2" });
+      await request(worker, {
+        id: 6,
+        operation: "add_source_batch",
+        generation: "g2",
+        sources: [source("replacement.md", "replacementterm")],
+      });
+      await expect(request(worker, {
+        id: 7,
+        operation: "commit_build",
+        generation: "g2",
+      })).resolves.toMatchObject({ ok: false, error: { code: "integrity_failed" } });
+
+      await expect(request(worker, { id: 8, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: "g1", staging_generation: null, searchable: true },
+      });
+      await expect(request(worker, {
+        id: 9,
+        operation: "search",
+        query: "replacementterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g1", hits: [] } });
+      await expect(request(worker, {
+        id: 10,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "stable.md" }] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  // `compact()` VACUUMs, which rewrites the whole database after the commit
+  // gate already ran. The artifact that ships must be the artifact that passed,
+  // so the gate is re-run on the compacted image.
+  it("re-verifies the compacted image and refuses to publish a corrupted one", async () => {
+    const needle = "target.index.compact();";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n    target.index.assertIntegrity = () => { throw new Error("post-compaction divergence"); };`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("stable.md", "stableterm")],
+      });
+
+      await expect(request(worker, {
+        id: 4,
+        operation: "commit_build",
+        generation: "g1",
+      })).resolves.toMatchObject({ ok: false, error: { code: "integrity_failed" } });
+      await expect(request(worker, { id: 5, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null, searchable: false },
+      });
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: false, error: { code: "index_building" } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  // A published generation is mutated in place and never re-enters the commit
+  // gate, so its reconciliation runs inside that transaction. The injected
+  // posting is exactly the divergence the removed external-content triggers
+  // used to make structurally impossible.
+  it("refuses an in-place active update whose postings diverge from its chunk rows", async () => {
+    const needle = "active.index.applySourceChanges(preparations, request.removals, true);";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `active.index.db.exec("INSERT INTO chunks_fts(rowid, content) VALUES(900000, 'sabotageterm')");\n    ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("stable.md", "stableterm")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+
+      await expect(request(worker, {
+        id: 5,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: "g2",
+        upserts: [source("added.md", "addedterm")],
+        removals: [],
+      })).resolves.toMatchObject({ ok: false, error: { code: "integrity_failed" } });
+
+      await expect(request(worker, { id: 6, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: "g1", documents: 1, chunks: 1, searchable: true },
+      });
+      await expect(request(worker, {
+        id: 7,
+        operation: "search",
+        query: "addedterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g1", hits: [] } });
+      await expect(request(worker, {
+        id: 8,
         operation: "search",
         query: "stableterm",
         limit: 20,
