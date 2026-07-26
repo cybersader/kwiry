@@ -12,6 +12,7 @@ directories = { workspace = true, optional = true }
 fs2 = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 ignore = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
 pulldown-cmark = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
@@ -51,6 +52,7 @@ native = [
   "dep:fs2",
   "dep:getrandom",
   "dep:ignore",
+  "dep:libc",
   "dep:rusqlite",
   "dep:sqlite-vec",
   "dep:subtle",
@@ -64,3 +66,6 @@ native = [
 # Enables the fastembed/ONNX embedder. Native sqlite-vec state and RRF remain
 # covered without ONNX so tests do not need to load the model.
 semantic-onnx = ["native", "dep:fastembed"]
+
+[dev-dependencies]
+filetime.workspace = true

@@ -202,6 +202,33 @@ fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
     assert!(!logs.contains("desktop-token"));
 }
 
+#[test]
+fn vaultless_daemon_serves_health_and_typed_index_building_instead_of_exiting() {
+    let temporary = tempdir().unwrap();
+    let config = temporary.path().join("config.toml");
+    let data = temporary.path().join("data");
+
+    // No vaults registered: the index bootstrap fails, but the desktop
+    // surface must come up degraded rather than the process exiting.
+    let daemon = Daemon::start_with_prefix(&config, &data, "kwiry listening on http://");
+    let token = fs::read_to_string(config.with_extension("token"))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let (health_status, health_body) = request(&daemon.address, &token, "GET", "/v0/health", None);
+    assert_eq!(health_status, 200, "{health_body}");
+
+    let body = serde_json::json!({"q": "anything", "mode": "lexical", "limit": 20}).to_string();
+    let (search_status, search_body) =
+        request(&daemon.address, &token, "POST", "/v0/search", Some(&body));
+    assert_eq!(search_status, 503, "{search_body}");
+    assert!(search_body.contains("index_building"), "{search_body}");
+
+    assert_eq!(status(&daemon.address, &token).state, DaemonState::Degraded);
+    daemon.stop();
+}
+
 fn vault_add(config: &Path, data: &Path, id: &str, vault: &Path) {
     let status = Command::new(cargo_bin("kwiry"))
         .args([

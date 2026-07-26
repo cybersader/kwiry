@@ -16,6 +16,8 @@ pub enum Error {
     InvalidVaultPath(PathBuf),
     #[error("no vaults are registered")]
     NoVaults,
+    #[error("index is still building")]
+    IndexBuilding,
     #[error("index error: {0}")]
     Index(String),
     #[error("query error: {0}")]
@@ -24,6 +26,8 @@ pub enum Error {
     Auth(String),
     #[error("data-root lock is already held at {0}")]
     LockHeld(PathBuf),
+    #[error("data root is unsuitable at {path}: {reason}")]
+    UnsuitableDataRoot { path: PathBuf, reason: String },
     #[error("state error: {0}")]
     State(String),
     #[error("semantic error: {0}")]

@@ -11,15 +11,18 @@ The presentation plugin does not own parsing, chunking, ranking, authorization, 
 
 ## No-daemon profile status
 
-The **In-plugin · Lexical** profile is contractual but not delivered in the current release. The Tantivy normal incremental writer reached a technical NO-GO, then the official SQLite FTS5-WASM runtime and one-file installed Obsidian/frozen-BRAT gates passed. Portable Rust Gate 3 and backend-neutral production integration Gate 4 are owner-accepted GO. Gate 4's explicit backend selection, credential hardening, portable Rust plus official SQLite in one Worker, fixed query binding, generation isolation, deterministic artifact, complete automated matrix, and installed disposable-vault UI-foundation witness all pass in the current Gate 4 baseline. The profile still reports `index_building` because active-vault lifecycle and delivered-profile acceptance remain Gate 5.
+The **In-plugin · Lexical** profile is contractual but not delivered in the current release. Gates 1–4 are owner-accepted GO. The Gate 5 candidate on PR #2 adds bounded active-vault build/reconciliation, exact-Worker/package evidence, and deterministic functional/performance corpora, but remains unmerged under the owner's field-first sequence. Its generated build/search/update/event-loop targets pass while added memory remains above the provisional target; installed restart/update/rollback and declared-reference-hardware acceptance remain open.
 
-Planned first scope:
+A separately approved durability checkpoint will evaluate a versioned machine-local startup cache. It must restore only a complete validated generation, label it stale/reconciling until vault reconciliation completes, and remain fully disposable. SQLite export/restore integrity and peak memory are a hard feasibility gate before that protocol is implemented.
+
+Candidate and approved follow-on scope:
 
 - current open vault and Markdown files only;
-- in-memory disposable index rebuilt from source files;
+- one in-memory active FTS5 index, optionally accelerated by a validated disposable cache outside the vault on machine-local storage;
 - lexical mode only, with no semantic/hybrid fallback;
 - explicit backend selection rather than automatic daemon failover;
 - active-vault create/modify/delete/rename reconciliation;
+- explicit `strict_hash` or metadata-audit freshness behavior with stale/reconciling disclosure;
 - future, separately reviewed relevance phases for recency, properties, folder hierarchy, and configurable profiles.
 
 See [`../../docs/design/obsidian-lite.md`](../../docs/design/obsidian-lite.md), [`../../docs/roadmap/desktop-obsidian.md`](../../docs/roadmap/desktop-obsidian.md), the Gate 1 [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md) evidence, and the Gate 2 [`../../bench/fts5-wasm-obsidian-probe/README.md`](../../bench/fts5-wasm-obsidian-probe/README.md) automation and field record.
@@ -27,8 +30,9 @@ See [`../../docs/design/obsidian-lite.md`](../../docs/design/obsidian-lite.md), 
 ## Network and privacy disclosure
 
 - In **Daemon** mode, the plugin communicates only with a configured literal loopback HTTP origin, using Obsidian's `requestUrl` for `POST /v0/search`, `GET /v0/status`, and `GET /v0/health`.
-- In **In-plugin · Lexical** mode, the embedded Worker has no network, persistence, helper-Worker, daemon URL, or daemon-token capability.
-- Daemon search queries are sent only to the selected local daemon. In-plugin queries remain inside the in-memory Worker.
+- In **In-plugin · Lexical** mode, the embedded Worker has no network, filesystem/OPFS persistence, helper-Worker, daemon URL, or daemon-token capability.
+- A future cache implementation, if its feasibility gate passes, is owned by a main-thread machine-local cache port outside the vault; the Worker receives/returns only bounded validated generation bytes.
+- Daemon search queries are sent only to the selected local daemon. In-plugin queries remain inside the Worker and are never written to the cache.
 - The daemon bearer token is read from a bounded regular non-symlink file immediately before each authenticated request and is never stored in plugin data, sent to the Worker, logged, or displayed.
 - No telemetry of any kind.
 

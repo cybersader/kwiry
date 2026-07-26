@@ -1,6 +1,75 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::CHUNKING_VERSION;
+use crate::model::{CHUNKING_VERSION, IndexFreshnessBasis};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexFreshnessState {
+    Current,
+    Reconciling,
+    Stale,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexFreshness {
+    pub state: IndexFreshnessState,
+    pub basis: IndexFreshnessBasis,
+}
+
+impl IndexFreshness {
+    pub const fn new(state: IndexFreshnessState, basis: IndexFreshnessBasis) -> Self {
+        Self { state, basis }
+    }
+
+    pub const fn strict_hash(state: IndexFreshnessState) -> Self {
+        Self {
+            state,
+            basis: IndexFreshnessBasis::StrictHash,
+        }
+    }
+
+    pub fn header_value(self) -> &'static str {
+        match (self.state, self.basis) {
+            (IndexFreshnessState::Current, IndexFreshnessBasis::StrictHash) => {
+                "current; basis=strict_hash"
+            }
+            (IndexFreshnessState::Reconciling, IndexFreshnessBasis::StrictHash) => {
+                "reconciling; basis=strict_hash"
+            }
+            (IndexFreshnessState::Stale, IndexFreshnessBasis::StrictHash) => {
+                "stale; basis=strict_hash"
+            }
+            (IndexFreshnessState::Unavailable, IndexFreshnessBasis::StrictHash) => {
+                "unavailable; basis=strict_hash"
+            }
+            (IndexFreshnessState::Current, IndexFreshnessBasis::MetadataAudit) => {
+                "current; basis=metadata_audit"
+            }
+            (IndexFreshnessState::Reconciling, IndexFreshnessBasis::MetadataAudit) => {
+                "reconciling; basis=metadata_audit"
+            }
+            (IndexFreshnessState::Stale, IndexFreshnessBasis::MetadataAudit) => {
+                "stale; basis=metadata_audit"
+            }
+            (IndexFreshnessState::Unavailable, IndexFreshnessBasis::MetadataAudit) => {
+                "unavailable; basis=metadata_audit"
+            }
+            (IndexFreshnessState::Current, IndexFreshnessBasis::ProducerManifest) => {
+                "current; basis=producer_manifest"
+            }
+            (IndexFreshnessState::Reconciling, IndexFreshnessBasis::ProducerManifest) => {
+                "reconciling; basis=producer_manifest"
+            }
+            (IndexFreshnessState::Stale, IndexFreshnessBasis::ProducerManifest) => {
+                "stale; basis=producer_manifest"
+            }
+            (IndexFreshnessState::Unavailable, IndexFreshnessBasis::ProducerManifest) => {
+                "unavailable; basis=producer_manifest"
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -65,6 +134,18 @@ impl DaemonStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_hash_freshness_has_a_stable_header_value() {
+        assert_eq!(
+            IndexFreshness::strict_hash(IndexFreshnessState::Current).header_value(),
+            "current; basis=strict_hash"
+        );
+        assert_eq!(
+            IndexFreshness::strict_hash(IndexFreshnessState::Reconciling).header_value(),
+            "reconciling; basis=strict_hash"
+        );
+    }
 
     #[test]
     fn lexical_status_reports_no_semantic_model() {

@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use kwiry_core::{
-    DaemonState, DataRoot, HostProfile, LexicalSearchRequest, Paths, acquire_setup_lock, add_vault,
-    build_index, load_config, search_index, update_config,
+    DaemonState, DataRoot, HostProfile, IndexFreshnessBasis, LexicalSearchRequest, Paths,
+    acquire_setup_lock, add_vault, build_index, load_config, search_index, update_config,
 };
 use serde::Serialize;
 
@@ -53,6 +53,11 @@ enum Command {
     Vault {
         #[command(subcommand)]
         command: VaultCommand,
+    },
+    /// Inspect or change daemon configuration without editing files.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     /// Rebuild the disposable lexical index from registered files.
     Index,
@@ -132,6 +137,47 @@ enum VaultCommand {
         #[arg(long)]
         room: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Print the effective validated configuration.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set reconciliation freshness-basis options. A running daemon applies
+    /// them on its next reconcile pass without a restart.
+    SetIndexing {
+        /// Evidence basis: strict-hash reads every source each pass;
+        /// metadata-audit reuses settled unchanged sources and audits.
+        #[arg(long, value_enum)]
+        basis: Option<BasisArg>,
+        /// Rolling-audit source budget per pass (1-256).
+        #[arg(long, value_name = "COUNT")]
+        audit_sources: Option<usize>,
+        /// Rolling-audit byte budget per pass.
+        #[arg(long, value_name = "BYTES")]
+        audit_bytes: Option<u64>,
+        /// Sources modified within this window are always re-read.
+        #[arg(long, value_name = "MILLISECONDS")]
+        racy_window_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BasisArg {
+    StrictHash,
+    MetadataAudit,
+}
+
+impl From<BasisArg> for IndexFreshnessBasis {
+    fn from(value: BasisArg) -> Self {
+        match value {
+            BasisArg::StrictHash => Self::StrictHash,
+            BasisArg::MetadataAudit => Self::MetadataAudit,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -222,6 +268,7 @@ async fn main() -> Result<()> {
                 registration.path.display()
             );
         }
+        Command::Config { command } => run_config(&paths, command)?,
         Command::Index => {
             let config = load_config(&paths.config).with_context(|| {
                 format!(
@@ -281,6 +328,62 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_config(paths: &Paths, command: ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Show { json } => {
+            let config = load_config(&paths.config)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&config)?);
+            } else {
+                print!("{}", toml::to_string_pretty(&config)?);
+            }
+        }
+        ConfigCommand::SetIndexing {
+            basis,
+            audit_sources,
+            audit_bytes,
+            racy_window_ms,
+        } => {
+            if basis.is_none()
+                && audit_sources.is_none()
+                && audit_bytes.is_none()
+                && racy_window_ms.is_none()
+            {
+                bail!(
+                    "nothing to change; pass --basis, --audit-sources, --audit-bytes, or --racy-window-ms"
+                );
+            }
+            let indexing = update_config(&paths.config, |config| {
+                if let Some(basis) = basis {
+                    config.indexing.basis = basis.into();
+                }
+                if let Some(value) = audit_sources {
+                    config.indexing.audit_sources_per_pass = value;
+                }
+                if let Some(value) = audit_bytes {
+                    config.indexing.audit_bytes_per_pass = value;
+                }
+                if let Some(value) = racy_window_ms {
+                    config.indexing.racy_window_millis = value;
+                }
+                Ok(config.indexing.clone())
+            })?;
+            println!(
+                "Indexing configured: basis={}, audit {} sources / {} bytes per pass, racy window {} ms. A running daemon applies this on its next reconcile.",
+                match indexing.basis {
+                    IndexFreshnessBasis::StrictHash => "strict_hash",
+                    IndexFreshnessBasis::MetadataAudit => "metadata_audit",
+                    IndexFreshnessBasis::ProducerManifest => "producer_manifest",
+                },
+                indexing.audit_sources_per_pass,
+                indexing.audit_bytes_per_pass,
+                indexing.racy_window_millis
+            );
+        }
+    }
     Ok(())
 }
 

@@ -37,7 +37,7 @@ The current BRAT-installable plugin provides a query modal, result rendering, ex
 
 ## D5B — no-daemon in-plugin lexical host
 
-State: urgent need; Gates 1–4 are owner-accepted GO, and the production host remains undelivered pending Gate 5 active-vault lifecycle, performance, packaging, and field acceptance.
+State: Gate 5 candidate implemented on PR #2 and under the owner's field-first acceptance sequence. The production host remains undelivered; durable machine-local warm start is an approved separate checkpoint.
 
 ### Checkpoint B0 — Tantivy-WASM feasibility — Completed NO-GO for normal incremental writer
 
@@ -65,9 +65,15 @@ Automation reported `READY_FOR_FIELD_TEST`; the owner then accepted B2 after fro
 
 The Gate 4 production baseline has explicit daemon/in-plugin selection, hardened daemon credentials/responses, truthful capability/mode/status behavior, stale-result and result-origin enforcement, a strict portable Rust adapter, fixed parameterized FTS5 SQL, and a long-lived classic Worker with one complete plus at most one staging generation. The deterministic CommonJS artifact embeds exactly the portable Rust and official SQLite WASM payloads. The complete Rust/WASM/plugin matrix, corruption and denied-capability tests, Node 22/24 exact-Worker execution, deterministic artifact evidence, and installed disposable-vault Obsidian UI-foundation witness passed before the owner accepted B4 as GO. Active-vault enumeration/events and a delivered-profile claim remain excluded.
 
-### Checkpoint B5 — active-vault lifecycle, package, and field-test
+### Checkpoint B5 — active-vault lifecycle, package, and field-test — Implemented, awaiting field acceptance
 
-Build an atomic initial in-memory index and reconcile create, modify, delete, and rename events. Measure generated and real vaults, install the exact one-file artifact through Obsidian/BRAT, test upgrades/rollback, and obtain owner acceptance before calling the profile delivered.
+PR #2 builds an atomic initial in-memory index and reconciles create, modify, delete, and rename events with bounded reads/queues and no partial-corpus publication. Deterministic functional and 10,000-note/50-MiB corpora, strict aggregate evidence, the exact generated Worker, disposable-vault smoke, and candidate/publication workflow separation pass. Generated build, warm-search, update-visibility, and event-loop targets pass; added memory remains above the provisional 300 MiB target. Installed restart/upgrade/rollback and declared-reference-hardware evidence remain owner-gated.
+
+### Checkpoint B6 — durable differential warm start — Approved, not implemented
+
+Permit a versioned disposable cache only on machine-local storage outside the vault. Restore the previous complete generation as searchable but `stale`/`reconciling`, compare current vault metadata under an explicit freshness policy, read/hash only changed/racy/audit-selected sources, and persist a new cache only after a complete clean generation exists. The Worker remains unable to access persistence APIs; a main-thread cache port owns bounded atomic storage.
+
+Before protocol integration, the exact official SQLite WASM must prove export/deserialize integrity, restore speed, event-loop behavior, and bounded peak memory on the generated corpus. A failed feasibility gate returns to owner review; it does not authorize OPFS, a helper Worker, an extra WASM payload, or vault-relative cache storage.
 
 ## D5C — relevance signals and configuration
 
@@ -104,3 +110,5 @@ Ship named, versioned, judged profiles before exposing arbitrary sliders. Requir
 - Gate B1 GO proves runtime viability only; B2 packaging, B3 core extraction, and production integration remain separately gated.
 - D5C scoring changes require judged evidence and owner review of public behavior.
 - Passing tests do not establish owner daily-drive or distribution acceptance.
+- The B6 cache remains disposable and machine-local; cache corruption/version mismatch must discard and rebuild within In-plugin · Lexical, never switch profiles.
+- Strong hashes remain authoritative. Metadata-audit fast paths require racy-file checks and bounded rolling verification; a complete producer manifest may be authoritative only for an already-approved materialized root.

@@ -60,14 +60,17 @@ Native installers and packages are still planned. See [`docs/setup.md`](docs/set
 - Query modal, result rendering, status indication, and explicit lexical, semantic, and hybrid selection.
 - The token is read on demand and never persisted by the plugin.
 
-### D5B — no-daemon in-plugin lexical host — Gate 4 owner-accepted GO; Gate 5 pending
+### D5B — no-daemon in-plugin lexical host — Gate 5 candidate implemented; field acceptance and durable warm-start pending
 
 - Active-vault Markdown search remains the urgent need where policy or device constraints prohibit a native daemon.
 - The first path proved thread-free fresh Tantivy indexes can run in WASM, but Tantivy 0.26.1's normal `IndexWriter` failed while spawning its segment-updater thread. The hard gate stopped before a fork or production integration.
 - The isolated official SQLite FTS5-WASM Gate 1 passed: the pinned runtime, FTS5 behavior, external-content synchronization, weighted BM25, query/excerpt behavior, transactional source replacement, rollback, integrity, and repeated close lifecycle were verified.
 - The separate one-file compatibility probe now passes automated packaging, protocol, real-Worker, privacy, corruption, deterministic-build, and 25-cycle lifecycle checks. CI enforces the Gate 1 baseline plus Gate 2 checks on Node 22 and 24. See [`bench/fts5-wasm-obsidian-probe/README.md`](bench/fts5-wasm-obsidian-probe/README.md).
 - Automation reported `READY_FOR_FIELD_TEST`; the owner then accepted Gate 2 after frozen BRAT `0.0.1` installation and ten runs, update to `0.0.2`, full restart/rerun, rollback to `0.0.1`, and final rerun all passed under desktop Obsidian. BRAT's add-plugin modal remained open after successful installation and was accepted as a non-blocking upstream UI defect. A separate filesystem hash of the installed copies was not recorded; exact release hashes, versions, public delivery, and execution were verified.
-- Portable Rust Gate 3 and backend-neutral production integration Gate 4 are owner-accepted GO. The Gate 4 baseline passed deterministic automated evidence plus the installed disposable-vault Obsidian UI-foundation witness. Active-vault lifecycle/measurement, installed active-index/BRAT acceptance, and a delivered-profile claim remain Gate 5.
+- Portable Rust Gate 3 and backend-neutral production integration Gate 4 are owner-accepted GO.
+- The Gate 5 candidate on PR #2 implements bounded active-vault build/reconciliation, deterministic functional/performance corpora, exact-Worker evidence, disposable-vault packaging, and candidate/publication workflow separation. It remains unmerged and not delivered pending the owner's field-first acceptance sequence.
+- Generated runtime evidence meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the 300 MiB added-memory target; installed startup/progress and declared-reference-hardware measurements remain pending.
+- The 2026-07-25 durability amendment authorizes a separately gated machine-local disposable cache, stale/reconciling warm start, and explicit strong-hash/metadata/producer-manifest freshness modes. SQLite export/restore must pass a memory and integrity feasibility gate before protocol integration.
 
 See the historical Tantivy evidence in [`bench/tantivy-wasm/README.md`](bench/tantivy-wasm/README.md) and the selected sequence in [`docs/design/obsidian-lite.md`](docs/design/obsidian-lite.md).
 
@@ -85,7 +88,7 @@ See the historical Tantivy evidence in [`bench/tantivy-wasm/README.md`](bench/ta
 
 See [`docs/roadmap/desktop-obsidian.md`](docs/roadmap/desktop-obsidian.md), [`docs/design/obsidian-lite.md`](docs/design/obsidian-lite.md), and [`clients/obsidian/README.md`](clients/obsidian/README.md).
 
-D5B is independent of IG-1 acceptance. Gates 1–4 are GO; production Obsidian/core work now stops before Gate 5 active-vault lifecycle and delivery acceptance. IG-2 remains the next enterprise implementation lane after IG-1 acceptance; MCP, connectors, and structural-agent work are tabled as implementation, not canceled.
+D5B is independent of IG-1 acceptance. Gates 1–4 are GO; Gate 5 is implemented on its review branch and remains field-acceptance gated. Durable warm-start work is a separate approved checkpoint and does not authorize merge, release, BRAT action, or a delivered claim. IG-2 remains the next governed capability lane after IG-1 acceptance; shared durability/indexing work may proceed first because it does not widen enterprise authorization or modes.
 
 ## Identity-governed enterprise retrieval
 
@@ -166,7 +169,9 @@ These tracks continue across the numbered gates:
 - **User experience:** stupid-easy setup, transparent mode behavior, strong keyboard workflows, installability, and recovery.
 - **Knowledge operations:** current-state recovery, canonical-source routing, stable question/decision records, evidence-backed checkpoints, and bounded curation workflows.
 - **Privacy and security:** no credential persistence in clients, no secret-bearing logs, explicit trust profiles, and privacy scans before publication.
-- **Rebuildability:** source files remain authoritative and every derived projection remains disposable.
+- **Rebuildability:** source files/materialized outputs remain authoritative and every derived projection remains disposable.
+- **Durability and freshness:** complete generations may be cached on machine-local storage and served during bounded reconciliation only with explicit `current`/`reconciling`/`stale` disclosure; strong hashes remain authoritative, with metadata and producer manifests used only under declared policies.
+- **Laptop/network efficiency:** path-scoped reconciliation, bounded queues/concurrency/bytes in flight, rolling audits, and producer manifests must reduce source operations without weakening deletion, rename, authorization, or rebuild guarantees.
 
 ## Current implementation and review boundaries
 
@@ -181,4 +186,4 @@ Before beginning the next governed enterprise gate, confirm:
 3. the separate search key and server-side capability boundary are operationally understandable;
 4. the next enterprise delivery lane is governed semantic/hybrid, followed closely by read-only governed MCP.
 
-D5B has passed owner acceptance through Gate 4. The integrated Worker, explicit backend/mode/status behavior, deterministic two-WASM one-file artifact, daemon regressions, and installed disposable-vault UI foundation are accepted as the base for the separately gated lifecycle work. Do not begin Gate 5 active-vault indexing, production publication, or a delivered no-daemon profile claim without separate owner authorization.
+D5B has passed owner acceptance through Gate 4. Gate 5 active-vault indexing is implemented on PR #2 under the owner's field-first sequence; it is not merged or delivered. The 2026-07-25 durability amendment separately authorizes contract/storage/freshness work and an evidence-first SQLite cache feasibility gate. The native format-5 durability slice is implemented and workspace-verified in the current review work; owner acceptance remains pending, and differential reconciliation is the next checkpoint. Passing either native or SQLite evidence gates does not authorize publication or the final no-daemon delivered claim.

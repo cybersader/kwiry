@@ -134,8 +134,8 @@ fn build_desktop_candidate(
             return Err(Error::InvalidVaultPath(vault.path.clone()));
         }
         let fingerprint = registration_fingerprint(vault);
-        let (outcomes, discovery_warnings) = ingest_vault_files(vault);
-        stats.warnings.extend(discovery_warnings);
+        let (outcomes, enumeration) = ingest_vault_files(vault);
+        stats.warnings.extend(enumeration.warnings);
         for outcome in outcomes {
             if let Some(warning) = outcome.warning.clone() {
                 stats.warnings.push(warning);
@@ -275,8 +275,8 @@ fn build_partition(
         .writer(WRITER_MEMORY_BYTES)
         .map_err(|error| Error::Index(error.to_string()))?;
     let fingerprint = registration_fingerprint(vault);
-    let (outcomes, discovery_warnings) = ingest_vault_files(vault);
-    stats.warnings.extend(discovery_warnings);
+    let (outcomes, enumeration) = ingest_vault_files(vault);
+    stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
             stats.warnings.push(warning);

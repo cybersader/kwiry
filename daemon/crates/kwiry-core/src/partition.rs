@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::model::{HostProfile, ResourceKey};
 use crate::state::{read_json, write_json_atomic};
 
-pub(crate) const GENERATION_LAYOUT_VERSION: u32 = 1;
+pub(crate) const GENERATION_LAYOUT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct GenerationLayout {

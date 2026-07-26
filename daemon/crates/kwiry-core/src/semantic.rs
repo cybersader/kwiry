@@ -455,6 +455,11 @@ impl SemanticRuntime {
         self.lock_store()?.has_source(source_key)
     }
 
+    /// The content hash the source was last embedded at, if any.
+    pub fn source_hash(&self, source_key: &str) -> Result<Option<String>> {
+        self.lock_store()?.source_hash(source_key)
+    }
+
     pub fn delete_source(&self, source_key: &str) -> Result<()> {
         self.lock_store()?.delete_source(source_key)
     }

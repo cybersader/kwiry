@@ -1,6 +1,4 @@
-use std::fs;
-#[cfg(unix)]
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
@@ -37,18 +35,49 @@ pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<
     temporary
         .persist(path)
         .map_err(|error| io_error(path, error.error))?;
-    sync_parent(parent)?;
+    sync_directory(parent)?;
     Ok(())
 }
 
+pub(crate) fn sync_tree(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
+    if metadata.file_type().is_symlink() {
+        return Err(Error::State(format!(
+            "derived-state tree contains a symbolic link: {}",
+            path.display()
+        )));
+    }
+    if metadata.is_file() {
+        return File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| io_error(path, error));
+    }
+    if !metadata.is_dir() {
+        return Err(Error::State(format!(
+            "derived-state tree contains an unsupported entry: {}",
+            path.display()
+        )));
+    }
+
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| io_error(path, error))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| io_error(path, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        sync_tree(&entry.path())?;
+    }
+    sync_directory(path)
+}
+
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| io_error(path, error))
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> Result<()> {
+pub(crate) fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
