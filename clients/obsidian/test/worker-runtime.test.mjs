@@ -1,27 +1,54 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { buildPlugin } from "../esbuild.config.mjs";
+import { CACHE_SCHEMA_VERSION, isWorkerResponse } from "../src/worker/protocol";
 
 const require = createRequire(import.meta.url);
+const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
 let workerSource;
 let guardWorkerSource;
+let artifactIdentities;
 
 beforeAll(async () => {
-  ({ workerSource } = await buildPlugin({ write: false, production: true }));
+  ({ workerSource, identities: artifactIdentities } = await buildPlugin({
+    write: false,
+    production: true,
+  }));
   ({ workerSource: guardWorkerSource } = await buildPlugin({ write: false, production: false }));
 }, 120_000);
 
-function nodeWorkerSource(source) {
+function postMessageShim({ dropTransfer, failTransfer }) {
+  // Rejects any post that carries a transfer list, which is what a real
+  // DataCloneError looks like from inside the Worker.
+  if (failTransfer) {
+    return "(message, transfer) => {\n"
+      + "      if (transfer !== undefined && transfer.length > 0) {\n"
+      + "        throw new Error(\"DataCloneError: could not be transferred\");\n"
+      + "      }\n"
+      + "      parentPort.postMessage(message);\n"
+      + "    }";
+  }
+  if (dropTransfer) return "(message) => parentPort.postMessage(message)";
+  return "(message, transfer) => parentPort.postMessage(message, transfer)";
+}
+
+function nodeWorkerSource(source, { dropTransfer = false, failTransfer = false } = {}) {
   return `
     const { parentPort } = require("node:worker_threads");
     globalThis.self = globalThis;
-    globalThis.postMessage = (message) => parentPort.postMessage(message);
+    // The transfer list is forwarded, not dropped: the export path transfers
+    // its image buffer, and a shim that quietly copied it would hide both the
+    // transfer and the detachment it causes. The dropping variant exists so
+    // the detachment probe below is provably able to fail, and the failing
+    // variant so the post-failure path is a real path rather than a claim.
+    globalThis.postMessage = ${postMessageShim({ dropTransfer, failTransfer })};
     globalThis.addEventListener = (type, listener) => {
       if (type === "message") parentPort.on("message", (data) => listener({ data }));
     };
@@ -76,6 +103,446 @@ function source(path, text) {
     bytes,
   };
 }
+
+let sqliteRuntime;
+
+/**
+ * Opens a received export blob as a real database inside the TEST process,
+ * using the same pinned package the Worker embeds. Nothing about the export is
+ * taken on the Worker's word: the bytes have to load and answer queries.
+ */
+async function openExportedImage(bytes) {
+  if (!sqliteRuntime) {
+    const initialize = (await import("@sqlite.org/sqlite-wasm")).default;
+    sqliteRuntime = await initialize({ print: () => undefined, printErr: () => undefined });
+  }
+  const db = new sqliteRuntime.oo1.DB(":memory:", "c");
+  const pointer = sqliteRuntime.wasm.allocFromTypedArray(bytes);
+  const rc = sqliteRuntime.capi.sqlite3_deserialize(
+    db.pointer,
+    "main",
+    pointer,
+    bytes.byteLength,
+    bytes.byteLength,
+    sqliteRuntime.capi.SQLITE_DESERIALIZE_FREEONCLOSE
+      | sqliteRuntime.capi.SQLITE_DESERIALIZE_RESIZEABLE,
+  );
+  if (rc !== 0) {
+    db.close();
+    throw new Error(`sqlite3_deserialize failed with ${rc}`);
+  }
+  return db;
+}
+
+async function buildActiveGeneration(worker, { generation = "g1", path = "alpha.md", text } = {}) {
+  await request(worker, { id: 1, operation: "initialize" });
+  await request(worker, { id: 2, operation: "begin_build", generation });
+  await request(worker, {
+    id: 3,
+    operation: "add_source_batch",
+    generation,
+    sources: [source(path, text ?? "# Alpha\nstableterm portable cache")],
+  });
+  await request(worker, { id: 4, operation: "commit_build", generation });
+}
+
+describe("exported cache generation", () => {
+  it("exports a working database with an independently verifiable identity", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await buildActiveGeneration(worker);
+
+      const response = await request(worker, {
+        id: 5,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      });
+      expect(response).toMatchObject({ ok: true });
+      // The real Worker's real output, checked by the validator that gates it
+      // in production rather than by a hand-written approximation.
+      expect(isWorkerResponse(response)).toBe(true);
+
+      const envelope = response.result;
+      const bytes = envelope.bytes;
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect(bytes.byteLength).toBe(envelope.blob_byte_length);
+      // Independently measured, never echoed.
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(envelope.blob_sha256);
+
+      expect(envelope).toMatchObject({
+        generation: "g1",
+        documents: 1,
+        chunks: 1,
+        protocol_version: 2,
+        cache_schema_version: CACHE_SCHEMA_VERSION,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        plugin_id: "kwiry-search",
+        cache_identity: CACHE_IDENTITY,
+      });
+
+      // The embedded-artifact digests are checked against the build's own
+      // identities AND against the artifact files hashed directly here, so the
+      // assertion does not rest on the build script being correct.
+      expect(envelope.sqlite_wasm_sha256).toBe(artifactIdentities.sqlite.sha256);
+      expect(envelope.rust_wasm_sha256).toBe(artifactIdentities.rust.sha256);
+      expect(envelope.plugin_id).toBe(artifactIdentities.plugin.id);
+      expect(envelope.plugin_version).toBe(artifactIdentities.plugin.version);
+      expect(envelope.sqlite_wasm_sha256).toBe(createHash("sha256")
+        .update(readFileSync(require.resolve("@sqlite.org/sqlite-wasm/sqlite3.wasm")))
+        .digest("hex"));
+      expect(envelope.rust_wasm_sha256).toBe(createHash("sha256")
+        .update(readFileSync(new URL(
+          "../rust/kwiry-obsidian-wasm/pkg/production/kwiry_obsidian_wasm_bg.wasm",
+          import.meta.url,
+        )))
+        .digest("hex"));
+
+      const restored = await openExportedImage(bytes);
+      try {
+        expect(() => restored.exec(
+          "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
+        )).not.toThrow();
+        expect(Number(restored.selectValue("PRAGMA user_version"))).toBe(CACHE_SCHEMA_VERSION);
+        const counts = restored.selectObjects(`
+          SELECT
+            (SELECT count(*) FROM chunks) AS chunks,
+            (SELECT count(*) FROM chunks_fts) AS fts,
+            (SELECT count(*) FROM chunks_fts f LEFT JOIN chunks c ON c.rowid = f.rowid
+               WHERE c.rowid IS NULL) AS orphan_fts,
+            (SELECT count(*) FROM chunks c LEFT JOIN chunks_fts f ON f.rowid = c.rowid
+               WHERE f.rowid IS NULL) AS missing_fts,
+            (SELECT COALESCE(SUM(chunk_count), 0) FROM sources) AS source_chunks
+        `)[0];
+        expect(counts).toEqual({
+          chunks: 1,
+          fts: 1,
+          orphan_fts: 0,
+          missing_fts: 0,
+          source_chunks: 1,
+        });
+        // The restorable half: the image is a searchable index, not merely a
+        // hash-consistent buffer.
+        expect(restored.selectValue(
+          "SELECT c.path FROM chunks c JOIN chunks_fts f ON f.rowid = c.rowid "
+          + "WHERE chunks_fts MATCH ?",
+          ['"stableterm"'],
+        )).toBe("alpha.md");
+        expect(restored.selectObjects("SELECT outcome, content_hash, mtime_nanos FROM sources"))
+          .toEqual([{
+            outcome: "indexed",
+            content_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+            mtime_nanos: "1000001",
+          }]);
+      } finally {
+        restored.close();
+      }
+
+      // Exporting neither disturbed the serving generation nor damaged the
+      // Worker's own state: it still searches, and it still exports.
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "alpha.md" }] },
+      });
+      const second = await request(worker, {
+        id: 7,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      });
+      expect(isWorkerResponse(second)).toBe(true);
+      // Deliberately NOT asserted byte-identical: VACUUM rewrites the file
+      // header on every run, so an identical image is not something SQLite
+      // promises. What must hold is that the second export is the same size,
+      // describes itself truthfully, and is still a working index.
+      expect(second.result.blob_byte_length).toBe(envelope.blob_byte_length);
+      expect(createHash("sha256").update(second.result.bytes).digest("hex"))
+        .toBe(second.result.blob_sha256);
+      const reexported = await openExportedImage(second.result.bytes);
+      try {
+        expect(reexported.selectValue(
+          "SELECT c.path FROM chunks c JOIN chunks_fts f ON f.rowid = c.rowid "
+          + "WHERE chunks_fts MATCH ?",
+          ['"stableterm"'],
+        )).toBe("alpha.md");
+      } finally {
+        reexported.close();
+      }
+
+      await request(worker, { id: 8, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  // The image is transferred, never copied. The probe below fires when the
+  // Worker's own view of the buffer survives the post, and the second case
+  // proves the probe can actually fail.
+  //
+  // The probe reports by POSTING a sentinel rather than by throwing. An escaping
+  // throw would be observed only as the Worker dying, and the Worker no longer
+  // dies on one — the message chain is re-resolved after every link precisely so
+  // a single failure cannot deafen it. Tying this probe to that crash would have
+  // made it an assertion about the bug rather than about the transfer.
+  it.each([
+    ["transferred", false, true],
+    ["copied", true, false],
+  ])("detects that the export buffer was %s", async (_name, dropTransfer, expectDetached) => {
+    const needle = "if (!isWorkerError(parsed) && parsed.operation === \"dispose\"";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `if (transfer.length > 0 && response.result.bytes.byteLength !== 0) {\n`
+      + `    scope.postMessage({ probe: "export image buffer survived its transfer" });\n`
+      + `  }\n  ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected, { dropTransfer }), { eval: true });
+    const survived = new Promise((resolve) => {
+      worker.on("message", (message) => {
+        if (message?.probe !== undefined) resolve("failed");
+      });
+    });
+    try {
+      await buildActiveGeneration(worker);
+      await expect(request(worker, {
+        id: 5,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      })).resolves.toMatchObject({ ok: true });
+
+      const outcome = await Promise.race([
+        survived,
+        request(worker, { id: 6, operation: "status" }).then(() => "alive", () => "failed"),
+      ]);
+      expect(outcome).toBe(expectDetached ? "alive" : "failed");
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  // Posting is itself fallible, and the transfer list is the realistic source.
+  // Left to propagate, the throw escapes the handler and the caller sees only
+  // the RPC timeout; the export must instead come back as a reported failure
+  // carrying no bytes, on a Worker that is still serving.
+  it("reports a post that cannot be transferred instead of dropping the response", async () => {
+    const worker = new Worker(
+      nodeWorkerSource(guardWorkerSource, { failTransfer: true }),
+      { eval: true },
+    );
+    try {
+      await buildActiveGeneration(worker);
+
+      const response = await request(worker, {
+        id: 5,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      }, 15_000);
+      expect(response).toMatchObject({
+        ok: false,
+        operation: "export_generation",
+        error: { code: "internal_error" },
+      });
+      expect(response.result).toBeUndefined();
+      expect(Object.keys(response)).toEqual(["version", "id", "operation", "ok", "error"]);
+
+      // The active generation is untouched and still answering.
+      await expect(request(worker, { id: 6, operation: "status" }, 15_000)).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: "g1", staging_generation: null, searchable: true },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  // The resilience the probe above had to be decoupled from, asserted directly:
+  // one throw escaping the message handler must not stop the Worker answering.
+  // Left unhandled, the serialized chain stays rejected and every later request
+  // is dropped, which the user experiences as every request timing out rather
+  // than as a reported fault.
+  it("keeps answering after a message handler throws", async () => {
+    const needle = "if (!isWorkerError(parsed) && parsed.operation === \"dispose\"";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `if (parsed.operation === "status" && parsed.id === 5) {\n`
+      + `    throw new Error("injected post-response failure");\n`
+      + `  }\n  ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await expect(request(worker, { id: 5, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+      });
+      // The throw happened after id 5 was answered. Every later message must
+      // still be handled.
+      await expect(request(worker, { id: 6, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+      });
+      await expect(request(worker, { id: 7, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it.each([
+    ["before any generation is published", async (worker) => {
+      await request(worker, { id: 1, operation: "initialize" });
+      return { id: 2, generation: "g1" };
+    }],
+    ["while a staging generation is in flight", async (worker) => {
+      await buildActiveGeneration(worker);
+      await request(worker, { id: 5, operation: "begin_build", generation: "g2" });
+      return { id: 6, generation: "g1" };
+    }],
+    ["for a generation that is no longer active", async (worker) => {
+      await buildActiveGeneration(worker);
+      await request(worker, {
+        id: 5,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: "g2",
+        upserts: [source("added.md", "addedterm")],
+        removals: [],
+      });
+      return { id: 6, generation: "g1" };
+    }],
+  ])("refuses an export %s and returns no bytes", async (_name, arrange) => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      const { id, generation } = await arrange(worker);
+      const response = await request(worker, {
+        id,
+        operation: "export_generation",
+        generation,
+        cache_identity: CACHE_IDENTITY,
+      });
+      expect(response).toMatchObject({ ok: false, error: { code: "invalid_state" } });
+      expect(response.result).toBeUndefined();
+      expect(Object.keys(response)).toEqual(["version", "id", "operation", "ok", "error"]);
+      expect(isWorkerResponse(response)).toBe(true);
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  // The asymmetry with commit_build: a failed export operates on the LIVE
+  // generation, so it must leave it intact, open and searchable. Aborting it
+  // the way a failed commit aborts staging would destroy a working index.
+  it.each([
+    ["pre-export compaction", "target.index.compact = () => { throw new Error(\"compaction failed\"); };"],
+    ["post-compaction re-verification", "target.index.assertIntegrity = () => { throw new Error(\"divergence\"); };"],
+  ])("reports a failed %s without disturbing the active generation", async (_name, sabotage) => {
+    const needle = "const target = active;";
+    const injected = guardWorkerSource.replace(needle, `${needle}\n  ${sabotage}`);
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await buildActiveGeneration(worker);
+
+      const response = await request(worker, {
+        id: 5,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      });
+      expect(response).toMatchObject({ ok: false, error: { code: "integrity_failed" } });
+      expect(response.result).toBeUndefined();
+
+      await expect(request(worker, { id: 6, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          active_generation: "g1",
+          staging_generation: null,
+          searchable: true,
+          documents: 1,
+          chunks: 1,
+        },
+      });
+      await expect(request(worker, {
+        id: 7,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "alpha.md" }] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("records every prepared source, including a skipped one, in the exported image", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      const binary = source("binary.md", "readable");
+      // A NUL byte is one of the content skips the Rust chunker performs, and
+      // it is the case that must still leave a queryable freshness row.
+      binary.bytes = Buffer.from([0x61, 0x00, 0x62]);
+      binary.descriptor.byte_length = 3;
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("alpha.md", "stableterm"), binary],
+      })).resolves.toMatchObject({ ok: true, result: { documents: 1, chunks: 1 } });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+
+      const response = await request(worker, {
+        id: 5,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      });
+      expect(response).toMatchObject({ ok: true, result: { documents: 1, chunks: 1 } });
+
+      const restored = await openExportedImage(response.result.bytes);
+      try {
+        const rows = restored.selectObjects(
+          "SELECT path, outcome, content_hash, byte_length, chunk_count FROM sources ORDER BY path",
+        );
+        expect(rows).toEqual([
+          {
+            path: "alpha.md",
+            outcome: "indexed",
+            content_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+            byte_length: 10,
+            chunk_count: 1,
+          },
+          // Seen and skipped, with the hash the Rust adapter computed — not an
+          // absent row a restore would have to re-read forever.
+          {
+            path: "binary.md",
+            outcome: "skipped",
+            content_hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+            byte_length: 3,
+            chunk_count: 0,
+          },
+        ]);
+      } finally {
+        restored.close();
+      }
+
+      await request(worker, { id: 6, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+});
 
 describe("exact generated production Worker", () => {
   it("initializes both WASM runtimes and publishes only complete generations", async () => {

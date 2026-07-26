@@ -4,12 +4,37 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CACHE_SCHEMA_VERSION,
+  MAX_EXPORT_BLOB_BYTES,
   MAX_SOURCE_CHANGES,
   WORKER_PROTOCOL_VERSION,
   type SourceInput,
   isWorkerResponse,
   parseWorkerRequest,
 } from "../src/worker/protocol";
+
+const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
+
+function exportEnvelope(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    generation: "g1",
+    documents: 1,
+    chunks: 2,
+    bytes: new Uint8Array([1, 2, 3, 4]),
+    blob_byte_length: 4,
+    blob_sha256: "a".repeat(64),
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: 1,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: "b".repeat(64),
+    rust_wasm_sha256: "c".repeat(64),
+    plugin_id: "kwiry-search",
+    plugin_version: "0.1.0",
+    cache_identity: CACHE_IDENTITY,
+    ...overrides,
+  };
+}
 
 function source(path = "note.md", vaultId = "active"): SourceInput {
   const bytes = new Uint8Array([35, 32, 65]);
@@ -135,6 +160,137 @@ describe("Worker protocol", () => {
         path: `${index}.md`,
       })),
     })).toMatchObject({ code: "invalid_request" });
+  });
+
+  it("accepts an exact export request and rejects every loosened form", () => {
+    const base = {
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      generation: "g1",
+      cache_identity: CACHE_IDENTITY,
+    } as const;
+    expect(parseWorkerRequest(base)).toMatchObject({ operation: "export_generation" });
+
+    const { cache_identity: _identity, ...withoutIdentity } = base;
+    expect(parseWorkerRequest(withoutIdentity)).toMatchObject({ code: "invalid_request" });
+    expect(parseWorkerRequest({ ...base, extra: true })).toMatchObject({
+      code: "invalid_request",
+    });
+    expect(parseWorkerRequest({ ...base, generation: "../g1" })).toMatchObject({
+      code: "invalid_request",
+    });
+    // A path is not 64 lowercase hex characters, so passing one here is
+    // structurally impossible rather than merely discouraged.
+    for (const identity of [
+      "/home/user/vault",
+      CACHE_IDENTITY.toUpperCase(),
+      CACHE_IDENTITY.slice(0, 63),
+      `${CACHE_IDENTITY}0`,
+      "g".repeat(64),
+      64,
+    ]) {
+      expect(parseWorkerRequest({ ...base, cache_identity: identity })).toMatchObject({
+        code: "invalid_request",
+      });
+    }
+  });
+
+  it("holds the export envelope shape exactly and cross-checks its declared length", () => {
+    const response = (result: unknown) => ({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation" as const,
+      ok: true as const,
+      result,
+    });
+
+    expect(isWorkerResponse(response(exportEnvelope()))).toBe(true);
+
+    expect(isWorkerResponse(response(exportEnvelope({ extra: true })))).toBe(false);
+    const { plugin_id: _pluginId, ...withoutPluginId } = exportEnvelope();
+    expect(isWorkerResponse(response(withoutPluginId))).toBe(false);
+    // The declared length must equal the buffer that actually arrived.
+    expect(isWorkerResponse(response(exportEnvelope({ blob_byte_length: 3 })))).toBe(false);
+    expect(isWorkerResponse(response(exportEnvelope({ bytes: [1, 2, 3, 4] })))).toBe(false);
+    expect(isWorkerResponse(response(exportEnvelope({
+      bytes: new Uint8Array(0),
+      blob_byte_length: 0,
+    })))).toBe(false);
+    for (const digest of ["a".repeat(63), "A".repeat(64), "z".repeat(64), null]) {
+      expect(isWorkerResponse(response(exportEnvelope({ blob_sha256: digest })))).toBe(false);
+      expect(isWorkerResponse(response(exportEnvelope({ rust_wasm_sha256: digest })))).toBe(false);
+      expect(isWorkerResponse(response(exportEnvelope({ cache_identity: digest })))).toBe(false);
+    }
+    expect(isWorkerResponse(response(exportEnvelope({
+      cache_schema_version: CACHE_SCHEMA_VERSION + 1,
+    })))).toBe(false);
+    expect(isWorkerResponse(response(exportEnvelope({ protocol_version: 1 })))).toBe(false);
+    expect(isWorkerResponse(response(exportEnvelope({ sqlite_version: "3.52.0" })))).toBe(false);
+    expect(isWorkerResponse(response(exportEnvelope({ chunking_version: 1.5 })))).toBe(false);
+    expect(isWorkerResponse(response(exportEnvelope({ plugin_version: "" })))).toBe(false);
+
+    // Cross-operation confusion in both directions.
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      ok: true,
+      result: { generation: "g1", documents: 1, chunks: 1 },
+    })).toBe(false);
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "commit_build",
+      ok: true,
+      result: exportEnvelope(),
+    })).toBe(false);
+  });
+
+  // Refusing an oversized image must be structural, not a truncation, so the
+  // validator has to reject a blob above the cap even if one somehow arrived.
+  it("rejects an export blob above the transported ceiling", () => {
+    expect(MAX_EXPORT_BLOB_BYTES).toBe(384 * 1024 * 1024);
+    const oversized = {
+      byteLength: MAX_EXPORT_BLOB_BYTES + 1,
+    };
+    Object.setPrototypeOf(oversized, Uint8Array.prototype);
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      ok: true,
+      result: exportEnvelope({
+        bytes: oversized,
+        blob_byte_length: MAX_EXPORT_BLOB_BYTES + 1,
+      }),
+    })).toBe(false);
+  });
+
+  // The error envelope's key set is exact, so a failed export provably cannot
+  // smuggle bytes back to the host.
+  it("refuses an error response that carries export bytes", () => {
+    const error = {
+      code: "integrity_failed",
+      stage: "index",
+      message: "Active generation failed its pre-export integrity check.",
+      retryable: false,
+    };
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      ok: false,
+      error,
+    })).toBe(true);
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      ok: false,
+      error,
+      result: exportEnvelope(),
+    })).toBe(false);
   });
 
   it("validates operation-correlated exact responses", () => {

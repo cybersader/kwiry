@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use kwiry_core::{
-    LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_FILE_BYTES, QueryMatchOperator,
-    QueryPlanKind, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
-    prepare_lexical_query, prepare_source_buffer,
+    CHUNKING_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_FILE_BYTES,
+    QueryMatchOperator, QueryPlanKind, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor,
+    SourcePreparation, prepare_lexical_query, prepare_source_buffer,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -38,6 +38,10 @@ pub struct AbiIdentity {
     pub source_preparation_schema_version: u32,
     pub lexical_query_plan_schema_version: u32,
     pub fts5_match_plan_schema_version: u32,
+    /// The chunker the adapter will actually apply. Chunk rows carry it too,
+    /// but a generation with no chunks still has to be able to name the
+    /// chunking contract its cached image was produced under.
+    pub chunking_version: u64,
     pub max_request_bytes: usize,
     pub max_source_buffer_bytes: usize,
     pub operations: [AdapterOperation; 3],
@@ -159,6 +163,7 @@ pub fn abi_identity() -> String {
         source_preparation_schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
         lexical_query_plan_schema_version: LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
         fts5_match_plan_schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
+        chunking_version: CHUNKING_VERSION,
         max_request_bytes: MAX_ADAPTER_REQUEST_BYTES,
         max_source_buffer_bytes: MAX_SOURCE_BUFFER_BYTES,
         operations: [
@@ -643,6 +648,7 @@ mod tests {
             identity["lexical_query_plan_schema_version"],
             LEXICAL_QUERY_PLAN_SCHEMA_VERSION
         );
+        assert_eq!(identity["chunking_version"], CHUNKING_VERSION);
         assert_eq!(
             identity["operations"],
             serde_json::json!(["prepare_source", "prepare_query", "finalize_query"])

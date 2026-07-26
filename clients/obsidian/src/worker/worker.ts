@@ -6,6 +6,8 @@ import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import sqliteWasmBytes from "@sqlite.org/sqlite-wasm/sqlite3.wasm";
 import rustWasmBytes from "virtual:kwiry-rust-wasm-bytes";
 import {
+  PLUGIN_ID,
+  PLUGIN_VERSION,
   RUST_WASM_SHA256,
   RUST_WASM_SIZE,
   SQLITE_WASM_SHA256,
@@ -20,9 +22,11 @@ import {
   type SQLiteApi,
 } from "./fts5-index";
 import {
+  CACHE_SCHEMA_VERSION,
   WORKER_PROTOCOL_VERSION,
   type BuildResult,
   type DisposeResult,
+  type ExportGenerationResult,
   type InitializeResult,
   type SearchResult,
   type StatusResult,
@@ -70,6 +74,10 @@ let staging: Generation | null = null;
 const usedGenerations = new Set<string>();
 let lastRequestId = 0;
 let guards: GuardCounters | null = null;
+// Declared by the Rust adapter at initialize. A generation with no chunks
+// still has to be able to name the chunking contract its image was built
+// under, so the adapter identity — not an observed chunk — is the source.
+let declaredChunkingVersion: number | null = null;
 
 async function initialize(): Promise<InitializeResult> {
   if (state !== "cold") {
@@ -81,6 +89,7 @@ async function initialize(): Promise<InitializeResult> {
     await verifyArtifact(sqliteWasmBytes, SQLITE_WASM_SIZE, SQLITE_WASM_SHA256);
     await verifyArtifact(rustWasmBytes, RUST_WASM_SIZE, RUST_WASM_SHA256);
     const rustIdentity = initializeRustAdapter();
+    declaredChunkingVersion = rustIdentity.chunking_version;
 
     const initializeSqlite = sqlite3InitModule as unknown as SQLiteInitializer;
     const originalWarn = console.warn;
@@ -151,6 +160,7 @@ async function initialize(): Promise<InitializeResult> {
   } catch (error) {
     state = "failed";
     sqlite = null;
+    declaredChunkingVersion = null;
     if (isWorkerError(error)) throw error;
     if (error instanceof RustAdapterError) {
       throw fixedWorkerError(
@@ -317,6 +327,104 @@ function commitBuild(generation: string): BuildResult {
   return generationResult(active);
 }
 
+/**
+ * Exports the ACTIVE generation, and only while it is clean.
+ *
+ * "No mutation in flight" needs no flag of its own: `handleMessage` is chained
+ * onto a single serialized queue, so no other operation can be part-way through
+ * when this one runs. What must be written is the rest: there is no staging
+ * generation, and the caller named the generation that is actually active.
+ *
+ * The asymmetry with `commitBuild` is deliberate and load-bearing. `commitBuild`
+ * aborts its staging generation when the gate fails; this operates on the live,
+ * serving generation, so a failure here must leave `active` intact, open, and
+ * searchable. Destroying a working index because an export failed would be a
+ * strictly worse outcome than not having a cache.
+ */
+async function exportGeneration(
+  generation: string,
+  cacheIdentity: string,
+): Promise<ExportGenerationResult> {
+  requireInitialized();
+  if (!sqlite || staging !== null || !active || active.id !== generation) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Requested generation is not the clean active generation.",
+      true,
+    );
+  }
+  if (declaredChunkingVersion === null) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Portable Rust chunking identity is unavailable.",
+      true,
+    );
+  }
+  const target = active;
+
+  // The image that ships must be the image that passed the gate, so the gate
+  // runs, then the compaction rewrites the file, then the gate runs again on
+  // the artifact that is actually about to be serialized.
+  try {
+    target.index.assertIntegrity();
+    target.index.compact();
+    target.index.assertIntegrity();
+  } catch {
+    throw fixedWorkerError(
+      "integrity_failed",
+      "index",
+      "Active generation failed its pre-export integrity check.",
+      false,
+    );
+  }
+
+  const observedChunkingVersion = target.index.chunkingVersion;
+  if (observedChunkingVersion !== null && observedChunkingVersion !== declaredChunkingVersion) {
+    throw fixedWorkerError(
+      "integrity_failed",
+      "index",
+      "Active generation was chunked by a different chunker.",
+      false,
+    );
+  }
+
+  let image: Uint8Array;
+  try {
+    image = target.index.exportImage(sqlite);
+  } catch (error) {
+    if (error instanceof IndexCapacityError) throw indexCapacityError();
+    throw fixedWorkerError(
+      "internal_error",
+      "index",
+      "Active generation could not be exported.",
+      false,
+    );
+  }
+
+  // Measured before the response is posted: the buffer is transferred, so the
+  // Worker's own view of it is detached by the time anything else could read it.
+  const blobSha256 = await sha256Hex(image);
+  return {
+    generation: target.id,
+    documents: target.index.documents,
+    chunks: target.index.chunks,
+    bytes: image,
+    blob_byte_length: image.byteLength,
+    blob_sha256: blobSha256,
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: declaredChunkingVersion,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: SQLITE_WASM_SHA256,
+    rust_wasm_sha256: RUST_WASM_SHA256,
+    plugin_id: PLUGIN_ID,
+    plugin_version: PLUGIN_VERSION,
+    cache_identity: cacheIdentity,
+  };
+}
+
 function abortBuild(generation: string): BuildResult {
   const target = requireStaging(generation);
   const result = generationResult(target);
@@ -396,6 +504,7 @@ function dispose(): DisposeResult {
   active = null;
   usedGenerations.clear();
   sqlite = null;
+  declaredChunkingVersion = null;
   state = "disposed";
   return { closed: true };
 }
@@ -494,6 +603,8 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       return commitBuild(request.generation);
     case "abort_build":
       return abortBuild(request.generation);
+    case "export_generation":
+      return exportGeneration(request.generation, request.cache_identity);
     case "search":
       return search(request.query, request.limit);
     case "status":
@@ -541,10 +652,47 @@ async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
       };
     }
   }
-  scope.postMessage(response);
+  // Posting is itself fallible — the transfer list is the realistic source, and
+  // a buffer that cannot be transferred raises DataCloneError. Left to
+  // propagate, that throw escapes `handleMessage` entirely and rejects the
+  // serialized queue, after which every later message is silently dropped and
+  // the user sees every request die on the RPC timeout instead of a reported
+  // fault. A failure to post the result is reported as a failure, without the
+  // transfer list that could not be honoured.
+  const transfer = transferListFor(response);
+  try {
+    if (transfer.length === 0) scope.postMessage(response);
+    else scope.postMessage(response, transfer);
+  } catch {
+    scope.postMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: response.id,
+      operation: response.operation,
+      ok: false,
+      error: fixedWorkerError(
+        "internal_error",
+        "lifecycle",
+        "In-plugin search Worker failed.",
+        false,
+      ),
+    } satisfies WorkerResponse);
+    return;
+  }
   if (!isWorkerError(parsed) && parsed.operation === "dispose" && response.ok) {
     setTimeout(() => scope.close(), 0);
   }
+}
+
+/**
+ * Only a successful export moves a buffer, and only the image buffer. A failed
+ * response cannot carry bytes at all: the error envelope's key set is exact, so
+ * a leaked blob would fail response validation on the host rather than be
+ * quietly accepted.
+ */
+function transferListFor(response: WorkerResponse): Transferable[] {
+  if (!response.ok || response.operation !== "export_generation") return [];
+  const result = response.result as Partial<ExportGenerationResult>;
+  return result.bytes instanceof Uint8Array ? [result.bytes.buffer as ArrayBuffer] : [];
 }
 
 function responseIdentity(value: unknown): { id: number; operation: WorkerOperation } {
@@ -568,6 +716,7 @@ function isOperation(value: unknown): value is WorkerOperation {
     || value === "apply_source_changes"
     || value === "commit_build"
     || value === "abort_build"
+    || value === "export_generation"
     || value === "search"
     || value === "status"
     || value === "dispose";
@@ -590,13 +739,17 @@ async function verifyArtifact(
   if (bytes.byteLength !== expectedSize) {
     throw fixedWorkerError("artifact_mismatch", "artifact", "Embedded WASM artifact mismatch.", false);
   }
-  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
-  const actual = Array.from(new Uint8Array(digest), (value) =>
-    value.toString(16).padStart(2, "0")
-  ).join("");
+  const actual = await sha256Hex(bytes.slice());
   if (actual !== expectedSha256) {
     throw fixedWorkerError("artifact_mismatch", "artifact", "Embedded WASM artifact mismatch.", false);
   }
+}
+
+async function sha256Hex(data: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", data as unknown as BufferSource);
+  return Array.from(new Uint8Array(digest), (value) =>
+    value.toString(16).padStart(2, "0")
+  ).join("");
 }
 
 function installGuards(): GuardCounters {
@@ -656,5 +809,11 @@ function disableProperty(target: object, property: PropertyKey): void {
 
 let messageQueue = Promise.resolve();
 scope.addEventListener("message", (event: MessageEvent<unknown>) => {
-  messageQueue = messageQueue.then(() => handleMessage(event));
+  // The chain is re-resolved after every link. A rejection left in it would
+  // poison it permanently: every subsequent message would be dropped without a
+  // response, and the user would see every request die on the RPC timeout
+  // rather than receive a reported fault.
+  messageQueue = messageQueue
+    .then(() => handleMessage(event))
+    .catch(() => undefined);
 });

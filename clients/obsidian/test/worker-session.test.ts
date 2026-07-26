@@ -4,6 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  CACHE_SCHEMA_VERSION,
   WORKER_PROTOCOL_VERSION,
   type WorkerRequest,
   type WorkerResult,
@@ -68,6 +69,24 @@ function resultFor(message: WorkerRequest): WorkerResult {
         documents: message.upserts.length,
         chunks: message.upserts.length,
       };
+    case "export_generation":
+      return {
+        generation: message.generation,
+        documents: 1,
+        chunks: 1,
+        bytes: new Uint8Array([1, 2, 3]),
+        blob_byte_length: 3,
+        blob_sha256: "a".repeat(64),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        cache_schema_version: CACHE_SCHEMA_VERSION,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        sqlite_wasm_sha256: "b".repeat(64),
+        rust_wasm_sha256: "c".repeat(64),
+        plugin_id: "kwiry-search",
+        plugin_version: "0.1.0",
+        cache_identity: message.cache_identity,
+      };
     case "search":
       return { generation: "g1", hits: [] };
     case "status":
@@ -126,6 +145,27 @@ describe("InPluginWorkerSession", () => {
         removals: [{ vault_id: "active", path: "old.md" }],
       },
     ]);
+  });
+
+  // The Worker never learns the vault path: the host derives an opaque
+  // identity and the session forwards only that digest.
+  it("posts an exact export request carrying only the opaque cache identity", async () => {
+    const worker = new MockWorker();
+    const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 1_000);
+    const identity = "9".repeat(64);
+
+    await expect(session.exportGeneration("g1", identity)).resolves.toMatchObject({
+      generation: "g1",
+      cache_identity: identity,
+    });
+
+    expect(worker.posted).toEqual([{
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      generation: "g1",
+      cache_identity: identity,
+    }]);
   });
 
   it("terminates its Worker and revokes the Blob URL exactly once", async () => {

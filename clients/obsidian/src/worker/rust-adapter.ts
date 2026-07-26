@@ -24,6 +24,12 @@ export interface RustIdentity {
   source_preparation_schema_version: 1;
   lexical_query_plan_schema_version: 2;
   fts5_match_plan_schema_version: 1;
+  /**
+   * The chunking contract the adapter applies. Chunk rows carry it per chunk,
+   * but a generation with no chunks still has to name the contract its cached
+   * image was produced under, so the identity is the source of truth.
+   */
+  chunking_version: number;
   max_request_bytes: number;
   max_source_buffer_bytes: number;
   operations: ["prepare_source", "prepare_query", "finalize_query"];
@@ -236,6 +242,7 @@ function isRustIdentity(value: unknown): value is RustIdentity {
       "source_preparation_schema_version",
       "lexical_query_plan_schema_version",
       "fts5_match_plan_schema_version",
+      "chunking_version",
       "max_request_bytes",
       "max_source_buffer_bytes",
       "operations",
@@ -246,6 +253,7 @@ function isRustIdentity(value: unknown): value is RustIdentity {
     && value.source_preparation_schema_version === SOURCE_SCHEMA_VERSION
     && value.lexical_query_plan_schema_version === QUERY_SCHEMA_VERSION
     && value.fts5_match_plan_schema_version === MATCH_PLAN_SCHEMA_VERSION
+    && isNonNegativeSafeInteger(value.chunking_version)
     && isPositiveSafeInteger(value.max_request_bytes)
     && isPositiveSafeInteger(value.max_source_buffer_bytes)
     && Array.isArray(value.operations)
@@ -293,7 +301,13 @@ function isSourcePreparation(value: unknown): value is SourcePreparation {
     || (value.warning !== undefined && !isBoundedString(value.warning, 4_096, true))) {
     return false;
   }
-  return value.kind !== "skipped" || value.chunks.length === 0;
+  // A skipped source never carries chunks, and an indexed source always
+  // carries the hash its chunks were derived from. Both halves are enforced
+  // here so a malformed preparation is rejected at the ABI boundary — as
+  // `source_rejected` — rather than surfacing later as a storage constraint
+  // violation the Worker would have to blame on the index.
+  if (value.kind === "skipped") return value.chunks.length === 0;
+  return value.content_hash !== null;
 }
 
 function isRetrieval(value: unknown): boolean {

@@ -4,6 +4,7 @@
 import type {
   BuildResult,
   DisposeResult,
+  ExportGenerationResult,
   InitializeResult,
   SearchResult,
   SourceInput,
@@ -62,6 +63,19 @@ export class InPluginWorkerSession {
 
   abortBuild(generation: string): Promise<BuildResult> {
     return this.client.request({ operation: "abort_build", generation }) as Promise<BuildResult>;
+  }
+
+  /**
+   * Exports the clean active generation. Deliberately absent from
+   * `IndexWorkerPort`: exporting a cache is not part of the index controller's
+   * contract, and adding it there would pull indexing into cache concerns.
+   */
+  exportGeneration(generation: string, cacheIdentity: string): Promise<ExportGenerationResult> {
+    return this.client.request({
+      operation: "export_generation",
+      generation,
+      cache_identity: cacheIdentity,
+    }) as Promise<ExportGenerationResult>;
   }
 
   search(query: string, limit: number): Promise<SearchResult> {

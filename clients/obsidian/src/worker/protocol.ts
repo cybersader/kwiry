@@ -12,6 +12,28 @@ export const MAX_GENERATION_CHARACTERS = 128;
 export const MAX_QUERY_CHARACTERS = 4_096;
 export const MAX_SEARCH_HITS = 100;
 
+/**
+ * Version of the cache image format the Worker produces. It covers the SQLite
+ * schema in `./fts5-index` (which stamps the same number into
+ * `PRAGMA user_version`). Any schema edit must bump it: an image whose value
+ * differs from the running build's is not restorable.
+ */
+export const CACHE_SCHEMA_VERSION = 1;
+
+/**
+ * Ceiling on a single exported generation image. Derived from the corpus
+ * bounds the index already enforces: 256 MiB of indexed text in a contentless
+ * FTS5 index is roughly 230 MiB of image, so an image above this means the
+ * corpus invariants were already violated, and the correct outcome is a
+ * refusal carrying no bytes rather than a truncated export.
+ */
+export const MAX_EXPORT_BLOB_BYTES = 384 * 1024 * 1024;
+
+export const MAX_PLUGIN_ID_CHARACTERS = 128;
+export const MAX_PLUGIN_VERSION_CHARACTERS = 64;
+
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
+
 export type WorkerOperation =
   | "initialize"
   | "begin_build"
@@ -19,6 +41,7 @@ export type WorkerOperation =
   | "apply_source_changes"
   | "commit_build"
   | "abort_build"
+  | "export_generation"
   | "search"
   | "status"
   | "dispose";
@@ -91,6 +114,15 @@ export type WorkerRequest =
   | (RequestBase & { operation: "commit_build"; generation: string })
   | (RequestBase & { operation: "abort_build"; generation: string })
   | (RequestBase & {
+      operation: "export_generation";
+      generation: string;
+      // Derived on the host from the canonical vault location and passed in as
+      // an opaque digest. The Worker is persistence-blind: it never learns the
+      // vault path, and bounding this to exactly 64 hex characters makes
+      // passing a path here structurally impossible.
+      cache_identity: string;
+    })
+  | (RequestBase & {
       operation: "search";
       query: string;
       limit: number;
@@ -151,11 +183,38 @@ export interface DisposeResult {
   closed: true;
 }
 
+/**
+ * A sealed cache image plus the identity every field of which is authored by
+ * its producer. The shape is flat on purpose: `generation` has to stay at the
+ * top level so the existing RPC generation correlation applies unchanged.
+ *
+ * `bytes` is transferred, never copied, so `blob_byte_length` and
+ * `blob_sha256` must be computed before the response leaves the Worker.
+ */
+export interface ExportGenerationResult {
+  generation: string;
+  documents: number;
+  chunks: number;
+  bytes: Uint8Array;
+  blob_byte_length: number;
+  blob_sha256: string;
+  protocol_version: typeof WORKER_PROTOCOL_VERSION;
+  cache_schema_version: typeof CACHE_SCHEMA_VERSION;
+  chunking_version: number;
+  sqlite_version: "3.53.0";
+  sqlite_wasm_sha256: string;
+  rust_wasm_sha256: string;
+  plugin_id: string;
+  plugin_version: string;
+  cache_identity: string;
+}
+
 export type WorkerResult =
   | InitializeResult
   | BuildResult
   | StatusResult
   | SearchResult
+  | ExportGenerationResult
   | DisposeResult;
 
 export type WorkerResponse =
@@ -199,6 +258,12 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
     case "commit_build":
     case "abort_build":
       return hasExactKeys(value, [...base, "generation"]) && isGeneration(value.generation)
+        ? value as unknown as WorkerRequest
+        : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
+    case "export_generation":
+      return hasExactKeys(value, [...base, "generation", "cache_identity"])
+        && isGeneration(value.generation)
+        && isSha256Hex(value.cache_identity)
         ? value as unknown as WorkerRequest
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "add_source_batch":
@@ -350,6 +415,8 @@ function isResultForOperation(operation: WorkerOperation, value: unknown): boole
     case "commit_build":
     case "abort_build":
       return isBuildResult(value);
+    case "export_generation":
+      return isExportGenerationResult(value);
     case "status":
       return isStatusResult(value);
     case "search":
@@ -383,6 +450,46 @@ function isBuildResult(value: unknown): value is BuildResult {
     && isGeneration(value.generation)
     && isNonNegativeSafeInteger(value.documents)
     && isNonNegativeSafeInteger(value.chunks);
+}
+
+function isExportGenerationResult(value: unknown): value is ExportGenerationResult {
+  return isRecord(value)
+    && hasExactKeys(value, [
+      "generation",
+      "documents",
+      "chunks",
+      "bytes",
+      "blob_byte_length",
+      "blob_sha256",
+      "protocol_version",
+      "cache_schema_version",
+      "chunking_version",
+      "sqlite_version",
+      "sqlite_wasm_sha256",
+      "rust_wasm_sha256",
+      "plugin_id",
+      "plugin_version",
+      "cache_identity",
+    ])
+    && isGeneration(value.generation)
+    && isNonNegativeSafeInteger(value.documents)
+    && isNonNegativeSafeInteger(value.chunks)
+    && value.bytes instanceof Uint8Array
+    && value.bytes.byteLength > 0
+    && value.bytes.byteLength <= MAX_EXPORT_BLOB_BYTES
+    // The declared length must equal the buffer that actually arrived, the
+    // same cross-check the inbound source descriptors get.
+    && value.blob_byte_length === value.bytes.byteLength
+    && isSha256Hex(value.blob_sha256)
+    && value.protocol_version === WORKER_PROTOCOL_VERSION
+    && value.cache_schema_version === CACHE_SCHEMA_VERSION
+    && isNonNegativeSafeInteger(value.chunking_version)
+    && value.sqlite_version === "3.53.0"
+    && isSha256Hex(value.sqlite_wasm_sha256)
+    && isSha256Hex(value.rust_wasm_sha256)
+    && isBoundedString(value.plugin_id, MAX_PLUGIN_ID_CHARACTERS)
+    && isBoundedString(value.plugin_version, MAX_PLUGIN_VERSION_CHARACTERS)
+    && isSha256Hex(value.cache_identity);
 }
 
 function isStatusResult(value: unknown): value is StatusResult {
@@ -497,9 +604,14 @@ function isWorkerOperation(value: unknown): value is WorkerOperation {
     || value === "apply_source_changes"
     || value === "commit_build"
     || value === "abort_build"
+    || value === "export_generation"
     || value === "search"
     || value === "status"
     || value === "dispose";
+}
+
+export function isSha256Hex(value: unknown): value is string {
+  return typeof value === "string" && SHA256_HEX_PATTERN.test(value);
 }
 
 function isRequestId(value: unknown): value is number {

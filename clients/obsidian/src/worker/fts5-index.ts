@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import { CACHE_SCHEMA_VERSION, MAX_EXPORT_BLOB_BYTES } from "./protocol";
 import type { SourceRemoval, WorkerSearchHit } from "./protocol";
 import { bindMetadataProbe, bindSearchPlan } from "./query-binder";
 import type {
@@ -12,15 +13,30 @@ import type {
 
 const MAX_INDEX_CHUNKS = 100_000;
 const MAX_INDEXED_TEXT_BYTES = 256 * 1024 * 1024;
+// A skipped source costs no chunks and no indexed bytes, so neither existing
+// bound can constrain how many source rows a generation accumulates. The
+// freshness table needs its own ceiling.
+const MAX_INDEX_SOURCES = 200_000;
 
 export interface Fts5IndexLimits {
   maxChunks: number;
   maxIndexedTextBytes: number;
+  maxSources?: number;
+  maxExportBytes?: number;
+}
+
+interface ResolvedFts5IndexLimits {
+  maxChunks: number;
+  maxIndexedTextBytes: number;
+  maxSources: number;
+  maxExportBytes: number;
 }
 
 const DEFAULT_INDEX_LIMITS: Fts5IndexLimits = {
   maxChunks: MAX_INDEX_CHUNKS,
   maxIndexedTextBytes: MAX_INDEXED_TEXT_BYTES,
+  maxSources: MAX_INDEX_SOURCES,
+  maxExportBytes: MAX_EXPORT_BLOB_BYTES,
 };
 
 export class IndexCapacityError extends Error {
@@ -56,16 +72,51 @@ export interface SQLiteApi {
   oo1: {
     DB: new (filename: string, flags: string) => SQLiteDatabase;
   };
+  capi: {
+    /**
+     * Serializes the database into a fresh JS-heap buffer copied out of WASM
+     * memory. The live database is untouched, so the returned bytes may be
+     * transferred without disturbing the serving generation.
+     */
+    sqlite3_js_db_export(db: unknown, schema?: string): Uint8Array;
+  };
 }
 
+// Any edit to the tables below changes the cache image format and must bump
+// `CACHE_SCHEMA_VERSION` in ./protocol, which the export identity envelope
+// carries: an image whose value differs from the running build's is not
+// restorable. `PRAGMA user_version` stamps the same number into the SQLite
+// header, so a restored image declares its own schema version before anything
+// outside it has to be trusted.
+//
+// `sources` is the freshness table a later restore reconciles against, so it
+// records every prepared source — including the ones the chunker skipped —
+// with the facts the Rust adapter produced. It never records a fact the host
+// or TypeScript derived.
+//
+// `mtime_nanos` is TEXT, not INTEGER: it is a u128 of up to 39 digits, which a
+// 64-bit SQLite INTEGER would silently truncate, corrupting exactly the
+// comparison the restore path depends on.
+//
+// `content_hash` is nullable because one skip outcome genuinely has no hash:
+// a source over the 10 MiB file ceiling is refused before it is read, and that
+// length is reachable through the Worker protocol.
 const SCHEMA_SQL = `
+PRAGMA user_version = ${requireSchemaVersionLiteral(CACHE_SCHEMA_VERSION)};
+
 CREATE TABLE sources (
   source_key TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
-  byte_length INTEGER NOT NULL,
-  chunk_count INTEGER NOT NULL,
-  indexed_bytes INTEGER NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),
+  content_hash TEXT,
+  byte_length INTEGER NOT NULL CHECK(byte_length >= 0),
+  mtime_nanos TEXT NOT NULL
+    CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),
+  chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),
+  indexed_bytes INTEGER NOT NULL CHECK(indexed_bytes >= 0),
+  CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),
+  CHECK(outcome = 'indexed' OR (chunk_count = 0 AND indexed_bytes = 0)),
   UNIQUE(vault_id, path)
 );
 
@@ -106,22 +157,25 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
 );
 `;
 
+const SOURCE_COLUMNS_SQL = `
+source_key, vault_id, path, outcome, content_hash, byte_length,
+mtime_nanos, chunk_count, indexed_bytes
+`;
+
 const SELECT_SOURCE_BY_KEY_SQL = `
-SELECT source_key, vault_id, path, chunk_count, indexed_bytes
+SELECT ${SOURCE_COLUMNS_SQL}
 FROM sources
 WHERE source_key = ?
 `;
 
 const SELECT_SOURCE_BY_IDENTITY_SQL = `
-SELECT source_key, vault_id, path, chunk_count, indexed_bytes
+SELECT ${SOURCE_COLUMNS_SQL}
 FROM sources
 WHERE vault_id = ? AND path = ?
 `;
 
 const INSERT_SOURCE_SQL = `
-INSERT INTO sources(
-  source_key, vault_id, path, byte_length, chunk_count, indexed_bytes
-) VALUES(?, ?, ?, ?, ?, ?)
+INSERT INTO sources(${SOURCE_COLUMNS_SQL}) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 const INSERT_CHUNK_SQL = `
@@ -167,6 +221,10 @@ SELECT MAX(
 // keeps the shadowed posting alive across the next delete, and no
 // integrity check can see it. Reconciling `chunks` against `chunks_fts` is
 // the only check that can fail once the external-content cross-check is gone.
+//
+// The `sources` half is new with the freshness table: the per-source chunk
+// tallies are the numbers a restore diff will trust, so they are checked
+// against the real chunk rows rather than assumed.
 const RECONCILE_SQL = `
 SELECT
   (SELECT count(*) FROM chunks) AS chunks,
@@ -174,30 +232,57 @@ SELECT
   (SELECT count(*) FROM chunks_fts f LEFT JOIN chunks c ON c.rowid = f.rowid
      WHERE c.rowid IS NULL) AS orphan_fts,
   (SELECT count(*) FROM chunks c LEFT JOIN chunks_fts f ON f.rowid = c.rowid
-     WHERE f.rowid IS NULL) AS missing_fts
+     WHERE f.rowid IS NULL) AS missing_fts,
+  (SELECT count(*) FROM sources) AS sources,
+  (SELECT count(*) FROM sources WHERE outcome = 'indexed') AS indexed_sources,
+  (SELECT COALESCE(SUM(chunk_count), 0) FROM sources) AS source_chunks,
+  (SELECT count(*) FROM chunks c LEFT JOIN sources s ON s.source_key = c.source_key
+     WHERE s.source_key IS NULL) AS orphan_chunks,
+  (SELECT count(*) FROM sources s WHERE s.outcome = 'skipped'
+     AND EXISTS(SELECT 1 FROM chunks c WHERE c.source_key = s.source_key))
+    AS skipped_with_chunks
 `;
 
 export class Fts5GenerationIndex {
   private documentCount = 0;
   private corpusBytes = 0;
   private chunkCount = 0;
+  private sourceCount = 0;
+  private observedChunkingVersion: number | null = null;
   private closed = false;
+  private readonly limits: ResolvedFts5IndexLimits;
 
   constructor(
     private readonly db: SQLiteDatabase,
-    private readonly limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
+    limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   ) {
     if (db.filename !== ":memory:") throw new Error("FTS5 generation is not in memory");
-    validateIndexLimits(limits);
+    this.limits = resolveIndexLimits(limits);
     db.exec(SCHEMA_SQL);
   }
 
+  /** Indexed sources only. Skipped sources are recorded but are not documents. */
   get documents(): number {
     return this.documentCount;
   }
 
   get chunks(): number {
     return this.chunkCount;
+  }
+
+  /** Every prepared source recorded in the freshness table, skips included. */
+  get sources(): number {
+    return this.sourceCount;
+  }
+
+  /**
+   * The single chunking contract every chunk in this generation was produced
+   * under, or `null` while the generation holds no chunks. A generation that
+   * mixed two chunkers would produce a cache image no single chunking version
+   * could describe, so `applySourceChanges` refuses the batch that would do it.
+   */
+  get chunkingVersion(): number | null {
+    return this.observedChunkingVersion;
   }
 
   replaceSource(preparation: SourcePreparation): void {
@@ -245,15 +330,25 @@ export class Fts5GenerationIndex {
       if (byKey) touched.set(byKey.source_key, byKey);
     }
 
+    const stored = [...touched.values()];
     const indexed = projected.filter((change) => change.preparation.kind === "indexed");
-    const removedChunks = sumSafe([...touched.values()].map((source) => source.chunk_count));
-    const removedBytes = sumSafe([...touched.values()].map((source) => source.indexed_bytes));
+    // Only indexed rows are documents. Counting every touched row here would
+    // drive `documents` negative the second time an already-recorded skipped
+    // source is re-prepared, turning a benign re-scan into a rejected batch.
+    const removedDocuments = stored.filter((source) => source.outcome === "indexed").length;
+    const removedChunks = sumSafe(stored.map((source) => source.chunk_count));
+    const removedBytes = sumSafe(stored.map((source) => source.indexed_bytes));
     const addedChunks = sumSafe(indexed.map((change) => change.rows.length));
     const addedBytes = sumSafe(indexed.map((change) => change.indexedBytes));
-    const nextDocuments = this.documentCount - touched.size + indexed.length;
+    const nextDocuments = this.documentCount - removedDocuments + indexed.length;
     const nextChunks = this.chunkCount - removedChunks + addedChunks;
     const nextBytes = this.corpusBytes - removedBytes + addedBytes;
-    requireProjectedCounts(nextDocuments, nextChunks, nextBytes, this.limits);
+    const nextSources = this.sourceCount - touched.size + projected.length;
+    const nextChunkingVersion = requireSingleChunkingVersion(
+      this.observedChunkingVersion,
+      projected,
+    );
+    requireProjectedCounts(nextDocuments, nextChunks, nextBytes, nextSources, this.limits);
 
     this.db.transaction("IMMEDIATE", () => {
       // Seeded from both tables before any delete, so every rowid allocated in
@@ -270,13 +365,20 @@ export class Fts5GenerationIndex {
         this.db.exec(DELETE_SOURCE_CHUNKS_SQL, { bind: [stored.source_key] });
         this.db.exec(DELETE_SOURCE_SQL, { bind: [stored.source_key] });
       }
-      for (const change of indexed) {
+      // Every prepared source is recorded, not just the indexed ones: a
+      // restore has to be able to tell "seen and skipped, still current" from
+      // "never seen", and only a stored row can carry that distinction. Every
+      // value bound here comes from the Rust preparation verbatim.
+      for (const change of projected) {
         this.db.exec(INSERT_SOURCE_SQL, {
           bind: [
             change.preparation.source_key,
             change.preparation.vault_id,
             change.preparation.path,
+            change.preparation.kind,
+            change.preparation.content_hash,
             change.preparation.byte_length,
+            change.preparation.mtime_nanos,
             change.rows.length,
             change.indexedBytes,
           ],
@@ -295,12 +397,16 @@ export class Fts5GenerationIndex {
       // the only failure this ordering of raw statements can introduce. Run
       // inside the transaction so a divergence rolls the whole batch back
       // instead of publishing a half-applied change.
-      if (verifyIntegrity) this.runReconciliationCheck(nextChunks);
+      if (verifyIntegrity) {
+        this.runReconciliationCheck(nextChunks, nextDocuments, nextSources);
+      }
     });
 
     this.documentCount = nextDocuments;
     this.chunkCount = nextChunks;
     this.corpusBytes = nextBytes;
+    this.sourceCount = nextSources;
+    this.observedChunkingVersion = nextChunkingVersion;
   }
 
   metadataProbe(plan: MetadataProbePlan): boolean {
@@ -319,10 +425,25 @@ export class Fts5GenerationIndex {
     this.requireOpen();
     try {
       this.runIntegrityCheck();
-      this.runReconciliationCheck(this.chunkCount);
+      this.runReconciliationCheck(this.chunkCount, this.documentCount, this.sourceCount);
     } catch {
       throw new Error("FTS5 integrity check failed");
     }
+  }
+
+  /**
+   * Serializes the generation into a detached buffer. `sqlite3_js_db_export`
+   * copies out of WASM memory, so the returned bytes can be transferred to the
+   * host without touching the live, serving database.
+   */
+  exportImage(api: SQLiteApi): Uint8Array {
+    this.requireOpen();
+    const image = api.capi.sqlite3_js_db_export(this.db.pointer);
+    if (!(image instanceof Uint8Array) || image.byteLength === 0) {
+      throw new IndexIntegrityError("FTS5 generation produced no exportable image");
+    }
+    if (image.byteLength > this.limits.maxExportBytes) throw new IndexCapacityError();
+    return image;
   }
 
   /**
@@ -345,6 +466,8 @@ export class Fts5GenerationIndex {
     this.documentCount = 0;
     this.corpusBytes = 0;
     this.chunkCount = 0;
+    this.sourceCount = 0;
+    this.observedChunkingVersion = null;
   }
 
   private selectSourceByKey(sourceKey: string): StoredSource | null {
@@ -368,11 +491,16 @@ export class Fts5GenerationIndex {
   }
 
   /**
-   * `expectedChunks` is passed in rather than read from `this.chunkCount`: the
-   * in-transaction caller runs before the counters are advanced, and comparing
-   * against the projected count also checks the projection arithmetic itself.
+   * The expected counts are passed in rather than read from the committed
+   * fields: the in-transaction caller runs before the counters are advanced,
+   * and comparing against the projected counts also checks the projection
+   * arithmetic itself.
    */
-  private runReconciliationCheck(expectedChunks: number): void {
+  private runReconciliationCheck(
+    expectedChunks: number,
+    expectedDocuments: number,
+    expectedSources: number,
+  ): void {
     const rows = this.db.selectObjects(RECONCILE_SQL);
     if (rows.length !== 1) {
       throw new IndexIntegrityError("FTS5 reconciliation query returned no row");
@@ -381,13 +509,26 @@ export class Fts5GenerationIndex {
     if (!isNonNegativeSafeInteger(row.chunks)
       || !isNonNegativeSafeInteger(row.fts)
       || !isNonNegativeSafeInteger(row.orphan_fts)
-      || !isNonNegativeSafeInteger(row.missing_fts)) {
+      || !isNonNegativeSafeInteger(row.missing_fts)
+      || !isNonNegativeSafeInteger(row.sources)
+      || !isNonNegativeSafeInteger(row.indexed_sources)
+      || !isNonNegativeSafeInteger(row.source_chunks)
+      || !isNonNegativeSafeInteger(row.orphan_chunks)
+      || !isNonNegativeSafeInteger(row.skipped_with_chunks)) {
       throw new IndexIntegrityError("FTS5 reconciliation query returned invalid counts");
     }
     if (row.orphan_fts !== 0
       || row.missing_fts !== 0
       || row.chunks !== row.fts
-      || row.chunks !== expectedChunks) {
+      || row.chunks !== expectedChunks
+      || row.sources !== expectedSources
+      || row.indexed_sources !== expectedDocuments
+      // Per-source tallies must sum to the real chunk count, no chunk may
+      // outlive its source row, and a skipped source may never own chunks.
+      // These are what make the stored `chunk_count` trustworthy for a diff.
+      || row.source_chunks !== row.chunks
+      || row.orphan_chunks !== 0
+      || row.skipped_with_chunks !== 0) {
       throw new IndexIntegrityError("FTS5 index and chunk metadata disagree");
     }
   }
@@ -411,6 +552,7 @@ interface ProjectedChunk {
   ftsBind: readonly string[];
   indexedBytes: number;
   chunkId: string;
+  chunkingVersion: number;
 }
 
 interface ProjectedPreparation {
@@ -423,6 +565,10 @@ interface StoredSource {
   source_key: string;
   vault_id: string;
   path: string;
+  outcome: "indexed" | "skipped";
+  content_hash: string | null;
+  byte_length: number;
+  mtime_nanos: string;
   chunk_count: number;
   indexed_bytes: number;
 }
@@ -436,6 +582,27 @@ function projectPreparation(preparation: SourcePreparation): ProjectedPreparatio
     rows,
     indexedBytes: sumSafe(rows.map((row) => row.indexedBytes)),
   };
+}
+
+/**
+ * A generation whose chunks came from two different chunkers cannot be
+ * described by one chunking version, so its exported image could not be
+ * validated on restore. The divergence is refused before the transaction opens.
+ */
+function requireSingleChunkingVersion(
+  current: number | null,
+  projected: readonly ProjectedPreparation[],
+): number | null {
+  let version = current;
+  for (const change of projected) {
+    for (const row of change.rows) {
+      if (version === null) version = row.chunkingVersion;
+      else if (version !== row.chunkingVersion) {
+        throw new Error("source change batch mixes chunking versions");
+      }
+    }
+  }
+  return version;
 }
 
 function validateChangeIdentities(
@@ -507,7 +674,20 @@ function projectChunk(preparation: SourcePreparation, prepared: PreparedChunk): 
     ftsBind: fields,
     indexedBytes,
     chunkId: chunk.chunk_id,
+    chunkingVersion: chunk.chunking_version,
   };
+}
+
+/**
+ * `PRAGMA user_version` takes a literal, not a bind parameter, so the value is
+ * interpolated. It is a build constant, but interpolating anything into SQL
+ * without proving its shape is exactly how an injection is introduced later.
+ */
+function requireSchemaVersionLiteral(version: number): string {
+  if (!Number.isSafeInteger(version) || version < 1 || version > 2_147_483_647) {
+    throw new Error("cache schema version must be a positive 32-bit integer");
+  }
+  return String(version);
 }
 
 function requireRowidSeed(value: unknown): number {
@@ -516,6 +696,11 @@ function requireRowidSeed(value: unknown): number {
   return seed;
 }
 
+/**
+ * The read side of the freshness table. It is exact rather than permissive
+ * because a restore diff reads exactly these columns: a row that survives this
+ * check is a row a later slice is entitled to trust.
+ */
 function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null {
   if (rows.length === 0) return null;
   if (rows.length !== 1) throw new Error("stored source identity is ambiguous");
@@ -524,14 +709,28 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
     || typeof row.source_key !== "string"
     || typeof row.vault_id !== "string"
     || typeof row.path !== "string"
+    || (row.outcome !== "indexed" && row.outcome !== "skipped")
+    || !(row.content_hash === null
+      || (typeof row.content_hash === "string"
+        && row.content_hash.length > 0
+        && row.content_hash.length <= 128))
+    || !isNonNegativeSafeInteger(row.byte_length)
+    || typeof row.mtime_nanos !== "string"
+    || !/^[0-9]{1,39}$/u.test(row.mtime_nanos)
     || !isNonNegativeSafeInteger(row.chunk_count)
-    || !isNonNegativeSafeInteger(row.indexed_bytes)) {
+    || !isNonNegativeSafeInteger(row.indexed_bytes)
+    || (row.outcome === "indexed" && row.content_hash === null)
+    || (row.outcome === "skipped" && (row.chunk_count !== 0 || row.indexed_bytes !== 0))) {
     throw new Error("stored source metadata is invalid");
   }
   return {
     source_key: row.source_key,
     vault_id: row.vault_id,
     path: row.path,
+    outcome: row.outcome,
+    content_hash: row.content_hash,
+    byte_length: row.byte_length,
+    mtime_nanos: row.mtime_nanos,
     chunk_count: row.chunk_count,
     indexed_bytes: row.indexed_bytes,
   };
@@ -541,25 +740,35 @@ function requireProjectedCounts(
   documents: number,
   chunks: number,
   bytes: number,
-  limits: Fts5IndexLimits,
+  sources: number,
+  limits: ResolvedFts5IndexLimits,
 ): void {
   if (!isNonNegativeSafeInteger(documents)
     || !isNonNegativeSafeInteger(chunks)
-    || !isNonNegativeSafeInteger(bytes)) {
+    || !isNonNegativeSafeInteger(bytes)
+    || !isNonNegativeSafeInteger(sources)) {
     throw new Error("source accounting is invalid");
   }
-  if (chunks > limits.maxChunks || bytes > limits.maxIndexedTextBytes) {
+  if (chunks > limits.maxChunks
+    || bytes > limits.maxIndexedTextBytes
+    || sources > limits.maxSources) {
     throw new IndexCapacityError();
   }
 }
 
-function validateIndexLimits(limits: Fts5IndexLimits): void {
-  if (!Number.isSafeInteger(limits.maxChunks)
-    || limits.maxChunks < 1
-    || !Number.isSafeInteger(limits.maxIndexedTextBytes)
-    || limits.maxIndexedTextBytes < 1) {
-    throw new Error("FTS5 index limits must be positive safe integers");
+function resolveIndexLimits(limits: Fts5IndexLimits): ResolvedFts5IndexLimits {
+  const resolved: ResolvedFts5IndexLimits = {
+    maxChunks: limits.maxChunks,
+    maxIndexedTextBytes: limits.maxIndexedTextBytes,
+    maxSources: limits.maxSources ?? MAX_INDEX_SOURCES,
+    maxExportBytes: limits.maxExportBytes ?? MAX_EXPORT_BLOB_BYTES,
+  };
+  for (const limit of Object.values(resolved)) {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new Error("FTS5 index limits must be positive safe integers");
+    }
   }
+  return resolved;
 }
 
 function sumSafe(values: readonly number[]): number {

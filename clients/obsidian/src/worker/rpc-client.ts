@@ -28,6 +28,7 @@ export type WorkerCommand =
     }
   | { operation: "commit_build"; generation: string }
   | { operation: "abort_build"; generation: string }
+  | { operation: "export_generation"; generation: string; cache_identity: string }
   | { operation: "search"; query: string; limit: number }
   | { operation: "status" }
   | { operation: "dispose" };
@@ -223,6 +224,10 @@ function expectedGeneration(command: WorkerCommand): string | null {
     case "add_source_batch":
     case "commit_build":
     case "abort_build":
+    // The caller names the generation it believes is active, so an export that
+    // came back describing a different one is uncorrelated and poisons the
+    // client, exactly as a build result would.
+    case "export_generation":
       return command.generation;
     case "apply_source_changes":
       return command.next_generation ?? command.generation;

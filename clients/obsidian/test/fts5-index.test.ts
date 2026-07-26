@@ -11,7 +11,44 @@ import {
   type SQLiteApi,
   type SQLiteDatabase,
 } from "../src/worker/fts5-index";
+import { CACHE_SCHEMA_VERSION } from "../src/worker/protocol";
 import type { SourcePreparation } from "../src/worker/rust-adapter";
+
+/**
+ * Opens an exported image as a real database. Nothing about the export is
+ * taken on trust: the bytes have to load and answer queries, or the test fails.
+ */
+function deserialize(api: SQLiteApi, image: Uint8Array): SQLiteDatabase {
+  const runtime = api as unknown as {
+    wasm: { allocFromTypedArray(bytes: Uint8Array): number };
+    capi: Record<string, (...args: never[]) => unknown> & {
+      SQLITE_DESERIALIZE_FREEONCLOSE: number;
+      SQLITE_DESERIALIZE_RESIZEABLE: number;
+    };
+  };
+  const db = new api.oo1.DB(":memory:", "c");
+  const pointer = runtime.wasm.allocFromTypedArray(image);
+  const rc = (runtime.capi.sqlite3_deserialize as unknown as (
+    db: unknown,
+    schema: string,
+    data: number,
+    size: number,
+    buffer: number,
+    flags: number,
+  ) => number)(
+    db.pointer,
+    "main",
+    pointer,
+    image.byteLength,
+    image.byteLength,
+    runtime.capi.SQLITE_DESERIALIZE_FREEONCLOSE | runtime.capi.SQLITE_DESERIALIZE_RESIZEABLE,
+  );
+  if (rc !== 0) {
+    db.close();
+    throw new Error(`sqlite3_deserialize failed with ${rc}`);
+  }
+  return db;
+}
 
 let sqlite: SQLiteApi;
 let index: Fts5GenerationIndex;
@@ -276,6 +313,211 @@ describe("Fts5GenerationIndex", () => {
     index.replaceSource(skipped);
     expect(index.documents).toBe(0);
     expect(index.chunks).toBe(0);
+    // The row itself must survive: a restore has to be able to tell a source
+    // that was seen and skipped from one that was never seen at all.
+    expect(index.sources).toBe(1);
+  });
+
+  // The freshness table is the differential state a later restore reconciles
+  // against, so a skip has to be queryable — with the hash the Rust adapter
+  // actually produced, not a hash TypeScript invented.
+  it("records a skipped source with its adapter-produced hash and zero tallies", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const skipped = source("binary", "unused", "");
+      skipped.chunks = [];
+      skipped.kind = "skipped";
+      skipped.content_hash = "hash-binary";
+      skipped.byte_length = 4;
+      skipped.mtime_nanos = "170000000000000000123456789";
+      scoped.replaceSource(skipped);
+
+      const rows = db.selectObjects("SELECT * FROM sources");
+      expect(rows).toEqual([{
+        source_key: "binary",
+        vault_id: "active",
+        path: "binary.md",
+        outcome: "skipped",
+        content_hash: "hash-binary",
+        byte_length: 4,
+        // Stored as TEXT: a 27-digit nanosecond stamp does not fit a 64-bit
+        // INTEGER, and a truncated value would corrupt the freshness compare.
+        mtime_nanos: "170000000000000000123456789",
+        chunk_count: 0,
+        indexed_bytes: 0,
+      }]);
+      expect(scoped.documents).toBe(0);
+      expect(scoped.sources).toBe(1);
+      expect(() => scoped.assertIntegrity()).not.toThrow();
+    } finally {
+      scoped.close();
+    }
+  });
+
+  // The one skip outcome that genuinely has no hash: a source over the file
+  // ceiling is refused before it is ever read.
+  it("records an oversized skip with a null hash and stays counter-stable when repeated", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const oversized = source("huge", "unused", "");
+      oversized.chunks = [];
+      oversized.kind = "skipped";
+      oversized.content_hash = null;
+      oversized.byte_length = 10 * 1024 * 1024 + 1;
+
+      scoped.replaceSource(oversized);
+      expect(db.selectValue("SELECT content_hash FROM sources WHERE source_key = 'huge'"))
+        .toBe(null);
+      expect(db.selectValue("SELECT byte_length FROM sources WHERE source_key = 'huge'"))
+        .toBe(10 * 1024 * 1024 + 1);
+
+      // Re-preparing an already-recorded skip must not drive any counter
+      // negative — that would turn a benign re-scan into a rejected batch.
+      scoped.replaceSource(structuredClone(oversized));
+      scoped.replaceSource(structuredClone(oversized));
+      expect(scoped.documents).toBe(0);
+      expect(scoped.chunks).toBe(0);
+      expect(scoped.sources).toBe(1);
+      expect(db.selectValue("SELECT count(*) FROM sources")).toBe(1);
+      expect(() => scoped.assertIntegrity()).not.toThrow();
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("round-trips indexed freshness facts verbatim and drops the row on removal", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const indexed = source("alpha", "chunk-a", "quasarterm");
+      indexed.byte_length = 10;
+      indexed.mtime_nanos = "99999999999999999999999999999999999999";
+      scoped.replaceSource(indexed);
+
+      expect(db.selectObjects("SELECT * FROM sources")).toEqual([{
+        source_key: "alpha",
+        vault_id: "active",
+        path: "alpha.md",
+        outcome: "indexed",
+        content_hash: "hash-alpha",
+        byte_length: 10,
+        mtime_nanos: "99999999999999999999999999999999999999",
+        chunk_count: 1,
+        indexed_bytes: expect.any(Number),
+      }]);
+      expect(scoped.sources).toBe(1);
+
+      scoped.applySourceChanges([], [{ vault_id: "active", path: "alpha.md" }], true);
+      expect(db.selectValue("SELECT count(*) FROM sources")).toBe(0);
+      expect(scoped.sources).toBe(0);
+      expect(scoped.documents).toBe(0);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("mixes indexed and skipped sources in one batch and counts only indexed as documents", () => {
+    const skipped = source("skipped", "unused", "");
+    skipped.chunks = [];
+    skipped.kind = "skipped";
+
+    index.applySourceChanges([
+      source("alpha", "chunk-a", "alphaterm"),
+      skipped,
+    ], [], true);
+
+    expect(index.documents).toBe(1);
+    expect(index.chunks).toBe(1);
+    expect(index.sources).toBe(2);
+  });
+
+  it("refuses a batch that would exceed the source ceiling without changing rows", () => {
+    index.close();
+    index = openFts5Generation(sqlite, {
+      maxChunks: 100,
+      maxIndexedTextBytes: 1_048_576,
+      maxSources: 1,
+    });
+    index.replaceSource(source("alpha", "chunk-a", "stableterm"));
+
+    expect(() => index.replaceSource(source("beta", "chunk-b", "overflowterm")))
+      .toThrow(IndexCapacityError);
+    expect(index.sources).toBe(1);
+    expect(index.documents).toBe(1);
+    expect(index.search(anyPlan("overflowterm"), 20)).toEqual([]);
+  });
+
+  // The reconciliation clauses that make the stored per-source tallies
+  // trustworthy have to be provably fail-able, so each is corrupted directly.
+  it.each([
+    [
+      "a chunk outliving its source row",
+      "DELETE FROM sources WHERE source_key = 'alpha'",
+    ],
+    [
+      "a skipped source owning chunks",
+      "UPDATE sources SET outcome = 'skipped', chunk_count = 0, indexed_bytes = 0, "
+        + "content_hash = NULL WHERE source_key = 'alpha'",
+    ],
+    [
+      "a tampered per-source chunk tally",
+      "UPDATE sources SET chunk_count = 5 WHERE source_key = 'alpha'",
+    ],
+    [
+      "an invented source row",
+      "INSERT INTO sources VALUES('ghost','active','ghost.md','skipped',NULL,0,'1',0,0)",
+    ],
+  ])("fails the integrity gate on %s", (_name, corruption) => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      scoped.replaceSource(source("alpha", "chunk-a", "quasar"));
+      expect(() => scoped.assertIntegrity()).not.toThrow();
+
+      db.exec(corruption);
+
+      // The FTS5 structure check stays green through every one of these: only
+      // the explicit reconciliation can see them, and it must.
+      expect(() => db.exec(
+        "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
+      )).not.toThrow();
+      expect(() => scoped.assertIntegrity()).toThrow(/integrity check failed/);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("rejects a stored source row whose recorded facts are malformed", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      scoped.replaceSource(source("alpha", "chunk-a", "quasar"));
+      // Writing through the raw handle bypasses the column CHECKs only for
+      // shapes the CHECKs do not cover; the read side must catch it anyway.
+      db.exec("UPDATE sources SET mtime_nanos = '00000000000000000000000000000000000000000' "
+        + "WHERE source_key = 'alpha'");
+
+      expect(() => scoped.replaceSource(source("alpha", "chunk-b", "replacementterm")))
+        .toThrow(/stored source metadata is invalid/);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("refuses a batch that would mix chunking versions in one generation", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    expect(index.chunkingVersion).toBe(1);
+
+    const rechunked = source("beta", "chunk-b", "pulsarterm");
+    rechunked.chunks[0]!.chunk.chunking_version = 2;
+    expect(() => index.replaceSource(rechunked)).toThrow(/mixes chunking versions/);
+
+    expect(index.chunkingVersion).toBe(1);
+    expect(index.documents).toBe(1);
+    expect(index.sources).toBe(1);
+    expect(index.search(anyPlan("pulsarterm"), 20)).toEqual([]);
   });
 
   it("treats a missing removal as an idempotent no-op", () => {
@@ -429,6 +671,44 @@ describe("Fts5GenerationIndex", () => {
     } finally {
       scoped.close();
     }
+  });
+
+  it("exports a working image whose schema version is stamped into its header", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasarterm"));
+
+    const image = index.exportImage(sqlite);
+    expect(image).toBeInstanceOf(Uint8Array);
+    expect(image.byteLength).toBeGreaterThan(0);
+    // The live generation is untouched by serialization.
+    expect(index.search(anyPlan("quasarterm"), 20)).toHaveLength(1);
+
+    const restored = deserialize(sqlite, image);
+    try {
+      expect(Number(restored.selectValue("PRAGMA user_version"))).toBe(CACHE_SCHEMA_VERSION);
+      expect(restored.selectValue("SELECT count(*) FROM sources")).toBe(1);
+      expect(restored.selectValue("SELECT outcome FROM sources")).toBe("indexed");
+      expect(restored.selectValue(
+        "SELECT path FROM chunks c JOIN chunks_fts f ON f.rowid = c.rowid "
+        + "WHERE chunks_fts MATCH ?",
+        ['"quasarterm"'],
+      )).toBe("alpha.md");
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("refuses to export an image over its ceiling", () => {
+    index.close();
+    index = openFts5Generation(sqlite, {
+      maxChunks: 100,
+      maxIndexedTextBytes: 1_048_576,
+      maxExportBytes: 1_024,
+    });
+    index.replaceSource(source("alpha", "chunk-a", "quasarterm"));
+
+    expect(() => index.exportImage(sqlite)).toThrow(IndexCapacityError);
+    // Refusing costs the caller nothing: the generation is still serving.
+    expect(index.search(anyPlan("quasarterm"), 20)).toHaveLength(1);
   });
 
   // A generation that is already published has no later commit gate, so its

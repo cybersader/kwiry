@@ -3,7 +3,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { WORKER_PROTOCOL_VERSION, type WorkerRequest } from "../src/worker/protocol";
+import {
+  CACHE_SCHEMA_VERSION,
+  WORKER_PROTOCOL_VERSION,
+  type WorkerRequest,
+} from "../src/worker/protocol";
 import { WorkerRpcClient, type WorkerLike } from "../src/worker/rpc-client";
 
 class MockWorker implements WorkerLike {
@@ -52,6 +56,26 @@ function statusResponse(id: number): unknown {
       dirty: true,
       rebuilding: false,
     },
+  };
+}
+
+function exportResult(generation: string, cacheIdentity: string): unknown {
+  return {
+    generation,
+    documents: 1,
+    chunks: 1,
+    bytes: new Uint8Array([7, 7, 7]),
+    blob_byte_length: 3,
+    blob_sha256: "a".repeat(64),
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: 1,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: "b".repeat(64),
+    rust_wasm_sha256: "c".repeat(64),
+    plugin_id: "kwiry-search",
+    plugin_version: "0.1.0",
+    cache_identity: cacheIdentity,
   };
 }
 
@@ -128,6 +152,61 @@ describe("WorkerRpcClient", () => {
       result: { generation: "g3", documents: 0, chunks: 0 },
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
+  // Export inherits the existing generation correlation rather than inventing
+  // a new rule: the caller names the generation it believes is active, and an
+  // envelope describing a different one is a protocol failure, not a result.
+  it("poisons the client on an export envelope for another generation", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, 1_000);
+    const identity = "d".repeat(64);
+    const pending = client.request({
+      operation: "export_generation",
+      generation: "g1",
+      cache_identity: identity,
+    });
+    expect(worker.posted[0]).toEqual({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      generation: "g1",
+      cache_identity: identity,
+    });
+
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      ok: true,
+      result: exportResult("g2", identity),
+    });
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
+    await expect(client.request({ operation: "status" })).rejects.toMatchObject({
+      code: "disposed",
+    });
+  });
+
+  it("resolves an export envelope correlated to the requested generation", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, 1_000);
+    const identity = "e".repeat(64);
+    const pending = client.request({
+      operation: "export_generation",
+      generation: "g1",
+      cache_identity: identity,
+    });
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_generation",
+      ok: true,
+      result: exportResult("g1", identity),
+    });
+    await expect(pending).resolves.toMatchObject({
+      generation: "g1",
+      cache_identity: identity,
+    });
   });
 
   it("rejects pending work on crashes and all later work", async () => {

@@ -111,6 +111,20 @@ function verifySqliteArtifact() {
   return { bytes: identity.wasmBytes, sha256: identity.wasmSha256 };
 }
 
+// The whole export identity envelope must be authored by the Worker that
+// produces the image. `manifest.json` is a main-thread file, so its identity is
+// read at build time and pinned into the Worker bundle instead of being
+// stamped on by the host after the fact.
+function readPluginIdentity() {
+  const manifest = JSON.parse(readFileSync(resolve(root, "manifest.json"), "utf8"));
+  const bounded = (value, maximum) =>
+    typeof value === "string" && value.length > 0 && value.length <= maximum;
+  if (!bounded(manifest.id, 128) || !bounded(manifest.version, 64)) {
+    throw new Error("plugin manifest identity is missing or unbounded");
+  }
+  return { id: manifest.id, version: manifest.version };
+}
+
 function rustVirtualPlugin(identities) {
   return {
     name: "kwiry-rust-wasm",
@@ -131,6 +145,8 @@ function rustVirtualPlugin(identities) {
           `export const RUST_WASM_SHA256=${JSON.stringify(identities.rust.sha256)};`,
           `export const SQLITE_WASM_SIZE=${identities.sqlite.bytes};`,
           `export const SQLITE_WASM_SHA256=${JSON.stringify(identities.sqlite.sha256)};`,
+          `export const PLUGIN_ID=${JSON.stringify(identities.plugin.id)};`,
+          `export const PLUGIN_VERSION=${JSON.stringify(identities.plugin.version)};`,
         ].join("\n"),
         loader: "js",
       }));
@@ -176,6 +192,7 @@ export async function buildPlugin({ write = true, production: optimized = true }
   const identities = {
     rust: prepareRustAdapter(),
     sqlite: verifySqliteArtifact(),
+    plugin: readPluginIdentity(),
   };
   const workerBuild = await esbuild.build({
     absWorkingDir: root,

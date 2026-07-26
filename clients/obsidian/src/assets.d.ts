@@ -24,6 +24,8 @@ declare module "virtual:kwiry-artifact-identities" {
   export const RUST_WASM_SHA256: string;
   export const SQLITE_WASM_SIZE: number;
   export const SQLITE_WASM_SHA256: string;
+  export const PLUGIN_ID: string;
+  export const PLUGIN_VERSION: string;
 }
 
 declare module "@sqlite.org/sqlite-wasm/sqlite3.wasm" {
