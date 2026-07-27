@@ -17,6 +17,25 @@ const LAYOUT_VERSION: u32 = 2;
 const RETAINED_GENERATIONS: usize = 3;
 static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+thread_local! {
+    static STORAGE_PROBE_TEST_FAULT: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+fn inject_storage_probe_test_fault() -> Result<()> {
+    STORAGE_PROBE_TEST_FAULT.with(|fault| {
+        if fault.replace(false) {
+            return Err(Error::State(
+                "injected storage-probe checkpoint failure".to_owned(),
+            ));
+        }
+        Ok(())
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct DataRoot {
     root: PathBuf,
@@ -585,6 +604,8 @@ fn probe_storage_semantics(root: &Path) -> Result<()> {
     let probe_dir = root.join(format!(".storage-probe-{probe_id}"));
     let result = (|| -> Result<()> {
         fs::create_dir(&probe_dir).map_err(|error| io_error(&probe_dir, error))?;
+        #[cfg(test)]
+        inject_storage_probe_test_fault()?;
 
         let lock_path = probe_dir.join("lock");
         let first = OpenOptions::new()
@@ -659,7 +680,7 @@ fn reject_known_network_filesystem(root: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn filesystem_for_path(path: &Path, mountinfo: &str) -> Option<String> {
     mountinfo
         .lines()
@@ -675,7 +696,7 @@ fn filesystem_for_path(path: &Path, mountinfo: &str) -> Option<String> {
         .map(|(_, filesystem)| filesystem)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn decode_mount_path(value: &str) -> String {
     value
         .replace("\\040", " ")
@@ -684,7 +705,7 @@ fn decode_mount_path(value: &str) -> String {
         .replace("\\134", "\\")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn is_known_network_filesystem(filesystem: &str) -> bool {
     matches!(
         filesystem,
@@ -802,6 +823,76 @@ mod tests {
     }
 
     #[test]
+    fn native_local_data_root_passes_platform_suitability_and_storage_probes() {
+        let temporary = tempdir().unwrap();
+        let root = DataRoot::new(temporary.path());
+
+        root.prepare().unwrap();
+
+        assert!(temporary.path().join("generations").is_dir());
+        assert!(temporary.path().join("daemon.lock").is_file());
+        assert!(fs::read_dir(temporary.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".storage-probe-")
+        }));
+    }
+
+    #[test]
+    fn storage_probe_checkpoint_failure_is_observed_and_cleaned_up() {
+        let temporary = tempdir().unwrap();
+        let root = DataRoot::new(temporary.path());
+        STORAGE_PROBE_TEST_FAULT.with(|fault| fault.set(true));
+
+        let error = root.prepare().unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::UnsuitableDataRoot { ref reason, .. }
+                if reason.contains("injected storage-probe checkpoint failure")
+        ));
+        assert!(fs::read_dir(temporary.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".storage-probe-")
+        }));
+    }
+
+    #[test]
+    fn native_writer_lock_is_exclusive_across_processes() {
+        const CHILD_ROOT: &str = "KWIRY_TEST_WRITER_LOCK_CHILD_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            assert!(matches!(
+                DataRoot::new(root).acquire_writer_lock(),
+                Err(Error::LockHeld(_))
+            ));
+            return;
+        }
+
+        let temporary = tempdir().unwrap();
+        let root = DataRoot::new(temporary.path());
+        let _lock = root.acquire_writer_lock().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("generation::tests::native_writer_lock_is_exclusive_across_processes")
+            .arg("--nocapture")
+            .env(CHILD_ROOT, temporary.path())
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child lock assertion failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn incompatible_index_pointer_is_rejected_without_mutation() {
         let temporary = tempdir().unwrap();
         let current_path = temporary.path().join("current.json");
@@ -891,6 +982,36 @@ mod tests {
         let active = root.active().unwrap().unwrap();
         assert_eq!(active.id, candidate_id);
         assert_ne!(active.id, previous.id);
+    }
+
+    #[test]
+    fn native_publication_fault_instrument_proves_each_recovery_boundary() {
+        for (fault, candidate_becomes_active) in [
+            (PublishFault::CandidateSynced, false),
+            (PublishFault::GenerationRenamed, false),
+            (PublishFault::PointerWritten, true),
+        ] {
+            let temporary = tempdir().unwrap();
+            let root = DataRoot::new(temporary.path());
+            let _lock = root.acquire_writer_lock().unwrap();
+            let previous = publish_complete_desktop(&root);
+            let candidate = complete_desktop_candidate(&root);
+            let candidate_id = candidate.id.clone();
+
+            let error = root.publish_with_fault(candidate, fault).unwrap_err();
+            assert!(error.to_string().contains(&format!(
+                "injected publication interruption after {fault:?}"
+            )));
+            root.prepare_locked().unwrap();
+
+            let active = root.active().unwrap().unwrap();
+            let expected = if candidate_becomes_active {
+                &candidate_id
+            } else {
+                &previous.id
+            };
+            assert_eq!(&active.id, expected, "recovery mismatch after {fault:?}");
+        }
     }
 
     #[test]
@@ -1012,10 +1133,18 @@ mod tests {
         assert!(root.active().unwrap().is_none());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn known_network_filesystems_are_rejected() {
-        for filesystem in ["9p", "cifs", "drvfs", "fuse.sshfs", "nfs", "nfs4", "smb3"] {
+    fn network_filesystem_type_decision_logic_is_platform_independent() {
+        for filesystem in [
+            "9p",
+            "cifs",
+            "drvfs",
+            "fuse.sshfs",
+            "nfs",
+            "nfs4",
+            "smb3",
+            "sshfs",
+        ] {
             assert!(is_known_network_filesystem(filesystem));
         }
         for filesystem in ["btrfs", "ext4", "overlay", "tmpfs", "xfs"] {
@@ -1023,9 +1152,8 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn mountinfo_uses_the_deepest_matching_mount_and_decodes_paths() {
+    fn mountinfo_decision_logic_uses_deepest_mount_and_decodes_paths() {
         let mountinfo = concat!(
             "1 0 0:1 / / rw - ext4 /dev/root rw\n",
             "2 1 0:2 / /mnt/shared\\040notes rw - cifs //server/share rw\n",
@@ -1038,5 +1166,166 @@ mod tests {
             filesystem_for_path(Path::new("/tmp/kwiry"), mountinfo),
             Some("ext4".to_owned())
         );
+    }
+
+    #[cfg(windows)]
+    fn assert_windows_network_root_is_rejected(path: &Path) {
+        let error = reject_known_network_filesystem(path).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::UnsuitableDataRoot { ref reason, .. }
+                if reason.contains("network drives are not supported")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_local_temp_directory_exercises_drive_type_classification() {
+        let temporary = tempdir().unwrap();
+        reject_known_network_filesystem(temporary.path()).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires KWIRY_TEST_WINDOWS_UNC_ROOT on an accessible UNC share"]
+    fn windows_unc_prefix_is_rejected_on_a_real_share() {
+        use std::path::{Component, Prefix};
+
+        let base = PathBuf::from(
+            std::env::var_os("KWIRY_TEST_WINDOWS_UNC_ROOT").expect(
+                "KWIRY_TEST_WINDOWS_UNC_ROOT is required when this ignored native validation test is explicitly run",
+            ),
+        );
+        assert!(
+            matches!(
+                base.components().next(),
+                Some(Component::Prefix(prefix))
+                    if matches!(prefix.kind(), Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _))
+            ),
+            "KWIRY_TEST_WINDOWS_UNC_ROOT must be a UNC path, got {}",
+            base.display()
+        );
+        let temporary = tempfile::Builder::new()
+            .prefix("kwiry-platform-validation-")
+            .tempdir_in(&base)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "could not create a validation directory in {}: {error}",
+                    base.display()
+                )
+            });
+
+        assert_windows_network_root_is_rejected(temporary.path());
+    }
+
+    #[cfg(windows)]
+    fn windows_drive_type(path: &Path) -> (PathBuf, u32) {
+        use std::os::windows::ffi::OsStrExt;
+        use std::path::{Component, Prefix};
+        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+        let canonical = fs::canonicalize(path).unwrap();
+        let drive_root = match canonical.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                    PathBuf::from(format!("{}:\\", char::from(letter)))
+                }
+                kind => panic!(
+                    "mapped-drive validation canonicalized to non-drive prefix {kind:?}: {}",
+                    canonical.display()
+                ),
+            },
+            _ => panic!(
+                "mapped-drive validation canonicalized without a Windows prefix: {}",
+                canonical.display()
+            ),
+        };
+        let mut wide: Vec<u16> = drive_root.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let drive_type = unsafe { GetDriveTypeW(wide.as_ptr()) };
+        (canonical, drive_type)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires KWIRY_TEST_WINDOWS_REMOTE_DRIVE_ROOT on a mapped network drive"]
+    fn windows_drive_remote_is_rejected_on_a_mapped_drive() {
+        use std::path::{Component, Prefix};
+        use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE;
+
+        let base = PathBuf::from(
+            std::env::var_os("KWIRY_TEST_WINDOWS_REMOTE_DRIVE_ROOT").expect(
+                "KWIRY_TEST_WINDOWS_REMOTE_DRIVE_ROOT is required when this ignored native validation test is explicitly run",
+            ),
+        );
+        assert!(
+            matches!(
+                base.components().next(),
+                Some(Component::Prefix(prefix))
+                    if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+            ),
+            "KWIRY_TEST_WINDOWS_REMOTE_DRIVE_ROOT must be a drive-letter path, got {}",
+            base.display()
+        );
+        let temporary = tempfile::Builder::new()
+            .prefix("kwiry-platform-validation-")
+            .tempdir_in(&base)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "could not create a validation directory in {}: {error}",
+                    base.display()
+                )
+            });
+        let (canonical, drive_type) = windows_drive_type(temporary.path());
+        assert!(
+            matches!(
+                canonical.components().next(),
+                Some(Component::Prefix(prefix))
+                    if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+            ),
+            "mapped-drive temporary directory canonicalized away from a drive prefix: {}",
+            canonical.display()
+        );
+        assert_eq!(
+            drive_type,
+            DRIVE_REMOTE,
+            "GetDriveTypeW did not classify {} as DRIVE_REMOTE",
+            canonical.display()
+        );
+
+        assert_windows_network_root_is_rejected(temporary.path());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_local_temp_directory_exercises_statfs_mnt_local() {
+        let temporary = tempdir().unwrap();
+        reject_known_network_filesystem(temporary.path()).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires KWIRY_TEST_MACOS_NETWORK_ROOT on a mount without MNT_LOCAL"]
+    fn macos_nonlocal_mount_is_rejected() {
+        let base = PathBuf::from(
+            std::env::var_os("KWIRY_TEST_MACOS_NETWORK_ROOT").expect(
+                "KWIRY_TEST_MACOS_NETWORK_ROOT is required when this ignored native validation test is explicitly run",
+            ),
+        );
+        let temporary = tempfile::Builder::new()
+            .prefix("kwiry-platform-validation-")
+            .tempdir_in(&base)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "could not create a validation directory in {}: {error}",
+                    base.display()
+                )
+            });
+        let error = reject_known_network_filesystem(temporary.path()).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::UnsuitableDataRoot { ref reason, .. }
+                if reason.contains("is not local")
+        ));
     }
 }
