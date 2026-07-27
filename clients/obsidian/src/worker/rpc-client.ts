@@ -5,6 +5,7 @@ import {
   MAX_PENDING_REQUESTS,
   WORKER_PROTOCOL_VERSION,
   WORKER_REQUEST_TIMEOUT_MS,
+  type RestoreGenerationInput,
   type SourceInput,
   type SourceRemoval,
   type WorkerError,
@@ -29,12 +30,13 @@ export type WorkerCommand =
   | { operation: "commit_build"; generation: string }
   | { operation: "abort_build"; generation: string }
   | { operation: "export_generation"; generation: string; cache_identity: string }
+  | ({ operation: "restore_generation" } & RestoreGenerationInput)
   | { operation: "search"; query: string; limit: number }
   | { operation: "status" }
   | { operation: "dispose" };
 
 export interface WorkerLike {
-  postMessage(message: WorkerRequest): void;
+  postMessage(message: WorkerRequest, transfer?: Transferable[]): void;
   terminate(): void;
   addEventListener(type: "message", listener: (event: MessageEvent<unknown>) => void): void;
   addEventListener(type: "error" | "messageerror", listener: (event: Event) => void): void;
@@ -179,7 +181,9 @@ export class WorkerRpcClient {
         timeout,
       });
       try {
-        this.worker.postMessage(request);
+        const transfer = requestTransferList(command);
+        if (transfer.length === 0) this.worker.postMessage(request);
+        else this.worker.postMessage(request, transfer);
       } catch {
         this.poison(new WorkerRpcError(fixedWorkerError(
           "worker_crashed",
@@ -218,12 +222,18 @@ export class WorkerRpcClient {
   }
 }
 
+function requestTransferList(command: WorkerCommand): Transferable[] {
+  if (command.operation !== "restore_generation") return [];
+  return [command.bytes.buffer as ArrayBuffer];
+}
+
 function expectedGeneration(command: WorkerCommand): string | null {
   switch (command.operation) {
     case "begin_build":
     case "add_source_batch":
     case "commit_build":
     case "abort_build":
+    case "restore_generation":
     // The caller names the generation it believes is active, so an export that
     // came back describing a different one is uncorrelated and poisons the
     // client, exactly as a build result would.

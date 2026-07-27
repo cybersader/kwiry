@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import type { CacheLoad } from "../cache/cache-store";
 import type {
   BuildResult,
   DisposeResult,
@@ -76,6 +77,28 @@ export class InPluginWorkerSession {
       generation,
       cache_identity: cacheIdentity,
     }) as Promise<ExportGenerationResult>;
+  }
+
+  /**
+   * Transfers a B6.2 hit to the persistence-blind Worker. The literal false is
+   * forwarded rather than erased so the Worker can require and discharge the
+   * digest-verification obligation itself.
+   */
+  restoreGeneration(
+    hit: Extract<CacheLoad, { kind: "hit" }>,
+    expectedCacheIdentity: string,
+  ): Promise<BuildResult> {
+    const { record } = hit;
+    return this.client.request({
+      operation: "restore_generation",
+      generation: record.generationId,
+      bytes: hit.bytes,
+      blob_byte_length: record.byteLength,
+      blob_sha256: record.sha256,
+      digest_verified: hit.digestVerified,
+      ...record.identity,
+      expected_cache_identity: expectedCacheIdentity,
+    }) as Promise<BuildResult>;
   }
 
   search(query: string, limit: number): Promise<SearchResult> {

@@ -5,9 +5,12 @@ import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CacheImageInvalidError,
+  CacheVersionMismatchError,
   Fts5GenerationIndex,
   IndexCapacityError,
   openFts5Generation,
+  openRestoredFts5Generation,
   type SQLiteApi,
   type SQLiteDatabase,
 } from "../src/worker/fts5-index";
@@ -739,7 +742,197 @@ describe("Fts5GenerationIndex", () => {
       scoped.close();
     }
   });
+
+  it("restores a plain-block image with hydrated counters and VFS-backed export", () => {
+    index.applySourceChanges([
+      source("alpha", "chunk-a", "oldterm"),
+      source("keep", "chunk-k", "keepterm"),
+    ], []);
+    index.assertIntegrity();
+    const image = index.exportImage(sqlite);
+
+    const restored = openRestoredFts5Generation(sqlite, image, 1);
+    try {
+      expect(restored.documents).toBe(2);
+      expect(restored.chunks).toBe(2);
+      expect(restored.sources).toBe(2);
+      expect(restored.search(anyPlan("oldterm"), 20)).toHaveLength(1);
+      expect(() => restored.assertIntegrity()).not.toThrow();
+      const reexported = restored.exportImage(sqlite);
+      expect(reexported).toBeInstanceOf(Uint8Array);
+      expect(reexported.byteLength).toBe(image.byteLength);
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("completes restore, mutate, VFS export, and second restore", () => {
+    index.applySourceChanges([
+      source("old", "chunk-old", "oldterm"),
+      source("keep", "chunk-keep", "keepterm"),
+    ], []);
+    const first = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
+    let second: Fts5GenerationIndex | null = null;
+    try {
+      first.applySourceChanges(
+        [source("new", "chunk-new", "newterm")],
+        [{ vault_id: "active", path: "old.md" }],
+        true,
+      );
+      expect(first.search(anyPlan("oldterm"), 20)).toEqual([]);
+      expect(first.search(anyPlan("newterm"), 20)).toHaveLength(1);
+      expect(first.search(anyPlan("keepterm"), 20)).toHaveLength(1);
+
+      second = openRestoredFts5Generation(sqlite, first.exportImage(sqlite), 1);
+      expect(second.search(anyPlan("oldterm"), 20)).toEqual([]);
+      expect(second.search(anyPlan("newterm"), 20)).toHaveLength(1);
+      expect(second.search(anyPlan("keepterm"), 20)).toHaveLength(1);
+      expect(second.documents).toBe(first.documents);
+      expect(second.chunks).toBe(first.chunks);
+    } finally {
+      second?.close();
+      first.close();
+    }
+  });
+
+  it("refuses internal schema version drift after the VFS opens", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    const image = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec(`PRAGMA user_version = ${CACHE_SCHEMA_VERSION + 1}`);
+    });
+    expect(() => openRestoredFts5Generation(sqlite, image, 1))
+      .toThrow(CacheVersionMismatchError);
+  });
+
+  it("refuses an exact-schema mismatch before integrity is trusted", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    const image = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec("CREATE TABLE unexpected_cache_object(value TEXT)");
+    });
+    expect(() => openRestoredFts5Generation(sqlite, image, 1))
+      .toThrow(CacheImageInvalidError);
+  });
+
+  it("refuses invalid source rows and per-source tally transfers", () => {
+    index.applySourceChanges([
+      source("alpha", "chunk-a", "quasar"),
+      source("beta", "chunk-b", "pulsar"),
+    ], []);
+    const base = index.exportImage(sqlite);
+    const invalidRow = mutateExportedImage(base, (db) => {
+      db.exec("UPDATE sources SET content_hash = '' WHERE source_key = 'alpha'");
+    });
+    expect(() => openRestoredFts5Generation(sqlite, invalidRow, 1))
+      .toThrow(CacheImageInvalidError);
+
+    const transferredTallies = mutateExportedImage(base, (db) => {
+      db.exec("UPDATE sources SET chunk_count = chunk_count + 1 WHERE source_key = 'alpha'");
+      db.exec("UPDATE sources SET chunk_count = chunk_count - 1 WHERE source_key = 'beta'");
+    });
+    expect(() => openRestoredFts5Generation(sqlite, transferredTallies, 1))
+      .toThrow(CacheImageInvalidError);
+  });
+
+  it.each([
+    ["malformed heading JSON", (db: SQLiteDatabase) => {
+      db.exec("UPDATE chunks SET heading_path_json = 'not-json'");
+    }],
+    ["invalid frontmatter shape", (db: SQLiteDatabase) => {
+      db.exec(`UPDATE chunks SET frontmatter_json = '{"title":42}'`);
+    }],
+    ["chunk/source identity disagreement", (db: SQLiteDatabase) => {
+      db.exec("UPDATE chunks SET vault_id = 'another-vault'");
+    }],
+  ])("refuses digest-valid %s even when SQLite and FTS integrity stay green", (_name, mutate) => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    const corrupt = mutateExportedImage(index.exportImage(sqlite), mutate);
+
+    const precondition = deserialize(sqlite, corrupt);
+    try {
+      expect(precondition.selectValue("PRAGMA integrity_check")).toBe("ok");
+      expect(() => precondition.exec(
+        "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
+      )).not.toThrow();
+    } finally {
+      precondition.close();
+    }
+
+    expect(() => openRestoredFts5Generation(sqlite, corrupt, 1))
+      .toThrow(CacheImageInvalidError);
+  });
+
+  it("refuses interior B-tree corruption after header and schema validation pass", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    const good = index.exportImage(sqlite);
+    const inspector = deserialize(sqlite, good);
+    let rootPage: number;
+    try {
+      rootPage = Number(inspector.selectValue(
+        "SELECT rootpage FROM sqlite_schema WHERE name = 'sources'",
+      ));
+    } finally {
+      inspector.close();
+    }
+    const corrupt = good.slice();
+    const encodedPageSize = new DataView(corrupt.buffer).getUint16(16);
+    const pageSize = encodedPageSize === 1 ? 65_536 : encodedPageSize;
+    corrupt[(rootPage - 1) * pageSize] = 0;
+
+    const precondition = deserialize(sqlite, corrupt);
+    try {
+      expect(precondition.selectValue("SELECT count(*) FROM sqlite_schema"))
+        .toBeGreaterThan(0);
+      let integrity: unknown;
+      try {
+        integrity = precondition.selectValue("PRAGMA integrity_check");
+      } catch {
+        integrity = "threw";
+      }
+      expect(integrity).not.toBe("ok");
+    } finally {
+      precondition.close();
+    }
+    expect(() => openRestoredFts5Generation(sqlite, corrupt, 1))
+      .toThrow(CacheImageInvalidError);
+  });
+
+  it("refuses FTS shadow corruption during full SQLite integrity validation", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    const corrupt = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec("DELETE FROM chunks_fts_data WHERE id > 10");
+    });
+    const precondition = deserialize(sqlite, corrupt);
+    try {
+      expect(precondition.selectValue("PRAGMA integrity_check")).not.toBe("ok");
+    } finally {
+      precondition.close();
+    }
+    expect(() => openRestoredFts5Generation(sqlite, corrupt, 1))
+      .toThrow(CacheImageInvalidError);
+  });
+
+  it("refuses contentless FTS and metadata divergence", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    const image = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec("INSERT INTO chunks_fts(rowid, content) VALUES(900000, 'orphanterm')");
+    });
+    expect(() => openRestoredFts5Generation(sqlite, image, 1))
+      .toThrow(CacheImageInvalidError);
+  });
 });
+
+function mutateExportedImage(
+  image: Uint8Array,
+  mutate: (db: SQLiteDatabase) => void,
+): Uint8Array {
+  const db = deserialize(sqlite, image);
+  try {
+    mutate(db);
+    return sqlite.capi.sqlite3_js_db_export(db.pointer);
+  } finally {
+    db.close();
+  }
+}
 
 /** Delegating wrapper that records the statements a generation issues. */
 class RecordingDatabase implements SQLiteDatabase {

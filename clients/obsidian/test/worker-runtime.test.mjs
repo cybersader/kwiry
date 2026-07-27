@@ -146,6 +146,63 @@ async function buildActiveGeneration(worker, { generation = "g1", path = "alpha.
   await request(worker, { id: 4, operation: "commit_build", generation });
 }
 
+function restoreFromExport(envelope, { id = 2, generation = envelope.generation, ...overrides } = {}) {
+  return {
+    id,
+    operation: "restore_generation",
+    generation,
+    bytes: envelope.bytes.slice(),
+    blob_byte_length: envelope.blob_byte_length,
+    blob_sha256: envelope.blob_sha256,
+    digest_verified: false,
+    protocol_version: envelope.protocol_version,
+    cache_schema_version: envelope.cache_schema_version,
+    chunking_version: envelope.chunking_version,
+    sqlite_version: envelope.sqlite_version,
+    sqlite_wasm_sha256: envelope.sqlite_wasm_sha256,
+    rust_wasm_sha256: envelope.rust_wasm_sha256,
+    plugin_id: envelope.plugin_id,
+    plugin_version: envelope.plugin_version,
+    cache_identity: envelope.cache_identity,
+    expected_cache_identity: envelope.cache_identity,
+    ...overrides,
+  };
+}
+
+async function exportedFixture(options = {}) {
+  const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+  try {
+    await buildActiveGeneration(worker, options);
+    const response = await request(worker, {
+      id: 5,
+      operation: "export_generation",
+      generation: "g1",
+      cache_identity: CACHE_IDENTITY,
+    });
+    expect(response).toMatchObject({ ok: true });
+    return response.result;
+  } finally {
+    await worker.terminate();
+  }
+}
+
+async function mutateEnvelope(envelope, mutate) {
+  const db = await openExportedImage(envelope.bytes);
+  let bytes;
+  try {
+    mutate(db);
+    bytes = sqliteRuntime.capi.sqlite3_js_db_export(db.pointer);
+  } finally {
+    db.close();
+  }
+  return {
+    ...envelope,
+    bytes,
+    blob_byte_length: bytes.byteLength,
+    blob_sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
 describe("exported cache generation", () => {
   it("exports a working database with an independently verifiable identity", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
@@ -540,6 +597,550 @@ describe("exported cache generation", () => {
       await request(worker, { id: 6, operation: "dispose" });
     } finally {
       await worker.terminate();
+    }
+  }, 120_000);
+});
+
+describe("restored cache generation", () => {
+  it("restores a validated image through the block VFS and searches it", async () => {
+    const envelope = await exportedFixture();
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await expect(request(worker, restoreFromExport(envelope))).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", documents: 1, chunks: 1 },
+      });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          active_generation: "g1",
+          staging_generation: null,
+          searchable: true,
+          documents: 1,
+          chunks: 1,
+        },
+      });
+      await expect(request(worker, {
+        id: 4,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "alpha.md" }] },
+      });
+
+      const reexported = await request(worker, {
+        id: 5,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      });
+      expect(reexported).toMatchObject({ ok: true, result: { generation: "g1" } });
+      expect(createHash("sha256").update(reexported.result.bytes).digest("hex"))
+        .toBe(reexported.result.blob_sha256);
+      const reopened = await openExportedImage(reexported.result.bytes);
+      try {
+        expect(reopened.selectValue(
+          "SELECT c.path FROM chunks c JOIN chunks_fts f ON f.rowid = c.rowid "
+          + "WHERE chunks_fts MATCH ?",
+          ['"stableterm"'],
+        )).toBe("alpha.md");
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("keeps the SQLite WASM floor independent of restored image size and VFS export", async () => {
+    const small = await exportedFixture();
+    const largeText = Array.from({ length: 250_000 }, (_, index) => `floor${index.toString(36)}`).join(" ");
+    const large = await exportedFixture({
+      path: "large.md",
+      text: largeText,
+    });
+    expect(large.blob_byte_length).toBeGreaterThan(small.blob_byte_length * 4);
+
+    let injected = guardWorkerSource;
+    for (const [needle, replacement] of [
+      ["state = \"ready\";\n      return {", "state = \"ready\";\n      scope.postMessage({ probe: 'initialized-wasm', wasmBytes: sqlite.wasm.memory.buffer.byteLength });\n      return {"],
+      ["return publishStaging(staging, false);", "const published = publishStaging(staging, false);\n      scope.postMessage({ probe: 'restored-wasm', wasmBytes: sqlite.wasm.memory.buffer.byteLength });\n      return published;"],
+      ["image = target.index.exportImage(sqlite);", "image = target.index.exportImage(sqlite);\n    scope.postMessage({ probe: 'exported-wasm', wasmBytes: sqlite.wasm.memory.buffer.byteLength });"],
+    ]) {
+      const next = injected.replace(needle, replacement);
+      expect(next).not.toBe(injected);
+      injected = next;
+    }
+
+    const measure = async (envelope) => {
+      const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+      const probes = new Map();
+      worker.on("message", (message) => {
+        if (message?.probe && Number.isSafeInteger(message.wasmBytes)) {
+          probes.set(message.probe, message.wasmBytes);
+        }
+      });
+      try {
+        await request(worker, { id: 1, operation: "initialize" });
+        await request(worker, restoreFromExport(envelope));
+        await request(worker, {
+          id: 3,
+          operation: "export_generation",
+          generation: envelope.generation,
+          cache_identity: CACHE_IDENTITY,
+        });
+        return {
+          initialized: probes.get("initialized-wasm"),
+          restored: probes.get("restored-wasm"),
+          exported: probes.get("exported-wasm"),
+        };
+      } finally {
+        await worker.terminate();
+      }
+    };
+
+    const smallFloor = await measure(small);
+    const largeFloor = await measure(large);
+    for (const floor of [smallFloor, largeFloor]) {
+      expect(floor.initialized).toEqual(expect.any(Number));
+      expect(floor.restored).toEqual(expect.any(Number));
+      expect(floor.exported).toEqual(expect.any(Number));
+      expect(floor.exported - floor.restored).toBeLessThanOrEqual(2 * 1024 * 1024);
+    }
+    const smallRestoreDelta = smallFloor.restored - smallFloor.initialized;
+    const largeRestoreDelta = largeFloor.restored - largeFloor.initialized;
+    expect(Math.abs(largeRestoreDelta - smallRestoreDelta)).toBeLessThanOrEqual(4 * 1024 * 1024);
+    expect(largeRestoreDelta).toBeLessThan(large.blob_byte_length);
+  }, 120_000);
+
+  it.each([
+    ["protocol_version", 1, "cache_version_mismatch"],
+    ["cache_schema_version", CACHE_SCHEMA_VERSION + 1, "cache_version_mismatch"],
+    ["chunking_version", 999, "cache_version_mismatch"],
+    ["sqlite_version", "3.52.0", "cache_version_mismatch"],
+    ["sqlite_wasm_sha256", "a".repeat(64), "cache_version_mismatch"],
+    ["rust_wasm_sha256", "a".repeat(64), "cache_version_mismatch"],
+    ["plugin_version", "999.0.0", "cache_version_mismatch"],
+    ["plugin_id", "another-plugin", "cache_identity_mismatch"],
+    ["expected_cache_identity", "f".repeat(64), "cache_identity_mismatch"],
+  ])("refuses one-field identity drift in %s before opening", async (field, value, code) => {
+    const envelope = await exportedFixture();
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await expect(request(worker, restoreFromExport(envelope, { [field]: value })))
+        .resolves.toMatchObject({ ok: false, error: { code, retryable: false } });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null, searchable: false },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("rejects same-length tampering at the digest gate and preserves the active generation", async () => {
+    const envelope = await exportedFixture();
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "live",
+        path: "live.md",
+        text: "liveterm",
+      });
+      const bytes = envelope.bytes.slice();
+      bytes[Math.floor(bytes.byteLength / 2)] ^= 0xff;
+      const response = await request(worker, restoreFromExport(envelope, {
+        id: 5,
+        generation: "cached",
+        bytes,
+      }));
+      expect(response).toMatchObject({ ok: false, error: { code: "cache_digest_mismatch" } });
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "liveterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "live", hits: [{ path: "live.md" }] },
+      });
+      await expect(request(worker, { id: 7, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: "live", staging_generation: null },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it.each([
+    ["magic", (bytes) => { bytes[0] ^= 0xff; }],
+    ["illegal page size", (bytes) => { bytes[16] = 0; bytes[17] = 3; }],
+    ["WAL header", (bytes) => { bytes[18] = 2; }],
+  ])("rejects a digest-valid %s corruption at the image gate", async (_name, corrupt) => {
+    const envelope = await exportedFixture();
+    const bytes = envelope.bytes.slice();
+    corrupt(bytes);
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      const response = await request(worker, restoreFromExport(envelope, {
+        bytes,
+        blob_sha256: createHash("sha256").update(bytes).digest("hex"),
+      }));
+      expect(response).toMatchObject({ ok: false, error: { code: "cache_image_invalid" } });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("proves identity, digest, header, VFS, and publication stages are ordered and fail-able", async () => {
+    const envelope = await exportedFixture();
+    let injected = guardWorkerSource;
+    for (const [needle, replacement] of [
+      ["if (await sha256Hex(request.bytes) !== request.blob_sha256)", "scope.postMessage({ probe: 'hash' });\n  if (await sha256Hex(request.bytes) !== request.blob_sha256)"],
+      ["const header = validateSQLiteImage(request.bytes);", "scope.postMessage({ probe: 'header' });\n    const header = validateSQLiteImage(request.bytes);"],
+      ["const index = openRestoredFts5Generation(", "scope.postMessage({ probe: 'vfs' });\n    const index = openRestoredFts5Generation("],
+      ["return publishStaging(staging, false);", "scope.postMessage({ probe: 'publish' });\n      return publishStaging(staging, false);"],
+    ]) {
+      const next = injected.replace(needle, replacement);
+      expect(next).not.toBe(injected);
+      injected = next;
+    }
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    const probes = [];
+    worker.on("message", (message) => {
+      if (message?.probe) probes.push(message.probe);
+    });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+
+      probes.length = 0;
+      await request(worker, restoreFromExport(envelope, {
+        id: 2,
+        generation: "identity-fail",
+        expected_cache_identity: "f".repeat(64),
+      }));
+      expect(probes).toEqual([]);
+
+      probes.length = 0;
+      await request(worker, restoreFromExport(envelope, {
+        id: 3,
+        generation: "digest-fail",
+        blob_sha256: "f".repeat(64),
+      }));
+      expect(probes).toEqual(["hash"]);
+
+      probes.length = 0;
+      const badHeader = envelope.bytes.slice();
+      badHeader[0] ^= 0xff;
+      await request(worker, restoreFromExport(envelope, {
+        id: 4,
+        generation: "header-fail",
+        bytes: badHeader,
+        blob_sha256: createHash("sha256").update(badHeader).digest("hex"),
+      }));
+      expect(probes).toEqual(["hash", "header"]);
+
+      probes.length = 0;
+      await request(worker, restoreFromExport(envelope, { id: 5, generation: "restored" }));
+      expect(probes).toEqual(["hash", "header", "vfs", "publish"]);
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("proves the explicit rank-1 FTS5 integrity gate can independently refuse", async () => {
+    const envelope = await exportedFixture();
+    const needle = `try {\n        db.exec("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)");`;
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n        throw new Error("injected FTS integrity failure");`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await expect(request(worker, restoreFromExport(envelope))).resolves.toMatchObject({
+        ok: false,
+        error: { code: "cache_image_invalid", stage: "index", retryable: false },
+      });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("reports a missing VFS installation capability as runtime failure, not cache corruption", async () => {
+    const envelope = await exportedFixture();
+    const needle = "const index = openRestoredFts5Generation(";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `sqlite.vfs.installVfs = () => { throw new Error("injected capability failure"); };\n    ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await expect(request(worker, restoreFromExport(envelope))).resolves.toMatchObject({
+        ok: false,
+        error: { code: "internal_error", stage: "sqlite", retryable: false },
+      });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it.each([
+    ["internal user_version drift", (db) => db.exec(`PRAGMA user_version = ${CACHE_SCHEMA_VERSION + 1}`), "cache_version_mismatch"],
+    ["extra schema object", (db) => db.exec("CREATE TABLE unexpected_cache_object(value TEXT)"), "cache_image_invalid"],
+    ["invalid source inventory", (db) => db.exec("UPDATE sources SET content_hash = ''"), "cache_image_invalid"],
+    ["per-source tally mismatch", (db) => db.exec("UPDATE sources SET chunk_count = chunk_count + 1"), "cache_image_invalid"],
+    ["malformed heading JSON", (db) => db.exec("UPDATE chunks SET heading_path_json = 'not-json'"), "cache_image_invalid"],
+    ["invalid frontmatter shape", (db) => db.exec(`UPDATE chunks SET frontmatter_json = '{"tags":"not-an-array"}'`), "cache_image_invalid"],
+    ["chunk/source identity disagreement", (db) => db.exec("UPDATE chunks SET path = 'other.md'"), "cache_image_invalid"],
+    ["orphan FTS posting", (db) => db.exec("INSERT INTO chunks_fts(rowid, content) VALUES(900000, 'orphanterm')"), "cache_image_invalid"],
+  ])("rejects digest-valid staged %s and leaves the active generation serving", async (_name, mutate, code) => {
+    const corrupt = await mutateEnvelope(await exportedFixture(), mutate);
+    const precondition = await openExportedImage(corrupt.bytes);
+    try {
+      expect(precondition.selectValue("PRAGMA integrity_check")).toBe("ok");
+      expect(() => precondition.exec(
+        "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
+      )).not.toThrow();
+    } finally {
+      precondition.close();
+    }
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "live",
+        path: "live.md",
+        text: "liveterm",
+      });
+      const response = await request(worker, restoreFromExport(corrupt, {
+        id: 5,
+        generation: "cached",
+      }));
+      expect(response).toMatchObject({ ok: false, error: { code, retryable: false } });
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "liveterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "live", hits: [{ path: "live.md" }] },
+      });
+      await expect(request(worker, { id: 7, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: "live", staging_generation: null },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("does not publish or retain a restored generation when prior cleanup fails", async () => {
+    const envelope = await exportedFixture();
+    let injected = guardWorkerSource;
+    for (const [needle, replacement] of [
+      [
+        "previous?.index.close();",
+        `if (previous) previous.index.close = () => { throw new Error("cleanup failed"); };\n    previous?.index.close();`,
+      ],
+      [
+        "mainFile = null;",
+        `mainFile = null;\n    self.postMessage({ probe: "vfs-released" });`,
+      ],
+    ]) {
+      const next = injected.replace(needle, replacement);
+      expect(next).not.toBe(injected);
+      injected = next;
+    }
+
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    const probes = [];
+    worker.on("message", (message) => {
+      if (message?.probe) probes.push(message.probe);
+    });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "live",
+        path: "live.md",
+        text: "liveterm",
+      });
+      await expect(request(worker, restoreFromExport(envelope, {
+        id: 5,
+        generation: "cached",
+      }))).resolves.toMatchObject({
+        ok: false,
+        error: { code: "worker_crashed", stage: "lifecycle", retryable: true },
+      });
+      expect(probes).toContain("vfs-released");
+      await expect(request(worker, { id: 6, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          active_generation: "live",
+          staging_generation: null,
+          searchable: true,
+        },
+      });
+      await expect(request(worker, {
+        id: 7,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "live", hits: [] },
+      });
+      await expect(request(worker, {
+        id: 8,
+        operation: "search",
+        query: "liveterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "live", hits: [{ path: "live.md" }] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("reuses private VFS registrations across repeated staged replacements", async () => {
+    const envelope = await exportedFixture();
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      for (let index = 0; index < 6; index += 1) {
+        const generation = `restored-${index}`;
+        await expect(request(worker, restoreFromExport(envelope, {
+          id: index + 2,
+          generation,
+        }))).resolves.toMatchObject({
+          ok: true,
+          result: { generation, documents: 1, chunks: 1 },
+        });
+      }
+      await expect(request(worker, {
+        id: 8,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "restored-5", hits: [{ path: "alpha.md" }] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("cleans a rejected staged VFS before a later good restore", async () => {
+    const envelope = await exportedFixture();
+    const corrupt = await mutateEnvelope(envelope, (db) => {
+      db.exec("CREATE TABLE unexpected_cache_object(value TEXT)");
+    });
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await expect(request(worker, restoreFromExport(corrupt, {
+        id: 2,
+        generation: "bad",
+      }))).resolves.toMatchObject({ ok: false, error: { code: "cache_image_invalid" } });
+      await expect(request(worker, restoreFromExport(envelope, {
+        id: 3,
+        generation: "good",
+      }))).resolves.toMatchObject({ ok: true, result: { generation: "good" } });
+      await expect(request(worker, {
+        id: 4,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "alpha.md" }] } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("completes restore, mutate, block export, and restore again", async () => {
+    const producer = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    let firstEnvelope;
+    try {
+      await request(producer, { id: 1, operation: "initialize" });
+      await request(producer, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(producer, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("old.md", "oldterm"), source("keep.md", "keepterm")],
+      });
+      await request(producer, { id: 4, operation: "commit_build", generation: "g1" });
+      firstEnvelope = (await request(producer, {
+        id: 5,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      })).result;
+    } finally {
+      await producer.terminate();
+    }
+
+    const mutator = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    let secondEnvelope;
+    try {
+      await request(mutator, { id: 1, operation: "initialize" });
+      await request(mutator, restoreFromExport(firstEnvelope));
+      await expect(request(mutator, {
+        id: 3,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: "g2",
+        upserts: [source("new.md", "newterm")],
+        removals: [{ vault_id: "active-vault", path: "old.md" }],
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g2", documents: 2 } });
+      for (const [id, query, count] of [[4, "oldterm", 0], [5, "newterm", 1], [6, "keepterm", 1]]) {
+        const response = await request(mutator, { id, operation: "search", query, limit: 20 });
+        expect(response.result.hits).toHaveLength(count);
+      }
+      secondEnvelope = (await request(mutator, {
+        id: 7,
+        operation: "export_generation",
+        generation: "g2",
+        cache_identity: CACHE_IDENTITY,
+      })).result;
+    } finally {
+      await mutator.terminate();
+    }
+
+    const consumer = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(consumer, { id: 1, operation: "initialize" });
+      await expect(request(consumer, restoreFromExport(secondEnvelope, { generation: "g2" })))
+        .resolves.toMatchObject({ ok: true, result: { generation: "g2", documents: 2 } });
+      for (const [id, query, count] of [[3, "oldterm", 0], [4, "newterm", 1], [5, "keepterm", 1]]) {
+        const response = await request(consumer, { id, operation: "search", query, limit: 20 });
+        expect(response.result.hits).toHaveLength(count);
+      }
+    } finally {
+      await consumer.terminate();
     }
   }, 120_000);
 });
@@ -1205,11 +1806,11 @@ describe("exact generated production Worker", () => {
     }
   }, 120_000);
 
-  it("reports post-publication cleanup failure as uncertain Worker state", async () => {
+  it("aborts publication before the swap when prior-generation cleanup fails", async () => {
     const needle = "previous?.index.close();";
     const injected = guardWorkerSource.replace(
       needle,
-      `if (previous) previous.index.close = () => { throw new Error("cleanup failed"); };\n  ${needle}`,
+      `if (previous) previous.index.close = () => { throw new Error("cleanup failed"); };\n    ${needle}`,
     );
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
@@ -1241,8 +1842,27 @@ describe("exact generated production Worker", () => {
       });
       await expect(request(worker, { id: 8, operation: "status" })).resolves.toMatchObject({
         ok: true,
-        result: { active_generation: "g2", searchable: true },
+        result: {
+          active_generation: "g1",
+          staging_generation: null,
+          searchable: true,
+        },
       });
+      await expect(request(worker, {
+        id: 9,
+        operation: "search",
+        query: "oldterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "old.md" }] },
+      });
+      await expect(request(worker, {
+        id: 10,
+        operation: "search",
+        query: "newterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g1", hits: [] } });
     } finally {
       await worker.terminate();
     }

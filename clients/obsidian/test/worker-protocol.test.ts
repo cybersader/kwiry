@@ -36,6 +36,30 @@ function exportEnvelope(overrides: Record<string, unknown> = {}): Record<string,
   };
 }
 
+function restoreRequest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: WORKER_PROTOCOL_VERSION,
+    id: 1,
+    operation: "restore_generation",
+    generation: "g1",
+    bytes: new Uint8Array([1, 2, 3, 4]),
+    blob_byte_length: 4,
+    blob_sha256: "a".repeat(64),
+    digest_verified: false,
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: 1,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: "b".repeat(64),
+    rust_wasm_sha256: "c".repeat(64),
+    plugin_id: "kwiry-search",
+    plugin_version: "0.1.0",
+    cache_identity: CACHE_IDENTITY,
+    expected_cache_identity: CACHE_IDENTITY,
+    ...overrides,
+  };
+}
+
 function source(path = "note.md", vaultId = "active"): SourceInput {
   const bytes = new Uint8Array([35, 32, 65]);
   return {
@@ -193,6 +217,62 @@ describe("Worker protocol", () => {
       expect(parseWorkerRequest({ ...base, cache_identity: identity })).toMatchObject({
         code: "invalid_request",
       });
+    }
+  });
+
+  it("accepts only an exact unverified restore envelope", () => {
+    expect(parseWorkerRequest(restoreRequest())).toMatchObject({ operation: "restore_generation" });
+    for (const overrides of [
+      { digest_verified: true },
+      { digest_verified: undefined },
+      { expected_cache_identity: "/vault/path" },
+      { blob_sha256: "A".repeat(64) },
+      { bytes: [1, 2, 3, 4] },
+      { extra: true },
+    ]) {
+      expect(parseWorkerRequest(restoreRequest(overrides))).toMatchObject({ code: "invalid_request" });
+    }
+  });
+
+  it("returns typed restore refusals for invalid lengths and oversized blobs", () => {
+    expect(parseWorkerRequest(restoreRequest({
+      bytes: new Uint8Array(0),
+      blob_byte_length: 0,
+    }))).toMatchObject({ code: "cache_image_invalid", stage: "protocol" });
+    expect(parseWorkerRequest(restoreRequest({ blob_byte_length: 3 }))).toMatchObject({
+      code: "cache_image_invalid",
+    });
+
+    const oversized = { byteLength: MAX_EXPORT_BLOB_BYTES + 1 };
+    Object.setPrototypeOf(oversized, Uint8Array.prototype);
+    expect(parseWorkerRequest(restoreRequest({
+      bytes: oversized,
+      blob_byte_length: MAX_EXPORT_BLOB_BYTES + 1,
+    }))).toMatchObject({ code: "cache_blob_too_large", stage: "protocol" });
+  });
+
+  it("validates restore responses and typed refusal envelopes", () => {
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "restore_generation",
+      ok: true,
+      result: { generation: "g1", documents: 1, chunks: 2 },
+    })).toBe(true);
+    for (const code of [
+      "cache_identity_mismatch",
+      "cache_version_mismatch",
+      "cache_digest_mismatch",
+      "cache_image_invalid",
+      "cache_blob_too_large",
+    ]) {
+      expect(isWorkerResponse({
+        version: WORKER_PROTOCOL_VERSION,
+        id: 1,
+        operation: "restore_generation",
+        ok: false,
+        error: { code, stage: "index", message: "Restore refused.", retryable: false },
+      })).toBe(true);
     }
   });
 

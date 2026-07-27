@@ -14,15 +14,21 @@ import {
   SQLITE_WASM_SIZE,
 } from "virtual:kwiry-artifact-identities";
 
+import { BlockVfsUnavailableError } from "./block-vfs";
 import {
+  CacheImageInvalidError,
+  CacheVersionMismatchError,
   IndexCapacityError,
   IndexIntegrityError,
   openFts5Generation,
+  openRestoredFts5Generation,
   type Fts5GenerationIndex,
   type SQLiteApi,
 } from "./fts5-index";
+import { validateSQLiteImage } from "./image-header";
 import {
   CACHE_SCHEMA_VERSION,
+  MAX_EXPORT_BLOB_BYTES,
   WORKER_PROTOCOL_VERSION,
   type BuildResult,
   type DisposeResult,
@@ -270,7 +276,15 @@ function applySourceChanges(
 }
 
 function commitBuild(generation: string): BuildResult {
-  const target = requireStaging(generation);
+  return publishStaging(requireStaging(generation), true);
+}
+
+/**
+ * The single active/staging publication barrier. Restored cache images already
+ * passed compaction before export, so they use the same two integrity gates and
+ * atomic swap without rewriting the whole image again.
+ */
+function publishStaging(target: Generation, compact: boolean): BuildResult {
   try {
     target.index.assertIntegrity();
   } catch {
@@ -283,21 +297,20 @@ function commitBuild(generation: string): BuildResult {
     );
   }
 
-  try {
-    target.index.compact();
-  } catch {
-    abortStaging();
-    throw fixedWorkerError(
-      "integrity_failed",
-      "index",
-      "Staging generation failed its pre-publication compaction.",
-      false,
-    );
+  if (compact) {
+    try {
+      target.index.compact();
+    } catch {
+      abortStaging();
+      throw fixedWorkerError(
+        "integrity_failed",
+        "index",
+        "Staging generation failed its pre-publication compaction.",
+        false,
+      );
+    }
   }
 
-  // The image that ships must be the image that passed the gate. `compact()`
-  // rewrites the whole database after the gate above ran, so the gate is run
-  // again on the artifact that is actually about to be published.
   try {
     target.index.assertIntegrity();
   } catch {
@@ -305,18 +318,29 @@ function commitBuild(generation: string): BuildResult {
     throw fixedWorkerError(
       "integrity_failed",
       "index",
-      "Compacted staging generation failed its integrity check.",
+      compact
+        ? "Compacted staging generation failed its integrity check."
+        : "Restored staging generation failed its integrity check.",
       false,
     );
   }
 
+  // Compute the immutable response and release the prior generation before the
+  // commit point. After `active = target` there must be no operation left which
+  // can throw and turn a successful publication into a failed protocol result.
+  const result = generationResult(target);
   const previous = active;
-  active = target;
-  staging = null;
-  state = "ready";
   try {
     previous?.index.close();
   } catch {
+    // The target is still STAGING, so a teardown failure cannot publish it. The
+    // abort also releases a restored target's private VFS and JS block store.
+    try {
+      abortStaging();
+    } catch {
+      // `abortStaging` detaches the target before closing it. A close failure may
+      // affect diagnostics, but it cannot leave the target published or staged.
+    }
     throw fixedWorkerError(
       "worker_crashed",
       "lifecycle",
@@ -324,7 +348,11 @@ function commitBuild(generation: string): BuildResult {
       true,
     );
   }
-  return generationResult(active);
+
+  active = target;
+  staging = null;
+  state = "ready";
+  return result;
 }
 
 /**
@@ -364,12 +392,13 @@ async function exportGeneration(
   }
   const target = active;
 
-  // The image that ships must be the image that passed the gate, so the gate
-  // runs, then the compaction rewrites the file, then the gate runs again on
-  // the artifact that is actually about to be serialized.
+  // The image that ships must be the image that passed the gate. Clean-built
+  // in-memory generations are compacted and rechecked. Block-VFS generations
+  // skip VACUUM because it would ratchet the non-shrinking WASM heap; they are
+  // still rechecked immediately before their JS blocks are exported.
   try {
     target.index.assertIntegrity();
-    target.index.compact();
+    if (target.index.requiresPreExportCompaction) target.index.compact();
     target.index.assertIntegrity();
   } catch {
     throw fixedWorkerError(
@@ -423,6 +452,142 @@ async function exportGeneration(
     plugin_version: PLUGIN_VERSION,
     cache_identity: cacheIdentity,
   };
+}
+
+async function restoreGeneration(
+  request: Extract<WorkerRequest, { operation: "restore_generation" }>,
+): Promise<BuildResult> {
+  requireInitialized();
+  if (!sqlite || declaredChunkingVersion === null || staging || usedGenerations.has(request.generation)) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Requested generation is unavailable.",
+      true,
+    );
+  }
+
+  // Compatibility is checked against independently known running identities
+  // before the candidate bytes are hashed, parsed, copied into blocks, or shown
+  // to SQLite.
+  if (request.cache_identity !== request.expected_cache_identity
+    || request.plugin_id !== PLUGIN_ID) {
+    throw fixedWorkerError(
+      "cache_identity_mismatch",
+      "index",
+      "Cached generation belongs to a different identity.",
+      false,
+    );
+  }
+  if (request.protocol_version !== WORKER_PROTOCOL_VERSION
+    || request.cache_schema_version !== CACHE_SCHEMA_VERSION
+    || request.chunking_version !== declaredChunkingVersion
+    || request.sqlite_version !== "3.53.0"
+    || request.sqlite_wasm_sha256 !== SQLITE_WASM_SHA256
+    || request.rust_wasm_sha256 !== RUST_WASM_SHA256
+    || request.plugin_version !== PLUGIN_VERSION) {
+    throw fixedWorkerError(
+      "cache_version_mismatch",
+      "index",
+      "Cached generation is incompatible with this build.",
+      false,
+    );
+  }
+  if (request.bytes.byteLength > MAX_EXPORT_BLOB_BYTES
+    || request.blob_byte_length > MAX_EXPORT_BLOB_BYTES) {
+    throw fixedWorkerError(
+      "cache_blob_too_large",
+      "protocol",
+      "Cached generation exceeds the restore limit.",
+      false,
+    );
+  }
+  if (request.bytes.byteLength === 0
+    || request.blob_byte_length !== request.bytes.byteLength) {
+    throw fixedWorkerError(
+      "cache_image_invalid",
+      "index",
+      "Cached generation has an invalid length.",
+      false,
+    );
+  }
+
+  if (await sha256Hex(request.bytes) !== request.blob_sha256) {
+    throw fixedWorkerError(
+      "cache_digest_mismatch",
+      "index",
+      "Cached generation failed digest verification.",
+      false,
+    );
+  }
+
+  try {
+    const header = validateSQLiteImage(request.bytes);
+    if (header.wal) throw new CacheImageInvalidError("WAL images require unsupported VFS methods");
+  } catch {
+    throw fixedWorkerError(
+      "cache_image_invalid",
+      "index",
+      "Cached generation is not a valid restorable SQLite image.",
+      false,
+    );
+  }
+
+  try {
+    const index = openRestoredFts5Generation(
+      sqlite,
+      request.bytes,
+      declaredChunkingVersion,
+    );
+    staging = { id: request.generation, index };
+    usedGenerations.add(request.generation);
+    state = "building";
+    try {
+      return publishStaging(staging, false);
+    } catch (error) {
+      if (isWorkerError(error) && error.code === "integrity_failed") {
+        throw fixedWorkerError(
+          "cache_image_invalid",
+          "index",
+          "Cached generation failed its publication integrity gate.",
+          false,
+        );
+      }
+      throw error;
+    }
+  } catch (error) {
+    if (error instanceof CacheVersionMismatchError) {
+      throw fixedWorkerError(
+        "cache_version_mismatch",
+        "index",
+        "Cached generation schema is incompatible with this build.",
+        false,
+      );
+    }
+    if (error instanceof CacheImageInvalidError || error instanceof IndexCapacityError) {
+      throw fixedWorkerError(
+        "cache_image_invalid",
+        "index",
+        "Cached generation failed staged validation.",
+        false,
+      );
+    }
+    if (error instanceof BlockVfsUnavailableError) {
+      throw fixedWorkerError(
+        "internal_error",
+        "sqlite",
+        "Required SQLite restore capability is unavailable.",
+        false,
+      );
+    }
+    if (isWorkerError(error)) throw error;
+    throw fixedWorkerError(
+      "cache_image_invalid",
+      "index",
+      "Cached generation could not be opened safely.",
+      false,
+    );
+  }
 }
 
 function abortBuild(generation: string): BuildResult {
@@ -532,9 +697,12 @@ function requireStaging(generation: string): Generation {
 }
 
 function abortStaging(): void {
-  staging?.index.close();
+  const target = staging;
+  // Detach first so even an injected or runtime close failure cannot leave a
+  // rejected generation visible as retained STAGING state.
   staging = null;
   state = "ready";
+  target?.index.close();
 }
 
 function generationResult(generation: Generation): BuildResult {
@@ -605,6 +773,8 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       return abortBuild(request.generation);
     case "export_generation":
       return exportGeneration(request.generation, request.cache_identity);
+    case "restore_generation":
+      return restoreGeneration(request);
     case "search":
       return search(request.query, request.limit);
     case "status":
@@ -717,6 +887,7 @@ function isOperation(value: unknown): value is WorkerOperation {
     || value === "commit_build"
     || value === "abort_build"
     || value === "export_generation"
+    || value === "restore_generation"
     || value === "search"
     || value === "status"
     || value === "dispose";

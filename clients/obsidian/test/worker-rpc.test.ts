@@ -12,11 +12,13 @@ import { WorkerRpcClient, type WorkerLike } from "../src/worker/rpc-client";
 
 class MockWorker implements WorkerLike {
   readonly posted: WorkerRequest[] = [];
+  readonly transfers: (Transferable[] | undefined)[] = [];
   readonly listeners = new Map<string, Set<(event: never) => void>>();
   terminate = vi.fn();
 
-  postMessage(message: WorkerRequest): void {
+  postMessage(message: WorkerRequest, transfer?: Transferable[]): void {
     this.posted.push(message);
+    this.transfers.push(transfer);
   }
 
   addEventListener(type: "message" | "error" | "messageerror", listener: (event: never) => void): void {
@@ -76,6 +78,28 @@ function exportResult(generation: string, cacheIdentity: string): unknown {
     plugin_id: "kwiry-search",
     plugin_version: "0.1.0",
     cache_identity: cacheIdentity,
+  };
+}
+
+function restoreCommand(generation = "g1") {
+  const identity = "d".repeat(64);
+  return {
+    operation: "restore_generation" as const,
+    generation,
+    bytes: new Uint8Array([1, 2, 3]),
+    blob_byte_length: 3,
+    blob_sha256: "a".repeat(64),
+    digest_verified: false as const,
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: 1,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: "b".repeat(64),
+    rust_wasm_sha256: "c".repeat(64),
+    plugin_id: "kwiry-search",
+    plugin_version: "0.1.0",
+    cache_identity: identity,
+    expected_cache_identity: identity,
   };
 }
 
@@ -207,6 +231,61 @@ describe("WorkerRpcClient", () => {
       generation: "g1",
       cache_identity: identity,
     });
+  });
+
+  it("transfers only the restore image buffer and correlates its generation", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, 1_000);
+    const command = restoreCommand();
+    const buffer = command.bytes.buffer;
+    const pending = client.request(command);
+    expect(worker.transfers[0]).toEqual([buffer]);
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "restore_generation",
+      ok: true,
+      result: { generation: "g1", documents: 1, chunks: 1 },
+    });
+    await expect(pending).resolves.toMatchObject({ generation: "g1" });
+  });
+
+  it.each([
+    ["honours", true, 0],
+    ["drops", false, 3],
+  ])("%s the inbound restore transfer list", async (_name, honourTransfer, remainingBytes) => {
+    const worker = new MockWorker();
+    worker.postMessage = (message, transfer) => {
+      worker.posted.push(honourTransfer
+        ? structuredClone(message, { transfer: transfer as Transferable[] })
+        : structuredClone(message));
+    };
+    const client = new WorkerRpcClient(worker, 1_000);
+    const command = restoreCommand();
+    const pending = client.request(command);
+    expect(command.bytes.byteLength).toBe(remainingBytes);
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "restore_generation",
+      ok: true,
+      result: { generation: "g1", documents: 1, chunks: 1 },
+    });
+    await expect(pending).resolves.toMatchObject({ generation: "g1" });
+  });
+
+  it("poisons the client on a restore result for another generation", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, 1_000);
+    const pending = client.request(restoreCommand("g1"));
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "restore_generation",
+      ok: true,
+      result: { generation: "g2", documents: 1, chunks: 1 },
+    });
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
   });
 
   it("rejects pending work on crashes and all later work", async () => {

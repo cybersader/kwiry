@@ -42,6 +42,7 @@ export type WorkerOperation =
   | "commit_build"
   | "abort_build"
   | "export_generation"
+  | "restore_generation"
   | "search"
   | "status"
   | "dispose";
@@ -59,6 +60,11 @@ export type WorkerErrorCode =
   | "index_building"
   | "index_limit_exceeded"
   | "integrity_failed"
+  | "cache_identity_mismatch"
+  | "cache_version_mismatch"
+  | "cache_digest_mismatch"
+  | "cache_image_invalid"
+  | "cache_blob_too_large"
   | "worker_crashed"
   | "timeout"
   | "disposed"
@@ -89,6 +95,26 @@ export interface SourceInput {
 export interface SourceRemoval {
   vault_id: string;
   path: string;
+}
+
+export interface RestoreGenerationInput {
+  generation: string;
+  bytes: Uint8Array;
+  blob_byte_length: number;
+  blob_sha256: string;
+  /** B6.2 deliberately has not verified this digest; no other value is valid. */
+  digest_verified: false;
+  protocol_version: number;
+  cache_schema_version: number;
+  chunking_version: number;
+  sqlite_version: string;
+  sqlite_wasm_sha256: string;
+  rust_wasm_sha256: string;
+  plugin_id: string;
+  plugin_version: string;
+  cache_identity: string;
+  /** Independently derived for the currently open vault, never copied from the record. */
+  expected_cache_identity: string;
 }
 
 interface RequestBase {
@@ -122,6 +148,7 @@ export type WorkerRequest =
       // passing a path here structurally impossible.
       cache_identity: string;
     })
+  | (RequestBase & RestoreGenerationInput & { operation: "restore_generation" })
   | (RequestBase & {
       operation: "search";
       query: string;
@@ -266,6 +293,8 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
         && isSha256Hex(value.cache_identity)
         ? value as unknown as WorkerRequest
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
+    case "restore_generation":
+      return parseRestoreGenerationRequest(value, base);
     case "add_source_batch":
       return hasExactKeys(value, [...base, "generation", "sources"])
         && isGeneration(value.generation)
@@ -297,6 +326,66 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
         ? value as unknown as WorkerRequest
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
   }
+}
+
+function parseRestoreGenerationRequest(
+  value: Record<string, unknown>,
+  base: readonly string[],
+): WorkerRequest | WorkerError {
+  const keys = [
+    ...base,
+    "generation",
+    "bytes",
+    "blob_byte_length",
+    "blob_sha256",
+    "digest_verified",
+    "protocol_version",
+    "cache_schema_version",
+    "chunking_version",
+    "sqlite_version",
+    "sqlite_wasm_sha256",
+    "rust_wasm_sha256",
+    "plugin_id",
+    "plugin_version",
+    "cache_identity",
+    "expected_cache_identity",
+  ];
+  if (!hasExactKeys(value, keys)
+    || !isGeneration(value.generation)
+    || !(value.bytes instanceof Uint8Array)
+    || !isNonNegativeSafeInteger(value.blob_byte_length)
+    || !isSha256Hex(value.blob_sha256)
+    || value.digest_verified !== false
+    || !isNonNegativeSafeInteger(value.protocol_version)
+    || !isNonNegativeSafeInteger(value.cache_schema_version)
+    || !isNonNegativeSafeInteger(value.chunking_version)
+    || !isBoundedString(value.sqlite_version, 64)
+    || !isSha256Hex(value.sqlite_wasm_sha256)
+    || !isSha256Hex(value.rust_wasm_sha256)
+    || !isBoundedString(value.plugin_id, MAX_PLUGIN_ID_CHARACTERS)
+    || !isBoundedString(value.plugin_version, MAX_PLUGIN_VERSION_CHARACTERS)
+    || !isSha256Hex(value.cache_identity)
+    || !isSha256Hex(value.expected_cache_identity)) {
+    return fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
+  }
+  if (value.bytes.byteLength > MAX_EXPORT_BLOB_BYTES
+    || value.blob_byte_length > MAX_EXPORT_BLOB_BYTES) {
+    return fixedWorkerError(
+      "cache_blob_too_large",
+      "protocol",
+      "Cached generation exceeds the restore limit.",
+      false,
+    );
+  }
+  if (value.bytes.byteLength === 0 || value.blob_byte_length !== value.bytes.byteLength) {
+    return fixedWorkerError(
+      "cache_image_invalid",
+      "protocol",
+      "Cached generation has an invalid length.",
+      false,
+    );
+  }
+  return value as unknown as WorkerRequest;
 }
 
 export function isWorkerResponse(value: unknown): value is WorkerResponse {
@@ -414,6 +503,7 @@ function isResultForOperation(operation: WorkerOperation, value: unknown): boole
     case "apply_source_changes":
     case "commit_build":
     case "abort_build":
+    case "restore_generation":
       return isBuildResult(value);
     case "export_generation":
       return isExportGenerationResult(value);
@@ -589,6 +679,11 @@ function isWorkerError(value: unknown): value is WorkerError {
     "index_building",
     "index_limit_exceeded",
     "integrity_failed",
+    "cache_identity_mismatch",
+    "cache_version_mismatch",
+    "cache_digest_mismatch",
+    "cache_image_invalid",
+    "cache_blob_too_large",
     "worker_crashed",
     "timeout",
     "disposed",
@@ -605,6 +700,7 @@ function isWorkerOperation(value: unknown): value is WorkerOperation {
     || value === "commit_build"
     || value === "abort_build"
     || value === "export_generation"
+    || value === "restore_generation"
     || value === "search"
     || value === "status"
     || value === "dispose";

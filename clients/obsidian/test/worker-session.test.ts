@@ -62,6 +62,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
     case "add_source_batch":
     case "commit_build":
     case "abort_build":
+    case "restore_generation":
       return { generation: message.generation, documents: 0, chunks: 0 };
     case "apply_source_changes":
       return {
@@ -166,6 +167,55 @@ describe("InPluginWorkerSession", () => {
       generation: "g1",
       cache_identity: identity,
     }]);
+  });
+
+  it("maps a B6.2 unverified hit into the exact restore request", async () => {
+    const worker = new MockWorker();
+    const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 1_000);
+    const identity = "8".repeat(64);
+    const bytes = new Uint8Array([1, 2, 3]);
+    await expect(session.restoreGeneration({
+      kind: "hit",
+      record: {
+        generationId: "g1",
+        byteLength: 3,
+        sha256: "a".repeat(64),
+        identity: {
+          protocol_version: WORKER_PROTOCOL_VERSION,
+          cache_schema_version: CACHE_SCHEMA_VERSION,
+          chunking_version: 1,
+          sqlite_version: "3.53.0",
+          sqlite_wasm_sha256: "b".repeat(64),
+          rust_wasm_sha256: "c".repeat(64),
+          plugin_id: "kwiry-search",
+          plugin_version: "0.1.0",
+          cache_identity: identity,
+        },
+      },
+      bytes,
+      digestVerified: false,
+    }, identity)).resolves.toMatchObject({ generation: "g1" });
+
+    expect(worker.posted[0]).toEqual({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "restore_generation",
+      generation: "g1",
+      bytes,
+      blob_byte_length: 3,
+      blob_sha256: "a".repeat(64),
+      digest_verified: false,
+      protocol_version: WORKER_PROTOCOL_VERSION,
+      cache_schema_version: CACHE_SCHEMA_VERSION,
+      chunking_version: 1,
+      sqlite_version: "3.53.0",
+      sqlite_wasm_sha256: "b".repeat(64),
+      rust_wasm_sha256: "c".repeat(64),
+      plugin_id: "kwiry-search",
+      plugin_version: "0.1.0",
+      cache_identity: identity,
+      expected_cache_identity: identity,
+    });
   });
 
   it("terminates its Worker and revokes the Blob URL exactly once", async () => {

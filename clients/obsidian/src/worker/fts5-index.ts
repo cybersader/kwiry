@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import { openPlainBlockVfs, type BlockVfsHandle } from "./block-vfs";
 import { CACHE_SCHEMA_VERSION, MAX_EXPORT_BLOB_BYTES } from "./protocol";
-import type { SourceRemoval, WorkerSearchHit } from "./protocol";
+import type { SourceRemoval, WorkerFrontmatter, WorkerSearchHit } from "./protocol";
 import { bindMetadataProbe, bindSearchPlan } from "./query-binder";
 import type {
   MatchPlan,
@@ -58,6 +59,20 @@ export class IndexIntegrityError extends Error {
   }
 }
 
+export class CacheImageInvalidError extends Error {
+  constructor(message = "cache image is invalid") {
+    super(message);
+    this.name = "CacheImageInvalidError";
+  }
+}
+
+export class CacheVersionMismatchError extends Error {
+  constructor() {
+    super("cache schema version does not match this build");
+    this.name = "CacheVersionMismatchError";
+  }
+}
+
 export interface SQLiteDatabase {
   readonly filename: string;
   readonly pointer: unknown | undefined;
@@ -68,10 +83,32 @@ export interface SQLiteDatabase {
   close(): void;
 }
 
+export interface SQLiteStruct {
+  readonly pointer: number;
+  dispose(): void;
+  $iVersion?: number;
+  $szOsFile?: number;
+  $mxPathname?: number;
+  $pMethods?: number;
+  $xRandomness?: number;
+  $xSleep?: number;
+}
+
+interface SQLiteStructConstructor {
+  new (pointer?: number): SQLiteStruct;
+}
+
+interface SQLiteFileConstructor extends SQLiteStructConstructor {
+  readonly structInfo: { readonly sizeof: number };
+}
+
+interface SQLiteDatabaseConstructor {
+  new (filename: string, flags: string): SQLiteDatabase;
+  new (options: { filename: string; flags: string }): SQLiteDatabase;
+}
+
 export interface SQLiteApi {
-  oo1: {
-    DB: new (filename: string, flags: string) => SQLiteDatabase;
-  };
+  oo1: { DB: SQLiteDatabaseConstructor };
   capi: {
     /**
      * Serializes the database into a fresh JS-heap buffer copied out of WASM
@@ -79,6 +116,46 @@ export interface SQLiteApi {
      * transferred without disturbing the serving generation.
      */
     sqlite3_js_db_export(db: unknown, schema?: string): Uint8Array;
+    sqlite3_vfs_find(name: string | null): number;
+    sqlite3_vfs_unregister(pointer: number): number;
+    sqlite3_vfs: SQLiteStructConstructor;
+    sqlite3_io_methods: SQLiteStructConstructor;
+    sqlite3_file: SQLiteFileConstructor;
+    SQLITE_OK: number;
+    SQLITE_IOERR: number;
+    SQLITE_IOERR_READ: number;
+    SQLITE_IOERR_SHORT_READ: number;
+    SQLITE_IOERR_WRITE: number;
+    SQLITE_IOERR_TRUNCATE: number;
+    SQLITE_IOERR_FSYNC: number;
+    SQLITE_IOERR_FSTAT: number;
+    SQLITE_IOERR_LOCK: number;
+    SQLITE_IOERR_UNLOCK: number;
+    SQLITE_IOERR_CHECKRESERVEDLOCK: number;
+    SQLITE_IOERR_DELETE: number;
+    SQLITE_IOERR_ACCESS: number;
+    SQLITE_NOTFOUND: number;
+    SQLITE_CANTOPEN: number;
+    SQLITE_OPEN_CREATE: number;
+    SQLITE_OPEN_DELETEONCLOSE: number;
+    SQLITE_IOCAP_ATOMIC: number;
+    SQLITE_IOCAP_SAFE_APPEND: number;
+    SQLITE_IOCAP_SEQUENTIAL: number;
+    SQLITE_IOCAP_POWERSAFE_OVERWRITE: number;
+  };
+  wasm: {
+    readonly memory: WebAssembly.Memory;
+    heap8u(): Uint8Array;
+    cstrToJs(pointer: number): string | null;
+    cstrncpy(target: number, source: number, maximum: number): number;
+    poke(pointer: number, value: number, type: "i32" | "double"): void;
+    poke64(pointer: number, value: number | bigint): void;
+  };
+  vfs: {
+    installVfs(options: {
+      io: { struct: SQLiteStruct; methods: object };
+      vfs: { struct: SQLiteStruct; methods: object; name: string; asDefault: boolean };
+    }): void;
   };
 }
 
@@ -156,6 +233,30 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
   tokenize='unicode61 remove_diacritics 2'
 );
 `;
+
+interface ExpectedSchemaObject {
+  type: "index" | "table";
+  name: string;
+  table: string;
+  sql: string | null;
+}
+
+// Exact objects emitted by the pinned 3.53.0 runtime for SCHEMA_SQL. Comparing
+// names alone would accept a semantically different FTS declaration or an
+// added trigger/table; comparing normalized SQL keeps the check fail-able.
+const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
+  { type: "index", name: "chunks_by_source", table: "chunks", sql: "CREATE INDEX chunks_by_source ON chunks(source_key)" },
+  { type: "index", name: "sqlite_autoindex_chunks_1", table: "chunks", sql: null },
+  { type: "index", name: "sqlite_autoindex_sources_1", table: "sources", sql: null },
+  { type: "index", name: "sqlite_autoindex_sources_2", table: "sources", sql: null },
+  { type: "table", name: "chunks", table: "chunks", sql: "CREATE TABLE chunks (rowid INTEGER PRIMARY KEY,source_key TEXT NOT NULL,chunk_id TEXT NOT NULL UNIQUE,vault_id TEXT NOT NULL,path TEXT NOT NULL,heading_path_json TEXT NOT NULL,frontmatter_json TEXT NOT NULL)" },
+  { type: "table", name: "chunks_fts", table: "chunks_fts", sql: "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename,stem,aliases,title,heading_text,path_text,tags,content,identifiers,content='',contentless_delete=1,tokenize='unicode61 remove_diacritics 2')" },
+  { type: "table", name: "chunks_fts_config", table: "chunks_fts_config", sql: "CREATE TABLE 'chunks_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID" },
+  { type: "table", name: "chunks_fts_data", table: "chunks_fts_data", sql: "CREATE TABLE 'chunks_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
+  { type: "table", name: "chunks_fts_docsize", table: "chunks_fts_docsize", sql: "CREATE TABLE 'chunks_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)" },
+  { type: "table", name: "chunks_fts_idx", table: "chunks_fts_idx", sql: "CREATE TABLE 'chunks_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
+  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),indexed_bytes INTEGER NOT NULL CHECK(indexed_bytes >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND indexed_bytes = 0)),UNIQUE(vault_id, path))" },
+];
 
 const SOURCE_COLUMNS_SQL = `
 source_key, vault_id, path, outcome, content_hash, byte_length,
@@ -236,12 +337,26 @@ SELECT
   (SELECT count(*) FROM sources) AS sources,
   (SELECT count(*) FROM sources WHERE outcome = 'indexed') AS indexed_sources,
   (SELECT COALESCE(SUM(chunk_count), 0) FROM sources) AS source_chunks,
+  (SELECT COALESCE(SUM(indexed_bytes), 0) FROM sources) AS indexed_bytes,
   (SELECT count(*) FROM chunks c LEFT JOIN sources s ON s.source_key = c.source_key
      WHERE s.source_key IS NULL) AS orphan_chunks,
   (SELECT count(*) FROM sources s WHERE s.outcome = 'skipped'
      AND EXISTS(SELECT 1 FROM chunks c WHERE c.source_key = s.source_key))
-    AS skipped_with_chunks
+    AS skipped_with_chunks,
+  (SELECT count(*) FROM sources s
+     WHERE s.chunk_count <> (SELECT count(*) FROM chunks c WHERE c.source_key = s.source_key))
+    AS source_tally_mismatches
 `;
+
+interface ExistingGenerationState {
+  documents: number;
+  chunks: number;
+  sources: number;
+  indexedBytes: number;
+  chunkingVersion: number;
+  exportImage: () => Uint8Array;
+  close: () => void;
+}
 
 export class Fts5GenerationIndex {
   private documentCount = 0;
@@ -251,14 +366,47 @@ export class Fts5GenerationIndex {
   private observedChunkingVersion: number | null = null;
   private closed = false;
   private readonly limits: ResolvedFts5IndexLimits;
+  private readonly exportStrategy: (api: SQLiteApi) => Uint8Array;
+  private readonly closeStrategy: () => void;
+  private readonly compactOnExport: boolean;
 
   constructor(
     private readonly db: SQLiteDatabase,
     limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
+    existing?: ExistingGenerationState,
   ) {
-    if (db.filename !== ":memory:") throw new Error("FTS5 generation is not in memory");
     this.limits = resolveIndexLimits(limits);
-    db.exec(SCHEMA_SQL);
+    if (existing === undefined) {
+      if (db.filename !== ":memory:") throw new Error("FTS5 generation is not in memory");
+      db.exec(SCHEMA_SQL);
+      this.exportStrategy = (api) => api.capi.sqlite3_js_db_export(this.db.pointer);
+      this.closeStrategy = () => this.db.close();
+      this.compactOnExport = true;
+      return;
+    }
+
+    requireProjectedCounts(
+      existing.documents,
+      existing.chunks,
+      existing.indexedBytes,
+      existing.sources,
+      this.limits,
+    );
+    this.documentCount = existing.documents;
+    this.chunkCount = existing.chunks;
+    this.corpusBytes = existing.indexedBytes;
+    this.sourceCount = existing.sources;
+    this.observedChunkingVersion = existing.chunks === 0 ? null : existing.chunkingVersion;
+    this.exportStrategy = () => existing.exportImage();
+    this.closeStrategy = existing.close;
+    // The selected mechanism exports directly from JS blocks. Running VACUUM
+    // before that export grows the non-shrinking WASM heap and defeats the
+    // mechanism; restored images are already compact at the point they enter.
+    this.compactOnExport = false;
+  }
+
+  get requiresPreExportCompaction(): boolean {
+    return this.compactOnExport;
   }
 
   /** Indexed sources only. Skipped sources are recorded but are not documents. */
@@ -398,7 +546,7 @@ export class Fts5GenerationIndex {
       // inside the transaction so a divergence rolls the whole batch back
       // instead of publishing a half-applied change.
       if (verifyIntegrity) {
-        this.runReconciliationCheck(nextChunks, nextDocuments, nextSources);
+        this.runReconciliationCheck(nextChunks, nextDocuments, nextSources, nextBytes);
       }
     });
 
@@ -425,7 +573,12 @@ export class Fts5GenerationIndex {
     this.requireOpen();
     try {
       this.runIntegrityCheck();
-      this.runReconciliationCheck(this.chunkCount, this.documentCount, this.sourceCount);
+      this.runReconciliationCheck(
+        this.chunkCount,
+        this.documentCount,
+        this.sourceCount,
+        this.corpusBytes,
+      );
     } catch {
       throw new Error("FTS5 integrity check failed");
     }
@@ -438,7 +591,7 @@ export class Fts5GenerationIndex {
    */
   exportImage(api: SQLiteApi): Uint8Array {
     this.requireOpen();
-    const image = api.capi.sqlite3_js_db_export(this.db.pointer);
+    const image = this.exportStrategy(api);
     if (!(image instanceof Uint8Array) || image.byteLength === 0) {
       throw new IndexIntegrityError("FTS5 generation produced no exportable image");
     }
@@ -461,7 +614,7 @@ export class Fts5GenerationIndex {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.db.close();
+    this.closeStrategy();
     if (this.db.pointer !== undefined) throw new Error("SQLite database remained open");
     this.documentCount = 0;
     this.corpusBytes = 0;
@@ -500,6 +653,7 @@ export class Fts5GenerationIndex {
     expectedChunks: number,
     expectedDocuments: number,
     expectedSources: number,
+    expectedIndexedBytes: number,
   ): void {
     const rows = this.db.selectObjects(RECONCILE_SQL);
     if (rows.length !== 1) {
@@ -513,8 +667,10 @@ export class Fts5GenerationIndex {
       || !isNonNegativeSafeInteger(row.sources)
       || !isNonNegativeSafeInteger(row.indexed_sources)
       || !isNonNegativeSafeInteger(row.source_chunks)
+      || !isNonNegativeSafeInteger(row.indexed_bytes)
       || !isNonNegativeSafeInteger(row.orphan_chunks)
-      || !isNonNegativeSafeInteger(row.skipped_with_chunks)) {
+      || !isNonNegativeSafeInteger(row.skipped_with_chunks)
+      || !isNonNegativeSafeInteger(row.source_tally_mismatches)) {
       throw new IndexIntegrityError("FTS5 reconciliation query returned invalid counts");
     }
     if (row.orphan_fts !== 0
@@ -523,12 +679,14 @@ export class Fts5GenerationIndex {
       || row.chunks !== expectedChunks
       || row.sources !== expectedSources
       || row.indexed_sources !== expectedDocuments
+      || row.indexed_bytes !== expectedIndexedBytes
       // Per-source tallies must sum to the real chunk count, no chunk may
       // outlive its source row, and a skipped source may never own chunks.
       // These are what make the stored `chunk_count` trustworthy for a diff.
       || row.source_chunks !== row.chunks
       || row.orphan_chunks !== 0
-      || row.skipped_with_chunks !== 0) {
+      || row.skipped_with_chunks !== 0
+      || row.source_tally_mismatches !== 0) {
       throw new IndexIntegrityError("FTS5 index and chunk metadata disagree");
     }
   }
@@ -543,6 +701,172 @@ export function openFts5Generation(
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
 ): Fts5GenerationIndex {
   return new Fts5GenerationIndex(new sqlite.oo1.DB(":memory:", "c"), limits);
+}
+
+/**
+ * Opens an already-digest-verified image through the plain-block VFS, validates
+ * every stored fact before hydrating counters, and returns an index which owns
+ * the VFS registration and block store for its full lifetime.
+ */
+export function openRestoredFts5Generation(
+  sqlite: SQLiteApi,
+  bytes: Uint8Array,
+  chunkingVersion: number,
+  limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
+): Fts5GenerationIndex {
+  let handle: BlockVfsHandle | null = null;
+  try {
+    handle = openPlainBlockVfs(sqlite, bytes);
+    const db = handle.db;
+    const storedVersion = Number(db.selectValue("PRAGMA user_version"));
+    if (storedVersion !== CACHE_SCHEMA_VERSION) throw new CacheVersionMismatchError();
+    validateExactSchema(db);
+    let integrity: unknown;
+    try {
+      integrity = db.selectValue("PRAGMA integrity_check");
+    } catch {
+      throw new CacheImageInvalidError("cache image failed SQLite integrity validation");
+    }
+    if (integrity !== "ok") {
+      throw new CacheImageInvalidError("cache image failed SQLite integrity validation");
+    }
+    try {
+      db.exec("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)");
+    } catch {
+      throw new CacheImageInvalidError("cache image failed FTS5 integrity validation");
+    }
+    const inventory = readRestoredInventory(db, limits);
+    const ownedHandle = handle;
+    const index = new Fts5GenerationIndex(db, limits, {
+      ...inventory,
+      chunkingVersion,
+      exportImage: () => ownedHandle.exportImage(),
+      close: () => ownedHandle.close(),
+    });
+    try {
+      index.assertIntegrity();
+    } catch {
+      index.close();
+      throw new CacheImageInvalidError("cache image metadata and postings disagree");
+    }
+    handle = null;
+    return index;
+  } catch (error) {
+    handle?.close();
+    if (error instanceof CacheVersionMismatchError
+      || error instanceof CacheImageInvalidError
+      || error instanceof IndexCapacityError) {
+      throw error;
+    }
+    throw error;
+  }
+}
+
+function validateExactSchema(db: SQLiteDatabase): void {
+  const rows = db.selectObjects(`
+    SELECT type, name, tbl_name, sql
+    FROM sqlite_schema
+    WHERE type IN ('table', 'index', 'view', 'trigger')
+    ORDER BY type, name
+  `);
+  if (rows.length !== EXPECTED_SCHEMA_OBJECTS.length) {
+    throw new CacheImageInvalidError("cache image schema object set differs");
+  }
+  for (let index = 0; index < EXPECTED_SCHEMA_OBJECTS.length; index += 1) {
+    const actual = rows[index];
+    const expected = EXPECTED_SCHEMA_OBJECTS[index];
+    if (!actual
+      || !expected
+      || actual.type !== expected.type
+      || actual.name !== expected.name
+      || actual.tbl_name !== expected.table
+      || !(actual.sql === null || typeof actual.sql === "string")
+      || normalizeSchemaSql(actual.sql) !== normalizeSchemaSql(expected.sql)) {
+      throw new CacheImageInvalidError("cache image schema object differs");
+    }
+  }
+}
+
+function normalizeSchemaSql(value: string | null): string | null {
+  return value === null ? null : value.replace(/\s+/gu, " ").replace(/\s*([(),=])\s*/gu, "$1").trim();
+}
+
+function readRestoredInventory(
+  db: SQLiteDatabase,
+  limits: Fts5IndexLimits,
+): {
+  documents: number;
+  chunks: number;
+  sources: number;
+  indexedBytes: number;
+} {
+  const resolvedLimits = resolveIndexLimits(limits);
+  const sourceRows = db.selectObjects(
+    `SELECT ${SOURCE_COLUMNS_SQL} FROM sources ORDER BY source_key LIMIT ?`,
+    [onePastLimit(resolvedLimits.maxSources)],
+  );
+  if (sourceRows.length > resolvedLimits.maxSources) throw new IndexCapacityError();
+
+  let documents = 0;
+  let indexedBytes = 0;
+  const sourcesByKey = new Map<string, StoredSource>();
+  for (const row of sourceRows) {
+    let source: StoredSource | null;
+    try {
+      source = parseStoredSource([row]);
+    } catch {
+      throw new CacheImageInvalidError("cache source inventory is invalid");
+    }
+    if (source === null) throw new CacheImageInvalidError("cache source inventory is invalid");
+    sourcesByKey.set(source.source_key, source);
+    if (source.outcome === "indexed") documents += 1;
+    indexedBytes = sumSafe([indexedBytes, source.indexed_bytes]);
+  }
+
+  // Do not count and trust chunk rows. Read at most one beyond the configured
+  // ceiling, then validate every metadata field before any restored generation
+  // can reach the publication barrier.
+  const chunkRows = db.selectObjects(`
+    SELECT source_key, chunk_id, vault_id, path, heading_path_json, frontmatter_json
+    FROM chunks
+    ORDER BY rowid
+    LIMIT ?
+  `, [onePastLimit(resolvedLimits.maxChunks)]);
+  if (chunkRows.length > resolvedLimits.maxChunks) throw new IndexCapacityError();
+  for (const row of chunkRows) validateRestoredChunk(row, sourcesByKey);
+
+  return {
+    documents,
+    chunks: chunkRows.length,
+    sources: sourceRows.length,
+    indexedBytes,
+  };
+}
+
+function validateRestoredChunk(
+  row: Record<string, unknown>,
+  sourcesByKey: ReadonlyMap<string, StoredSource>,
+): void {
+  if (!isBoundedString(row.source_key, 128)
+    || !isBoundedString(row.chunk_id, 128)
+    || !isBoundedString(row.vault_id, 1_024)
+    || row.vault_id.trim().length === 0
+    || !isNormalizedVaultRelativePath(row.path)
+    || parseHeadingPathJson(row.heading_path_json) === null
+    || parseFrontmatterJson(row.frontmatter_json) === null) {
+    throw new CacheImageInvalidError("cache chunk inventory is invalid");
+  }
+  const source = sourcesByKey.get(row.source_key);
+  if (!source
+    || source.outcome !== "indexed"
+    || row.vault_id !== source.vault_id
+    || row.path !== source.path) {
+    throw new CacheImageInvalidError("cache chunk identity does not match its source");
+  }
+}
+
+function onePastLimit(limit: number): number {
+  return limit === Number.MAX_SAFE_INTEGER ? limit : limit + 1;
 }
 
 interface ProjectedChunk {
@@ -706,9 +1030,11 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
   if (rows.length !== 1) throw new Error("stored source identity is ambiguous");
   const row = rows[0];
   if (!row
-    || typeof row.source_key !== "string"
+    || !isBoundedString(row.source_key, 128)
     || typeof row.vault_id !== "string"
-    || typeof row.path !== "string"
+    || row.vault_id.trim().length < 1
+    || row.vault_id.length > 1_024
+    || !isNormalizedVaultRelativePath(row.path)
     || (row.outcome !== "indexed" && row.outcome !== "skipped")
     || !(row.content_hash === null
       || (typeof row.content_hash === "string"
@@ -789,23 +1115,75 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function isNormalizedVaultRelativePath(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 4_096
+    && !value.startsWith("/")
+    && !value.endsWith("/")
+    && !value.includes("\\")
+    && !value.includes("\0")
+    && value.split("/").every((component) => (
+      component.length > 0 && component !== "." && component !== ".."
+    ));
+}
+
+function isBoundedString(value: unknown, maximum: number, allowEmpty = false): value is string {
+  return typeof value === "string"
+    && value.length <= maximum
+    && (allowEmpty || value.length > 0);
+}
+
+function parseHeadingPathJson(value: unknown): string[] | null {
+  if (typeof value !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  return Array.isArray(parsed)
+    && parsed.length <= 64
+    && parsed.every((heading) => isBoundedString(heading, 1_024))
+    ? parsed
+    : null;
+}
+
+function parseFrontmatterJson(value: unknown): WorkerFrontmatter | null {
+  if (typeof value !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const allowed = ["title", "description", "tags", "status", "date"];
+  if (Object.keys(record).some((key) => !allowed.includes(key))) return null;
+  for (const key of ["title", "description", "status", "date"] as const) {
+    if (record[key] !== undefined && !isBoundedString(record[key], 1_024, true)) return null;
+  }
+  if (record.tags !== undefined
+    && (!Array.isArray(record.tags)
+      || record.tags.length > 256
+      || !record.tags.every((tag) => isBoundedString(tag, 1_024, true)))) {
+    return null;
+  }
+  return record as WorkerFrontmatter;
+}
+
 function parseSearchRow(row: Record<string, unknown>): WorkerSearchHit {
-  if (typeof row.chunk_id !== "string"
-    || typeof row.vault_id !== "string"
-    || typeof row.path !== "string"
-    || typeof row.heading_path_json !== "string"
-    || typeof row.frontmatter_json !== "string"
+  const headingPath = parseHeadingPathJson(row.heading_path_json);
+  const frontmatter = parseFrontmatterJson(row.frontmatter_json);
+  if (!isBoundedString(row.chunk_id, 128)
+    || !isBoundedString(row.vault_id, 1_024)
+    || row.vault_id.trim().length === 0
+    || !isNormalizedVaultRelativePath(row.path)
+    || headingPath === null
+    || frontmatter === null
     || typeof row.score !== "number"
     || !Number.isFinite(row.score)) {
-    throw new Error("SQLite returned an invalid search row");
-  }
-  const headingPath = JSON.parse(row.heading_path_json) as unknown;
-  const frontmatter = JSON.parse(row.frontmatter_json) as unknown;
-  if (!Array.isArray(headingPath)
-    || !headingPath.every((heading) => typeof heading === "string")
-    || typeof frontmatter !== "object"
-    || frontmatter === null
-    || Array.isArray(frontmatter)) {
     throw new Error("SQLite returned invalid stored metadata");
   }
   return {
@@ -819,5 +1197,5 @@ function parseSearchRow(row: Record<string, unknown>): WorkerSearchHit {
     // by hydrating a bounded window from the authoritative vault file.
     excerpt: "",
     frontmatter,
-  } as WorkerSearchHit;
+  };
 }
