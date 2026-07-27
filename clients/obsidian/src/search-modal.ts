@@ -9,6 +9,7 @@ import { Notice, SuggestModal, TFile } from "obsidian";
 import type { SearchMode } from "./api";
 import type { BackendSearchHit, BackendStatus, SearchBackend } from "./backend";
 import type KwiryPlugin from "./main";
+import { emptyStateMessage } from "./empty-state";
 import { validateOpenResult } from "./open-result";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
 import { SearchSessionController } from "./search-session";
@@ -65,19 +66,34 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     switch (outcome.kind) {
       case "results":
         this.lastErrorCode = null;
+        // A completed search that matched nothing must say so. Without
+        // this, no-matches and no-query-typed render identically blank.
+        this.setEmptyState(
+          outcome.execution.response.hits.length === 0
+            ? emptyStateMessage("no-matches", query)
+            : emptyStateMessage("prompt"),
+        );
         return outcome.execution.response.hits.map((hit) => ({ hit }));
       case "error":
         if (outcome.error.code !== this.lastErrorCode) {
           this.lastErrorCode = outcome.error.code;
           new Notice(`Kwiry: ${outcome.error.safeMessage}`);
         }
+        this.setEmptyState(emptyStateMessage("error"));
         return [];
       case "empty":
         this.lastErrorCode = null;
+        this.setEmptyState(emptyStateMessage("prompt"));
         return [];
       case "stale":
+        // A superseded request must not overwrite the newer request's
+        // message; leave whatever the in-flight search will set.
         return [];
     }
+  }
+
+  private setEmptyState(text: string): void {
+    this.emptyStateText = text;
   }
 
   renderSuggestion(result: ModalResult, el: HTMLElement): void {
