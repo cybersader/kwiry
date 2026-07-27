@@ -8,7 +8,11 @@ import { Worker } from "node:worker_threads";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { buildPlugin } from "../esbuild.config.mjs";
-import { CACHE_SCHEMA_VERSION, isWorkerResponse } from "../src/worker/protocol";
+import {
+  CACHE_SCHEMA_VERSION,
+  WORKER_PROTOCOL_VERSION,
+  isWorkerResponse,
+} from "../src/worker/protocol";
 
 const require = createRequire(import.meta.url);
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
@@ -79,7 +83,7 @@ function request(worker, message, timeoutMs = 30_000) {
     };
     worker.on("message", onMessage);
     worker.on("error", onError);
-    worker.postMessage({ version: 2, ...message });
+    worker.postMessage({ version: WORKER_PROTOCOL_VERSION, ...message });
   });
 }
 
@@ -231,7 +235,7 @@ describe("exported cache generation", () => {
         generation: "g1",
         documents: 1,
         chunks: 1,
-        protocol_version: 2,
+        protocol_version: WORKER_PROTOCOL_VERSION,
         cache_schema_version: CACHE_SCHEMA_VERSION,
         chunking_version: 1,
         sqlite_version: "3.53.0",
@@ -595,6 +599,69 @@ describe("exported cache generation", () => {
       }
 
       await request(worker, { id: 6, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("records an oversized source without bytes and plans metadata-only reconciliation", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [
+          source("alpha.md", "stableterm"),
+          {
+            oversized: true,
+            descriptor: {
+              vault_id: "active-vault",
+              path: "large.md",
+              format: "markdown",
+              byte_length: 10 * 1024 * 1024 + 1,
+              mtime: 2,
+              mtime_nanos: "2000000",
+            },
+          },
+        ],
+      })).resolves.toMatchObject({ ok: true, result: { documents: 1, chunks: 1 } });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+
+      await expect(request(worker, {
+        id: 5,
+        operation: "plan_reconciliation",
+        generation: "g1",
+        vault_id: "active-vault",
+        current_sources: [
+          { path: "alpha.md", byte_length: 10, mtime_nanos: "1000001", indexable: true },
+          {
+            path: "large.md",
+            byte_length: 10 * 1024 * 1024 + 1,
+            mtime_nanos: "2000000",
+            indexable: false,
+          },
+        ],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", unchanged: ["alpha.md", "large.md"], refresh: [], remove: [] },
+      });
+
+      await expect(request(worker, {
+        id: 6,
+        operation: "plan_reconciliation",
+        generation: "g1",
+        vault_id: "active-vault",
+        current_sources: [
+          { path: "alpha.md", byte_length: 10, mtime_nanos: "3000000", indexable: true },
+        ],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", unchanged: [], refresh: ["alpha.md"], remove: ["large.md"] },
+      });
+      await request(worker, { id: 7, operation: "dispose" });
     } finally {
       await worker.terminate();
     }

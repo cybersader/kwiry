@@ -10,6 +10,7 @@ declare module "virtual:kwiry-rust-wasm-bindings" {
   export function initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
   export function abi_identity(): string;
   export function prepare_source(requestJson: string, sourceBytes: Uint8Array): string;
+  export function prepare_oversized_source(requestJson: string): string;
   export function prepare_query(requestJson: string): string;
   export function finalize_query(requestJson: string): string;
 }

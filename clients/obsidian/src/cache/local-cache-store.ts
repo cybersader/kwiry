@@ -45,7 +45,6 @@ import { deriveVaultCacheIdentity } from "./vault-identity";
 import {
   resolveCanonicalVaultPath,
   type VaultLocationIo,
-  type VaultLocationSource,
 } from "./vault-location";
 
 const DIRECTORY_MODE = 0o700;
@@ -80,6 +79,7 @@ export interface CacheFileSystem {
   mkdir(target: string, options: { recursive: true; mode: number }): Promise<void>;
   chmod(target: string, mode: number): Promise<void>;
   lstat(target: string): Promise<CacheFileStats>;
+  realpath(target: string): Promise<string>;
   readdir(target: string): Promise<string[]>;
   open(target: string, flags: string, mode?: number): Promise<CacheFileHandle>;
   rename(from: string, to: string): Promise<void>;
@@ -143,6 +143,7 @@ export function nodeCacheFileSystem(): CacheFileSystem {
         mtimeMs: stats.mtimeMs,
       };
     },
+    realpath: (target) => fsPromises.realpath(target),
     readdir: (target) => fsPromises.readdir(target),
     open: async (target, flags, mode) => {
       const handle = await fsPromises.open(target, flags, mode);
@@ -209,29 +210,33 @@ export async function openLocalCacheStore(
     root = resolution.path;
   }
 
-  // Containment refusal. Reachable in reality — a $HOME inside a vault, or an
-  // XDG_CACHE_HOME pointed at one — and the answer is a refusal, never a
-  // rewrite of the root to something vault-relative.
-  //
-  // Every step here — the fold, the join, and the containment arithmetic — uses
-  // the TARGET platform. Folding for win32 and then comparing with the ambient
-  // POSIX `path.relative` would answer `false` for every backslash-separated
-  // pair, so the win32 refusal would look correct while never firing.
-  const foldedRoot = foldPathForComparison(platform, root);
-  const foldedVault = foldPathForComparison(platform, canonicalVaultPath);
-  const foldedConfig = foldPathForComparison(
+  // First refuse the lexical destination, then resolve the closest existing
+  // ancestor and refuse the projected canonical destination BEFORE mkdir can
+  // follow an XDG/home symlink or a Windows junction into the vault.
+  if (cacheRootTouchesVault(
     platform,
-    resolverFor(platform).join(canonicalVaultPath, options.vaultConfigDirName),
-  );
-  if (isPathWithin(foldedVault, foldedRoot, platform)
-    || isPathWithin(foldedConfig, foldedRoot, platform)
-    || isPathWithin(foldedRoot, foldedVault, platform)) {
+    root,
+    canonicalVaultPath,
+    options.vaultConfigDirName,
+  )) {
+    return { kind: "unavailable", reason: "root_inside_vault" };
+  }
+  const projectedRoot = await projectCanonicalDestination(io, root, platform);
+  if (projectedRoot === null) {
+    return { kind: "unavailable", reason: "root_not_writable" };
+  }
+  if (cacheRootTouchesVault(
+    platform,
+    projectedRoot,
+    canonicalVaultPath,
+    options.vaultConfigDirName,
+  )) {
     return { kind: "unavailable", reason: "root_inside_vault" };
   }
 
   if (platform === "linux") {
     const mountInfo = (options.readMountInfo ?? readLinuxMountInfo)();
-    if (mountInfo !== null && isNetworkMountedPath(root, mountInfo)) {
+    if (mountInfo !== null && isNetworkMountedPath(projectedRoot, mountInfo)) {
       return { kind: "unavailable", reason: "root_not_machine_local" };
     }
   }
@@ -239,11 +244,26 @@ export async function openLocalCacheStore(
   const probe = await probeCacheRoot(io, root, platform, options.randomSuffix ?? randomSuffix);
   if (probe !== null) return { kind: "unavailable", reason: probe };
 
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = await io.realpath(root);
+  } catch {
+    return { kind: "unavailable", reason: "root_probe_failed" };
+  }
+  if (cacheRootTouchesVault(
+    platform,
+    canonicalRoot,
+    canonicalVaultPath,
+    options.vaultConfigDirName,
+  )) {
+    return { kind: "unavailable", reason: "root_inside_vault" };
+  }
+
   const vaultCacheIdentity = deriveVaultCacheIdentity({ platform, canonicalVaultPath });
   const store = new LocalCacheStore({
     io,
     platform,
-    root,
+    root: canonicalRoot,
     vaultCacheIdentity,
     maxBlobBytes: options.maxBlobBytes ?? MAX_CACHE_BLOB_BYTES,
     now: options.now ?? (() => Date.now()),
@@ -264,7 +284,7 @@ export async function openLocalCacheStore(
  * means the composed path has exactly one way to obtain a root.
  */
 export async function openVaultCacheStore(options: {
-  readonly adapter: VaultLocationSource;
+  readonly adapter: unknown;
   readonly vaultConfigDirName: string;
   readonly locationIo?: VaultLocationIo;
   readonly rootInputs?: CacheRootInputs;
@@ -341,9 +361,9 @@ class LocalCacheStore implements CacheStorePort {
       await this.withWriterLock(async () => {
         // Pointer first: an interrupted discard degrades to a clean miss, never
         // to a pointer naming a file that is already gone.
-        await this.removeQuietly(this.pointerPath);
-        await this.removeTreeQuietly(this.generationsDirectory);
-        await this.removeTreeQuietly(this.quarantineDirectory);
+        await this.removeDefinitively(this.pointerPath);
+        await this.removeTreeDefinitively(this.generationsDirectory);
+        await this.removeTreeDefinitively(this.quarantineDirectory);
       });
     });
   }
@@ -380,6 +400,85 @@ class LocalCacheStore implements CacheStorePort {
     if (this.disposed) throw new CacheStoreError("disposed", "Cache store is disposed.");
   }
 
+  private async assertOwnedParent(target: string): Promise<void> {
+    await this.assertOwnedDirectoryChain(path.dirname(target));
+  }
+
+  private async assertOwnedDirectoryChain(target: string): Promise<void> {
+    const relative = path.relative(this.deps.root, target);
+    if (relative === "" || relative === ".") {
+      await this.assertRealDirectory(this.deps.root);
+      return;
+    }
+    if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+      throw unsafeCachePathError();
+    }
+
+    await this.assertRealDirectory(this.deps.root);
+    let current = this.deps.root;
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      let stats: CacheFileStats;
+      try {
+        stats = await this.deps.io.lstat(current);
+      } catch (error) {
+        if (isNotFoundError(error)) return;
+        throw unsafeCachePathError();
+      }
+      if (!stats.isDirectory() || stats.isSymbolicLink()) throw unsafeCachePathError();
+      await this.assertCanonicalLocation(current);
+    }
+  }
+
+  private async ensureOwnedDirectory(target: string): Promise<void> {
+    const relative = path.relative(this.deps.root, target);
+    if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+      throw unsafeCachePathError();
+    }
+    await this.assertRealDirectory(this.deps.root);
+    let current = this.deps.root;
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      try {
+        const stats = await this.deps.io.lstat(current);
+        if (!stats.isDirectory() || stats.isSymbolicLink()) throw unsafeCachePathError();
+        await this.assertCanonicalLocation(current);
+      } catch (error) {
+        if (!isNotFoundError(error)) {
+          if (error instanceof CacheStoreError) throw error;
+          throw unsafeCachePathError();
+        }
+        await this.assertOwnedDirectoryChain(path.dirname(current));
+        await this.deps.io.mkdir(current, { recursive: true, mode: DIRECTORY_MODE });
+        await this.assertRealDirectory(current);
+      }
+    }
+  }
+
+  private async assertRealDirectory(target: string): Promise<void> {
+    try {
+      const stats = await this.deps.io.lstat(target);
+      if (!stats.isDirectory() || stats.isSymbolicLink()) throw unsafeCachePathError();
+      await this.assertCanonicalLocation(target);
+    } catch (error) {
+      if (error instanceof CacheStoreError) throw error;
+      throw unsafeCachePathError();
+    }
+  }
+
+  private async assertCanonicalLocation(target: string): Promise<void> {
+    let canonical: string;
+    try {
+      canonical = await this.deps.io.realpath(target);
+    } catch {
+      throw unsafeCachePathError();
+    }
+    if (foldPathForComparison(this.deps.platform, canonical)
+      !== foldPathForComparison(this.deps.platform, target)) {
+      throw unsafeCachePathError();
+    }
+  }
+
   private validateWrite(write: CacheWrite): void {
     if (!isGenerationId(write.generationId)) {
       throw new CacheStoreError("invalid_generation_id", "Generation identifier is invalid.");
@@ -399,11 +498,13 @@ class LocalCacheStore implements CacheStorePort {
 
   private async loadLocked(): Promise<CacheLoad> {
     this.requireUsable();
+    await this.assertOwnedParent(this.pointerPath);
     let stats: CacheFileStats;
     try {
       stats = await this.deps.io.lstat(this.pointerPath);
-    } catch {
-      return { kind: "miss", reason: "absent" };
+    } catch (error) {
+      if (isNotFoundError(error)) return { kind: "miss", reason: "absent" };
+      throw error;
     }
     if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_POINTER_BYTES) {
       await this.removeQuietly(this.pointerPath);
@@ -429,11 +530,13 @@ class LocalCacheStore implements CacheStorePort {
     }
 
     const imagePath = path.join(this.generationsDirectory, imageFileName(pointer.generationId));
+    await this.assertOwnedParent(imagePath);
     let imageStats: CacheFileStats;
     try {
       imageStats = await this.deps.io.lstat(imagePath);
-    } catch {
-      return { kind: "miss", reason: "image_absent" };
+    } catch (error) {
+      if (isNotFoundError(error)) return { kind: "miss", reason: "image_absent" };
+      throw error;
     }
     if (imageStats.isSymbolicLink() || !imageStats.isFile()) {
       await this.quarantine(imagePath, pointer.generationId);
@@ -482,10 +585,7 @@ class LocalCacheStore implements CacheStorePort {
     this.requireUsable();
     return this.withWriterLock(async () => {
       const previous = await this.readPointerQuietly();
-      await this.deps.io.mkdir(this.generationsDirectory, {
-        recursive: true,
-        mode: DIRECTORY_MODE,
-      });
+      await this.ensureOwnedDirectory(this.generationsDirectory);
       await this.applyDirectoryMode(this.generationsDirectory);
       await this.removeTreeQuietly(this.quarantineDirectory);
 
@@ -498,6 +598,8 @@ class LocalCacheStore implements CacheStorePort {
         // (1) image data durable, then (2) the rename that names it durable,
         // before the pointer is written at all.
         await this.writeFileDurably(imageTemp, write.bytes);
+        await this.assertOwnedParent(imageTemp);
+        await this.assertOwnedParent(imagePath);
         await this.deps.io.rename(imageTemp, imagePath);
         await this.syncDirectory(this.generationsDirectory);
 
@@ -522,6 +624,8 @@ class LocalCacheStore implements CacheStorePort {
         }
         await this.writeFileDurably(pointerTemp, encoded);
         // (3) The commit point. Everything it names is already durable.
+        await this.assertOwnedParent(pointerTemp);
+        await this.assertOwnedParent(this.pointerPath);
         await this.deps.io.rename(pointerTemp, this.pointerPath);
         await this.syncDirectory(this.vaultDirectory, true);
       } catch (error) {
@@ -544,6 +648,7 @@ class LocalCacheStore implements CacheStorePort {
   }
 
   private async writeFileDurably(target: string, bytes: Uint8Array): Promise<void> {
+    await this.assertOwnedParent(target);
     const handle = await this.deps.io.open(target, "wx", FILE_MODE);
     try {
       await handle.write(bytes);
@@ -567,6 +672,7 @@ class LocalCacheStore implements CacheStorePort {
    */
   private async syncDirectory(target: string, optional = false): Promise<void> {
     try {
+      await this.assertRealDirectory(target);
       const handle = await this.deps.io.open(target, "r");
       try {
         await handle.sync();
@@ -574,13 +680,14 @@ class LocalCacheStore implements CacheStorePort {
         await handle.close();
       }
     } catch (error) {
+      if (error instanceof CacheStoreError && error.code === "unsafe_path") throw error;
       if (optional || this.deps.platform === "win32") return;
       throw error;
     }
   }
 
   private async withWriterLock<T>(operation: () => Promise<T>): Promise<T> {
-    await this.deps.io.mkdir(this.vaultDirectory, { recursive: true, mode: DIRECTORY_MODE });
+    await this.ensureOwnedDirectory(this.vaultDirectory);
     await this.applyDirectoryMode(this.vaultDirectory);
     await this.acquireLock();
     this.holdsLock = true;
@@ -598,7 +705,7 @@ class LocalCacheStore implements CacheStorePort {
    */
   private async tryWithWriterLock(operation: () => Promise<void>): Promise<boolean> {
     try {
-      await this.deps.io.mkdir(this.vaultDirectory, { recursive: true, mode: DIRECTORY_MODE });
+      await this.ensureOwnedDirectory(this.vaultDirectory);
       await this.acquireLock();
     } catch {
       return false;
@@ -636,6 +743,7 @@ class LocalCacheStore implements CacheStorePort {
 
   private async tryCreateLock(): Promise<boolean> {
     try {
+      await this.assertOwnedParent(this.lockPath);
       const handle = await this.deps.io.open(this.lockPath, "wx", FILE_MODE);
       try {
         await handle.write(new TextEncoder().encode(
@@ -726,15 +834,15 @@ class LocalCacheStore implements CacheStorePort {
       if (pointer !== null && pointer.generationId !== generationId) return;
       await this.removeQuietly(this.pointerPath);
       try {
-        await this.deps.io.rm(this.quarantineDirectory, { recursive: true, force: true });
-        await this.deps.io.mkdir(this.quarantineDirectory, {
-          recursive: true,
-          mode: DIRECTORY_MODE,
-        });
-        await this.deps.io.rename(
-          imagePath,
-          path.join(this.quarantineDirectory, `${generationId}-${this.deps.now()}.kwc`),
+        await this.removeTreeQuietly(this.quarantineDirectory);
+        await this.ensureOwnedDirectory(this.quarantineDirectory);
+        const quarantinedPath = path.join(
+          this.quarantineDirectory,
+          `${generationId}-${this.deps.now()}.kwc`,
         );
+        await this.assertOwnedParent(imagePath);
+        await this.assertOwnedParent(quarantinedPath);
+        await this.deps.io.rename(imagePath, quarantinedPath);
       } catch {
         await this.removeQuietly(imagePath);
       }
@@ -771,6 +879,7 @@ class LocalCacheStore implements CacheStorePort {
     try {
       // mkdir's mode is masked by the umask; chmod is not, so owner-only
       // permissions are applied explicitly rather than hoped for.
+      await this.assertRealDirectory(target);
       await this.deps.io.chmod(target, DIRECTORY_MODE);
     } catch {
       if (this.deps.platform !== "win32") throw new CacheStoreError(
@@ -780,7 +889,28 @@ class LocalCacheStore implements CacheStorePort {
     }
   }
 
+  private async removeDefinitively(target: string): Promise<void> {
+    await this.assertOwnedParent(target);
+    try {
+      await this.deps.io.unlink(target);
+    } catch (error) {
+      if (isNotFoundError(error)) return;
+      throw new CacheStoreError("discard_failed", "Cache data could not be discarded.");
+    }
+  }
+
+  private async removeTreeDefinitively(target: string): Promise<void> {
+    await this.assertOwnedDirectoryChain(target);
+    try {
+      await this.deps.io.rm(target, { recursive: true, force: true });
+    } catch (error) {
+      if (isNotFoundError(error)) return;
+      throw new CacheStoreError("discard_failed", "Cache data could not be discarded.");
+    }
+  }
+
   private async removeQuietly(target: string): Promise<void> {
+    await this.assertOwnedParent(target);
     try {
       await this.deps.io.unlink(target);
     } catch {
@@ -789,11 +919,59 @@ class LocalCacheStore implements CacheStorePort {
   }
 
   private async removeTreeQuietly(target: string): Promise<void> {
+    await this.assertOwnedDirectoryChain(target);
     try {
       await this.deps.io.rm(target, { recursive: true, force: true });
     } catch {
       // Absent is the desired state.
     }
+  }
+}
+
+function cacheRootTouchesVault(
+  platform: NodeJS.Platform,
+  root: string,
+  canonicalVaultPath: string,
+  vaultConfigDirName: string,
+): boolean {
+  // Every step uses the TARGET platform. Mixing win32 folding with ambient
+  // POSIX path arithmetic makes a Windows containment test pass without ever
+  // exercising the refusal.
+  const foldedRoot = foldPathForComparison(platform, root);
+  const foldedVault = foldPathForComparison(platform, canonicalVaultPath);
+  const foldedConfig = foldPathForComparison(
+    platform,
+    resolverFor(platform).join(canonicalVaultPath, vaultConfigDirName),
+  );
+  return isPathWithin(foldedVault, foldedRoot, platform)
+    || isPathWithin(foldedConfig, foldedRoot, platform)
+    || isPathWithin(foldedRoot, foldedVault, platform);
+}
+
+/**
+ * Resolves the nearest existing ancestor without creating anything, then
+ * projects the missing suffix through that canonical location. This catches a
+ * symlink/junction anywhere above the requested root before the first mkdir.
+ */
+async function projectCanonicalDestination(
+  io: CacheFileSystem,
+  target: string,
+  platform: NodeJS.Platform,
+): Promise<string | null> {
+  const resolver = resolverFor(platform);
+  let ancestor = resolver.normalize(target);
+  for (;;) {
+    try {
+      await io.lstat(ancestor);
+      const canonicalAncestor = await io.realpath(ancestor);
+      const suffix = resolver.relative(ancestor, target);
+      return resolver.resolve(canonicalAncestor, suffix);
+    } catch (error) {
+      if (!isNotFoundError(error)) return null;
+    }
+    const parent = resolver.dirname(ancestor);
+    if (parent === ancestor) return null;
+    ancestor = parent;
   }
 }
 
@@ -883,6 +1061,20 @@ function readLinuxMountInfo(): string | null {
   } catch {
     return null;
   }
+}
+
+function unsafeCachePathError(): CacheStoreError {
+  return new CacheStoreError(
+    "unsafe_path",
+    "Cache path contains a symlink, junction, or non-directory component.",
+  );
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "ENOENT";
 }
 
 function randomSuffix(): string {

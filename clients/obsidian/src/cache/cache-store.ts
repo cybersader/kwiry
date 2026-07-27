@@ -118,6 +118,8 @@ export type CacheStoreErrorCode =
   | "invalid_identity"
   | "invalid_blob"
   | "write_failed"
+  | "discard_failed"
+  | "unsafe_path"
   | "locked"
   | "disposed";
 

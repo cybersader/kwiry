@@ -3,7 +3,8 @@
 use kwiry_core::{
     CHUNKING_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_FILE_BYTES,
     QueryMatchOperator, QueryPlanKind, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor,
-    SourcePreparation, prepare_lexical_query, prepare_source_buffer,
+    SourcePreparation, prepare_lexical_query,
+    prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -20,6 +21,7 @@ const MAX_MATCH_VALUE_BYTES: usize = 16 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum AdapterOperation {
     PrepareSource,
+    PrepareOversizedSource,
     PrepareQuery,
     FinalizeQuery,
 }
@@ -44,7 +46,7 @@ pub struct AbiIdentity {
     pub chunking_version: u64,
     pub max_request_bytes: usize,
     pub max_source_buffer_bytes: usize,
-    pub operations: [AdapterOperation; 3],
+    pub operations: [AdapterOperation; 4],
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -125,6 +127,21 @@ enum PrepareSourceOperation {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PrepareOversizedSourceRequest {
+    abi_version: u32,
+    #[serde(rename = "operation")]
+    _operation: PrepareOversizedSourceOperation,
+    descriptor: SourceDescriptor,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PrepareOversizedSourceOperation {
+    PrepareOversizedSource,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PrepareQueryRequest {
     abi_version: u32,
     #[serde(rename = "operation")]
@@ -168,6 +185,7 @@ pub fn abi_identity() -> String {
         max_source_buffer_bytes: MAX_SOURCE_BUFFER_BYTES,
         operations: [
             AdapterOperation::PrepareSource,
+            AdapterOperation::PrepareOversizedSource,
             AdapterOperation::PrepareQuery,
             AdapterOperation::FinalizeQuery,
         ],
@@ -196,6 +214,29 @@ pub fn prepare_source(request_json: &str, source_bytes: Vec<u8>) -> String {
     }
 
     match prepare_source_buffer(&request.descriptor, &source_bytes) {
+        Ok(preparation) => success_response(operation, PreparedSourceResult { preparation }),
+        Err(error) => error_response(
+            operation,
+            AdapterError {
+                code: error.code,
+                message: error.message,
+            },
+        ),
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn prepare_oversized_source(request_json: &str) -> String {
+    let operation = AdapterOperation::PrepareOversizedSource;
+    let request = match parse_request::<PrepareOversizedSourceRequest>(request_json) {
+        Ok(request) => request,
+        Err(error) => return error_response(operation, error),
+    };
+    if let Err(error) = check_abi(request.abi_version) {
+        return error_response(operation, error);
+    }
+
+    match prepare_oversized_source_descriptor(&request.descriptor) {
         Ok(preparation) => success_response(operation, PreparedSourceResult { preparation }),
         Err(error) => error_response(
             operation,
@@ -651,7 +692,40 @@ mod tests {
         assert_eq!(identity["chunking_version"], CHUNKING_VERSION);
         assert_eq!(
             identity["operations"],
-            serde_json::json!(["prepare_source", "prepare_query", "finalize_query"])
+            serde_json::json!([
+                "prepare_source",
+                "prepare_oversized_source",
+                "prepare_query",
+                "finalize_query"
+            ])
+        );
+    }
+
+    #[test]
+    fn oversized_preparation_records_metadata_without_a_buffer() {
+        let request = serde_json::json!({
+            "abi_version": ADAPTER_ABI_VERSION,
+            "operation": "prepare_oversized_source",
+            "descriptor": {
+                "vault_id": "active-vault",
+                "path": "large.md",
+                "format": "markdown",
+                "byte_length": MAX_FILE_BYTES + 1,
+                "mtime": 1,
+                "mtime_nanos": "1000000"
+            }
+        })
+        .to_string();
+        let prepared = response(prepare_oversized_source(&request));
+        assert_eq!(prepared["status"], "ok");
+        assert_eq!(prepared["result"]["preparation"]["kind"], "skipped");
+        assert_eq!(
+            prepared["result"]["preparation"]["content_hash"],
+            Value::Null
+        );
+        assert_eq!(
+            prepared["result"]["preparation"]["byte_length"],
+            MAX_FILE_BYTES + 1
         );
     }
 

@@ -7,8 +7,10 @@ import type {
   DisposeResult,
   ExportGenerationResult,
   InitializeResult,
+  ReconciliationPlanResult,
+  ReconciliationSourceMetadata,
   SearchResult,
-  SourceInput,
+  SourceUpsert,
   SourceRemoval,
   StatusResult,
 } from "./protocol";
@@ -35,7 +37,7 @@ export class InPluginWorkerSession {
     return this.client.request({ operation: "begin_build", generation }) as Promise<BuildResult>;
   }
 
-  addSourceBatch(generation: string, sources: SourceInput[]): Promise<BuildResult> {
+  addSourceBatch(generation: string, sources: SourceUpsert[]): Promise<BuildResult> {
     return this.client.request({
       operation: "add_source_batch",
       generation,
@@ -46,7 +48,7 @@ export class InPluginWorkerSession {
   applySourceChanges(
     generation: string,
     nextGeneration: string | null,
-    upserts: SourceInput[],
+    upserts: SourceUpsert[],
     removals: SourceRemoval[],
   ): Promise<BuildResult> {
     return this.client.request({
@@ -99,6 +101,19 @@ export class InPluginWorkerSession {
       ...record.identity,
       expected_cache_identity: expectedCacheIdentity,
     }) as Promise<BuildResult>;
+  }
+
+  planReconciliation(
+    generation: string,
+    vaultId: string,
+    currentSources: ReconciliationSourceMetadata[],
+  ): Promise<ReconciliationPlanResult> {
+    return this.client.request({
+      operation: "plan_reconciliation",
+      generation,
+      vault_id: vaultId,
+      current_sources: currentSources,
+    }) as Promise<ReconciliationPlanResult>;
   }
 
   search(query: string, limit: number): Promise<SearchResult> {

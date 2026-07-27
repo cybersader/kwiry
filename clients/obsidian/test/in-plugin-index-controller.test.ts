@@ -11,14 +11,24 @@ import {
   type StableSourceRead,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
+import type { CacheLoad, CacheStorePort, CacheWrite } from "../src/cache/cache-store";
 import {
   InPluginIndexController,
+  type IndexControllerCacheOptions,
   type IndexControllerStatus,
   type IndexCounts,
   type IndexWorkerPort,
   type SourceRemoval,
 } from "../src/backends/in-plugin-index-controller";
-import type { SourceInput } from "../src/worker/protocol";
+import {
+  CACHE_SCHEMA_VERSION,
+  WORKER_PROTOCOL_VERSION,
+  type ExportGenerationResult,
+  type ReconciliationPlanResult,
+  type ReconciliationSourceMetadata,
+  type SourceInput,
+  type SourceUpsert,
+} from "../src/worker/protocol";
 import { WorkerRpcError } from "../src/worker/rpc-client";
 
 class FakeSource implements ActiveVaultSource {
@@ -53,7 +63,9 @@ class FakeSource implements ActiveVaultSource {
   inspectMarkdown(path: string): SourceInspection {
     const record = this.records.get(path);
     if (!record) return { kind: "missing", path };
-    if (this.oversizedPaths.has(path)) return { kind: "oversized", path };
+    if (this.oversizedPaths.has(path)) {
+      return { kind: "oversized", path, size: record.bytes.byteLength, mtime: record.mtime };
+    }
     return {
       kind: "candidate",
       path,
@@ -118,7 +130,7 @@ class FakeWorker implements IndexWorkerPort {
     return this.counts(generation, this.stagingPaths);
   }
 
-  async addSourceBatch(generation: string, sources: SourceInput[]): Promise<IndexCounts> {
+  async addSourceBatch(generation: string, sources: SourceUpsert[]): Promise<IndexCounts> {
     this.calls.push(`add:${sources.map((source) => source.descriptor.path).join(",")}`);
     if (generation !== this.stagingGeneration) throw new Error("wrong staging generation");
     for (const source of sources) this.stagingPaths.add(source.descriptor.path);
@@ -128,7 +140,7 @@ class FakeWorker implements IndexWorkerPort {
   async applySourceChanges(
     generation: string,
     nextGeneration: string | null,
-    upserts: SourceInput[],
+    upserts: SourceUpsert[],
     removals: SourceRemoval[],
   ): Promise<IndexCounts> {
     this.applyCalls.push({
@@ -170,6 +182,148 @@ class FakeWorker implements IndexWorkerPort {
   }
 }
 
+const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
+
+class FakeCacheWorker extends FakeWorker {
+  readonly restoredLedger = new Map<string, ReconciliationSourceMetadata>();
+  readonly planCalls: ReconciliationSourceMetadata[][] = [];
+  readonly exportCalls: string[] = [];
+  restoreCalls = 0;
+  exportGate: Promise<void> | null = null;
+
+  async restoreGeneration(hit: Extract<CacheLoad, { kind: "hit" }>): Promise<IndexCounts> {
+    this.restoreCalls += 1;
+    this.activeGeneration = hit.record.generationId;
+    this.activePaths = new Set(this.restoredLedger.keys());
+    return this.countsFor(hit.record.generationId, this.activePaths);
+  }
+
+  async planReconciliation(
+    generation: string,
+    _vaultId: string,
+    currentSources: ReconciliationSourceMetadata[],
+  ): Promise<ReconciliationPlanResult> {
+    this.planCalls.push(currentSources);
+    const stored = new Map(this.restoredLedger);
+    const storedSourceCount = stored.size;
+    let matchedSourceCount = 0;
+    const unchanged: string[] = [];
+    const refresh: string[] = [];
+    for (const source of currentSources) {
+      const previous = stored.get(source.path);
+      if (previous) matchedSourceCount += 1;
+      stored.delete(source.path);
+      if (previous
+        && previous.byte_length === source.byte_length
+        && previous.mtime_nanos === source.mtime_nanos
+        && previous.indexable === source.indexable) {
+        unchanged.push(source.path);
+      } else {
+        refresh.push(source.path);
+      }
+    }
+    return {
+      generation,
+      unchanged,
+      refresh,
+      remove: [...stored.keys()].sort(),
+      stored_source_count: storedSourceCount,
+      matched_source_count: matchedSourceCount,
+    };
+  }
+
+  async exportGeneration(generation: string): Promise<ExportGenerationResult> {
+    this.exportCalls.push(generation);
+    if (this.exportGate) await this.exportGate;
+    return exportResult(generation);
+  }
+
+  private countsFor(generation: string, paths: Set<string>): IndexCounts {
+    return { generation, documents: paths.size, chunks: paths.size };
+  }
+}
+
+class FakeCacheStore implements CacheStorePort {
+  readonly vaultCacheIdentity = CACHE_IDENTITY;
+  readonly puts: CacheWrite[] = [];
+  readonly discards: string[] = [];
+  disposed = 0;
+  putError: unknown = null;
+
+  constructor(
+    readonly loaded: CacheLoad,
+    private readonly onLoad: (() => void) | null = null,
+  ) {}
+
+  async load(): Promise<CacheLoad> {
+    this.onLoad?.();
+    return this.loaded;
+  }
+
+  async put(write: CacheWrite) {
+    this.puts.push(write);
+    if (this.putError) throw this.putError;
+    return {
+      generationId: write.generationId,
+      byteLength: write.byteLength,
+      sha256: write.sha256,
+      identity: write.identity,
+    };
+  }
+
+  async discard(reason: "corrupt" | "incompatible" | "requested"): Promise<void> {
+    this.discards.push(reason);
+  }
+
+  async dispose(): Promise<void> {
+    this.disposed += 1;
+  }
+}
+
+function cacheHit(generationId = "cached-generation"): Extract<CacheLoad, { kind: "hit" }> {
+  return {
+    kind: "hit",
+    record: {
+      generationId,
+      byteLength: 4,
+      sha256: "a".repeat(64),
+      identity: {
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        cache_schema_version: CACHE_SCHEMA_VERSION,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        sqlite_wasm_sha256: "b".repeat(64),
+        rust_wasm_sha256: "c".repeat(64),
+        plugin_id: "kwiry-search",
+        plugin_version: "0.1.0",
+        cache_identity: CACHE_IDENTITY,
+      },
+    },
+    bytes: new Uint8Array([1, 2, 3, 4]),
+    digestVerified: false,
+  };
+}
+
+function exportResult(generation: string): ExportGenerationResult {
+  return {
+    generation,
+    documents: 1,
+    chunks: 1,
+    bytes: new Uint8Array([1, 2, 3, 4]),
+    blob_byte_length: 4,
+    blob_sha256: "d".repeat(64),
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: 1,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: "b".repeat(64),
+    rust_wasm_sha256: "c".repeat(64),
+    plugin_id: "kwiry-search",
+    plugin_version: "0.1.0",
+    cache_identity: CACHE_IDENTITY,
+  };
+}
+
 function sourceInput(path: string, bytes: Uint8Array, mtime: number): SourceInput {
   return {
     descriptor: {
@@ -188,6 +342,7 @@ function harness(
   source: FakeSource,
   worker = new FakeWorker(),
   limits: ConstructorParameters<typeof InPluginIndexController>[0]["limits"] = {},
+  cache?: IndexControllerCacheOptions,
 ): {
     controller: InPluginIndexController;
     worker: FakeWorker;
@@ -205,6 +360,7 @@ function harness(
     onFailure: (error) => failures.push(error),
     yieldControl: () => Promise.resolve(),
     limits,
+    ...(cache ? { cache } : {}),
   });
   return { controller, worker, statuses, failures };
 }
@@ -236,6 +392,284 @@ describe("InPluginIndexController", () => {
       documents: 2,
       dirty: false,
     });
+  });
+
+  it("binds before Worker and cache awaits, restores searchable-stale, and reads only changed sources", async () => {
+    const source = new FakeSource();
+    source.set("unchanged.md", "same", 1);
+    source.set("changed.md", "new value", 2);
+    source.set("new.md", "brand new", 1);
+    const worker = new FakeCacheWorker();
+    worker.restoredLedger.set("unchanged.md", {
+      path: "unchanged.md",
+      byte_length: 4,
+      mtime_nanos: "1000000",
+      indexable: true,
+    });
+    worker.restoredLedger.set("changed.md", {
+      path: "changed.md",
+      byte_length: 3,
+      mtime_nanos: "1000000",
+      indexable: true,
+    });
+    worker.restoredLedger.set("deleted.md", {
+      path: "deleted.md",
+      byte_length: 7,
+      mtime_nanos: "1000000",
+      indexable: true,
+    });
+    let releasePlan!: () => void;
+    const planGate = new Promise<void>((resolve) => {
+      releasePlan = resolve;
+    });
+    const originalPlan = worker.planReconciliation.bind(worker);
+    worker.planReconciliation = vi.fn(async (generation, vaultId, currentSources) => {
+      await planGate;
+      return originalPlan(generation, vaultId, currentSources);
+    });
+    worker.initialize = vi.fn(async () => {
+      source.log.push("initialize");
+    });
+    const store = new FakeCacheStore(cacheHit());
+    const { controller, statuses } = harness(source, worker, {}, {
+      openStore: async () => {
+        source.log.push("open-store");
+        return { kind: "available", store };
+      },
+    });
+
+    controller.start();
+    await vi.waitFor(() => expect(worker.planReconciliation).toHaveBeenCalledTimes(1));
+
+    expect(source.log[0]).toBe("subscribe");
+    expect(source.log.indexOf("subscribe")).toBeLessThan(source.log.indexOf("initialize"));
+    expect(source.log.indexOf("initialize")).toBeLessThan(source.log.indexOf("open-store"));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "replay",
+      searchable: true,
+      generation: "cached-generation",
+      dirty: true,
+      issue: "index_reconciling",
+    });
+    expect(source.log.filter((entry) => entry.startsWith("read:"))).toEqual([]);
+
+    releasePlan();
+    await controller.whenIdle();
+
+    expect(source.log.filter((entry) => entry.startsWith("read:"))).toEqual([
+      "read:changed.md",
+      "read:new.md",
+    ]);
+    expect(worker.applyCalls).toEqual([
+      {
+        generation: "cached-generation",
+        nextGeneration: "generation-1",
+        upserts: ["changed.md"],
+        removals: [],
+      },
+      {
+        generation: "generation-1",
+        nextGeneration: "generation-2",
+        upserts: ["new.md"],
+        removals: [],
+      },
+      {
+        generation: "generation-2",
+        nextGeneration: "generation-3",
+        upserts: [],
+        removals: ["deleted.md"],
+      },
+    ]);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      generation: "generation-3",
+      dirty: false,
+    });
+  });
+
+  it("never reuses a restored generation when the restarted allocator collides", async () => {
+    const source = new FakeSource();
+    source.set("changed.md", "new", 2);
+    const worker = new FakeCacheWorker();
+    worker.restoredLedger.set("changed.md", {
+      path: "changed.md",
+      byte_length: 3,
+      mtime_nanos: "1000000",
+      indexable: true,
+    });
+    const store = new FakeCacheStore(cacheHit("generation-1"));
+    const { controller } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+    expect(worker.applyCalls[0]).toMatchObject({
+      generation: "generation-1",
+      nextGeneration: "generation-2",
+      upserts: ["changed.md"],
+    });
+
+    source.set("later.md", "later", 3);
+    source.emit({ kind: "upsert", path: "later.md" });
+    await controller.whenIdle();
+    expect(worker.applyCalls.at(-1)).toMatchObject({
+      generation: "generation-2",
+      nextGeneration: "generation-3",
+      upserts: ["later.md"],
+    });
+
+    controller.requestRebuild();
+    await controller.whenIdle();
+    expect(worker.calls).toContain("begin:generation-4");
+    expect(worker.activeGeneration).toBe("generation-4");
+  });
+
+  it.each([
+    [
+      "an omitted current path",
+      {
+        generation: "cached-generation",
+        unchanged: [],
+        refresh: [],
+        remove: [],
+        stored_source_count: 1,
+        matched_source_count: 1,
+      },
+    ],
+    [
+      "an omitted stored deletion",
+      {
+        generation: "cached-generation",
+        unchanged: ["current.md"],
+        refresh: [],
+        remove: [],
+        stored_source_count: 2,
+        matched_source_count: 1,
+      },
+    ],
+  ] as const)("fails closed on a reconciliation plan with %s", async (_name, invalidPlan) => {
+    const source = new FakeSource();
+    source.set("current.md", "current", 1);
+    const worker = new FakeCacheWorker();
+    worker.restoredLedger.set("current.md", {
+      path: "current.md",
+      byte_length: 7,
+      mtime_nanos: "1000000",
+      indexable: true,
+    });
+    worker.planReconciliation = vi.fn(
+      async () => invalidPlan as unknown as ReconciliationPlanResult,
+    );
+    const store = new FakeCacheStore(cacheHit());
+    const { controller, statuses, failures } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toHaveLength(1);
+    expect(worker.applyCalls).toEqual([]);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "degraded",
+      searchable: true,
+      generation: "cached-generation",
+      dirty: true,
+      issue: "index_update_failed",
+    });
+    expect(statuses.some((status) => status.stage === "ready" && !status.dirty)).toBe(false);
+  });
+
+  it("subsumes an event captured during cache load into the snapshot exactly once", async () => {
+    const source = new FakeSource();
+    const worker = new FakeCacheWorker();
+    const store = new FakeCacheStore(cacheHit(), () => {
+      source.set("during-load.md", "captured", 1);
+      source.emit({ kind: "upsert", path: "during-load.md" });
+    });
+    const { controller } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(worker.applyCalls).toEqual([{
+      generation: "cached-generation",
+      nextGeneration: "generation-1",
+      upserts: ["during-load.md"],
+      removals: [],
+    }]);
+    expect(worker.activePaths).toEqual(new Set(["during-load.md"]));
+  });
+
+  it("exports only after two clean idle seconds and degrades durability without dirtying search", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("note.md", "value", 1);
+      const worker = new FakeCacheWorker();
+      const store = new FakeCacheStore({ kind: "miss", reason: "absent" });
+      store.putError = new Error("quota");
+      const { controller, statuses } = harness(source, worker, {}, {
+        openStore: async () => ({ kind: "available", store }),
+      });
+
+      controller.start();
+      await controller.whenIdle();
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(worker.exportCalls).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(worker.exportCalls).toEqual(["generation-1"]));
+      await vi.waitFor(() => expect(statuses.at(-1)).toMatchObject({
+        stage: "ready",
+        searchable: true,
+        generation: "generation-1",
+        dirty: false,
+        issue: "cache_save_failed",
+      }));
+      expect(store.puts).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(worker.exportCalls).toEqual(["generation-1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops an export made stale by a vault event and persists the later clean generation", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("base.md", "base", 1);
+      const worker = new FakeCacheWorker();
+      let releaseExport!: () => void;
+      worker.exportGate = new Promise<void>((resolve) => {
+        releaseExport = resolve;
+      });
+      const store = new FakeCacheStore({ kind: "miss", reason: "absent" });
+      const { controller } = harness(source, worker, {}, {
+        openStore: async () => ({ kind: "available", store }),
+      });
+
+      controller.start();
+      await controller.whenIdle();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect(worker.exportCalls).toEqual(["generation-1"]));
+      source.set("late.md", "late", 2);
+      source.emit({ kind: "upsert", path: "late.md" });
+      releaseExport();
+      await controller.whenIdle();
+      await Promise.resolve();
+      expect(store.puts).toHaveLength(0);
+
+      worker.exportGate = null;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect(store.puts).toHaveLength(1));
+      expect(store.puts[0]!.generationId).toBe("generation-2");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reads up to four sources concurrently but emits deterministic sorted batches", async () => {
@@ -430,7 +864,7 @@ describe("InPluginIndexController", () => {
     expect([...worker.activePaths]).toEqual(["note.md"]);
   });
 
-  it("removes active sources that become oversized or vanish", async () => {
+  it("records an oversized skip and removes only sources that vanish", async () => {
     const source = new FakeSource();
     source.set("oversized.md", "old");
     source.set("vanished.md", "old");
@@ -444,10 +878,20 @@ describe("InPluginIndexController", () => {
     source.emit({ kind: "upsert", path: "vanished.md" });
     await controller.whenIdle();
 
-    expect([...worker.activePaths]).toEqual([]);
-    expect(worker.applyCalls.slice(-2).flatMap((call) => call.removals).sort()).toEqual([
-      "oversized.md",
-      "vanished.md",
+    expect([...worker.activePaths]).toEqual(["oversized.md"]);
+    expect(worker.applyCalls.slice(-2)).toEqual([
+      {
+        generation: "generation-1",
+        nextGeneration: "generation-2",
+        upserts: ["oversized.md"],
+        removals: [],
+      },
+      {
+        generation: "generation-2",
+        nextGeneration: "generation-3",
+        upserts: [],
+        removals: ["vanished.md"],
+      },
     ]);
   });
 

@@ -5,8 +5,9 @@ import {
   MAX_PENDING_REQUESTS,
   WORKER_PROTOCOL_VERSION,
   WORKER_REQUEST_TIMEOUT_MS,
+  type ReconciliationSourceMetadata,
   type RestoreGenerationInput,
-  type SourceInput,
+  type SourceUpsert,
   type SourceRemoval,
   type WorkerError,
   type WorkerOperation,
@@ -19,18 +20,24 @@ import {
 export type WorkerCommand =
   | { operation: "initialize" }
   | { operation: "begin_build"; generation: string }
-  | { operation: "add_source_batch"; generation: string; sources: SourceInput[] }
+  | { operation: "add_source_batch"; generation: string; sources: SourceUpsert[] }
   | {
       operation: "apply_source_changes";
       generation: string;
       next_generation: string | null;
-      upserts: SourceInput[];
+      upserts: SourceUpsert[];
       removals: SourceRemoval[];
     }
   | { operation: "commit_build"; generation: string }
   | { operation: "abort_build"; generation: string }
   | { operation: "export_generation"; generation: string; cache_identity: string }
   | ({ operation: "restore_generation" } & RestoreGenerationInput)
+  | {
+      operation: "plan_reconciliation";
+      generation: string;
+      vault_id: string;
+      current_sources: ReconciliationSourceMetadata[];
+    }
   | { operation: "search"; query: string; limit: number }
   | { operation: "status" }
   | { operation: "dispose" };
@@ -234,6 +241,7 @@ function expectedGeneration(command: WorkerCommand): string | null {
     case "commit_build":
     case "abort_build":
     case "restore_generation":
+    case "plan_reconciliation":
     // The caller names the generation it believes is active, so an export that
     // came back describing a different one is uncorrelated and poisons the
     // client, exactly as a build result would.

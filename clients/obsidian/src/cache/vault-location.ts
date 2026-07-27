@@ -30,15 +30,19 @@ export const nodeVaultLocationIo: VaultLocationIo = {
 };
 
 export function resolveCanonicalVaultPath(
-  adapter: VaultLocationSource,
+  adapter: unknown,
   io: VaultLocationIo = nodeVaultLocationIo,
 ): VaultLocation {
-  if (typeof adapter.getBasePath !== "function") {
+  if (typeof adapter !== "object" || adapter === null) {
+    return { kind: "unavailable", reason: "vault_location_unavailable" };
+  }
+  const source = adapter as VaultLocationSource;
+  if (typeof source.getBasePath !== "function") {
     return { kind: "unavailable", reason: "vault_location_unavailable" };
   }
   let basePath: unknown;
   try {
-    basePath = (adapter.getBasePath as () => unknown)();
+    basePath = (source.getBasePath as () => unknown)();
   } catch {
     return { kind: "unavailable", reason: "vault_location_unavailable" };
   }

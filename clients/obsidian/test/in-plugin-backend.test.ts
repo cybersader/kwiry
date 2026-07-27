@@ -10,7 +10,13 @@ import {
   type StableSourceRead,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
+import type { CacheLoad, CacheStorePort, CacheWrite } from "../src/cache/cache-store";
 import { InPluginLexicalBackend } from "../src/backends/in-plugin-lexical-backend";
+import {
+  CACHE_SCHEMA_VERSION,
+  WORKER_PROTOCOL_VERSION,
+  type ExportGenerationResult,
+} from "../src/worker/protocol";
 import { WorkerRpcError } from "../src/worker/rpc-client";
 import type { InPluginWorkerSession } from "../src/worker/session";
 
@@ -60,9 +66,84 @@ class FakeSource implements ActiveVaultSource {
   }
 }
 
+const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
+
+function cacheHit(generationId = "cached-generation"): Extract<CacheLoad, { kind: "hit" }> {
+  return {
+    kind: "hit",
+    record: {
+      generationId,
+      byteLength: 4,
+      sha256: "a".repeat(64),
+      identity: {
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        cache_schema_version: CACHE_SCHEMA_VERSION,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        sqlite_wasm_sha256: "b".repeat(64),
+        rust_wasm_sha256: "c".repeat(64),
+        plugin_id: "kwiry-search",
+        plugin_version: "0.1.0",
+        cache_identity: CACHE_IDENTITY,
+      },
+    },
+    bytes: new Uint8Array([1, 2, 3, 4]),
+    digestVerified: false,
+  };
+}
+
+function exportResult(generation: string): ExportGenerationResult {
+  return {
+    generation,
+    documents: 0,
+    chunks: 0,
+    bytes: new Uint8Array([1, 2, 3, 4]),
+    blob_byte_length: 4,
+    blob_sha256: "d".repeat(64),
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: 1,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: "b".repeat(64),
+    rust_wasm_sha256: "c".repeat(64),
+    plugin_id: "kwiry-search",
+    plugin_version: "0.1.0",
+    cache_identity: CACHE_IDENTITY,
+  };
+}
+
+class FakeCacheStore implements CacheStorePort {
+  readonly vaultCacheIdentity = CACHE_IDENTITY;
+  readonly puts: CacheWrite[] = [];
+  readonly discards: Array<"corrupt" | "incompatible" | "requested"> = [];
+  putError: unknown = null;
+  discardError: unknown = null;
+
+  constructor(readonly loaded: CacheLoad) {}
+  async load(): Promise<CacheLoad> { return this.loaded; }
+  async put(write: CacheWrite) {
+    this.puts.push(write);
+    if (this.putError) throw this.putError;
+    return {
+      generationId: write.generationId,
+      byteLength: write.byteLength,
+      sha256: write.sha256,
+      identity: write.identity,
+    };
+  }
+  async discard(reason: "corrupt" | "incompatible" | "requested"): Promise<void> {
+    this.discards.push(reason);
+    if (this.discardError) throw this.discardError;
+  }
+  async dispose(): Promise<void> {}
+}
+
 function fakeSession(options: {
   initialize?: () => Promise<unknown>;
   search?: () => Promise<unknown>;
+  restore?: (hit: Extract<CacheLoad, { kind: "hit" }>) => Promise<unknown>;
+  plan?: () => Promise<unknown>;
+  export?: (generation: string) => Promise<unknown>;
 } = {}): InPluginWorkerSession {
   return {
     initialize: vi.fn(options.initialize ?? (async () => ({}))),
@@ -94,6 +175,20 @@ function fakeSession(options: {
       documents: 0,
       chunks: 0,
     })),
+    restoreGeneration: vi.fn(options.restore ?? (async (hit: Extract<CacheLoad, { kind: "hit" }>) => ({
+      generation: hit.record.generationId,
+      documents: 0,
+      chunks: 0,
+    }))),
+    planReconciliation: vi.fn(options.plan ?? (async () => ({
+      generation: "cached-generation",
+      unchanged: [],
+      refresh: [],
+      remove: [],
+      stored_source_count: 0,
+      matched_source_count: 0,
+    }))),
+    exportGeneration: vi.fn(options.export ?? (async (generation: string) => exportResult(generation))),
     search: vi.fn(options.search ?? (async () => ({
       generation: "generation-1",
       hits: [{
@@ -114,6 +209,7 @@ function fakeSession(options: {
 function backend(
   source: FakeSource,
   sessions: InPluginWorkerSession[],
+  cache?: ConstructorParameters<typeof InPluginLexicalBackend>[0]["cache"],
 ): InPluginLexicalBackend {
   let generation = 0;
   return new InPluginLexicalBackend({
@@ -128,6 +224,7 @@ function backend(
     },
     nextGeneration: () => `generation-${++generation}`,
     yieldControl: () => Promise.resolve(),
+    ...(cache ? { cache } : {}),
   });
 }
 
@@ -162,6 +259,234 @@ describe("InPluginLexicalBackend", () => {
         generation: "generation-1",
       });
     });
+  });
+
+  it("publishes a restored generation as searchable but stale until reconciliation completes", async () => {
+    let releasePlan!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releasePlan = resolve;
+    });
+    const source = new FakeSource();
+    const session = fakeSession({
+      plan: async () => {
+        await gate;
+        return {
+          generation: "cached-generation",
+          unchanged: [],
+          refresh: [],
+          remove: [],
+          stored_source_count: 0,
+          matched_source_count: 0,
+        };
+      },
+      search: async () => ({ generation: "cached-generation", hits: [] }),
+    });
+    const store = new FakeCacheStore(cacheHit());
+    const inPlugin = backend(source, [session], {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    await inPlugin.initialize();
+    await vi.waitFor(() => expect(session.planReconciliation).toHaveBeenCalledTimes(1));
+    await expect(inPlugin.status()).resolves.toMatchObject({
+      phase: "building",
+      searchable: true,
+      generation: "cached-generation",
+      dirty: true,
+      issue: {
+        code: "index_reconciling",
+        safeMessage: "Cached index searchable; reconciling vault changes…",
+      },
+    });
+    await expect(inPlugin.search({ q: "query", mode: "lexical" })).resolves.toMatchObject({
+      generation: "cached-generation",
+    });
+
+    releasePlan();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "ready",
+        searchable: true,
+        generation: "cached-generation",
+        dirty: false,
+      });
+    });
+  });
+
+  it("keeps cache unavailability observable after an explicit clean build", async () => {
+    const source = new FakeSource();
+    const session = fakeSession();
+    const inPlugin = backend(source, [session], {
+      openStore: async () => ({ kind: "unavailable", reason: "root_not_writable" }),
+    });
+
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "degraded",
+        searchable: true,
+        generation: "generation-1",
+        dirty: false,
+        issue: {
+          code: "cache_unavailable",
+          safeMessage: "Index is current, but cache durability is unavailable.",
+        },
+      });
+    });
+    expect(session.restoreGeneration).not.toHaveBeenCalled();
+  });
+
+  it("turns a thrown cache-open failure into the same explicit clean build", async () => {
+    const source = new FakeSource();
+    const session = fakeSession();
+    const inPlugin = backend(source, [session], {
+      openStore: async () => {
+        throw new Error("platform probe failed");
+      },
+    });
+
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "degraded",
+        searchable: true,
+        generation: "generation-1",
+        dirty: false,
+        issue: { code: "cache_unavailable" },
+      });
+    });
+  });
+
+  it.each([
+    ["cache_digest_mismatch", "corrupt", "cache_corrupt", "Cached index rejected and discarded; building fresh…", "Fresh index is current; replacing the discarded cache…"],
+    ["cache_image_invalid", "corrupt", "cache_corrupt", "Cached index rejected and discarded; building fresh…", "Fresh index is current; replacing the discarded cache…"],
+    ["cache_blob_too_large", "corrupt", "cache_corrupt", "Cached index rejected and discarded; building fresh…", "Fresh index is current; replacing the discarded cache…"],
+    ["cache_version_mismatch", "incompatible", "cache_incompatible", "Cached index is incompatible; building fresh…", "Fresh index is current; replacing the incompatible cache…"],
+    ["cache_identity_mismatch", "incompatible", "cache_incompatible", "Cached index is incompatible; building fresh…", "Fresh index is current; replacing the incompatible cache…"],
+  ] as const)(
+    "discards a %s restore refusal explicitly and completes a clean build",
+    async (code, discardReason, issue, buildingMessage, safeMessage) => {
+      const source = new FakeSource();
+      const refusal = Object.assign(new Error(code), { code });
+      const session = fakeSession({ restore: async () => Promise.reject(refusal) });
+      const store = new FakeCacheStore(cacheHit());
+      const inPlugin = backend(source, [session], {
+        openStore: async () => ({ kind: "available", store }),
+      });
+      const statuses: Array<Awaited<ReturnType<typeof inPlugin.status>>> = [];
+      inPlugin.subscribeStatus((status) => statuses.push(status));
+
+      await inPlugin.initialize();
+      await vi.waitFor(async () => {
+        await expect(inPlugin.status()).resolves.toMatchObject({
+          phase: "degraded",
+          searchable: true,
+          generation: "generation-1",
+          dirty: false,
+          issue: { code: issue, safeMessage },
+        });
+      });
+      expect(statuses).toContainEqual(expect.objectContaining({
+        searchable: false,
+        dirty: true,
+        issue: expect.objectContaining({ code: issue, safeMessage: buildingMessage }),
+      }));
+      expect(store.discards).toEqual([discardReason]);
+      expect(session.restoreGeneration).toHaveBeenCalledTimes(1);
+      expect(session.beginBuild).toHaveBeenCalledWith("generation-1");
+      expect(session.commitBuild).toHaveBeenCalledWith("generation-1");
+      expect(session.planReconciliation).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["internal_error", "invalid_state"] as const)(
+    "reports a %s restore failure as cache-restore-unavailable and builds clean",
+    async (code) => {
+      const source = new FakeSource();
+      const refusal = Object.assign(new Error(code), { code });
+      const session = fakeSession({ restore: async () => Promise.reject(refusal) });
+      const store = new FakeCacheStore(cacheHit());
+      const inPlugin = backend(source, [session], {
+        openStore: async () => ({ kind: "available", store }),
+      });
+
+      await inPlugin.initialize();
+      await vi.waitFor(async () => {
+        await expect(inPlugin.status()).resolves.toMatchObject({
+          phase: "degraded",
+          searchable: true,
+          generation: "generation-1",
+          dirty: false,
+          issue: {
+            code: "cache_restore_unavailable",
+            safeMessage: "Fresh index is current; replacing the unrestorable cache…",
+          },
+        });
+      });
+      expect(store.discards).toEqual([]);
+      expect(session.commitBuild).toHaveBeenCalledWith("generation-1");
+    },
+  );
+
+  it("reports discard failure distinctly while still completing the explicit clean build", async () => {
+    const source = new FakeSource();
+    const refusal = Object.assign(new Error("digest mismatch"), {
+      code: "cache_digest_mismatch",
+    });
+    const session = fakeSession({ restore: async () => Promise.reject(refusal) });
+    const store = new FakeCacheStore(cacheHit());
+    store.discardError = new Error("permission denied");
+    const inPlugin = backend(source, [session], {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "degraded",
+        searchable: true,
+        generation: "generation-1",
+        dirty: false,
+        issue: {
+          code: "cache_discard_failed",
+          safeMessage: "Fresh index is current; rejected cache could not be discarded.",
+        },
+      });
+    });
+    expect(store.discards).toEqual(["corrupt"]);
+    expect(session.commitBuild).toHaveBeenCalledWith("generation-1");
+  });
+
+  it("reports cache save failure without changing index freshness or searchability", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      const session = fakeSession();
+      const store = new FakeCacheStore({ kind: "miss", reason: "absent" });
+      store.putError = new Error("quota");
+      const inPlugin = backend(source, [session], {
+        openStore: async () => ({ kind: "available", store }),
+        idleExportMs: 1,
+      });
+
+      await inPlugin.initialize();
+      await vi.waitFor(() => expect(session.commitBuild).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(async () => {
+        await expect(inPlugin.status()).resolves.toMatchObject({
+          phase: "degraded",
+          searchable: true,
+          generation: "generation-1",
+          dirty: false,
+          issue: { code: "cache_save_failed", safeMessage: "Search ready; cache save failed" },
+        });
+      });
+      await expect(inPlugin.search({ q: "query", mode: "lexical" })).resolves.toMatchObject({
+        generation: "generation-1",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("emits cached status immediately and starts a manual replacement build", async () => {

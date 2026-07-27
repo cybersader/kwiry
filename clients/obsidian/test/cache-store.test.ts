@@ -4,11 +4,13 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
@@ -24,7 +26,7 @@ import {
   type CacheStorePort,
   type CacheWrite,
 } from "../src/cache/cache-store";
-import { MAX_EXPORT_BLOB_BYTES } from "../src/worker/protocol";
+import { MAX_EXPORT_BLOB_BYTES, WORKER_PROTOCOL_VERSION } from "../src/worker/protocol";
 import {
   nodeCacheFileSystem,
   openLocalCacheStore,
@@ -98,6 +100,11 @@ class RecordingFileSystem implements CacheFileSystem {
     return this.inner.lstat(target);
   }
 
+  realpath(target: string): Promise<string> {
+    this.record("realpath", target);
+    return this.inner.realpath(target);
+  }
+
   readdir(target: string): Promise<string[]> {
     this.record("readdir", target);
     return this.inner.readdir(target);
@@ -140,7 +147,7 @@ class RecordingFileSystem implements CacheFileSystem {
 
 function envelope(overrides: Partial<CacheIdentityEnvelope> = {}): CacheIdentityEnvelope {
   return {
-    protocol_version: 2,
+    protocol_version: WORKER_PROTOCOL_VERSION,
     cache_schema_version: 1,
     chunking_version: 1,
     sqlite_version: "3.53.0",
@@ -317,6 +324,40 @@ describe("LocalCacheStore availability", () => {
     })).resolves.toEqual({ kind: "unavailable", reason: "root_inside_vault" });
   });
 
+  it.skipIf(process.platform === "win32")(
+    "refuses a cache root whose existing symlink ancestor resolves into the vault before mkdir",
+    async () => {
+      mkdirSync(vaultPath, { recursive: true });
+      const linkedAncestor = path.join(workspace, "linked-cache-home");
+      symlinkSync(vaultPath, linkedAncestor, "dir");
+      const requestedRoot = path.join(linkedAncestor, "kwiry-search");
+
+      await expect(openLocalCacheStore({
+        canonicalVaultPath: vaultPath,
+        vaultConfigDirName: ".obsidian",
+        rootOverride: requestedRoot,
+      })).resolves.toEqual({ kind: "unavailable", reason: "root_inside_vault" });
+      expect(existsSync(path.join(vaultPath, "kwiry-search"))).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "refuses a cache root whose existing junction ancestor resolves into the vault before mkdir",
+    async () => {
+      mkdirSync(vaultPath, { recursive: true });
+      const junction = path.join(workspace, "linked-cache-home");
+      symlinkSync(vaultPath, junction, "junction");
+      const requestedRoot = path.join(junction, "kwiry-search");
+
+      await expect(openLocalCacheStore({
+        canonicalVaultPath: vaultPath,
+        vaultConfigDirName: ".obsidian",
+        rootOverride: requestedRoot,
+      })).resolves.toEqual({ kind: "unavailable", reason: "root_inside_vault" });
+      expect(existsSync(path.join(vaultPath, "kwiry-search"))).toBe(false);
+    },
+  );
+
   it("reports a probe failure truthfully instead of writing anywhere else", async () => {
     const io = new RecordingFileSystem();
     io.failure = (call) => call.op === "rename" && call.path.includes(".store-probe-");
@@ -446,6 +487,57 @@ describe("LocalCacheStore", () => {
       // The path must not appear in the file names either.
       expect(file.slice(rootPath.length)).not.toContain(path.basename(vaultPath));
     }
+    await store.dispose();
+  });
+
+  it.each(["vault identity", "generations"] as const)(
+    "rejects a symlink or junction at the owned %s directory without touching its target",
+    async (component) => {
+      mkdirSync(vaultPath, { recursive: true });
+      const io = new RecordingFileSystem();
+      const store = await openStore({ fs: io });
+      const vaults = path.join(rootPath, "vaults");
+      mkdirSync(vaults, { recursive: true });
+      const identityDirectory = path.join(vaults, vaultIdentity);
+      const attackedDirectory = component === "vault identity"
+        ? identityDirectory
+        : path.join(identityDirectory, "generations");
+      if (component === "vault identity") {
+        symlinkSync(vaultPath, identityDirectory, process.platform === "win32" ? "junction" : "dir");
+      } else {
+        mkdirSync(identityDirectory, { recursive: true });
+        symlinkSync(
+          vaultPath,
+          attackedDirectory,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
+
+      await expect(store.put(write("g1", image(0x42)))).rejects.toMatchObject({
+        code: "unsafe_path",
+      });
+      expect(io.calls.some((call) => call.op === "chmod" && call.path === attackedDirectory))
+        .toBe(false);
+      expect(io.calls.some((call) => call.op === "open(wx)"
+        && call.path.startsWith(`${attackedDirectory}${path.sep}`))).toBe(false);
+      expect(readdirSync(vaultPath)).toEqual([]);
+      await store.dispose();
+    },
+  );
+
+  it("rethrows pointer permission and I/O failures instead of reporting cache absence", async () => {
+    const io = new RecordingFileSystem();
+    const store = await openStore({ fs: io });
+    for (const code of ["EACCES", "EIO"] as const) {
+      io.failure = (call) => {
+        if (call.op !== "lstat" || !call.path.endsWith("current.json")) return false;
+        const error = new Error(`injected ${code}`) as NodeJS.ErrnoException;
+        error.code = code;
+        throw error;
+      };
+      await expect(store.load()).rejects.toMatchObject({ code });
+    }
+    io.failure = null;
     await store.dispose();
   });
 
@@ -897,6 +989,17 @@ describe("LocalCacheStore", () => {
 
     await expect(store.load()).resolves.toEqual({ kind: "miss", reason: "absent" });
     expect(readdirSync(vaultDirectory()).sort()).toEqual([]);
+    await store.dispose();
+  });
+
+  it("reports a definitive discard failure instead of claiming removal", async () => {
+    const io = new RecordingFileSystem();
+    const store = await openStore({ fs: io });
+    await store.put(write("g1", image(1)));
+    io.failure = (call) => call.op === "unlink" && call.path.endsWith("current.json");
+
+    await expect(store.discard("corrupt")).rejects.toMatchObject({ code: "discard_failed" });
+    expect(existsSync(path.join(vaultDirectory(), "current.json"))).toBe(true);
     await store.dispose();
   });
 

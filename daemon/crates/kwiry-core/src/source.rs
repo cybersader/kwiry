@@ -82,6 +82,40 @@ struct HeadingMarker {
     path: Vec<String>,
 }
 
+/// Records an oversized source from trusted host metadata without reading or
+/// transferring its contents. The same descriptor validation and Rust-authored
+/// identity path as ordinary preparation are used; only the content-dependent
+/// work is deliberately absent.
+pub fn prepare_oversized_source(
+    descriptor: &SourceDescriptor,
+) -> Result<SourcePreparation, SourcePreparationError> {
+    validate_descriptor(descriptor)?;
+    if descriptor.byte_length <= MAX_FILE_BYTES {
+        return Err(validation_error(
+            "oversized source does not exceed the file limit",
+        ));
+    }
+    Ok(SourcePreparation {
+        schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
+        source_key: source_key(&descriptor.vault_id, &descriptor.path),
+        vault_id: descriptor.vault_id.clone(),
+        room: descriptor.room.clone(),
+        path: descriptor.path.clone(),
+        format: descriptor.format,
+        content_hash: None,
+        byte_length: descriptor.byte_length,
+        mtime: descriptor.mtime,
+        mtime_nanos: descriptor.mtime_nanos,
+        retrieval: retrieval_metadata(&descriptor.path, Vec::new()),
+        chunks: Vec::new(),
+        kind: SourcePreparationKind::Skipped,
+        warning: Some(format!(
+            "skipped file larger than {MAX_FILE_BYTES} bytes ({})",
+            descriptor.byte_length
+        )),
+    })
+}
+
 pub fn prepare_source_buffer(
     descriptor: &SourceDescriptor,
     bytes: &[u8],
@@ -94,30 +128,11 @@ pub fn prepare_source_buffer(
             descriptor.byte_length
         )));
     }
+    if actual_byte_length > MAX_FILE_BYTES {
+        return prepare_oversized_source(descriptor);
+    }
     let source_key = source_key(&descriptor.vault_id, &descriptor.path);
     let empty_retrieval = retrieval_metadata(&descriptor.path, Vec::new());
-
-    if actual_byte_length > MAX_FILE_BYTES {
-        return Ok(SourcePreparation {
-            schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
-            source_key,
-            vault_id: descriptor.vault_id.clone(),
-            room: descriptor.room.clone(),
-            path: descriptor.path.clone(),
-            format: descriptor.format,
-            content_hash: None,
-            byte_length: descriptor.byte_length,
-            mtime: descriptor.mtime,
-            mtime_nanos: descriptor.mtime_nanos,
-            retrieval: empty_retrieval,
-            chunks: Vec::new(),
-            kind: SourcePreparationKind::Skipped,
-            warning: Some(format!(
-                "skipped file larger than {MAX_FILE_BYTES} bytes ({})",
-                descriptor.byte_length
-            )),
-        });
-    }
 
     let content_hash = hex_digest(bytes);
     let source = match String::from_utf8(bytes.to_vec()) {

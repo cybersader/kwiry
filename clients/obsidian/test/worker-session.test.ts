@@ -70,6 +70,15 @@ function resultFor(message: WorkerRequest): WorkerResult {
         documents: message.upserts.length,
         chunks: message.upserts.length,
       };
+    case "plan_reconciliation":
+      return {
+        generation: message.generation,
+        unchanged: [],
+        refresh: message.current_sources.map((source) => source.path),
+        remove: [],
+        stored_source_count: 0,
+        matched_source_count: 0,
+      };
     case "export_generation":
       return {
         generation: message.generation,
@@ -216,6 +225,29 @@ describe("InPluginWorkerSession", () => {
       cache_identity: identity,
       expected_cache_identity: identity,
     });
+  });
+
+  it("posts an exact bounded reconciliation snapshot", async () => {
+    const worker = new MockWorker();
+    const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 1_000);
+    const current = [{
+      path: "note.md",
+      byte_length: 4,
+      mtime_nanos: "1000000",
+      indexable: true,
+    }];
+
+    await expect(session.planReconciliation("g1", "active-vault", current)).resolves.toMatchObject({
+      generation: "g1",
+    });
+    expect(worker.posted).toEqual([{
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "plan_reconciliation",
+      generation: "g1",
+      vault_id: "active-vault",
+      current_sources: current,
+    }]);
   });
 
   it("terminates its Worker and revokes the Blob URL exactly once", async () => {

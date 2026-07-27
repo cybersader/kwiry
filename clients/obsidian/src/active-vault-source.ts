@@ -17,6 +17,10 @@ export const MAX_INDEXABLE_SOURCE_BYTES = 10 * 1024 * 1024;
  */
 export const MAX_EXCERPT_SOURCE_BYTES = 1024 * 1024;
 
+export function canonicalMtimeNanos(mtimeMs: number): string {
+  return (BigInt(Math.trunc(mtimeMs)) * 1_000_000n).toString();
+}
+
 export type VaultSourceEvent =
   | { kind: "upsert"; path: string }
   | { kind: "remove"; path: string }
@@ -26,12 +30,12 @@ export type VaultSourceEvent =
 export type SourceInspection =
   | { kind: "candidate"; path: string; size: number; mtime: number }
   | { kind: "missing"; path: string }
-  | { kind: "oversized"; path: string };
+  | { kind: "oversized"; path: string; size: number; mtime: number };
 
 export type StableSourceRead =
   | { kind: "source"; source: SourceInput }
   | { kind: "missing"; path: string }
-  | { kind: "oversized"; path: string }
+  | { kind: "oversized"; path: string; size: number; mtime: number }
   | { kind: "stale"; path: string };
 
 /**
@@ -90,7 +94,9 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
     if (!isNormalizedMarkdownPath(path)) return { kind: "missing", path };
     const file = this.vault.getFileByPath(path);
     if (!file || !isMarkdownFile(file)) return { kind: "missing", path };
-    if (file.stat.size > MAX_INDEXABLE_SOURCE_BYTES) return { kind: "oversized", path };
+    if (file.stat.size > MAX_INDEXABLE_SOURCE_BYTES) {
+      return { kind: "oversized", path, size: file.stat.size, mtime: file.stat.mtime };
+    }
     return {
       kind: "candidate",
       path,
@@ -113,7 +119,12 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
 
     const bytes = new Uint8Array(buffer);
     if (bytes.byteLength > MAX_INDEXABLE_SOURCE_BYTES) {
-      return { kind: "oversized", path: inspection.path };
+      return {
+        kind: "oversized",
+        path: inspection.path,
+        size: bytes.byteLength,
+        mtime: inspection.mtime,
+      };
     }
     if (bytes.byteLength !== inspection.size) return { kind: "stale", path: inspection.path };
 
@@ -126,7 +137,7 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
           format: "markdown",
           byte_length: bytes.byteLength,
           mtime: Math.floor(inspection.mtime / 1_000),
-          mtime_nanos: (BigInt(Math.trunc(inspection.mtime)) * 1_000_000n).toString(),
+          mtime_nanos: canonicalMtimeNanos(inspection.mtime),
         },
         bytes,
       },

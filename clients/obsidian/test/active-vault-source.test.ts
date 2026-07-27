@@ -163,6 +163,8 @@ describe("ObsidianActiveVaultSource", () => {
     expect(source(fake).inspectMarkdown("large.md")).toEqual({
       kind: "oversized",
       path: "large.md",
+      size: MAX_INDEXABLE_SOURCE_BYTES + 1,
+      mtime: 1,
     });
     expect(fake.readBinary).not.toHaveBeenCalled();
   });

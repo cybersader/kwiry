@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 2 as const;
+export const WORKER_PROTOCOL_VERSION = 3 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -11,6 +11,8 @@ export const MAX_BATCH_BYTES = 16 * 1024 * 1024;
 export const MAX_GENERATION_CHARACTERS = 128;
 export const MAX_QUERY_CHARACTERS = 4_096;
 export const MAX_SEARCH_HITS = 100;
+export const MAX_RECONCILIATION_SOURCES = 200_000;
+export const MAX_RECONCILIATION_PLAN_PATHS = MAX_RECONCILIATION_SOURCES * 2;
 
 /**
  * Version of the cache image format the Worker produces. It covers the SQLite
@@ -43,6 +45,7 @@ export type WorkerOperation =
   | "abort_build"
   | "export_generation"
   | "restore_generation"
+  | "plan_reconciliation"
   | "search"
   | "status"
   | "dispose";
@@ -92,6 +95,32 @@ export interface SourceInput {
   bytes: Uint8Array;
 }
 
+/** Rust-authored skipped preparation without reading or transporting contents. */
+export interface OversizedSourceInput {
+  descriptor: SourceDescriptorInput;
+  oversized: true;
+}
+
+export type SourceUpsert = SourceInput | OversizedSourceInput;
+
+export interface ReconciliationSourceMetadata {
+  path: string;
+  byte_length: number;
+  mtime_nanos: string;
+  indexable: boolean;
+}
+
+export interface ReconciliationPlanResult {
+  generation: string;
+  unchanged: string[];
+  refresh: string[];
+  remove: string[];
+  /** Number of rows in the restored freshness ledger before planning. */
+  stored_source_count: number;
+  /** Current paths that were present in that restored ledger. */
+  matched_source_count: number;
+}
+
 export interface SourceRemoval {
   vault_id: string;
   path: string;
@@ -128,13 +157,13 @@ export type WorkerRequest =
   | (RequestBase & {
       operation: "add_source_batch";
       generation: string;
-      sources: SourceInput[];
+      sources: SourceUpsert[];
     })
   | (RequestBase & {
       operation: "apply_source_changes";
       generation: string;
       next_generation: string | null;
-      upserts: SourceInput[];
+      upserts: SourceUpsert[];
       removals: SourceRemoval[];
     })
   | (RequestBase & { operation: "commit_build"; generation: string })
@@ -149,6 +178,12 @@ export type WorkerRequest =
       cache_identity: string;
     })
   | (RequestBase & RestoreGenerationInput & { operation: "restore_generation" })
+  | (RequestBase & {
+      operation: "plan_reconciliation";
+      generation: string;
+      vault_id: string;
+      current_sources: ReconciliationSourceMetadata[];
+    })
   | (RequestBase & {
       operation: "search";
       query: string;
@@ -242,6 +277,7 @@ export type WorkerResult =
   | StatusResult
   | SearchResult
   | ExportGenerationResult
+  | ReconciliationPlanResult
   | DisposeResult;
 
 export type WorkerResponse =
@@ -295,6 +331,13 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "restore_generation":
       return parseRestoreGenerationRequest(value, base);
+    case "plan_reconciliation":
+      return hasExactKeys(value, [...base, "generation", "vault_id", "current_sources"])
+        && isGeneration(value.generation)
+        && isBoundedString(value.vault_id, 1_024)
+        && isReconciliationSources(value.current_sources)
+        ? value as unknown as WorkerRequest
+        : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "add_source_batch":
       return hasExactKeys(value, [...base, "generation", "sources"])
         && isGeneration(value.generation)
@@ -420,7 +463,7 @@ export function isGeneration(value: unknown): value is string {
     && /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value);
 }
 
-function isSourceBatch(value: unknown, allowEmpty = false): value is SourceInput[] {
+function isSourceBatch(value: unknown, allowEmpty = false): value is SourceUpsert[] {
   if (!Array.isArray(value)
     || (!allowEmpty && value.length < 1)
     || value.length > MAX_BATCH_SOURCES) {
@@ -428,16 +471,43 @@ function isSourceBatch(value: unknown, allowEmpty = false): value is SourceInput
   }
   let totalBytes = 0;
   for (const source of value) {
-    if (!isRecord(source)
-      || !hasExactKeys(source, ["descriptor", "bytes"])
-      || !(source.bytes instanceof Uint8Array)
-      || source.bytes.byteLength > MAX_SOURCE_BYTES
-      || !isSourceDescriptor(source.descriptor)
-      || source.descriptor.byte_length !== source.bytes.byteLength) {
+    if (!isRecord(source)) return false;
+    if (hasExactKeys(source, ["descriptor", "bytes"])) {
+      if (!isSourceDescriptor(source.descriptor)
+        || !(source.bytes instanceof Uint8Array)
+        || source.bytes.byteLength > MAX_SOURCE_BYTES
+        || source.descriptor.byte_length !== source.bytes.byteLength) {
+        return false;
+      }
+      totalBytes += source.bytes.byteLength;
+      if (totalBytes > MAX_BATCH_BYTES) return false;
+      continue;
+    }
+    if (!hasExactKeys(source, ["descriptor", "oversized"])
+      || source.oversized !== true
+      || !isSourceDescriptor(source.descriptor, true)
+      || source.descriptor.byte_length < MAX_SOURCE_BYTES) {
       return false;
     }
-    totalBytes += source.bytes.byteLength;
-    if (totalBytes > MAX_BATCH_BYTES) return false;
+  }
+  return true;
+}
+
+function isReconciliationSources(value: unknown): value is ReconciliationSourceMetadata[] {
+  if (!Array.isArray(value) || value.length > MAX_RECONCILIATION_SOURCES) return false;
+  const paths = new Set<string>();
+  for (const source of value) {
+    if (!isRecord(source)
+      || !hasExactKeys(source, ["path", "byte_length", "mtime_nanos", "indexable"])
+      || !isNormalizedVaultRelativePath(source.path)
+      || !isNonNegativeSafeInteger(source.byte_length)
+      || typeof source.mtime_nanos !== "string"
+      || !/^[0-9]{1,39}$/u.test(source.mtime_nanos)
+      || typeof source.indexable !== "boolean"
+      || paths.has(source.path)) {
+      return false;
+    }
+    paths.add(source.path);
   }
   return true;
 }
@@ -478,7 +548,7 @@ function sourceIdentity(vaultId: string, path: string): string {
   return JSON.stringify([vaultId, path]);
 }
 
-function isSourceDescriptor(value: unknown): value is SourceDescriptorInput {
+function isSourceDescriptor(value: unknown, allowOversized = false): value is SourceDescriptorInput {
   if (!isRecord(value)) return false;
   const required = ["vault_id", "path", "format", "byte_length", "mtime", "mtime_nanos"];
   const allowed = value.room === undefined ? required : [...required, "room"];
@@ -488,7 +558,7 @@ function isSourceDescriptor(value: unknown): value is SourceDescriptorInput {
     && isBoundedString(value.path, 4_096)
     && (value.format === "markdown" || value.format === "text")
     && isNonNegativeSafeInteger(value.byte_length)
-    && Number(value.byte_length) <= MAX_SOURCE_BYTES
+    && (allowOversized || Number(value.byte_length) <= MAX_SOURCE_BYTES)
     && isNonNegativeSafeInteger(value.mtime)
     && typeof value.mtime_nanos === "string"
     && /^[0-9]{1,39}$/u.test(value.mtime_nanos);
@@ -507,6 +577,8 @@ function isResultForOperation(operation: WorkerOperation, value: unknown): boole
       return isBuildResult(value);
     case "export_generation":
       return isExportGenerationResult(value);
+    case "plan_reconciliation":
+      return isReconciliationPlanResult(value);
     case "status":
       return isStatusResult(value);
     case "search":
@@ -580,6 +652,42 @@ function isExportGenerationResult(value: unknown): value is ExportGenerationResu
     && isBoundedString(value.plugin_id, MAX_PLUGIN_ID_CHARACTERS)
     && isBoundedString(value.plugin_version, MAX_PLUGIN_VERSION_CHARACTERS)
     && isSha256Hex(value.cache_identity);
+}
+
+function isReconciliationPlanResult(value: unknown): value is ReconciliationPlanResult {
+  if (!isRecord(value)
+    || !hasExactKeys(value, [
+      "generation",
+      "unchanged",
+      "refresh",
+      "remove",
+      "stored_source_count",
+      "matched_source_count",
+    ])
+    || !isGeneration(value.generation)
+    || !isNonNegativeSafeInteger(value.stored_source_count)
+    || value.stored_source_count > MAX_RECONCILIATION_SOURCES
+    || !isNonNegativeSafeInteger(value.matched_source_count)
+    || value.matched_source_count > MAX_RECONCILIATION_SOURCES) {
+    return false;
+  }
+  const groups = [value.unchanged, value.refresh, value.remove];
+  if (!groups.every((group) => Array.isArray(group)
+    && group.length <= MAX_RECONCILIATION_SOURCES
+    && group.every(isNormalizedVaultRelativePath))) {
+    return false;
+  }
+  const unchanged = value.unchanged as string[];
+  const refresh = value.refresh as string[];
+  const remove = value.remove as string[];
+  const paths = groups.flat() as string[];
+  const currentCount = unchanged.length + refresh.length;
+  return currentCount <= MAX_RECONCILIATION_SOURCES
+    && paths.length <= MAX_RECONCILIATION_PLAN_PATHS
+    && new Set(paths).size === paths.length
+    && unchanged.length <= value.matched_source_count
+    && value.matched_source_count <= currentCount
+    && value.matched_source_count + remove.length === value.stored_source_count;
 }
 
 function isStatusResult(value: unknown): value is StatusResult {
@@ -701,6 +809,7 @@ function isWorkerOperation(value: unknown): value is WorkerOperation {
     || value === "abort_build"
     || value === "export_generation"
     || value === "restore_generation"
+    || value === "plan_reconciliation"
     || value === "search"
     || value === "status"
     || value === "dispose";

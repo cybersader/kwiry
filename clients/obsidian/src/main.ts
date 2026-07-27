@@ -14,9 +14,11 @@ import { BackendManager } from "./backend-manager";
 import type { BackendIdentity, BackendStatus, SearchBackend } from "./backend";
 import { DaemonBackend } from "./backends/daemon-backend";
 import { InPluginLexicalBackend } from "./backends/in-plugin-lexical-backend";
+import { openVaultCacheStore } from "./cache/local-cache-store";
 import { readDaemonToken } from "./credentials";
 import { LatestRequestEpoch } from "./latest-request-epoch";
 import { KwirySearchModal } from "./search-modal";
+import { formatStatus } from "./status-format";
 import { DEFAULT_SETTINGS, loadSettings, type KwiryPluginSettings } from "./settings";
 import { KwirySettingTab } from "./settings-tab";
 
@@ -54,6 +56,12 @@ export default class KwiryPlugin extends Plugin {
         activeVaultId: ACTIVE_VAULT_ID,
         source: new ObsidianActiveVaultSource(this.app.vault),
         workerSource,
+        cache: {
+          openStore: () => openVaultCacheStore({
+            adapter: this.app.vault.adapter,
+            vaultConfigDirName: this.app.vault.configDir,
+          }),
+        },
       }),
     });
 
@@ -207,17 +215,6 @@ export default class KwiryPlugin extends Plugin {
   private isCurrent(pluginEpoch: number, activationEpoch: number): boolean {
     return pluginEpoch === this.pluginEpoch && activationEpoch === this.activationEpoch;
   }
-}
-
-function formatStatus(status: BackendStatus): string {
-  const profile = status.identity.profile === "daemon" ? "Daemon" : "In-plugin · Lexical";
-  if (status.progress) {
-    const total = status.progress.total === null ? "?" : String(status.progress.total);
-    return `kwiry: ${profile} · ${status.progress.stage} ${status.progress.completed}/${total}`;
-  }
-  if (status.issue) return `kwiry: ${profile} · ${status.issue.safeMessage}`;
-  const modes = status.capabilities.supportedModes.join("/");
-  return `kwiry: ${profile} · ${status.phase} (${status.chunks} chunks, ${modes})`;
 }
 
 function optionalString(value: string): string | null {

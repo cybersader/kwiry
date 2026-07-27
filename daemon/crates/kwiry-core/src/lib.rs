@@ -115,7 +115,8 @@ pub use semantic::{
 #[cfg(feature = "portable")]
 pub use source::{
     SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourceFormat, SourcePreparation,
-    SourcePreparationError, SourcePreparationKind, prepare_source_buffer, source_key,
+    SourcePreparationError, SourcePreparationKind, prepare_oversized_source, prepare_source_buffer,
+    source_key,
 };
 #[cfg(feature = "portable")]
 pub use status::{

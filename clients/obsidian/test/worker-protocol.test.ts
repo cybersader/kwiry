@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   CACHE_SCHEMA_VERSION,
   MAX_EXPORT_BLOB_BYTES,
+  MAX_RECONCILIATION_SOURCES,
+  MAX_SOURCE_BYTES,
   MAX_SOURCE_CHANGES,
   WORKER_PROTOCOL_VERSION,
   type SourceInput,
@@ -107,6 +109,135 @@ describe("Worker protocol", () => {
       upserts: [source("new.md")],
       removals: [],
     })).toMatchObject({ operation: "apply_source_changes", next_generation: "generation-2" });
+  });
+
+  it("accepts Rust-prepared oversized metadata without content bytes", () => {
+    const oversized = {
+      descriptor: {
+        vault_id: "active",
+        path: "large.md",
+        format: "markdown",
+        byte_length: MAX_SOURCE_BYTES,
+        mtime: 1,
+        mtime_nanos: "1000000000",
+      },
+      oversized: true,
+    } as const;
+    expect(parseWorkerRequest({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "add_source_batch",
+      generation: "g1",
+      sources: [oversized],
+    })).toMatchObject({ operation: "add_source_batch" });
+    expect(parseWorkerRequest({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 2,
+      operation: "apply_source_changes",
+      generation: "g1",
+      next_generation: "g2",
+      upserts: [oversized],
+      removals: [],
+    })).toMatchObject({ operation: "apply_source_changes" });
+    expect(parseWorkerRequest({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 3,
+      operation: "add_source_batch",
+      generation: "g1",
+      sources: [{ ...oversized, descriptor: { ...oversized.descriptor, byte_length: 1 } }],
+    })).toMatchObject({ code: "invalid_request" });
+  });
+
+  it("validates bounded exact reconciliation plans in both directions", () => {
+    const request = {
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "plan_reconciliation",
+      generation: "g1",
+      vault_id: "active-vault",
+      current_sources: [{
+        path: "note.md",
+        byte_length: 4,
+        mtime_nanos: "1000000",
+        indexable: true,
+      }],
+    } as const;
+    expect(parseWorkerRequest(request)).toMatchObject({ operation: "plan_reconciliation" });
+    expect(parseWorkerRequest({
+      ...request,
+      current_sources: Array(MAX_RECONCILIATION_SOURCES + 1).fill({
+        path: "note.md",
+        byte_length: 1,
+        mtime_nanos: "1",
+        indexable: true,
+      }),
+    })).toMatchObject({ code: "invalid_request" });
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "plan_reconciliation",
+      ok: true,
+      result: {
+        generation: "g1",
+        unchanged: ["note.md"],
+        refresh: ["changed.md"],
+        remove: ["gone.md"],
+        stored_source_count: 2,
+        matched_source_count: 1,
+      },
+    })).toBe(true);
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "plan_reconciliation",
+      ok: true,
+      result: {
+        generation: "g1",
+        unchanged: ["note.md"],
+        refresh: ["note.md"],
+        remove: [],
+        stored_source_count: 1,
+        matched_source_count: 1,
+      },
+    })).toBe(false);
+  });
+
+  it("accepts a disjoint stored/current inventory whose valid plan exceeds one source bound", () => {
+    const inventorySize = Math.floor(MAX_RECONCILIATION_SOURCES / 2) + 1;
+    const refresh = Array.from({ length: inventorySize }, (_, index) => `current-${index}.md`);
+    const remove = Array.from({ length: inventorySize }, (_, index) => `stored-${index}.md`);
+    expect(refresh.length + remove.length).toBeGreaterThan(MAX_RECONCILIATION_SOURCES);
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "plan_reconciliation",
+      ok: true,
+      result: {
+        generation: "g1",
+        unchanged: [],
+        refresh,
+        remove,
+        stored_source_count: inventorySize,
+        matched_source_count: 0,
+      },
+    })).toBe(true);
+  });
+
+  it("rejects a reconciliation plan whose ledger coverage counts omit stored deletions", () => {
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "plan_reconciliation",
+      ok: true,
+      result: {
+        generation: "g1",
+        unchanged: ["current.md"],
+        refresh: [],
+        remove: [],
+        stored_source_count: 2,
+        matched_source_count: 1,
+      },
+    })).toBe(false);
   });
 
   it("distinguishes incompatible versions from malformed requests", () => {

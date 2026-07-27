@@ -2,8 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { openPlainBlockVfs, type BlockVfsHandle } from "./block-vfs";
-import { CACHE_SCHEMA_VERSION, MAX_EXPORT_BLOB_BYTES } from "./protocol";
-import type { SourceRemoval, WorkerFrontmatter, WorkerSearchHit } from "./protocol";
+import {
+  CACHE_SCHEMA_VERSION,
+  MAX_EXPORT_BLOB_BYTES,
+  MAX_RECONCILIATION_SOURCES,
+} from "./protocol";
+import type {
+  ReconciliationPlanResult,
+  ReconciliationSourceMetadata,
+  SourceRemoval,
+  WorkerFrontmatter,
+  WorkerSearchHit,
+} from "./protocol";
 import { bindMetadataProbe, bindSearchPlan } from "./query-binder";
 import type {
   MatchPlan,
@@ -273,6 +283,14 @@ const SELECT_SOURCE_BY_IDENTITY_SQL = `
 SELECT ${SOURCE_COLUMNS_SQL}
 FROM sources
 WHERE vault_id = ? AND path = ?
+`;
+
+const SELECT_SOURCES_BY_VAULT_SQL = `
+SELECT ${SOURCE_COLUMNS_SQL}
+FROM sources
+WHERE vault_id = ?
+ORDER BY path
+LIMIT ?
 `;
 
 const INSERT_SOURCE_SQL = `
@@ -555,6 +573,53 @@ export class Fts5GenerationIndex {
     this.corpusBytes = nextBytes;
     this.sourceCount = nextSources;
     this.observedChunkingVersion = nextChunkingVersion;
+  }
+
+  planReconciliation(
+    vaultId: string,
+    current: readonly ReconciliationSourceMetadata[],
+  ): Omit<ReconciliationPlanResult, "generation"> {
+    this.requireOpen();
+    const rows = this.db.selectObjects(
+      SELECT_SOURCES_BY_VAULT_SQL,
+      [vaultId, onePastLimit(MAX_RECONCILIATION_SOURCES)],
+    );
+    if (rows.length > MAX_RECONCILIATION_SOURCES) throw new IndexCapacityError();
+    const stored = new Map<string, StoredSource>();
+    for (const row of rows) {
+      const source = parseStoredSource([row]);
+      if (source === null || source.vault_id !== vaultId || stored.has(source.path)) {
+        throw new IndexIntegrityError("stored source inventory is invalid");
+      }
+      stored.set(source.path, source);
+    }
+
+    const storedSourceCount = stored.size;
+    let matchedSourceCount = 0;
+    const unchanged: string[] = [];
+    const refresh: string[] = [];
+    for (const source of current) {
+      const previous = stored.get(source.path);
+      if (previous) matchedSourceCount += 1;
+      stored.delete(source.path);
+      const previousWasOversized = previous?.outcome === "skipped"
+        && previous.content_hash === null;
+      if (previous
+        && previous.byte_length === source.byte_length
+        && previous.mtime_nanos === source.mtime_nanos
+        && previousWasOversized === !source.indexable) {
+        unchanged.push(source.path);
+      } else {
+        refresh.push(source.path);
+      }
+    }
+    return {
+      unchanged,
+      refresh,
+      remove: [...stored.keys()].sort(comparePaths),
+      stored_source_count: storedSourceCount,
+      matched_source_count: matchedSourceCount,
+    };
   }
 
   metadataProbe(plan: MetadataProbePlan): boolean {
@@ -1105,6 +1170,10 @@ function sumSafe(values: readonly number[]): number {
     if (!Number.isSafeInteger(total)) throw new Error("source accounting exceeded its limit");
   }
   return total;
+}
+
+function comparePaths(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function sourceIdentity(vaultId: string, path: string): string {

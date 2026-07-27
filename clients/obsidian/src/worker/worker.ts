@@ -34,7 +34,9 @@ import {
   type DisposeResult,
   type ExportGenerationResult,
   type InitializeResult,
+  type ReconciliationPlanResult,
   type SearchResult,
+  type SourceUpsert,
   type StatusResult,
   type WorkerError,
   type WorkerOperation,
@@ -47,6 +49,7 @@ import {
   RustAdapterError,
   finalizeQueryWithRust,
   initializeRustAdapter,
+  prepareOversizedSourceWithRust,
   prepareQueryWithRust,
   prepareSourceWithRust,
 } from "./rust-adapter";
@@ -204,9 +207,7 @@ function addSourceBatch(
 ): BuildResult {
   const target = requireStaging(generation);
   try {
-    const preparations = sources.map((source) =>
-      prepareSourceWithRust(source.descriptor, source.bytes)
-    );
+    const preparations = sources.map(prepareSourceUpsert);
     target.index.applySourceChanges(preparations, []);
     return generationResult(target);
   } catch (error) {
@@ -236,9 +237,7 @@ function applySourceChanges(
   if (request.next_generation === null) {
     const target = requireStaging(request.generation);
     try {
-      const preparations = request.upserts.map((source) =>
-        prepareSourceWithRust(source.descriptor, source.bytes)
-      );
+      const preparations = request.upserts.map(prepareSourceUpsert);
       target.index.applySourceChanges(preparations, request.removals);
       return generationResult(target);
     } catch (error) {
@@ -260,9 +259,7 @@ function applySourceChanges(
   }
 
   try {
-    const preparations = request.upserts.map((source) =>
-      prepareSourceWithRust(source.descriptor, source.bytes)
-    );
+    const preparations = request.upserts.map(prepareSourceUpsert);
     // In place on a published generation: there is no later commit gate, so
     // the reconciliation runs inside this transaction. A divergence rolls the
     // batch back and is reported instead of quietly living in the active index.
@@ -590,6 +587,42 @@ async function restoreGeneration(
   }
 }
 
+function planReconciliation(
+  request: Extract<WorkerRequest, { operation: "plan_reconciliation" }>,
+): ReconciliationPlanResult {
+  requireInitialized();
+  if (staging || !active || active.id !== request.generation) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Requested generation is not the clean active generation.",
+      true,
+    );
+  }
+  try {
+    return {
+      generation: active.id,
+      ...active.index.planReconciliation(request.vault_id, request.current_sources),
+    };
+  } catch (error) {
+    if (error instanceof IndexCapacityError) throw indexCapacityError();
+    if (error instanceof IndexIntegrityError) {
+      throw fixedWorkerError(
+        "integrity_failed",
+        "index",
+        "Active generation source inventory is invalid.",
+        false,
+      );
+    }
+    throw fixedWorkerError(
+      "internal_error",
+      "index",
+      "Active generation could not be reconciled.",
+      false,
+    );
+  }
+}
+
 function abortBuild(generation: string): BuildResult {
   const target = requireStaging(generation);
   const result = generationResult(target);
@@ -722,6 +755,12 @@ function indexCapacityError(): WorkerError {
   );
 }
 
+function prepareSourceUpsert(source: SourceUpsert) {
+  return "bytes" in source
+    ? prepareSourceWithRust(source.descriptor, source.bytes)
+    : prepareOversizedSourceWithRust(source.descriptor);
+}
+
 function sourceChangeError(error: unknown): WorkerError {
   if (error instanceof IndexCapacityError) return indexCapacityError();
   if (error instanceof IndexIntegrityError) {
@@ -775,6 +814,8 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       return exportGeneration(request.generation, request.cache_identity);
     case "restore_generation":
       return restoreGeneration(request);
+    case "plan_reconciliation":
+      return planReconciliation(request);
     case "search":
       return search(request.query, request.limit);
     case "status":
@@ -888,6 +929,7 @@ function isOperation(value: unknown): value is WorkerOperation {
     || value === "abort_build"
     || value === "export_generation"
     || value === "restore_generation"
+    || value === "plan_reconciliation"
     || value === "search"
     || value === "status"
     || value === "dispose";

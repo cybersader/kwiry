@@ -6,6 +6,7 @@ import {
   abi_identity,
   finalize_query,
   initSync,
+  prepare_oversized_source,
   prepare_query,
   prepare_source,
 } from "virtual:kwiry-rust-wasm-bindings";
@@ -32,7 +33,7 @@ export interface RustIdentity {
   chunking_version: number;
   max_request_bytes: number;
   max_source_buffer_bytes: number;
-  operations: ["prepare_source", "prepare_query", "finalize_query"];
+  operations: ["prepare_source", "prepare_oversized_source", "prepare_query", "finalize_query"];
 }
 
 export interface PreparedFrontmatter {
@@ -162,6 +163,31 @@ export function prepareSourceWithRust(
   return response.result.preparation;
 }
 
+export function prepareOversizedSourceWithRust(
+  descriptor: SourceDescriptorInput,
+): SourcePreparation {
+  const response = parseResponse(
+    prepare_oversized_source(JSON.stringify({
+      abi_version: ABI_VERSION,
+      operation: "prepare_oversized_source",
+      descriptor,
+    })),
+    "prepare_oversized_source",
+  );
+  if (!isRecord(response.result)
+    || !hasExactKeys(response.result, ["preparation"])
+    || !isSourcePreparation(response.result.preparation)) {
+    throw new RustAdapterError("invalid_response", "Portable Rust returned invalid source data.");
+  }
+  const preparation = response.result.preparation;
+  if (preparation.kind !== "skipped"
+    || preparation.content_hash !== null
+    || preparation.byte_length !== descriptor.byte_length) {
+    throw new RustAdapterError("invalid_response", "Portable Rust returned invalid oversized source data.");
+  }
+  return preparation;
+}
+
 export function prepareQueryWithRust(query: string): PreparedQuery {
   const response = parseResponse(
     prepare_query(JSON.stringify({
@@ -259,6 +285,7 @@ function isRustIdentity(value: unknown): value is RustIdentity {
     && Array.isArray(value.operations)
     && JSON.stringify(value.operations) === JSON.stringify([
       "prepare_source",
+      "prepare_oversized_source",
       "prepare_query",
       "finalize_query",
     ]);

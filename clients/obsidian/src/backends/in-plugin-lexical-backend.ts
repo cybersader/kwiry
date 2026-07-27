@@ -22,6 +22,7 @@ import {
 } from "../worker/session";
 import {
   InPluginIndexController,
+  type IndexControllerCacheOptions,
   type IndexControllerStatus,
 } from "./in-plugin-index-controller";
 
@@ -33,6 +34,7 @@ export interface InPluginLexicalBackendOptions {
   createSession?: (workerSource: string) => InPluginWorkerSession;
   nextGeneration?: () => string;
   yieldControl?: () => Promise<void>;
+  cache?: IndexControllerCacheOptions;
 }
 
 const MAX_CONCURRENT_EXCERPT_READS = 4;
@@ -54,6 +56,7 @@ export class InPluginLexicalBackend implements SearchBackend {
   private readonly createSession: (workerSource: string) => InPluginWorkerSession;
   private readonly nextGeneration: () => string;
   private readonly yieldControl: () => Promise<void>;
+  private readonly cache: IndexControllerCacheOptions | null;
   private readonly statusListeners = new Set<(status: BackendStatus) => void>();
   private session: InPluginWorkerSession | null = null;
   private controller: InPluginIndexController | null = null;
@@ -77,6 +80,7 @@ export class InPluginLexicalBackend implements SearchBackend {
     this.nextGeneration = options.nextGeneration
       ?? (() => `${options.instanceId}-generation-${++generation}`);
     this.yieldControl = options.yieldControl ?? yieldToBrowser;
+    this.cache = options.cache ?? null;
     this.cachedStatus = baseStatus(this.identity);
   }
 
@@ -198,7 +202,8 @@ export class InPluginLexicalBackend implements SearchBackend {
     if (this.disposed) return;
     this.disposed = true;
     this.epoch += 1;
-    this.controller?.dispose();
+    const controller = this.controller;
+    controller?.dispose();
     this.controller = null;
     const session = this.session;
     this.session = null;
@@ -206,6 +211,7 @@ export class InPluginLexicalBackend implements SearchBackend {
     this.publish(disposedStatus(this.identity));
     this.statusListeners.clear();
     session?.forceDispose();
+    await controller?.whenDisposed();
   }
 
   /**
@@ -262,7 +268,7 @@ export class InPluginLexicalBackend implements SearchBackend {
         onStatus: (status) => {
           if (this.disposed || epoch !== this.epoch || controller !== this.controller) return;
           latestStatus = status;
-          if (status.stage === "ready") {
+          if (status.stage === "ready" && !status.dirty) {
             this.recovering = false;
             this.automaticRecoveries = 0;
           }
@@ -278,6 +284,7 @@ export class InPluginLexicalBackend implements SearchBackend {
           }
         },
         yieldControl: this.yieldControl,
+        ...(this.cache ? { cache: this.cache } : {}),
       });
       this.session = session;
       this.controller = controller;
@@ -337,14 +344,14 @@ function mapControllerStatus(
   recovering: boolean,
 ): BackendStatus {
   if (status.stage === "disposed") return disposedStatus(identity);
-  const issue = recovering && status.stage !== "ready"
+  const issue = recovering && !(status.stage === "ready" && !status.dirty)
     ? {
         code: "worker_recovering",
         safeMessage: "In-plugin search Worker is recovering.",
         recoverable: true,
       }
     : status.issue
-      ? controllerIssue(status.issue)
+      ? controllerIssue(status.issue, status)
       : status.searchable
         ? undefined
         : {
@@ -352,9 +359,11 @@ function mapControllerStatus(
             safeMessage: "In-plugin lexical index is still building.",
             recoverable: true,
           };
-  const phase = status.stage === "ready"
+  const phase = status.stage === "ready" && !status.dirty && !issue
     ? "ready"
-    : status.stage === "degraded"
+    : status.stage === "ready" && !status.dirty && issue
+      ? "degraded"
+      : status.stage === "degraded"
       ? "degraded"
       : status.stage === "failed"
         ? "unavailable"
@@ -388,7 +397,10 @@ function mapControllerStatus(
   };
 }
 
-function controllerIssue(issue: NonNullable<IndexControllerStatus["issue"]>) {
+function controllerIssue(
+  issue: NonNullable<IndexControllerStatus["issue"]>,
+  status: IndexControllerStatus,
+) {
   switch (issue) {
     case "vault_read_failed":
       return {
@@ -412,6 +424,72 @@ function controllerIssue(issue: NonNullable<IndexControllerStatus["issue"]>) {
       return {
         code: issue,
         safeMessage: "The in-plugin lexical index reached its capacity limit.",
+        recoverable: true,
+      };
+    case "index_reconciling":
+      return {
+        code: issue,
+        safeMessage: "Cached index searchable; reconciling vault changes…",
+        recoverable: true,
+      };
+    case "cache_absent":
+      return {
+        code: issue,
+        safeMessage: status.searchable
+          ? status.dirty
+            ? "Index is searchable but stale; cached durability is pending."
+            : "Index is current; cached durability is pending."
+          : "No cached index; building a fresh index…",
+        recoverable: true,
+      };
+    case "cache_unavailable":
+      return {
+        code: issue,
+        safeMessage: status.searchable
+          ? status.dirty
+            ? "Index is searchable but stale; cache durability is unavailable."
+            : "Index is current, but cache durability is unavailable."
+          : "Cache unavailable; building a fresh index…",
+        recoverable: true,
+      };
+    case "cache_corrupt":
+      return {
+        code: issue,
+        safeMessage: status.searchable
+          ? status.dirty
+            ? "Fresh index is searchable but stale; cache replacement is pending."
+            : "Fresh index is current; replacing the discarded cache…"
+          : "Cached index rejected and discarded; building fresh…",
+        recoverable: true,
+      };
+    case "cache_incompatible":
+      return {
+        code: issue,
+        safeMessage: status.searchable && !status.dirty
+          ? "Fresh index is current; replacing the incompatible cache…"
+          : "Cached index is incompatible; building fresh…",
+        recoverable: true,
+      };
+    case "cache_restore_unavailable":
+      return {
+        code: issue,
+        safeMessage: status.searchable && !status.dirty
+          ? "Fresh index is current; replacing the unrestorable cache…"
+          : "Cached index could not be restored; building fresh…",
+        recoverable: true,
+      };
+    case "cache_discard_failed":
+      return {
+        code: issue,
+        safeMessage: status.searchable && !status.dirty
+          ? "Fresh index is current; rejected cache could not be discarded."
+          : "Cached index was rejected but could not be discarded; building fresh…",
+        recoverable: true,
+      };
+    case "cache_save_failed":
+      return {
+        code: issue,
+        safeMessage: "Search ready; cache save failed",
         recoverable: true,
       };
   }
