@@ -1,0 +1,10 @@
+{
+  "id": "kwiry-fixtures",
+  "name": "Kwiry Fixtures (dev)",
+  "version": "0.1.0",
+  "minAppVersion": "1.7.2",
+  "description": "Development-only fixture generator for field-testing the Kwiry Search in-plugin index. Not for general use.",
+  "author": "cybersader",
+  "authorUrl": "https://github.com/cybersader/kwiry",
+  "isDesktopOnly": true
+}

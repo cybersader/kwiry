@@ -22,3 +22,7 @@
 # Regenerable feasibility-gate artifacts
 /bench/fts5-export-restore/experiments/*.db
 /bench/fts5-export-restore/experiments/sizes.json
+
+# Fixture plugin build output and deps
+/tools/kwiry-fixtures/node_modules/
+/tools/kwiry-fixtures/main.js
