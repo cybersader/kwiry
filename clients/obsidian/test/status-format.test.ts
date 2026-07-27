@@ -40,7 +40,12 @@ describe("formatStatus", () => {
         recoverable: true,
       },
       progress: { stage: "replay", completed: 1, total: 2 },
-    })).toBe("kwiry: In-plugin · Lexical · Cached index searchable; reconciling vault changes…");
+      // The counter accompanies the issue rather than being suppressed by it:
+      // during a long first build on a network vault, an issue-only line is
+      // indistinguishable from a stall for the entire build.
+    })).toBe(
+      "kwiry: In-plugin · Lexical · Cached index searchable; reconciling vault changes… replay 1/2",
+    );
 
     expect(formatStatus(base)).toBe("kwiry: In-plugin · Lexical · ready (3 chunks, lexical)");
 
@@ -89,5 +94,43 @@ describe("formatStatus", () => {
     expect(formatStatus({ ...base, dirty: true })).toBe(
       "kwiry: In-plugin · Lexical · building (3 chunks, lexical)",
     );
+  });
+});
+
+describe("formatStatus during a first build", () => {
+  it("shows the counter alongside a cache-absent issue", () => {
+    // Regression: the issue branch used to return early, so a first build --
+    // exactly when "no cached index" is expected and long-running -- showed a
+    // static message with no evidence of progress until it finished.
+    const line = formatStatus({
+      ...base,
+      phase: "building",
+      searchable: false,
+      dirty: true,
+      issue: {
+        code: "cache_absent",
+        safeMessage: "No cached index; building a fresh index…",
+        recoverable: true,
+      },
+      progress: { stage: "snapshot", completed: 42, total: 900 },
+    });
+
+    expect(line).toContain("No cached index");
+    expect(line).toContain("snapshot 42/900");
+  });
+
+  it("shows the issue alone when no work is in flight", () => {
+    const line = formatStatus({
+      ...base,
+      phase: "unavailable",
+      searchable: false,
+      issue: {
+        code: "cache_unavailable",
+        safeMessage: "Cache unavailable; building a fresh index…",
+        recoverable: true,
+      },
+    });
+
+    expect(line).toBe("kwiry: In-plugin · Lexical · Cache unavailable; building a fresh index…");
   });
 });

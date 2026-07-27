@@ -11,6 +11,7 @@ import type { BackendSearchHit, BackendStatus, SearchBackend } from "./backend";
 import type KwiryPlugin from "./main";
 import { emptyStateMessage } from "./empty-state";
 import { validateOpenResult } from "./open-result";
+import { progressLine } from "./progress-line";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
 import { SearchSessionController } from "./search-session";
 
@@ -23,6 +24,8 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private mode: SearchMode;
   private readonly modeButtons = new Map<SearchMode, HTMLButtonElement>();
   private lastErrorCode: string | null = null;
+  private progressEl: HTMLElement | null = null;
+  private progressTimer: number | null = null;
 
   constructor(
     private readonly plugin: KwiryPlugin,
@@ -42,6 +45,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     this.setPlaceholder("Search your notes with kwiry…");
     this.createProfileLabel(status);
     this.createModeControl();
+    this.createProgressLine(status);
     this.setInstructions([
       { command: "↵", purpose: "open" },
       { command: "ctrl ↵", purpose: "open in new tab" },
@@ -142,8 +146,43 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   onClose(): void {
+    if (this.progressTimer !== null) {
+      window.clearInterval(this.progressTimer);
+      this.progressTimer = null;
+    }
     this.session.dispose();
     super.onClose();
+  }
+
+  /// A single line under the input reporting what indexing is doing right now.
+  /// It polls rather than subscribing because the modal can outlive any one
+  /// status push, and it hides itself whenever nothing is in flight so a ready
+  /// index shows no chrome at all.
+  private createProgressLine(status: BackendStatus): void {
+    const line = this.contentEl.createDiv({ cls: "kwiry-progress-line" });
+    this.progressEl = line;
+    this.resultContainerEl.before(line);
+    this.renderProgress(status);
+    this.progressTimer = window.setInterval(() => {
+      void this.refreshProgress();
+    }, 400);
+  }
+
+  private async refreshProgress(): Promise<void> {
+    try {
+      this.renderProgress(await this.backend.status());
+    } catch {
+      // A failed status poll is not worth surfacing here: the search path
+      // already reports backend errors through the notice.
+    }
+  }
+
+  private renderProgress(status: BackendStatus): void {
+    const line = this.progressEl;
+    if (!line) return;
+    const text = progressLine(status);
+    line.setText(text ?? "");
+    line.toggleClass("is-active", text !== null);
   }
 
   private createProfileLabel(status: BackendStatus): void {

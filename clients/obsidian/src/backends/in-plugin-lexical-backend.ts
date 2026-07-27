@@ -379,6 +379,7 @@ function mapControllerStatus(
         stage: status.stage,
         completed: status.progress.completed,
         total: status.progress.total,
+        ...(status.progress.path === undefined ? {} : { path: status.progress.path }),
       }
     : undefined;
   return {

@@ -88,6 +88,9 @@ export interface IndexControllerStatus {
   progress?: {
     completed: number;
     total: number | null;
+    /// Most recently processed source path. Reported so a long first build on
+    /// a network vault visibly advances instead of looking stalled.
+    path?: string;
   };
   issue?: IndexControllerIssue;
 }
@@ -178,6 +181,7 @@ export class InPluginIndexController {
   private stage: IndexControllerStage = "starting";
   private completed = 0;
   private total: number | null = null;
+  private currentPath: string | null = null;
   private cacheStore: CacheStorePort | null = null;
   private cacheIssue: IndexControllerIssue | null = null;
   private lastPersistedGeneration: string | null = null;
@@ -218,6 +222,7 @@ export class InPluginIndexController {
     if (this.cacheIssue === "cache_save_failed") this.cacheIssue = null;
     this.cancelExportTimer();
     this.completed = 0;
+    this.currentPath = null;
     this.total = null;
     this.emit(this.activeGeneration === null ? "starting" : "rebuild");
     this.scheduleWork();
@@ -537,6 +542,7 @@ export class InPluginIndexController {
     if (!worker || generation === null) throw new Error("cache reconciliation is unavailable");
     const snapshot = this.captureSnapshot();
     this.completed = 0;
+    this.currentPath = null;
     this.total = snapshot.entries.length;
     this.emit("replay");
     const current = snapshot.entries.map(({ inspection }) => inspectionMetadata(inspection));
@@ -551,6 +557,7 @@ export class InPluginIndexController {
     const remove = new Set(plan.remove);
     for (const entry of snapshot.entries) {
       this.completed += 1;
+      this.currentPath = entry.path;
       if (refresh.has(entry.path) && !this.wasTouchedAfter(entry.path, snapshot.cut)) {
         await this.applySnapshotRefresh(entry, snapshot.cut);
       }
@@ -609,6 +616,7 @@ export class InPluginIndexController {
 
       const snapshot = this.captureSnapshot();
       this.completed = 0;
+      this.currentPath = null;
       this.total = snapshot.entries.length;
       this.emit(rebuilding ? "rebuild" : "snapshot");
       counts = await this.addSnapshotSources(generation, snapshot, counts, rebuilding);
@@ -715,6 +723,7 @@ export class InPluginIndexController {
         const { entry } = window[index]!;
         const read = result.value;
         this.completed += 1;
+        this.currentPath = entry.path;
         if (!this.wasTouchedAfter(entry.path, snapshot.cut)) {
           const upsert = sourceUpsert(read);
           if (upsert) {
@@ -945,7 +954,11 @@ export class InPluginIndexController {
       || stage === "degraded"
       || stage === "failed";
     const progress = stage === "snapshot" || stage === "replay" || stage === "rebuild"
-      ? { completed: this.completed, total: this.total }
+      ? {
+        completed: this.completed,
+        total: this.total,
+        ...(this.currentPath === null ? {} : { path: this.currentPath }),
+      }
       : undefined;
     const issue = explicitIssue
       ?? (this.startupReconciling ? "index_reconciling" : this.cacheIssue ?? undefined);

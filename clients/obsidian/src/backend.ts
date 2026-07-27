@@ -49,6 +49,8 @@ export interface BackendStatus {
     stage: "snapshot" | "replay" | "rebuild";
     completed: number;
     total: number | null;
+    /// Most recently processed source path, when the backend reports one.
+    path?: string;
   };
   issue?: BackendIssue;
 }

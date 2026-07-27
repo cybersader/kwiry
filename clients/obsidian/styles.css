@@ -90,3 +90,20 @@
   background-color: var(--text-highlight-bg);
   color: inherit;
 }
+
+/* Indexing progress under the search input. Deliberately quiet: it is
+   ambient reassurance during a long build, not a result. */
+.kwiry-progress-line {
+  display: none;
+  padding: 2px 12px 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kwiry-progress-line.is-active {
+  display: block;
+}

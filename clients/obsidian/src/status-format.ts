@@ -5,13 +5,21 @@ import type { BackendStatus } from "./backend";
 
 export function formatStatus(status: BackendStatus): string {
   const profile = status.identity.profile === "daemon" ? "Daemon" : "In-plugin · Lexical";
-  // Cache/freshness issues are more important than generic progress: a restored
-  // generation can be searchable while replay is still making it current.
-  if (status.issue) return `kwiry: ${profile} · ${status.issue.safeMessage}`;
-  if (status.progress) {
-    const total = status.progress.total === null ? "?" : String(status.progress.total);
-    return `kwiry: ${profile} · ${status.progress.stage} ${status.progress.completed}/${total}`;
+  const progress = status.progress
+    ? `${status.progress.stage} ${status.progress.completed}/${
+      status.progress.total === null ? "?" : String(status.progress.total)
+    }`
+    : null;
+  if (status.issue) {
+    // Show the counter alongside the issue while work is in flight. Reporting
+    // the issue alone leaves a first build — where "no cached index" is both
+    // expected and long-running on a network vault — indistinguishable from a
+    // stall for its entire duration.
+    return progress === null
+      ? `kwiry: ${profile} · ${status.issue.safeMessage}`
+      : `kwiry: ${profile} · ${status.issue.safeMessage} ${progress}`;
   }
+  if (progress !== null) return `kwiry: ${profile} · ${progress}`;
   const modes = status.capabilities.supportedModes.join("/");
   const phase = status.phase === "ready" && status.dirty ? "building" : status.phase;
   return `kwiry: ${profile} · ${phase} (${status.chunks} chunks, ${modes})`;
