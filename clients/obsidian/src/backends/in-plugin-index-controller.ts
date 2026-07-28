@@ -145,9 +145,11 @@ const MAX_GENERATION_ALLOCATION_ATTEMPTS = 32;
 const SYSTEMIC_UNREADABLE_READ_RATIO = 0.5;
 const MIN_SYSTEMIC_UNREADABLE_SOURCES = 2;
 
+type PresentSourceInspection = Exclude<SourceInspection, { kind: "missing" }>;
+
 interface SnapshotEntry {
   path: string;
-  inspection: SourceInspection;
+  inspection: PresentSourceInspection;
 }
 
 interface Snapshot {
@@ -589,7 +591,9 @@ export class InPluginIndexController {
         if (unreadableRefreshes >= MIN_SYSTEMIC_UNREADABLE_SOURCES
           && unreadableRefreshes
             > attemptedRefreshReads * SYSTEMIC_UNREADABLE_READ_RATIO) {
-          throw new VaultSourceReadError(new Error("active vault became unreadable"));
+          // A majority failure during refresh is vault-wide evidence; keeping the
+          // restored generation is safer than replacing it with partial success.
+          throw new VaultUnavailableError(new Error("active vault became unreadable"));
         }
       }
       this.emit("replay");
@@ -704,10 +708,37 @@ export class InPluginIndexController {
 
   private captureSnapshot(): Snapshot {
     const paths = this.listMarkdownPaths();
-    const entries = paths.flatMap((path) => {
-      const inspection = this.inspectMarkdown(path);
-      return inspection.kind === "missing" ? [] : [{ path, inspection }];
-    });
+    const entries: SnapshotEntry[] = [];
+    let unreadableInspections = 0;
+    let firstUnreadableError: UnreadableVaultSourceError | null = null;
+    for (const path of paths) {
+      let inspection: SourceInspection;
+      try {
+        inspection = this.inspectMarkdown(path);
+      } catch (error) {
+        if (!(error instanceof UnreadableVaultSourceError)) throw error;
+        unreadableInspections += 1;
+        firstUnreadableError ??= error;
+        this.unreadableSources.add(path);
+        continue;
+      }
+      if (inspection.kind === "missing") {
+        // Enumeration only proved the path existed at an earlier instant. Once
+        // it has vanished there is no source to quarantine, and omitting it from
+        // reconciliation correctly removes any cached copy.
+        this.unreadableSources.delete(path);
+        continue;
+      }
+      this.unreadableSources.delete(path);
+      entries.push({ path, inspection });
+    }
+    if (firstUnreadableError
+      && unreadableInspections >= MIN_SYSTEMIC_UNREADABLE_SOURCES
+      && unreadableInspections > paths.length * SYSTEMIC_UNREADABLE_READ_RATIO) {
+      // A majority of independent per-path inspections failing is evidence that
+      // the vault is unavailable, not permission to publish a mostly empty index.
+      throw new VaultUnavailableError(firstUnreadableError);
+    }
     const cut = this.eventSequence;
     // The enumeration, inspection, cut, and acknowledgement are one synchronous
     // turn. Every event at or before the cut is represented by this snapshot;
@@ -729,6 +760,7 @@ export class InPluginIndexController {
     let batch: SourceUpsert[] = [];
     let batchBytes = 0;
     let attemptedCandidateReads = 0;
+    let unreadableCandidateReads = 0;
 
     const flush = async (): Promise<void> => {
       if (batch.length === 0) return;
@@ -776,6 +808,7 @@ export class InPluginIndexController {
         if (result.status === "rejected") {
           if (!(result.reason instanceof UnreadableVaultSourceError)) throw result.reason;
           firstUnreadableError ??= result.reason;
+          unreadableCandidateReads += 1;
           this.unreadableSources.add(entry.path);
           this.emit(rebuilding ? "rebuild" : "snapshot");
           continue;
@@ -805,10 +838,12 @@ export class InPluginIndexController {
         if (batch.length >= this.limits.maxBatchSources) await flush();
       }
       if (firstUnreadableError
-        && this.unreadableSources.size >= MIN_SYSTEMIC_UNREADABLE_SOURCES
-        && this.unreadableSources.size
+        && unreadableCandidateReads >= MIN_SYSTEMIC_UNREADABLE_SOURCES
+        && unreadableCandidateReads
           > attemptedCandidateReads * SYSTEMIC_UNREADABLE_READ_RATIO) {
-        throw firstUnreadableError;
+        // The aggregate ratio, rather than any one rejected source, proves the
+        // vault is unavailable and must prevent a mostly empty commit.
+        throw new VaultUnavailableError(firstUnreadableError);
       }
       await this.yieldControl();
       this.requireActive();
@@ -921,8 +956,15 @@ export class InPluginIndexController {
       if (paths.length >= 1) break;
       const isUpsert = this.pendingUpserts.has(path);
       if (isUpsert) {
-        const inspection = this.inspectMarkdown(path);
-        const estimated = inspection.kind === "candidate" ? inspection.size : 0;
+        let estimated = 0;
+        try {
+          const inspection = this.inspectMarkdown(path);
+          estimated = inspection.kind === "candidate" ? inspection.size : 0;
+        } catch (error) {
+          if (!(error instanceof UnreadableVaultSourceError)) throw error;
+          // This preflight only sizes one pending source. readStable owns its
+          // retries and quarantine, so a local inspect failure cannot abort here.
+        }
         if (paths.length > 0 && bytes + estimated > this.limits.maxBatchBytes) continue;
         bytes += estimated;
       }
@@ -937,7 +979,9 @@ export class InPluginIndexController {
     try {
       return this.source.inspectMarkdown(path);
     } catch (error) {
-      throw new VaultSourceReadError(error);
+      // Inspection names exactly one source, so failure proves nothing about the
+      // rest of the vault and belongs on the per-source omission path.
+      throw new UnreadableVaultSourceError(error);
     }
   }
 
@@ -945,7 +989,9 @@ export class InPluginIndexController {
     try {
       return [...this.source.listMarkdownPaths()].sort(comparePaths);
     } catch (error) {
-      throw new VaultSourceReadError(error);
+      // Without the authoritative inventory there is no trustworthy source set
+      // or denominator from which a partial generation could be published.
+      throw new VaultUnavailableError(error);
     }
   }
 
@@ -981,8 +1027,11 @@ export class InPluginIndexController {
         this.requireActive();
       }
     }
-    if (readError !== null) throw new UnreadableVaultSourceError(readError);
-    throw new VaultSourceReadError(new Error("vault source did not become stable"));
+    // Every attempt concerned this one path. Continuous churn or share-level
+    // metadata lag therefore omits that source; it does not prove a dead vault.
+    throw new UnreadableVaultSourceError(
+      readError ?? new Error("vault source did not become stable"),
+    );
   }
 
   private wasTouchedAfter(path: string, cut: number): boolean {
@@ -1032,7 +1081,7 @@ export class InPluginIndexController {
     const hasActive = this.activeGeneration !== null;
     const issue = containsIndexLimitError(error)
       ? "index_limit_exceeded"
-      : containsVaultSourceReadError(error)
+      : containsVaultUnavailableError(error)
         ? "vault_read_failed"
         : hasActive
           ? "index_update_failed"
@@ -1179,14 +1228,21 @@ export class InPluginIndexController {
   }
 }
 
-class VaultSourceReadError extends Error {
+class VaultUnavailableError extends Error {
   constructor(cause: unknown) {
     super("active vault source could not be read", { cause });
+    // Preserve the established diagnostics identifier while keeping systemic
+    // failure unrelated to the source-local error that callers may quarantine.
     this.name = "VaultSourceReadError";
   }
 }
 
-class UnreadableVaultSourceError extends VaultSourceReadError {}
+class UnreadableVaultSourceError extends Error {
+  constructor(cause: unknown) {
+    super("one active vault source could not be read", { cause });
+    this.name = "UnreadableVaultSourceError";
+  }
+}
 
 function isCacheIndexWorker(worker: IndexWorkerPort): worker is CacheIndexWorkerPort {
   const candidate = worker as Partial<CacheIndexWorkerPort>;
@@ -1195,10 +1251,9 @@ function isCacheIndexWorker(worker: IndexWorkerPort): worker is CacheIndexWorker
     && typeof candidate.exportGeneration === "function";
 }
 
-function inspectionMetadata(inspection: SourceInspection): ReconciliationSourceMetadata {
-  if (inspection.kind === "missing") {
-    throw new VaultSourceReadError(new Error("enumerated source disappeared during inspection"));
-  }
+function inspectionMetadata(
+  inspection: PresentSourceInspection,
+): ReconciliationSourceMetadata {
   return {
     path: inspection.path,
     byte_length: inspection.size,
@@ -1255,10 +1310,10 @@ function containsIndexLimitError(error: unknown): boolean {
   return errorCode(error) === "index_limit_exceeded";
 }
 
-function containsVaultSourceReadError(error: unknown): boolean {
-  return error instanceof VaultSourceReadError
+function containsVaultUnavailableError(error: unknown): boolean {
+  return error instanceof VaultUnavailableError
     || (error instanceof AggregateError
-      && error.errors.some((nested) => containsVaultSourceReadError(nested)));
+      && error.errors.some((nested) => containsVaultUnavailableError(nested)));
 }
 
 function validateLimits(limits: IndexControllerLimits): void {

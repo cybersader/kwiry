@@ -417,6 +417,43 @@ describe("InPluginIndexController", () => {
     });
   });
 
+  it("omits a source that vanishes after enumeration and publishes the remaining counts", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    source.set("vanished.md", "gone");
+    const originalInspect = source.inspectMarkdown.bind(source);
+    source.inspectMarkdown = vi.fn((path) => {
+      if (path === "vanished.md") source.records.delete(path);
+      return originalInspect(path);
+    });
+    const { controller, worker, statuses, failures } = harness(source);
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toEqual([]);
+    expect(source.inspectMarkdown).toHaveBeenCalledWith("vanished.md");
+    expect(worker.calls).toEqual([
+      "initialize",
+      "begin:generation-1",
+      "add:a.md,b.md",
+      "commit:generation-1",
+    ]);
+    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-1",
+      documents: 2,
+      chunks: 2,
+      quarantinedSources: 0,
+      unreadableSources: 0,
+      dirty: false,
+    });
+    expect(statuses.at(-1)).not.toHaveProperty("issue");
+  });
+
   it("mirrors cumulative Worker quarantines and clears them before a rebuild retries sources", async () => {
     const source = new FakeSource();
     source.set("a.md", "a");
@@ -641,11 +678,23 @@ describe("InPluginIndexController", () => {
     await controller.whenIdle();
 
     expect([...source.readAttempts.values()].reduce((sum, attempts) => sum + attempts, 0)).toBe(12);
-    expect(worker.calls.some((call) => call.startsWith("commit:"))).toBe(false);
+    expect(worker.calls).toEqual([
+      "initialize",
+      "begin:generation-1",
+      "abort:generation-1",
+    ]);
+    expect(worker.activeGeneration).toBeNull();
+    expect(worker.activePaths).toEqual(new Set());
+    expect(statuses.some((status) => status.searchable)).toBe(false);
     expect(statuses.at(-1)).toMatchObject({
       stage: "failed",
       searchable: false,
+      generation: null,
+      documents: 0,
+      chunks: 0,
+      quarantinedSources: 0,
       unreadableSources: 4,
+      dirty: true,
       issue: "vault_read_failed",
     });
   });
@@ -1429,29 +1478,43 @@ describe("InPluginIndexController", () => {
     expect([...worker.activePaths].sort()).toEqual(["base.md", "x.md", "y.md"]);
   });
 
-  it("fails closed when an initial source never becomes stable", async () => {
+  it("isolates one source that never stabilizes and publishes truthful counts", async () => {
     const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
     source.set("changing.md", "value");
     source.staleReads.add("changing.md");
-    const { controller, worker, statuses } = harness(source, new FakeWorker(), {
+    const { controller, worker, statuses, failures } = harness(source, new FakeWorker(), {
+      maxConcurrentReads: 3,
       maxStableReadAttempts: 2,
     });
 
     controller.start();
     await controller.whenIdle();
 
-    expect(worker.calls.some((call) => call.startsWith("commit:"))).toBe(false);
+    expect(source.readAttempts.get("changing.md")).toBeGreaterThanOrEqual(2);
     expect(statuses.at(-1)).toMatchObject({
-      stage: "failed",
-      searchable: false,
-      issue: "vault_read_failed",
+      stage: "ready",
+      searchable: true,
+      generation: "generation-1",
+      documents: 2,
+      chunks: 2,
+      quarantinedSources: 0,
+      unreadableSources: 1,
+      dirty: false,
+      issue: "sources_unreadable",
     });
+    expect(failures).toEqual([]);
+    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md"]));
+    expect(worker.calls.some((call) => call.startsWith("commit:"))).toBe(true);
   });
 
   it("surfaces an uncertain abort failure instead of reusing that Worker", async () => {
     const source = new FakeSource();
-    source.set("changing.md", "value");
-    source.staleReads.add("changing.md");
+    for (const path of ["a.md", "b.md"]) {
+      source.set(path, path);
+      source.remainingReadFailures.set(path, 99);
+    }
     const worker = new FakeWorker();
     worker.abortBuild = vi.fn(async () => {
       throw new WorkerRpcError({
@@ -1461,11 +1524,19 @@ describe("InPluginIndexController", () => {
         retryable: true,
       });
     });
-    const { controller, failures } = harness(source, worker, { maxStableReadAttempts: 1 });
+    const { controller, failures } = harness(source, worker, {
+      maxConcurrentReads: 2,
+      maxStableReadAttempts: 1,
+    });
 
     controller.start();
     await controller.whenIdle();
 
+    expect(source.readAttempts).toEqual(new Map([
+      ["a.md", 1],
+      ["b.md", 1],
+    ]));
+    expect(worker.abortBuild).toHaveBeenCalledTimes(1);
     const failure = failures.at(-1);
     expect(failure).toBeInstanceOf(AggregateError);
     expect((failure as AggregateError).errors).toEqual(expect.arrayContaining([
