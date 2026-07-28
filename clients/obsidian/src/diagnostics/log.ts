@@ -189,6 +189,13 @@ export interface DiagnosticDetails {
   outcome?: DiagnosticTextValue;
   code?: DiagnosticTextValue;
   reason?: DiagnosticTextValue;
+  /// A JavaScript error class name, the one field admitting a value not on the
+  /// fixed vocabulary. Constrained to a bare identifier at runtime: an error
+  /// class name is always one (`DataCloneError`), and that shape cannot carry a
+  /// path, a query, or a sentence. Repeated field reports proved a closed list
+  /// could not keep up with names thrown by the platform, and "other" cost a
+  /// release each time it appeared.
+  errorName?: string;
   operation?: DiagnosticTextValue;
   subsystem?: DiagnosticTextValue;
   generationId?: DiagnosticGenerationId;
@@ -319,7 +326,7 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "fts5_unavailable", "rust_init_failed", "sqlite_init_failed", "artifact_mismatch", "protocol_mismatch", "invalid_request", "invalid_state", "source_rejected", "query_rejected", "integrity_failed", "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch", "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
 ];
 const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
-  "profile", "phase", "stage", "liveness", "mode", "outcome", "code", "reason", "operation",
+  "profile", "phase", "stage", "liveness", "mode", "outcome", "code", "reason", "errorName", "operation",
   "subsystem", "generationId", "pathHash", "pluginEpoch", "activationEpoch", "mutationEpoch",
   "count", "limit", "documents", "chunks", "completed", "total", "warningCount", "pending",
   "sourcesEnumerated", "sourcesRead", "sourcesSkipped", "sourcesOversized", "sourcesFailed",
@@ -603,7 +610,14 @@ function validateDetails(details: Readonly<DiagnosticDetails>): Readonly<Diagnos
   return Object.freeze(validated);
 }
 
+const ERROR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
+
 function isValidDetailValue(key: keyof DiagnosticDetails, value: unknown): boolean {
+  // The single field that accepts a value outside the fixed vocabulary, and
+  // therefore the one that has to justify itself. A JavaScript error class name
+  // is a bare identifier; the pattern rejects anything containing a space,
+  // slash, dot, or quote, so a path, query, or message cannot pass through it.
+  if (key === "errorName") return typeof value === "string" && ERROR_NAME_PATTERN.test(value);
   if (key === "pathHash") return typeof value === "string" && HASH_PATTERN.test(value);
   if (key === "generationId") {
     return typeof value === "string"

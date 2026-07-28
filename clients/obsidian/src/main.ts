@@ -96,7 +96,8 @@ export default class KwiryPlugin extends Plugin {
                 reason,
                 // A Worker protocol code names the fault exactly; the error
                 // class name is only a fallback for a thrown Error.
-                code: workerCode ?? errorName,
+                code: workerCode ?? "other",
+                errorName,
                 operation: "build",
                 recoverable: !nonError,
               }, () => undefined);

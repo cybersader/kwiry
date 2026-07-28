@@ -41,6 +41,7 @@ export type FailureReason =
 /// matched none of the patterns below. A class name is a fixed identifier
 /// chosen by this codebase, not caller text, so echoing it leaks nothing.
 export type FailureErrorName =
+  | (string & {})
   | "BlockVfsUnavailableError"
   | "IndexCapacityError"
   | "IndexIntegrityError"
@@ -55,6 +56,15 @@ export type FailureErrorName =
   | "SyntaxError"
   | "Error"
   | "other";
+
+/// An identifier-shaped name is echoed verbatim when it is not on the known
+/// list. Three releases were spent testing the name against lists that kept
+/// missing it, each round-trip reporting only "other" -- so the list was the
+/// wrong instrument. A JavaScript error class name is a bare identifier
+/// (`DataCloneError`, `QuotaExceededError`), never a path, query, or sentence:
+/// this pattern admits nothing that could carry vault content, and anything
+/// failing it is still reported as "other".
+const IDENTIFIER_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
 
 const KNOWN_ERROR_NAMES = new Set<FailureErrorName>([
   "BlockVfsUnavailableError", "IndexCapacityError", "IndexIntegrityError",
@@ -172,7 +182,9 @@ export function classifyFailure(error: unknown): FailureClassification {
 
   const errorName: FailureErrorName = KNOWN_ERROR_NAMES.has(name as FailureErrorName)
     ? (name as FailureErrorName)
-    : "other";
+    : IDENTIFIER_NAME.test(name)
+      ? name
+      : "other";
 
   // A WorkerError is a plain object, not an Error subclass, so it has no name
   // and falls through everything above as "other" -- which is exactly what the

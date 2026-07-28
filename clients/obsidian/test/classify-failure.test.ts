@@ -57,13 +57,27 @@ describe("classifyFailure error name", () => {
     expect(classifyFailure(new Error("something went wrong")).errorName).toBe("Error");
   });
 
-  it("does not echo an unrecognised class name", () => {
-    class SecretNamedError extends Error {
-      override readonly name = "AcmeClientDataError";
+  it("echoes an unrecognised identifier-shaped class name", () => {
+    // This deliberately reverses an earlier expectation. Refusing every
+    // unlisted name cost three release round-trips that reported only
+    // "other", because the thrown class was one no list here anticipated.
+    // A class name is a bare identifier and cannot carry a path, a query, or
+    // a sentence, so echoing it is a smaller risk than being unable to
+    // diagnose a production failure at all.
+    class UnlistedError extends Error {
+      override readonly name = "SomeUnlistedError";
     }
-    const result = classifyFailure(new SecretNamedError("x"));
-    expect(result.errorName).toBe("other");
-    expect(JSON.stringify(result)).not.toContain("Acme");
+    expect(classifyFailure(new UnlistedError("x")).errorName).toBe("SomeUnlistedError");
+  });
+
+  it("still refuses a name that is not a bare identifier", () => {
+    // The boundary that matters: anything with a space, slash, dot, or quote
+    // could be a path or a message, so it is reported as "other" and dropped.
+    for (const hostile of ["Clients/Acme.md", "Error: secret note", 'a"b', "two words"]) {
+      const result = classifyFailure(Object.assign(new Error("x"), { name: hostile }));
+      expect(result.errorName).toBe("other");
+      expect(JSON.stringify(result)).not.toContain("Acme");
+    }
   });
 });
 
