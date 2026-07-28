@@ -454,6 +454,103 @@ describe("InPluginIndexController", () => {
     expect(statuses.at(-1)).not.toHaveProperty("issue");
   });
 
+  it("publishes a minority of snapshot inspection failures as source-local omissions", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    source.set("unreadable.md", "locked");
+    const originalInspect = source.inspectMarkdown.bind(source);
+    source.inspectMarkdown = vi.fn((path) => {
+      if (path === "unreadable.md") throw new Error("simulated inspection failure");
+      return originalInspect(path);
+    });
+    const { controller, worker, statuses, failures } = harness(source);
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toEqual([]);
+    expect(worker.calls).toEqual([
+      "initialize",
+      "begin:generation-1",
+      "add:a.md,b.md",
+      "commit:generation-1",
+    ]);
+    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-1",
+      documents: 2,
+      chunks: 2,
+      unreadableSources: 1,
+      issue: "sources_unreadable",
+    });
+  });
+
+  it("aborts before committing when most snapshot inspections fail", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    source.set("healthy.md", "healthy");
+    const originalInspect = source.inspectMarkdown.bind(source);
+    source.inspectMarkdown = vi.fn((path) => {
+      if (path === "a.md" || path === "b.md") {
+        throw new Error("simulated inspection failure");
+      }
+      return originalInspect(path);
+    });
+    const { controller, worker, statuses, failures } = harness(source);
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toHaveLength(1);
+    expect(worker.calls).toEqual([
+      "initialize",
+      "begin:generation-1",
+      "abort:generation-1",
+    ]);
+    expect(worker.activeGeneration).toBeNull();
+    expect(worker.activePaths).toEqual(new Set());
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "failed",
+      searchable: false,
+      generation: null,
+      documents: 0,
+      chunks: 0,
+      unreadableSources: 2,
+      issue: "vault_read_failed",
+    });
+  });
+
+  it("classifies authoritative path enumeration failure as vault-wide", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "value");
+    source.listMarkdownPaths = vi.fn(() => {
+      throw new Error("simulated enumeration failure");
+    });
+    const { controller, worker, statuses, failures } = harness(source);
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toHaveLength(1);
+    expect(worker.calls).toEqual([
+      "initialize",
+      "begin:generation-1",
+      "abort:generation-1",
+    ]);
+    expect(worker.activeGeneration).toBeNull();
+    expect(worker.activePaths).toEqual(new Set());
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "failed",
+      searchable: false,
+      generation: null,
+      issue: "vault_read_failed",
+    });
+  });
+
   it("mirrors cumulative Worker quarantines and clears them before a rebuild retries sources", async () => {
     const source = new FakeSource();
     source.set("a.md", "a");
@@ -788,6 +885,90 @@ describe("InPluginIndexController", () => {
     expect(statuses.at(-1)).toMatchObject({
       stage: "ready",
       generation: "generation-3",
+      dirty: false,
+    });
+  });
+
+  it("keeps a complete restored generation when refresh reads prove a systemic outage", async () => {
+    const source = new FakeSource();
+    const worker = new FakeCacheWorker();
+    for (const path of ["a.md", "b.md", "c.md"]) {
+      source.set(path, "changed", 2);
+      source.remainingReadFailures.set(path, 99);
+      worker.restoredLedger.set(path, {
+        path,
+        byte_length: 3,
+        mtime_nanos: "1000000",
+        indexable: true,
+      });
+    }
+    const store = new FakeCacheStore(cacheHit());
+    const { controller, statuses, failures } = harness(source, worker, {
+      maxConcurrentReads: 3,
+      maxStableReadAttempts: 2,
+    }, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toHaveLength(1);
+    expect(worker.applyCalls).toEqual([]);
+    expect(worker.activeGeneration).toBe("cached-generation");
+    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "c.md"]));
+    expect(statuses.at(-1)?.unreadableSources).toBe(3);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "degraded",
+      searchable: true,
+      generation: "cached-generation",
+      documents: 3,
+      chunks: 3,
+      dirty: true,
+      issue: "vault_read_failed",
+    });
+  });
+
+  it("removes a genuinely deleted source from a restored generation", async () => {
+    const source = new FakeSource();
+    source.set("kept.md", "kept", 1);
+    const worker = new FakeCacheWorker();
+    worker.restoredLedger.set("kept.md", {
+      path: "kept.md",
+      byte_length: 4,
+      mtime_nanos: "1000000",
+      indexable: true,
+    });
+    worker.restoredLedger.set("deleted.md", {
+      path: "deleted.md",
+      byte_length: 7,
+      mtime_nanos: "1000000",
+      indexable: true,
+    });
+    const store = new FakeCacheStore(cacheHit());
+    const { controller, statuses, failures } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toEqual([]);
+    expect(worker.applyCalls).toEqual([{
+      generation: "cached-generation",
+      nextGeneration: "generation-1",
+      upserts: [],
+      removals: ["deleted.md"],
+    }]);
+    expect(worker.activeGeneration).toBe("generation-1");
+    expect(worker.activePaths).toEqual(new Set(["kept.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-1",
+      documents: 1,
+      chunks: 1,
+      unreadableSources: 0,
       dirty: false,
     });
   });
@@ -1190,6 +1371,117 @@ describe("InPluginIndexController", () => {
       nextGeneration: "generation-2",
       upserts: ["note.md"],
       removals: [],
+    });
+  });
+
+  it("defers a pending preflight inspection failure to the stable-read retries", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "first", 1);
+    const { controller, worker, statuses, failures } = harness(source);
+    controller.start();
+    await controller.whenIdle();
+
+    const originalInspect = source.inspectMarkdown.bind(source);
+    let postEventInspections = 0;
+    source.inspectMarkdown = vi.fn((path) => {
+      postEventInspections += 1;
+      if (postEventInspections === 1) throw new Error("simulated inspection failure");
+      return originalInspect(path);
+    });
+    source.set("note.md", "second", 2);
+    source.emit({ kind: "upsert", path: "note.md" });
+    await controller.whenIdle();
+
+    expect(postEventInspections).toBe(2);
+    expect(failures).toEqual([]);
+    expect(worker.applyCalls.at(-1)).toEqual({
+      generation: "generation-1",
+      nextGeneration: "generation-2",
+      upserts: ["note.md"],
+      removals: [],
+    });
+    expect(worker.activeGeneration).toBe("generation-2");
+    expect(worker.activePaths).toEqual(new Set(["note.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-2",
+      documents: 1,
+      unreadableSources: 0,
+      dirty: false,
+    });
+  });
+
+  it("retries a thrown pending read failure and publishes the recovered source", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "first", 1);
+    const { controller, worker, statuses, failures } = harness(source, new FakeWorker(), {
+      maxStableReadAttempts: 3,
+    });
+    controller.start();
+    await controller.whenIdle();
+    const attemptsBeforeUpdate = source.readAttempts.get("note.md") ?? 0;
+
+    source.set("note.md", "second", 2);
+    source.remainingReadFailures.set("note.md", 1);
+    source.emit({ kind: "upsert", path: "note.md" });
+    await controller.whenIdle();
+
+    expect((source.readAttempts.get("note.md") ?? 0) - attemptsBeforeUpdate).toBe(2);
+    expect(failures).toEqual([]);
+    expect(worker.applyCalls.at(-1)).toEqual({
+      generation: "generation-1",
+      nextGeneration: "generation-2",
+      upserts: ["note.md"],
+      removals: [],
+    });
+    expect(worker.activeGeneration).toBe("generation-2");
+    expect(worker.activePaths).toEqual(new Set(["note.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-2",
+      unreadableSources: 0,
+      dirty: false,
+    });
+  });
+
+  it("omits one pending source after thrown read retries are exhausted", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a", 1);
+    source.set("b.md", "b", 1);
+    source.set("unreadable.md", "old", 1);
+    const { controller, worker, statuses, failures } = harness(source, new FakeWorker(), {
+      maxStableReadAttempts: 2,
+    });
+    controller.start();
+    await controller.whenIdle();
+    const attemptsBeforeUpdate = source.readAttempts.get("unreadable.md") ?? 0;
+
+    source.set("unreadable.md", "new", 2);
+    source.remainingReadFailures.set("unreadable.md", 99);
+    source.emit({ kind: "upsert", path: "unreadable.md" });
+    await controller.whenIdle();
+
+    expect((source.readAttempts.get("unreadable.md") ?? 0) - attemptsBeforeUpdate).toBe(2);
+    expect(failures).toEqual([]);
+    expect(worker.applyCalls.at(-1)).toEqual({
+      generation: "generation-1",
+      nextGeneration: "generation-2",
+      upserts: [],
+      removals: ["unreadable.md"],
+    });
+    expect(worker.activeGeneration).toBe("generation-2");
+    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-2",
+      documents: 2,
+      chunks: 2,
+      unreadableSources: 1,
+      dirty: false,
+      issue: "sources_unreadable",
     });
   });
 

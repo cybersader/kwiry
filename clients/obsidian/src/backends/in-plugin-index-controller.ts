@@ -157,6 +157,10 @@ interface Snapshot {
   cut: number;
 }
 
+type ReconciliationProbe =
+  | { kind: "read"; inspection: SourceInspection; read: StableSourceRead }
+  | { kind: "unreadable" };
+
 export class InPluginIndexController {
   private readonly source: ActiveVaultSource;
   private readonly worker: IndexWorkerPort;
@@ -565,6 +569,8 @@ export class InPluginIndexController {
     const worker = isCacheIndexWorker(this.worker) ? this.worker : null;
     const generation = this.activeGeneration;
     if (!worker || generation === null) throw new Error("cache reconciliation is unavailable");
+    let expectedGeneration = generation;
+    let expectedEpoch = this.mutationEpoch;
     const snapshot = this.captureSnapshot();
     this.completed = 0;
     this.currentPath = null;
@@ -573,68 +579,234 @@ export class InPluginIndexController {
     const current = snapshot.entries.map(({ inspection }) => inspectionMetadata(inspection));
     const plan = await worker.planReconciliation(generation, ACTIVE_VAULT_ID, current);
     this.requireActive();
+    if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
+      this.retrySupersededReconciliation();
+      return;
+    }
     if (plan.generation !== this.activeGeneration) {
       throw new Error("reconciliation plan generation changed");
     }
     assertCompleteReconciliationPlan(plan, snapshot.entries.map((entry) => entry.path));
 
     const refresh = new Set(plan.refresh);
-    const remove = new Set(plan.remove);
-    let attemptedRefreshReads = 0;
-    let unreadableRefreshes = 0;
+    plan.remove.sort(comparePaths);
+    let attemptedRefreshChecks = 0;
+    let unreadableRefreshChecks = 0;
+    let attemptedRemovalChecks = 0;
+    let unreadableRemovalChecks = 0;
+    const bufferedProbes = new Map<string, Extract<ReconciliationProbe, { kind: "read" }>>();
+    let bufferedProbeBytes = 0;
+    const retainProbe = (path: string, probe: ReconciliationProbe): void => {
+      if (probe.kind === "unreadable") return;
+      const bytes = probe.read.kind === "source" ? probe.read.source.bytes.byteLength : 0;
+      if (bufferedProbes.size >= this.limits.maxPendingPaths
+        || bytes > this.limits.maxBatchBytes - bufferedProbeBytes) return;
+      bufferedProbes.set(path, probe);
+      bufferedProbeBytes += bytes;
+    };
+
+    // Probe the whole pass before publishing. Successful reads are retained up to
+    // the ordinary path and byte budgets; overflow is safely reread after verdict.
     for (const entry of snapshot.entries) {
       this.completed += 1;
       this.currentPath = entry.path;
       if (refresh.has(entry.path) && !this.wasTouchedAfter(entry.path, snapshot.cut)) {
-        if (entry.inspection.kind === "candidate") attemptedRefreshReads += 1;
-        if (await this.applySnapshotRefresh(entry, snapshot.cut)) unreadableRefreshes += 1;
-        if (unreadableRefreshes >= MIN_SYSTEMIC_UNREADABLE_SOURCES
-          && unreadableRefreshes
-            > attemptedRefreshReads * SYSTEMIC_UNREADABLE_READ_RATIO) {
-          // A majority failure during refresh is vault-wide evidence; keeping the
-          // restored generation is safer than replacing it with partial success.
-          throw new VaultUnavailableError(new Error("active vault became unreadable"));
+        if (entry.inspection.kind === "candidate") attemptedRefreshChecks += 1;
+        const probe = await this.probeSnapshotRefresh(entry);
+        if (probe.kind === "unreadable") unreadableRefreshChecks += 1;
+        else retainProbe(entry.path, probe);
+        this.requireActive();
+        if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
+          this.retrySupersededReconciliation();
+          return;
         }
       }
       this.emit("replay");
       await this.yieldControl();
       this.requireActive();
+      if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
+        this.retrySupersededReconciliation();
+        return;
+      }
     }
-    for (const path of [...remove].sort(comparePaths)) {
-      if (!this.wasTouchedAfter(path, snapshot.cut)) {
-        await this.applyReconciliationChange([], [{ vault_id: ACTIVE_VAULT_ID, path }]);
+
+    // A planner removal is only a hypothesis until the source API independently
+    // confirms the path is gone. This also protects cached rows omitted by a
+    // transiently incomplete inventory or failed first inspection.
+    for (const path of plan.remove) {
+      if (this.wasTouchedAfter(path, snapshot.cut)) continue;
+      attemptedRemovalChecks += 1;
+      const probe = await this.probePotentialRemoval(path);
+      if (probe.kind === "unreadable") unreadableRemovalChecks += 1;
+      else retainProbe(path, probe);
+      this.requireActive();
+      if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
+        this.retrySupersededReconciliation();
+        return;
+      }
+      await this.yieldControl();
+      this.requireActive();
+      if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
+        this.retrySupersededReconciliation();
+        return;
+      }
+    }
+
+    if (isSystemicUnreadability(unreadableRefreshChecks, attemptedRefreshChecks)
+      || isSystemicUnreadability(unreadableRemovalChecks, attemptedRemovalChecks)) {
+      // This is deliberately evaluated after the complete probe so early failures
+      // cannot misclassify a pass whose remaining independent reads succeed.
+      throw new VaultUnavailableError(new Error("active vault became unreadable"));
+    }
+
+    // Publish only after the verdict. Retained reads avoid a second network trip;
+    // probes beyond the configured budgets are reread one at a time here.
+    for (const entry of snapshot.entries) {
+      if (refresh.has(entry.path) && !this.wasTouchedAfter(entry.path, snapshot.cut)) {
+        if (!await this.applySnapshotRefresh(
+          entry,
+          snapshot.cut,
+          expectedGeneration,
+          expectedEpoch,
+          bufferedProbes.get(entry.path)?.read,
+        )) {
+          this.retrySupersededReconciliation();
+          return;
+        }
+        expectedGeneration = this.activeGeneration ?? expectedGeneration;
+        expectedEpoch = this.mutationEpoch;
       }
       this.emit("replay");
+      await this.yieldControl();
+      this.requireActive();
+      if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
+        this.retrySupersededReconciliation();
+        return;
+      }
+    }
+
+    for (const path of plan.remove) {
+      if (this.wasTouchedAfter(path, snapshot.cut)) continue;
+      const buffered = bufferedProbes.get(path);
+      let inspection: SourceInspection;
+      if (buffered) {
+        inspection = buffered.inspection;
+      } else {
+        try {
+          inspection = this.inspectMarkdown(path);
+        } catch (error) {
+          if (!(error instanceof UnreadableVaultSourceError)) throw error;
+          this.unreadableSources.add(path);
+          this.emit("replay");
+          continue;
+        }
+      }
+      this.requireActive();
+      if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
+        this.retrySupersededReconciliation();
+        return;
+      }
+      if (inspection.kind === "missing") {
+        this.unreadableSources.delete(path);
+        await this.applyReconciliationChange([], [{ vault_id: ACTIVE_VAULT_ID, path }]);
+      } else if (!await this.applySnapshotRefresh(
+        { path, inspection },
+        snapshot.cut,
+        expectedGeneration,
+        expectedEpoch,
+        buffered?.read,
+      )) {
+        this.retrySupersededReconciliation();
+        return;
+      }
+      expectedGeneration = this.activeGeneration ?? expectedGeneration;
+      expectedEpoch = this.mutationEpoch;
+      this.emit("replay");
+      await this.yieldControl();
+      this.requireActive();
+      if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
+        this.retrySupersededReconciliation();
+        return;
+      }
     }
   }
 
-  private async applySnapshotRefresh(entry: SnapshotEntry, cut: number): Promise<boolean> {
-    let read: StableSourceRead;
+  private async probeSnapshotRefresh(entry: SnapshotEntry): Promise<ReconciliationProbe> {
     try {
-      read = await this.readSnapshot(entry.inspection);
+      const read = await this.readSnapshot(entry.inspection);
+      this.requireActive();
+      return { kind: "read", inspection: entry.inspection, read };
     } catch (error) {
       if (!(error instanceof UnreadableVaultSourceError)) throw error;
       this.unreadableSources.add(entry.path);
-      await this.applyReconciliationChange(
-        [],
-        [{ vault_id: ACTIVE_VAULT_ID, path: entry.path }],
-      );
+      return { kind: "unreadable" };
+    }
+  }
+
+  private async probePotentialRemoval(path: string): Promise<ReconciliationProbe> {
+    let inspection: SourceInspection;
+    try {
+      inspection = this.inspectMarkdown(path);
+    } catch (error) {
+      if (!(error instanceof UnreadableVaultSourceError)) throw error;
+      this.unreadableSources.add(path);
+      return { kind: "unreadable" };
+    }
+    if (inspection.kind === "missing") {
+      return { kind: "read", inspection, read: inspection };
+    }
+    return this.probeSnapshotRefresh({ path, inspection });
+  }
+
+  private async applySnapshotRefresh(
+    entry: SnapshotEntry,
+    cut: number,
+    expectedGeneration: string,
+    expectedEpoch: number,
+    probedRead?: StableSourceRead,
+  ): Promise<boolean> {
+    let read: StableSourceRead;
+    try {
+      read = probedRead ?? await this.readSnapshot(entry.inspection);
+    } catch (error) {
+      if (!(error instanceof UnreadableVaultSourceError)) throw error;
+      this.requireActive();
+      if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) return false;
+      // A read exception is evidence about availability, never proof of deletion.
+      // Keep the last known-good cached row searchable and report the omission.
+      this.unreadableSources.add(entry.path);
       return true;
     }
     this.requireActive();
+    if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) return false;
     this.unreadableSources.delete(entry.path);
-    if (this.wasTouchedAfter(entry.path, cut)) return false;
+    if (this.wasTouchedAfter(entry.path, cut)) return true;
     if (read.kind === "source") {
       await this.applyReconciliationChange([read.source], []);
-      return false;
+      return true;
     }
     if (read.kind === "oversized") {
       await this.applyReconciliationChange([oversizedInput(read)], []);
-      return false;
+      return true;
     }
     if (read.kind === "missing") this.queueRemoval(entry.path);
     else this.queueUpsert(entry.path);
-    return false;
+    return true;
+  }
+
+  private reconciliationTupleIsCurrent(generation: string, epoch: number): boolean {
+    return this.activeGeneration === generation
+      && this.mutationEpoch === epoch
+      && !this.rebuildRequested
+      && !this.rescanRequested;
+  }
+
+  private retrySupersededReconciliation(): void {
+    if (this.disposed || this.rebuildRequested || this.rescanRequested) return;
+    // An event invalidated the pass-wide evidence. A fresh authoritative snapshot
+    // is safer than publishing decisions made against two different vault states.
+    this.requestAuthoritativeRescan();
+    this.rescanSequence = this.eventSequence;
   }
 
   private async applyReconciliationChange(
@@ -1314,6 +1486,11 @@ function containsVaultUnavailableError(error: unknown): boolean {
   return error instanceof VaultUnavailableError
     || (error instanceof AggregateError
       && error.errors.some((nested) => containsVaultUnavailableError(nested)));
+}
+
+function isSystemicUnreadability(unreadable: number, attempted: number): boolean {
+  return unreadable >= MIN_SYSTEMIC_UNREADABLE_SOURCES
+    && unreadable > attempted * SYSTEMIC_UNREADABLE_READ_RATIO;
 }
 
 function validateLimits(limits: IndexControllerLimits): void {
