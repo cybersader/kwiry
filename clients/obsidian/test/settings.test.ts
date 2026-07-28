@@ -54,6 +54,13 @@ describe("loadSettings", () => {
     );
   });
 
+  it("loads only supported diagnostics levels and defaults to field information", () => {
+    expect(DEFAULT_SETTINGS.diagnosticsLogLevel).toBe("info");
+    expect(loadSettings({ diagnosticsLogLevel: "off" }).diagnosticsLogLevel).toBe("off");
+    expect(loadSettings({ diagnosticsLogLevel: "error" }).diagnosticsLogLevel).toBe("error");
+    expect(loadSettings({ diagnosticsLogLevel: "verbose" }).diagnosticsLogLevel).toBe("info");
+  });
+
   it("never contains a token value field", () => {
     const keys = Object.keys(DEFAULT_SETTINGS);
     expect(keys.some((key) => key === "token" || key === "bearerToken")).toBe(false);

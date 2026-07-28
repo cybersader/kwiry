@@ -4,7 +4,8 @@
 // Modal UX (keyboard flow and result-row structure) is informed by Omnisearch
 // (https://github.com/scambier/obsidian-omnisearch), GPL-3.0.
 
-import { Notice, SuggestModal, TFile } from "obsidian";
+import { Notice, Platform, SuggestModal, TFile } from "obsidian";
+import type { Editor, EditorPosition } from "obsidian";
 
 import type { SearchMode } from "./api";
 import type { BackendSearchHit, BackendStatus, SearchBackend } from "./backend";
@@ -13,11 +14,26 @@ import { emptyStateMessage } from "./empty-state";
 import { validateOpenResult } from "./open-result";
 import { progressLine } from "./progress-line";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
+import {
+  SEARCH_SHORTCUT_BINDINGS,
+  searchShortcutAction,
+  type SearchShortcutAction,
+  type SearchShortcutPlatform,
+} from "./search-shortcuts";
 import { SearchSessionController } from "./search-session";
 
 interface ModalResult {
   hit: BackendSearchHit;
 }
+
+interface LinkInsertionTarget {
+  editor: Editor;
+  sourcePath: string;
+  from: EditorPosition;
+  to: EditorPosition;
+}
+
+type OpenPlacement = "current" | "tab" | "split";
 
 export class KwirySearchModal extends SuggestModal<ModalResult> {
   private readonly session: SearchSessionController;
@@ -26,6 +42,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private lastErrorCode: string | null = null;
   private progressEl: HTMLElement | null = null;
   private progressTimer: number | null = null;
+  private progressFailureRecorded = false;
+  private readonly shortcutPlatform: SearchShortcutPlatform;
+  private readonly linkInsertionTarget: LinkInsertionTarget | null;
 
   constructor(
     private readonly plugin: KwiryPlugin,
@@ -33,6 +52,8 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     status: BackendStatus,
   ) {
     super(plugin.app);
+    this.shortcutPlatform = Platform.isMacOS ? "macos" : "other";
+    this.linkInsertionTarget = this.captureLinkInsertionTarget();
     this.mode = selectSupportedMode(
       backend.identity.profile === "daemon" ? plugin.settings.defaultMode : "lexical",
       status.capabilities.supportedModes,
@@ -46,16 +67,22 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     this.createProfileLabel(status);
     this.createModeControl();
     this.createProgressLine(status);
-    this.setInstructions([
-      { command: "↵", purpose: "open" },
-      { command: "ctrl ↵", purpose: "open in new tab" },
-      { command: "tab", purpose: "cycle requested mode" },
-    ]);
-    this.scope.register([], "Tab", (event) => {
-      event.preventDefault();
-      this.selectMode(nextSearchMode(this.mode, this.session.supportedModes));
-      return false;
-    });
+    this.setInstructions(
+      SEARCH_SHORTCUT_BINDINGS.map(({ command, purpose }) => ({ command, purpose })),
+    );
+    for (const binding of SEARCH_SHORTCUT_BINDINGS) {
+      if (!binding.register) continue;
+      this.scope.register([...binding.modifiers], binding.key, (event) => {
+        event.preventDefault();
+        const action = this.shortcutAction(event);
+        if (action === "cycle-mode") {
+          this.selectMode(nextSearchMode(this.mode, this.session.supportedModes));
+        } else if (action !== null) {
+          this.selectActiveSuggestion(event);
+        }
+        return false;
+      });
+    }
   }
 
   async getSuggestions(query: string): Promise<ModalResult[]> {
@@ -63,37 +90,56 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       && this.plugin.settings.vaultId.trim().length > 0
       ? { vault_id: this.plugin.settings.vaultId.trim() }
       : undefined;
-    const outcome = await this.session.search(query, {
+    return this.plugin.captureDiagnostic("info", "search.lifecycle", {
+      profile: this.backend.identity.profile,
+      mode: this.mode,
       limit: this.plugin.settings.resultLimit,
-      filters,
+      operation: "search",
+      subsystem: "search_session",
+    }, async (event) => {
+      const outcome = await this.session.search(query, {
+        limit: this.plugin.settings.resultLimit,
+        filters,
+      });
+      switch (outcome.kind) {
+        case "results":
+          this.lastErrorCode = null;
+          event.set({
+            outcome: "succeeded",
+            resultCount: outcome.execution.response.hits.length,
+          });
+          // A completed search that matched nothing must say so. Without
+          // this, no-matches and no-query-typed render identically blank.
+          this.setEmptyState(
+            outcome.execution.response.hits.length === 0
+              ? emptyStateMessage("no-matches", query)
+              : emptyStateMessage("prompt"),
+          );
+          return outcome.execution.response.hits.map((hit) => ({ hit }));
+        case "error":
+          event.setLevel("error");
+          event.set({
+            outcome: "failed",
+            ...this.plugin.diagnosticErrorDetails(outcome.error),
+          });
+          if (outcome.error.code !== this.lastErrorCode) {
+            this.lastErrorCode = outcome.error.code;
+            new Notice(`Kwiry: ${outcome.error.safeMessage}`);
+          }
+          this.setEmptyState(emptyStateMessage("error"));
+          return [];
+        case "empty":
+          this.lastErrorCode = null;
+          event.set({ outcome: "skipped" });
+          this.setEmptyState(emptyStateMessage("prompt"));
+          return [];
+        case "stale":
+          event.set({ outcome: "superseded" });
+          // A superseded request must not overwrite the newer request's
+          // message; leave whatever the in-flight search will set.
+          return [];
+      }
     });
-    switch (outcome.kind) {
-      case "results":
-        this.lastErrorCode = null;
-        // A completed search that matched nothing must say so. Without
-        // this, no-matches and no-query-typed render identically blank.
-        this.setEmptyState(
-          outcome.execution.response.hits.length === 0
-            ? emptyStateMessage("no-matches", query)
-            : emptyStateMessage("prompt"),
-        );
-        return outcome.execution.response.hits.map((hit) => ({ hit }));
-      case "error":
-        if (outcome.error.code !== this.lastErrorCode) {
-          this.lastErrorCode = outcome.error.code;
-          new Notice(`Kwiry: ${outcome.error.safeMessage}`);
-        }
-        this.setEmptyState(emptyStateMessage("error"));
-        return [];
-      case "empty":
-        this.lastErrorCode = null;
-        this.setEmptyState(emptyStateMessage("prompt"));
-        return [];
-      case "stale":
-        // A superseded request must not overwrite the newer request's
-        // message; leave whatever the in-flight search will set.
-        return [];
-    }
   }
 
   private setEmptyState(text: string): void {
@@ -116,11 +162,92 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     }
   }
 
+  selectSuggestion(result: ModalResult, event: MouseEvent | KeyboardEvent): void {
+    // SuggestModal closes before onChooseSuggestion. Background open is the one
+    // action that must bypass that path while still using the active suggestion.
+    if (this.shortcutAction(event) === "open-background") {
+      this.openResult(result, "tab");
+      return;
+    }
+    super.selectSuggestion(result, event);
+  }
+
   onChooseSuggestion(result: ModalResult, event: MouseEvent | KeyboardEvent): void {
+    const action = this.shortcutAction(event);
+    switch (action) {
+      case "open-new-tab":
+      case "open-background":
+        this.openResult(result, "tab");
+        break;
+      case "open-new-split":
+        this.openResult(result, "split");
+        break;
+      case "insert-link":
+        this.insertResultLink(result);
+        break;
+      default:
+        // Preserve modified mouse selection from the previous implementation;
+        // keyboard chords are resolved by the table above.
+        this.openResult(result, !("key" in event) && (event.ctrlKey || event.metaKey)
+          ? "tab"
+          : "current");
+        break;
+    }
+  }
+
+  private shortcutAction(event: MouseEvent | KeyboardEvent): SearchShortcutAction | null {
+    if (!("key" in event)) return null;
+    return searchShortcutAction(event, this.shortcutPlatform);
+  }
+
+  private captureLinkInsertionTarget(): LinkInsertionTarget | null {
+    const activeEditor = this.app.workspace.activeEditor;
+    const editor = activeEditor?.editor;
+    const sourceFile = activeEditor?.file;
+    if (!editor || !sourceFile) return null;
+    return {
+      editor,
+      sourcePath: sourceFile.path,
+      from: { ...editor.getCursor("from") },
+      to: { ...editor.getCursor("to") },
+    };
+  }
+
+  private openResult(result: ModalResult, placement: OpenPlacement): void {
+    const validated = this.validatedResult(result);
+    if (!validated) return;
+    const leaf = this.app.workspace.getLeaf(placement === "current" ? false : placement);
+    void leaf.openFile(validated.file, {
+      eState: validated.heading ? { subpath: `#${validated.heading}` } : undefined,
+    }).catch((error: unknown) => {
+      this.plugin.recordCaughtFailure("ui", "open", error, {
+        profile: this.backend.identity.profile,
+      });
+    });
+  }
+
+  private insertResultLink(result: ModalResult): void {
+    const validated = this.validatedResult(result);
+    if (!validated) return;
+    const target = this.linkInsertionTarget;
+    if (!target) {
+      new Notice("Kwiry: open this search from a Markdown editor to insert a link.");
+      return;
+    }
+    const subpath = validated.heading ? `#${validated.heading}` : undefined;
+    const link = this.app.fileManager.generateMarkdownLink(
+      validated.file,
+      target.sourcePath,
+      subpath,
+    );
+    target.editor.replaceRange(link, target.from, target.to);
+  }
+
+  private validatedResult(result: ModalResult): { file: TFile; heading: string | undefined } | null {
     const activeBackend = this.plugin.getActiveBackendIdentity();
     if (!activeBackend) {
       new Notice("Kwiry: the search backend is no longer active.");
-      return;
+      return null;
     }
     const decision = validateOpenResult(
       result.hit,
@@ -129,20 +256,14 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     );
     if (!decision.ok) {
       new Notice(`Kwiry: ${decision.safeMessage}`);
-      return;
+      return null;
     }
-
     const file = this.app.vault.getAbstractFileByPath(decision.path);
     if (!(file instanceof TFile)) {
       new Notice("Kwiry: this result is not present in the current vault.");
-      return;
+      return null;
     }
-    const newTab = event.ctrlKey || event.metaKey;
-    const heading = result.hit.heading_path.at(-1);
-    const leaf = this.app.workspace.getLeaf(newTab);
-    void leaf.openFile(file, {
-      eState: heading ? { subpath: `#${heading}` } : undefined,
-    });
+    return { file, heading: result.hit.heading_path.at(-1) };
   }
 
   onClose(): void {
@@ -171,7 +292,14 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private async refreshProgress(): Promise<void> {
     try {
       this.renderProgress(await this.backend.status());
-    } catch {
+      this.progressFailureRecorded = false;
+    } catch (error) {
+      if (!this.progressFailureRecorded) {
+        this.progressFailureRecorded = true;
+        this.plugin.recordCaughtFailure("ui", "poll", error, {
+          profile: this.backend.identity.profile,
+        });
+      }
       // A failed status poll is not worth surfacing here: the search path
       // already reports backend errors through the notice.
     }

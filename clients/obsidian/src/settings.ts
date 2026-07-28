@@ -4,6 +4,8 @@
 import type { SearchMode } from "./api";
 import type { BackendProfile } from "./backend";
 
+export type DiagnosticsLogLevel = "off" | "error" | "info";
+
 export interface KwiryPluginSettings {
   backendProfile: BackendProfile;
   daemonUrl: string;
@@ -17,6 +19,7 @@ export interface KwiryPluginSettings {
   /** Daemon vault ID that identifies the current Obsidian vault for local actions. */
   daemonCurrentVaultId: string;
   showRibbonIcon: boolean;
+  diagnosticsLogLevel: DiagnosticsLogLevel;
 }
 
 export const DEFAULT_SETTINGS: KwiryPluginSettings = {
@@ -28,6 +31,7 @@ export const DEFAULT_SETTINGS: KwiryPluginSettings = {
   vaultId: "",
   daemonCurrentVaultId: "",
   showRibbonIcon: true,
+  diagnosticsLogLevel: "info",
 };
 
 /** Merges stored data over defaults, discarding unknown keys. */
@@ -57,5 +61,12 @@ export function loadSettings(stored: unknown): KwiryPluginSettings {
     settings.daemonCurrentVaultId = source.daemonCurrentVaultId;
   }
   if (typeof source.showRibbonIcon === "boolean") settings.showRibbonIcon = source.showRibbonIcon;
+  if (
+    source.diagnosticsLogLevel === "off"
+    || source.diagnosticsLogLevel === "error"
+    || source.diagnosticsLogLevel === "info"
+  ) {
+    settings.diagnosticsLogLevel = source.diagnosticsLogLevel;
+  }
   return settings;
 }

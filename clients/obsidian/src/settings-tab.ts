@@ -75,6 +75,47 @@ export class KwirySettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }),
       );
+
+    this.renderDiagnosticsSettings(containerEl);
+  }
+
+  private renderDiagnosticsSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Diagnostics").setHeading();
+
+    new Setting(containerEl)
+      .setName("Log level")
+      .setDesc(
+        "Keeps a bounded in-memory log for field diagnosis. It is cleared when the plugin unloads and never includes note text, queries, excerpts, or credentials.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            off: "Off",
+            error: "Errors only",
+            info: "Field information",
+          })
+          .setValue(this.plugin.settings.diagnosticsLogLevel)
+          .onChange(async (value) => {
+            const level = value === "off" || value === "error" ? value : "info";
+            this.plugin.settings.diagnosticsLogLevel = level;
+            this.plugin.setDiagnosticsLogLevel(level);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Diagnostic report")
+      .setDesc("Copy the current in-memory report for a support conversation, or clear it now.")
+      .addButton((button) =>
+        button
+          .setButtonText("Copy diagnostics")
+          .onClick(() => void this.plugin.copyDiagnostics()),
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Clear diagnostics")
+          .onClick(() => this.plugin.clearDiagnostics(true)),
+      );
   }
 
   private renderDaemonSettings(containerEl: HTMLElement): void {
