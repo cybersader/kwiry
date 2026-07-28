@@ -10,6 +10,7 @@ import {
   type SearchExecution,
   KwiryBackendError,
 } from "../backend";
+import { classifyFailure, type FailureClassification } from "../diagnostics/classify-failure";
 import {
   type ExcerptSource,
   createExcerptHydrator,
@@ -35,6 +36,10 @@ export interface InPluginLexicalBackendOptions {
   nextGeneration?: () => string;
   yieldControl?: () => Promise<void>;
   cache?: IndexControllerCacheOptions;
+  /// Records a safe classification of an indexing failure. Without this the
+  /// controller's catch-all `index_build_failed` reaches a field report with
+  /// no indication of which subsystem broke.
+  onDiagnosticFailure?: (classification: FailureClassification) => void;
 }
 
 const MAX_CONCURRENT_EXCERPT_READS = 4;
@@ -57,6 +62,7 @@ export class InPluginLexicalBackend implements SearchBackend {
   private readonly nextGeneration: () => string;
   private readonly yieldControl: () => Promise<void>;
   private readonly cache: IndexControllerCacheOptions | null;
+  private readonly onDiagnosticFailure: (classification: FailureClassification) => void;
   private readonly statusListeners = new Set<(status: BackendStatus) => void>();
   private session: InPluginWorkerSession | null = null;
   private controller: InPluginIndexController | null = null;
@@ -81,6 +87,7 @@ export class InPluginLexicalBackend implements SearchBackend {
       ?? (() => `${options.instanceId}-generation-${++generation}`);
     this.yieldControl = options.yieldControl ?? yieldToBrowser;
     this.cache = options.cache ?? null;
+    this.onDiagnosticFailure = options.onDiagnosticFailure ?? (() => undefined);
     this.cachedStatus = baseStatus(this.identity);
   }
 
@@ -275,6 +282,15 @@ export class InPluginLexicalBackend implements SearchBackend {
           this.publish(mapControllerStatus(this.identity, status, this.recovering));
         },
         onFailure: (error) => {
+          // Classify before any epoch guard returns. The controller's issue
+          // codes collapse everything unrecognised into index_build_failed, so
+          // without this the raw cause is discarded here and a field report
+          // can only say that indexing failed, not what failed.
+          try {
+            this.onDiagnosticFailure(classifyFailure(error));
+          } catch {
+            // Diagnostics must never change the failure path they observe.
+          }
           if (this.disposed || epoch !== this.epoch || controller !== this.controller) return;
           if (isUncertainWorkerFailure(error)) {
             this.handleUncertainWorkerFailure();

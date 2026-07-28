@@ -89,6 +89,15 @@ export default class KwiryPlugin extends Plugin {
                 vaultConfigDirName: this.app.vault.configDir,
               }),
             },
+            onDiagnosticFailure: ({ subsystem, reason, nonError }) => {
+              void this.diagnostics.capture("error", "failure.caught", {
+                profile: "in_plugin",
+                subsystem,
+                reason,
+                operation: "build",
+                recoverable: !nonError,
+              }, () => undefined);
+            },
           }),
         }, this.diagnostics);
 
