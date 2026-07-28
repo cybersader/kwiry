@@ -80,4 +80,38 @@ describe("progressLine", () => {
 
     expect(line).toBe("Indexing 0/0");
   });
+
+  it("renders nothing for explicit zero omission counts", () => {
+    expect(progressLine({
+      ...status(),
+      quarantinedSources: 0,
+      unreadableSources: 0,
+      quarantineValidatorFields: [],
+    })).toBeNull();
+  });
+
+  it("keeps omissions visible after indexing finishes", () => {
+    expect(progressLine({
+      ...status(),
+      phase: "degraded",
+      searchable: true,
+      dirty: false,
+      quarantinedSources: 2,
+      unreadableSources: 1,
+      quarantineValidatorFields: ["chunks_contents"],
+    })).toBe(
+      "3 notes may be missing from search (2 quarantined, 1 unreadable)",
+    );
+  });
+
+  it("keeps omissions visible while indexing is in flight", () => {
+    expect(progressLine({
+      ...status({ stage: "snapshot", completed: 7, total: 10 }),
+      quarantinedSources: 1,
+      unreadableSources: 0,
+      quarantineValidatorFields: ["mtime_nanos"],
+    })).toBe(
+      "Indexing 7/10 (70%) · 1 note may be missing from search (1 quarantined)",
+    );
+  });
 });

@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "source_key": "7355fc5a771229cfc09ecc97863925716ab78d5c9d3e235d025b57ead16e3075",
+  "vault_id": "golden-vault",
+  "path": "Golden/Deep Heading Nesting.md",
+  "format": "markdown",
+  "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
+  "byte_length": 165,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Deep Heading Nesting.md",
+    "stem": "Deep Heading Nesting",
+    "aliases": []
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "9db72fc877a38e803385cd3878cb3a9dbd2a31f0144428af56983886a0c8c7ca",
+        "vault_id": "golden-vault",
+        "room": null,
+        "path": "Golden/Deep Heading Nesting.md",
+        "heading_path": [
+          "Level One"
+        ],
+        "content": "# Level One\nFirst body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
+        "chunking_version": 1
+      },
+      "heading_text": "Level One",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "b9ca958767f65ed27f48e30862c713fe56b24c7ee6cf42d5702476b5f19b8d7e",
+        "vault_id": "golden-vault",
+        "room": null,
+        "path": "Golden/Deep Heading Nesting.md",
+        "heading_path": [
+          "Level One",
+          "Level Two"
+        ],
+        "content": "## Level Two\nSecond body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
+        "chunking_version": 1
+      },
+      "heading_text": "Level One Level Two",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "0ad1e2c3a9414521057fce81159d9e04f92e679ac447bd3129baa7ef819a04b4",
+        "vault_id": "golden-vault",
+        "room": null,
+        "path": "Golden/Deep Heading Nesting.md",
+        "heading_path": [
+          "Level One",
+          "Level Two",
+          "Level Three"
+        ],
+        "content": "### Level Three\nThird body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
+        "chunking_version": 1
+      },
+      "heading_text": "Level One Level Two Level Three",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "117faed06666eb22b59b641177e7b1592e8fe050b2beb5d49daaef5f09acfa8d",
+        "vault_id": "golden-vault",
+        "room": null,
+        "path": "Golden/Deep Heading Nesting.md",
+        "heading_path": [
+          "Level One",
+          "Level Two",
+          "Level Three",
+          "Level Four"
+        ],
+        "content": "#### Level Four\nFourth body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
+        "chunking_version": 1
+      },
+      "heading_text": "Level One Level Two Level Three Level Four",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "06850acb28f0c481288859fdfc6b031118d5b1b9430eab216c4a0a973d3189d4",
+        "vault_id": "golden-vault",
+        "room": null,
+        "path": "Golden/Deep Heading Nesting.md",
+        "heading_path": [
+          "Level One",
+          "Level Two",
+          "Level Three",
+          "Level Four",
+          "Level Five"
+        ],
+        "content": "##### Level Five\nFifth body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
+        "chunking_version": 1
+      },
+      "heading_text": "Level One Level Two Level Three Level Four Level Five",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "24b6f64380b2aefcf420dd31bc91d4160d413ee89b48836fe6a5309a5504f928",
+        "vault_id": "golden-vault",
+        "room": null,
+        "path": "Golden/Deep Heading Nesting.md",
+        "heading_path": [
+          "Level One",
+          "Level Two",
+          "Level Three",
+          "Level Four",
+          "Level Five",
+          "Level Six"
+        ],
+        "content": "###### Level Six\nSixth body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
+        "chunking_version": 1
+      },
+      "heading_text": "Level One Level Two Level Three Level Four Level Five Level Six",
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

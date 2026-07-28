@@ -29,6 +29,7 @@ import { validateSQLiteImage } from "./image-header";
 import {
   CACHE_SCHEMA_VERSION,
   MAX_EXPORT_BLOB_BYTES,
+  SOURCE_QUARANTINE_WARNING_CODE,
   WORKER_PROTOCOL_VERSION,
   type BuildResult,
   type DisposeResult,
@@ -36,6 +37,8 @@ import {
   type InitializeResult,
   type ReconciliationPlanResult,
   type SearchResult,
+  type SourcePreparationDefectField,
+  type SourceRemoval,
   type SourceUpsert,
   type StatusResult,
   type WorkerError,
@@ -43,6 +46,7 @@ import {
   type WorkerRequest,
   type WorkerResponse,
   fixedWorkerError,
+  isSourcePreparationDefectField,
   parseWorkerRequest,
 } from "./protocol";
 import {
@@ -52,6 +56,7 @@ import {
   prepareOversizedSourceWithRust,
   prepareQueryWithRust,
   prepareSourceWithRust,
+  type SourcePreparation,
 } from "./rust-adapter";
 
 interface SQLiteInitializerOptions {
@@ -67,6 +72,12 @@ type WorkerState = "cold" | "initializing" | "ready" | "building" | "disposed" |
 interface Generation {
   id: string;
   index: Fts5GenerationIndex;
+  quarantinedSources: Map<string, SourcePreparationDefectField>;
+}
+
+interface PreparedSourceBatch {
+  preparations: SourcePreparation[];
+  quarantined: Map<string, SourcePreparationDefectField>;
 }
 
 interface GuardCounters {
@@ -195,56 +206,48 @@ function beginBuild(generation: string): BuildResult {
       true,
     );
   }
-  staging = { id: generation, index: openFts5Generation(sqlite) };
+  staging = {
+    id: generation,
+    index: openFts5Generation(sqlite),
+    quarantinedSources: new Map(),
+  };
   usedGenerations.add(generation);
   state = "building";
   return generationResult(staging);
 }
 
-function addSourceBatch(
+async function addSourceBatch(
   generation: string,
   sources: Extract<WorkerRequest, { operation: "add_source_batch" }>["sources"],
-): BuildResult {
+): Promise<BuildResult> {
   const target = requireStaging(generation);
   try {
-    const preparations = sources.map(prepareSourceUpsert);
-    target.index.applySourceChanges(preparations, []);
+    const prepared = await prepareSourceBatch(sources);
+    target.index.applySourceChanges(prepared.preparations, []);
+    updateQuarantinedSources(target, sources, [], prepared.quarantined);
     return generationResult(target);
   } catch (error) {
     abortStaging();
     if (error instanceof IndexCapacityError) throw indexCapacityError();
-    if (error instanceof RustAdapterError) {
-      // Carry the failing field name into the message. It is a fixed
-      // identifier from this codebase, never vault content, and without it a
-      // field report can say only that Rust refused the batch.
-      const field = (error as { defectField?: string }).defectField;
-      throw fixedWorkerError(
-        "source_rejected",
-        "rust",
-        field === undefined
-          ? "Portable Rust rejected a source batch."
-          : `Portable Rust rejected a source batch: ${field}`,
-        false,
-      );
-    }
-    throw fixedWorkerError(
-      "source_rejected",
-      "index",
-      "In-plugin index rejected a source batch.",
-      false,
-    );
+    throw sourceChangeError(error);
   }
 }
 
-function applySourceChanges(
+async function applySourceChanges(
   request: Extract<WorkerRequest, { operation: "apply_source_changes" }>,
-): BuildResult {
+): Promise<BuildResult> {
   requireInitialized();
   if (request.next_generation === null) {
     const target = requireStaging(request.generation);
     try {
-      const preparations = request.upserts.map(prepareSourceUpsert);
-      target.index.applySourceChanges(preparations, request.removals);
+      const prepared = await prepareSourceBatch(request.upserts);
+      target.index.applySourceChanges(prepared.preparations, request.removals);
+      updateQuarantinedSources(
+        target,
+        request.upserts,
+        request.removals,
+        prepared.quarantined,
+      );
       return generationResult(target);
     } catch (error) {
       abortStaging();
@@ -265,11 +268,17 @@ function applySourceChanges(
   }
 
   try {
-    const preparations = request.upserts.map(prepareSourceUpsert);
+    const prepared = await prepareSourceBatch(request.upserts);
     // In place on a published generation: there is no later commit gate, so
     // the reconciliation runs inside this transaction. A divergence rolls the
     // batch back and is reported instead of quietly living in the active index.
-    active.index.applySourceChanges(preparations, request.removals, true);
+    active.index.applySourceChanges(prepared.preparations, request.removals, true);
+    updateQuarantinedSources(
+      active,
+      request.upserts,
+      request.removals,
+      prepared.quarantined,
+    );
     active.id = request.next_generation;
     usedGenerations.add(request.next_generation);
     return generationResult(active);
@@ -542,7 +551,11 @@ async function restoreGeneration(
       request.bytes,
       declaredChunkingVersion,
     );
-    staging = { id: request.generation, index };
+    staging = {
+      id: request.generation,
+      index,
+      quarantinedSources: new Map(),
+    };
     usedGenerations.add(request.generation);
     state = "building";
     try {
@@ -749,6 +762,8 @@ function generationResult(generation: Generation): BuildResult {
     generation: generation.id,
     documents: generation.index.documents,
     chunks: generation.index.chunks,
+    quarantined_sources: generation.quarantinedSources.size,
+    quarantine_fields: [...new Set(generation.quarantinedSources.values())].sort(),
   };
 }
 
@@ -761,10 +776,108 @@ function indexCapacityError(): WorkerError {
   );
 }
 
-function prepareSourceUpsert(source: SourceUpsert) {
+async function prepareSourceBatch(sources: readonly SourceUpsert[]): Promise<PreparedSourceBatch> {
+  const preparations: SourcePreparation[] = [];
+  const quarantined = new Map<string, SourcePreparationDefectField>();
+  for (const source of sources) {
+    try {
+      preparations.push(prepareSourceUpsert(source));
+    } catch (error) {
+      const defectField = quarantinablePreparationDefect(error);
+      if (defectField === null) throw error;
+      const identity = sourceIdentity(source.descriptor.vault_id, source.descriptor.path);
+      preparations.push(await quarantinedPreparation(source));
+      quarantined.set(identity, defectField);
+    }
+  }
+  return { preparations, quarantined };
+}
+
+function prepareSourceUpsert(source: SourceUpsert): SourcePreparation {
   return "bytes" in source
     ? prepareSourceWithRust(source.descriptor, source.bytes)
     : prepareOversizedSourceWithRust(source.descriptor);
+}
+
+function quarantinablePreparationDefect(error: unknown): SourcePreparationDefectField | null {
+  if (!(error instanceof RustAdapterError)) return null;
+  const field = (error as { defectField?: unknown }).defectField;
+  // A validated defectField proves the TypeScript ABI validator rejected this
+  // one preparation. RustAdapterError without one includes malformed JSON,
+  // invalid envelopes, ABI drift, and adapter failures, so it aborts. IndexCapacityError,
+  // IndexIntegrityError, and untyped SQLite errors arise after this function and
+  // also abort; Worker crashes and RPC timeouts are lifecycle failures outside
+  // this path and can never be converted into skipped sources.
+  return isSourcePreparationDefectField(field) ? field : null;
+}
+
+async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePreparation> {
+  const descriptor = source.descriptor;
+  const filename = descriptor.path.split("/").at(-1) ?? descriptor.path;
+  const separator = filename.lastIndexOf(".");
+  return {
+    schema_version: 1,
+    source_key: await sourceKey(descriptor.vault_id, descriptor.path),
+    vault_id: descriptor.vault_id,
+    ...(descriptor.room === undefined ? {} : { room: descriptor.room }),
+    path: descriptor.path,
+    format: descriptor.format,
+    content_hash: null,
+    byte_length: descriptor.byte_length,
+    mtime: descriptor.mtime,
+    mtime_nanos: descriptor.mtime_nanos,
+    retrieval: {
+      filename,
+      stem: separator > 0 ? filename.slice(0, separator) : filename,
+      aliases: [],
+    },
+    chunks: [],
+    kind: "skipped",
+    warning: SOURCE_QUARANTINE_WARNING_CODE,
+  };
+}
+
+function updateQuarantinedSources(
+  generation: Generation,
+  upserts: readonly SourceUpsert[],
+  removals: readonly SourceRemoval[],
+  quarantined: ReadonlyMap<string, SourcePreparationDefectField>,
+): void {
+  for (const source of upserts) {
+    generation.quarantinedSources.delete(
+      sourceIdentity(source.descriptor.vault_id, source.descriptor.path),
+    );
+  }
+  for (const removal of removals) {
+    generation.quarantinedSources.delete(sourceIdentity(removal.vault_id, removal.path));
+  }
+  for (const [identity, field] of quarantined) {
+    generation.quarantinedSources.set(identity, field);
+  }
+}
+
+// A later successful retry arrives with Rust's path-derived key. Reproducing
+// that contract here lets it replace the quarantine row instead of tripping the
+// index's source-key/identity conflict check.
+async function sourceKey(vaultId: string, path: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const parts = [encoder.encode("kwiry-source-v1\0")];
+  for (const component of [encoder.encode(vaultId), encoder.encode(path)]) {
+    const length = new Uint8Array(8);
+    new DataView(length.buffer).setBigUint64(0, BigInt(component.byteLength), true);
+    parts.push(length, component);
+  }
+  const bytes = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  return sha256Hex(bytes);
+}
+
+function sourceIdentity(vaultId: string, path: string): string {
+  return JSON.stringify([vaultId, path]);
 }
 
 function sourceChangeError(error: unknown): WorkerError {

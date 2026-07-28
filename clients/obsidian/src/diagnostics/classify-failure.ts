@@ -64,6 +64,16 @@ export type FailureErrorName =
 /// (`DataCloneError`, `QuotaExceededError`), never a path, query, or sentence:
 /// this pattern admits nothing that could carry vault content, and anything
 /// failing it is still reported as "other".
+/// The validator field names the Worker can name, mirrored from
+/// source-defect.ts. A closed list rather than a shape test, because shape
+/// cannot distinguish a field name from a note title.
+const SOURCE_DEFECT_FIELDS = new Set<string>([
+  "not_a_record", "schema_version", "source_key", "vault_id", "room", "path",
+  "format", "content_hash", "byte_length", "mtime", "mtime_nanos", "retrieval",
+  "chunks_shape", "chunks_contents", "kind", "warning", "skipped_has_chunks",
+  "indexed_missing_hash",
+]);
+
 const IDENTIFIER_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
 
 const KNOWN_ERROR_NAMES = new Set<FailureErrorName>([
@@ -231,11 +241,13 @@ export function classifyFailure(error: unknown): FailureClassification {
   const workerCode = WORKER_ERROR_CODES.has(code as WorkerFailureCode)
     ? (code as WorkerFailureCode)
     : null;
-  // The Worker appends the failing validator field after a colon. Only an
-  // identifier-shaped tail is taken, so a message containing a path or a
-  // sentence contributes nothing.
+  // The Worker appends the failing validator field after a colon. Matching the
+  // tail against the closed list of known field names, rather than merely
+  // checking that it is identifier-shaped: a note titled "MyNote" produces an
+  // identifier-shaped tail too, so shape alone would echo a vault filename into
+  // a log meant to be pasted into a chat.
   const tail = message.includes(": ") ? message.slice(message.lastIndexOf(": ") + 2) : "";
-  const defectField = IDENTIFIER_NAME.test(tail) ? tail : null;
+  const defectField = SOURCE_DEFECT_FIELDS.has(tail) ? tail : null;
   const rawStage = safeRead(unwrapped, "stage") ?? "";
   const workerStage = WORKER_ERROR_STAGES.has(rawStage as WorkerFailureStage)
     ? (rawStage as WorkerFailureStage)

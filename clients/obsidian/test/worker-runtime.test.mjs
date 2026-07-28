@@ -676,7 +676,7 @@ describe("restored cache generation", () => {
       await request(worker, { id: 1, operation: "initialize" });
       await expect(request(worker, restoreFromExport(envelope))).resolves.toMatchObject({
         ok: true,
-        result: { generation: "g1", documents: 1, chunks: 1 },
+        result: { generation: "g1", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
       });
       await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
         ok: true,
@@ -1379,7 +1379,7 @@ describe("exact generated production Worker", () => {
         removals: [{ vault_id: "active-vault", path: "alpha.md" }],
       })).resolves.toMatchObject({
         ok: true,
-        result: { generation: "g2", documents: 1, chunks: 1 },
+        result: { generation: "g2", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
       });
       await expect(request(worker, {
         id: 6,
@@ -1671,7 +1671,7 @@ describe("exact generated production Worker", () => {
         removals: [{ vault_id: "active-vault", path: "alpha.md" }],
       })).resolves.toMatchObject({
         ok: true,
-        result: { generation: "g2", documents: 1, chunks: 1 },
+        result: { generation: "g2", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
       });
       await expect(request(worker, {
         id: 6,
@@ -1689,7 +1689,7 @@ describe("exact generated production Worker", () => {
         removals: [],
       })).resolves.toMatchObject({
         ok: true,
-        result: { generation: "g3", documents: 2, chunks: 2 },
+        result: { generation: "g3", documents: 2, chunks: 2, quarantined_sources: 0, quarantine_fields: [] },
       });
       await expect(request(worker, {
         id: 8,
@@ -1822,7 +1822,7 @@ describe("exact generated production Worker", () => {
   // posting is exactly the divergence the removed external-content triggers
   // used to make structurally impossible.
   it("refuses an in-place active update whose postings diverge from its chunk rows", async () => {
-    const needle = "active.index.applySourceChanges(preparations, request.removals, true);";
+    const needle = "active.index.applySourceChanges(prepared.preparations, request.removals, true);";
     const injected = guardWorkerSource.replace(
       needle,
       `active.index.db.exec("INSERT INTO chunks_fts(rowid, content) VALUES(900000, 'sabotageterm')");\n    ${needle}`,

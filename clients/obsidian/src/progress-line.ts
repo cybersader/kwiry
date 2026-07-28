@@ -14,7 +14,8 @@ import type { BackendStatus } from "./backend";
 /// line should be hidden entirely rather than shown empty.
 export function progressLine(status: BackendStatus): string | null {
   const progress = status.progress;
-  if (!progress) return null;
+  const omissions = omissionLine(status);
+  if (!progress) return omissions;
   const verb = progress.stage === "replay" ? "Reconciling" : "Indexing";
   const counted = progress.total === null
     ? `${progress.completed}`
@@ -23,7 +24,21 @@ export function progressLine(status: BackendStatus): string | null {
     ? ` (${Math.floor((progress.completed / progress.total) * 100)}%)`
     : "";
   const path = progress.path === undefined ? "" : ` · ${shortenPath(progress.path)}`;
-  return `${verb} ${counted}${percent}${path}`;
+  const suffix = omissions === null ? "" : ` · ${omissions}`;
+  return `${verb} ${counted}${percent}${path}${suffix}`;
+}
+
+function omissionLine(status: BackendStatus): string | null {
+  const quarantined = status.quarantinedSources ?? 0;
+  const unreadable = status.unreadableSources ?? 0;
+  const total = quarantined + unreadable;
+  if (total === 0) return null;
+  const note = total === 1 ? "note may be" : "notes may be";
+  const kinds = [
+    quarantined === 0 ? null : `${quarantined} quarantined`,
+    unreadable === 0 ? null : `${unreadable} unreadable`,
+  ].filter((kind): kind is string => kind !== null).join(", ");
+  return `${total} ${note} missing from search (${kinds})`;
 }
 
 /// Keeps the line to a single row. The tail of a path identifies the file;

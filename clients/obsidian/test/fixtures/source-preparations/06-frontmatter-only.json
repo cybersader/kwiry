@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "source_key": "5c8e11a391032a89efd385316e949adf52b7ef9599cfaedbda6bcf0620827e6a",
+  "vault_id": "golden-vault",
+  "path": "Golden/Frontmatter Only.md",
+  "format": "markdown",
+  "content_hash": "c76507261ce04ff239bc2e636940912360fdf8c5e42bc1744d6481c21ed3d3d5",
+  "byte_length": 117,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Frontmatter Only.md",
+    "stem": "Frontmatter Only",
+    "aliases": [
+      "First alias",
+      "Second alias"
+    ]
+  },
+  "chunks": [],
+  "kind": "indexed"
+}

@@ -140,6 +140,7 @@ class FakeCacheStore implements CacheStorePort {
 
 function fakeSession(options: {
   initialize?: () => Promise<unknown>;
+  commit?: (generation: string) => Promise<unknown>;
   search?: () => Promise<unknown>;
   restore?: (hit: Extract<CacheLoad, { kind: "hit" }>) => Promise<unknown>;
   plan?: () => Promise<unknown>;
@@ -151,11 +152,15 @@ function fakeSession(options: {
       generation,
       documents: 0,
       chunks: 0,
+      quarantined_sources: 0,
+      quarantine_fields: [],
     })),
     addSourceBatch: vi.fn(async (generation: string) => ({
       generation,
       documents: 0,
       chunks: 0,
+      quarantined_sources: 0,
+      quarantine_fields: [],
     })),
     applySourceChanges: vi.fn(async (
       generation: string,
@@ -164,21 +169,29 @@ function fakeSession(options: {
       generation: nextGeneration ?? generation,
       documents: 0,
       chunks: 0,
+      quarantined_sources: 0,
+      quarantine_fields: [],
     })),
-    commitBuild: vi.fn(async (generation: string) => ({
+    commitBuild: vi.fn(options.commit ?? (async (generation: string) => ({
       generation,
       documents: 0,
       chunks: 0,
-    })),
+      quarantined_sources: 0,
+      quarantine_fields: [],
+    }))),
     abortBuild: vi.fn(async (generation: string) => ({
       generation,
       documents: 0,
       chunks: 0,
+      quarantined_sources: 0,
+      quarantine_fields: [],
     })),
     restoreGeneration: vi.fn(options.restore ?? (async (hit: Extract<CacheLoad, { kind: "hit" }>) => ({
       generation: hit.record.generationId,
       documents: 0,
       chunks: 0,
+      quarantined_sources: 0,
+      quarantine_fields: [],
     }))),
     planReconciliation: vi.fn(options.plan ?? (async () => ({
       generation: "cached-generation",
@@ -257,6 +270,38 @@ describe("InPluginLexicalBackend", () => {
         phase: "ready",
         searchable: true,
         generation: "generation-1",
+      });
+    });
+  });
+
+  it("publishes quarantined counts and validator fields as a degraded searchable status", async () => {
+    const source = new FakeSource();
+    const session = fakeSession({
+      commit: async (generation) => ({
+        generation,
+        documents: 9,
+        chunks: 12,
+        quarantined_sources: 1,
+        quarantine_fields: ["chunks_contents"],
+      }),
+    });
+    const inPlugin = backend(source, [session]);
+
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "degraded",
+        searchable: true,
+        generation: "generation-1",
+        documents: 9,
+        chunks: 12,
+        quarantinedSources: 1,
+        unreadableSources: 0,
+        quarantineValidatorFields: ["chunks_contents"],
+        issue: {
+          code: "sources_quarantined",
+          safeMessage: "1 note may be missing from search (1 quarantined).",
+        },
       });
     });
   });

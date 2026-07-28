@@ -407,6 +407,9 @@ function mapControllerStatus(
     capabilities: CAPABILITIES,
     documents: status.documents,
     chunks: status.chunks,
+    quarantinedSources: status.quarantinedSources,
+    unreadableSources: status.unreadableSources,
+    quarantineValidatorFields: status.quarantineValidatorFields,
     dirty: status.dirty,
     rebuilding: status.rebuilding,
     ...(progress ? { progress } : {}),
@@ -441,6 +444,13 @@ function controllerIssue(
       return {
         code: issue,
         safeMessage: "The in-plugin lexical index reached its capacity limit.",
+        recoverable: true,
+      };
+    case "sources_quarantined":
+    case "sources_unreadable":
+      return {
+        code: issue,
+        safeMessage: omissionMessage(status.quarantinedSources, status.unreadableSources),
         recoverable: true,
       };
     case "index_reconciling":
@@ -510,6 +520,16 @@ function controllerIssue(
         recoverable: true,
       };
   }
+}
+
+function omissionMessage(quarantined: number, unreadable: number): string {
+  const total = quarantined + unreadable;
+  const note = total === 1 ? "note may be" : "notes may be";
+  const details = [
+    ...(quarantined === 0 ? [] : [`${quarantined} quarantined`]),
+    ...(unreadable === 0 ? [] : [`${unreadable} unreadable`]),
+  ].join(", ");
+  return `${total} ${note} missing from search (${details}).`;
 }
 
 function baseStatus(identity: BackendIdentity): BackendStatus {

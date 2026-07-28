@@ -27,6 +27,7 @@ import {
   type ReconciliationPlanResult,
   type ReconciliationSourceMetadata,
   type SourceInput,
+  type SourcePreparationDefectField,
   type SourceUpsert,
 } from "../src/worker/protocol";
 import { WorkerRpcError } from "../src/worker/rpc-client";
@@ -38,6 +39,8 @@ class FakeSource implements ActiveVaultSource {
   onRead: ((path: string) => void) | null = null;
   staleReads = new Set<string>();
   oversizedPaths = new Set<string>();
+  readonly remainingReadFailures = new Map<string, number>();
+  readonly readAttempts = new Map<string, number>();
   unsubscribed = 0;
 
   subscribe(listener: (event: VaultSourceEvent) => void): () => void {
@@ -78,7 +81,13 @@ class FakeSource implements ActiveVaultSource {
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
   ): Promise<StableSourceRead> {
     this.log.push(`read:${inspection.path}`);
+    this.readAttempts.set(inspection.path, (this.readAttempts.get(inspection.path) ?? 0) + 1);
     this.onRead?.(inspection.path);
+    const failures = this.remainingReadFailures.get(inspection.path) ?? 0;
+    if (failures > 0) {
+      this.remainingReadFailures.set(inspection.path, failures - 1);
+      throw new Error("simulated read failure");
+    }
     if (this.staleReads.has(inspection.path)) return { kind: "stale", path: inspection.path };
     const record = this.records.get(inspection.path);
     if (!record) return { kind: "missing", path: inspection.path };
@@ -118,6 +127,8 @@ class FakeWorker implements IndexWorkerPort {
   stagingGeneration: string | null = null;
   activePaths = new Set<string>();
   stagingPaths = new Set<string>();
+  quarantinedSources = 0;
+  quarantineFields: SourcePreparationDefectField[] = [];
 
   async initialize(): Promise<void> {
     this.calls.push("initialize");
@@ -178,7 +189,13 @@ class FakeWorker implements IndexWorkerPort {
   }
 
   private counts(generation: string, paths: Set<string>): IndexCounts {
-    return { generation, documents: paths.size, chunks: paths.size };
+    return {
+      generation,
+      documents: paths.size,
+      chunks: paths.size,
+      quarantined_sources: this.quarantinedSources,
+      quarantine_fields: [...this.quarantineFields],
+    };
   }
 }
 
@@ -239,7 +256,13 @@ class FakeCacheWorker extends FakeWorker {
   }
 
   private countsFor(generation: string, paths: Set<string>): IndexCounts {
-    return { generation, documents: paths.size, chunks: paths.size };
+    return {
+      generation,
+      documents: paths.size,
+      chunks: paths.size,
+      quarantined_sources: 0,
+      quarantine_fields: [],
+    };
   }
 }
 
@@ -391,6 +414,239 @@ describe("InPluginIndexController", () => {
       generation: "generation-1",
       documents: 2,
       dirty: false,
+    });
+  });
+
+  it("mirrors cumulative Worker quarantines and clears them before a rebuild retries sources", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    const worker = new FakeWorker();
+    worker.quarantinedSources = 1;
+    worker.quarantineFields = ["chunks_contents"];
+    const { controller, statuses } = harness(source, worker);
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      quarantinedSources: 1,
+      unreadableSources: 0,
+      quarantineValidatorFields: ["chunks_contents"],
+      issue: "sources_quarantined",
+    });
+
+    worker.quarantinedSources = 0;
+    worker.quarantineFields = [];
+    controller.requestRebuild();
+    // Requesting a rebuild does not replace the active generation: it stays
+    // searchable, still missing the same notes. Dropping the warning here
+    // would leave a partial index answering queries with no indication.
+    expect(statuses.at(-1)).toMatchObject({
+      quarantinedSources: 1,
+      quarantineValidatorFields: ["chunks_contents"],
+    });
+    await controller.whenIdle();
+
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      quarantinedSources: 0,
+      unreadableSources: 0,
+      quarantineValidatorFields: [],
+    });
+    expect(statuses.at(-1)).not.toHaveProperty("issue");
+    expect(source.readAttempts).toEqual(new Map([
+      ["a.md", 2],
+      ["b.md", 2],
+    ]));
+  });
+
+  it("retries snapshot reads before quarantining one unreadable source", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    source.set("c.md", "c");
+    source.remainingReadFailures.set("b.md", 99);
+    const { controller, worker, statuses, failures } = harness(source);
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toEqual([]);
+    expect(source.readAttempts.get("b.md")).toBe(3);
+    expect(worker.calls).toContain("add:a.md,c.md");
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      documents: 2,
+      quarantinedSources: 0,
+      unreadableSources: 1,
+      issue: "sources_unreadable",
+    });
+  });
+
+  it("does not quarantine a snapshot source that succeeds on retry", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    source.remainingReadFailures.set("a.md", 1);
+    const { controller, statuses } = harness(source);
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(source.readAttempts.get("a.md")).toBe(2);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      documents: 2,
+      quarantinedSources: 0,
+      unreadableSources: 0,
+    });
+  });
+
+  it("aborts early when a multi-source read window indicates a systemic outage", async () => {
+    const source = new FakeSource();
+    for (const path of ["a.md", "b.md", "c.md", "d.md"]) {
+      source.set(path, path);
+      source.remainingReadFailures.set(path, 99);
+    }
+    const { controller, worker, statuses, failures } = harness(source);
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(failures).toHaveLength(1);
+    expect(worker.calls).toEqual([
+      "initialize",
+      "begin:generation-1",
+      "abort:generation-1",
+    ]);
+    expect([...source.readAttempts.values()].reduce((sum, count) => sum + count, 0)).toBe(12);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "failed",
+      searchable: false,
+      issue: "vault_read_failed",
+    });
+  });
+
+  it("keeps the omission warning visible until a rebuild actually starts", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "value");
+    const worker = new FakeWorker();
+    worker.quarantinedSources = 1;
+    worker.quarantineFields = ["chunks_contents"];
+    const { controller, statuses } = harness(source, worker);
+
+    controller.start();
+    await controller.whenIdle();
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      quarantinedSources: 1,
+      quarantineValidatorFields: ["chunks_contents"],
+      issue: "sources_quarantined",
+    });
+
+    worker.quarantinedSources = 0;
+    worker.quarantineFields = [];
+    controller.requestRebuild();
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "rebuild",
+      // The active generation is unchanged and still missing these notes.
+      quarantinedSources: 1,
+    });
+    await controller.whenIdle();
+
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      quarantinedSources: 0,
+      unreadableSources: 0,
+    });
+  });
+
+  it("retries a snapshot read before marking the source unreadable", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "value");
+    source.remainingReadFailures.set("note.md", 1);
+    const { controller, worker, statuses } = harness(source, new FakeWorker(), {
+      maxStableReadAttempts: 3,
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(source.readAttempts.get("note.md")).toBe(2);
+    expect(worker.activePaths).toEqual(new Set(["note.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      unreadableSources: 0,
+      quarantinedSources: 0,
+    });
+  });
+
+  it("publishes a minority of unreadable sources as an explicit degraded generation", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    source.set("unreadable.md", "locked");
+    source.remainingReadFailures.set("unreadable.md", 10);
+    const { controller, worker, statuses } = harness(source, new FakeWorker(), {
+      maxConcurrentReads: 3,
+      maxStableReadAttempts: 2,
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(source.readAttempts.get("unreadable.md")).toBe(2);
+    expect([...worker.activePaths].sort()).toEqual(["a.md", "b.md"]);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      documents: 2,
+      unreadableSources: 1,
+      quarantinedSources: 0,
+      issue: "sources_unreadable",
+    });
+
+    source.remainingReadFailures.set("unreadable.md", 0);
+    controller.requestRebuild();
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "rebuild",
+      unreadableSources: 1,
+    });
+    await controller.whenIdle();
+
+    expect([...worker.activePaths].sort()).toEqual(["a.md", "b.md", "unreadable.md"]);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      documents: 3,
+      unreadableSources: 0,
+    });
+  });
+
+  it("aborts after one fully retried window proves source reads are systemically unavailable", async () => {
+    const source = new FakeSource();
+    for (const path of ["a.md", "b.md", "c.md", "d.md"]) {
+      source.set(path, path);
+      source.remainingReadFailures.set(path, 10);
+    }
+    const { controller, worker, statuses } = harness(source, new FakeWorker(), {
+      maxConcurrentReads: 4,
+      maxStableReadAttempts: 3,
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect([...source.readAttempts.values()].reduce((sum, attempts) => sum + attempts, 0)).toBe(12);
+    expect(worker.calls.some((call) => call.startsWith("commit:"))).toBe(false);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "failed",
+      searchable: false,
+      unreadableSources: 4,
+      issue: "vault_read_failed",
     });
   });
 
@@ -603,6 +859,49 @@ describe("InPluginIndexController", () => {
     }]);
     expect(worker.activePaths).toEqual(new Set(["during-load.md"]));
   });
+
+  it.each(["unreadable", "quarantined"] as const)(
+    "never exports a generation with %s sources as a clean cache",
+    async (omission) => {
+      vi.useFakeTimers();
+      try {
+        const source = new FakeSource();
+        source.set("a.md", "a", 1);
+        source.set("b.md", "b", 1);
+        source.set("c.md", "c", 1);
+        const worker = new FakeCacheWorker();
+        if (omission === "unreadable") {
+          source.remainingReadFailures.set("c.md", 99);
+        } else {
+          worker.quarantinedSources = 1;
+          worker.quarantineFields = ["chunks_contents"];
+        }
+        const store = new FakeCacheStore({ kind: "miss", reason: "absent" });
+        const { controller, statuses } = harness(source, worker, {
+          maxConcurrentReads: 3,
+          maxStableReadAttempts: 2,
+        }, {
+          openStore: async () => ({ kind: "available", store }),
+        });
+
+        controller.start();
+        await controller.whenIdle();
+        expect(statuses.at(-1)).toMatchObject({
+          stage: "ready",
+          searchable: true,
+          ...(omission === "unreadable"
+            ? { unreadableSources: 1 }
+            : { quarantinedSources: 1 }),
+        });
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(worker.exportCalls).toEqual([]);
+        expect(store.puts).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("exports only after two clean idle seconds and degrades durability without dirtying search", async () => {
     vi.useFakeTimers();

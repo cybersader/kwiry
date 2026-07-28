@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 3 as const;
+export const WORKER_PROTOCOL_VERSION = 4 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -13,6 +13,28 @@ export const MAX_QUERY_CHARACTERS = 4_096;
 export const MAX_SEARCH_HITS = 100;
 export const MAX_RECONCILIATION_SOURCES = 200_000;
 export const MAX_RECONCILIATION_PLAN_PATHS = MAX_RECONCILIATION_SOURCES * 2;
+export const SOURCE_QUARANTINE_WARNING_CODE = "source_rejected" as const;
+export const SOURCE_PREPARATION_DEFECT_FIELDS = [
+  "not_a_record",
+  "schema_version",
+  "source_key",
+  "vault_id",
+  "room",
+  "path",
+  "format",
+  "content_hash",
+  "byte_length",
+  "mtime",
+  "mtime_nanos",
+  "retrieval",
+  "chunks_shape",
+  "chunks_contents",
+  "kind",
+  "warning",
+  "skipped_has_chunks",
+  "indexed_missing_hash",
+] as const;
+export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIELDS[number];
 
 /**
  * Version of the cache image format the Worker produces. It covers the SQLite
@@ -205,6 +227,8 @@ export interface BuildResult {
   generation: string;
   documents: number;
   chunks: number;
+  quarantined_sources: number;
+  quarantine_fields: SourcePreparationDefectField[];
 }
 
 export interface StatusResult {
@@ -608,10 +632,21 @@ function isInitializeResult(value: unknown): value is InitializeResult {
 
 function isBuildResult(value: unknown): value is BuildResult {
   return isRecord(value)
-    && hasExactKeys(value, ["generation", "documents", "chunks"])
+    && hasExactKeys(value, [
+      "generation",
+      "documents",
+      "chunks",
+      "quarantined_sources",
+      "quarantine_fields",
+    ])
     && isGeneration(value.generation)
     && isNonNegativeSafeInteger(value.documents)
-    && isNonNegativeSafeInteger(value.chunks);
+    && isNonNegativeSafeInteger(value.chunks)
+    && isNonNegativeSafeInteger(value.quarantined_sources)
+    && Array.isArray(value.quarantine_fields)
+    && value.quarantine_fields.length <= SOURCE_PREPARATION_DEFECT_FIELDS.length
+    && value.quarantine_fields.every(isSourcePreparationDefectField)
+    && new Set(value.quarantine_fields).size === value.quarantine_fields.length;
 }
 
 function isExportGenerationResult(value: unknown): value is ExportGenerationResult {
@@ -817,6 +852,13 @@ function isWorkerOperation(value: unknown): value is WorkerOperation {
 
 export function isSha256Hex(value: unknown): value is string {
   return typeof value === "string" && SHA256_HEX_PATTERN.test(value);
+}
+
+export function isSourcePreparationDefectField(
+  value: unknown,
+): value is SourcePreparationDefectField {
+  return typeof value === "string"
+    && (SOURCE_PREPARATION_DEFECT_FIELDS as readonly string[]).includes(value);
 }
 
 function isRequestId(value: unknown): value is number {

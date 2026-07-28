@@ -63,12 +63,20 @@ function resultFor(message: WorkerRequest): WorkerResult {
     case "commit_build":
     case "abort_build":
     case "restore_generation":
-      return { generation: message.generation, documents: 0, chunks: 0 };
+      return {
+        generation: message.generation,
+        documents: 0,
+        chunks: 0,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+      };
     case "apply_source_changes":
       return {
         generation: message.next_generation ?? message.generation,
         documents: message.upserts.length,
         chunks: message.upserts.length,
+        quarantined_sources: 0,
+        quarantine_fields: [],
       };
     case "plan_reconciliation":
       return {

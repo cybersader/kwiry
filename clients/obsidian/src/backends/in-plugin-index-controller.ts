@@ -19,6 +19,7 @@ import type {
   ExportGenerationResult,
   ReconciliationPlanResult,
   ReconciliationSourceMetadata,
+  SourcePreparationDefectField,
   SourceRemoval,
   SourceUpsert,
 } from "../worker/protocol";
@@ -68,6 +69,8 @@ export type IndexControllerIssue =
   | "index_build_failed"
   | "index_update_failed"
   | "index_limit_exceeded"
+  | "sources_quarantined"
+  | "sources_unreadable"
   | "index_reconciling"
   | "cache_absent"
   | "cache_unavailable"
@@ -83,6 +86,9 @@ export interface IndexControllerStatus {
   generation: string | null;
   documents: number;
   chunks: number;
+  quarantinedSources: number;
+  unreadableSources: number;
+  quarantineValidatorFields: readonly SourcePreparationDefectField[];
   dirty: boolean;
   rebuilding: boolean;
   progress?: {
@@ -130,6 +136,14 @@ const DEFAULT_LIMITS: IndexControllerLimits = {
 };
 const DEFAULT_IDLE_EXPORT_MS = 2_000;
 const MAX_GENERATION_ALLOCATION_ATTEMPTS = 32;
+// A network share that disappears midway can yield a plausible-looking partial
+// index. Requiring more than half of attempted reads to fail avoids publishing
+// that systemic outage while still isolating a minority of unreadable notes;
+// requiring two failures keeps one independently locked note source-isolated.
+// This is deliberately a judgement-call heuristic, not a measurement: at this
+// layer, many independent unreadable notes are indistinguishable from an outage.
+const SYSTEMIC_UNREADABLE_READ_RATIO = 0.5;
+const MIN_SYSTEMIC_UNREADABLE_SOURCES = 2;
 
 interface SnapshotEntry {
   path: string;
@@ -178,6 +192,9 @@ export class InPluginIndexController {
   private activeGeneration: string | null = null;
   private documents = 0;
   private chunks = 0;
+  private quarantinedSources = 0;
+  private readonly unreadableSources = new Set<string>();
+  private readonly quarantineValidatorFields = new Set<SourcePreparationDefectField>();
   private stage: IndexControllerStage = "starting";
   private completed = 0;
   private total: number | null = null;
@@ -221,6 +238,12 @@ export class InPluginIndexController {
     this.mutationEpoch += 1;
     if (this.cacheIssue === "cache_save_failed") this.cacheIssue = null;
     this.cancelExportTimer();
+    // Omissions are NOT cleared here. Requesting a rebuild does not replace the
+    // active generation -- that one stays searchable, still missing the same
+    // notes, until buildGeneration() actually starts and clears them there.
+    // Clearing on request drops the warning while the partial index is still
+    // the one answering queries, which is the silent-partial-index failure this
+    // whole change exists to prevent.
     this.completed = 0;
     this.currentPath = null;
     this.total = null;
@@ -555,11 +578,19 @@ export class InPluginIndexController {
 
     const refresh = new Set(plan.refresh);
     const remove = new Set(plan.remove);
+    let attemptedRefreshReads = 0;
+    let unreadableRefreshes = 0;
     for (const entry of snapshot.entries) {
       this.completed += 1;
       this.currentPath = entry.path;
       if (refresh.has(entry.path) && !this.wasTouchedAfter(entry.path, snapshot.cut)) {
-        await this.applySnapshotRefresh(entry, snapshot.cut);
+        if (entry.inspection.kind === "candidate") attemptedRefreshReads += 1;
+        if (await this.applySnapshotRefresh(entry, snapshot.cut)) unreadableRefreshes += 1;
+        if (unreadableRefreshes >= MIN_SYSTEMIC_UNREADABLE_SOURCES
+          && unreadableRefreshes
+            > attemptedRefreshReads * SYSTEMIC_UNREADABLE_READ_RATIO) {
+          throw new VaultSourceReadError(new Error("active vault became unreadable"));
+        }
       }
       this.emit("replay");
       await this.yieldControl();
@@ -573,20 +604,33 @@ export class InPluginIndexController {
     }
   }
 
-  private async applySnapshotRefresh(entry: SnapshotEntry, cut: number): Promise<void> {
-    const read = await this.readSnapshot(entry.inspection);
+  private async applySnapshotRefresh(entry: SnapshotEntry, cut: number): Promise<boolean> {
+    let read: StableSourceRead;
+    try {
+      read = await this.readSnapshot(entry.inspection);
+    } catch (error) {
+      if (!(error instanceof UnreadableVaultSourceError)) throw error;
+      this.unreadableSources.add(entry.path);
+      await this.applyReconciliationChange(
+        [],
+        [{ vault_id: ACTIVE_VAULT_ID, path: entry.path }],
+      );
+      return true;
+    }
     this.requireActive();
-    if (this.wasTouchedAfter(entry.path, cut)) return;
+    this.unreadableSources.delete(entry.path);
+    if (this.wasTouchedAfter(entry.path, cut)) return false;
     if (read.kind === "source") {
       await this.applyReconciliationChange([read.source], []);
-      return;
+      return false;
     }
     if (read.kind === "oversized") {
       await this.applyReconciliationChange([oversizedInput(read)], []);
-      return;
+      return false;
     }
     if (read.kind === "missing") this.queueRemoval(entry.path);
     else this.queueUpsert(entry.path);
+    return false;
   }
 
   private async applyReconciliationChange(
@@ -608,11 +652,13 @@ export class InPluginIndexController {
   private async buildGeneration(rebuilding: boolean): Promise<void> {
     const generation = this.allocateFreshGeneration();
     let began = false;
+    this.clearSourceOmissions();
     try {
       this.emit(rebuilding ? "rebuild" : "snapshot");
       let counts = await this.worker.beginBuild(generation);
       began = true;
       this.requireActive();
+      this.syncWorkerQuarantines(counts);
 
       const snapshot = this.captureSnapshot();
       this.completed = 0;
@@ -629,6 +675,7 @@ export class InPluginIndexController {
       this.emit(rebuilding ? "rebuild" : "replay");
       while (this.hasPendingChanges()) {
         counts = await this.applyPendingChanges(generation, null, counts);
+        this.syncWorkerQuarantines(counts);
         if (this.rescanRequested) {
           await this.worker.abortBuild(generation);
           return;
@@ -681,11 +728,13 @@ export class InPluginIndexController {
     let counts = initialCounts;
     let batch: SourceUpsert[] = [];
     let batchBytes = 0;
+    let attemptedCandidateReads = 0;
 
     const flush = async (): Promise<void> => {
       if (batch.length === 0) return;
       counts = await this.worker.addSourceBatch(generation, batch);
       this.requireActive();
+      this.syncWorkerQuarantines(counts);
       batch = [];
       batchBytes = 0;
       this.emit(rebuilding ? "rebuild" : "snapshot");
@@ -708,6 +757,7 @@ export class InPluginIndexController {
             continue;
           }
           reservedBytes += inspection.size;
+          attemptedCandidateReads += 1;
           window.push({ entry, read: this.readSnapshot(inspection) });
         } else {
           window.push({ entry, read: Promise.resolve(inspection) });
@@ -717,13 +767,21 @@ export class InPluginIndexController {
 
       const settled = await Promise.allSettled(window.map((entry) => entry.read));
       this.requireActive();
+      let firstUnreadableError: UnreadableVaultSourceError | null = null;
       for (let index = 0; index < window.length; index += 1) {
         const result = settled[index]!;
-        if (result.status === "rejected") throw result.reason;
         const { entry } = window[index]!;
-        const read = result.value;
         this.completed += 1;
         this.currentPath = entry.path;
+        if (result.status === "rejected") {
+          if (!(result.reason instanceof UnreadableVaultSourceError)) throw result.reason;
+          firstUnreadableError ??= result.reason;
+          this.unreadableSources.add(entry.path);
+          this.emit(rebuilding ? "rebuild" : "snapshot");
+          continue;
+        }
+        const read = result.value;
+        this.unreadableSources.delete(entry.path);
         if (!this.wasTouchedAfter(entry.path, snapshot.cut)) {
           const upsert = sourceUpsert(read);
           if (upsert) {
@@ -746,6 +804,12 @@ export class InPluginIndexController {
         this.emit(rebuilding ? "rebuild" : "snapshot");
         if (batch.length >= this.limits.maxBatchSources) await flush();
       }
+      if (firstUnreadableError
+        && this.unreadableSources.size >= MIN_SYSTEMIC_UNREADABLE_SOURCES
+        && this.unreadableSources.size
+          > attemptedCandidateReads * SYSTEMIC_UNREADABLE_READ_RATIO) {
+        throw firstUnreadableError;
+      }
       await this.yieldControl();
       this.requireActive();
     }
@@ -761,6 +825,8 @@ export class InPluginIndexController {
       generation,
       documents: this.documents,
       chunks: this.chunks,
+      quarantined_sources: this.quarantinedSources,
+      quarantine_fields: [...this.quarantineValidatorFields],
     });
     this.requireActive();
     this.setActiveCounts(counts);
@@ -780,10 +846,20 @@ export class InPluginIndexController {
       const removals = new Map<string, SourceRemoval>();
       for (const path of changes.removals) {
         removals.set(path, { vault_id: ACTIVE_VAULT_ID, path });
+        this.unreadableSources.delete(path);
       }
       for (const path of changes.upserts) {
-        const read = await this.readStable(path);
+        let read: StableSourceRead;
+        try {
+          read = await this.readStable(path);
+        } catch (error) {
+          if (!(error instanceof UnreadableVaultSourceError)) throw error;
+          this.unreadableSources.add(path);
+          removals.set(path, { vault_id: ACTIVE_VAULT_ID, path });
+          continue;
+        }
         this.requireActive();
+        this.unreadableSources.delete(path);
         const upsert = sourceUpsert(read);
         if (upsert) {
           if ("bytes" in upsert && upsert.bytes.byteLength > this.limits.maxBatchBytes) {
@@ -875,27 +951,37 @@ export class InPluginIndexController {
 
   private async readSnapshot(inspection: SourceInspection): Promise<StableSourceRead> {
     if (inspection.kind !== "candidate") return inspection;
-    try {
-      return await this.source.readMarkdown(inspection);
-    } catch (error) {
-      if (this.disposed) throw error;
-      throw new VaultSourceReadError(error);
+    let lastError: unknown = new Error("active-vault source could not be read");
+    for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
+      try {
+        const read = await this.source.readMarkdown(inspection);
+        this.requireActive();
+        return read;
+      } catch (error) {
+        if (this.disposed) throw error;
+        lastError = error;
+        this.requireActive();
+      }
     }
+    throw new UnreadableVaultSourceError(lastError);
   }
 
   private async readStable(path: string): Promise<StableSourceRead> {
-    try {
-      for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
+    let readError: unknown = null;
+    for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
+      try {
         const inspection = this.inspectMarkdown(path);
         if (inspection.kind !== "candidate") return inspection;
         const read = await this.source.readMarkdown(inspection);
         this.requireActive();
         if (read.kind !== "stale") return read;
+      } catch (error) {
+        if (this.disposed) throw error;
+        readError = error;
+        this.requireActive();
       }
-    } catch (error) {
-      if (this.disposed) throw error;
-      throw new VaultSourceReadError(error);
     }
+    if (readError !== null) throw new UnreadableVaultSourceError(readError);
     throw new VaultSourceReadError(new Error("vault source did not become stable"));
   }
 
@@ -914,12 +1000,25 @@ export class InPluginIndexController {
     throw new Error("generation allocator did not produce a fresh identifier");
   }
 
+  private clearSourceOmissions(): void {
+    this.quarantinedSources = 0;
+    this.quarantineValidatorFields.clear();
+    this.unreadableSources.clear();
+  }
+
+  private syncWorkerQuarantines(counts: IndexCounts): void {
+    this.quarantinedSources = counts.quarantined_sources;
+    this.quarantineValidatorFields.clear();
+    for (const field of counts.quarantine_fields) this.quarantineValidatorFields.add(field);
+  }
+
   private setActiveCounts(counts: IndexCounts): void {
     const changed = this.activeGeneration !== counts.generation;
     this.activeGeneration = counts.generation;
     this.issuedGenerationIds.add(counts.generation);
     this.documents = counts.documents;
     this.chunks = counts.chunks;
+    this.syncWorkerQuarantines(counts);
     if (changed) {
       this.mutationEpoch += 1;
       this.cancelExportTimer();
@@ -960,14 +1059,24 @@ export class InPluginIndexController {
         ...(this.currentPath === null ? {} : { path: this.currentPath }),
       }
       : undefined;
+    const omissionIssue = this.quarantinedSources > 0
+      ? "sources_quarantined"
+      : this.unreadableSources.size > 0
+        ? "sources_unreadable"
+        : undefined;
     const issue = explicitIssue
-      ?? (this.startupReconciling ? "index_reconciling" : this.cacheIssue ?? undefined);
+      ?? (this.startupReconciling
+        ? "index_reconciling"
+        : this.cacheIssue ?? omissionIssue);
     const status: IndexControllerStatus = {
       stage,
       searchable: this.activeGeneration !== null && stage !== "disposed",
       generation: this.activeGeneration,
       documents: this.documents,
       chunks: this.chunks,
+      quarantinedSources: this.quarantinedSources,
+      unreadableSources: this.unreadableSources.size,
+      quarantineValidatorFields: [...this.quarantineValidatorFields].sort(),
       dirty,
       rebuilding: stage === "rebuild",
       ...(progress ? { progress } : {}),
@@ -1077,6 +1186,8 @@ class VaultSourceReadError extends Error {
   }
 }
 
+class UnreadableVaultSourceError extends VaultSourceReadError {}
+
 function isCacheIndexWorker(worker: IndexWorkerPort): worker is CacheIndexWorkerPort {
   const candidate = worker as Partial<CacheIndexWorkerPort>;
   return typeof candidate.restoreGeneration === "function"
@@ -1124,6 +1235,8 @@ function isCleanStatus(status: IndexControllerStatus): status is IndexController
   return status.stage === "ready"
     && status.searchable
     && status.generation !== null
+    && status.quarantinedSources === 0
+    && status.unreadableSources === 0
     && !status.dirty
     && !status.rebuilding;
 }

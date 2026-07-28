@@ -163,3 +163,26 @@ describe("classifyFailure worker stage", () => {
     expect(JSON.stringify(result)).not.toContain("Acme");
   });
 });
+
+describe("defect field cannot leak a note title", () => {
+  it("refuses an identifier-shaped tail that is not a known field name", () => {
+    // Adversarial review found this: a note titled "MyNote" yields an
+    // identifier-shaped tail, so a shape test alone would echo a vault
+    // filename into a log meant to be pasted into a chat.
+    const result = classifyFailure({
+      code: "source_rejected",
+      stage: "rust",
+      message: "Portable Rust rejected a source batch: QuarterlyBudget",
+    });
+    expect(result.defectField).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("QuarterlyBudget");
+  });
+
+  it("still reports a real validator field", () => {
+    expect(classifyFailure({
+      code: "source_rejected",
+      stage: "rust",
+      message: "Portable Rust rejected a source batch: chunks_contents",
+    }).defectField).toBe("chunks_contents");
+  });
+});

@@ -383,7 +383,15 @@ export default class KwiryPlugin extends Plugin {
     pluginEpoch: number,
     activationEpoch: number,
   ): void {
-    const issueCode = status.issue ? diagnosticErrorCode(status.issue.code) : null;
+    const quarantinedSources = status.quarantinedSources ?? 0;
+    const unreadableSources = status.unreadableSources ?? 0;
+    const quarantineFields = status.quarantineValidatorFields ?? [];
+    const omissionCode = quarantinedSources > 0
+      ? diagnosticErrorCode("sources_quarantined")
+      : unreadableSources > 0
+        ? diagnosticErrorCode("sources_unreadable")
+        : null;
+    const issueCode = status.issue ? diagnosticErrorCode(status.issue.code) : omissionCode;
     const signature = [
       status.identity.instanceId,
       status.phase,
@@ -391,11 +399,15 @@ export default class KwiryPlugin extends Plugin {
       status.searchable,
       status.dirty,
       status.rebuilding,
+      quarantinedSources,
+      unreadableSources,
+      quarantineFields.join(","),
       issueCode,
     ].join(":");
     if (signature === this.lastDiagnosticStatus) return;
     this.lastDiagnosticStatus = signature;
-    void this.diagnostics.capture(status.issue ? "warn" : "info", "index.lifecycle", {
+    const hasOmissions = quarantinedSources > 0 || unreadableSources > 0;
+    void this.diagnostics.capture(status.issue || hasOmissions ? "warn" : "info", "index.lifecycle", {
       profile: status.identity.profile,
       phase: status.phase,
       liveness: status.liveness,
@@ -409,8 +421,32 @@ export default class KwiryPlugin extends Plugin {
       rebuilding: status.rebuilding,
       documents: status.documents,
       chunks: status.chunks,
+      sourcesSkipped: quarantinedSources,
+      sourcesFailed: unreadableSources,
       ...(status.issue ? { recoverable: status.issue.recoverable } : {}),
     }, () => undefined);
+    for (const field of quarantineFields) {
+      void this.diagnostics.capture("warn", "index.lifecycle", {
+        profile: status.identity.profile,
+        phase: status.phase,
+        outcome: "skipped",
+        operation: "status",
+        code: "source_rejected",
+        errorName: field,
+        sourcesSkipped: quarantinedSources,
+      }, () => undefined);
+    }
+    if (unreadableSources > 0) {
+      void this.diagnostics.capture("warn", "index.lifecycle", {
+        profile: status.identity.profile,
+        phase: status.phase,
+        outcome: "skipped",
+        operation: "status",
+        code: "vault_read_failed",
+        errorName: "vault_read",
+        sourcesFailed: unreadableSources,
+      }, () => undefined);
+    }
   }
 
   private isCurrent(pluginEpoch: number, activationEpoch: number): boolean {
@@ -449,6 +485,10 @@ function diagnosticErrorDetails(error: unknown): Readonly<DiagnosticDetails> {
 
 function diagnosticErrorCode(code: unknown): DiagnosticTextValue {
   switch (code) {
+    case "sources_quarantined":
+      return "source_rejected";
+    case "sources_unreadable":
+      return "vault_read_failed";
     case "disposed":
     case "daemon_unreachable":
     case "mode_unavailable":

@@ -388,7 +388,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "restore_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 2 },
+      result: { generation: "g1", documents: 1, chunks: 2, quarantined_sources: 0, quarantine_fields: [] },
     })).toBe(true);
     for (const code of [
       "cache_identity_mismatch",
@@ -447,7 +447,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "export_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 1 },
+      result: { generation: "g1", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
     })).toBe(false);
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
@@ -510,7 +510,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "apply_source_changes",
       ok: true,
-      result: { generation: "g2", documents: 1, chunks: 1 },
+      result: { generation: "g2", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
     })).toBe(true);
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,

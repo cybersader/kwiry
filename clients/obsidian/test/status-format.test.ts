@@ -145,3 +145,70 @@ describe("formatStatus with an empty index", () => {
     );
   });
 });
+
+describe("formatStatus with source omissions", () => {
+  it("renders no omission warning for explicit zero counts", () => {
+    const line = formatStatus({
+      ...base,
+      quarantinedSources: 0,
+      unreadableSources: 0,
+      quarantineValidatorFields: [],
+    });
+
+    expect(line).toBe("kwiry: In-plugin · Lexical · ready (3 chunks, lexical)");
+    expect(line).not.toContain("missing from search");
+  });
+
+  it("never presents a quarantined generation as clean ready", () => {
+    const line = formatStatus({
+      ...base,
+      phase: "degraded",
+      quarantinedSources: 2,
+      unreadableSources: 1,
+      quarantineValidatorFields: ["chunks_contents"],
+    });
+
+    expect(line).toBe(
+      "kwiry: In-plugin · Lexical · degraded (3 chunks, lexical) · 3 notes may be missing from search (2 quarantined, 1 unreadable)",
+    );
+  });
+
+  it("does not duplicate an omission issue that already names the missing count", () => {
+    const line = formatStatus({
+      ...base,
+      phase: "degraded",
+      quarantinedSources: 1,
+      unreadableSources: 0,
+      quarantineValidatorFields: ["chunks_contents"],
+      issue: {
+        code: "sources_quarantined",
+        safeMessage: "1 note may be missing from search (1 quarantined).",
+        recoverable: true,
+      },
+    });
+
+    expect(line).toBe(
+      "kwiry: In-plugin · Lexical · 1 note may be missing from search (1 quarantined).",
+    );
+  });
+
+  it("keeps omissions visible alongside another issue and progress", () => {
+    const line = formatStatus({
+      ...base,
+      phase: "building",
+      dirty: true,
+      quarantinedSources: 1,
+      unreadableSources: 0,
+      quarantineValidatorFields: ["mtime_nanos"],
+      issue: {
+        code: "cache_unavailable",
+        safeMessage: "Cache unavailable; building a fresh index…",
+        recoverable: true,
+      },
+      progress: { stage: "rebuild", completed: 4, total: 10 },
+    });
+
+    expect(line).toContain("Cache unavailable; building a fresh index… rebuild 4/10");
+    expect(line).toContain("1 note may be missing from search (1 quarantined)");
+  });
+});
