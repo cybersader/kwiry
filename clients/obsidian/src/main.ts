@@ -85,7 +85,16 @@ export default class KwiryPlugin extends Plugin {
     this.registerInterval(
       window.setInterval(() => void this.refreshStatus(), STATUS_POLL_MS),
     );
-    await this.activateBackendProfile();
+    // Wait for Obsidian to finish populating its file list before indexing.
+    // getMarkdownFiles() returns only what the vault has cached so far, and on
+    // a network-backed vault that enumeration is still in flight during
+    // onload: indexing here snapshots a nearly empty vault, reports ready, and
+    // finds nothing. onLayoutReady fires once the initial scan is complete.
+    // Vault event listeners are still registered inside the backend before its
+    // first await, so changes during the wait are not lost.
+    this.app.workspace.onLayoutReady(() => {
+      void this.activateBackendProfile();
+    });
   }
 
   onunload(): void {

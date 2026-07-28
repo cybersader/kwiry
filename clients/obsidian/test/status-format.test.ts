@@ -134,3 +134,14 @@ describe("formatStatus during a first build", () => {
     expect(line).toBe("kwiry: In-plugin · Lexical · Cache unavailable; building a fresh index…");
   });
 });
+
+describe("formatStatus with an empty index", () => {
+  it("reports zero indexed documents as ready with zero chunks", () => {
+    // An index that enumerated nothing must still be legible as "0", so the
+    // vault-not-yet-enumerated failure mode is visible rather than silently
+    // presenting as a normal ready state.
+    expect(formatStatus({ ...base, chunks: 0, documents: 0 })).toBe(
+      "kwiry: In-plugin · Lexical · ready (0 chunks, lexical)",
+    );
+  });
+});
