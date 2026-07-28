@@ -86,6 +86,16 @@ export type WorkerFailureCode =
   | "cache_image_invalid" | "cache_blob_too_large" | "worker_crashed" | "timeout"
   | "disposed" | "internal_error";
 
+/// The Worker's own stage vocabulary. `source_rejected` alone does not say
+/// whether portable Rust or the SQLite index refused the batch; the stage is
+/// what separates them, and reading only the code discards it.
+export type WorkerFailureStage =
+  | "protocol" | "artifact" | "rust" | "sqlite" | "index" | "query" | "lifecycle";
+
+const WORKER_ERROR_STAGES = new Set<WorkerFailureStage>([
+  "protocol", "artifact", "rust", "sqlite", "index", "query", "lifecycle",
+]);
+
 const WORKER_ERROR_CODES = new Set<WorkerFailureCode>([
   "protocol_mismatch", "invalid_request", "invalid_state", "artifact_mismatch",
   "rust_init_failed", "sqlite_init_failed", "fts5_unavailable", "source_rejected",
@@ -110,6 +120,10 @@ export interface FailureClassification {
   /// the most specific field in the classification; prefer it when reading a
   /// report.
   readonly workerCode?: WorkerFailureCode;
+  /// The Worker stage that refused, present alongside workerCode. Distinguishes
+  /// a Rust preparation rejection from a SQLite index rejection when the code
+  /// is the same for both.
+  readonly workerStage?: WorkerFailureStage;
   /// The thrown value's constructor name when it is one this codebase or the
   /// JS runtime defines, otherwise "other". A raw RangeError or TypeError
   /// here means an unhandled programming fault rather than a handled
@@ -215,12 +229,17 @@ export function classifyFailure(error: unknown): FailureClassification {
   const workerCode = WORKER_ERROR_CODES.has(code as WorkerFailureCode)
     ? (code as WorkerFailureCode)
     : null;
+  const rawStage = safeRead(unwrapped, "stage") ?? "";
+  const workerStage = WORKER_ERROR_STAGES.has(rawStage as WorkerFailureStage)
+    ? (rawStage as WorkerFailureStage)
+    : null;
 
   return {
     subsystem: workerCode === null ? subsystem : workerSubsystem(workerCode),
     reason,
     errorName,
     ...(workerCode === null ? {} : { workerCode }),
+    ...(workerStage === null ? {} : { workerStage }),
     nonError,
   };
 }

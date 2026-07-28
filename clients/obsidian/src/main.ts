@@ -89,7 +89,9 @@ export default class KwiryPlugin extends Plugin {
                 vaultConfigDirName: this.app.vault.configDir,
               }),
             },
-            onDiagnosticFailure: ({ subsystem, reason, errorName, workerCode, nonError }) => {
+            onDiagnosticFailure: (
+              { subsystem, reason, errorName, workerCode, workerStage, nonError },
+            ) => {
               void this.diagnostics.capture("error", "failure.caught", {
                 profile: "in_plugin",
                 subsystem,
@@ -97,6 +99,7 @@ export default class KwiryPlugin extends Plugin {
                 // A Worker protocol code names the fault exactly; the error
                 // class name is only a fallback for a thrown Error.
                 code: workerCode ?? "other",
+                ...(workerStage === undefined ? {} : { stage: workerStage }),
                 errorName,
                 operation: "build",
                 recoverable: !nonError,

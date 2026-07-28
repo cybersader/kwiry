@@ -137,3 +137,29 @@ describe("classifyFailure AggregateError", () => {
     expect(() => classifyFailure(loop)).not.toThrow();
   });
 });
+
+describe("classifyFailure worker stage", () => {
+  it("separates a Rust rejection from an index rejection", () => {
+    // source_rejected is thrown for both, so the code alone cannot say which
+    // layer refused the batch. The stage is the only discriminator.
+    expect(classifyFailure({ code: "source_rejected", stage: "rust" }).workerStage).toBe("rust");
+    expect(classifyFailure({ code: "source_rejected", stage: "index" }).workerStage).toBe("index");
+  });
+
+  it("reads the stage through an AggregateError wrapper", () => {
+    const wrapped = new AggregateError(
+      [{ code: "source_rejected", stage: "rust", message: "x", retryable: false }],
+      "build failed",
+    );
+    expect(classifyFailure(wrapped)).toMatchObject({
+      workerCode: "source_rejected",
+      workerStage: "rust",
+    });
+  });
+
+  it("drops an unrecognised stage rather than echoing it", () => {
+    const result = classifyFailure({ code: "source_rejected", stage: "Clients/Acme" });
+    expect(result.workerStage).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("Acme");
+  });
+});
