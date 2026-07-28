@@ -182,4 +182,21 @@ describe("DiagnosticLog", () => {
     expect(entry?.details).toMatchObject({ outcome: "failed", code: "internal_error" });
     expect(JSON.stringify(entry)).not.toContain(structurallySmuggled.queryText);
   });
+
+  it("rejects arbitrary text carried by an allow-listed field", async () => {
+    // The unknown-key case above is the easy half. The dangerous half is
+    // secret text smuggled through a field that IS on the allow list: a
+    // caller reaching for `code` or `reason` to describe a failure is the
+    // most natural way this leaks in practice. Covering it only with a
+    // compile-time @ts-expect-error leaves the runtime free to accept any
+    // string, which a single cast through `any` then exploits.
+    const secret = "Clients/Acme — Q3 layoffs, confidential";
+    for (const field of ["code", "reason", "outcome", "phase", "stage", "operation", "subsystem"]) {
+      const log = new DiagnosticLog(4, clock(0, 1));
+      await expect(
+        log.capture("info", "search.lifecycle", { [field]: secret } as never, () => undefined),
+      ).rejects.toThrow("Invalid diagnostic details");
+      expect(JSON.stringify(log.snapshot())).not.toContain(secret);
+    }
+  });
 });
