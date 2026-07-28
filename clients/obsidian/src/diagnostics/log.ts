@@ -152,7 +152,24 @@ export type DiagnosticTextValue =
   | "ReferenceError"
   | "SyntaxError"
   | "Error"
-  | "other";
+  | "other"
+  | "fts5_unavailable"
+  | "rust_init_failed"
+  | "sqlite_init_failed"
+  | "artifact_mismatch"
+  | "protocol_mismatch"
+  | "invalid_request"
+  | "invalid_state"
+  | "source_rejected"
+  | "query_rejected"
+  | "integrity_failed"
+  | "cache_identity_mismatch"
+  | "cache_version_mismatch"
+  | "cache_digest_mismatch"
+  | "cache_image_invalid"
+  | "cache_blob_too_large"
+  | "worker_crashed"
+  | "timeout";
 
 declare const diagnosticHashBrand: unique symbol;
 declare const diagnosticGenerationBrand: unique symbol;
@@ -299,6 +316,7 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "CacheImageInvalidError", "CacheVersionMismatchError", "VaultSourceReadError",
   "WorkerRpcError", "RustAdapterError", "TypeError", "RangeError",
   "ReferenceError", "SyntaxError", "Error", "other",
+  "fts5_unavailable", "rust_init_failed", "sqlite_init_failed", "artifact_mismatch", "protocol_mismatch", "invalid_request", "invalid_state", "source_rejected", "query_rejected", "integrity_failed", "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch", "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
 ];
 const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
   "profile", "phase", "stage", "liveness", "mode", "outcome", "code", "reason", "operation",

@@ -63,9 +63,43 @@ const KNOWN_ERROR_NAMES = new Set<FailureErrorName>([
   "ReferenceError", "SyntaxError", "Error",
 ]);
 
+/// The Worker protocol's own error vocabulary, mirrored here rather than
+/// imported so this module stays free of Worker types. A WorkerError is a
+/// plain `{code, stage, message, retryable}` object, not an Error subclass, so
+/// it carries no constructor name -- which is why the first three field
+/// reports could only say "other". Its code is the precise answer.
+export type WorkerFailureCode =
+  | "protocol_mismatch" | "invalid_request" | "invalid_state" | "artifact_mismatch"
+  | "rust_init_failed" | "sqlite_init_failed" | "fts5_unavailable" | "source_rejected"
+  | "query_rejected" | "index_building" | "index_limit_exceeded" | "integrity_failed"
+  | "cache_identity_mismatch" | "cache_version_mismatch" | "cache_digest_mismatch"
+  | "cache_image_invalid" | "cache_blob_too_large" | "worker_crashed" | "timeout"
+  | "disposed" | "internal_error";
+
+const WORKER_ERROR_CODES = new Set<WorkerFailureCode>([
+  "protocol_mismatch", "invalid_request", "invalid_state", "artifact_mismatch",
+  "rust_init_failed", "sqlite_init_failed", "fts5_unavailable", "source_rejected",
+  "query_rejected", "index_building", "index_limit_exceeded", "integrity_failed",
+  "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch",
+  "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
+  "disposed", "internal_error",
+]);
+
+function workerSubsystem(code: WorkerFailureCode): FailureSubsystem {
+  if (code === "rust_init_failed") return "worker";
+  if (code === "sqlite_init_failed" || code === "fts5_unavailable") return "vfs";
+  if (code.startsWith("cache_")) return "cache_store";
+  if (code === "worker_crashed" || code === "timeout") return "rpc";
+  return "worker";
+}
+
 export interface FailureClassification {
   readonly subsystem: FailureSubsystem;
   readonly reason: FailureReason;
+  /// Present only when the thrown value was a Worker protocol error. This is
+  /// the most specific field in the classification; prefer it when reading a
+  /// report.
+  readonly workerCode?: WorkerFailureCode;
   /// The thrown value's constructor name when it is one this codebase or the
   /// JS runtime defines, otherwise "other". A raw RangeError or TypeError
   /// here means an unhandled programming fault rather than a handled
@@ -140,5 +174,19 @@ export function classifyFailure(error: unknown): FailureClassification {
     ? (name as FailureErrorName)
     : "other";
 
-  return { subsystem, reason, errorName, nonError };
+  // A WorkerError is a plain object, not an Error subclass, so it has no name
+  // and falls through everything above as "other" -- which is exactly what the
+  // first three field reports said. Its `code` is a closed protocol vocabulary
+  // and names the real fault precisely, so prefer it over any inference.
+  const workerCode = WORKER_ERROR_CODES.has(code as WorkerFailureCode)
+    ? (code as WorkerFailureCode)
+    : null;
+
+  return {
+    subsystem: workerCode === null ? subsystem : workerSubsystem(workerCode),
+    reason,
+    errorName,
+    ...(workerCode === null ? {} : { workerCode }),
+    nonError,
+  };
 }

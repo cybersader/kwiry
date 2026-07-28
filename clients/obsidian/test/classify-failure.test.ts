@@ -66,3 +66,32 @@ describe("classifyFailure error name", () => {
     expect(JSON.stringify(result)).not.toContain("Acme");
   });
 });
+
+describe("classifyFailure worker protocol errors", () => {
+  it("reads the protocol code from a plain WorkerError object", () => {
+    // Regression: three field reports classified as "other" because a
+    // WorkerError is {code, stage, message, retryable}, not an Error subclass,
+    // so it carries no constructor name at all.
+    const workerError = {
+      code: "rust_init_failed",
+      stage: "lifecycle",
+      message: "adapter failed to start",
+      retryable: false,
+    };
+    expect(classifyFailure(workerError)).toMatchObject({
+      workerCode: "rust_init_failed",
+      subsystem: "worker",
+    });
+  });
+
+  it("routes a SQLite init failure to the vfs subsystem", () => {
+    expect(classifyFailure({ code: "sqlite_init_failed" }).subsystem).toBe("vfs");
+    expect(classifyFailure({ code: "fts5_unavailable" }).subsystem).toBe("vfs");
+  });
+
+  it("ignores an unrecognised code rather than echoing it", () => {
+    const result = classifyFailure({ code: "Clients/Acme secret" });
+    expect(result.workerCode).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("Acme");
+  });
+});
