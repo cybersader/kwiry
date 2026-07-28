@@ -1,6 +1,6 @@
 {
   "name": "kwiry-search",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Obsidian client for the kwiry search daemon",
   "license": "GPL-3.0-only",
   "main": "main.js",

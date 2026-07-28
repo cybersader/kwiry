@@ -358,7 +358,7 @@ function isRetrieval(value: unknown): boolean {
     && hasExactKeys(value, ["filename", "stem", "aliases"])
     && isBoundedString(value.filename, 4_096)
     && isBoundedString(value.stem, 4_096)
-    && isBoundedStrings(value.aliases, 256, 1_024);
+    && isStringArray(value.aliases);
 }
 
 function isPreparedChunk(value: unknown): boolean {
@@ -366,7 +366,7 @@ function isPreparedChunk(value: unknown): boolean {
     && hasExactKeys(value, ["chunk", "heading_text", "technical_identifiers"])
     && isChunk(value.chunk)
     && isBoundedString(value.heading_text, 8_192, true)
-    && isBoundedStrings(value.technical_identifiers, 1_024, 1_024);
+    && isStringArray(value.technical_identifiers);
 }
 
 function isChunk(value: unknown): boolean {
@@ -388,10 +388,10 @@ function isChunk(value: unknown): boolean {
     && isBoundedString(value.vault_id, 1_024)
     && (value.room === null || isBoundedString(value.room, 1_024))
     && isBoundedString(value.path, 4_096)
-    && isBoundedStrings(value.heading_path, 64, 1_024)
+    && isStringArray(value.heading_path)
     && isBoundedString(value.content, 16_384)
     && isFrontmatter(value.frontmatter)
-    && isBoundedStrings(value.links_out, 4_096, 4_096)
+    && isStringArray(value.links_out)
     && isNonNegativeSafeInteger(value.mtime)
     && isBoundedString(value.content_hash, 128)
     && isNonNegativeSafeInteger(value.chunking_version);
@@ -404,7 +404,7 @@ function isFrontmatter(value: unknown): boolean {
   for (const key of ["title", "description", "status", "date"] as const) {
     if (value[key] !== undefined && !isBoundedString(value[key], 1_024, true)) return false;
   }
-  return value.tags === undefined || isBoundedStrings(value.tags, 256, 1_024, true);
+  return value.tags === undefined || isStringArray(value.tags);
 }
 
 function isPreparedQuery(value: unknown): value is PreparedQuery {
@@ -521,4 +521,8 @@ function hasRequiredAndOptionalKeys(
   const actual = Object.keys(value);
   return required.every((key) => actual.includes(key))
     && actual.every((key) => required.includes(key) || optional.includes(key));
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }

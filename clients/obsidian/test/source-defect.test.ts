@@ -66,3 +66,81 @@ describe("defect field reaches the classification", () => {
     expect(JSON.stringify(result)).not.toContain("Acme");
   });
 });
+
+describe("caps reflect the Rust contract, not an invented policy", () => {
+  it("accepts a hub note with an unbounded number of wikilinks", () => {
+    // Reproduced against the real Rust chunker: a note of 5,000 wikilinks
+    // emits links_out=5000 per chunk. The old cap of 4,096 was chosen here,
+    // not promised by Rust, so a single hub or MOC note rejected its source --
+    // and a rejected source aborts the entire batch, so one note stopped a
+    // whole production vault from indexing.
+    const chunk = {
+      chunk: {
+        chunk_id: "c".repeat(64),
+        vault_id: "active-vault",
+        room: null,
+        path: "Maps/Index.md",
+        heading_path: [],
+        content: "body",
+        frontmatter: {},
+        links_out: Array.from({ length: 5_000 }, (_, i) => `Note ${i}`),
+        mtime: 1785253671659,
+        content_hash: "d".repeat(64),
+        chunking_version: 1,
+      },
+      heading_text: "",
+      technical_identifiers: [],
+    };
+    expect(sourcePreparationDefect({ ...VALID, kind: "indexed", chunks: [chunk] })).toBeNull();
+  });
+
+  it("still rejects a structurally corrupt chunk", () => {
+    // Raising the ceiling must not disable the check: its purpose is catching
+    // a corrupt ABI response, which is a different thing from a large note.
+    expect(sourcePreparationDefect({ ...VALID, kind: "indexed", chunks: [{ chunk: null }] }))
+      .toBe("chunks_contents");
+  });
+});
+
+describe("no count ceiling is enforced anywhere", () => {
+  const chunkWith = (over: Record<string, unknown>) => ({
+    chunk: {
+      chunk_id: "c".repeat(64),
+      vault_id: "active-vault",
+      room: null,
+      path: "Maps/Index.md",
+      heading_path: [],
+      content: "body",
+      frontmatter: {},
+      links_out: [],
+      mtime: 1785253671659,
+      content_hash: "d".repeat(64),
+      chunking_version: 1,
+      ...over,
+    },
+    heading_text: "",
+    technical_identifiers: [],
+  });
+
+  it("accepts arrays far past every former cap", () => {
+    // Pins the principle rather than a number: a count limit in this file is
+    // a content policy, and no length is evidence of a corrupt ABI response.
+    const huge = (n: number) => Array.from({ length: n }, (_, i) => `x${i}`);
+    for (const over of [
+      { links_out: huge(50_000) },
+      { heading_path: huge(5_000) },
+      { frontmatter: { tags: huge(10_000) } },
+    ]) {
+      expect(sourcePreparationDefect({ ...VALID, kind: "indexed", chunks: [chunkWith(over)] }))
+        .toBeNull();
+    }
+  });
+
+  it("still rejects a non-string element, which does indicate corruption", () => {
+    expect(sourcePreparationDefect({
+      ...VALID,
+      kind: "indexed",
+      chunks: [chunkWith({ links_out: ["ok", 42] })],
+    })).toBe("chunks_contents");
+  });
+});
