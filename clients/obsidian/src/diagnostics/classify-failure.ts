@@ -121,6 +121,22 @@ export interface FailureClassification {
   readonly nonError: boolean;
 }
 
+/// Returns the first cause of an AggregateError, or the value unchanged.
+/// Bounded to three levels so a self-referential or deeply nested chain cannot
+/// spin here; diagnostics must never hang the failure path they observe.
+function unwrapAggregate(error: unknown, depth = 0): unknown {
+  if (depth >= 3) return error;
+  if (typeof error !== "object" || error === null) return error;
+  let nested: unknown;
+  try {
+    nested = (error as { errors?: unknown }).errors;
+  } catch {
+    return error;
+  }
+  if (!Array.isArray(nested) || nested.length === 0) return error;
+  return unwrapAggregate(nested[0], depth + 1);
+}
+
 /// Reads a property without trusting the object. A rejected value may be a
 /// proxy or carry a throwing getter, in which case reading `name` or `message`
 /// would replace the real failure with the getter's failure -- turning
@@ -158,10 +174,16 @@ const REASON_PATTERNS: readonly (readonly [RegExp, FailureReason])[] = [
 /// text: the name and message are matched against fixed patterns and then
 /// discarded.
 export function classifyFailure(error: unknown): FailureClassification {
-  const nonError = !(error instanceof Error);
-  const name = safeRead(error, "name") ?? "";
-  const code = safeRead(error, "code") ?? "";
-  const message = safeRead(error, "message") ?? "";
+  // An AggregateError carries its real causes in `errors` and leaves `code`
+  // absent and `message` a generic wrapper sentence. Five field reports read
+  // only the outer shell and learned nothing, because the controller wraps a
+  // failed build together with a failed staging abort. Unwrap to the first
+  // cause before classifying: the original failure is what a report needs.
+  const unwrapped = unwrapAggregate(error);
+  const nonError = !(unwrapped instanceof Error);
+  const name = safeRead(unwrapped, "name") ?? "";
+  const code = safeRead(unwrapped, "code") ?? "";
+  const message = safeRead(unwrapped, "message") ?? "";
   const haystack = `${name} ${code} ${message}`;
 
   let subsystem: FailureSubsystem = "unknown";

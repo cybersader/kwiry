@@ -109,3 +109,31 @@ describe("classifyFailure worker protocol errors", () => {
     expect(JSON.stringify(result)).not.toContain("Acme");
   });
 });
+
+describe("classifyFailure AggregateError", () => {
+  it("classifies the first cause, not the wrapper", () => {
+    // Five field reports reported only AggregateError, because the controller
+    // wraps a failed build together with a failed staging abort and the outer
+    // shell carries no code and only a generic message.
+    const inner = Object.assign(new Error("adapter failed"), { name: "RustAdapterError" });
+    const wrapped = new AggregateError([inner, new Error("abort failed")], "build failed");
+    expect(classifyFailure(wrapped).errorName).toBe("RustAdapterError");
+  });
+
+  it("reads a WorkerError carried inside an AggregateError", () => {
+    const wrapped = new AggregateError(
+      [{ code: "sqlite_init_failed", stage: "lifecycle", message: "x", retryable: false }],
+      "build failed",
+    );
+    expect(classifyFailure(wrapped)).toMatchObject({
+      workerCode: "sqlite_init_failed",
+      subsystem: "vfs",
+    });
+  });
+
+  it("terminates on a self-referential chain", () => {
+    const loop: { errors: unknown[] } = { errors: [] };
+    loop.errors.push(loop);
+    expect(() => classifyFailure(loop)).not.toThrow();
+  });
+});
