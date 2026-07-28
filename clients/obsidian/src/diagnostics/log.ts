@@ -138,7 +138,21 @@ export type DiagnosticTextValue =
   | "locked"
   | "daemon_unreachable"
   | "mode_unavailable"
-  | "internal_error";
+  | "internal_error"
+  | "BlockVfsUnavailableError"
+  | "IndexCapacityError"
+  | "IndexIntegrityError"
+  | "CacheImageInvalidError"
+  | "CacheVersionMismatchError"
+  | "VaultSourceReadError"
+  | "WorkerRpcError"
+  | "RustAdapterError"
+  | "TypeError"
+  | "RangeError"
+  | "ReferenceError"
+  | "SyntaxError"
+  | "Error"
+  | "other";
 
 declare const diagnosticHashBrand: unique symbol;
 declare const diagnosticGenerationBrand: unique symbol;
@@ -277,6 +291,14 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "vault_location_unavailable", "invalid_generation_id", "invalid_identity", "invalid_blob",
   "write_failed", "discard_failed", "unsafe_path", "locked", "daemon_unreachable",
   "mode_unavailable", "internal_error",
+  // Constructor names of errors this codebase and the JS runtime define.
+  // These are fixed identifiers chosen here, not caller-supplied text, so
+  // recording one leaks nothing while turning an "unknown" report into a
+  // named fault.
+  "BlockVfsUnavailableError", "IndexCapacityError", "IndexIntegrityError",
+  "CacheImageInvalidError", "CacheVersionMismatchError", "VaultSourceReadError",
+  "WorkerRpcError", "RustAdapterError", "TypeError", "RangeError",
+  "ReferenceError", "SyntaxError", "Error", "other",
 ];
 const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
   "profile", "phase", "stage", "liveness", "mode", "outcome", "code", "reason", "operation",

@@ -40,3 +40,29 @@ describe("classifyFailure", () => {
     expect(classifyFailure(undefined).nonError).toBe(true);
   });
 });
+
+describe("classifyFailure error name", () => {
+  it("names a known project error class exactly", () => {
+    class RustAdapterError extends Error {
+      override readonly name = "RustAdapterError";
+    }
+    expect(classifyFailure(new RustAdapterError("init")).errorName).toBe("RustAdapterError");
+  });
+
+  it("reports a bare runtime fault, which the patterns cannot recognise", () => {
+    // The first field report classified as unknown/internal_error: a real
+    // Error whose text matched no pattern. The class name distinguishes a
+    // programming fault from a handled subsystem failure.
+    expect(classifyFailure(new RangeError("out of bounds")).errorName).toBe("RangeError");
+    expect(classifyFailure(new Error("something went wrong")).errorName).toBe("Error");
+  });
+
+  it("does not echo an unrecognised class name", () => {
+    class SecretNamedError extends Error {
+      override readonly name = "AcmeClientDataError";
+    }
+    const result = classifyFailure(new SecretNamedError("x"));
+    expect(result.errorName).toBe("other");
+    expect(JSON.stringify(result)).not.toContain("Acme");
+  });
+});

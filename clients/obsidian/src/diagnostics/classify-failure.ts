@@ -35,9 +35,42 @@ export type FailureReason =
   | "invalid_blob"
   | "internal_error";
 
+/// Exact constructor names, matched before any pattern. A field report that
+/// says only "unknown" costs another release round-trip, and the first one did
+/// exactly that: the thrown value was a real Error whose name and message
+/// matched none of the patterns below. A class name is a fixed identifier
+/// chosen by this codebase, not caller text, so echoing it leaks nothing.
+export type FailureErrorName =
+  | "BlockVfsUnavailableError"
+  | "IndexCapacityError"
+  | "IndexIntegrityError"
+  | "CacheImageInvalidError"
+  | "CacheVersionMismatchError"
+  | "VaultSourceReadError"
+  | "WorkerRpcError"
+  | "RustAdapterError"
+  | "TypeError"
+  | "RangeError"
+  | "ReferenceError"
+  | "SyntaxError"
+  | "Error"
+  | "other";
+
+const KNOWN_ERROR_NAMES = new Set<FailureErrorName>([
+  "BlockVfsUnavailableError", "IndexCapacityError", "IndexIntegrityError",
+  "CacheImageInvalidError", "CacheVersionMismatchError", "VaultSourceReadError",
+  "WorkerRpcError", "RustAdapterError", "TypeError", "RangeError",
+  "ReferenceError", "SyntaxError", "Error",
+]);
+
 export interface FailureClassification {
   readonly subsystem: FailureSubsystem;
   readonly reason: FailureReason;
+  /// The thrown value's constructor name when it is one this codebase or the
+  /// JS runtime defines, otherwise "other". A raw RangeError or TypeError
+  /// here means an unhandled programming fault rather than a handled
+  /// subsystem failure, which is the single most useful thing to know first.
+  readonly errorName: FailureErrorName;
   /// True when the value thrown was not an Error at all. A non-Error rejection
   /// is itself a defect worth seeing in a report, and it is invisible once the
   /// cause is reduced to an enum.
@@ -103,5 +136,9 @@ export function classifyFailure(error: unknown): FailureClassification {
     }
   }
 
-  return { subsystem, reason, nonError };
+  const errorName: FailureErrorName = KNOWN_ERROR_NAMES.has(name as FailureErrorName)
+    ? (name as FailureErrorName)
+    : "other";
+
+  return { subsystem, reason, errorName, nonError };
 }
