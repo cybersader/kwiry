@@ -17,9 +17,31 @@ export const MAX_INDEXABLE_SOURCE_BYTES = 10 * 1024 * 1024;
  */
 export const MAX_EXCERPT_SOURCE_BYTES = 1024 * 1024;
 
+/// Converts a millisecond mtime to the canonical nanosecond string the ABI
+/// requires: digits only, at most 39 of them.
+///
+/// A vault on an SMB or DFS share can report a timestamp this arithmetic
+/// cannot represent. A pre-epoch mtime yields a leading minus and fails the
+/// digits-only check; NaN or Infinity makes BigInt throw outright. Either way
+/// the Rust boundary refuses the whole batch as `source_rejected`, so one note
+/// with an odd timestamp stops the entire vault from indexing -- which is what
+/// a production network vault did.
+///
+/// Clamping is the right response rather than rejecting: an mtime is an
+/// acceleration hint used to detect change, never authority over content. A
+/// clamped value simply looks old, so the source is read and hashed rather
+/// than skipped, which is the safe direction to be wrong in.
 export function canonicalMtimeNanos(mtimeMs: number): string {
-  return (BigInt(Math.trunc(mtimeMs)) * 1_000_000n).toString();
+  if (!Number.isFinite(mtimeMs)) return "0";
+  const truncated = Math.trunc(mtimeMs);
+  if (truncated <= 0) return "0";
+  const nanos = BigInt(truncated) * 1_000_000n;
+  // 39 digits is the ABI ceiling. A timestamp that large is nonsense rather
+  // than a date, so it clamps to the ceiling instead of failing the batch.
+  return nanos > MAX_CANONICAL_MTIME_NANOS ? MAX_CANONICAL_MTIME_NANOS.toString() : nanos.toString();
 }
+
+const MAX_CANONICAL_MTIME_NANOS = 10n ** 39n - 1n;
 
 export type VaultSourceEvent =
   | { kind: "upsert"; path: string }
