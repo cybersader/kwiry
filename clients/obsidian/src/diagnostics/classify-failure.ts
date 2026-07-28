@@ -124,6 +124,8 @@ export interface FailureClassification {
   /// a Rust preparation rejection from a SQLite index rejection when the code
   /// is the same for both.
   readonly workerStage?: WorkerFailureStage;
+  /// The validator field that refused the source, when the Worker named one.
+  readonly defectField?: string;
   /// The thrown value's constructor name when it is one this codebase or the
   /// JS runtime defines, otherwise "other". A raw RangeError or TypeError
   /// here means an unhandled programming fault rather than a handled
@@ -229,6 +231,11 @@ export function classifyFailure(error: unknown): FailureClassification {
   const workerCode = WORKER_ERROR_CODES.has(code as WorkerFailureCode)
     ? (code as WorkerFailureCode)
     : null;
+  // The Worker appends the failing validator field after a colon. Only an
+  // identifier-shaped tail is taken, so a message containing a path or a
+  // sentence contributes nothing.
+  const tail = message.includes(": ") ? message.slice(message.lastIndexOf(": ") + 2) : "";
+  const defectField = IDENTIFIER_NAME.test(tail) ? tail : null;
   const rawStage = safeRead(unwrapped, "stage") ?? "";
   const workerStage = WORKER_ERROR_STAGES.has(rawStage as WorkerFailureStage)
     ? (rawStage as WorkerFailureStage)
@@ -240,6 +247,7 @@ export function classifyFailure(error: unknown): FailureClassification {
     errorName,
     ...(workerCode === null ? {} : { workerCode }),
     ...(workerStage === null ? {} : { workerStage }),
+    ...(defectField === null ? {} : { defectField }),
     nonError,
   };
 }

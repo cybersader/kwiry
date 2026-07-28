@@ -214,10 +214,16 @@ function addSourceBatch(
     abortStaging();
     if (error instanceof IndexCapacityError) throw indexCapacityError();
     if (error instanceof RustAdapterError) {
+      // Carry the failing field name into the message. It is a fixed
+      // identifier from this codebase, never vault content, and without it a
+      // field report can say only that Rust refused the batch.
+      const field = (error as { defectField?: string }).defectField;
       throw fixedWorkerError(
         "source_rejected",
         "rust",
-        "Portable Rust rejected a source batch.",
+        field === undefined
+          ? "Portable Rust rejected a source batch."
+          : `Portable Rust rejected a source batch: ${field}`,
         false,
       );
     }

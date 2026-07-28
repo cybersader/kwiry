@@ -143,6 +143,9 @@ export function initializeRustAdapter(): RustIdentity {
   return identity;
 }
 
+import { sourcePreparationDefect } from "./source-defect";
+export { sourcePreparationDefect } from "./source-defect";
+
 export function prepareSourceWithRust(
   descriptor: SourceDescriptorInput,
   bytes: Uint8Array,
@@ -155,12 +158,25 @@ export function prepareSourceWithRust(
     }), bytes),
     "prepare_source",
   );
-  if (!isRecord(response.result)
-    || !hasExactKeys(response.result, ["preparation"])
-    || !isSourcePreparation(response.result.preparation)) {
+  if (!isRecord(response.result) || !hasExactKeys(response.result, ["preparation"])) {
     throw new RustAdapterError("invalid_response", "Portable Rust returned invalid source data.");
   }
-  return response.result.preparation;
+  const prepared = response.result.preparation;
+  const defect = sourcePreparationDefect(prepared);
+  if (defect !== null) {
+    // The field name is carried on the error so a field report can say which
+    // check refused the source instead of only that one did.
+    const failure = new RustAdapterError(
+      "invalid_response",
+      "Portable Rust returned invalid source data.",
+    );
+    (failure as { defectField?: string }).defectField = defect;
+    throw failure;
+  }
+  if (!isSourcePreparation(prepared)) {
+    throw new RustAdapterError("invalid_response", "Portable Rust returned invalid source data.");
+  }
+  return prepared;
 }
 
 export function prepareOversizedSourceWithRust(

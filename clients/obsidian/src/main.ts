@@ -90,7 +90,7 @@ export default class KwiryPlugin extends Plugin {
               }),
             },
             onDiagnosticFailure: (
-              { subsystem, reason, errorName, workerCode, workerStage, nonError },
+              { subsystem, reason, errorName, workerCode, workerStage, defectField, nonError },
             ) => {
               void this.diagnostics.capture("error", "failure.caught", {
                 profile: "in_plugin",
@@ -100,7 +100,7 @@ export default class KwiryPlugin extends Plugin {
                 // class name is only a fallback for a thrown Error.
                 code: workerCode ?? "other",
                 ...(workerStage === undefined ? {} : { stage: workerStage }),
-                errorName,
+                errorName: defectField ?? errorName,
                 operation: "build",
                 recoverable: !nonError,
               }, () => undefined);
