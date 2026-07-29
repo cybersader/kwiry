@@ -198,6 +198,8 @@ export class InPluginIndexController {
   private activeGeneration: string | null = null;
   private documents = 0;
   private chunks = 0;
+  private databaseBytes = 0;
+  private databaseByteLimit = 1;
   private quarantinedSources = 0;
   private readonly unreadableSources = new Set<string>();
   private readonly quarantineValidatorFields = new Set<SourcePreparationDefectField>();
@@ -589,6 +591,7 @@ export class InPluginIndexController {
     assertCompleteReconciliationPlan(plan, snapshot.entries.map((entry) => entry.path));
 
     const refresh = new Set(plan.refresh);
+    const audit = new Map(plan.audit.map((entry) => [entry.path, entry.content_hash]));
     plan.remove.sort(comparePaths);
     let attemptedRefreshChecks = 0;
     let unreadableRefreshChecks = 0;
@@ -610,11 +613,23 @@ export class InPluginIndexController {
     for (const entry of snapshot.entries) {
       this.completed += 1;
       this.currentPath = entry.path;
-      if (refresh.has(entry.path) && !this.wasTouchedAfter(entry.path, snapshot.cut)) {
+      if ((refresh.has(entry.path) || audit.has(entry.path))
+        && !this.wasTouchedAfter(entry.path, snapshot.cut)) {
         if (entry.inspection.kind === "candidate") attemptedRefreshChecks += 1;
         const probe = await this.probeSnapshotRefresh(entry);
-        if (probe.kind === "unreadable") unreadableRefreshChecks += 1;
-        else retainProbe(entry.path, probe);
+        if (probe.kind === "unreadable") {
+          unreadableRefreshChecks += 1;
+        } else {
+          const expectedHash = audit.get(entry.path);
+          if (expectedHash !== undefined
+            && probe.read.kind === "source"
+            && await sha256Hex(probe.read.source.bytes) === expectedHash) {
+            audit.delete(entry.path);
+          } else {
+            refresh.add(entry.path);
+            retainProbe(entry.path, probe);
+          }
+        }
         this.requireActive();
         if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
           this.retrySupersededReconciliation();
@@ -1032,6 +1047,8 @@ export class InPluginIndexController {
       generation,
       documents: this.documents,
       chunks: this.chunks,
+      database_bytes: this.databaseBytes,
+      database_byte_limit: this.databaseByteLimit,
       quarantined_sources: this.quarantinedSources,
       quarantine_fields: [...this.quarantineValidatorFields],
     });
@@ -1239,6 +1256,8 @@ export class InPluginIndexController {
     this.issuedGenerationIds.add(counts.generation);
     this.documents = counts.documents;
     this.chunks = counts.chunks;
+    this.databaseBytes = counts.database_bytes;
+    this.databaseByteLimit = counts.database_byte_limit;
     this.syncWorkerQuarantines(counts);
     if (changed) {
       this.mutationEpoch += 1;
@@ -1507,27 +1526,38 @@ function assertCompleteReconciliationPlan(
 ): void {
   const current = new Set(currentPaths);
   const unchanged = new Set(plan.unchanged);
+  const audit = new Set(plan.audit.map((entry) => entry.path));
   const refresh = new Set(plan.refresh);
   const remove = new Set(plan.remove);
-  const uniqueCount = unchanged.size + refresh.size + remove.size;
-  const declaredCount = plan.unchanged.length + plan.refresh.length + plan.remove.length;
+  const uniqueCount = unchanged.size + audit.size + refresh.size + remove.size;
+  const declaredCount = plan.unchanged.length + plan.audit.length
+    + plan.refresh.length + plan.remove.length;
   if (current.size !== currentPaths.length
     || uniqueCount !== declaredCount
-    || plan.unchanged.some((path) => refresh.has(path) || remove.has(path))
+    || plan.unchanged.some((path) => audit.has(path) || refresh.has(path) || remove.has(path))
+    || plan.audit.some((entry) => refresh.has(entry.path) || remove.has(entry.path))
     || plan.refresh.some((path) => remove.has(path))
     || plan.remove.some((path) => current.has(path))
     || plan.unchanged.some((path) => !current.has(path))
+    || plan.audit.some((entry) => !current.has(entry.path))
     || plan.refresh.some((path) => !current.has(path))
-    || plan.unchanged.length + plan.refresh.length !== current.size
-    || [...current].some((path) => !unchanged.has(path) && !refresh.has(path))
+    || plan.unchanged.length + plan.audit.length + plan.refresh.length !== current.size
+    || [...current].some((path) => !unchanged.has(path) && !audit.has(path) && !refresh.has(path))
     || !Number.isSafeInteger(plan.stored_source_count)
     || !Number.isSafeInteger(plan.matched_source_count)
     || plan.stored_source_count < 0
-    || plan.matched_source_count < plan.unchanged.length
+    || plan.matched_source_count < plan.unchanged.length + plan.audit.length
     || plan.matched_source_count > current.size
     || plan.matched_source_count + plan.remove.length !== plan.stored_source_count) {
     throw new Error("reconciliation plan did not prove complete ledger coverage");
   }
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function comparePaths(left: string, right: string): number {

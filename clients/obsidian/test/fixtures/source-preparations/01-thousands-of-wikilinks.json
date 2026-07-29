@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source_key": "50a4522ffd926fbf2ab7738bd88ab2f8d90c615078eec37bfc51bd21473d8531",
   "vault_id": "golden-vault",
   "room": "fixture-room",
@@ -14,6 +14,7 @@
     "stem": "Thousands of Wikilinks",
     "aliases": []
   },
+  "frontmatter": {},
   "chunks": [
     {
       "chunk": {
@@ -5030,7 +5031,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -10213,7 +10214,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -15533,7 +15534,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -20857,7 +20858,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -26184,7 +26185,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -31511,7 +31512,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -36913,7 +36914,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -42361,7 +42362,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -47809,7 +47810,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -53235,7 +53236,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -58490,7 +58491,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [
@@ -63797,7 +63798,7 @@
         ],
         "mtime": 1785253671659,
         "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Link map",
       "technical_identifiers": [

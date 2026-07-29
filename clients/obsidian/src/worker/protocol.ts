@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 4 as const;
+export const WORKER_PROTOCOL_VERSION = 5 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -16,6 +16,7 @@ export const MAX_RECONCILIATION_PLAN_PATHS = MAX_RECONCILIATION_SOURCES * 2;
 export const SOURCE_QUARANTINE_WARNING_CODE = "source_rejected" as const;
 export const SOURCE_PREPARATION_DEFECT_FIELDS = [
   "not_a_record",
+  "preparation_fields",
   "schema_version",
   "source_key",
   "vault_id",
@@ -29,6 +30,11 @@ export const SOURCE_PREPARATION_DEFECT_FIELDS = [
   "retrieval",
   "chunks_shape",
   "chunks_contents",
+  "chunks_source_correlation",
+  "frontmatter_not_a_record",
+  "frontmatter_property_value",
+  "frontmatter_property_nesting",
+  "frontmatter_property_cycle",
   "kind",
   "warning",
   "skipped_has_chunks",
@@ -42,14 +48,12 @@ export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIEL
  * `PRAGMA user_version`). Any schema edit must bump it: an image whose value
  * differs from the running build's is not restorable.
  */
-export const CACHE_SCHEMA_VERSION = 1;
+export const CACHE_SCHEMA_VERSION = 5;
 
 /**
- * Ceiling on a single exported generation image. Derived from the corpus
- * bounds the index already enforces: 256 MiB of indexed text in a contentless
- * FTS5 index is roughly 230 MiB of image, so an image above this means the
- * corpus invariants were already violated, and the correct outcome is a
- * refusal carrying no bytes rather than a truncated export.
+ * Independent ceiling on a transported generation image. The SQLite adapter's
+ * durable page budget is configured below this value, so a compliant compact
+ * database fits without truncation; this remains a defense at the RPC boundary.
  */
 export const MAX_EXPORT_BLOB_BYTES = 384 * 1024 * 1024;
 
@@ -134,7 +138,10 @@ export interface ReconciliationSourceMetadata {
 
 export interface ReconciliationPlanResult {
   generation: string;
+  /** Metadata-identical oversized skips; no content exists to hash. */
   unchanged: string[];
+  /** Metadata-identical indexed sources that require raw-byte hash audit. */
+  audit: Array<{ path: string; content_hash: string }>;
   refresh: string[];
   remove: string[];
   /** Number of rows in the restored freshness ledger before planning. */
@@ -227,6 +234,8 @@ export interface BuildResult {
   generation: string;
   documents: number;
   chunks: number;
+  database_bytes: number;
+  database_byte_limit: number;
   quarantined_sources: number;
   quarantine_fields: SourcePreparationDefectField[];
 }
@@ -238,16 +247,33 @@ export interface StatusResult {
   staging_generation: string | null;
   documents: number;
   chunks: number;
+  active_database_bytes: number;
+  staging_database_bytes: number;
+  database_byte_limit: number;
   dirty: boolean;
   rebuilding: boolean;
 }
 
+export type PropertyValue =
+  | null
+  | boolean
+  | number
+  | string
+  | PropertyValue[]
+  | PropertyBag;
+
+/**
+ * The complete note-authored property projection. Property policy is applied at
+ * query time; narrowing this shape would make a later policy change require a
+ * second rebuild of the vault.
+ */
+export interface PropertyBag {
+  [name: string]: PropertyValue;
+}
+
+/** Compact ordinary-search metadata. The complete source-owned bag stays in SQLite. */
 export interface WorkerFrontmatter {
   title?: string;
-  description?: string;
-  tags?: string[];
-  status?: string;
-  date?: string;
 }
 
 export interface WorkerSearchHit {
@@ -636,12 +662,17 @@ function isBuildResult(value: unknown): value is BuildResult {
       "generation",
       "documents",
       "chunks",
+      "database_bytes",
+      "database_byte_limit",
       "quarantined_sources",
       "quarantine_fields",
     ])
     && isGeneration(value.generation)
     && isNonNegativeSafeInteger(value.documents)
     && isNonNegativeSafeInteger(value.chunks)
+    && isNonNegativeSafeInteger(value.database_bytes)
+    && isPositiveSafeInteger(value.database_byte_limit)
+    && value.database_bytes <= value.database_byte_limit
     && isNonNegativeSafeInteger(value.quarantined_sources)
     && Array.isArray(value.quarantine_fields)
     && value.quarantine_fields.length <= SOURCE_PREPARATION_DEFECT_FIELDS.length
@@ -694,6 +725,7 @@ function isReconciliationPlanResult(value: unknown): value is ReconciliationPlan
     || !hasExactKeys(value, [
       "generation",
       "unchanged",
+      "audit",
       "refresh",
       "remove",
       "stored_source_count",
@@ -709,18 +741,25 @@ function isReconciliationPlanResult(value: unknown): value is ReconciliationPlan
   const groups = [value.unchanged, value.refresh, value.remove];
   if (!groups.every((group) => Array.isArray(group)
     && group.length <= MAX_RECONCILIATION_SOURCES
-    && group.every(isNormalizedVaultRelativePath))) {
+    && group.every(isNormalizedVaultRelativePath))
+    || !Array.isArray(value.audit)
+    || value.audit.length > MAX_RECONCILIATION_SOURCES
+    || !value.audit.every((entry) => isRecord(entry)
+      && hasExactKeys(entry, ["path", "content_hash"])
+      && isNormalizedVaultRelativePath(entry.path)
+      && isSha256Hex(entry.content_hash))) {
     return false;
   }
   const unchanged = value.unchanged as string[];
+  const audit = value.audit as Array<{ path: string; content_hash: string }>;
   const refresh = value.refresh as string[];
   const remove = value.remove as string[];
-  const paths = groups.flat() as string[];
-  const currentCount = unchanged.length + refresh.length;
+  const paths = [...groups.flat() as string[], ...audit.map((entry) => entry.path)];
+  const currentCount = unchanged.length + audit.length + refresh.length;
   return currentCount <= MAX_RECONCILIATION_SOURCES
     && paths.length <= MAX_RECONCILIATION_PLAN_PATHS
     && new Set(paths).size === paths.length
-    && unchanged.length <= value.matched_source_count
+    && unchanged.length + audit.length <= value.matched_source_count
     && value.matched_source_count <= currentCount
     && value.matched_source_count + remove.length === value.stored_source_count;
 }
@@ -734,6 +773,9 @@ function isStatusResult(value: unknown): value is StatusResult {
       "staging_generation",
       "documents",
       "chunks",
+      "active_database_bytes",
+      "staging_database_bytes",
+      "database_byte_limit",
       "dirty",
       "rebuilding",
     ])
@@ -746,6 +788,11 @@ function isStatusResult(value: unknown): value is StatusResult {
     && (value.staging_generation === null || isGeneration(value.staging_generation))
     && isNonNegativeSafeInteger(value.documents)
     && isNonNegativeSafeInteger(value.chunks)
+    && isNonNegativeSafeInteger(value.active_database_bytes)
+    && isNonNegativeSafeInteger(value.staging_database_bytes)
+    && isPositiveSafeInteger(value.database_byte_limit)
+    && value.active_database_bytes <= value.database_byte_limit
+    && value.staging_database_bytes <= value.database_byte_limit
     && typeof value.dirty === "boolean"
     && typeof value.rebuilding === "boolean";
 }
@@ -787,16 +834,9 @@ function isSearchHit(value: unknown): value is WorkerSearchHit {
 }
 
 function isFrontmatter(value: unknown): value is WorkerFrontmatter {
-  if (!isRecord(value)) return false;
-  const allowed = ["title", "description", "tags", "status", "date"];
-  if (Object.keys(value).some((key) => !allowed.includes(key))) return false;
-  for (const key of ["title", "description", "status", "date"] as const) {
-    if (value[key] !== undefined && !isBoundedString(value[key], 1_024, true)) return false;
-  }
-  return value.tags === undefined
-    || (Array.isArray(value.tags)
-      && value.tags.length <= 256
-      && value.tags.every((tag) => isBoundedString(tag, 1_024, true)));
+  return isRecord(value)
+    && Object.keys(value).every((key) => key === "title")
+    && (value.title === undefined || isBoundedString(value.title, 1_024, true));
 }
 
 function isWorkerError(value: unknown): value is WorkerError {
@@ -867,6 +907,10 @@ function isRequestId(value: unknown): value is number {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function isBoundedString(value: unknown, maximum: number, allowEmpty = false): value is string {

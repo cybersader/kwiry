@@ -14,8 +14,12 @@ import {
   type SQLiteApi,
   type SQLiteDatabase,
 } from "../src/worker/fts5-index";
-import { CACHE_SCHEMA_VERSION } from "../src/worker/protocol";
-import type { SourcePreparation } from "../src/worker/rust-adapter";
+import { CACHE_SCHEMA_VERSION, type PropertyBag } from "../src/worker/protocol";
+import type {
+  PreparedFrontmatter,
+  PreparedPropertyValue,
+  SourcePreparation,
+} from "../src/worker/rust-adapter";
 
 /**
  * Opens an exported image as a real database. Nothing about the export is
@@ -78,6 +82,34 @@ afterEach(() => {
   consoleFailure.mockRestore();
 });
 
+function prepareFrontmatter(frontmatter: PropertyBag): PreparedFrontmatter {
+  return Object.fromEntries(
+    Object.entries(frontmatter).map(([name, value]) => [name, preparePropertyValue(value)]),
+  );
+}
+
+function preparePropertyValue(value: PropertyBag[string]): PreparedPropertyValue {
+  if (value === null) return { type: "null" };
+  if (typeof value === "boolean") return { type: "boolean", value };
+  if (typeof value === "string") return { type: "string", value };
+  if (typeof value === "number") {
+    if (Number.isInteger(value)) return { type: "i64", value: String(value) };
+    const bytes = new ArrayBuffer(8);
+    const view = new DataView(bytes);
+    view.setFloat64(0, value, false);
+    return { type: "f64", value: view.getBigUint64(0, false).toString(16).padStart(16, "0") };
+  }
+  if (Array.isArray(value)) {
+    return { type: "sequence", value: value.map(preparePropertyValue) };
+  }
+  return {
+    type: "map",
+    value: Object.fromEntries(
+      Object.entries(value).map(([name, child]) => [name, preparePropertyValue(child)]),
+    ),
+  };
+}
+
 function source(
   sourceKey: string,
   chunkId: string,
@@ -93,9 +125,10 @@ function sourceAt(
   chunkId: string,
   content: string,
   title = "Title",
+  frontmatter: PropertyBag = { title, tags: ["test"] },
 ): SourcePreparation {
   return {
-    schema_version: 1,
+    schema_version: 2,
     source_key: sourceKey,
     vault_id: "active",
     path,
@@ -109,6 +142,7 @@ function sourceAt(
       stem: sourceKey,
       aliases: [],
     },
+    frontmatter: prepareFrontmatter(frontmatter),
     chunks: [{
       chunk: {
         chunk_id: chunkId,
@@ -117,7 +151,7 @@ function sourceAt(
         path: path,
         heading_path: ["Heading"],
         content,
-        frontmatter: { title, tags: ["test"] },
+        frontmatter,
         links_out: [],
         mtime: 1,
         content_hash: `hash-${sourceKey}`,
@@ -161,7 +195,375 @@ describe("Fts5GenerationIndex", () => {
     expect(hits[0]!.excerpt).toBe("");
   });
 
-  it("stores no indexed field text and keeps phrase and column queries working", () => {
+  it("coerces legacy title and tags exactly like the Rust projection", () => {
+    index.replaceSource(sourceAt(
+      "typed-legacy",
+      "typed-legacy.md",
+      "chunk-typed-legacy",
+      "bodycontrol",
+      "unused",
+      { title: 7, tags: ["one", 2, true, null, { ignored: "map" }] },
+    ));
+
+    expect(index.search(anyPlan("7"), 20)[0]?.frontmatter).toEqual({ title: "7" });
+    expect(index.search(anyPlan("2"), 20)).toHaveLength(1);
+    expect(index.search(anyPlan("true"), 20)).toHaveLength(1);
+    expect(index.search(anyPlan("ignored"), 20)).toEqual([]);
+  });
+
+  it("stores each property once per source and returns only compact display metadata", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const frontmatter: PropertyBag = {
+        title: "Projection Guide",
+        tags: ["one", "two"],
+        nested: { z: 3, a: [true, "leaf"] },
+      };
+      const prepared = sourceAt(
+        "alpha",
+        "alpha.md",
+        "chunk-a",
+        "first projectionterm",
+        "Projection Guide",
+        frontmatter,
+      );
+      const second = structuredClone(prepared.chunks[0]!);
+      second.chunk.chunk_id = "chunk-b";
+      second.chunk.content = "second projectionterm";
+      prepared.chunks.push(second);
+
+      scoped.replaceSource(prepared);
+
+      expect(db.selectObjects(
+        "SELECT frontmatter_json FROM chunks ORDER BY rowid",
+      )).toEqual([
+        { frontmatter_json: '{"title":"Projection Guide"}' },
+        { frontmatter_json: '{"title":"Projection Guide"}' },
+      ]);
+      expect(db.selectValue("SELECT count(*) FROM source_properties")).toBe(3);
+      expect(db.selectValue("SELECT count(*) FROM source_property_scalars")).toBe(6);
+      expect(db.selectValue("SELECT count(*) FROM source_property_text_fts")).toBe(3);
+      expect(db.selectValue(
+        "SELECT property_count FROM sources WHERE source_key = 'alpha'",
+      )).toBe(3);
+      expect(scoped.search(anyPlan("projectionterm"), 20)).toHaveLength(2);
+      expect(scoped.search(anyPlan("projectionterm"), 20)[0]!.frontmatter)
+        .toEqual({ title: "Projection Guide" });
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("does not read or parse the open property bag for an ordinary lexical search", () => {
+    const recorder = new RecordingDatabase(new sqlite.oo1.DB(":memory:", "c"));
+    const scoped = new Fts5GenerationIndex(recorder);
+    try {
+      scoped.replaceSource(sourceAt(
+        "lazy",
+        "lazy.md",
+        "chunk-lazy",
+        "lazyterm",
+        "Compact Title",
+        { title: "Compact Title", payload: "x".repeat(2 * 1024 * 1024) },
+      ));
+      recorder.selectedStatements.length = 0;
+
+      const hits = scoped.search(anyPlan("lazyterm"), 20);
+
+      expect(hits).toHaveLength(1);
+      expect(hits[0]!.frontmatter).toEqual({ title: "Compact Title" });
+      expect(recorder.selectedStatements.join("\n")).not.toMatch(/source_properties|value_json/u);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("projects frontmatter-only sources without depending on a chunk", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const prepared = sourceAt(
+        "properties-only",
+        "properties-only.md",
+        "unused-chunk",
+        "unused",
+        "Title",
+        { priority: 7 },
+      );
+      prepared.chunks = [];
+
+      scoped.replaceSource(prepared);
+
+      expect(db.selectValue("SELECT count(*) FROM source_properties")).toBe(1);
+      expect(db.selectObjects(`
+        SELECT property_name, root_type, exact_value
+        FROM source_properties
+      `)).toEqual([{ property_name: "priority", root_type: "i64", exact_value: "7" }]);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("preserves unsafe integers and integral floats in the durable projection", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const prepared = sourceAt(
+        "numeric",
+        "numeric.md",
+        "chunk-numeric",
+        "numericterm",
+        "Numeric",
+        {},
+      );
+      prepared.frontmatter = {
+        unsafe_i64: { type: "i64", value: "-9007199254740993" },
+        max_u64: { type: "u64", value: "18446744073709551615" },
+        integral_float: { type: "f64", value: "405f400000000000" },
+      };
+
+      scoped.replaceSource(prepared);
+
+      expect(db.selectObjects(`
+        SELECT property_name, scalar_type, exact_value, numeric_value
+        FROM source_property_scalars
+        ORDER BY property_name
+      `)).toEqual([
+        { property_name: "integral_float", scalar_type: "real", exact_value: "405f400000000000", numeric_value: 125 },
+        { property_name: "max_u64", scalar_type: "u64", exact_value: "18446744073709551615", numeric_value: null },
+        { property_name: "unsafe_i64", scalar_type: "i64", exact_value: "-9007199254740993", numeric_value: null },
+      ]);
+      expect(scoped.search(anyPlan("numericterm"), 20)[0]!.frontmatter).toEqual({});
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("canonicalizes top-level JSON and flattens scalar leaves to JSON Pointers", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      scoped.replaceSource(sourceAt(
+        "alpha",
+        "alpha.md",
+        "chunk-a",
+        "projectionterm",
+        "Title",
+        {
+          complex: {
+            z: [{ "a/b~": "needle" }, null],
+            a: 12,
+          },
+        },
+      ));
+
+      expect(db.selectObjects(`
+        SELECT property_name, value_json, root_type, exact_value
+        FROM source_properties
+      `)).toEqual([{
+        property_name: "complex",
+        value_json: '{"type":"map","value":{"a":{"type":"i64","value":"12"},"z":{"type":"sequence","value":[{"type":"map","value":{"a/b~":{"type":"string","value":"needle"}}},{"type":"null"}]}}}',
+        root_type: "object",
+        exact_value: null,
+      }]);
+      expect(db.selectObjects(`
+        SELECT json_pointer, scalar_type, exact_value
+        FROM source_property_scalars
+        ORDER BY json_pointer
+      `)).toEqual([
+        { json_pointer: "/a", scalar_type: "i64", exact_value: "12" },
+        { json_pointer: "/z/0/a~1b~0", scalar_type: "string", exact_value: "needle" },
+        { json_pointer: "/z/1", scalar_type: "null", exact_value: "null" },
+      ]);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("keeps a large array to one source-property text contribution", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      scoped.replaceSource(sourceAt(
+        "alpha",
+        "alpha.md",
+        "chunk-a",
+        "projectionterm",
+        "Title",
+        { tags: Array.from({ length: 1_200 }, (_unused, index) => `tag-${index}`) },
+      ));
+
+      expect(db.selectValue("SELECT count(*) FROM source_properties")).toBe(1);
+      expect(db.selectValue("SELECT count(*) FROM source_property_scalars")).toBe(1_200);
+      expect(db.selectValue("SELECT count(*) FROM source_property_text_fts")).toBe(1);
+      expect(db.selectValue(`
+        SELECT count(DISTINCT source_key)
+        FROM source_property_scalars
+        WHERE property_name = 'tags'
+      `)).toBe(1);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("indexes an open bag of one thousand top-level properties without truncation", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const properties = Object.fromEntries(
+        Array.from({ length: 1_000 }, (_unused, index) => [`property-${index}`, index]),
+      );
+      scoped.replaceSource(sourceAt(
+        "alpha",
+        "alpha.md",
+        "chunk-a",
+        "projectionterm",
+        "Title",
+        properties,
+      ));
+
+      expect(db.selectValue("SELECT count(*) FROM source_properties")).toBe(1_000);
+      expect(db.selectValue("SELECT count(*) FROM source_property_scalars")).toBe(1_000);
+      expect(db.selectValue("SELECT count(*) FROM source_property_text_fts")).toBe(1_000);
+      expect(db.selectValue(`
+        SELECT exact_value FROM source_property_scalars
+        WHERE property_name = 'property-999'
+      `)).toBe("999");
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("keeps exact and textual projections separated by scalar type", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      scoped.replaceSource(sourceAt(
+        "alpha",
+        "alpha.md",
+        "chunk-a",
+        "projectionterm",
+        "Title",
+        {
+          string_value: "12",
+          integer_value: 12,
+          real_value: 12.5,
+          boolean_value: true,
+          date_value: "2026-07-28",
+          invalid_date: "2026-02-30",
+        },
+      ));
+
+      expect(db.selectObjects(`
+        SELECT property_name, scalar_type, exact_value, numeric_value, date_value
+        FROM source_property_scalars
+        ORDER BY property_name
+      `)).toEqual([
+        { property_name: "boolean_value", scalar_type: "boolean", exact_value: "true", numeric_value: null, date_value: null },
+        { property_name: "date_value", scalar_type: "date", exact_value: "2026-07-28", numeric_value: null, date_value: "2026-07-28" },
+        { property_name: "integer_value", scalar_type: "i64", exact_value: "12", numeric_value: 12, date_value: null },
+        { property_name: "invalid_date", scalar_type: "string", exact_value: "2026-02-30", numeric_value: null, date_value: null },
+        { property_name: "real_value", scalar_type: "real", exact_value: "4029000000000000", numeric_value: 12.5, date_value: null },
+        { property_name: "string_value", scalar_type: "string", exact_value: "12", numeric_value: null, date_value: null },
+      ]);
+
+      const textMatches = (match: string): string[] => db.selectObjects(`
+        SELECT p.property_name
+        FROM source_property_text_fts AS f
+        JOIN source_properties AS p ON p.rowid = f.rowid
+        WHERE source_property_text_fts MATCH ?
+        ORDER BY p.property_name
+        LIMIT ?
+      `, [match, 10]).map((row) => String(row.property_name));
+      expect(textMatches('string_value : "12"')).toEqual(["string_value"]);
+      expect(textMatches('integer_value : "12"')).toEqual(["integer_value"]);
+      expect(textMatches('boolean_value : "true"')).toEqual(["boolean_value"]);
+      expect(textMatches('date_value : "2026 07 28"')).toEqual(["date_value"]);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("keeps each property-text leg independently filtered and bounded", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      scoped.applySourceChanges([
+        sourceAt("alpha", "alpha.md", "chunk-a", "body-a", "Title", {
+          summary: "common needle",
+          other: "common needle",
+        }),
+        sourceAt("beta", "beta.md", "chunk-b", "body-b", "Title", {
+          summary: "common needle",
+        }),
+        sourceAt("gamma", "gamma.md", "chunk-c", "body-c", "Title", {
+          summary: "common needle",
+        }),
+      ], []);
+
+      const textLeg = (propertyName: string, limit: number) => db.selectObjects(`
+        SELECT p.source_key, p.property_name
+        FROM source_property_text_fts AS f
+        JOIN source_properties AS p ON p.rowid = f.rowid
+        WHERE source_property_text_fts MATCH ? AND p.property_name = ?
+        ORDER BY p.source_key
+        LIMIT ?
+      `, ['string_value : "needle"', propertyName, limit]);
+      expect(textLeg("summary", 2)).toEqual([
+        { source_key: "alpha", property_name: "summary" },
+        { source_key: "beta", property_name: "summary" },
+      ]);
+      expect(textLeg("other", 2)).toEqual([
+        { source_key: "alpha", property_name: "other" },
+      ]);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("provides dedicated B-tree plans for presence, exact, numeric, and date rules", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      scoped.replaceSource(sourceAt(
+        "alpha",
+        "alpha.md",
+        "chunk-a",
+        "projectionterm",
+        "Title",
+        { priority: 12, due: "2026-07-28" },
+      ));
+
+      const plan = (sql: string, bind: readonly unknown[]): string => db.selectObjects(
+        `EXPLAIN QUERY PLAN ${sql}`,
+        bind,
+      ).map((row) => String(row.detail)).join("\n");
+      expect(plan(
+        "SELECT source_key FROM source_properties WHERE property_name = ?",
+        ["priority"],
+      )).toContain("source_properties_presence");
+      expect(plan(
+        "SELECT source_key FROM source_property_scalars "
+          + "WHERE property_name = ? AND scalar_type = ? AND exact_value = ?",
+        ["priority", "i64", "12"],
+      )).toContain("source_property_scalars_exact");
+      expect(plan(
+        "SELECT source_key FROM source_property_scalars "
+          + "WHERE property_name = ? AND numeric_value >= ? AND numeric_value IS NOT NULL",
+        ["priority", 10],
+      )).toContain("source_property_scalars_numeric");
+      expect(plan(
+        "SELECT source_key FROM source_property_scalars "
+          + "WHERE property_name = ? AND date_value <= ? AND date_value IS NOT NULL",
+        ["due", "2026-07-31"],
+      )).toContain("source_property_scalars_date");
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("keeps canonical FTS content external while phrase and column queries work", () => {
     const db = new sqlite.oo1.DB(":memory:", "c");
     const scoped = new Fts5GenerationIndex(db);
     try {
@@ -169,12 +571,15 @@ describe("Fts5GenerationIndex", () => {
 
       expect(db.selectValue(
         "SELECT count(*) FROM pragma_table_info('chunks') WHERE name = 'content'",
-      )).toBe(0);
-      expect(db.selectValue("SELECT content FROM chunks_fts WHERE rowid = 1")).toBe(null);
+      )).toBe(1);
+      expect(db.selectValue("SELECT content FROM chunks WHERE rowid = 1"))
+        .toBe("portable quasar cache storage");
+      expect(db.selectValue("SELECT content FROM chunks_fts WHERE rowid = 1"))
+        .toBe("portable quasar cache storage");
       expect(db.selectValue(
         "SELECT snippet(chunks_fts, 7, '[', ']', '…', 8) FROM chunks_fts WHERE chunks_fts MATCH ?",
         ['"quasar"'],
-      )).toBe(null);
+      )).toContain("[quasar]");
 
       expect(scoped.search({
         schema_version: 1,
@@ -207,6 +612,7 @@ describe("Fts5GenerationIndex", () => {
     try {
       scoped.replaceSource(source("alpha", "chunk-a", "firstterm"));
       expect(db.selectValue("SELECT count(*) FROM chunks_fts")).toBe(1);
+      expect(db.selectValue("SELECT count(*) FROM source_property_text_fts")).toBe(2);
 
       // Replacement frees rowid 1; the replacement must not reuse it while a
       // stale posting could still exist, and the old posting must be gone.
@@ -218,6 +624,9 @@ describe("Fts5GenerationIndex", () => {
       scoped.applySourceChanges([], [{ vault_id: "active", path: "alpha.md" }], true);
       expect(db.selectValue("SELECT count(*) FROM chunks_fts")).toBe(0);
       expect(db.selectValue("SELECT count(*) FROM chunks")).toBe(0);
+      expect(db.selectValue("SELECT count(*) FROM source_properties")).toBe(0);
+      expect(db.selectValue("SELECT count(*) FROM source_property_scalars")).toBe(0);
+      expect(db.selectValue("SELECT count(*) FROM source_property_text_fts")).toBe(0);
       expect(scoped.search(anyPlan("secondterm"), 20)).toEqual([]);
       expect(() => scoped.assertIntegrity()).not.toThrow();
     } finally {
@@ -289,7 +698,7 @@ describe("Fts5GenerationIndex", () => {
     index.close();
     index = openFts5Generation(sqlite, {
       maxChunks: 1,
-      maxIndexedTextBytes: 1_024,
+      maxDatabaseBytes: 1_048_576,
     });
     index.replaceSource(source("alpha", "chunk-a", "stableterm"));
 
@@ -301,6 +710,65 @@ describe("Fts5GenerationIndex", () => {
     expect(index.chunks).toBe(1);
     expect(index.search(anyPlan("stableterm"), 20)).toHaveLength(1);
     expect(index.search(anyPlan("overflowterm"), 20)).toEqual([]);
+  });
+
+  it("counts a 10,000-null projection against durable SQLite pages and rolls it back", () => {
+    const stable = source("stable", "chunk-stable", "stableterm");
+    const overflow = sourceAt(
+      "overflow",
+      "overflow.md",
+      "chunk-overflow",
+      "overflowterm",
+      "Overflow",
+      { values: Array.from({ length: 10_000 }, () => null) },
+    );
+
+    const probeDb = new sqlite.oo1.DB(":memory:", "c");
+    const probe = new Fts5GenerationIndex(probeDb);
+    let stableBytes = 0;
+    let overflowBytes = 0;
+    try {
+      probe.replaceSource(stable);
+      stableBytes = probe.databaseBytes;
+      probe.replaceSource(overflow);
+      overflowBytes = probe.databaseBytes;
+    } finally {
+      probe.close();
+    }
+    expect(overflowBytes).toBeGreaterThan(stableBytes + 1_000_000);
+
+    const limitedDb = new sqlite.oo1.DB(":memory:", "c");
+    const limited = new Fts5GenerationIndex(limitedDb, {
+      maxChunks: 100,
+      maxDatabaseBytes: stableBytes + Math.floor((overflowBytes - stableBytes) / 2),
+    });
+    try {
+      limited.replaceSource(stable);
+      const bytesBefore = limited.databaseBytes;
+      expect(() => limited.replaceSource(overflow)).toThrow(IndexCapacityError);
+
+      expect(limited.databaseBytes).toBe(bytesBefore);
+      expect(limited.databaseBytes).toBeLessThanOrEqual(limited.databaseByteLimit);
+      expect(limited.documents).toBe(1);
+      expect(limited.chunks).toBe(1);
+      expect(limited.search(anyPlan("stableterm"), 20)).toHaveLength(1);
+      expect(limited.search(anyPlan("overflowterm"), 20)).toEqual([]);
+      expect(limitedDb.selectValue("SELECT count(*) FROM sources WHERE source_key = 'overflow'"))
+        .toBe(0);
+      expect(limitedDb.selectValue(
+        "SELECT count(*) FROM source_properties WHERE source_key = 'overflow'",
+      )).toBe(0);
+      expect(limitedDb.selectValue(
+        "SELECT count(*) FROM source_property_scalars WHERE source_key = 'overflow'",
+      )).toBe(0);
+      expect(limitedDb.selectValue(`
+        SELECT count(*) FROM source_property_text_fts f
+        JOIN source_properties p ON p.rowid = f.rowid
+        WHERE p.source_key = 'overflow'
+      `)).toBe(0);
+    } finally {
+      limited.close();
+    }
   });
 
   it("distinguishes indexed empty documents from skipped sources", () => {
@@ -347,8 +815,15 @@ describe("Fts5GenerationIndex", () => {
         // Stored as TEXT: a 27-digit nanosecond stamp does not fit a 64-bit
         // INTEGER, and a truncated value would corrupt the freshness compare.
         mtime_nanos: "170000000000000000123456789",
+        retrieval_json: '{"filename":"binary.md","stem":"binary","aliases":[]}',
+        aliases_text: "",
+        // A skipped source retains freshness evidence only; it cannot claim
+        // searchable metadata that Rust did not index.
+        title_text: "",
+        tags_text: "",
         chunk_count: 0,
-        indexed_bytes: 0,
+        property_count: 0,
+        property_scalar_count: 0,
       }]);
       expect(scoped.documents).toBe(0);
       expect(scoped.sources).toBe(1);
@@ -407,8 +882,13 @@ describe("Fts5GenerationIndex", () => {
         content_hash: "hash-alpha",
         byte_length: 10,
         mtime_nanos: "99999999999999999999999999999999999999",
+        retrieval_json: '{"filename":"alpha.md","stem":"alpha","aliases":[]}',
+        aliases_text: "",
+        title_text: "Title",
+        tags_text: "test",
         chunk_count: 1,
-        indexed_bytes: expect.any(Number),
+        property_count: 2,
+        property_scalar_count: 2,
       }]);
       expect(scoped.sources).toBe(1);
 
@@ -440,7 +920,7 @@ describe("Fts5GenerationIndex", () => {
     index.close();
     index = openFts5Generation(sqlite, {
       maxChunks: 100,
-      maxIndexedTextBytes: 1_048_576,
+      maxDatabaseBytes: 1_048_576,
       maxSources: 1,
     });
     index.replaceSource(source("alpha", "chunk-a", "stableterm"));
@@ -461,8 +941,9 @@ describe("Fts5GenerationIndex", () => {
     ],
     [
       "a skipped source owning chunks",
-      "UPDATE sources SET outcome = 'skipped', chunk_count = 0, indexed_bytes = 0, "
-        + "content_hash = NULL WHERE source_key = 'alpha'",
+      "UPDATE sources SET outcome = 'skipped', chunk_count = 0, property_count = 0, "
+        + "property_scalar_count = 0, content_hash = NULL "
+        + "WHERE source_key = 'alpha'",
     ],
     [
       "a tampered per-source chunk tally",
@@ -470,7 +951,8 @@ describe("Fts5GenerationIndex", () => {
     ],
     [
       "an invented source row",
-      "INSERT INTO sources VALUES('ghost','active','ghost.md','skipped',NULL,0,'1',0,0)",
+      "INSERT INTO sources VALUES('ghost','active','ghost.md','skipped',NULL,0,'1',"
+        + "'{\"filename\":\"ghost.md\",\"stem\":\"ghost\",\"aliases\":[]}','','','',0,0,0)",
     ],
   ])("fails the integrity gate on %s", (_name, corruption) => {
     const db = new sqlite.oo1.DB(":memory:", "c");
@@ -481,11 +963,8 @@ describe("Fts5GenerationIndex", () => {
 
       db.exec(corruption);
 
-      // The FTS5 structure check stays green through every one of these: only
-      // the explicit reconciliation can see them, and it must.
-      expect(() => db.exec(
-        "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
-      )).not.toThrow();
+      // External-content integrity catches text/content divergence; explicit
+      // reconciliation catches source tallies and ownership. The combined gate must fail.
       expect(() => scoped.assertIntegrity()).toThrow(/integrity check failed/);
     } finally {
       scoped.close();
@@ -538,19 +1017,13 @@ describe("Fts5GenerationIndex", () => {
     expect(() => index.close()).not.toThrow();
   });
 
-  // Negative control for the publish gate. On a contentless table the FTS5
-  // 'integrity-check' command can only inspect the index internally, so it
-  // stays green through either desync direction; only the explicit
-  // reconciliation can fail, and it must.
+  // Negative control for the combined external-content FTS and metadata gate.
   it("fails the publish integrity gate when the index and metadata desync", () => {
     const orphaned = new sqlite.oo1.DB(":memory:", "c");
     const withOrphanFts = new Fts5GenerationIndex(orphaned);
     try {
       withOrphanFts.replaceSource(source("alpha", "chunk-a", "quasar"));
       orphaned.exec("DELETE FROM chunks WHERE rowid = 1");
-      expect(() => orphaned.exec(
-        "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
-      )).not.toThrow();
       expect(() => withOrphanFts.assertIntegrity()).toThrow(/integrity check failed/);
     } finally {
       withOrphanFts.close();
@@ -561,12 +1034,31 @@ describe("Fts5GenerationIndex", () => {
     try {
       withMissingFts.replaceSource(source("alpha", "chunk-a", "quasar"));
       missing.exec("DELETE FROM chunks_fts WHERE rowid = 1");
-      expect(() => missing.exec(
-        "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
-      )).not.toThrow();
       expect(() => withMissingFts.assertIntegrity()).toThrow(/integrity check failed/);
     } finally {
       withMissingFts.close();
+    }
+  });
+
+  it("fails the publish integrity gate when property scalars and text postings diverge", () => {
+    const orphaned = new sqlite.oo1.DB(":memory:", "c");
+    const withOrphanPropertyFts = new Fts5GenerationIndex(orphaned);
+    try {
+      withOrphanPropertyFts.replaceSource(source("alpha", "chunk-a", "quasar"));
+      orphaned.exec("DELETE FROM source_properties WHERE rowid = 1");
+      expect(() => withOrphanPropertyFts.assertIntegrity()).toThrow(/integrity check failed/);
+    } finally {
+      withOrphanPropertyFts.close();
+    }
+
+    const missing = new sqlite.oo1.DB(":memory:", "c");
+    const withMissingPropertyFts = new Fts5GenerationIndex(missing);
+    try {
+      withMissingPropertyFts.replaceSource(source("alpha", "chunk-a", "quasar"));
+      missing.exec("DELETE FROM source_property_text_fts WHERE rowid = 1");
+      expect(() => withMissingPropertyFts.assertIntegrity()).toThrow(/integrity check failed/);
+    } finally {
+      withMissingPropertyFts.close();
     }
   });
 
@@ -616,6 +1108,7 @@ describe("Fts5GenerationIndex", () => {
 
       expect(recorder.statements).toEqual([
         "INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')",
+        "INSERT INTO source_property_text_fts(source_property_text_fts) VALUES('optimize')",
         "VACUUM",
       ]);
       expect(recorder.openTransactions).toBe(0);
@@ -669,7 +1162,25 @@ describe("Fts5GenerationIndex", () => {
       scoped.replaceSource(source("alpha", "chunk-a", "quasar"));
 
       expect(db.selectValue("SELECT min(rowid) FROM chunks")).toBe(2);
-      expect(db.selectValue("SELECT count(*) FROM chunks_fts")).toBe(2);
+      expect(db.selectValue("SELECT count(*) FROM chunks_fts_docsize")).toBe(2);
+      expect(() => scoped.assertIntegrity()).toThrow(/integrity check failed/);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("allocates property rowids above a property-FTS-only posting", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      db.exec(
+        "INSERT INTO source_property_text_fts(rowid, string_value) VALUES(1, 'orphanterm')",
+      );
+
+      scoped.replaceSource(source("alpha", "chunk-a", "quasar"));
+
+      expect(db.selectValue("SELECT min(rowid) FROM source_properties")).toBe(2);
+      expect(db.selectValue("SELECT count(*) FROM source_property_text_fts")).toBe(3);
       expect(() => scoped.assertIntegrity()).toThrow(/integrity check failed/);
     } finally {
       scoped.close();
@@ -700,18 +1211,14 @@ describe("Fts5GenerationIndex", () => {
     }
   });
 
-  it("refuses to export an image over its ceiling", () => {
+  it("requires the durable database budget to fit inside the transport ceiling", () => {
     index.close();
-    index = openFts5Generation(sqlite, {
+    expect(() => openFts5Generation(sqlite, {
       maxChunks: 100,
-      maxIndexedTextBytes: 1_048_576,
+      maxDatabaseBytes: 1_048_576,
       maxExportBytes: 1_024,
-    });
-    index.replaceSource(source("alpha", "chunk-a", "quasarterm"));
-
-    expect(() => index.exportImage(sqlite)).toThrow(IndexCapacityError);
-    // Refusing costs the caller nothing: the generation is still serving.
-    expect(index.search(anyPlan("quasarterm"), 20)).toHaveLength(1);
+    })).toThrow(/database byte limit must not exceed export byte limit/);
+    index = openFts5Generation(sqlite);
   });
 
   // A generation that is already published has no later commit gate, so its
@@ -734,7 +1241,7 @@ describe("Fts5GenerationIndex", () => {
         [source("gamma", "chunk-c", "nebulaterm")],
         [],
         true,
-      )).toThrow(/chunk metadata disagree/);
+      )).toThrow(/canonical content/);
       expect(db.selectValue("SELECT count(*) FROM sources")).toBe(2);
       expect(db.selectValue("SELECT count(*) FROM chunks WHERE chunk_id = 'chunk-c'")).toBe(0);
       expect(scoped.search(anyPlan("nebulaterm"), 20)).toEqual([]);
@@ -804,12 +1311,114 @@ describe("Fts5GenerationIndex", () => {
       .toThrow(CacheVersionMismatchError);
   });
 
+  it("rejects a schema-v1 cache instead of attempting to read it as the property projection", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    const oldImage = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec("PRAGMA user_version = 1");
+    });
+    expect(() => openRestoredFts5Generation(sqlite, oldImage, 1))
+      .toThrow(CacheVersionMismatchError);
+  });
+
   it("refuses an exact-schema mismatch before integrity is trusted", () => {
     index.replaceSource(source("alpha", "chunk-a", "quasar"));
     const image = mutateExportedImage(index.exportImage(sqlite), (db) => {
       db.exec("CREATE TABLE unexpected_cache_object(value TEXT)");
     });
     expect(() => openRestoredFts5Generation(sqlite, image, 1))
+      .toThrow(CacheImageInvalidError);
+  });
+
+  it.each([
+    ["source property", (db: SQLiteDatabase) => {
+      db.exec("PRAGMA ignore_check_constraints = ON");
+      db.exec("UPDATE source_properties SET rowid = -1 WHERE rowid = 1");
+      db.exec("DELETE FROM source_property_text_fts WHERE rowid = 1");
+      db.exec("INSERT INTO source_property_text_fts(rowid, string_value) VALUES(-1, 'negative')");
+    }],
+    ["property scalar", (db: SQLiteDatabase) => {
+      db.exec("PRAGMA ignore_check_constraints = ON");
+      db.exec("UPDATE source_property_scalars SET rowid = -1 WHERE rowid = 1");
+    }],
+    ["property FTS", (db: SQLiteDatabase) => {
+      db.exec("DELETE FROM source_property_text_fts WHERE rowid = 1");
+      db.exec("INSERT INTO source_property_text_fts(rowid, string_value) VALUES(-1, 'negative')");
+    }],
+  ])("rejects a digest-valid negative %s rowid before restore pagination", (_name, mutate) => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar"));
+    const corrupt = mutateExportedImage(index.exportImage(sqlite), mutate);
+    expect(() => openRestoredFts5Generation(sqlite, corrupt, 1))
+      .toThrow(CacheImageInvalidError);
+  });
+
+  it("rebuilds forged property FTS text from canonical source properties", () => {
+    index.replaceSource(source("alpha", "chunk-a", "quasar", "Canonical Title"));
+    const forged = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      const rowid = Number(db.selectValue(
+        "SELECT rowid FROM source_properties WHERE property_name = 'title'",
+      ));
+      db.exec("DELETE FROM source_property_text_fts WHERE rowid = ?", { bind: [rowid] });
+      db.exec(
+        "INSERT INTO source_property_text_fts(rowid, string_value) VALUES(?, 'forgedterm')",
+        { bind: [rowid] },
+      );
+    });
+    const precondition = deserialize(sqlite, forged);
+    try {
+      expect(precondition.selectValue(
+        "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH ?",
+        ['string_value : "forgedterm"'],
+      )).toBe(1);
+      expect(precondition.selectValue(
+        "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH ?",
+        ['string_value : "canonical"'],
+      )).toBe(0);
+    } finally {
+      precondition.close();
+    }
+
+    const restored = openRestoredFts5Generation(sqlite, forged, 1);
+    try {
+      const repaired = deserialize(sqlite, restored.exportImage(sqlite));
+      try {
+        expect(repaired.selectValue(
+          "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH ?",
+          ['string_value : "canonical"'],
+        )).toBe(1);
+        expect(repaired.selectValue(
+          "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH ?",
+          ['string_value : "forgedterm"'],
+        )).toBe(0);
+      } finally {
+        repaired.close();
+      }
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("rejects same-rowid forged chunk postings against canonical chunk rows", () => {
+    index.replaceSource(source("alpha", "chunk-a", "canonicalterm", "Canonical Title"));
+    const forged = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      const rowid = Number(db.selectValue("SELECT rowid FROM chunks WHERE chunk_id = 'chunk-a'"));
+      db.exec("DELETE FROM chunks_fts WHERE rowid = ?", { bind: [rowid] });
+      db.exec(
+        "INSERT INTO chunks_fts(rowid, content) VALUES(?, 'forgedterm')",
+        { bind: [rowid] },
+      );
+    });
+
+    expect(() => openRestoredFts5Generation(sqlite, forged, 1))
+      .toThrow(CacheImageInvalidError);
+  });
+
+  it("rejects compact title metadata that disagrees with canonical source properties", () => {
+    index.replaceSource(source("alpha", "chunk-a", "canonicalterm", "Canonical Title"));
+    const forged = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec("UPDATE chunks SET frontmatter_json = '{\"title\":\"Forged Title\"}'");
+    });
+
+    expect(() => openRestoredFts5Generation(sqlite, forged, 1))
       .toThrow(CacheImageInvalidError);
   });
 
@@ -837,8 +1446,8 @@ describe("Fts5GenerationIndex", () => {
     ["malformed heading JSON", (db: SQLiteDatabase) => {
       db.exec("UPDATE chunks SET heading_path_json = 'not-json'");
     }],
-    ["invalid frontmatter shape", (db: SQLiteDatabase) => {
-      db.exec(`UPDATE chunks SET frontmatter_json = '{"title":42}'`);
+    ["property JSON disagreeing with its typed projection", (db: SQLiteDatabase) => {
+      db.exec("UPDATE source_properties SET value_json = '42' WHERE property_name = 'title'");
     }],
     ["chunk/source identity disagreement", (db: SQLiteDatabase) => {
       db.exec("UPDATE chunks SET vault_id = 'another-vault'");
@@ -937,6 +1546,7 @@ function mutateExportedImage(
 /** Delegating wrapper that records the statements a generation issues. */
 class RecordingDatabase implements SQLiteDatabase {
   readonly statements: string[] = [];
+  readonly selectedStatements: string[] = [];
   openTransactions = 0;
 
   constructor(private readonly inner: SQLiteDatabase) {}
@@ -956,10 +1566,12 @@ class RecordingDatabase implements SQLiteDatabase {
   }
 
   selectValue(sql: string, bind?: readonly unknown[]): unknown {
+    this.selectedStatements.push(sql);
     return this.inner.selectValue(sql, bind);
   }
 
   selectObjects(sql: string, bind?: readonly unknown[]): Record<string, unknown>[] {
+    this.selectedStatements.push(sql);
     return this.inner.selectObjects(sql, bind);
   }
 

@@ -55,6 +55,9 @@ function statusResponse(id: number): unknown {
       staging_generation: null,
       documents: 0,
       chunks: 0,
+      active_database_bytes: 0,
+      staging_database_bytes: 0,
+      database_byte_limit: 1,
       dirty: true,
       rebuilding: false,
     },
@@ -142,7 +145,15 @@ describe("WorkerRpcClient", () => {
       id: 1,
       operation: "apply_source_changes",
       ok: true,
-      result: { generation: "g2", documents: 0, chunks: 0, quarantined_sources: 0, quarantine_fields: [] },
+      result: {
+        generation: "g2",
+        documents: 0,
+        chunks: 0,
+        database_bytes: 0,
+        database_byte_limit: 1,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+      },
     });
     await expect(pending).resolves.toMatchObject({ generation: "g2" });
   });
@@ -173,7 +184,15 @@ describe("WorkerRpcClient", () => {
       id: 1,
       operation: "apply_source_changes",
       ok: true,
-      result: { generation: "g3", documents: 0, chunks: 0, quarantined_sources: 0, quarantine_fields: [] },
+      result: {
+        generation: "g3",
+        documents: 0,
+        chunks: 0,
+        database_bytes: 0,
+        database_byte_limit: 1,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+      },
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
   });
@@ -245,7 +264,15 @@ describe("WorkerRpcClient", () => {
       id: 1,
       operation: "restore_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
+      result: {
+        generation: "g1",
+        documents: 1,
+        chunks: 1,
+        database_bytes: 1,
+        database_byte_limit: 2,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+      },
     });
     await expect(pending).resolves.toMatchObject({ generation: "g1" });
   });
@@ -269,7 +296,15 @@ describe("WorkerRpcClient", () => {
       id: 1,
       operation: "restore_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
+      result: {
+        generation: "g1",
+        documents: 1,
+        chunks: 1,
+        database_bytes: 1,
+        database_byte_limit: 2,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+      },
     });
     await expect(pending).resolves.toMatchObject({ generation: "g1" });
   });
@@ -283,7 +318,15 @@ describe("WorkerRpcClient", () => {
       id: 1,
       operation: "restore_generation",
       ok: true,
-      result: { generation: "g2", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
+      result: {
+        generation: "g2",
+        documents: 1,
+        chunks: 1,
+        database_bytes: 1,
+        database_byte_limit: 2,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+      },
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
   });

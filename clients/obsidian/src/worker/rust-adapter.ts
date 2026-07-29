@@ -11,10 +11,10 @@ import {
   prepare_source,
 } from "virtual:kwiry-rust-wasm-bindings";
 
-import type { SourceDescriptorInput } from "./protocol";
+import type { PropertyBag, SourceDescriptorInput } from "./protocol";
 
 const ABI_VERSION = 1;
-const SOURCE_SCHEMA_VERSION = 1;
+const SOURCE_SCHEMA_VERSION = 2;
 const QUERY_SCHEMA_VERSION = 2;
 const MATCH_PLAN_SCHEMA_VERSION = 1;
 
@@ -22,7 +22,7 @@ export interface RustIdentity {
   abi_version: 1;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
-  source_preparation_schema_version: 1;
+  source_preparation_schema_version: 2;
   lexical_query_plan_schema_version: 2;
   fts5_match_plan_schema_version: 1;
   /**
@@ -36,12 +36,17 @@ export interface RustIdentity {
   operations: ["prepare_source", "prepare_oversized_source", "prepare_query", "finalize_query"];
 }
 
+export type PreparedPropertyValue =
+  | { type: "null" }
+  | { type: "boolean"; value: boolean }
+  | { type: "i64" | "u64"; value: string }
+  | { type: "f64"; value: string }
+  | { type: "string"; value: string }
+  | { type: "sequence"; value: PreparedPropertyValue[] }
+  | { type: "map"; value: PreparedFrontmatter };
+
 export interface PreparedFrontmatter {
-  title?: string;
-  description?: string;
-  tags?: string[];
-  status?: string;
-  date?: string;
+  [name: string]: PreparedPropertyValue;
 }
 
 export interface PreparedChunk {
@@ -52,7 +57,7 @@ export interface PreparedChunk {
     path: string;
     heading_path: string[];
     content: string;
-    frontmatter: PreparedFrontmatter;
+    frontmatter: PropertyBag;
     links_out: string[];
     mtime: number;
     content_hash: string;
@@ -63,7 +68,7 @@ export interface PreparedChunk {
 }
 
 export interface SourcePreparation {
-  schema_version: 1;
+  schema_version: 2;
   source_key: string;
   vault_id: string;
   room?: string;
@@ -78,6 +83,7 @@ export interface SourcePreparation {
     stem: string;
     aliases: string[];
   };
+  frontmatter: PreparedFrontmatter;
   chunks: PreparedChunk[];
   kind: "indexed" | "skipped";
   warning?: string;
@@ -161,11 +167,14 @@ export function prepareSourceWithRust(
   if (!isRecord(response.result) || !hasExactKeys(response.result, ["preparation"])) {
     throw new RustAdapterError("invalid_response", "Portable Rust returned invalid source data.");
   }
-  const prepared = response.result.preparation;
-  const defect = sourcePreparationDefect(prepared);
+  return requireSourcePreparation(response.result.preparation);
+}
+
+function requireSourcePreparation(value: unknown): SourcePreparation {
+  const defect = sourcePreparationDefect(value);
   if (defect !== null) {
-    // The field name is carried on the error so a field report can say which
-    // check refused the source instead of only that one did.
+    // Only the fixed structural identifier crosses the diagnostic boundary;
+    // property names and values remain note content and are never reported.
     const failure = new RustAdapterError(
       "invalid_response",
       "Portable Rust returned invalid source data.",
@@ -173,10 +182,7 @@ export function prepareSourceWithRust(
     (failure as { defectField?: string }).defectField = defect;
     throw failure;
   }
-  if (!isSourcePreparation(prepared)) {
-    throw new RustAdapterError("invalid_response", "Portable Rust returned invalid source data.");
-  }
-  return prepared;
+  return value as SourcePreparation;
 }
 
 export function prepareOversizedSourceWithRust(
@@ -190,12 +196,10 @@ export function prepareOversizedSourceWithRust(
     })),
     "prepare_oversized_source",
   );
-  if (!isRecord(response.result)
-    || !hasExactKeys(response.result, ["preparation"])
-    || !isSourcePreparation(response.result.preparation)) {
+  if (!isRecord(response.result) || !hasExactKeys(response.result, ["preparation"])) {
     throw new RustAdapterError("invalid_response", "Portable Rust returned invalid source data.");
   }
-  const preparation = response.result.preparation;
+  const preparation = requireSourcePreparation(response.result.preparation);
   if (preparation.kind !== "skipped"
     || preparation.content_hash !== null
     || preparation.byte_length !== descriptor.byte_length) {
@@ -265,9 +269,10 @@ function parseResponse(source: string, operation: string): SuccessResponse {
 }
 
 function parseJson(source: string): unknown {
-  if (source.length > 32 * 1024 * 1024) {
-    throw new RustAdapterError("invalid_response", "Portable Rust response exceeded its limit.");
-  }
+  // The in-process Rust call has already allocated the complete response before
+  // this point. A second arbitrary length cap cannot protect allocation; it can
+  // only reject valid large property bags, especially when note-level metadata
+  // is repeated across several chunks.
   try {
     return JSON.parse(source);
   } catch {
@@ -305,106 +310,6 @@ function isRustIdentity(value: unknown): value is RustIdentity {
       "prepare_query",
       "finalize_query",
     ]);
-}
-
-function isSourcePreparation(value: unknown): value is SourcePreparation {
-  if (!isRecord(value)) return false;
-  const required = [
-    "schema_version",
-    "source_key",
-    "vault_id",
-    "path",
-    "format",
-    "content_hash",
-    "byte_length",
-    "mtime",
-    "mtime_nanos",
-    "retrieval",
-    "chunks",
-    "kind",
-  ];
-  const optional = ["room", "warning"];
-  if (!hasRequiredAndOptionalKeys(value, required, optional)
-    || value.schema_version !== SOURCE_SCHEMA_VERSION
-    || !isBoundedString(value.source_key, 128)
-    || !isBoundedString(value.vault_id, 1_024)
-    || (value.room !== undefined && !isBoundedString(value.room, 1_024))
-    || !isBoundedString(value.path, 4_096)
-    || (value.format !== "markdown" && value.format !== "text")
-    || (value.content_hash !== null && !isBoundedString(value.content_hash, 128))
-    || !isNonNegativeSafeInteger(value.byte_length)
-    || !isNonNegativeSafeInteger(value.mtime)
-    || typeof value.mtime_nanos !== "string"
-    || !/^[0-9]{1,39}$/u.test(value.mtime_nanos)
-    || !isRetrieval(value.retrieval)
-    || !Array.isArray(value.chunks)
-    || value.chunks.length > 100_000
-    || !value.chunks.every(isPreparedChunk)
-    || (value.kind !== "indexed" && value.kind !== "skipped")
-    || (value.warning !== undefined && !isBoundedString(value.warning, 4_096, true))) {
-    return false;
-  }
-  // A skipped source never carries chunks, and an indexed source always
-  // carries the hash its chunks were derived from. Both halves are enforced
-  // here so a malformed preparation is rejected at the ABI boundary — as
-  // `source_rejected` — rather than surfacing later as a storage constraint
-  // violation the Worker would have to blame on the index.
-  if (value.kind === "skipped") return value.chunks.length === 0;
-  return value.content_hash !== null;
-}
-
-function isRetrieval(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ["filename", "stem", "aliases"])
-    && isBoundedString(value.filename, 4_096)
-    && isBoundedString(value.stem, 4_096)
-    && isStringArray(value.aliases);
-}
-
-function isPreparedChunk(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ["chunk", "heading_text", "technical_identifiers"])
-    && isChunk(value.chunk)
-    && isBoundedString(value.heading_text, 8_192, true)
-    && isStringArray(value.technical_identifiers);
-}
-
-function isChunk(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, [
-      "chunk_id",
-      "vault_id",
-      "room",
-      "path",
-      "heading_path",
-      "content",
-      "frontmatter",
-      "links_out",
-      "mtime",
-      "content_hash",
-      "chunking_version",
-    ])
-    && isBoundedString(value.chunk_id, 128)
-    && isBoundedString(value.vault_id, 1_024)
-    && (value.room === null || isBoundedString(value.room, 1_024))
-    && isBoundedString(value.path, 4_096)
-    && isStringArray(value.heading_path)
-    && isBoundedString(value.content, 16_384)
-    && isFrontmatter(value.frontmatter)
-    && isStringArray(value.links_out)
-    && isNonNegativeSafeInteger(value.mtime)
-    && isBoundedString(value.content_hash, 128)
-    && isNonNegativeSafeInteger(value.chunking_version);
-}
-
-function isFrontmatter(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const allowed = ["title", "description", "tags", "status", "date"];
-  if (Object.keys(value).some((key) => !allowed.includes(key))) return false;
-  for (const key of ["title", "description", "status", "date"] as const) {
-    if (value[key] !== undefined && !isBoundedString(value[key], 1_024, true)) return false;
-  }
-  return value.tags === undefined || isStringArray(value.tags);
 }
 
 function isPreparedQuery(value: unknown): value is PreparedQuery {
@@ -521,8 +426,4 @@ function hasRequiredAndOptionalKeys(
   const actual = Object.keys(value);
   return required.every((key) => actual.includes(key))
     && actual.every((key) => required.includes(key) || optional.includes(key));
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }

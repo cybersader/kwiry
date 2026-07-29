@@ -896,13 +896,28 @@ mod tests {
     fn incompatible_index_pointer_is_rejected_without_mutation() {
         let temporary = tempdir().unwrap();
         let current_path = temporary.path().join("current.json");
-        let source = r#"{"layout_version":1,"index_format_version":2,"generation":"old"}"#;
+        let source = r#"{"layout_version":2,"index_format_version":5,"generation":"old"}"#;
         fs::write(&current_path, source).unwrap();
         let root = DataRoot::new(temporary.path());
 
         let error = root.active().unwrap_err();
-        assert!(error.to_string().contains("found layout=1, index=2"));
-        assert!(error.to_string().contains("expected layout=2, index=5"));
+        assert!(error.to_string().contains("found layout=2, index=5"));
+        assert!(error.to_string().contains("expected layout=2, index=6"));
+        assert!(error.to_string().contains("kwiry index"));
+        assert_eq!(fs::read_to_string(current_path).unwrap(), source);
+    }
+
+    #[test]
+    fn incompatible_layout_pointer_is_rejected_without_mutation() {
+        let temporary = tempdir().unwrap();
+        let current_path = temporary.path().join("current.json");
+        let source = r#"{"layout_version":1,"index_format_version":6,"generation":"old"}"#;
+        fs::write(&current_path, source).unwrap();
+        let root = DataRoot::new(temporary.path());
+
+        let error = root.active().unwrap_err();
+        assert!(error.to_string().contains("found layout=1, index=6"));
+        assert!(error.to_string().contains("expected layout=2, index=6"));
         assert!(error.to_string().contains("kwiry index"));
         assert_eq!(fs::read_to_string(current_path).unwrap(), source);
     }
@@ -916,7 +931,7 @@ mod tests {
 
         let error = root.active_or_legacy_index().unwrap_err();
         assert!(error.to_string().contains("legacy index layout"));
-        assert!(error.to_string().contains("expected index format 5"));
+        assert!(error.to_string().contains("expected index format 6"));
         assert!(error.to_string().contains("kwiry index"));
         assert_eq!(fs::read_to_string(meta_path).unwrap(), "{}");
     }

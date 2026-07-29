@@ -67,6 +67,8 @@ function resultFor(message: WorkerRequest): WorkerResult {
         generation: message.generation,
         documents: 0,
         chunks: 0,
+        database_bytes: 0,
+        database_byte_limit: 1,
         quarantined_sources: 0,
         quarantine_fields: [],
       };
@@ -75,6 +77,8 @@ function resultFor(message: WorkerRequest): WorkerResult {
         generation: message.next_generation ?? message.generation,
         documents: message.upserts.length,
         chunks: message.upserts.length,
+        database_bytes: 0,
+        database_byte_limit: 1,
         quarantined_sources: 0,
         quarantine_fields: [],
       };
@@ -82,6 +86,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
       return {
         generation: message.generation,
         unchanged: [],
+        audit: [],
         refresh: message.current_sources.map((source) => source.path),
         remove: [],
         stored_source_count: 0,
@@ -115,6 +120,9 @@ function resultFor(message: WorkerRequest): WorkerResult {
         staging_generation: null,
         documents: 0,
         chunks: 0,
+        active_database_bytes: 0,
+        staging_database_bytes: 0,
+        database_byte_limit: 1,
         dirty: false,
         rebuilding: false,
       };

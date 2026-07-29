@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source_key": "7355fc5a771229cfc09ecc97863925716ab78d5c9d3e235d025b57ead16e3075",
   "vault_id": "golden-vault",
   "path": "Golden/Deep Heading Nesting.md",
@@ -13,6 +13,7 @@
     "stem": "Deep Heading Nesting",
     "aliases": []
   },
+  "frontmatter": {},
   "chunks": [
     {
       "chunk": {
@@ -28,7 +29,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Level One",
       "technical_identifiers": []
@@ -48,7 +49,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Level One Level Two",
       "technical_identifiers": []
@@ -69,7 +70,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Level One Level Two Level Three",
       "technical_identifiers": []
@@ -91,7 +92,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Level One Level Two Level Three Level Four",
       "technical_identifiers": []
@@ -114,7 +115,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Level One Level Two Level Three Level Four Level Five",
       "technical_identifiers": []
@@ -138,7 +139,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Level One Level Two Level Three Level Four Level Five Level Six",
       "technical_identifiers": []

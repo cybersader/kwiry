@@ -180,6 +180,7 @@ describe("Worker protocol", () => {
       result: {
         generation: "g1",
         unchanged: ["note.md"],
+        audit: [],
         refresh: ["changed.md"],
         remove: ["gone.md"],
         stored_source_count: 2,
@@ -194,6 +195,7 @@ describe("Worker protocol", () => {
       result: {
         generation: "g1",
         unchanged: ["note.md"],
+        audit: [],
         refresh: ["note.md"],
         remove: [],
         stored_source_count: 1,
@@ -215,6 +217,7 @@ describe("Worker protocol", () => {
       result: {
         generation: "g1",
         unchanged: [],
+        audit: [],
         refresh,
         remove,
         stored_source_count: inventorySize,
@@ -232,6 +235,7 @@ describe("Worker protocol", () => {
       result: {
         generation: "g1",
         unchanged: ["current.md"],
+        audit: [],
         refresh: [],
         remove: [],
         stored_source_count: 2,
@@ -388,7 +392,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "restore_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 2, quarantined_sources: 0, quarantine_fields: [] },
+      result: { generation: "g1", documents: 1, chunks: 2, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [] },
     })).toBe(true);
     for (const code of [
       "cache_identity_mismatch",
@@ -447,7 +451,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "export_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
+      result: { generation: "g1", documents: 1, chunks: 1, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [] },
     })).toBe(false);
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
@@ -510,7 +514,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "apply_source_changes",
       ok: true,
-      result: { generation: "g2", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
+      result: { generation: "g2", documents: 1, chunks: 1, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [] },
     })).toBe(true);
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
@@ -538,6 +542,62 @@ describe("Worker protocol", () => {
       ok: true,
       result: { closed: true },
     })).toBe(true);
+  });
+
+  it("requires measured database bytes in build and status responses", () => {
+    const status = {
+      phase: "ready",
+      searchable: true,
+      active_generation: "g1",
+      staging_generation: null,
+      documents: 1,
+      chunks: 2,
+      active_database_bytes: 131_072,
+      staging_database_bytes: 0,
+      database_byte_limit: 1024 * 1024,
+      dirty: false,
+      rebuilding: false,
+    };
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "status",
+      ok: true,
+      result: status,
+    })).toBe(true);
+    const { active_database_bytes: _bytes, ...missingBytes } = status;
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "status",
+      ok: true,
+      result: missingBytes,
+    })).toBe(false);
+  });
+
+  it("carries only compact display frontmatter in ordinary search responses", () => {
+    const response = (frontmatter: unknown) => ({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "search" as const,
+      ok: true as const,
+      result: {
+        generation: "g1",
+        hits: [{
+          chunk_id: "chunk-1",
+          vault_id: "active-vault",
+          path: "note.md",
+          heading_path: [],
+          score: 1,
+          excerpt: "",
+          frontmatter,
+        }],
+      },
+    });
+    expect(isWorkerResponse(response({ title: "Display title" }))).toBe(true);
+    expect(isWorkerResponse(response({}))).toBe(true);
+    expect(isWorkerResponse(response({ payload: "x".repeat(2 * 1024 * 1024) }))).toBe(false);
+    expect(isWorkerResponse(response({ title: "x".repeat(1_025) }))).toBe(false);
   });
 
   // The hit shape is frozen. Slimming the index changed how the excerpt text

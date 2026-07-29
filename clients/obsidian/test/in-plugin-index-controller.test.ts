@@ -193,6 +193,8 @@ class FakeWorker implements IndexWorkerPort {
       generation,
       documents: paths.size,
       chunks: paths.size,
+      database_bytes: paths.size,
+      database_byte_limit: 1_000_000,
       quarantined_sources: this.quarantinedSources,
       quarantine_fields: [...this.quarantineFields],
     };
@@ -201,8 +203,18 @@ class FakeWorker implements IndexWorkerPort {
 
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
 
+async function sha256Text(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 class FakeCacheWorker extends FakeWorker {
-  readonly restoredLedger = new Map<string, ReconciliationSourceMetadata>();
+  readonly restoredLedger = new Map<
+    string,
+    ReconciliationSourceMetadata & { content_hash?: string }
+  >();
   readonly planCalls: ReconciliationSourceMetadata[][] = [];
   readonly exportCalls: string[] = [];
   restoreCalls = 0;
@@ -225,6 +237,7 @@ class FakeCacheWorker extends FakeWorker {
     const storedSourceCount = stored.size;
     let matchedSourceCount = 0;
     const unchanged: string[] = [];
+    const audit: Array<{ path: string; content_hash: string }> = [];
     const refresh: string[] = [];
     for (const source of currentSources) {
       const previous = stored.get(source.path);
@@ -234,7 +247,14 @@ class FakeCacheWorker extends FakeWorker {
         && previous.byte_length === source.byte_length
         && previous.mtime_nanos === source.mtime_nanos
         && previous.indexable === source.indexable) {
-        unchanged.push(source.path);
+        if (source.indexable) {
+          audit.push({
+            path: source.path,
+            content_hash: previous.content_hash ?? "0".repeat(64),
+          });
+        } else {
+          unchanged.push(source.path);
+        }
       } else {
         refresh.push(source.path);
       }
@@ -242,6 +262,7 @@ class FakeCacheWorker extends FakeWorker {
     return {
       generation,
       unchanged,
+      audit,
       refresh,
       remove: [...stored.keys()].sort(),
       stored_source_count: storedSourceCount,
@@ -260,6 +281,8 @@ class FakeCacheWorker extends FakeWorker {
       generation,
       documents: paths.size,
       chunks: paths.size,
+      database_bytes: paths.size,
+      database_byte_limit: 1_000_000,
       quarantined_sources: 0,
       quarantine_fields: [],
     };
@@ -796,7 +819,7 @@ describe("InPluginIndexController", () => {
     });
   });
 
-  it("binds before Worker and cache awaits, restores searchable-stale, and reads only changed sources", async () => {
+  it("binds before awaits, audits metadata matches, and mutates only changed sources", async () => {
     const source = new FakeSource();
     source.set("unchanged.md", "same", 1);
     source.set("changed.md", "new value", 2);
@@ -807,6 +830,7 @@ describe("InPluginIndexController", () => {
       byte_length: 4,
       mtime_nanos: "1000000",
       indexable: true,
+      content_hash: await sha256Text("same"),
     });
     worker.restoredLedger.set("changed.md", {
       path: "changed.md",
@@ -861,6 +885,7 @@ describe("InPluginIndexController", () => {
     expect(source.log.filter((entry) => entry.startsWith("read:"))).toEqual([
       "read:changed.md",
       "read:new.md",
+      "read:unchanged.md",
     ]);
     expect(worker.applyCalls).toEqual([
       {
@@ -887,6 +912,33 @@ describe("InPluginIndexController", () => {
       generation: "generation-3",
       dirty: false,
     });
+  });
+
+  it("refreshes a same-size same-mtime source when its authoritative hash changed", async () => {
+    const source = new FakeSource();
+    source.set("property.md", "008", 1);
+    const worker = new FakeCacheWorker();
+    worker.restoredLedger.set("property.md", {
+      path: "property.md",
+      byte_length: 3,
+      mtime_nanos: "1000000",
+      indexable: true,
+      content_hash: await sha256Text("007"),
+    });
+    const { controller } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store: new FakeCacheStore(cacheHit()) }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(source.log).toContain("read:property.md");
+    expect(worker.applyCalls).toEqual([{
+      generation: "cached-generation",
+      nextGeneration: "generation-1",
+      upserts: ["property.md"],
+      removals: [],
+    }]);
   });
 
   it("keeps a complete restored generation when refresh reads prove a systemic outage", async () => {
@@ -938,6 +990,7 @@ describe("InPluginIndexController", () => {
       byte_length: 4,
       mtime_nanos: "1000000",
       indexable: true,
+      content_hash: await sha256Text("kept"),
     });
     worker.restoredLedger.set("deleted.md", {
       path: "deleted.md",

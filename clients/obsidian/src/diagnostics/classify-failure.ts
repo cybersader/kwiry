@@ -68,9 +68,11 @@ export type FailureErrorName =
 /// source-defect.ts. A closed list rather than a shape test, because shape
 /// cannot distinguish a field name from a note title.
 const SOURCE_DEFECT_FIELDS = new Set<string>([
-  "not_a_record", "schema_version", "source_key", "vault_id", "room", "path",
-  "format", "content_hash", "byte_length", "mtime", "mtime_nanos", "retrieval",
-  "chunks_shape", "chunks_contents", "kind", "warning", "skipped_has_chunks",
+  "not_a_record", "preparation_fields", "schema_version", "source_key", "vault_id",
+  "room", "path", "format", "content_hash", "byte_length", "mtime", "mtime_nanos",
+  "retrieval", "chunks_shape", "chunks_contents", "frontmatter_not_a_record",
+  "frontmatter_property_value", "frontmatter_property_nesting",
+  "frontmatter_property_cycle", "kind", "warning", "skipped_has_chunks",
   "indexed_missing_hash",
 ]);
 

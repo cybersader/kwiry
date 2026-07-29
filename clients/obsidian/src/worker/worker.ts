@@ -18,6 +18,7 @@ import { BlockVfsUnavailableError } from "./block-vfs";
 import {
   CacheImageInvalidError,
   CacheVersionMismatchError,
+  DEFAULT_DATABASE_BYTE_LIMIT,
   IndexCapacityError,
   IndexIntegrityError,
   openFts5Generation,
@@ -312,8 +313,9 @@ function publishStaging(target: Generation, compact: boolean): BuildResult {
   if (compact) {
     try {
       target.index.compact();
-    } catch {
+    } catch (error) {
       abortStaging();
+      if (error instanceof IndexCapacityError) throw indexCapacityError();
       throw fixedWorkerError(
         "integrity_failed",
         "index",
@@ -696,6 +698,9 @@ function status(): StatusResult {
       staging_generation: null,
       documents: 0,
       chunks: 0,
+      active_database_bytes: 0,
+      staging_database_bytes: 0,
+      database_byte_limit: DEFAULT_DATABASE_BYTE_LIMIT,
       dirty: true,
       rebuilding: false,
     };
@@ -708,6 +713,11 @@ function status(): StatusResult {
     staging_generation: staging?.id ?? null,
     documents: active?.index.documents ?? 0,
     chunks: active?.index.chunks ?? 0,
+    active_database_bytes: active?.index.databaseBytes ?? 0,
+    staging_database_bytes: staging?.index.databaseBytes ?? 0,
+    database_byte_limit: active?.index.databaseByteLimit
+      ?? staging?.index.databaseByteLimit
+      ?? DEFAULT_DATABASE_BYTE_LIMIT,
     dirty: !active || staging !== null || failed,
     rebuilding: staging !== null,
   };
@@ -762,6 +772,8 @@ function generationResult(generation: Generation): BuildResult {
     generation: generation.id,
     documents: generation.index.documents,
     chunks: generation.index.chunks,
+    database_bytes: generation.index.databaseBytes,
+    database_byte_limit: generation.index.databaseByteLimit,
     quarantined_sources: generation.quarantinedSources.size,
     quarantine_fields: [...new Set(generation.quarantinedSources.values())].sort(),
   };
@@ -816,7 +828,7 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
   const filename = descriptor.path.split("/").at(-1) ?? descriptor.path;
   const separator = filename.lastIndexOf(".");
   return {
-    schema_version: 1,
+    schema_version: 2,
     source_key: await sourceKey(descriptor.vault_id, descriptor.path),
     vault_id: descriptor.vault_id,
     ...(descriptor.room === undefined ? {} : { room: descriptor.room }),
@@ -831,6 +843,7 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
       stem: separator > 0 ? filename.slice(0, separator) : filename,
       aliases: [],
     },
+    frontmatter: {},
     chunks: [],
     kind: "skipped",
     warning: SOURCE_QUARANTINE_WARNING_CODE,

@@ -1,18 +1,21 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use std::ops::Range;
+use std::sync::Arc;
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::frontmatter::parse_frontmatter;
 use crate::lexical::technical_identifiers;
 use crate::links::extract_wikilinks;
 use crate::model::{
-    CHUNK_OVERLAP_CHARS, CHUNKING_VERSION, Chunk, MAX_CHUNK_CHARS, MAX_FILE_BYTES, PreparedChunk,
-    RetrievalMetadata,
+    CHUNK_OVERLAP_CHARS, CHUNKING_VERSION, Chunk, Frontmatter, MAX_CHUNK_CHARS, MAX_FILE_BYTES,
+    PreparedChunk, PropertyBag, RetrievalMetadata,
 };
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 1;
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -42,7 +45,7 @@ pub enum SourcePreparationKind {
     Skipped,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SourcePreparation {
     pub schema_version: u32,
     pub source_key: String,
@@ -57,10 +60,69 @@ pub struct SourcePreparation {
     #[serde(with = "decimal_u128")]
     pub mtime_nanos: u128,
     pub retrieval: RetrievalMetadata,
+    /// Canonical source-level properties. The Obsidian ABI serializes this bag
+    /// with explicit numeric variants so JavaScript cannot round unsafe integers
+    /// or reclassify integral floats before the durable projection is built.
+    #[serde(with = "frontmatter_abi")]
+    pub frontmatter: PropertyBag,
     pub chunks: Vec<PreparedChunk>,
     pub kind: SourcePreparationKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SourcePreparationWire {
+    schema_version: u32,
+    source_key: String,
+    vault_id: String,
+    #[serde(default)]
+    room: Option<String>,
+    path: String,
+    format: SourceFormat,
+    content_hash: Option<String>,
+    byte_length: u64,
+    mtime: u64,
+    #[serde(with = "decimal_u128")]
+    mtime_nanos: u128,
+    retrieval: RetrievalMetadata,
+    #[serde(with = "frontmatter_abi")]
+    frontmatter: PropertyBag,
+    chunks: Vec<PreparedChunk>,
+    kind: SourcePreparationKind,
+    #[serde(default)]
+    warning: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SourcePreparation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut wire = SourcePreparationWire::deserialize(deserializer)?;
+        let source_frontmatter = Arc::new(Frontmatter::from_properties(&wire.frontmatter));
+        for chunk in &mut wire.chunks {
+            chunk.source_properties = wire.frontmatter.clone();
+            chunk.source_frontmatter = Arc::clone(&source_frontmatter);
+        }
+        Ok(Self {
+            schema_version: wire.schema_version,
+            source_key: wire.source_key,
+            vault_id: wire.vault_id,
+            room: wire.room,
+            path: wire.path,
+            format: wire.format,
+            content_hash: wire.content_hash,
+            byte_length: wire.byte_length,
+            mtime: wire.mtime,
+            mtime_nanos: wire.mtime_nanos,
+            retrieval: wire.retrieval,
+            frontmatter: wire.frontmatter,
+            chunks: wire.chunks,
+            kind: wire.kind,
+            warning: wire.warning,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
@@ -107,6 +169,7 @@ pub fn prepare_oversized_source(
         mtime: descriptor.mtime,
         mtime_nanos: descriptor.mtime_nanos,
         retrieval: retrieval_metadata(&descriptor.path, Vec::new()),
+        frontmatter: Default::default(),
         chunks: Vec::new(),
         kind: SourcePreparationKind::Skipped,
         warning: Some(format!(
@@ -157,11 +220,18 @@ pub fn prepare_source_buffer(
         ));
     }
 
-    let (frontmatter, aliases, body, warning) = match descriptor.format {
+    let (properties, frontmatter, aliases, body, warning) = match descriptor.format {
         SourceFormat::Markdown => parse_frontmatter(&source),
-        SourceFormat::Text => (Default::default(), Vec::new(), source.as_str(), None),
+        SourceFormat::Text => (
+            PropertyBag::default(),
+            Frontmatter::default(),
+            Vec::new(),
+            source.as_str(),
+            None,
+        ),
     };
     let retrieval = retrieval_metadata(&descriptor.path, aliases);
+    let source_frontmatter = Arc::new(frontmatter);
     let links_out = extract_wikilinks(body);
     let sections = match descriptor.format {
         SourceFormat::Markdown => markdown_sections(body),
@@ -190,7 +260,7 @@ pub fn prepare_source_buffer(
                 path: descriptor.path.clone(),
                 heading_path: section.heading_path.clone(),
                 content: part.trim().to_owned(),
-                frontmatter: frontmatter.clone(),
+                frontmatter: Frontmatter::default(),
                 links_out: links_out.clone(),
                 mtime: descriptor.mtime,
                 content_hash: content_hash.clone(),
@@ -199,10 +269,37 @@ pub fn prepare_source_buffer(
             chunks.push(PreparedChunk {
                 heading_text: chunk.heading_path.join(" "),
                 technical_identifiers: technical_identifiers(&chunk.content),
+                source_properties: properties.clone(),
+                source_frontmatter: Arc::clone(&source_frontmatter),
                 chunk,
             });
             chunk_ix += 1;
         }
+    }
+
+    // A frontmatter-only note still needs a deterministic searchable result. Its empty portable
+    // chunk carries no source-level projection; native indexing shares both source-owned views.
+    if chunks.is_empty() && !properties.is_empty() {
+        let chunk = Chunk {
+            chunk_id: chunk_id(&descriptor.vault_id, &descriptor.path, &[], 0),
+            vault_id: descriptor.vault_id.clone(),
+            room: descriptor.room.clone(),
+            path: descriptor.path.clone(),
+            heading_path: Vec::new(),
+            content: String::new(),
+            frontmatter: Frontmatter::default(),
+            links_out,
+            mtime: descriptor.mtime,
+            content_hash: content_hash.clone(),
+            chunking_version: CHUNKING_VERSION,
+        };
+        chunks.push(PreparedChunk {
+            heading_text: String::new(),
+            technical_identifiers: Vec::new(),
+            source_properties: properties.clone(),
+            source_frontmatter: Arc::clone(&source_frontmatter),
+            chunk,
+        });
     }
 
     Ok(SourcePreparation {
@@ -217,6 +314,7 @@ pub fn prepare_source_buffer(
         mtime: descriptor.mtime,
         mtime_nanos: descriptor.mtime_nanos,
         retrieval,
+        frontmatter: properties,
         chunks,
         kind: SourcePreparationKind::Indexed,
         warning,
@@ -285,6 +383,7 @@ fn skipped_preparation(
         mtime: descriptor.mtime,
         mtime_nanos: descriptor.mtime_nanos,
         retrieval,
+        frontmatter: Default::default(),
         chunks: Vec::new(),
         kind: SourcePreparationKind::Skipped,
         warning: Some(warning),
@@ -465,6 +564,120 @@ fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+mod frontmatter_abi {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
+    use crate::model::{PropertyBag, PropertyValue};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(
+        tag = "type",
+        content = "value",
+        rename_all = "snake_case",
+        deny_unknown_fields
+    )]
+    enum AbiPropertyValue {
+        Null,
+        Boolean(bool),
+        I64(String),
+        U64(String),
+        F64(String),
+        String(String),
+        Sequence(Vec<Self>),
+        Map(BTreeMap<String, Self>),
+    }
+
+    impl From<&PropertyValue> for AbiPropertyValue {
+        fn from(value: &PropertyValue) -> Self {
+            match value {
+                PropertyValue::Null => Self::Null,
+                PropertyValue::Bool(value) => Self::Boolean(*value),
+                PropertyValue::I64(value) => Self::I64(value.to_string()),
+                PropertyValue::U64(value) => Self::U64(value.to_string()),
+                PropertyValue::F64(value) => Self::F64(format!("{:016x}", value.to_bits())),
+                PropertyValue::String(value) => Self::String(value.clone()),
+                PropertyValue::Sequence(values) => {
+                    Self::Sequence(values.iter().map(Self::from).collect())
+                }
+                PropertyValue::Map(values) => Self::Map(
+                    values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), Self::from(value)))
+                        .collect(),
+                ),
+            }
+        }
+    }
+
+    impl TryFrom<AbiPropertyValue> for PropertyValue {
+        type Error = String;
+
+        fn try_from(value: AbiPropertyValue) -> Result<Self, Self::Error> {
+            match value {
+                AbiPropertyValue::Null => Ok(Self::Null),
+                AbiPropertyValue::Boolean(value) => Ok(Self::Bool(value)),
+                AbiPropertyValue::I64(value) => value
+                    .parse()
+                    .map(Self::I64)
+                    .map_err(|_| "invalid i64 property value".to_owned()),
+                AbiPropertyValue::U64(value) => value
+                    .parse()
+                    .map(Self::U64)
+                    .map_err(|_| "invalid u64 property value".to_owned()),
+                AbiPropertyValue::F64(value) => {
+                    if value.len() != 16 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        return Err("invalid f64 property value".to_owned());
+                    }
+                    u64::from_str_radix(&value, 16)
+                        .map(f64::from_bits)
+                        .map(Self::F64)
+                        .map_err(|_| "invalid f64 property value".to_owned())
+                }
+                AbiPropertyValue::String(value) => Ok(Self::String(value)),
+                AbiPropertyValue::Sequence(values) => values
+                    .into_iter()
+                    .map(Self::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Self::Sequence),
+                AbiPropertyValue::Map(values) => values
+                    .into_iter()
+                    .map(|(name, value)| Self::try_from(value).map(|value| (name, value)))
+                    .collect::<Result<BTreeMap<_, _>, _>>()
+                    .map(Self::Map),
+            }
+        }
+    }
+
+    pub fn serialize<S>(frontmatter: &PropertyBag, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        frontmatter
+            .iter()
+            .map(|(name, value)| (name, AbiPropertyValue::from(value)))
+            .collect::<BTreeMap<_, _>>()
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PropertyBag, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, AbiPropertyValue>::deserialize(deserializer)?;
+        let properties = values
+            .into_iter()
+            .map(|(name, value)| {
+                PropertyValue::try_from(value)
+                    .map(|value| (name, value))
+                    .map_err(de::Error::custom)
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        Ok(PropertyBag::from_properties(properties))
+    }
+}
+
 mod decimal_u128 {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -486,6 +699,8 @@ mod decimal_u128 {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::PropertyValue;
+
     use super::*;
 
     fn descriptor(path: &str, format: SourceFormat, bytes: &[u8]) -> SourceDescriptor {
@@ -579,6 +794,264 @@ mod tests {
                 .unwrap();
         assert_eq!(prepared.chunks.len(), 1);
         assert!(prepared.chunks[0].heading_path.is_empty());
+    }
+
+    #[test]
+    fn carries_a_thousand_open_properties_without_truncation() {
+        let mut source = String::from("---\n");
+        for index in 0..1_000 {
+            source.push_str(&format!("property_{index}: value_{index}\n"));
+        }
+        source.push_str("---\nBody\n");
+
+        let prepared = prepare_source_buffer(
+            &descriptor(
+                "many-properties.md",
+                SourceFormat::Markdown,
+                source.as_bytes(),
+            ),
+            source.as_bytes(),
+        )
+        .unwrap();
+        let frontmatter = &prepared.frontmatter;
+
+        assert_eq!(frontmatter.len(), 1_000);
+        assert_eq!(
+            frontmatter.get("property_999"),
+            Some(&PropertyValue::String("value_999".to_owned()))
+        );
+    }
+
+    #[test]
+    fn carries_deep_property_maps_within_the_corruption_boundary() {
+        // Thirty-two levels is adversarially deep while remaining below the explicit 64-level
+        // corruption/call-stack boundary shared by property construction and alias replay.
+        const DEPTH: usize = 32;
+        let mut source = String::from("---\nnested:\n");
+        for depth in 0..DEPTH {
+            source.push_str(&"  ".repeat(depth + 1));
+            source.push_str(&format!("level_{depth}:\n"));
+        }
+        source.push_str(&"  ".repeat(DEPTH + 1));
+        source.push_str("leaf: value\n---\nBody\n");
+
+        let prepared = prepare_source_buffer(
+            &descriptor(
+                "deep-properties.md",
+                SourceFormat::Markdown,
+                source.as_bytes(),
+            ),
+            source.as_bytes(),
+        )
+        .unwrap();
+        let mut value = prepared.frontmatter.get("nested").expect("nested property");
+        for depth in 0..DEPTH {
+            let PropertyValue::Map(map) = value else {
+                panic!("level {depth} must remain a map");
+            };
+            value = map.get(&format!("level_{depth}")).expect("nested level");
+        }
+        let PropertyValue::Map(leaf) = value else {
+            panic!("deepest value must remain a map");
+        };
+        assert_eq!(
+            leaf.get("leaf"),
+            Some(&PropertyValue::String("value".to_owned()))
+        );
+    }
+
+    #[test]
+    fn carries_a_twelve_hundred_element_property_array_once_per_source() {
+        let values = (0..1_200)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("---\nitems: [{values}]\n---\nBody\n");
+
+        let prepared = prepare_source_buffer(
+            &descriptor("large-array.md", SourceFormat::Markdown, source.as_bytes()),
+            source.as_bytes(),
+        )
+        .unwrap();
+        let Some(PropertyValue::Sequence(items)) = prepared.frontmatter.get("items") else {
+            panic!("items must remain a sequence");
+        };
+
+        assert_eq!(items.len(), 1_200);
+        assert_eq!(items.first(), Some(&PropertyValue::I64(0)));
+        assert_eq!(items.last(), Some(&PropertyValue::I64(1_199)));
+    }
+
+    #[test]
+    fn permits_the_same_property_key_to_have_different_types_across_notes() {
+        let cases = [
+            ("integer.md", "signal: 7", PropertyValue::I64(7)),
+            (
+                "string.md",
+                "signal: '7'",
+                PropertyValue::String("7".to_owned()),
+            ),
+            ("boolean.md", "signal: true", PropertyValue::Bool(true)),
+        ];
+
+        for (path, yaml, expected) in cases {
+            let source = format!("---\n{yaml}\n---\nBody\n");
+            let prepared = prepare_source_buffer(
+                &descriptor(path, SourceFormat::Markdown, source.as_bytes()),
+                source.as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(prepared.frontmatter.get("signal"), Some(&expected));
+        }
+    }
+
+    #[test]
+    fn frontmatter_only_sources_emit_one_compact_search_chunk() {
+        let source = b"---\npriority: 7\naliases: [Only Alias]\n---\n";
+        let prepared = prepare_source_buffer(
+            &descriptor("frontmatter-only.md", SourceFormat::Markdown, source),
+            source,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.chunks.len(), 1);
+        assert_eq!(prepared.chunks[0].chunking_version, 2);
+        assert!(prepared.chunks[0].content.is_empty());
+        assert_eq!(prepared.chunks[0].frontmatter, Frontmatter::default());
+        assert_eq!(prepared.chunks[0].source_properties, prepared.frontmatter);
+        assert_eq!(
+            prepared.frontmatter.get("priority"),
+            Some(&PropertyValue::I64(7))
+        );
+    }
+
+    #[test]
+    fn source_property_abi_preserves_numeric_variants_exactly() {
+        let source = b"---\ni64_value: -9007199254740993\nu64_value: 18446744073709551615\nf64_value: 125.0\n---\nBody\n";
+        let prepared = prepare_source_buffer(
+            &descriptor("numeric.md", SourceFormat::Markdown, source),
+            source,
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(&prepared).unwrap();
+
+        assert_eq!(encoded["frontmatter"]["i64_value"]["type"], "i64");
+        assert_eq!(
+            encoded["frontmatter"]["i64_value"]["value"],
+            "-9007199254740993"
+        );
+        assert_eq!(encoded["frontmatter"]["u64_value"]["type"], "u64");
+        assert_eq!(
+            encoded["frontmatter"]["u64_value"]["value"],
+            "18446744073709551615"
+        );
+        assert_eq!(encoded["frontmatter"]["f64_value"]["type"], "f64");
+        assert_eq!(
+            encoded["frontmatter"]["f64_value"]["value"],
+            "405f400000000000"
+        );
+        assert_eq!(
+            encoded["chunks"][0]["chunk"]["frontmatter"],
+            serde_json::json!({})
+        );
+        assert!(encoded["chunks"][0]["chunk"]["frontmatter"]["i64_value"].is_null());
+        assert!(encoded["chunks"][0]["chunk"]["frontmatter"]["u64_value"].is_null());
+        assert!(encoded["chunks"][0]["chunk"]["frontmatter"]["f64_value"].is_null());
+
+        let restored: SourcePreparation = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored, prepared);
+        assert!(
+            restored.chunks[0]
+                .source_properties
+                .shares_storage_with(&restored.frontmatter)
+        );
+    }
+
+    #[test]
+    fn serializes_one_source_bag_without_chunk_count_amplification() {
+        let payload = "property-payload-marker-".repeat(12_000);
+        let body = "bodyword ".repeat(120_000);
+        let source = format!("---\npayload: {payload}\n---\n{body}");
+        let prepared = prepare_source_buffer(
+            &descriptor(
+                "amplification.md",
+                SourceFormat::Markdown,
+                source.as_bytes(),
+            ),
+            source.as_bytes(),
+        )
+        .unwrap();
+
+        assert!(prepared.chunks.len() > 250);
+        assert!(prepared.chunks.iter().all(|chunk| {
+            chunk
+                .source_properties
+                .shares_storage_with(&prepared.frontmatter)
+        }));
+        let encoded = serde_json::to_string(&prepared).unwrap();
+        assert_eq!(encoded.matches(&payload).count(), 1);
+        assert!(
+            encoded.len() < source.len() * 2,
+            "serialized preparation unexpectedly amplified from {} to {} bytes",
+            source.len(),
+            encoded.len()
+        );
+    }
+
+    #[test]
+    fn serializes_legacy_fields_once_without_chunk_count_amplification() {
+        let title = "legacy-title-marker-".repeat(7_000);
+        let first_tag = "legacy-tag-marker-".repeat(5_000);
+        let body = "bodyword ".repeat(120_000);
+        let source = format!("---\ntitle: {title}\ntags: [{first_tag}, second]\n---\n{body}");
+        let prepared = prepare_source_buffer(
+            &descriptor(
+                "legacy-amplification.md",
+                SourceFormat::Markdown,
+                source.as_bytes(),
+            ),
+            source.as_bytes(),
+        )
+        .unwrap();
+
+        assert!(prepared.chunks.len() > 250);
+        assert!(prepared.chunks.iter().all(|chunk| {
+            Arc::ptr_eq(
+                &chunk.source_frontmatter,
+                &prepared.chunks[0].source_frontmatter,
+            )
+        }));
+        let encoded = serde_json::to_string(&prepared).unwrap();
+        assert_eq!(encoded.matches(&title).count(), 1);
+        assert_eq!(encoded.matches(&first_tag).count(), 1);
+        assert!(
+            encoded.len() < source.len() * 2,
+            "serialized legacy projection unexpectedly amplified from {} to {} bytes",
+            source.len(),
+            encoded.len()
+        );
+    }
+
+    #[test]
+    fn carries_a_megabyte_scale_property_value_without_truncation() {
+        let payload = "x".repeat(2 * 1024 * 1024);
+        let source = format!("---\npayload: {payload}\n---\nBody\n");
+
+        let prepared = prepare_source_buffer(
+            &descriptor(
+                "large-property.md",
+                SourceFormat::Markdown,
+                source.as_bytes(),
+            ),
+            source.as_bytes(),
+        )
+        .unwrap();
+        let Some(PropertyValue::String(actual)) = prepared.frontmatter.get("payload") else {
+            panic!("payload must remain a string");
+        };
+
+        assert_eq!(actual.len(), payload.len());
+        assert_eq!(actual, &payload);
     }
 
     #[test]

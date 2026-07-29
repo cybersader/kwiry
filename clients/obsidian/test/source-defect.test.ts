@@ -7,7 +7,7 @@ import { sourcePreparationDefect } from "../src/worker/source-defect";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
 
 const VALID = {
-  schema_version: 1,
+  schema_version: 2,
   source_key: "a".repeat(64),
   vault_id: "active-vault",
   path: "Notes/Example.md",
@@ -17,6 +17,7 @@ const VALID = {
   mtime: 1785253671659,
   mtime_nanos: "1785253671659000000",
   retrieval: { filename: "Example.md", stem: "Example", aliases: [] },
+  frontmatter: {},
   chunks: [],
   kind: "skipped",
 };
@@ -46,6 +47,156 @@ describe("sourcePreparationDefect", () => {
   });
 });
 
+describe("chunk/source correlation", () => {
+  const indexed = () => ({
+    ...VALID,
+    room: "reference",
+    kind: "indexed",
+    frontmatter: {},
+    chunks: [{
+      chunk: {
+        chunk_id: "c".repeat(64),
+        vault_id: VALID.vault_id,
+        room: "reference",
+        path: VALID.path,
+        heading_path: [],
+        content: "body",
+        frontmatter: {},
+        links_out: [],
+        mtime: VALID.mtime,
+        content_hash: VALID.content_hash,
+        chunking_version: 1,
+      },
+      heading_text: "",
+      technical_identifiers: [],
+    }],
+  });
+
+  it.each([
+    ["vault_id", "different-vault"],
+    ["room", "different-room"],
+    ["path", "Different.md"],
+    ["mtime", VALID.mtime + 1],
+    ["content_hash", "e".repeat(64)],
+  ])("names a mismatched chunk %s at the source quarantine boundary", (field, value) => {
+    const preparation = indexed();
+    (preparation.chunks[0]!.chunk as Record<string, unknown>)[field] = value;
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_source_correlation");
+  });
+
+  it("accepts the normalized absent-room correlation", () => {
+    const preparation = indexed();
+    delete (preparation as { room?: string }).room;
+    (preparation.chunks[0]!.chunk as Record<string, unknown>).room = null;
+    expect(sourcePreparationDefect(preparation)).toBeNull();
+  });
+});
+
+describe("open property bag validation", () => {
+  const prepareValue = (value: unknown): Record<string, unknown> => {
+    if (value === null) return { type: "null" };
+    if (typeof value === "boolean") return { type: "boolean", value };
+    if (typeof value === "string") return { type: "string", value };
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return { type: "f64", value: "invalid" };
+      if (Number.isInteger(value)) return { type: "i64", value: String(value) };
+      const bytes = new ArrayBuffer(8);
+      const view = new DataView(bytes);
+      view.setFloat64(0, value, false);
+      return {
+        type: "f64",
+        value: view.getBigUint64(0, false).toString(16).padStart(16, "0"),
+      };
+    }
+    if (Array.isArray(value)) return { type: "sequence", value: value.map(prepareValue) };
+    if (typeof value !== "object") return { type: "broken" };
+    return {
+      type: "map",
+      value: Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .map(([name, child]) => [name, prepareValue(child)]),
+      ),
+    };
+  };
+  const prepareBag = (frontmatter: Record<string, unknown>) => Object.fromEntries(
+    Object.entries(frontmatter).map(([name, value]) => [name, prepareValue(value)]),
+  );
+  const preparationWith = (frontmatter: Record<string, unknown>) => ({
+    ...VALID,
+    path: "Properties/Open.md",
+    content_hash: VALID.content_hash,
+    kind: "indexed",
+    frontmatter: prepareBag(frontmatter),
+    chunks: [{
+      chunk: {
+        chunk_id: "c".repeat(64),
+        vault_id: "active-vault",
+        room: null,
+        path: "Properties/Open.md",
+        heading_path: [],
+        content: "body",
+        frontmatter,
+        links_out: [],
+        mtime: 1785253671659,
+        content_hash: VALID.content_hash,
+        chunking_version: 1,
+      },
+      heading_text: "",
+      technical_identifiers: [],
+    }],
+  });
+
+  it("accepts one thousand properties without a cardinality policy", () => {
+    const properties = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [`property_${index}`, `value_${index}`]),
+    );
+    expect(sourcePreparationDefect(preparationWith(properties))).toBeNull();
+  });
+
+  it("accepts deeply nested maps and names the corruption-only depth boundary", () => {
+    let nested: unknown = "leaf";
+    for (let depth = 0; depth < 64; depth += 1) nested = { nested };
+    expect(sourcePreparationDefect(preparationWith({ nested }))).toBeNull();
+
+    let tooDeep: unknown = "leaf";
+    for (let depth = 0; depth < 128; depth += 1) tooDeep = { nested: tooDeep };
+    expect(sourcePreparationDefect(preparationWith({ nested: tooDeep })))
+      .toBe("frontmatter_property_nesting");
+  });
+
+  it("accepts a twelve-hundred-element array as one property value", () => {
+    const items = Array.from({ length: 1_200 }, (_, index) => index);
+    expect(sourcePreparationDefect(preparationWith({ items }))).toBeNull();
+  });
+
+  it("accepts mixed types for the same key across notes", () => {
+    for (const signal of [null, true, 7, 3.5, "7", [7, "7"], { nested: false }]) {
+      expect(sourcePreparationDefect(preparationWith({ signal }))).toBeNull();
+    }
+  });
+
+  it("accepts a property value measured in megabytes without truncation", () => {
+    const payload = "x".repeat(2 * 1024 * 1024);
+    const preparation = preparationWith({ payload });
+    expect(sourcePreparationDefect(preparation)).toBeNull();
+    expect((preparation.chunks[0]!.chunk.frontmatter.payload as string).length)
+      .toBe(payload.length);
+  });
+
+  it("rejects impossible JSON values and cycles with fixed privacy-safe fields", () => {
+    expect(sourcePreparationDefect(preparationWith({ broken: undefined })))
+      .toBe("frontmatter_property_value");
+    expect(sourcePreparationDefect(preparationWith({ broken: Number.POSITIVE_INFINITY })))
+      .toBe("frontmatter_property_value");
+
+    const cycle: Record<string, unknown> = { type: "map", value: {} };
+    (cycle.value as Record<string, unknown>).self = cycle;
+    const cyclicPreparation = { ...preparationWith({}), frontmatter: { cycle } };
+    expect(() => sourcePreparationDefect(cyclicPreparation)).not.toThrow();
+    expect(sourcePreparationDefect(cyclicPreparation)).toBe("frontmatter_property_cycle");
+  });
+});
+
 describe("defect field reaches the classification", () => {
   it("extracts an identifier tail from the worker message", () => {
     const result = classifyFailure({
@@ -54,6 +205,11 @@ describe("defect field reaches the classification", () => {
       message: "Portable Rust rejected a source batch: mtime_nanos",
     });
     expect(result.defectField).toBe("mtime_nanos");
+    expect(classifyFailure({
+      code: "source_rejected",
+      stage: "rust",
+      message: "Portable Rust rejected a source batch: frontmatter_property_value",
+    }).defectField).toBe("frontmatter_property_value");
   });
 
   it("ignores a tail that could be a path or a sentence", () => {
@@ -79,13 +235,13 @@ describe("caps reflect the Rust contract, not an invented policy", () => {
         chunk_id: "c".repeat(64),
         vault_id: "active-vault",
         room: null,
-        path: "Maps/Index.md",
+        path: VALID.path,
         heading_path: [],
         content: "body",
         frontmatter: {},
         links_out: Array.from({ length: 5_000 }, (_, i) => `Note ${i}`),
         mtime: 1785253671659,
-        content_hash: "d".repeat(64),
+        content_hash: VALID.content_hash,
         chunking_version: 1,
       },
       heading_text: "",
@@ -108,13 +264,13 @@ describe("no count ceiling is enforced anywhere", () => {
       chunk_id: "c".repeat(64),
       vault_id: "active-vault",
       room: null,
-      path: "Maps/Index.md",
+      path: VALID.path,
       heading_path: [],
       content: "body",
       frontmatter: {},
       links_out: [],
       mtime: 1785253671659,
-      content_hash: "d".repeat(64),
+      content_hash: VALID.content_hash,
       chunking_version: 1,
       ...over,
     },

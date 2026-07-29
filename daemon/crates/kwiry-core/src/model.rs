@@ -1,9 +1,16 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+use std::collections::BTreeMap;
 #[cfg(feature = "native")]
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
+};
 
-pub const CHUNKING_VERSION: u64 = 1;
+pub const CHUNKING_VERSION: u64 = 2;
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_CHUNK_CHARS: usize = 4_000;
 pub const CHUNK_OVERLAP_CHARS: usize = 400;
@@ -214,18 +221,282 @@ pub struct VaultRegistration {
     pub room: Option<String>,
 }
 
+// This is a call-stack safety boundary for maliciously recursive YAML, not a content-policy
+// limit. Cardinality and value sizes remain governed only by the accepted source-file bytes, so
+// legitimate large properties cannot repeat the links_out incident by tripping an invented cap.
+pub(crate) const MAX_PROPERTY_NESTING_DEPTH: usize = 64;
+
+#[derive(Debug, Clone)]
+pub enum PropertyValue {
+    Null,
+    Bool(bool),
+    I64(i64),
+    U64(u64),
+    F64(f64),
+    String(String),
+    Sequence(Vec<Self>),
+    Map(BTreeMap<String, Self>),
+}
+
+impl PartialEq for PropertyValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null) => true,
+            (Self::Bool(left), Self::Bool(right)) => left == right,
+            (Self::I64(left), Self::I64(right)) => left == right,
+            (Self::U64(left), Self::U64(right)) => left == right,
+            (Self::F64(left), Self::F64(right)) => left.to_bits() == right.to_bits(),
+            (Self::String(left), Self::String(right)) => left == right,
+            (Self::Sequence(left), Self::Sequence(right)) => left == right,
+            (Self::Map(left), Self::Map(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PropertyValue {}
+
+// PropertyValue deliberately has no general-purpose Serialize implementation. The complete open
+// bag crosses persistence and JavaScript boundaries only through the tagged, precision-safe source
+// ABI in source.rs; chunk/result metadata is a separate compact string projection.
+impl<'de> Deserialize<'de> for PropertyValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        PropertyValueSeed { depth: 0 }.deserialize(deserializer)
+    }
+}
+
+struct PropertyValueSeed {
+    depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for PropertyValueSeed {
+    type Value = PropertyValue;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(PropertyValueVisitor { depth: self.depth })
+    }
+}
+
+struct PropertyValueVisitor {
+    depth: usize,
+}
+
+impl PropertyValueVisitor {
+    fn child_seed<E>(&self) -> Result<PropertyValueSeed, E>
+    where
+        E: de::Error,
+    {
+        if self.depth >= MAX_PROPERTY_NESTING_DEPTH {
+            return Err(E::custom(format!(
+                "property nesting exceeds {MAX_PROPERTY_NESTING_DEPTH} levels"
+            )));
+        }
+        Ok(PropertyValueSeed {
+            depth: self.depth + 1,
+        })
+    }
+}
+
+impl<'de> Visitor<'de> for PropertyValueVisitor {
+    type Value = PropertyValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a YAML property value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(PropertyValue::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(PropertyValue::Null)
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(PropertyValue::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(PropertyValue::I64(value))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(i64::try_from(value).map_or(PropertyValue::U64(value), PropertyValue::I64))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(PropertyValue::F64(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(PropertyValue::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(PropertyValue::String(value))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(self.child_seed()?)? {
+            values.push(value);
+        }
+        Ok(PropertyValue::Sequence(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = BTreeMap::new();
+        while let Some(key) = map.next_key::<String>()? {
+            values.insert(key, map.next_value_seed(self.child_seed()?)?);
+        }
+        Ok(PropertyValue::Map(values))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PropertyBag {
+    // One immutable allocation is shared by the source preparation and its native prepared chunks.
+    // PreparedChunk skips this pointer during serialization, so the portable ABI emits the bag once.
+    properties: Arc<BTreeMap<String, PropertyValue>>,
+}
+
+impl PropertyBag {
+    pub fn from_properties(properties: BTreeMap<String, PropertyValue>) -> Self {
+        Self {
+            properties: Arc::new(properties),
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&PropertyValue> {
+        self.properties.get(name)
+    }
+
+    pub fn len(&self) -> usize {
+        self.properties.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.properties.is_empty()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &PropertyValue)> {
+        self.properties.iter()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.properties, &other.properties)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Frontmatter {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+}
+
+impl Frontmatter {
+    pub fn from_properties(properties: &PropertyBag) -> Self {
+        let title = properties.get("title").and_then(property_string);
+        let description = properties.get("description").and_then(property_string);
+        let tags = properties
+            .get("tags")
+            .map_or_else(Vec::new, property_strings);
+        let status = properties.get("status").and_then(property_string);
+        // serde-saphyr currently supplies YAML dates as strings. The compact projection clones
+        // that string while the original typed value remains in the source-owned property bag.
+        let date = properties.get("date").and_then(property_string);
+
+        Self {
+            title,
+            description,
+            tags,
+            status,
+            date,
+        }
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    pub fn date(&self) -> Option<&str> {
+        self.date.as_deref()
+    }
+}
+
+fn property_strings(value: &PropertyValue) -> Vec<String> {
+    match value {
+        PropertyValue::Sequence(values) => values.iter().filter_map(property_string).collect(),
+        _ => property_string(value).into_iter().collect(),
+    }
+}
+
+fn property_string(value: &PropertyValue) -> Option<String> {
+    match value {
+        PropertyValue::Bool(value) => Some(value.to_string()),
+        PropertyValue::I64(value) => Some(value.to_string()),
+        PropertyValue::U64(value) => Some(value.to_string()),
+        PropertyValue::F64(value) => Some(value.to_string()),
+        PropertyValue::String(value) => Some(value.clone()),
+        PropertyValue::Null | PropertyValue::Sequence(_) | PropertyValue::Map(_) => None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,6 +526,16 @@ pub struct PreparedChunk {
     pub chunk: Chunk,
     pub heading_text: String,
     pub technical_identifiers: Vec<String>,
+    // Native indexing needs the source-level projections while reconciliation still transports
+    // chunks independently. Both are non-serialized shared views owned once by the preparation.
+    #[serde(skip, default)]
+    pub(crate) source_properties: PropertyBag,
+    #[serde(skip, default = "default_shared_frontmatter")]
+    pub(crate) source_frontmatter: Arc<Frontmatter>,
+}
+
+fn default_shared_frontmatter() -> Arc<Frontmatter> {
+    Arc::new(Frontmatter::default())
 }
 
 impl std::ops::Deref for PreparedChunk {

@@ -14,7 +14,7 @@ pub use crate::source::source_key;
 use crate::state::{read_json, write_json_atomic};
 
 pub const MANIFEST_VERSION: u32 = 2;
-pub const INDEX_FORMAT_VERSION: u32 = 5;
+pub const INDEX_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
@@ -201,13 +201,13 @@ mod tests {
     #[test]
     fn incompatible_index_manifest_requires_an_explicit_rebuild() {
         let manifest = Manifest {
-            index_format_version: 2,
+            index_format_version: 5,
             ..Manifest::default()
         };
 
         let error = manifest.validate().unwrap_err();
-        assert!(error.to_string().contains("found manifest=2, index=2"));
-        assert!(error.to_string().contains("expected manifest=2, index=5"));
+        assert!(error.to_string().contains("found manifest=2, index=5"));
+        assert!(error.to_string().contains("expected manifest=2, index=6"));
         assert!(error.to_string().contains("kwiry index"));
     }
 

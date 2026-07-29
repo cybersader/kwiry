@@ -5,19 +5,42 @@
 // free of the WASM import so it is directly testable. The adapter cannot be
 // imported in a unit test because it pulls in the Rust binary.
 
-const SOURCE_SCHEMA_VERSION = 1;
+const SOURCE_SCHEMA_VERSION = 2;
 
-/// Names the first field of a source preparation that fails validation, or
-/// null when the preparation is valid.
-///
-/// Eight releases were spent narrowing a production failure to
-/// `source_rejected` at the rust stage, at which point the report still could
-/// not say WHICH field the Rust layer refused. This function is why: the
-/// predicate below is one long boolean chain that collapses forty checks into
-/// a single false. Field names are fixed identifiers chosen in this codebase,
-/// never vault content, so reporting one is safe.
+// This mirrors Rust's call-stack safety boundary. It is deliberately the only
+// property-bag bound: source byte limits already protect allocation, while a
+// cardinality or string-length cap would turn a valid large note into a reason
+// to reject the whole source batch.
+const MAX_PROPERTY_NESTING_DEPTH = 128;
+
+export type PropertyBagDefect =
+  | "frontmatter_not_a_record"
+  | "frontmatter_property_value"
+  | "frontmatter_property_nesting"
+  | "frontmatter_property_cycle";
+
+/** Names the first fixed ABI field that fails validation, or null when valid. */
 export function sourcePreparationDefect(value: unknown): string | null {
   if (!isRecord(value)) return "not_a_record";
+  const required = [
+    "schema_version",
+    "source_key",
+    "vault_id",
+    "path",
+    "format",
+    "content_hash",
+    "byte_length",
+    "mtime",
+    "mtime_nanos",
+    "retrieval",
+    "frontmatter",
+    "chunks",
+    "kind",
+  ];
+  if (!hasRequiredAndOptionalKeys(value, required, ["room", "warning"])) {
+    return "preparation_fields";
+  }
+
   const checks: readonly (readonly [string, () => boolean])[] = [
     ["schema_version", () => value.schema_version === SOURCE_SCHEMA_VERSION],
     ["source_key", () => isBoundedString(value.source_key, 128)],
@@ -33,7 +56,28 @@ export function sourcePreparationDefect(value: unknown): string | null {
       && /^[0-9]{1,39}$/u.test(value.mtime_nanos)],
     ["retrieval", () => isRetrieval(value.retrieval)],
     ["chunks_shape", () => Array.isArray(value.chunks) && value.chunks.length <= 100_000],
-    ["chunks_contents", () => Array.isArray(value.chunks) && value.chunks.every(isPreparedChunk)],
+  ];
+  for (const [name, check] of checks) {
+    try {
+      if (!check()) return name;
+    } catch {
+      return name;
+    }
+  }
+
+  const frontmatterDefect = preparedPropertyBagDefect(value.frontmatter);
+  if (frontmatterDefect !== null) return frontmatterDefect;
+
+  try {
+    for (const chunk of value.chunks as unknown[]) {
+      const defect = preparedChunkDefect(chunk, value);
+      if (defect !== null) return defect;
+    }
+  } catch {
+    return "chunks_contents";
+  }
+
+  const trailingChecks: readonly (readonly [string, () => boolean])[] = [
     ["kind", () => value.kind === "indexed" || value.kind === "skipped"],
     ["warning", () => value.warning === undefined
       || isBoundedString(value.warning, 4_096, true)],
@@ -41,18 +85,221 @@ export function sourcePreparationDefect(value: unknown): string | null {
       || (Array.isArray(value.chunks) && value.chunks.length === 0)],
     ["indexed_missing_hash", () => value.kind !== "indexed" || value.content_hash !== null],
   ];
-  for (const [name, check] of checks) {
-    let passed: boolean;
+  for (const [name, check] of trailingChecks) {
     try {
-      passed = check();
+      if (!check()) return name;
     } catch {
       return name;
     }
-    if (!passed) return name;
   }
   return null;
 }
 
+/**
+ * Validates the JSON-shaped open property bag without imposing note-content
+ * policy. The returned identifiers are safe for diagnostics: they describe the
+ * failed structural rule and never include a property name or value from a note.
+ */
+export function propertyBagDefect(value: unknown): PropertyBagDefect | null {
+  if (!isRecord(value)) return "frontmatter_not_a_record";
+
+  try {
+    const seen = new WeakSet<object>();
+    seen.add(value);
+    const pending: Array<{ value: unknown; depth: number }> = Object.keys(value)
+      .map((name) => ({ value: value[name], depth: 1 }));
+
+    while (pending.length > 0) {
+      const item = pending.pop();
+      if (item === undefined) break;
+      if (item.depth > MAX_PROPERTY_NESTING_DEPTH) {
+        return "frontmatter_property_nesting";
+      }
+
+      const property = item.value;
+      if (property === null
+        || typeof property === "string"
+        || typeof property === "boolean") {
+        continue;
+      }
+      if (typeof property === "number") {
+        if (!Number.isFinite(property)) return "frontmatter_property_value";
+        continue;
+      }
+      if (typeof property !== "object") return "frontmatter_property_value";
+
+      // JSON is a tree. Cycles and shared object references cannot have come
+      // from Rust JSON and therefore prove corruption rather than large content.
+      if (seen.has(property)) return "frontmatter_property_cycle";
+      seen.add(property);
+
+      if (Array.isArray(property)) {
+        for (let index = 0; index < property.length; index += 1) {
+          pending.push({ value: property[index], depth: item.depth + 1 });
+        }
+        continue;
+      }
+      if (!isRecord(property)) return "frontmatter_property_value";
+      for (const name of Object.keys(property)) {
+        pending.push({ value: property[name], depth: item.depth + 1 });
+      }
+    }
+  } catch {
+    return "frontmatter_property_value";
+  }
+  return null;
+}
+
+export function isPropertyBag(value: unknown): value is Record<string, unknown> {
+  return propertyBagDefect(value) === null;
+}
+
+/** Validates the explicitly tagged, lossless numeric property ABI from Rust. */
+export function preparedPropertyBagDefect(value: unknown): PropertyBagDefect | null {
+  if (!isRecord(value)) return "frontmatter_not_a_record";
+
+  try {
+    const seen = new WeakSet<object>();
+    seen.add(value);
+    const pending: Array<{ value: unknown; depth: number }> = Object.keys(value)
+      .map((name) => ({ value: value[name], depth: 1 }));
+
+    while (pending.length > 0) {
+      const item = pending.pop();
+      if (item === undefined) break;
+      if (item.depth > MAX_PROPERTY_NESTING_DEPTH) {
+        return "frontmatter_property_nesting";
+      }
+      if (!isRecord(item.value) || seen.has(item.value)) {
+        return seen.has(item.value as object)
+          ? "frontmatter_property_cycle"
+          : "frontmatter_property_value";
+      }
+      seen.add(item.value);
+      const type = item.value.type;
+      if (type === "null") {
+        if (!hasExactKeys(item.value, ["type"])) return "frontmatter_property_value";
+        continue;
+      }
+      if (!hasExactKeys(item.value, ["type", "value"])) {
+        return "frontmatter_property_value";
+      }
+      if (type === "boolean") {
+        if (typeof item.value.value !== "boolean") return "frontmatter_property_value";
+        continue;
+      }
+      if (type === "string") {
+        if (typeof item.value.value !== "string") return "frontmatter_property_value";
+        continue;
+      }
+      if (type === "i64") {
+        if (!isSignedIntegerString(item.value.value)
+          || !integerWithin(item.value.value, -(1n << 63n), (1n << 63n) - 1n)) {
+          return "frontmatter_property_value";
+        }
+        continue;
+      }
+      if (type === "u64") {
+        if (!isUnsignedIntegerString(item.value.value)
+          || !integerWithin(item.value.value, 0n, (1n << 64n) - 1n)) {
+          return "frontmatter_property_value";
+        }
+        continue;
+      }
+      if (type === "f64") {
+        if (typeof item.value.value !== "string"
+          || !/^[0-9a-f]{16}$/u.test(item.value.value)) {
+          return "frontmatter_property_value";
+        }
+        continue;
+      }
+      if (type === "sequence") {
+        if (!Array.isArray(item.value.value)) return "frontmatter_property_value";
+        for (const child of item.value.value) {
+          pending.push({ value: child, depth: item.depth + 1 });
+        }
+        continue;
+      }
+      if (type === "map") {
+        if (!isRecord(item.value.value)) return "frontmatter_property_value";
+        if (seen.has(item.value.value)) return "frontmatter_property_cycle";
+        seen.add(item.value.value);
+        for (const name of Object.keys(item.value.value)) {
+          pending.push({ value: item.value.value[name], depth: item.depth + 1 });
+        }
+        continue;
+      }
+      return "frontmatter_property_value";
+    }
+  } catch {
+    return "frontmatter_property_value";
+  }
+  return null;
+}
+
+export function isPreparedPropertyBag(value: unknown): value is Record<string, unknown> {
+  return preparedPropertyBagDefect(value) === null;
+}
+
+function isSignedIntegerString(value: unknown): value is string {
+  return typeof value === "string" && /^(?:0|-[1-9][0-9]*|[1-9][0-9]*)$/u.test(value);
+}
+
+function isUnsignedIntegerString(value: unknown): value is string {
+  return typeof value === "string" && /^(?:0|[1-9][0-9]*)$/u.test(value);
+}
+
+function integerWithin(value: string, minimum: bigint, maximum: bigint): boolean {
+  const integer = BigInt(value);
+  return integer >= minimum && integer <= maximum;
+}
+
+function preparedChunkDefect(
+  value: unknown,
+  owner: Record<string, unknown>,
+): string | null {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ["chunk", "heading_text", "technical_identifiers"])
+    || !isRecord(value.chunk)) {
+    return "chunks_contents";
+  }
+  const chunk = value.chunk;
+  if (!hasExactKeys(chunk, [
+    "chunk_id",
+    "vault_id",
+    "room",
+    "path",
+    "heading_path",
+    "content",
+    "frontmatter",
+    "links_out",
+    "mtime",
+    "content_hash",
+    "chunking_version",
+  ])
+    || !isBoundedString(chunk.chunk_id, 128)
+    || !isBoundedString(chunk.vault_id, 1_024)
+    || (chunk.room !== null && !isBoundedString(chunk.room, 1_024))
+    || !isBoundedString(chunk.path, 4_096)
+    || !isStringArray(chunk.heading_path)
+    || !isBoundedString(chunk.content, 16_384, true)
+    || !isStringArray(chunk.links_out)
+    || !isNonNegativeSafeInteger(chunk.mtime)
+    || !isBoundedString(chunk.content_hash, 128)
+    || !isNonNegativeSafeInteger(chunk.chunking_version)
+    || !isBoundedString(value.heading_text, 8_192, true)
+    || !isStringArray(value.technical_identifiers)) {
+    return "chunks_contents";
+  }
+  if (chunk.vault_id !== owner.vault_id
+    || chunk.room !== (owner.room ?? null)
+    || chunk.path !== owner.path
+    || chunk.mtime !== owner.mtime
+    || chunk.content_hash !== owner.content_hash) {
+    return "chunks_source_correlation";
+  }
+  return propertyBagDefect(chunk.frontmatter);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -62,17 +309,6 @@ function isBoundedString(value: unknown, maximum: number, allowEmpty = false): v
   return typeof value === "string"
     && value.length <= maximum
     && (allowEmpty || value.length > 0);
-}
-
-function isBoundedStrings(
-  value: unknown,
-  maximumItems: number,
-  maximumCharacters: number,
-  allowEmpty = false,
-): value is string[] {
-  return Array.isArray(value)
-    && value.length <= maximumItems
-    && value.every((item) => isBoundedString(item, maximumCharacters, allowEmpty));
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
@@ -87,69 +323,30 @@ function isRetrieval(value: unknown): boolean {
     && isStringArray(value.aliases);
 }
 
-function isPreparedChunk(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ["chunk", "heading_text", "technical_identifiers"])
-    && isChunk(value.chunk)
-    && isBoundedString(value.heading_text, 8_192, true)
-    && isStringArray(value.technical_identifiers);
-}
-
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && actual.every((key) => keys.includes(key));
 }
 
-function isChunk(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, [
-      "chunk_id",
-      "vault_id",
-      "room",
-      "path",
-      "heading_path",
-      "content",
-      "frontmatter",
-      "links_out",
-      "mtime",
-      "content_hash",
-      "chunking_version",
-    ])
-    && isBoundedString(value.chunk_id, 128)
-    && isBoundedString(value.vault_id, 1_024)
-    && (value.room === null || isBoundedString(value.room, 1_024))
-    && isBoundedString(value.path, 4_096)
-    && isStringArray(value.heading_path)
-    && isBoundedString(value.content, 16_384)
-    && isFrontmatter(value.frontmatter)
-    // No count ceiling. These checks exist to catch a corrupt ABI response,
-    // and a count cap cannot do that -- an array of the wrong length is not
-    // evidence of corruption, it is evidence of a large note. The Rust side
-    // promises no ceiling here, so any number chosen in this file is a policy
-    // invented by the validator, and because a rejected source aborts the
-    // whole batch, that policy silently became "one hub note may stop the
-    // entire vault from indexing". Element shape is still checked, which is
-    // what actually detects corruption.
-    && isStringArray(value.links_out)
-    && isNonNegativeSafeInteger(value.mtime)
-    && isBoundedString(value.content_hash, 128)
-    && isNonNegativeSafeInteger(value.chunking_version);
+function hasRequiredAndOptionalKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const actual = Object.keys(value);
+  return required.every((key) => actual.includes(key))
+    && actual.every((key) => required.includes(key) || optional.includes(key));
 }
 
-function isFrontmatter(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const allowed = ["title", "description", "tags", "status", "date"];
-  if (Object.keys(value).some((key) => !allowed.includes(key))) return false;
-  for (const key of ["title", "description", "status", "date"] as const) {
-    if (value[key] !== undefined && !isBoundedString(value[key], 1_024, true)) return false;
-  }
-  return value.tags === undefined || isStringArray(value.tags);
-}
-
-/// Every element is a string. Deliberately unbounded in count: the purpose of
-/// these checks is detecting a malformed ABI response, and no array length is
-/// evidence of that. A cap here is a content policy wearing a validator's
-/// clothes, and one rejected source aborts the whole batch.
+/**
+ * Every element is a string. Deliberately unbounded in count: no array length
+ * demonstrates a malformed ABI response, while one rejected source aborts the
+ * whole batch.
+ */
 function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
+  if (!Array.isArray(value)) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (typeof value[index] !== "string") return false;
+  }
+  return true;
 }

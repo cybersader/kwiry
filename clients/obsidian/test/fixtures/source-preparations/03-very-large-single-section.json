@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source_key": "2a376ae7f4ab462ccbd5a869e571e213d33c85fe7c702bdd355b0219dfea4535",
   "vault_id": "golden-vault",
   "room": "fixture-room",
@@ -14,6 +14,7 @@
     "stem": "Very Large Single Section",
     "aliases": []
   },
+  "frontmatter": {},
   "chunks": [
     {
       "chunk": {
@@ -29,7 +30,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Oversized section",
       "technical_identifiers": [
@@ -355,7 +356,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Oversized section",
       "technical_identifiers": [
@@ -682,7 +683,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Oversized section",
       "technical_identifiers": [
@@ -1009,7 +1010,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Oversized section",
       "technical_identifiers": [
@@ -1336,7 +1337,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Oversized section",
       "technical_identifiers": [
@@ -1663,7 +1664,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Oversized section",
       "technical_identifiers": [
@@ -1990,7 +1991,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Oversized section",
       "technical_identifiers": [
@@ -2317,7 +2318,7 @@
         "links_out": [],
         "mtime": 1785253671659,
         "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
-        "chunking_version": 1
+        "chunking_version": 2
       },
       "heading_text": "Oversized section",
       "technical_identifiers": [

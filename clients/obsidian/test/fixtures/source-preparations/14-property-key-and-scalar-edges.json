@@ -1,0 +1,98 @@
+{
+  "schema_version": 2,
+  "source_key": "3c47a35af57764e0226b2e2383dbbb3fcbba10ece8c83e27860aab44892beaeb",
+  "vault_id": "golden-vault",
+  "path": "Golden/Property Key and Scalar Edges.md",
+  "format": "markdown",
+  "content_hash": "6cc3598e7a5bc661577f11e001fc31dec0a4271cfc8fcc4a7ff1464498aa1dbc",
+  "byte_length": 384,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Property Key and Scalar Edges.md",
+    "stem": "Property Key and Scalar Edges",
+    "aliases": []
+  },
+  "frontmatter": {
+    "chunk_id": {
+      "type": "string",
+      "value": "property-owned-value"
+    },
+    "empty_array": {
+      "type": "sequence",
+      "value": []
+    },
+    "empty_map": {
+      "type": "map",
+      "value": {}
+    },
+    "empty_string": {
+      "type": "string",
+      "value": ""
+    },
+    "empty_value": {
+      "type": "null"
+    },
+    "explicit_null": {
+      "type": "null"
+    },
+    "integral_float": {
+      "type": "f64",
+      "value": "405f400000000000"
+    },
+    "max_u64": {
+      "type": "u64",
+      "value": "18446744073709551615"
+    },
+    "quoted_numeral": {
+      "type": "string",
+      "value": "007"
+    },
+    "unsafe_i64": {
+      "type": "i64",
+      "value": "-9007199254740993"
+    },
+    "yaml_date": {
+      "type": "string",
+      "value": "2026-07-28"
+    },
+    "yaml_timestamp": {
+      "type": "string",
+      "value": "2026-07-28T12:34:56Z"
+    },
+    "émoji-🧭": {
+      "type": "string",
+      "value": "unicode key"
+    },
+    "ключ": {
+      "type": "boolean",
+      "value": true
+    },
+    "内部字段": {
+      "type": "i64",
+      "value": "7"
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "448320896b310a5304315b1ccf86915db30c6ec1f7bb6e2b9bfd76a75bc9ea6b",
+        "vault_id": "golden-vault",
+        "room": null,
+        "path": "Golden/Property Key and Scalar Edges.md",
+        "heading_path": [
+          "Body"
+        ],
+        "content": "# Body\nProperty key and scalar edges.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "6cc3598e7a5bc661577f11e001fc31dec0a4271cfc8fcc4a7ff1464498aa1dbc",
+        "chunking_version": 2
+      },
+      "heading_text": "Body",
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

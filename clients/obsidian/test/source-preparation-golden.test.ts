@@ -8,6 +8,23 @@ import { describe, expect, it } from "vitest";
 
 import { sourcePreparationDefect } from "../src/worker/source-defect";
 
+const expectedFixtureNames = [
+  "01-thousands-of-wikilinks.json",
+  "02-deep-heading-nesting.json",
+  "03-very-large-single-section.json",
+  "04-large-frontmatter-tags.json",
+  "05-empty-note.json",
+  "06-frontmatter-only.json",
+  "07-unusual-valid-utf8.json",
+  "08-thousand-open-properties.json",
+  "09-deep-property-map.json",
+  "10-large-property-array.json",
+  "11-shared-key-integer.json",
+  "12-shared-key-string.json",
+  "13-shared-key-boolean.json",
+  "14-property-key-and-scalar-edges.json",
+] as const;
+
 const fixtureDirectory = fileURLToPath(
   new URL("./fixtures/source-preparations/", import.meta.url),
 );
@@ -20,8 +37,8 @@ const fixtures = fixtureNames.map((name) => ({
 }));
 
 describe("Rust SourcePreparation golden fixtures", () => {
-  it("contains the required adversarial producer matrix", () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(7);
+  it("contains the complete adversarial producer matrix", () => {
+    expect(fixtureNames).toEqual(expectedFixtureNames);
   });
 
   it.each(fixtures)("accepts real Rust output from $name", ({ preparation }) => {

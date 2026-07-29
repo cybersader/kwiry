@@ -91,7 +91,7 @@ pub use model::{
 #[cfg(feature = "portable")]
 pub use model::{
     CHUNKING_VERSION, Chunk, Frontmatter, IndexFreshnessBasis, MAX_FILE_BYTES, PreparedChunk,
-    RetrievalMetadata, SearchHit,
+    PropertyBag, PropertyValue, RetrievalMetadata, SearchHit,
 };
 #[cfg(feature = "portable")]
 pub use query::{

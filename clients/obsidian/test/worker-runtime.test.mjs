@@ -237,7 +237,7 @@ describe("exported cache generation", () => {
         chunks: 1,
         protocol_version: WORKER_PROTOCOL_VERSION,
         cache_schema_version: CACHE_SCHEMA_VERSION,
-        chunking_version: 1,
+        chunking_version: 2,
         sqlite_version: "3.53.0",
         plugin_id: "kwiry-search",
         cache_identity: CACHE_IDENTITY,
@@ -646,7 +646,13 @@ describe("exported cache generation", () => {
         ],
       })).resolves.toMatchObject({
         ok: true,
-        result: { generation: "g1", unchanged: ["alpha.md", "large.md"], refresh: [], remove: [] },
+        result: {
+          generation: "g1",
+          unchanged: ["large.md"],
+          audit: [{ path: "alpha.md", content_hash: expect.stringMatching(/^[0-9a-f]{64}$/u) }],
+          refresh: [],
+          remove: [],
+        },
       });
 
       await expect(request(worker, {
@@ -659,7 +665,13 @@ describe("exported cache generation", () => {
         ],
       })).resolves.toMatchObject({
         ok: true,
-        result: { generation: "g1", unchanged: [], refresh: ["alpha.md"], remove: ["large.md"] },
+        result: {
+          generation: "g1",
+          unchanged: [],
+          audit: [],
+          refresh: ["alpha.md"],
+          remove: ["large.md"],
+        },
       });
       await request(worker, { id: 7, operation: "dispose" });
     } finally {
@@ -979,17 +991,33 @@ describe("restored cache generation", () => {
     ["invalid source inventory", (db) => db.exec("UPDATE sources SET content_hash = ''"), "cache_image_invalid"],
     ["per-source tally mismatch", (db) => db.exec("UPDATE sources SET chunk_count = chunk_count + 1"), "cache_image_invalid"],
     ["malformed heading JSON", (db) => db.exec("UPDATE chunks SET heading_path_json = 'not-json'"), "cache_image_invalid"],
-    ["invalid frontmatter shape", (db) => db.exec(`UPDATE chunks SET frontmatter_json = '{"tags":"not-an-array"}'`), "cache_image_invalid"],
+    ["negative property FTS rowid", (db) => {
+      db.exec(
+        "INSERT INTO source_property_text_fts(rowid, string_value) VALUES(-1, 'negative')",
+      );
+    }, "cache_image_invalid"],
+    ["invalid frontmatter shape", (db) => db.exec(`
+      INSERT INTO source_properties(
+        rowid, source_key, property_name, value_json, root_type, exact_value
+      )
+      SELECT 900001, source_key, 'broken', '{"type":"broken"}', 'string', 'broken'
+      FROM sources LIMIT 1
+    `), "cache_image_invalid"],
     ["chunk/source identity disagreement", (db) => db.exec("UPDATE chunks SET path = 'other.md'"), "cache_image_invalid"],
+    ["forged compact title", (db) => db.exec(
+      "UPDATE chunks SET frontmatter_json = '{\"title\":\"Forged Title\"}'",
+    ), "cache_image_invalid"],
     ["orphan FTS posting", (db) => db.exec("INSERT INTO chunks_fts(rowid, content) VALUES(900000, 'orphanterm')"), "cache_image_invalid"],
   ])("rejects digest-valid staged %s and leaves the active generation serving", async (_name, mutate, code) => {
     const corrupt = await mutateEnvelope(await exportedFixture(), mutate);
     const precondition = await openExportedImage(corrupt.bytes);
     try {
       expect(precondition.selectValue("PRAGMA integrity_check")).toBe("ok");
-      expect(() => precondition.exec(
+      const ftsIntegrity = () => precondition.exec(
         "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)",
-      )).not.toThrow();
+      );
+      if (_name === "orphan FTS posting") expect(ftsIntegrity).toThrow();
+      else expect(ftsIntegrity).not.toThrow();
     } finally {
       precondition.close();
     }
@@ -1018,6 +1046,88 @@ describe("restored cache generation", () => {
         ok: true,
         result: { active_generation: "live", staging_generation: null },
       });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("rejects same-rowid forged chunk postings before staged publication", async () => {
+    const forged = await mutateEnvelope(await exportedFixture({ text: "canonicalterm" }), (db) => {
+      const rowid = Number(db.selectValue("SELECT rowid FROM chunks LIMIT 1"));
+      db.exec("DELETE FROM chunks_fts WHERE rowid = ?", { bind: [rowid] });
+      db.exec("INSERT INTO chunks_fts(rowid, content) VALUES(?, 'forgedterm')", {
+        bind: [rowid],
+      });
+    });
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await expect(request(worker, restoreFromExport(forged))).resolves.toMatchObject({
+        ok: false,
+        error: { code: "cache_image_invalid", retryable: false },
+      });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null, searchable: false },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("repairs same-rowid forged property postings before staged publication", async () => {
+    const forged = await mutateEnvelope(await exportedFixture({
+      text: "---\ntitle: Canonical Title\n---\nstableterm",
+    }), (db) => {
+      const rowid = Number(db.selectValue(
+        "SELECT rowid FROM source_properties WHERE property_name = 'title'",
+      ));
+      db.exec("DELETE FROM source_property_text_fts WHERE rowid = ?", { bind: [rowid] });
+      db.exec(
+        "INSERT INTO source_property_text_fts(rowid, string_value) VALUES(?, 'forgedterm')",
+        { bind: [rowid] },
+      );
+    });
+    const before = await openExportedImage(forged.bytes);
+    try {
+      expect(before.selectValue(
+        "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH ?",
+        ['string_value : "forgedterm"'],
+      )).toBe(1);
+      expect(before.selectValue(
+        "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH ?",
+        ['string_value : "canonical"'],
+      )).toBe(0);
+    } finally {
+      before.close();
+    }
+
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await expect(request(worker, restoreFromExport(forged))).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1" },
+      });
+      const repairedEnvelope = (await request(worker, {
+        id: 3,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      })).result;
+      const repaired = await openExportedImage(repairedEnvelope.bytes);
+      try {
+        expect(repaired.selectValue(
+          "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH ?",
+          ['string_value : "canonical"'],
+        )).toBe(1);
+        expect(repaired.selectValue(
+          "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH ?",
+          ['string_value : "forgedterm"'],
+        )).toBe(0);
+      } finally {
+        repaired.close();
+      }
     } finally {
       await worker.terminate();
     }
@@ -1220,7 +1330,7 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: {
           rustAbiVersion: 1,
-          sourceSchemaVersion: 1,
+          sourceSchemaVersion: 2,
           querySchemaVersion: 2,
           matchPlanSchemaVersion: 1,
           sqliteVersion: "3.53.0",
@@ -1305,6 +1415,148 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: { closed: true },
       });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("reports durable page-cap overflow and preserves the published generation", async () => {
+    const injected = guardWorkerSource.replace(
+      "var DEFAULT_DATABASE_BYTE_LIMIT = 320 * 1024 * 1024;",
+      "var DEFAULT_DATABASE_BYTE_LIMIT = 1 * 1024 * 1024;",
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    const nullBag = `---\nvalues:\n${"  - null\n".repeat(10_000)}---\n`;
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "live",
+        path: "stable.md",
+        text: "stableterm",
+      });
+      const before = await request(worker, { id: 5, operation: "status" });
+      expect(before).toMatchObject({
+        ok: true,
+        result: {
+          active_generation: "live",
+          staging_generation: null,
+          active_database_bytes: expect.any(Number),
+          staging_database_bytes: 0,
+          database_byte_limit: 1 * 1024 * 1024,
+        },
+      });
+
+      await request(worker, { id: 6, operation: "begin_build", generation: "overflow-stage" });
+      await expect(request(worker, {
+        id: 7,
+        operation: "add_source_batch",
+        generation: "overflow-stage",
+        sources: [source("overflow.md", nullBag)],
+      }, 120_000)).resolves.toMatchObject({
+        ok: false,
+        error: { code: "index_limit_exceeded" },
+      });
+      await expect(request(worker, { id: 8, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          active_generation: "live",
+          staging_generation: null,
+          active_database_bytes: before.result.active_database_bytes,
+          staging_database_bytes: 0,
+        },
+      });
+
+      await expect(request(worker, {
+        id: 9,
+        operation: "apply_source_changes",
+        generation: "live",
+        next_generation: "after-overflow",
+        upserts: [source("overflow.md", nullBag)],
+        removals: [],
+      }, 120_000)).resolves.toMatchObject({
+        ok: false,
+        error: { code: "index_limit_exceeded" },
+      });
+      await expect(request(worker, {
+        id: 10,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "live", hits: [{ path: "stable.md" }] },
+      });
+      await expect(request(worker, { id: 11, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          active_generation: "live",
+          active_database_bytes: before.result.active_database_bytes,
+          staging_database_bytes: 0,
+        },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("quarantines a chunk/source mismatch without aborting the good source batch", async () => {
+    const needle = "function requireSourcePreparation(value) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  if (value?.path === "bad.md" && value.chunks?.[0]?.chunk) value.chunks[0].chunk.path = "other.md";`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("good.md", "goodterm"), source("bad.md", "badterm")],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          generation: "g1",
+          documents: 1,
+          chunks: 1,
+          quarantined_sources: 1,
+          quarantine_fields: ["chunks_source_correlation"],
+        },
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "g1" });
+      await expect(request(worker, {
+        id: 5,
+        operation: "search",
+        query: "goodterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "good.md" }] } });
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "badterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [] } });
+      const exported = await request(worker, {
+        id: 7,
+        operation: "export_generation",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+      });
+      const db = await openExportedImage(exported.result.bytes);
+      try {
+        expect(db.selectValue(`
+          SELECT count(*) FROM chunks c JOIN sources s ON s.source_key = c.source_key
+          WHERE s.path = 'bad.md'
+        `)).toBe(0);
+        expect(db.selectValue(`
+          SELECT count(*) FROM source_properties p JOIN sources s ON s.source_key = p.source_key
+          WHERE s.path = 'bad.md'
+        `)).toBe(0);
+      } finally {
+        db.close();
+      }
     } finally {
       await worker.terminate();
     }
