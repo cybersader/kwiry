@@ -21,10 +21,53 @@ ORDER BY score DESC, c.chunk_id ASC, c.path ASC
 LIMIT ?
 `;
 
-const EXACT_SEARCH_SQL = `
-WITH exact(value) AS (VALUES (?)),
-candidates(rowid, score) AS (
-  SELECT c.rowid, 12.0
+const REQUIRED_IDENTIFIER_SEARCH_SQL = `
+WITH required(value) AS (SELECT value FROM json_each(?)),
+eligible(rowid) AS (
+  SELECT identifier.chunk_rowid
+  FROM chunk_exact_identifiers AS identifier
+  JOIN required ON required.value = identifier.value
+  GROUP BY identifier.chunk_rowid
+  HAVING count(*) = (SELECT count(*) FROM required)
+)
+SELECT
+  c.chunk_id,
+  c.vault_id,
+  c.path,
+  c.heading_path_json,
+  c.frontmatter_json,
+  -bm25(chunks_fts, ${FTS5_WEIGHTS.join(", ")}) AS score
+FROM chunks_fts
+JOIN chunks AS c ON c.rowid = chunks_fts.rowid
+JOIN eligible ON eligible.rowid = c.rowid
+WHERE chunks_fts MATCH ?
+ORDER BY score DESC, c.chunk_id ASC, c.path ASC
+LIMIT ?
+`;
+
+const IDENTIFIER_ONLY_SEARCH_SQL = `
+WITH required(value) AS (SELECT value FROM json_each(?)),
+eligible(rowid) AS (
+  SELECT identifier.chunk_rowid
+  FROM chunk_exact_identifiers AS identifier
+  JOIN required ON required.value = identifier.value
+  GROUP BY identifier.chunk_rowid
+  HAVING count(*) = (SELECT count(*) FROM required)
+)
+SELECT
+  c.chunk_id,
+  c.vault_id,
+  c.path,
+  c.heading_path_json,
+  c.frontmatter_json,
+  5.0 AS score
+FROM eligible JOIN chunks AS c ON c.rowid = eligible.rowid
+ORDER BY score DESC, c.chunk_id ASC, c.path ASC
+LIMIT ?
+`;
+
+const EXACT_CANDIDATES_SQL = `
+  SELECT c.rowid, 12.0 AS score
   FROM exact JOIN sources AS s ON s.exact_filename = exact.value
   JOIN chunks AS c ON c.source_key = s.source_key
   UNION ALL
@@ -37,16 +80,20 @@ candidates(rowid, score) AS (
   JOIN chunks AS c ON c.source_key = s.source_key
   UNION ALL
   SELECT c.rowid, 12.0
-  FROM exact JOIN sources AS s
-  JOIN json_each(s.exact_aliases_json) AS alias ON alias.value = exact.value
-  JOIN chunks AS c ON c.source_key = s.source_key
+  FROM exact JOIN source_exact_aliases AS alias ON alias.value = exact.value
+  JOIN chunks AS c ON c.source_key = alias.source_key
   UNION ALL
   SELECT c.rowid, 3.0
   FROM exact JOIN chunks AS c ON c.exact_heading = exact.value
   UNION ALL
-  SELECT c.rowid, 5.0
-  FROM exact JOIN chunks AS c
-  JOIN json_each(c.identifiers_json) AS identifier ON identifier.value = exact.value
+  SELECT identifier.chunk_rowid, 5.0
+  FROM exact JOIN chunk_exact_identifiers AS identifier ON identifier.value = exact.value
+`;
+
+const EXACT_SEARCH_SQL = `
+WITH exact(value) AS (VALUES (?)),
+candidates(rowid, score) AS (
+${EXACT_CANDIDATES_SQL}
 ),
 ranked(rowid, score) AS (
   SELECT rowid, max(score) FROM candidates GROUP BY rowid
@@ -63,11 +110,50 @@ ORDER BY ranked.score DESC, c.chunk_id ASC, c.path ASC
 LIMIT ?
 `;
 
-const EXISTS_SQL = `
+const REQUIRED_IDENTIFIER_EXACT_SEARCH_SQL = `
+WITH exact(value) AS (VALUES (?)),
+required(value) AS (SELECT value FROM json_each(?)),
+eligible(rowid) AS (
+  SELECT identifier.chunk_rowid
+  FROM chunk_exact_identifiers AS identifier
+  JOIN required ON required.value = identifier.value
+  GROUP BY identifier.chunk_rowid
+  HAVING count(*) = (SELECT count(*) FROM required)
+),
+candidates(rowid, score) AS (
+${EXACT_CANDIDATES_SQL}
+),
+ranked(rowid, score) AS (
+  SELECT candidates.rowid, max(candidates.score)
+  FROM candidates JOIN eligible ON eligible.rowid = candidates.rowid
+  GROUP BY candidates.rowid
+)
+SELECT
+  c.chunk_id,
+  c.vault_id,
+  c.path,
+  c.heading_path_json,
+  c.frontmatter_json,
+  ranked.score
+FROM ranked JOIN chunks AS c ON c.rowid = ranked.rowid
+ORDER BY ranked.score DESC, c.chunk_id ASC, c.path ASC
+LIMIT ?
+`;
+
+const FTS_EXISTS_SQL = `
 SELECT EXISTS(
   SELECT 1
   FROM chunks_fts
   WHERE chunks_fts MATCH ?
+  LIMIT 1
+)
+`;
+
+const EXACT_IDENTIFIER_EXISTS_SQL = `
+SELECT EXISTS(
+  SELECT 1
+  FROM chunk_exact_identifiers
+  WHERE value = ?
   LIMIT 1
 )
 `;
@@ -84,11 +170,11 @@ LIMIT ?
 `;
 
 const MATCH_STAGE_IDS = new Set<StagePlan["plan_id"]>([
-  "lexical_explicit_v2",
-  "lexical_exact_phrase_v2",
-  "lexical_all_terms_v2",
-  "lexical_partial_coverage_v2",
-  "lexical_prefix_v2",
+  "lexical_explicit_v3",
+  "lexical_exact_phrase_v3",
+  "lexical_all_terms_v3",
+  "lexical_partial_coverage_v3",
+  "lexical_prefix_v3",
 ]);
 
 export interface BoundSearchStage {
@@ -112,7 +198,7 @@ export interface BoundEvidenceProbe {
 }
 
 export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
-  if (plan.schema_version !== 2
+  if (plan.schema_version !== 3
     || plan.profile_id !== FTS5_PROFILE_ID
     || plan.max_total_candidates !== 512
     || plan.stages.length > 5
@@ -124,13 +210,13 @@ export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
     return;
   }
   if (plan.disposition === "explicit_bypass") {
-    if (plan.stages.length !== 1 || plan.stages[0]?.plan_id !== "lexical_explicit_v2") {
+    if (plan.stages.length !== 1 || plan.stages[0]?.plan_id !== "lexical_explicit_v3") {
       throw new Error("invalid explicit FTS5 execution plan");
     }
     return;
   }
   if (plan.disposition !== "ready" || plan.stages.length === 0
-    || plan.stages.some((stage) => stage.plan_id === "lexical_explicit_v2")) {
+    || plan.stages.some((stage) => stage.plan_id === "lexical_explicit_v3")) {
     throw new Error("invalid assisted FTS5 execution plan");
   }
 }
@@ -139,37 +225,67 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
   if (!isLimit(limit) || stage.max_candidates < limit) {
     throw new Error("invalid FTS5 stage search limit");
   }
-  if (stage.plan_id === "lexical_exact_metadata_v2") {
-    if (!isOpaqueUnicodeScalarValue(stage.exact_value, 256) || stage.match_value !== undefined) {
+  const required = requireIdentifiers(stage.required_identifiers);
+  if (stage.plan_id === "lexical_exact_metadata_v3") {
+    if (!isOpaqueUnicodeScalarValue(stage.exact_value, 4_096) || stage.match_value !== undefined) {
       throw new Error("unsupported Rust FTS5 exact stage");
     }
-    return { sql: EXACT_SEARCH_SQL, bind: [stage.exact_value, limit] };
+    return required.length === 0
+      ? { sql: EXACT_SEARCH_SQL, bind: [stage.exact_value, limit] }
+      : {
+          sql: REQUIRED_IDENTIFIER_EXACT_SEARCH_SQL,
+          bind: [stage.exact_value, JSON.stringify(required), limit],
+        };
   }
-  if (!MATCH_STAGE_IDS.has(stage.plan_id)
-    || !isOpaqueValue(stage.match_value, 16_384)
-    || stage.exact_value !== undefined) {
+  if (!MATCH_STAGE_IDS.has(stage.plan_id) || stage.exact_value !== undefined) {
     throw new Error("unsupported Rust FTS5 match stage");
   }
-  return { sql: SEARCH_SQL, bind: [stage.match_value, limit] };
+  if (stage.plan_id === "lexical_explicit_v3" && required.length !== 0) {
+    throw new Error("unsupported Rust FTS5 explicit stage");
+  }
+  if (stage.match_value === undefined) {
+    if (required.length === 0 || stage.plan_id === "lexical_explicit_v3") {
+      throw new Error("unsupported Rust FTS5 match stage");
+    }
+    return {
+      sql: IDENTIFIER_ONLY_SEARCH_SQL,
+      bind: [JSON.stringify(required), limit],
+    };
+  }
+  if (!isOpaqueValue(stage.match_value, 16_384)) {
+    throw new Error("unsupported Rust FTS5 match stage");
+  }
+  return required.length === 0
+    ? { sql: SEARCH_SQL, bind: [stage.match_value, limit] }
+    : {
+        sql: REQUIRED_IDENTIFIER_SEARCH_SQL,
+        bind: [JSON.stringify(required), stage.match_value, limit],
+      };
 }
 
 export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
-  if (plan.schema_version !== 2 || !isOpaqueValue(plan.match_value, 16_384)) {
+  if (plan.schema_version !== 3) {
     throw new Error("unsupported Rust FTS5 evidence probe");
   }
-  if (plan.plan_id === "identifier_metadata_v2") {
-    return { exists: { sql: EXISTS_SQL, bind: [plan.match_value] }, prefix: null };
+  if (plan.plan_id === "identifier_metadata_v3") {
+    if (!isOpaqueValue(plan.match_value, 16_384)) {
+      throw new Error("unsupported Rust FTS5 metadata probe");
+    }
+    return { exists: { sql: FTS_EXISTS_SQL, bind: [plan.match_value] }, prefix: null };
   }
-  if (plan.plan_id !== "term_support_v2"
+  if (plan.plan_id !== "term_support_v3"
     || plan.max_prefix_expansions !== 16
     || plan.max_prefix_term_bytes !== 96
     || !Number.isSafeInteger(plan.probe_id)
     || !Number.isSafeInteger(plan.term_index)) {
     throw new Error("unsupported Rust FTS5 term probe");
   }
+  const hasMatch = isOpaqueValue(plan.match_value, 16_384);
+  const hasIdentifier = isOpaqueUnicodeScalarValue(plan.exact_identifier, 4_096);
+  if (hasMatch === hasIdentifier) throw new Error("unsupported Rust FTS5 term probe");
   const prefix = plan.prefix_pattern === null
     ? null
-    : isOpaqueValue(plan.prefix_pattern, 4_096)
+    : hasMatch && isOpaqueValue(plan.prefix_pattern, 4_096)
       ? {
           sql: PREFIX_EXPANSIONS_SQL,
           bind: [
@@ -182,7 +298,24 @@ export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
   if (plan.prefix_pattern !== null && prefix === null) {
     throw new Error("unsupported Rust FTS5 prefix probe");
   }
-  return { exists: { sql: EXISTS_SQL, bind: [plan.match_value] }, prefix };
+  return {
+    exists: hasIdentifier
+      ? { sql: EXACT_IDENTIFIER_EXISTS_SQL, bind: [plan.exact_identifier as string] }
+      : { sql: FTS_EXISTS_SQL, bind: [plan.match_value as string] },
+    prefix,
+  };
+}
+
+function requireIdentifiers(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)
+    || value.length < 1
+    || value.length > 128
+    || !value.every((identifier) => isOpaqueUnicodeScalarValue(identifier, 4_096))
+    || new Set(value).size !== value.length) {
+    throw new Error("unsupported Rust FTS5 identifier constraints");
+  }
+  return value;
 }
 
 function isLimit(value: number): boolean {
@@ -196,9 +329,9 @@ function isOpaqueValue(value: unknown, maximum: number): value is string {
     && !value.includes("\0");
 }
 
-function isOpaqueUnicodeScalarValue(value: unknown, maximum: number): value is string {
+function isOpaqueUnicodeScalarValue(value: unknown, maximumBytes: number): value is string {
   return typeof value === "string"
     && value.length > 0
-    && [...value].length <= maximum
+    && new TextEncoder().encode(value).byteLength <= maximumBytes
     && !value.includes("\0");
 }

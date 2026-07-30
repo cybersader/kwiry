@@ -18,7 +18,7 @@ import {
 } from "./protocol";
 
 export type WorkerCommand =
-  | { operation: "initialize" }
+  | { operation: "initialize"; vault_id: string }
   | { operation: "begin_build"; generation: string }
   | { operation: "add_source_batch"; generation: string; sources: SourceUpsert[] }
   | {

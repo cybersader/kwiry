@@ -111,19 +111,29 @@ if (nativeJson !== wasmJson) {
 
 const byName = Object.fromEntries(wasmOutput.map((fixture) => [fixture.name, fixture.output]));
 if (byName["abi-identity"].abi_version !== 2
-  || byName["abi-identity"].lexical_query_plan_schema_version !== 3
-  || byName["abi-identity"].fts5_match_plan_schema_version !== 2
+  || byName["abi-identity"].source_preparation_schema_version !== 4
+  || byName["abi-identity"].lexical_query_plan_schema_version !== 4
+  || byName["abi-identity"].fts5_match_plan_schema_version !== 3
   || byName["ordinary-any-match"].result.execution_plan.stages[0].plan_id
-    !== "lexical_exact_metadata_v2"
+    !== "lexical_exact_metadata_v3"
   || byName["ordinary-any-match"].result.execution_plan.stages[0].match_value !== undefined
   || byName["ordinary-any-match"].result.execution_plan.stages[0].exact_value
     !== "dungeons and dragons"
   || byName["identifier-all-match"].result.plan.kind !== "identifier"
   || byName["metadata-promoted-match"].result.plan.kind !== "identifier"
   || byName["allowlisted-explicit-match"].result.execution_plan.stages[0].plan_id
-    !== "lexical_explicit_v2"
+    !== "lexical_explicit_v3"
   || byName["no-evidence-empty"].result.execution_plan.disposition !== "empty_no_evidence"
-  || byName["bounded-prefix"].result.execution_plan.stages.at(-1).plan_id !== "lexical_prefix_v2"
+  || byName["bounded-prefix"].result.execution_plan.stages.at(-1).plan_id !== "lexical_prefix_v3"
+  || byName["numeric-field-explicit"].result.plan.kind !== "explicit"
+  || byName["natural-question"].result.plan.kind !== "ordinary"
+  || byName["natural-parenthetical"].result.plan.kind !== "ordinary"
+  || byName["decomposed-accent-query"].result.plan.normalized_exact !== "resume cache"
+  || byName["complete-long-exact"].result.plan.normalized_exact.length !== 4096
+  || byName["accented-prefix"].result.execution_plan.stages[0].match_value !== "\"resu\"*"
+  || byName["rfc-exact-identifier"].result.plan.terms[0] !== "rfc 9110"
+  || byName["rfc-exact-identifier"].result.execution_plan.stages[0].required_identifiers[0]
+    !== "rfc 9110"
   || byName["inert-sql-looking-query"].error.code !== "explicit_query_unsupported"
   || JSON.stringify(byName["inert-sql-looking-query"]).includes("DROP TABLE")
   || byName["invalid-source-envelope"].error.code !== "invalid_request"

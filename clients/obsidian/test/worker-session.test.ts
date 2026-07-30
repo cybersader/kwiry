@@ -52,9 +52,9 @@ function resultFor(message: WorkerRequest): WorkerResult {
     case "initialize":
       return {
         rustAbiVersion: 2,
-        sourceSchemaVersion: 3,
-        querySchemaVersion: 3,
-        matchPlanSchemaVersion: 2,
+        sourceSchemaVersion: 4,
+        querySchemaVersion: 4,
+        matchPlanSchemaVersion: 3,
         sqliteVersion: "3.53.0",
         fts5Enabled: 1,
       };
@@ -271,7 +271,7 @@ describe("InPluginWorkerSession", () => {
     const revoke = vi.fn();
     const session = new InPluginWorkerSession(worker, "blob:kwiry", revoke, 1_000);
 
-    await expect(session.initialize()).resolves.toMatchObject({ rustAbiVersion: 2 });
+    await expect(session.initialize("active-vault")).resolves.toMatchObject({ rustAbiVersion: 2 });
     await expect(session.dispose()).resolves.toEqual({ closed: true });
     session.forceDispose();
 
@@ -284,7 +284,7 @@ describe("InPluginWorkerSession", () => {
     const worker = new MockWorker();
     worker.postMessage = vi.fn();
     const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 1_000);
-    const pending = session.initialize();
+    const pending = session.initialize("active-vault");
     const rejected = expect(pending).rejects.toMatchObject({ code: "disposed" });
     session.forceDispose();
     await rejected;

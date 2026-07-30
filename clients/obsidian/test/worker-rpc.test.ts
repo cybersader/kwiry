@@ -172,7 +172,7 @@ describe("WorkerRpcClient", () => {
   it("poisons the client when initialization claims the legacy source schema", async () => {
     const worker = new MockWorker();
     const client = new WorkerRpcClient(worker, 1_000);
-    const pending = client.request({ operation: "initialize" });
+    const pending = client.request({ operation: "initialize", vault_id: "active-vault" });
     worker.emitMessage({
       version: WORKER_PROTOCOL_VERSION,
       id: 1,

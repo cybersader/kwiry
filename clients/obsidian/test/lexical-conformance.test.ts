@@ -41,7 +41,7 @@ interface GeneratedDocuments {
 
 interface ExpectedPath {
   path: string;
-  tier: QueryEvidenceStageKind;
+  tier: QueryEvidenceStageKind | "explicit";
 }
 
 interface CorpusCase {
@@ -143,7 +143,7 @@ function finalizeQueryWithRust(
     operation: "finalize_query",
     query,
     evidence_report: {
-      schema_version: 3,
+      schema_version: 4,
       identifier_probe_matched: evidence.identifier_probe_matched,
       term_support: evidence.term_support,
     },
@@ -205,7 +205,7 @@ function documentsFor(scopes: readonly string[]): CorpusDocument[] {
 function prepareDocument(document: CorpusDocument): SourcePreparation {
   const bytes = encoder.encode(document.markdown);
   return prepareSourceWithRust({
-    vault_id: document.scope,
+    vault_id: "active-vault",
     path: document.path,
     format: "markdown",
     byte_length: bytes.byteLength,
@@ -215,7 +215,7 @@ function prepareDocument(document: CorpusDocument): SourcePreparation {
 }
 
 function openCorpusIndex(scopes: readonly string[]): Fts5GenerationIndex {
-  const index = openFts5Generation(sqlite);
+  const index = openFts5Generation(sqlite, undefined, "active-vault");
   try {
     for (const document of documentsFor(scopes)) index.replaceSource(prepareDocument(document));
     return index;
@@ -225,22 +225,22 @@ function openCorpusIndex(scopes: readonly string[]): Fts5GenerationIndex {
   }
 }
 
-function stageKind(stage: StagePlan): QueryEvidenceStageKind | null {
+function stageKind(stage: StagePlan): QueryEvidenceStageKind | "explicit" {
   switch (stage.plan_id) {
-    case "lexical_exact_metadata_v2": return "exact_metadata";
-    case "lexical_exact_phrase_v2": return "exact_phrase";
-    case "lexical_all_terms_v2": return "all_terms";
-    case "lexical_partial_coverage_v2": return "partial_coverage";
-    case "lexical_prefix_v2": return "prefix";
-    case "lexical_explicit_v2": return null;
+    case "lexical_exact_metadata_v3": return "exact_metadata";
+    case "lexical_exact_phrase_v3": return "exact_phrase";
+    case "lexical_all_terms_v3": return "all_terms";
+    case "lexical_partial_coverage_v3": return "partial_coverage";
+    case "lexical_prefix_v3": return "prefix";
+    case "lexical_explicit_v3": return "explicit";
   }
 }
 
 function singleStagePlan(stage: StagePlan): ExecutionPlan {
   return {
-    schema_version: 2,
+    schema_version: 3,
     profile_id: "lexical-v1",
-    disposition: "ready",
+    disposition: stage.plan_id === "lexical_explicit_v3" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
     stages: [{ ...stage, ordinal: 0 }],
   };
@@ -263,10 +263,17 @@ describe("shared lexical-v1 conformance corpus", () => {
         const { observation, finalized } = execute(index, testCase.query);
         expect(finalized.plan.assistance, `${testCase.id} assistance`).toBe(testCase.assistance);
         expect(finalized.plan.execution, `${testCase.id} execution`).toBe(testCase.execution);
+        // The corpus lists the bounded stage envelope. Rust deliberately omits
+        // the partial-coverage relaxation when every probed term has direct
+        // support, because that tier would be redundant rather than broader.
+        const expectedStages = observation.term_support.every((support) =>
+          support.document_frequency > 0)
+          ? testCase.stages.filter((stage) => stage !== "partial_coverage")
+          : testCase.stages;
         expect(
           finalized.plan.evidence_stages.map((stage) => stage.kind),
           `${testCase.id} stages`,
-        ).toEqual(testCase.stages);
+        ).toEqual(expectedStages);
         expect(
           finalized.plan.term_intents
             .filter((intent) => intent.role === "required_identifier_anchor")
@@ -290,7 +297,7 @@ describe("shared lexical-v1 conformance corpus", () => {
           const firstTier = finalized.execution_plan.stages
             .map((stage) => ({
               kind: stageKind(stage),
-              hits: stageKind(stage) === null ? [] : index.search(singleStagePlan(stage), 100),
+              hits: index.search(singleStagePlan(stage), 100),
             }))
             .find((stage) => stage.hits.some((hit) => hit.path === expected.path))?.kind;
           expect(firstTier, `${testCase.id} tier for ${expected.path}`).toBe(expected.tier);
@@ -352,8 +359,16 @@ describe("shared lexical-v1 conformance corpus", () => {
       maximum_candidates_per_stage: 256,
       maximum_total_candidates: 512,
     });
-    const maximum = Array.from({ length: corpus.bounds.maximum_terms }, () => "boundterm").join(" ");
+    const maximum = Array.from(
+      { length: corpus.bounds.maximum_terms },
+      (_, index) => `boundterm${index}`,
+    ).join(" ");
     expect(prepareQueryWithRust(maximum).plan.support_probes).toHaveLength(128);
+    const duplicates = Array.from(
+      { length: corpus.bounds.maximum_terms },
+      () => "boundterm",
+    ).join(" ");
+    expect(prepareQueryWithRust(duplicates).plan.support_probes).toHaveLength(1);
     const overTerms = Array.from(
       { length: corpus.bounds.over_limit_terms },
       () => "boundterm",

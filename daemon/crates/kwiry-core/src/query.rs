@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::lexical::{normalize_raw, technical_identifiers};
+use crate::lexical::{normalize_raw, technical_identifier_spans, technical_identifiers};
 
-pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 3;
+pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 4;
 pub const MAX_QUERY_BYTES: usize = 4_096;
 pub const MAX_QUERY_TERMS: usize = 128;
 pub const MAX_TERM_SUPPORT_PROBES: usize = 128;
@@ -53,6 +53,13 @@ pub enum QueryExecutionDisposition {
 pub enum QueryTermRole {
     RequiredIdentifierAnchor,
     OptionalContext,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryTermProjection {
+    AnalyzedText,
+    ExactIdentifier,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,6 +173,7 @@ pub struct QueryTermIntent {
     pub index: u16,
     pub text: String,
     pub role: QueryTermRole,
+    pub projection: QueryTermProjection,
     pub support: QueryTermSupport,
 }
 
@@ -509,26 +517,15 @@ pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanE
         QueryPlanKind::Ordinary => QueryMatchOperator::Any,
         QueryPlanKind::Identifier => QueryMatchOperator::All,
     };
-    let terms = if kind == QueryPlanKind::Explicit {
+    let term_intents = if kind == QueryPlanKind::Explicit {
         Vec::new()
     } else {
-        query_terms(query)
+        query_term_intents(query, kind)
     };
-    let anchor_indexes = identifier_anchor_indexes(query, kind, &terms);
-    let term_intents: Vec<_> = terms
+    let terms = term_intents
         .iter()
-        .enumerate()
-        .map(|(index, term)| QueryTermIntent {
-            index: index as u16,
-            text: term.clone(),
-            role: if anchor_indexes.contains(&(index as u16)) {
-                QueryTermRole::RequiredIdentifierAnchor
-            } else {
-                QueryTermRole::OptionalContext
-            },
-            support: QueryTermSupport::Unknown,
-        })
-        .collect();
+        .map(|intent| intent.text.clone())
+        .collect::<Vec<_>>();
     let support_probes: Vec<_> = term_intents
         .iter()
         .map(|intent| QueryTermSupportProbe {
@@ -659,6 +656,16 @@ fn validate_plan(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
     for (index, (term, intent)) in plan.terms.iter().zip(&plan.term_intents).enumerate() {
         if intent.index != index as u16 || intent.text != *term {
             return Err(invalid_plan("query term intent is not canonical"));
+        }
+        if intent.projection == QueryTermProjection::ExactIdentifier
+            && (intent.role != QueryTermRole::RequiredIdentifierAnchor
+                || !technical_identifiers(&intent.text)
+                    .iter()
+                    .any(|identifier| identifier == &intent.text))
+        {
+            return Err(invalid_plan(
+                "exact identifier term intent is not a complete recognized identity",
+            ));
         }
     }
     if plan.kind == QueryPlanKind::Identifier
@@ -946,7 +953,7 @@ fn invalid_plan(message: &str) -> QueryPlanError {
 pub(crate) fn classify_query(query: &str) -> QueryPlanKind {
     if has_explicit_syntax(query) {
         QueryPlanKind::Explicit
-    } else if is_identifier_like(query) {
+    } else if is_standalone_technical_identifier(query) || is_identifier_like(query) {
         QueryPlanKind::Identifier
     } else {
         QueryPlanKind::Ordinary
@@ -979,33 +986,38 @@ fn lowercase_identifier_components(query: &str) -> Option<(Vec<&str>, usize)> {
 }
 
 fn has_explicit_syntax(query: &str) -> bool {
-    if query.chars().any(|character| {
-        matches!(
-            character,
-            '"' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '~' | '*' | '?'
-        )
-    }) {
+    let boolean_syntax = query
+        .split_whitespace()
+        .any(|token| matches!(token, "AND" | "OR" | "NOT"));
+    if boolean_syntax
+        || query
+            .chars()
+            .any(|character| matches!(character, '"' | '[' | ']' | '{' | '}' | '^' | '~' | '*'))
+        || query.contains(':')
+        || query
+            .split_whitespace()
+            .any(|token| token.starts_with('+') || token.starts_with('-'))
+    {
         return true;
     }
-    const FIELDS: &[&str] = &[
-        "filename",
-        "stem",
-        "aliases",
-        "title",
-        "heading_text",
-        "content",
-        "path",
-        "vault_id",
-        "room",
-        "tags",
-    ];
-    query.split_whitespace().any(|token| {
-        matches!(token, "AND" | "OR" | "NOT")
-            || token.starts_with('+')
-            || token.starts_with('-')
-            || FIELDS
-                .iter()
-                .any(|field| token.starts_with(&format!("{field}:")))
+
+    let trimmed = query.trim_end();
+    let natural_terminal_question = trimmed.ends_with('?')
+        && trimmed[..trimmed.len() - 1].contains(char::is_whitespace)
+        && !trimmed[..trimmed.len() - 1].contains('?');
+    if query.contains('?') && !natural_terminal_question {
+        return true;
+    }
+
+    false
+}
+
+fn is_standalone_technical_identifier(query: &str) -> bool {
+    let trimmed = query.trim();
+    normalize_raw(trimmed).is_some_and(|normalized| {
+        technical_identifiers(trimmed)
+            .into_iter()
+            .any(|identifier| identifier == normalized)
     })
 }
 
@@ -1033,34 +1045,78 @@ fn is_identifier_like(query: &str) -> bool {
     has_mixed_alphanumeric || (has_number && has_acronym)
 }
 
-fn identifier_anchor_indexes(query: &str, kind: QueryPlanKind, terms: &[String]) -> BTreeSet<u16> {
-    if kind != QueryPlanKind::Identifier {
-        return BTreeSet::new();
+fn query_term_intents(query: &str, kind: QueryPlanKind) -> Vec<QueryTermIntent> {
+    let mut seen = BTreeSet::new();
+    let mut planned = Vec::new();
+    let mut cursor = 0;
+    for (range, identifier) in technical_identifier_spans(query) {
+        push_analyzed_terms(&query[cursor..range.start], &mut seen, &mut planned);
+        let key = (QueryTermProjection::ExactIdentifier, identifier.clone());
+        if seen.insert(key) {
+            planned.push((identifier, QueryTermProjection::ExactIdentifier));
+        }
+        cursor = range.end;
     }
-    let mut anchor_terms = BTreeSet::new();
-    for identifier in technical_identifiers(query) {
-        anchor_terms.extend(query_terms(&identifier));
-    }
-    for token in query.split_whitespace() {
-        let normalized = normalize_token(token);
-        let is_mixed = token.chars().any(char::is_alphabetic)
-            && token.chars().any(|character| character.is_ascii_digit());
-        let is_acronym = (2..=8).contains(&token.chars().count())
-            && token.chars().all(|character| character.is_alphabetic())
-            && token.chars().all(|character| !character.is_lowercase());
-        let is_number = token.chars().all(|character| character.is_ascii_digit());
-        if (is_mixed || is_acronym || is_number)
-            && let Some(normalized) = normalized
-        {
-            anchor_terms.insert(normalized);
+    push_analyzed_terms(&query[cursor..], &mut seen, &mut planned);
+
+    let mut fallback_anchors = BTreeSet::new();
+    if kind == QueryPlanKind::Identifier {
+        for token in query.split_whitespace() {
+            let is_mixed = token.chars().any(char::is_alphabetic)
+                && token.chars().any(|character| character.is_ascii_digit());
+            let is_acronym = (2..=8).contains(&token.chars().count())
+                && token.chars().all(|character| character.is_alphabetic())
+                && token.chars().all(|character| !character.is_lowercase());
+            let is_number = token.chars().all(|character| character.is_ascii_digit());
+            if (is_mixed || is_acronym || is_number)
+                && let Some(normalized) = normalize_token(token)
+            {
+                fallback_anchors.insert(normalized);
+            }
         }
     }
-    terms
-        .iter()
+
+    planned
+        .into_iter()
         .enumerate()
-        .filter(|(_, term)| anchor_terms.contains(*term))
-        .map(|(index, _)| index as u16)
+        .map(|(index, (text, projection))| QueryTermIntent {
+            index: index as u16,
+            role: if projection == QueryTermProjection::ExactIdentifier
+                || fallback_anchors.contains(&text)
+            {
+                QueryTermRole::RequiredIdentifierAnchor
+            } else {
+                QueryTermRole::OptionalContext
+            },
+            text,
+            projection,
+            support: QueryTermSupport::Unknown,
+        })
         .collect()
+}
+
+fn push_analyzed_terms(
+    source: &str,
+    seen: &mut BTreeSet<(QueryTermProjection, String)>,
+    planned: &mut Vec<(String, QueryTermProjection)>,
+) {
+    for authored in source.split_whitespace() {
+        let authored = authored.trim_matches(|character: char| !character.is_alphanumeric());
+        let Some(folded) = normalize_raw(authored) else {
+            continue;
+        };
+        for component in
+            folded.split(|character: char| !character.is_alphanumeric() && character != '_')
+        {
+            let Some(normalized) = normalize_token(component) else {
+                continue;
+            };
+            let key = (QueryTermProjection::AnalyzedText, normalized.clone());
+            if seen.insert(key) {
+                planned.push((normalized, QueryTermProjection::AnalyzedText));
+            }
+        }
+    }
 }
 
 fn lowercase_identifier_anchor_indexes(query: &str, terms: &[String]) -> BTreeSet<u16> {
@@ -1084,13 +1140,6 @@ fn lowercase_identifier_anchor_indexes(query: &str, terms: &[String]) -> BTreeSe
         .enumerate()
         .filter(|(_, term)| anchors.contains(*term))
         .map(|(index, _)| index as u16)
-        .collect()
-}
-
-fn query_terms(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .filter_map(normalize_token)
         .collect()
 }
 
@@ -1152,7 +1201,30 @@ mod tests {
         assert_eq!(classify_query("\"IIA 2 line\""), QueryPlanKind::Explicit);
         assert_eq!(classify_query("IIA OR line"), QueryPlanKind::Explicit);
         assert_eq!(classify_query("title:IIA"), QueryPlanKind::Explicit);
+        assert_eq!(classify_query("title:2026"), QueryPlanKind::Explicit);
+        assert_eq!(classify_query("title : IIA"), QueryPlanKind::Explicit);
+        assert_eq!(classify_query("bogus:IIA"), QueryPlanKind::Explicit);
         assert_eq!(classify_query("CVE-*"), QueryPlanKind::Explicit);
+        assert_eq!(classify_query("cache governance?"), QueryPlanKind::Ordinary);
+        assert_eq!(
+            classify_query("cache governance (draft)"),
+            QueryPlanKind::Ordinary
+        );
+        assert_eq!(classify_query("alph?"), QueryPlanKind::Explicit);
+    }
+
+    #[test]
+    fn ordinary_punctuation_and_duplicates_have_backend_neutral_term_boundaries() {
+        let comma = prepare_lexical_query("alpha,beta alpha").unwrap();
+        assert_eq!(comma.terms, ["alpha", "beta"]);
+        assert_eq!(comma.support_probes.len(), 2);
+
+        let parenthetical = prepare_lexical_query("cache governance (draft)").unwrap();
+        assert_eq!(parenthetical.terms, ["cache", "governance", "draft"]);
+        assert_eq!(
+            parenthetical.assistance,
+            QueryAssistanceEligibility::Eligible
+        );
     }
 
     #[test]
@@ -1199,29 +1271,35 @@ mod tests {
     fn identifier_anchors_remain_required_while_context_can_relax() {
         let prepared = prepare_lexical_query("RFC 9110 caching").unwrap();
         assert_eq!(prepared.kind, QueryPlanKind::Identifier);
+        assert_eq!(prepared.terms, ["rfc 9110", "caching"]);
         assert_eq!(
             prepared
                 .term_intents
                 .iter()
-                .map(|intent| intent.role)
+                .map(|intent| (intent.role, intent.projection))
                 .collect::<Vec<_>>(),
             [
-                QueryTermRole::RequiredIdentifierAnchor,
-                QueryTermRole::RequiredIdentifierAnchor,
-                QueryTermRole::OptionalContext,
+                (
+                    QueryTermRole::RequiredIdentifierAnchor,
+                    QueryTermProjection::ExactIdentifier,
+                ),
+                (
+                    QueryTermRole::OptionalContext,
+                    QueryTermProjection::AnalyzedText,
+                ),
             ]
         );
 
-        let report = evidence_report(&prepared, None, &[(3, 0), (3, 0), (0, 0)]);
+        let report = evidence_report(&prepared, None, &[(3, 0), (0, 0)]);
         let finalized = prepared.clone().finalize_evidence(report).unwrap();
         let partial = finalized
             .evidence_stages
             .iter()
             .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
             .unwrap();
-        assert_eq!(partial.required_term_indexes, [0, 1]);
+        assert_eq!(partial.required_term_indexes, [0]);
 
-        let missing_anchor = evidence_report(&prepared, None, &[(0, 4), (3, 0), (9, 0)]);
+        let missing_anchor = evidence_report(&prepared, None, &[(0, 4), (9, 0)]);
         let empty = prepared.finalize_evidence(missing_anchor).unwrap();
         assert_eq!(empty.execution, QueryExecutionDisposition::EmptyNoEvidence);
         assert!(empty.evidence_stages.is_empty());
@@ -1253,14 +1331,14 @@ mod tests {
     #[test]
     fn assisted_plan_carries_exact_phrase_fields_bounds_and_disabled_typo_intent() {
         let plan = prepare_lexical_query("Résumé Cache").unwrap();
-        assert_eq!(plan.normalized_exact.as_deref(), Some("résumé cache"));
+        assert_eq!(plan.normalized_exact.as_deref(), Some("resume cache"));
         assert_eq!(
             plan.exact_intent.as_ref().unwrap().field_group,
             QueryFieldGroup::Exact
         );
         assert_eq!(
             plan.phrase_intent.as_ref().unwrap().terms,
-            ["résumé", "cache"]
+            ["resume", "cache"]
         );
         assert_eq!(plan.field_groups, QueryFieldGroups::lexical_v1());
         assert_eq!(plan.bounds, QueryBounds::lexical_v1());
@@ -1357,16 +1435,24 @@ mod tests {
     #[test]
     fn unicode_and_query_bounds_are_byte_and_term_stable() {
         let unicode = prepare_lexical_query("NAÏVE café 東京").unwrap();
-        assert_eq!(unicode.terms, ["naïve", "café", "東京"]);
+        assert_eq!(unicode.terms, ["naive", "cafe", "東京"]);
 
         for term_count in [1, 2, 7, MAX_QUERY_TERMS] {
-            let query = std::iter::repeat_n("é", term_count)
+            let query = (0..term_count)
+                .map(|index| format!("é{index}"))
                 .collect::<Vec<_>>()
                 .join(" ");
             let plan = prepare_lexical_query(&query).unwrap();
             assert_eq!(plan.terms.len(), term_count);
             assert_eq!(plan.support_probes.len(), term_count);
         }
+
+        let repeated = std::iter::repeat_n("é", MAX_QUERY_TERMS)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let repeated = prepare_lexical_query(&repeated).unwrap();
+        assert_eq!(repeated.terms, ["e"]);
+        assert_eq!(repeated.support_probes.len(), 1);
 
         let bytes = "é".repeat(MAX_QUERY_BYTES / 2 + 1);
         let byte_error = prepare_lexical_query(&bytes).unwrap_err();
@@ -1381,12 +1467,54 @@ mod tests {
     }
 
     #[test]
+    fn exact_values_preserve_complete_identity_up_to_the_query_byte_ceiling() {
+        let query = "a".repeat(MAX_QUERY_BYTES);
+        let plan = prepare_lexical_query(&query).unwrap();
+        assert_eq!(plan.normalized_exact.as_deref(), Some(query.as_str()));
+        assert_eq!(plan.exact_intent.unwrap().normalized.len(), MAX_QUERY_BYTES);
+
+        let error = prepare_lexical_query(&(query + "a")).unwrap_err();
+        assert_eq!(error.code, "invalid_query");
+    }
+
+    #[test]
+    fn recognized_identifiers_are_single_exact_projection_anchors() {
+        for (query, expected) in [
+            ("RFC 9110 optional", "rfc 9110"),
+            ("CVE-2026-1234 optional", "cve-2026-1234"),
+            ("CVE 2026 1234 optional", "cve 2026 1234"),
+            ("product/v2.4.1 optional", "product/v2.4.1"),
+        ] {
+            let plan = prepare_lexical_query(query).unwrap();
+            assert_eq!(plan.kind, QueryPlanKind::Identifier, "{query}");
+            assert_eq!(plan.terms[0], expected, "{query}");
+            assert_eq!(
+                plan.term_intents[0].projection,
+                QueryTermProjection::ExactIdentifier,
+                "{query}"
+            );
+            assert_eq!(
+                plan.term_intents[0].role,
+                QueryTermRole::RequiredIdentifierAnchor,
+                "{query}"
+            );
+        }
+
+        let iia = prepare_lexical_query("IIA 2 optional").unwrap();
+        assert_eq!(iia.terms, ["iia", "2", "optional"]);
+        assert!(iia.term_intents[..2].iter().all(|intent| {
+            intent.role == QueryTermRole::RequiredIdentifierAnchor
+                && intent.projection == QueryTermProjection::AnalyzedText
+        }));
+    }
+
+    #[test]
     fn serialization_is_deterministic_and_legacy_shapes_are_refused() {
         let plan = prepare_lexical_query("RFC 9110 caching").unwrap();
         let first = serde_json::to_string(&plan).unwrap();
         let second = serde_json::to_string(&plan.clone()).unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("{\"schema_version\":3,\"query\":\"RFC 9110 caching\""));
+        assert!(first.starts_with("{\"schema_version\":4,\"query\":\"RFC 9110 caching\""));
         let decoded: LexicalQueryPlan = serde_json::from_str(&first).unwrap();
         assert_eq!(serde_json::to_string(&decoded).unwrap(), first);
 

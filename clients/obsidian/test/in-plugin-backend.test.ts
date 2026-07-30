@@ -625,6 +625,9 @@ describe("InPluginLexicalBackend", () => {
     await expect(inPlugin.search({ q: "query", mode: "semantic" })).rejects.toMatchObject({
       code: "mode_unavailable",
     });
+    await expect(inPlugin.search({ q: "query", mode: "hybrid" })).rejects.toMatchObject({
+      code: "mode_unavailable",
+    });
   });
 
   it("hydrates excerpts from the vault file and attaches in-plugin result origin", async () => {

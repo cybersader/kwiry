@@ -15,6 +15,10 @@ crate-type = ["cdylib", "rlib"]
 name = "kwiry-obsidian-wasm-fixtures"
 path = "src/bin/fixtures.rs"
 
+[features]
+default = []
+internal-typo-prototype = []
+
 [dependencies]
 kwiry-core = { path = "../../../../daemon/crates/kwiry-core", default-features = false, features = ["portable"] }
 serde = { version = "1", features = ["derive"] }

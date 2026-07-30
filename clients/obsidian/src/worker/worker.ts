@@ -5,6 +5,7 @@
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import sqliteWasmBytes from "@sqlite.org/sqlite-wasm/sqlite3.wasm";
 import rustWasmBytes from "virtual:kwiry-rust-wasm-bytes";
+import { createInternalPrototypeHandler } from "virtual:kwiry-internal-prototype";
 import {
   PLUGIN_ID,
   PLUGIN_VERSION,
@@ -21,6 +22,7 @@ import {
   DEFAULT_DATABASE_BYTE_LIMIT,
   IndexCapacityError,
   IndexIntegrityError,
+  MAX_INDEX_CHUNKS,
   openFts5Generation,
   openRestoredFts5Generation,
   type Fts5GenerationIndex,
@@ -99,8 +101,20 @@ let guards: GuardCounters | null = null;
 // still has to be able to name the chunking contract its image was built
 // under, so the adapter identity — not an observed chunk — is the source.
 let declaredChunkingVersion: number | null = null;
+let initializedVaultId: string | null = null;
+const handleInternalPrototypeMessage = createInternalPrototypeHandler({
+  scope,
+  getActive: () => active,
+  requireInitialized,
+  search,
+  getLastRequestId: () => lastRequestId,
+  setLastRequestId: (id) => { lastRequestId = id; },
+  mapError: (error) => isWorkerError(error)
+    ? error
+    : fixedWorkerError("internal_error", "query", "Internal prototype failed.", false),
+});
 
-async function initialize(): Promise<InitializeResult> {
+async function initialize(vaultId: string): Promise<InitializeResult> {
   if (state !== "cold") {
     throw fixedWorkerError("invalid_state", "lifecycle", "Worker is already initialized.", false);
   }
@@ -111,6 +125,7 @@ async function initialize(): Promise<InitializeResult> {
     await verifyArtifact(rustWasmBytes, RUST_WASM_SIZE, RUST_WASM_SHA256);
     const rustIdentity = initializeRustAdapter();
     declaredChunkingVersion = rustIdentity.chunking_version;
+    initializedVaultId = vaultId;
 
     const initializeSqlite = sqlite3InitModule as unknown as SQLiteInitializer;
     const originalWarn = console.warn;
@@ -182,6 +197,7 @@ async function initialize(): Promise<InitializeResult> {
     state = "failed";
     sqlite = null;
     declaredChunkingVersion = null;
+    initializedVaultId = null;
     if (isWorkerError(error)) throw error;
     if (error instanceof RustAdapterError) {
       throw fixedWorkerError(
@@ -209,7 +225,7 @@ function beginBuild(generation: string): BuildResult {
   }
   staging = {
     id: generation,
-    index: openFts5Generation(sqlite),
+    index: openFts5Generation(sqlite, undefined, requireInitializedVaultId()),
     quarantinedSources: new Map(),
   };
   usedGenerations.add(generation);
@@ -552,6 +568,8 @@ async function restoreGeneration(
       sqlite,
       request.bytes,
       declaredChunkingVersion,
+      undefined,
+      requireInitializedVaultId(),
     );
     staging = {
       id: request.generation,
@@ -661,15 +679,27 @@ function search(query: string, limit: number): SearchResult {
       true,
     );
   }
+  const trace = active.index.beginInternalLexicalTrace();
+  let traceFinished = false;
   try {
     const prepared = prepareQueryWithRust(query);
-    const evidence = active.index.observeQuery(prepared.probes);
+    const evidence = active.index.observeQuery(prepared.probes, trace);
     const finalized = finalizeQueryWithRust(query, evidence);
+    const hits = active.index.search(finalized.execution_plan, limit, trace);
+    active.index.finishInternalLexicalTrace(trace);
+    traceFinished = true;
     return {
       generation: active.id,
-      hits: active.index.search(finalized.execution_plan, limit),
+      hits,
     };
   } catch (error) {
+    if (!traceFinished) {
+      try {
+        active.index.finishInternalLexicalTrace(trace);
+      } catch {
+        // A trace is diagnostic state only and must never replace the query failure.
+      }
+    }
     if (error instanceof RustAdapterError) {
       throw fixedWorkerError(
         "query_rejected",
@@ -730,8 +760,17 @@ function dispose(): DisposeResult {
   usedGenerations.clear();
   sqlite = null;
   declaredChunkingVersion = null;
+  initializedVaultId = null;
   state = "disposed";
   return { closed: true };
+}
+
+function requireInitializedVaultId(): string {
+  requireInitialized();
+  if (initializedVaultId === null) {
+    throw fixedWorkerError("invalid_state", "lifecycle", "Worker vault is unavailable.", false);
+  }
+  return initializedVaultId;
 }
 
 function requireInitialized(): void {
@@ -789,9 +828,15 @@ function indexCapacityError(): WorkerError {
 async function prepareSourceBatch(sources: readonly SourceUpsert[]): Promise<PreparedSourceBatch> {
   const preparations: SourcePreparation[] = [];
   const quarantined = new Map<string, SourcePreparationDefectField>();
+  let preparedChunks = 0;
   for (const source of sources) {
     try {
-      preparations.push(prepareSourceUpsert(source));
+      const preparation = prepareSourceUpsert(source);
+      preparedChunks += preparation.kind === "indexed" ? preparation.chunks.length : 0;
+      if (!Number.isSafeInteger(preparedChunks) || preparedChunks > MAX_INDEX_CHUNKS) {
+        throw new IndexCapacityError();
+      }
+      preparations.push(preparation);
     } catch (error) {
       const defectField = quarantinablePreparationDefect(error);
       if (defectField === null) throw error;
@@ -826,7 +871,7 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
   const filename = descriptor.path.split("/").at(-1) ?? descriptor.path;
   const separator = filename.lastIndexOf(".");
   return {
-    schema_version: 3,
+    schema_version: 4,
     source_key: await sourceKey(descriptor.vault_id, descriptor.path),
     vault_id: descriptor.vault_id,
     ...(descriptor.room === undefined ? {} : { room: descriptor.room }),
@@ -908,6 +953,7 @@ function sourceChangeError(error: unknown): WorkerError {
     );
   }
   if (error instanceof RustAdapterError) {
+    if (error.code === "index_limit_exceeded") return indexCapacityError();
     return fixedWorkerError(
       "source_rejected",
       "rust",
@@ -935,7 +981,7 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
   lastRequestId = request.id;
   switch (request.operation) {
     case "initialize":
-      return initialize();
+      return initialize(request.vault_id);
     case "begin_build":
       return beginBuild(request.generation);
     case "add_source_batch":
@@ -962,6 +1008,7 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
 }
 
 async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
+  if (await handleInternalPrototypeMessage(event.data)) return;
   const parsed = parseWorkerRequest(event.data);
   const identity = responseIdentity(event.data);
   let response: WorkerResponse;

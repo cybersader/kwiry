@@ -14,17 +14,17 @@ import {
 import type { PropertyBag, SourceDescriptorInput } from "./protocol";
 
 const ABI_VERSION = 2;
-const SOURCE_SCHEMA_VERSION = 3;
-const QUERY_SCHEMA_VERSION = 3;
-const MATCH_PLAN_SCHEMA_VERSION = 2;
+const SOURCE_SCHEMA_VERSION = 4;
+const QUERY_SCHEMA_VERSION = 4;
+const MATCH_PLAN_SCHEMA_VERSION = 3;
 
 export interface RustIdentity {
   abi_version: 2;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
-  source_preparation_schema_version: 3;
-  lexical_query_plan_schema_version: 3;
-  fts5_match_plan_schema_version: 2;
+  source_preparation_schema_version: 4;
+  lexical_query_plan_schema_version: 4;
+  fts5_match_plan_schema_version: 3;
   /**
    * The chunking contract the adapter applies. Chunk rows carry it per chunk,
    * but a generation with no chunks still has to name the contract its cached
@@ -69,7 +69,7 @@ export interface PreparedChunk {
 }
 
 export interface SourcePreparation {
-  schema_version: 3;
+  schema_version: 4;
   source_key: string;
   vault_id: string;
   room?: string;
@@ -104,7 +104,7 @@ export type QueryEvidenceStageKind =
   | "exact_metadata" | "exact_phrase" | "all_terms" | "partial_coverage" | "prefix";
 
 export interface LexicalQueryPlan {
-  schema_version: 3;
+  schema_version: 4;
   query: string;
   kind: "explicit" | "ordinary" | "identifier";
   match_operator: "explicit" | "any" | "all";
@@ -115,6 +115,7 @@ export interface LexicalQueryPlan {
     index: number;
     text: string;
     role: "required_identifier_anchor" | "optional_context";
+    projection: "analyzed_text" | "exact_identifier";
     support: "unknown" | "useful" | "unsupported";
   }>;
   normalized_exact: string | null;
@@ -164,16 +165,17 @@ export interface LexicalQueryPlan {
 
 export type EvidenceProbePlan =
   | {
-      schema_version: 2;
-      plan_id: "identifier_metadata_v2";
+      schema_version: 3;
+      plan_id: "identifier_metadata_v3";
       match_value: string;
     }
   | {
-      schema_version: 2;
-      plan_id: "term_support_v2";
+      schema_version: 3;
+      plan_id: "term_support_v3";
       probe_id: number;
       term_index: number;
-      match_value: string;
+      match_value?: string;
+      exact_identifier?: string;
       prefix_pattern: string | null;
       max_prefix_expansions: 16;
       max_prefix_term_bytes: 96;
@@ -195,23 +197,24 @@ export interface QueryEvidenceObservation {
 }
 
 export type StagePlanId =
-  | "lexical_explicit_v2"
-  | "lexical_exact_metadata_v2"
-  | "lexical_exact_phrase_v2"
-  | "lexical_all_terms_v2"
-  | "lexical_partial_coverage_v2"
-  | "lexical_prefix_v2";
+  | "lexical_explicit_v3"
+  | "lexical_exact_metadata_v3"
+  | "lexical_exact_phrase_v3"
+  | "lexical_all_terms_v3"
+  | "lexical_partial_coverage_v3"
+  | "lexical_prefix_v3";
 
 export interface StagePlan {
   ordinal: number;
   plan_id: StagePlanId;
   match_value?: string;
   exact_value?: string;
+  required_identifiers?: string[];
   max_candidates: number;
 }
 
 export interface ExecutionPlan {
-  schema_version: 2;
+  schema_version: 3;
   profile_id: "lexical-v1";
   disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
   max_total_candidates: 512;
@@ -458,15 +461,23 @@ function probesMatchPlan(probes: EvidenceProbePlan[], plan: LexicalQueryPlan): b
   }
   let cursor = 0;
   if (plan.metadata_probe !== null) {
-    if (probes[0]?.plan_id !== "identifier_metadata_v2") return false;
+    if (probes[0]?.plan_id !== "identifier_metadata_v3") return false;
     cursor = 1;
   }
   if (probes.length - cursor !== plan.support_probes.length) return false;
   return plan.support_probes.every((probe, index) => {
     const actual = probes[index + cursor];
-    return actual?.plan_id === "term_support_v2"
+    const intent = plan.term_intents[probe.term_index];
+    return actual?.plan_id === "term_support_v3"
       && actual.probe_id === probe.probe_id
-      && actual.term_index === probe.term_index;
+      && actual.term_index === probe.term_index
+      && intent !== undefined
+      && (intent.projection === "exact_identifier"
+        ? actual.exact_identifier === intent.text
+          && actual.match_value === undefined
+          && actual.prefix_pattern === null
+        : actual.match_value !== undefined
+          && actual.exact_identifier === undefined);
   });
 }
 
@@ -498,7 +509,7 @@ function isLexicalQueryPlan(value: unknown): value is LexicalQueryPlan {
     || value.term_intents.length !== value.terms.length
     || !value.term_intents.every((intent, index) => isTermIntent(intent, index, (value.terms as string[])[index]))
     || !(value.normalized_exact === null
-      || isBoundedUnicodeScalarString(value.normalized_exact, 256))
+      || isBoundedUtf8String(value.normalized_exact, 4_096))
     || !isExactIntent(value.exact_intent, value.normalized_exact)
     || typeof value.phrase_boost !== "boolean"
     || !isPhraseIntent(value.phrase_intent, value.terms, value.phrase_boost)
@@ -553,10 +564,13 @@ function isLexicalQueryPlan(value: unknown): value is LexicalQueryPlan {
 
 function isTermIntent(value: unknown, index: number, term: string | undefined): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ["index", "text", "role", "support"])
+    && hasExactKeys(value, ["index", "text", "role", "projection", "support"])
     && value.index === index
     && value.text === term
     && (value.role === "required_identifier_anchor" || value.role === "optional_context")
+    && (value.projection === "analyzed_text" || value.projection === "exact_identifier")
+    && (value.role !== "required_identifier_anchor" || value.projection === "exact_identifier")
+    && (value.projection !== "exact_identifier" || value.role === "required_identifier_anchor")
     && (value.support === "unknown" || value.support === "useful" || value.support === "unsupported");
 }
 
@@ -704,23 +718,30 @@ function isMetadataProbe(value: unknown): boolean {
 }
 
 function isEvidenceProbePlan(value: unknown): value is EvidenceProbePlan {
-  if (!isRecord(value) || value.schema_version !== MATCH_PLAN_SCHEMA_VERSION
-    || !isBoundedString(value.match_value, 16_384)) return false;
-  if (value.plan_id === "identifier_metadata_v2") {
-    return hasExactKeys(value, ["plan_id", "schema_version", "match_value"]);
+  if (!isRecord(value) || value.schema_version !== MATCH_PLAN_SCHEMA_VERSION) return false;
+  if (value.plan_id === "identifier_metadata_v3") {
+    return hasExactKeys(value, ["plan_id", "schema_version", "match_value"])
+      && isBoundedString(value.match_value, 16_384);
   }
-  return value.plan_id === "term_support_v2"
-    && hasExactKeys(value, [
-      "plan_id", "schema_version", "probe_id", "term_index", "match_value",
-      "prefix_pattern", "max_prefix_expansions", "max_prefix_term_bytes",
-    ])
-    && isNonNegativeSafeInteger(value.probe_id)
-    && value.probe_id < 128
-    && isNonNegativeSafeInteger(value.term_index)
-    && value.term_index < 128
-    && (value.prefix_pattern === null || isBoundedString(value.prefix_pattern, 4_096))
-    && value.max_prefix_expansions === 16
-    && value.max_prefix_term_bytes === 96;
+  if (value.plan_id !== "term_support_v3"
+    || !hasRequiredAndOptionalKeys(value, [
+      "plan_id", "schema_version", "probe_id", "term_index", "prefix_pattern",
+      "max_prefix_expansions", "max_prefix_term_bytes",
+    ], ["match_value", "exact_identifier"])
+    || isNonNegativeSafeInteger(value.probe_id) === false
+    || value.probe_id >= 128
+    || isNonNegativeSafeInteger(value.term_index) === false
+    || value.term_index >= 128
+    || (value.prefix_pattern !== null && !isBoundedString(value.prefix_pattern, 4_096))
+    || value.max_prefix_expansions !== 16
+    || value.max_prefix_term_bytes !== 96) {
+    return false;
+  }
+  const hasMatch = isBoundedString(value.match_value, 16_384);
+  const hasIdentifier = isBoundedUtf8String(value.exact_identifier, 4_096);
+  return hasMatch !== hasIdentifier
+    && (hasIdentifier ? value.prefix_pattern === null : true);
+
 }
 
 function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is ExecutionPlan {
@@ -744,14 +765,14 @@ function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is 
   if (value.disposition === "explicit_bypass") {
     return queryPlan.execution === "explicit_bypass"
       && value.stages.length === 1
-      && value.stages[0]?.plan_id === "lexical_explicit_v2";
+      && value.stages[0]?.plan_id === "lexical_explicit_v3";
   }
   const stagePlanIds: Readonly<Record<QueryEvidenceStageKind, StagePlanId>> = {
-    exact_metadata: "lexical_exact_metadata_v2",
-    exact_phrase: "lexical_exact_phrase_v2",
-    all_terms: "lexical_all_terms_v2",
-    partial_coverage: "lexical_partial_coverage_v2",
-    prefix: "lexical_prefix_v2",
+    exact_metadata: "lexical_exact_metadata_v3",
+    exact_phrase: "lexical_exact_phrase_v3",
+    all_terms: "lexical_all_terms_v3",
+    partial_coverage: "lexical_partial_coverage_v3",
+    prefix: "lexical_prefix_v3",
   };
   return queryPlan.execution === "ready"
     && value.stages.length === queryPlan.evidence_stages.length
@@ -760,7 +781,12 @@ function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is 
       return evidenceStage !== undefined
         && stage.ordinal === evidenceStage.ordinal
         && stage.plan_id === stagePlanIds[evidenceStage.kind]
-        && stage.max_candidates === evidenceStage.max_candidates;
+        && stage.max_candidates === evidenceStage.max_candidates
+        && JSON.stringify(stage.required_identifiers ?? []) === JSON.stringify(
+          queryPlan.term_intents
+            .filter((intent) => intent.projection === "exact_identifier")
+            .map((intent) => intent.text),
+        );
     });
 }
 
@@ -769,22 +795,31 @@ function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
     || !hasRequiredAndOptionalKeys(
       value,
       ["ordinal", "plan_id", "max_candidates"],
-      ["match_value", "exact_value"],
+      ["match_value", "exact_value", "required_identifiers"],
     )
     || value.ordinal !== ordinal
     || !isPositiveSafeInteger(value.max_candidates)
     || value.max_candidates > 512) return false;
-  const matchIds = [
-    "lexical_explicit_v2", "lexical_exact_phrase_v2", "lexical_all_terms_v2",
-    "lexical_partial_coverage_v2", "lexical_prefix_v2",
-  ];
-  if (value.plan_id === "lexical_exact_metadata_v2") {
-    return value.match_value === undefined
-      && isBoundedUnicodeScalarString(value.exact_value, 256);
+  const requiredIdentifiers = value.required_identifiers ?? [];
+  if (!Array.isArray(requiredIdentifiers)
+    || requiredIdentifiers.length > 128
+    || !requiredIdentifiers.every((identifier) => isBoundedUtf8String(identifier, 4_096))
+    || new Set(requiredIdentifiers).size !== requiredIdentifiers.length) {
+    return false;
   }
-  return matchIds.includes(String(value.plan_id))
-    && value.exact_value === undefined
-    && isBoundedString(value.match_value, 16_384);
+  const matchIds = [
+    "lexical_explicit_v3", "lexical_exact_phrase_v3", "lexical_all_terms_v3",
+    "lexical_partial_coverage_v3", "lexical_prefix_v3",
+  ];
+  if (value.plan_id === "lexical_exact_metadata_v3") {
+    return value.match_value === undefined
+      && isBoundedUtf8String(value.exact_value, 4_096);
+  }
+  if (!matchIds.includes(String(value.plan_id)) || value.exact_value !== undefined) return false;
+  if (value.plan_id === "lexical_explicit_v3") {
+    return requiredIdentifiers.length === 0 && isBoundedString(value.match_value, 16_384);
+  }
+  return isBoundedString(value.match_value, 16_384) || requiredIdentifiers.length > 0;
 }
 
 function isExactRecord(value: unknown, expected: Readonly<Record<string, number>>): boolean {
@@ -810,8 +845,11 @@ function isBoundedString(value: unknown, maximum: number, allowEmpty = false): v
     && (allowEmpty || value.length > 0);
 }
 
-function isBoundedUnicodeScalarString(value: unknown, maximum: number): value is string {
-  return typeof value === "string" && value.length > 0 && [...value].length <= maximum;
+function isBoundedUtf8String(value: unknown, maximumBytes: number): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && new TextEncoder().encode(value).byteLength <= maximumBytes
+    && !value.includes("\0");
 }
 
 function isPositiveSafeInteger(value: unknown): value is number {

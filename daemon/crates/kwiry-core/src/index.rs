@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::str::CharIndices;
 
 use sha2::{Digest, Sha256};
 use tantivy::Index;
@@ -10,12 +11,15 @@ use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, JsonObjectOptions, OwnedValue, STORED, STRING, Schema,
     TEXT, TantivyDocument, TextFieldIndexing,
 };
-use tantivy::tokenizer::{SimpleTokenizer, TokenStream, Tokenizer};
+use tantivy::tokenizer::{
+    RemoveLongFilter, SimpleTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer,
+};
+use unicode_normalization::char::is_combining_mark;
 
 use crate::chunk::ingest_vault_files;
 use crate::error::{Error, Result};
 use crate::generation::DataRoot;
-use crate::lexical::normalize_raw;
+use crate::lexical::{fold_lexical, normalize_raw};
 use crate::manifest::{Manifest, registration_fingerprint, source_key};
 use crate::model::{
     Config, FileOutcomeKind, HostProfile, IndexStats, PreparedChunk, PropertyBag, PropertyValue,
@@ -25,6 +29,70 @@ use crate::partition::{GenerationLayout, partition_index_dir};
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 const MAX_RAW_PROPERTY_TOKEN_BYTES: usize = 39;
+
+#[derive(Clone, Default)]
+struct LexicalTokenizer {
+    token: Token,
+}
+
+struct LexicalTokenStream<'a> {
+    text: &'a str,
+    chars: CharIndices<'a>,
+    token: &'a mut Token,
+}
+
+impl Tokenizer for LexicalTokenizer {
+    type TokenStream<'a> = LexicalTokenStream<'a>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        self.token.reset();
+        LexicalTokenStream {
+            text,
+            chars: text.char_indices(),
+            token: &mut self.token,
+        }
+    }
+}
+
+impl LexicalTokenStream<'_> {
+    fn search_token_end(&mut self) -> usize {
+        self.chars
+            .find(|(_, character)| !character.is_alphanumeric() && !is_combining_mark(*character))
+            .map_or(self.text.len(), |(offset, _)| offset)
+    }
+}
+
+impl TokenStream for LexicalTokenStream<'_> {
+    fn advance(&mut self) -> bool {
+        self.token.text.clear();
+        self.token.position = self.token.position.wrapping_add(1);
+        while let Some((offset_from, character)) = self.chars.next() {
+            if character.is_alphanumeric() {
+                let offset_to = self.search_token_end();
+                self.token.offset_from = offset_from;
+                self.token.offset_to = offset_to;
+                self.token.text = fold_lexical(&self.text[offset_from..offset_to]);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn token(&self) -> &Token {
+        self.token
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.token
+    }
+}
+
+pub(crate) fn register_lexical_analyzer(index: &Index) {
+    let analyzer = TextAnalyzer::builder(LexicalTokenizer::default())
+        .filter(RemoveLongFilter::limit(40))
+        .build();
+    index.tokenizers().register("default", analyzer);
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Fields {
@@ -168,6 +236,7 @@ fn build_desktop_candidate(
     let fields = Fields::from_schema(&schema)?;
     let index =
         Index::create_in_dir(index_dir, schema).map_err(|error| Error::Index(error.to_string()))?;
+    register_lexical_analyzer(&index);
     let mut writer = index
         .writer(WRITER_MEMORY_BYTES)
         .map_err(|error| Error::Index(error.to_string()))?;
@@ -316,6 +385,7 @@ fn build_partition(
     let fields = Fields::from_schema(&schema)?;
     let index =
         Index::create_in_dir(index_dir, schema).map_err(|error| Error::Index(error.to_string()))?;
+    register_lexical_analyzer(&index);
     let mut writer = index
         .writer(WRITER_MEMORY_BYTES)
         .map_err(|error| Error::Index(error.to_string()))?;
@@ -367,6 +437,7 @@ pub(crate) fn open_index_dir(index_dir: &Path) -> Result<(Index, Fields)> {
         )));
     }
     let index = Index::open_in_dir(index_dir).map_err(|error| Error::Index(error.to_string()))?;
+    register_lexical_analyzer(&index);
     let fields = Fields::from_schema(&index.schema())?;
     Ok((index, fields))
 }
@@ -1116,6 +1187,7 @@ mod tests {
         let schema = build_schema();
         let fields = Fields::from_schema(&schema).unwrap();
         let index = Index::create_in_ram(schema);
+        register_lexical_analyzer(&index);
         let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
         writer
             .add_document(
@@ -1160,6 +1232,7 @@ mod tests {
         let schema = build_schema();
         let fields = Fields::from_schema(&schema).unwrap();
         let index = Index::create_in_ram(schema);
+        register_lexical_analyzer(&index);
         let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
         for chunk in &preparation.chunks {
             writer
@@ -1238,6 +1311,7 @@ mod tests {
         let schema = build_schema();
         let fields = Fields::from_schema(&schema).unwrap();
         let index = Index::create_in_ram(schema);
+        register_lexical_analyzer(&index);
         let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
         for chunk in &preparation.chunks {
             writer

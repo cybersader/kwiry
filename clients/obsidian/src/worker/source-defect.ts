@@ -5,7 +5,7 @@
 // free of the WASM import so it is directly testable. The adapter cannot be
 // imported in a unit test because it pulls in the Rust binary.
 
-const SOURCE_SCHEMA_VERSION = 3;
+const SOURCE_SCHEMA_VERSION = 4;
 
 // This mirrors Rust's call-stack safety boundary. It is deliberately the only
 // property-bag bound: source byte limits already protect allocation, while a
@@ -342,7 +342,7 @@ function isNormalizedExact(value: unknown): boolean {
 function isBoundedNormalizedExact(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
-    && [...value].length <= 256;
+    && new TextEncoder().encode(value).byteLength <= 4_096;
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

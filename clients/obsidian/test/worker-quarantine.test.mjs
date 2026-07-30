@@ -79,7 +79,7 @@ function source(path, text) {
 
 async function initializedWorker() {
   const worker = new Worker(nodeWorkerSource(injectedWorkerSource), { eval: true });
-  await request(worker, { id: 1, operation: "initialize" });
+  await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
   return worker;
 }
 

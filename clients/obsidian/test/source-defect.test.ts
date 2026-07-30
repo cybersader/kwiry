@@ -7,7 +7,7 @@ import { sourcePreparationDefect } from "../src/worker/source-defect";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
 
 const VALID = {
-  schema_version: 3,
+  schema_version: 4,
   source_key: "a".repeat(64),
   vault_id: "active-vault",
   path: "Notes/Example.md",
@@ -46,8 +46,8 @@ describe("sourcePreparationDefect", () => {
       .toBe("indexed_missing_hash");
   });
 
-  it("validates normalized exact values by Unicode scalar count", () => {
-    const bounded = "🚀".repeat(256);
+  it("validates normalized exact values by Rust's UTF-8 byte bound", () => {
+    const bounded = "🚀".repeat(1_024);
     expect(sourcePreparationDefect({
       ...VALID,
       normalized_exact: { ...VALID.normalized_exact, title: bounded },

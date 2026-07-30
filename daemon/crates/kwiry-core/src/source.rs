@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -15,7 +16,9 @@ use crate::model::{
     PreparedChunk, PropertyBag, RetrievalMetadata,
 };
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 3;
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 4;
+pub const MAX_PREPARED_CHUNKS_PER_SOURCE: usize = 100_000;
+pub const MAX_PREPARED_HEADING_BYTES_PER_SOURCE: usize = MAX_FILE_BYTES as usize;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -249,7 +252,7 @@ pub fn prepare_source_buffer(
     let source_frontmatter = Arc::new(frontmatter);
     let links_out = extract_wikilinks(body);
     let sections = match descriptor.format {
-        SourceFormat::Markdown => markdown_sections(body),
+        SourceFormat::Markdown => markdown_sections(body)?,
         SourceFormat::Text => vec![Section {
             heading_path: Vec::new(),
             content: body,
@@ -258,11 +261,25 @@ pub fn prepare_source_buffer(
 
     let mut chunks = Vec::new();
     let mut chunk_ix = 0_u64;
+    let mut prepared_heading_bytes = 0_usize;
     for section in sections {
         for part in split_oversized(section.content) {
             if part.trim().is_empty() {
                 continue;
             }
+            if chunks.len() == MAX_PREPARED_CHUNKS_PER_SOURCE {
+                return Err(chunk_inventory_error());
+            }
+            let heading_text = section.heading_path.join(" ");
+            let normalized_heading = normalize_raw(&heading_text);
+            let heading_cost = heading_path_bytes(&section.heading_path)
+                .saturating_add(heading_text.len())
+                .saturating_add(normalized_heading.as_ref().map_or(0, String::len));
+            prepared_heading_bytes = prepared_heading_bytes
+                .checked_add(heading_cost)
+                .filter(|total| *total <= MAX_PREPARED_HEADING_BYTES_PER_SOURCE)
+                .ok_or_else(heading_inventory_error)?;
+            let content = part.trim().to_owned();
             let chunk = Chunk {
                 chunk_id: chunk_id(
                     &descriptor.vault_id,
@@ -274,16 +291,15 @@ pub fn prepare_source_buffer(
                 room: descriptor.room.clone(),
                 path: descriptor.path.clone(),
                 heading_path: section.heading_path.clone(),
-                content: part.trim().to_owned(),
+                content,
                 frontmatter: Frontmatter::default(),
                 links_out: links_out.clone(),
                 mtime: descriptor.mtime,
                 content_hash: content_hash.clone(),
                 chunking_version: CHUNKING_VERSION,
             };
-            let heading_text = chunk.heading_path.join(" ");
             chunks.push(PreparedChunk {
-                normalized_heading: normalize_raw(&heading_text),
+                normalized_heading,
                 heading_text,
                 technical_identifiers: technical_identifiers(&chunk.content),
                 source_properties: properties.clone(),
@@ -430,19 +446,24 @@ fn source_exact_metadata(
     SourceExactMetadata {
         filename: normalize_raw(&retrieval.filename),
         stem: normalize_raw(&retrieval.stem),
-        aliases: retrieval
-            .aliases
-            .iter()
-            .filter_map(|alias| normalize_raw(alias))
-            .collect(),
+        aliases: {
+            let mut seen = HashSet::new();
+            retrieval
+                .aliases
+                .iter()
+                .filter_map(|alias| normalize_raw(alias))
+                .filter(|alias| seen.insert(alias.clone()))
+                .collect()
+        },
         title: frontmatter.title().and_then(normalize_raw),
     }
 }
 
-fn markdown_sections(source: &str) -> Vec<Section<'_>> {
+fn markdown_sections(source: &str) -> Result<Vec<Section<'_>>, SourcePreparationError> {
     let mut markers = Vec::new();
     let mut heading_stack: Vec<(usize, String)> = Vec::new();
     let mut active_heading: Option<(usize, usize, String)> = None;
+    let mut prepared_path_bytes = 0_usize;
 
     for (event, range) in Parser::new_ext(source, Options::all()).into_offset_iter() {
         match event {
@@ -468,6 +489,17 @@ fn markdown_sections(source: &str) -> Vec<Section<'_>> {
                         heading_stack.pop();
                     }
                     heading_stack.push((level, heading.trim().to_owned()));
+                    if markers.len() == MAX_PREPARED_CHUNKS_PER_SOURCE {
+                        return Err(chunk_inventory_error());
+                    }
+                    let path_bytes = heading_stack
+                        .iter()
+                        .map(|(_, heading)| heading.len())
+                        .sum::<usize>();
+                    prepared_path_bytes = prepared_path_bytes
+                        .checked_add(path_bytes)
+                        .filter(|total| *total <= MAX_PREPARED_HEADING_BYTES_PER_SOURCE)
+                        .ok_or_else(heading_inventory_error)?;
                     markers.push(HeadingMarker {
                         start,
                         path: heading_stack
@@ -481,7 +513,31 @@ fn markdown_sections(source: &str) -> Vec<Section<'_>> {
         }
     }
 
-    sections_from_markers(source, &markers)
+    if markers
+        .first()
+        .is_some_and(|marker| marker.start > 0 && markers.len() == MAX_PREPARED_CHUNKS_PER_SOURCE)
+    {
+        return Err(chunk_inventory_error());
+    }
+    Ok(sections_from_markers(source, markers))
+}
+
+fn chunk_inventory_error() -> SourcePreparationError {
+    SourcePreparationError {
+        code: "index_limit_exceeded".to_owned(),
+        message: "prepared source exceeds the chunk inventory limit".to_owned(),
+    }
+}
+
+fn heading_inventory_error() -> SourcePreparationError {
+    SourcePreparationError {
+        code: "index_limit_exceeded".to_owned(),
+        message: "prepared source exceeds the heading-path memory limit".to_owned(),
+    }
+}
+
+fn heading_path_bytes(path: &[String]) -> usize {
+    path.iter().map(String::len).sum::<usize>()
 }
 
 fn heading_level(level: pulldown_cmark::HeadingLevel) -> usize {
@@ -495,7 +551,7 @@ fn heading_level(level: pulldown_cmark::HeadingLevel) -> usize {
     }
 }
 
-fn sections_from_markers<'a>(source: &'a str, markers: &[HeadingMarker]) -> Vec<Section<'a>> {
+fn sections_from_markers(source: &str, markers: Vec<HeadingMarker>) -> Vec<Section<'_>> {
     if markers.is_empty() {
         return vec![Section {
             heading_path: Vec::new(),
@@ -511,12 +567,15 @@ fn sections_from_markers<'a>(source: &'a str, markers: &[HeadingMarker]) -> Vec<
         });
     }
 
-    for (index, marker) in markers.iter().enumerate() {
-        let end = markers
-            .get(index + 1)
-            .map_or(source.len(), |next| next.start);
+    let ends = markers
+        .iter()
+        .skip(1)
+        .map(|marker| marker.start)
+        .chain(std::iter::once(source.len()))
+        .collect::<Vec<_>>();
+    for (marker, end) in markers.into_iter().zip(ends) {
         sections.push(Section {
-            heading_path: marker.path.clone(),
+            heading_path: marker.path,
             content: &source[marker.start..end],
         });
     }
@@ -806,6 +865,39 @@ mod tests {
     }
 
     #[test]
+    fn preparation_refuses_one_chunk_past_the_generation_ceiling() {
+        let source = (0..=MAX_PREPARED_CHUNKS_PER_SOURCE)
+            .map(|index| format!("# h{index}\nx\n"))
+            .collect::<String>();
+        let error = prepare_source_buffer(
+            &descriptor("many.md", SourceFormat::Markdown, source.as_bytes()),
+            source.as_bytes(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "index_limit_exceeded");
+    }
+
+    #[test]
+    fn preparation_refuses_large_parent_heading_path_amplification_early() {
+        let parent = "p".repeat(1024 * 1024);
+        let mut source = format!("# {parent}\nparent body\n");
+        for index in 0..12 {
+            source.push_str(&format!("## child-{index}\nx\n"));
+        }
+        assert!((source.len() as u64) < MAX_FILE_BYTES);
+
+        let error = prepare_source_buffer(
+            &descriptor("large-parent.md", SourceFormat::Markdown, source.as_bytes()),
+            source.as_bytes(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "index_limit_exceeded");
+        assert!(error.message.contains("heading-path memory limit"));
+    }
+
+    #[test]
     fn chunk_ids_are_stable_but_change_with_path() {
         let source = b"# Heading\nBody";
         let first =
@@ -833,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_rust_normalized_exact_metadata_with_unicode_scalar_bounds() {
+    fn projects_complete_rust_normalized_exact_metadata_with_utf8_byte_bounds() {
         let rockets = "🚀".repeat(260);
         let source = format!(
             "---\ntitle: 'RÉSUMÉ   Cache'\naliases:\n  - '  Mixed   Alias  '\n  - '{rockets}'\n---\n# API   Surface\nBody\n"
@@ -852,10 +944,10 @@ mod tests {
         assert_eq!(
             prepared.normalized_exact,
             SourceExactMetadata {
-                filename: Some("résumé cache.md".to_owned()),
-                stem: Some("résumé cache".to_owned()),
-                aliases: vec!["mixed alias".to_owned(), "🚀".repeat(256)],
-                title: Some("résumé cache".to_owned()),
+                filename: Some("resume cache.md".to_owned()),
+                stem: Some("resume cache".to_owned()),
+                aliases: vec!["mixed alias".to_owned(), "🚀".repeat(260)],
+                title: Some("resume cache".to_owned()),
             }
         );
         assert_eq!(
@@ -864,7 +956,7 @@ mod tests {
         );
 
         let bounded = normalize_raw(&rockets).unwrap();
-        assert_eq!(bounded.chars().count(), 256);
+        assert_eq!(bounded.chars().count(), 260);
         assert!(bounded.chars().all(|character| character == '🚀'));
     }
 

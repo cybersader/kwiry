@@ -27,6 +27,7 @@ tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
+unicode-normalization = { workspace = true, optional = true }
 zerocopy = { workspace = true, optional = true }
 fastembed = { workspace = true, optional = true }
 
@@ -43,6 +44,7 @@ portable = [
   "dep:serde_json",
   "dep:sha2",
   "dep:thiserror",
+  "dep:unicode-normalization",
 ]
 native = [
   "portable",

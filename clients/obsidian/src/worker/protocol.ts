@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 5 as const;
+export const WORKER_PROTOCOL_VERSION = 6 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -49,7 +49,7 @@ export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIEL
  * `PRAGMA user_version`). Any schema edit must bump it: an image whose value
  * differs from the running build's is not restorable.
  */
-export const CACHE_SCHEMA_VERSION = 6;
+export const CACHE_SCHEMA_VERSION = 7;
 
 /**
  * Independent ceiling on a transported generation image. The SQLite adapter's
@@ -182,7 +182,7 @@ interface RequestBase {
 }
 
 export type WorkerRequest =
-  | (RequestBase & { operation: "initialize" })
+  | (RequestBase & { operation: "initialize"; vault_id: string })
   | (RequestBase & { operation: "begin_build"; generation: string })
   | (RequestBase & {
       operation: "add_source_batch";
@@ -224,9 +224,9 @@ export type WorkerRequest =
 
 export interface InitializeResult {
   rustAbiVersion: 2;
-  sourceSchemaVersion: 3;
-  querySchemaVersion: 3;
-  matchPlanSchemaVersion: 2;
+  sourceSchemaVersion: 4;
+  querySchemaVersion: 4;
+  matchPlanSchemaVersion: 3;
   sqliteVersion: "3.53.0";
   fts5Enabled: 1;
 }
@@ -363,6 +363,11 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
   const base = ["version", "id", "operation"];
   switch (value.operation) {
     case "initialize":
+      return hasExactKeys(value, [...base, "vault_id"])
+        && isBoundedString(value.vault_id, 1_024)
+        && value.vault_id.trim().length > 0
+        ? value as unknown as WorkerRequest
+        : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "status":
     case "dispose":
       return hasExactKeys(value, base)
@@ -650,9 +655,9 @@ function isInitializeResult(value: unknown): value is InitializeResult {
       "fts5Enabled",
     ])
     && value.rustAbiVersion === 2
-    && value.sourceSchemaVersion === 3
-    && value.querySchemaVersion === 3
-    && value.matchPlanSchemaVersion === 2
+    && value.sourceSchemaVersion === 4
+    && value.querySchemaVersion === 4
+    && value.matchPlanSchemaVersion === 3
     && value.sqliteVersion === "3.53.0"
     && value.fts5Enabled === 1;
 }

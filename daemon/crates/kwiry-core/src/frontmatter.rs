@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::collections::HashSet;
+
 use crate::model::{
     Frontmatter, MAX_FILE_BYTES, MAX_PROPERTY_NESTING_DEPTH, PropertyBag, PropertyValue,
 };
@@ -104,10 +106,15 @@ fn select_aliases(properties: &PropertyBag) -> Vec<String> {
     };
 
     let mut aliases = Vec::new();
+    let mut seen = HashSet::new();
     for alias in property_strings(value) {
         let alias = alias.trim();
-        if !alias.is_empty() && !aliases.iter().any(|existing| existing == alias) {
-            aliases.push(alias.to_owned());
+        if alias.is_empty() {
+            continue;
+        }
+        let alias = alias.to_owned();
+        if seen.insert(alias.clone()) {
+            aliases.push(alias);
         }
     }
     aliases

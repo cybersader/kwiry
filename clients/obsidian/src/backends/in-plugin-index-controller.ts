@@ -28,7 +28,7 @@ export type IndexCounts = BuildResult;
 export type { SourceRemoval } from "../worker/protocol";
 
 export interface IndexWorkerPort {
-  initialize(): Promise<unknown>;
+  initialize(vaultId: string): Promise<unknown>;
   beginBuild(generation: string): Promise<IndexCounts>;
   addSourceBatch(generation: string, sources: SourceUpsert[]): Promise<IndexCounts>;
   applySourceChanges(
@@ -418,7 +418,7 @@ export class InPluginIndexController {
 
   private async runLoop(): Promise<void> {
     if (!this.workerInitialized) {
-      await this.worker.initialize();
+      await this.worker.initialize(ACTIVE_VAULT_ID);
       this.requireActive();
       this.workerInitialized = true;
     }

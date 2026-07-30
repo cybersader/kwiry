@@ -6,6 +6,18 @@ declare module "virtual:kwiry-worker-source" {
   export default source;
 }
 
+declare module "virtual:kwiry-internal-prototype" {
+  export function createInternalPrototypeHandler(context: {
+    scope: DedicatedWorkerGlobalScope;
+    getActive(): { id: string; index: import("./worker/fts5-index").Fts5GenerationIndex } | null;
+    requireInitialized(): void;
+    search(query: string, limit: number): import("./worker/protocol").SearchResult;
+    getLastRequestId(): number;
+    setLastRequestId(id: number): void;
+    mapError(error: unknown): import("./worker/protocol").WorkerError;
+  }): (value: unknown) => Promise<boolean>;
+}
+
 declare module "virtual:kwiry-rust-wasm-bindings" {
   export function initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
   export function abi_identity(): string;
@@ -13,6 +25,8 @@ declare module "virtual:kwiry-rust-wasm-bindings" {
   export function prepare_oversized_source(requestJson: string): string;
   export function prepare_query(requestJson: string): string;
   export function finalize_query(requestJson: string): string;
+  export function prepare_typo_suggestion_probe(requestJson: string): string;
+  export function finalize_typo_suggestion_probe(requestJson: string): string;
 }
 
 declare module "virtual:kwiry-rust-wasm-bytes" {

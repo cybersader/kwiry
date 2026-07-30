@@ -18,14 +18,30 @@ const require = createRequire(import.meta.url);
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
 let workerSource;
 let guardWorkerSource;
+let prototypeWorkerSource;
 let artifactIdentities;
+let prototypeArtifactIdentities;
+let workerMetafile;
+let prototypeWorkerMetafile;
 
 beforeAll(async () => {
-  ({ workerSource, identities: artifactIdentities } = await buildPlugin({
+  ({ workerSource, identities: artifactIdentities, workerMetafile } = await buildPlugin({
     write: false,
     production: true,
   }));
-  ({ workerSource: guardWorkerSource } = await buildPlugin({ write: false, production: false }));
+  ({ workerSource: guardWorkerSource } = await buildPlugin({
+    write: false,
+    production: false,
+  }));
+  ({
+    workerSource: prototypeWorkerSource,
+    identities: prototypeArtifactIdentities,
+    workerMetafile: prototypeWorkerMetafile,
+  } = await buildPlugin({
+    write: false,
+    production: true,
+    internalTypoPrototype: true,
+  }));
 }, 120_000);
 
 function postMessageShim({ dropTransfer, failTransfer }) {
@@ -139,7 +155,7 @@ async function openExportedImage(bytes) {
 }
 
 async function buildActiveGeneration(worker, { generation = "g1", path = "alpha.md", text } = {}) {
-  await request(worker, { id: 1, operation: "initialize" });
+  await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
   await request(worker, { id: 2, operation: "begin_build", generation });
   await request(worker, {
     id: 3,
@@ -148,6 +164,23 @@ async function buildActiveGeneration(worker, { generation = "g1", path = "alpha.
     sources: [source(path, text ?? "# Alpha\nstableterm portable cache")],
   });
   await request(worker, { id: 4, operation: "commit_build", generation });
+}
+
+async function buildTypoPrototypeGeneration(worker) {
+  await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+  await request(worker, { id: 2, operation: "begin_build", generation: "typo-g1" });
+  await request(worker, {
+    id: 3,
+    operation: "add_source_batch",
+    generation: "typo-g1",
+    sources: [
+      source("alpha.md", "# Retrieval alpha\nretrieval retrieval stableterm"),
+      source("beta.md", "# Retrieval beta\nretrieval stableterm"),
+      source("gamma.md", "# Related forms\nretrieved retriever"),
+      source("delta.md", "# Literal ordering\nstableterm"),
+    ],
+  });
+  await request(worker, { id: 4, operation: "commit_build", generation: "typo-g1" });
 }
 
 function restoreFromExport(envelope, { id = 2, generation = envelope.generation, ...overrides } = {}) {
@@ -190,6 +223,11 @@ async function exportedFixture(options = {}) {
   }
 }
 
+function percentile(values, fraction) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))];
+}
+
 async function mutateEnvelope(envelope, mutate) {
   const db = await openExportedImage(envelope.bytes);
   let bytes;
@@ -206,6 +244,200 @@ async function mutateEnvelope(envelope, mutate) {
     blob_sha256: createHash("sha256").update(bytes).digest("hex"),
   };
 }
+
+describe("internal suggestion-only typo prototype", () => {
+  const limitation = "Bounded prefix vocabulary only considers terms sharing the first four ASCII characters; it cannot catch early-character errors such as rettrieval.";
+
+  it("is absent from normal product inputs and artifacts", async () => {
+    const normalInputs = Object.keys(workerMetafile.inputs).join("\n").replaceAll("\\", "/");
+    const prototypeInputs = Object.keys(prototypeWorkerMetafile.inputs).join("\n").replaceAll("\\", "/");
+    for (const forbidden of [
+      "internal_typo_prototype",
+      "prepare_typo_suggestion",
+      "finalize_typo_suggestion",
+      "max_vocabulary_candidates",
+      limitation,
+    ]) {
+      expect(workerSource).not.toContain(forbidden);
+    }
+    expect(normalInputs).not.toContain("typo-prototype.ts");
+    expect(normalInputs).not.toContain("pkg/internal-typo-prototype");
+    expect(prototypeInputs).toContain("typo-prototype.ts");
+    expect(prototypeInputs).toContain("pkg/internal-typo-prototype");
+    expect(prototypeWorkerSource).toContain("internal_typo_prototype");
+    expect(prototypeWorkerSource).toContain(limitation);
+    expect(prototypeWorkerSource.length - workerSource.length).toBeGreaterThan(1_000);
+    expect(prototypeArtifactIdentities.rust.bytes - artifactIdentities.rust.bytes)
+      .toBeGreaterThan(1_000);
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await buildActiveGeneration(worker);
+      await expect(request(worker, {
+        id: 5,
+        operation: "internal_typo_prototype",
+        query: "retrievel",
+      })).resolves.toMatchObject({
+        ok: false,
+        operation: "status",
+        error: { code: "invalid_request" },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("suggests separately, preserves literal ordering, bypasses explicit syntax, and discloses coverage", async () => {
+    const worker = new Worker(nodeWorkerSource(prototypeWorkerSource), { eval: true });
+    try {
+      await buildTypoPrototypeGeneration(worker);
+      const before = await request(worker, {
+        id: 5,
+        operation: "search",
+        query: "stableterm",
+        limit: 100,
+      });
+      expect(before).toMatchObject({ ok: true });
+      const beforeIds = before.result.hits.map((hit) => hit.chunk_id);
+
+      const literal = await request(worker, {
+        id: 6,
+        operation: "internal_typo_prototype",
+        query: "stableterm",
+      });
+      expect(literal).toMatchObject({
+        ok: true,
+        result: {
+          disposition: "literal_results",
+          suggested_query: null,
+          candidates_examined: 0,
+          limitation,
+        },
+      });
+      expect(literal.result.literal_hits.map((hit) => hit.chunk_id)).toEqual(beforeIds);
+
+      const suggested = await request(worker, {
+        id: 7,
+        operation: "internal_typo_prototype",
+        query: "retrievel",
+      });
+      expect(suggested).toMatchObject({
+        ok: true,
+        result: {
+          disposition: "suggestion",
+          literal_hits: [],
+          suggested_query: "retrieval",
+          limitation,
+          bounds: {
+            prefix_chars: 4,
+            max_vocabulary_candidates: 40,
+            max_candidate_bytes: 96,
+            max_edit_distance: 1,
+            max_output_suggestions: 1,
+            max_work_units: 3_840,
+          },
+        },
+      });
+      expect(suggested.result.candidates_examined).toBeLessThanOrEqual(40);
+      expect(suggested.result.work_units).toBeLessThanOrEqual(3_840);
+
+      await expect(request(worker, {
+        id: 8,
+        operation: "internal_typo_prototype",
+        query: "title:retrievel",
+      })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          disposition: "explicit_syntax_bypass",
+          literal_hits: [],
+          suggested_query: null,
+          candidates_examined: 0,
+        },
+      });
+
+      await expect(request(worker, {
+        id: 9,
+        operation: "internal_typo_prototype",
+        query: "rettrieval",
+      })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          disposition: "no_candidate",
+          literal_hits: [],
+          suggested_query: null,
+          limitation,
+        },
+      });
+
+      const after = await request(worker, {
+        id: 10,
+        operation: "search",
+        query: "stableterm",
+        limit: 100,
+      });
+      expect(after.result.hits.map((hit) => hit.chunk_id)).toEqual(beforeIds);
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("measures bounded cost through the generated Worker bridge", async () => {
+    const worker = new Worker(nodeWorkerSource(prototypeWorkerSource), { eval: true });
+    try {
+      await buildTypoPrototypeGeneration(worker);
+      let id = 5;
+      for (let index = 0; index < 5; index += 1) {
+        await request(worker, { id: id++, operation: "internal_typo_prototype", query: "retrievel" });
+      }
+      const rssBefore = process.memoryUsage().rss;
+      const utilizationBefore = worker.performance.eventLoopUtilization();
+      const wallStarted = performance.now();
+      const totals = [];
+      const vocabularies = [];
+      for (let index = 0; index < 30; index += 1) {
+        const response = await request(worker, {
+          id: id++,
+          operation: "internal_typo_prototype",
+          query: "retrievel",
+        });
+        expect(response).toMatchObject({
+          ok: true,
+          result: { disposition: "suggestion", suggested_query: "retrieval", literal_hits: [] },
+        });
+        totals.push(response.result.total_duration_ms);
+        vocabularies.push(response.result.vocabulary_duration_ms);
+      }
+      const wallMs = performance.now() - wallStarted;
+      const utilization = worker.performance.eventLoopUtilization(utilizationBefore);
+      const rssDeltaBytes = Math.max(0, process.memoryUsage().rss - rssBefore);
+      const report = {
+        iterations: totals.length,
+        total_p50_ms: percentile(totals, 0.50),
+        total_p95_ms: percentile(totals, 0.95),
+        total_max_ms: Math.max(...totals),
+        vocabulary_p50_ms: percentile(vocabularies, 0.50),
+        vocabulary_p95_ms: percentile(vocabularies, 0.95),
+        vocabulary_max_ms: Math.max(...vocabularies),
+        wall_ms: Math.round(wallMs * 1_000) / 1_000,
+        worker_event_loop_active_ms: Math.round(utilization.active * 1_000) / 1_000,
+        worker_event_loop_utilization: Math.round(utilization.utilization * 1_000_000) / 1_000_000,
+        process_rss_delta_bytes: rssDeltaBytes,
+        limitation,
+      };
+      console.info(`KWIRY_TYPO_PROTOTYPE_MEASUREMENT ${JSON.stringify(report)}`);
+      expect(report.total_p95_ms).toBeLessThan(500);
+      expect(report.vocabulary_p95_ms).toBeLessThan(100);
+      expect(report.process_rss_delta_bytes).toBeLessThan(64 * 1024 * 1024);
+      expect(Number.isFinite(report.worker_event_loop_active_ms)).toBe(true);
+      expect(report.limitation).toContain("rettrieval");
+      await expect(request(worker, { id: id++, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { phase: "ready", searchable: true },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+});
 
 describe("exported cache generation", () => {
   it("exports a working database with an independently verifiable identity", async () => {
@@ -440,7 +672,7 @@ describe("exported cache generation", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, { id: 5, operation: "status" })).resolves.toMatchObject({
         ok: true,
       });
@@ -459,7 +691,7 @@ describe("exported cache generation", () => {
 
   it.each([
     ["before any generation is published", async (worker) => {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       return { id: 2, generation: "g1" };
     }],
     ["while a staging generation is in flight", async (worker) => {
@@ -548,7 +780,7 @@ describe("exported cache generation", () => {
   it("records every prepared source, including a skipped one, in the exported image", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       const binary = source("binary.md", "readable");
       // A NUL byte is one of the content skips the Rust chunker performs, and
@@ -607,7 +839,7 @@ describe("exported cache generation", () => {
   it("records an oversized source without bytes and plans metadata-only reconciliation", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await expect(request(worker, {
         id: 3,
@@ -685,7 +917,7 @@ describe("restored cache generation", () => {
     const envelope = await exportedFixture();
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, restoreFromExport(envelope))).resolves.toMatchObject({
         ok: true,
         result: { generation: "g1", documents: 1, chunks: 1, quarantined_sources: 0, quarantine_fields: [] },
@@ -763,7 +995,7 @@ describe("restored cache generation", () => {
         }
       });
       try {
-        await request(worker, { id: 1, operation: "initialize" });
+        await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
         await request(worker, restoreFromExport(envelope));
         await request(worker, {
           id: 3,
@@ -809,7 +1041,7 @@ describe("restored cache generation", () => {
     const envelope = await exportedFixture();
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, restoreFromExport(envelope, { [field]: value })))
         .resolves.toMatchObject({ ok: false, error: { code, retryable: false } });
       await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
@@ -866,7 +1098,7 @@ describe("restored cache generation", () => {
     corrupt(bytes);
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       const response = await request(worker, restoreFromExport(envelope, {
         bytes,
         blob_sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -900,7 +1132,7 @@ describe("restored cache generation", () => {
       if (message?.probe) probes.push(message.probe);
     });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
 
       probes.length = 0;
       await request(worker, restoreFromExport(envelope, {
@@ -947,7 +1179,7 @@ describe("restored cache generation", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, restoreFromExport(envelope))).resolves.toMatchObject({
         ok: false,
         error: { code: "cache_image_invalid", stage: "index", retryable: false },
@@ -971,7 +1203,7 @@ describe("restored cache generation", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, restoreFromExport(envelope))).resolves.toMatchObject({
         ok: false,
         error: { code: "internal_error", stage: "sqlite", retryable: false },
@@ -1051,6 +1283,41 @@ describe("restored cache generation", () => {
     }
   }, 120_000);
 
+  it("rejects a digest-valid image coherently rewritten to another vault", async () => {
+    const forged = await mutateEnvelope(await exportedFixture(), (db) => {
+      db.exec("UPDATE generation_identity SET vault_id = 'other-vault'");
+      db.exec("UPDATE sources SET vault_id = 'other-vault'");
+      db.exec("UPDATE chunks SET vault_id = 'other-vault'");
+    });
+    const precondition = await openExportedImage(forged.bytes);
+    try {
+      expect(precondition.selectValue("PRAGMA integrity_check")).toBe("ok");
+      expect(precondition.selectValue(
+        "SELECT count(*) FROM sources WHERE vault_id = 'other-vault'",
+      )).toBe(1);
+      expect(precondition.selectValue(
+        "SELECT count(*) FROM chunks WHERE vault_id = 'other-vault'",
+      )).toBe(1);
+    } finally {
+      precondition.close();
+    }
+
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await expect(request(worker, restoreFromExport(forged))).resolves.toMatchObject({
+        ok: false,
+        error: { code: "cache_image_invalid", retryable: false },
+      });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null, searchable: false },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
   it("rejects same-rowid forged chunk postings before staged publication", async () => {
     const forged = await mutateEnvelope(await exportedFixture({ text: "canonicalterm" }), (db) => {
       const rowid = Number(db.selectValue("SELECT rowid FROM chunks LIMIT 1"));
@@ -1061,7 +1328,7 @@ describe("restored cache generation", () => {
     });
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, restoreFromExport(forged))).resolves.toMatchObject({
         ok: false,
         error: { code: "cache_image_invalid", retryable: false },
@@ -1104,7 +1371,7 @@ describe("restored cache generation", () => {
 
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, restoreFromExport(forged))).resolves.toMatchObject({
         ok: true,
         result: { generation: "g1" },
@@ -1205,7 +1472,7 @@ describe("restored cache generation", () => {
     const envelope = await exportedFixture();
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       for (let index = 0; index < 6; index += 1) {
         const generation = `restored-${index}`;
         await expect(request(worker, restoreFromExport(envelope, {
@@ -1237,7 +1504,7 @@ describe("restored cache generation", () => {
     });
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, restoreFromExport(corrupt, {
         id: 2,
         generation: "bad",
@@ -1261,7 +1528,7 @@ describe("restored cache generation", () => {
     const producer = new Worker(nodeWorkerSource(workerSource), { eval: true });
     let firstEnvelope;
     try {
-      await request(producer, { id: 1, operation: "initialize" });
+      await request(producer, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(producer, { id: 2, operation: "begin_build", generation: "g1" });
       await request(producer, {
         id: 3,
@@ -1283,7 +1550,7 @@ describe("restored cache generation", () => {
     const mutator = new Worker(nodeWorkerSource(workerSource), { eval: true });
     let secondEnvelope;
     try {
-      await request(mutator, { id: 1, operation: "initialize" });
+      await request(mutator, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(mutator, restoreFromExport(firstEnvelope));
       await expect(request(mutator, {
         id: 3,
@@ -1309,7 +1576,7 @@ describe("restored cache generation", () => {
 
     const consumer = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(consumer, { id: 1, operation: "initialize" });
+      await request(consumer, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(consumer, restoreFromExport(secondEnvelope, { generation: "g2" })))
         .resolves.toMatchObject({ ok: true, result: { generation: "g2", documents: 2 } });
       for (const [id, query, count] of [[3, "oldterm", 0], [4, "newterm", 1], [5, "keepterm", 1]]) {
@@ -1326,13 +1593,13 @@ describe("exact generated production Worker", () => {
   it("initializes both WASM runtimes and publishes only complete generations", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await expect(request(worker, { id: 1, operation: "initialize" })).resolves.toMatchObject({
+      await expect(request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" })).resolves.toMatchObject({
         ok: true,
         result: {
           rustAbiVersion: 2,
-          sourceSchemaVersion: 3,
-          querySchemaVersion: 3,
-          matchPlanSchemaVersion: 2,
+          sourceSchemaVersion: 4,
+          querySchemaVersion: 4,
+          matchPlanSchemaVersion: 3,
           sqliteVersion: "3.53.0",
           fts5Enabled: 1,
         },
@@ -1383,7 +1650,7 @@ describe("exact generated production Worker", () => {
       await expect(request(worker, {
         id: 7,
         operation: "search",
-        query: "iia 2 line",
+        query: "line guide",
         limit: 20,
       })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "alpha.md" }] } });
       await expect(request(worker, {
@@ -1429,7 +1696,7 @@ describe("exact generated production Worker", () => {
   it("executes the Rust-owned evidence ladder across exact, partial, prefix, anchor, and empty branches", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "ladder" });
       await request(worker, {
         id: 3,
@@ -1498,7 +1765,7 @@ describe("exact generated production Worker", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "validator" });
       await request(worker, {
         id: 3,
@@ -1524,7 +1791,7 @@ describe("exact generated production Worker", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "anchor-validator" });
       await request(worker, {
         id: 3,
@@ -1629,7 +1896,7 @@ describe("exact generated production Worker", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await expect(request(worker, {
         id: 3,
@@ -1686,7 +1953,7 @@ describe("exact generated production Worker", () => {
   it("aborts a rejected staging generation and preserves the active generation", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "generation-1" });
       await request(worker, {
         id: 3,
@@ -1733,7 +2000,7 @@ describe("exact generated production Worker", () => {
   it("atomically renames active content and advances the generation once", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -1798,7 +2065,7 @@ describe("exact generated production Worker", () => {
   it("replays staging changes without exposing them before commit", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -1864,7 +2131,7 @@ describe("exact generated production Worker", () => {
   it("preserves active content when any source in a mutation is rejected", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -1912,7 +2179,7 @@ describe("exact generated production Worker", () => {
   it("drops a failed staging replay and preserves the active generation", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -1972,7 +2239,7 @@ describe("exact generated production Worker", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -2025,7 +2292,7 @@ describe("exact generated production Worker", () => {
   it("removes contentless postings on delete and never resurrects them", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -2098,7 +2365,7 @@ describe("exact generated production Worker", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -2161,7 +2428,7 @@ describe("exact generated production Worker", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -2203,7 +2470,7 @@ describe("exact generated production Worker", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -2255,7 +2522,7 @@ describe("exact generated production Worker", () => {
     expect(injected).not.toBe(guardWorkerSource);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
       await request(worker, {
         id: 3,
@@ -2317,7 +2584,7 @@ describe("exact generated production Worker", () => {
 
     const worker = new Worker(nodeWorkerSource(corrupted), { eval: true });
     try {
-      await expect(request(worker, { id: 1, operation: "initialize" })).resolves.toMatchObject({
+      await expect(request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" })).resolves.toMatchObject({
         ok: false,
         error: { code: "artifact_mismatch", stage: "artifact" },
       });
@@ -2338,7 +2605,7 @@ describe("exact generated production Worker", () => {
     const injected = injectGuardProbe(guardWorkerSource, needle, statement);
     const worker = new Worker(nodeWorkerSource(injected), { eval: true });
     try {
-      await expect(request(worker, { id: 1, operation: "initialize" })).resolves.toMatchObject({
+      await expect(request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" })).resolves.toMatchObject({
         ok: false,
         error: { code: "sqlite_init_failed" },
       });
@@ -2351,7 +2618,7 @@ describe("exact generated production Worker", () => {
     for (let cycle = 0; cycle < 10; cycle += 1) {
       const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
       try {
-        await expect(request(worker, { id: 1, operation: "initialize" })).resolves.toMatchObject({
+        await expect(request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" })).resolves.toMatchObject({
           ok: true,
         });
         await expect(request(worker, { id: 2, operation: "dispose" })).resolves.toMatchObject({
@@ -2367,7 +2634,7 @@ describe("exact generated production Worker", () => {
   it("rejects duplicate request IDs", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
-      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
       await expect(request(worker, { id: 1, operation: "status" })).resolves.toMatchObject({
         ok: false,
         error: { code: "invalid_request" },

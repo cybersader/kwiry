@@ -23,7 +23,7 @@ use crate::query::{
     LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, QueryAssistanceEligibility,
     QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageKind, QueryExecutionDisposition,
     QueryField, QueryFieldGroup, QueryMatchOperator, QueryMetadataField, QueryMetadataProbe,
-    QueryPlanKind, QueryTermSupportObservation, prepare_lexical_query,
+    QueryPlanKind, QueryTermProjection, QueryTermSupportObservation, prepare_lexical_query,
 };
 
 const MAX_RESULTS: usize = 100;
@@ -273,16 +273,28 @@ fn support_document_frequency(
     probe: &crate::query::QueryTermSupportProbe,
 ) -> Result<u64> {
     let mut total = 0_u64;
+    let exact_identifier_anchor = plan
+        .term_intents
+        .get(probe.term_index as usize)
+        .is_some_and(|intent| intent.projection == QueryTermProjection::ExactIdentifier);
     for context in contexts {
-        let Some(query) = term_query_for_group(
-            context.index,
-            context.fields,
-            plan,
-            probe.field_group,
-            &probe.term,
-        )?
-        else {
-            continue;
+        let query = if exact_identifier_anchor {
+            let Some(query) = identifier_anchor_query(context.fields, plan, &probe.term)? else {
+                continue;
+            };
+            query
+        } else {
+            let Some(query) = term_query_for_group(
+                context.index,
+                context.fields,
+                plan,
+                probe.field_group,
+                &probe.term,
+            )?
+            else {
+                continue;
+            };
+            query
         };
         let count = context
             .searcher
@@ -401,10 +413,16 @@ fn execute_explicit(
 
     let mut hits = Vec::new();
     for context in contexts {
-        let parser = lexical_parser(context.index, context.fields);
-        let parsed = parser
-            .parse_query(&plan.query)
-            .map_err(|error| Error::Query(error.to_string()))?;
+        let parsed = if let Some(prefix) =
+            simple_explicit_prefix_query(context.index, context.fields, &plan.query)?
+        {
+            prefix
+        } else {
+            let parser = lexical_parser(context.index, context.fields);
+            parser
+                .parse_query(&plan.query)
+                .map_err(|error| Error::Query(error.to_string()))?
+        };
         let query = filtered_query(parsed, filters, context.fields)?;
         let partition_hits = collect_stable_hits(
             context.searcher,
@@ -417,6 +435,54 @@ fn execute_explicit(
         merge_bounded_hits(&mut hits, partition_hits, limit);
     }
     Ok(hits)
+}
+
+fn simple_explicit_prefix_query(
+    index: &Index,
+    fields: &Fields,
+    query: &str,
+) -> Result<Option<Box<dyn Query>>> {
+    let authored = query.trim();
+    let Some(authored_prefix) = authored.strip_suffix('*') else {
+        return Ok(None);
+    };
+    let Some(prefix) = crate::lexical::normalize_raw(authored_prefix) else {
+        return Ok(None);
+    };
+    if prefix.chars().any(char::is_whitespace)
+        || prefix
+            .chars()
+            .any(|character| !character.is_alphanumeric() && character != '_')
+        || authored[..authored.len() - 1].contains('*')
+    {
+        return Ok(None);
+    }
+
+    let bindings = field_bindings(
+        fields,
+        &[
+            QueryField::Filename,
+            QueryField::Stem,
+            QueryField::Aliases,
+            QueryField::Title,
+            QueryField::Heading,
+            QueryField::Content,
+        ],
+        QueryFieldGroup::SearchableText,
+    );
+    let mut alternatives = Vec::new();
+    for (field, boost) in bindings {
+        let tokens = analyze_text(index, field, &prefix)?;
+        if tokens.len() != 1 {
+            continue;
+        }
+        let pattern = format!("{}.*", regex::escape(&tokens[0]));
+        let regex = RegexQuery::from_pattern(&pattern, field)
+            .map_err(|error| Error::Query(error.to_string()))?;
+        alternatives.push(Box::new(BoostQuery::new(Box::new(regex), boost)) as Box<dyn Query>);
+    }
+    Ok((!alternatives.is_empty())
+        .then(|| Box::new(DisjunctionMaxQuery::new(alternatives)) as Box<dyn Query>))
 }
 
 fn execute_evidence_stages(
@@ -444,13 +510,16 @@ fn execute_evidence_stages(
 
         let mut stage_hits = Vec::new();
         for context in contexts {
-            let stage_query = compile_evidence_stage(
+            let Some(stage_query) = compile_evidence_stage(
                 context.index,
                 context.fields,
                 plan,
                 stage,
                 &resolved.prefix_expansions,
-            )?;
+            )?
+            else {
+                continue;
+            };
             let query = filtered_query(stage_query, filters, context.fields)?;
             let partition_hits = collect_stable_hits(
                 context.searcher,
@@ -481,11 +550,20 @@ fn compile_evidence_stage(
     plan: &LexicalQueryPlan,
     stage: &QueryEvidenceStage,
     prefix_expansions: &BTreeMap<u16, Vec<String>>,
-) -> Result<Box<dyn Query>> {
+) -> Result<Option<Box<dyn Query>>> {
     match stage.kind {
         QueryEvidenceStageKind::ExactMetadata => exact_query(fields, plan)
-            .ok_or_else(|| Error::Query("exact metadata stage has no intent".to_owned())),
-        QueryEvidenceStageKind::ExactPhrase => phrase_query(index, fields, plan),
+            .map(|query| with_exact_identifier_anchors(fields, plan, query))
+            .transpose()
+            .and_then(|query| {
+                query
+                    .map(Some)
+                    .ok_or_else(|| Error::Query("exact metadata stage has no intent".to_owned()))
+            }),
+        QueryEvidenceStageKind::ExactPhrase => phrase_query(index, fields, plan)?.map_or_else(
+            || Ok(None),
+            |query| with_exact_identifier_anchors(fields, plan, query).map(Some),
+        ),
         QueryEvidenceStageKind::AllTerms | QueryEvidenceStageKind::PartialCoverage => {
             required_terms_query(index, fields, plan, stage)
         }
@@ -500,18 +578,29 @@ fn required_terms_query(
     fields: &Fields,
     plan: &LexicalQueryPlan,
     stage: &QueryEvidenceStage,
-) -> Result<Box<dyn Query>> {
+) -> Result<Option<Box<dyn Query>>> {
     let mut clauses = Vec::with_capacity(stage.required_term_indexes.len());
     for term_index in &stage.required_term_indexes {
         let intent = plan
             .term_intents
             .get(*term_index as usize)
             .ok_or_else(|| Error::Query("evidence stage references an unknown term".to_owned()))?;
-        let query = term_query_for_group(index, fields, plan, stage.field_group, &intent.text)?
-            .ok_or_else(|| Error::Query("evidence term produced no backend tokens".to_owned()))?;
+        let query = if intent.projection == QueryTermProjection::ExactIdentifier {
+            let Some(query) = identifier_anchor_query(fields, plan, &intent.text)? else {
+                return Ok(None);
+            };
+            query
+        } else {
+            let Some(query) =
+                term_query_for_group(index, fields, plan, stage.field_group, &intent.text)?
+            else {
+                return Ok(None);
+            };
+            query
+        };
         clauses.push((Occur::Must, query));
     }
-    Ok(Box::new(BooleanQuery::new(clauses)))
+    Ok(Some(Box::new(BooleanQuery::new(clauses))))
 }
 
 fn prefix_stage_query(
@@ -520,21 +609,31 @@ fn prefix_stage_query(
     plan: &LexicalQueryPlan,
     stage: &QueryEvidenceStage,
     prefix_expansions: &BTreeMap<u16, Vec<String>>,
-) -> Result<Box<dyn Query>> {
+) -> Result<Option<Box<dyn Query>>> {
     let mut clauses = Vec::new();
     for term_index in &stage.required_term_indexes {
         let intent = plan
             .term_intents
             .get(*term_index as usize)
             .ok_or_else(|| Error::Query("prefix stage references an unknown term".to_owned()))?;
-        let query = term_query_for_group(
-            index,
-            fields,
-            plan,
-            QueryFieldGroup::SearchableText,
-            &intent.text,
-        )?
-        .ok_or_else(|| Error::Query("required prefix context produced no tokens".to_owned()))?;
+        let query = if intent.projection == QueryTermProjection::ExactIdentifier {
+            let Some(query) = identifier_anchor_query(fields, plan, &intent.text)? else {
+                return Ok(None);
+            };
+            query
+        } else {
+            let Some(query) = term_query_for_group(
+                index,
+                fields,
+                plan,
+                QueryFieldGroup::SearchableText,
+                &intent.text,
+            )?
+            else {
+                return Ok(None);
+            };
+            query
+        };
         clauses.push((Occur::Must, query));
     }
     for term_index in &stage.prefix_term_indexes {
@@ -551,16 +650,55 @@ fn prefix_stage_query(
             alternatives.extend(term_alternatives(&bindings, expansion));
         }
         if alternatives.is_empty() {
-            return Err(Error::Query(
-                "prefix stage has no executable expansion".to_owned(),
-            ));
+            return Ok(None);
         }
         clauses.push((
             Occur::Must,
             Box::new(DisjunctionMaxQuery::new(alternatives)) as Box<dyn Query>,
         ));
     }
-    Ok(Box::new(BooleanQuery::new(clauses)))
+    Ok(Some(Box::new(BooleanQuery::new(clauses))))
+}
+
+fn identifier_anchor_query(
+    fields: &Fields,
+    plan: &LexicalQueryPlan,
+    text: &str,
+) -> Result<Option<Box<dyn Query>>> {
+    if !declared_fields(plan, QueryFieldGroup::Exact).contains(&QueryField::ContentIdentifiers) {
+        return Err(Error::Query(
+            "exact identifier projection is not declared".to_owned(),
+        ));
+    }
+    Ok(Some(Box::new(BoostQuery::new(
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.content_identifiers, text),
+            IndexRecordOption::Basic,
+        )),
+        BOOST_CONTENT_IDENTIFIER,
+    ))))
+}
+
+fn with_exact_identifier_anchors(
+    fields: &Fields,
+    plan: &LexicalQueryPlan,
+    query: Box<dyn Query>,
+) -> Result<Box<dyn Query>> {
+    let mut clauses = vec![(Occur::Must, query)];
+    for intent in plan
+        .term_intents
+        .iter()
+        .filter(|intent| intent.projection == QueryTermProjection::ExactIdentifier)
+    {
+        let anchor = identifier_anchor_query(fields, plan, &intent.text)?
+            .ok_or_else(|| Error::Query("exact identifier anchor has no query".to_owned()))?;
+        clauses.push((Occur::Must, anchor));
+    }
+    if clauses.len() == 1 {
+        Ok(clauses.pop().expect("base query exists").1)
+    } else {
+        Ok(Box::new(BooleanQuery::new(clauses)))
+    }
 }
 
 fn term_query_for_group(
@@ -613,7 +751,11 @@ fn term_alternatives(bindings: &[(Field, f32)], token: &str) -> Vec<Box<dyn Quer
         .collect()
 }
 
-fn phrase_query(index: &Index, fields: &Fields, plan: &LexicalQueryPlan) -> Result<Box<dyn Query>> {
+fn phrase_query(
+    index: &Index,
+    fields: &Fields,
+    plan: &LexicalQueryPlan,
+) -> Result<Option<Box<dyn Query>>> {
     let intent = plan
         .phrase_intent
         .as_ref()
@@ -640,11 +782,9 @@ fn phrase_query(index: &Index, fields: &Fields, plan: &LexicalQueryPlan) -> Resu
         alternatives.push(Box::new(BoostQuery::new(query, boost * BOOST_PHRASE)) as Box<dyn Query>);
     }
     if alternatives.is_empty() {
-        return Err(Error::Query(
-            "phrase intent produced no backend tokens".to_owned(),
-        ));
+        return Ok(None);
     }
-    Ok(Box::new(DisjunctionMaxQuery::new(alternatives)))
+    Ok(Some(Box::new(DisjunctionMaxQuery::new(alternatives))))
 }
 
 fn exact_query(fields: &Fields, plan: &LexicalQueryPlan) -> Option<Box<dyn Query>> {
@@ -1266,7 +1406,7 @@ mod tests {
             ("title:Alpha", 1),
             ("alpha AND beta", 1),
             ("\"alpha beta\"", 1),
-            ("alph*", 0),
+            ("alph*", 1),
             ("alph?", 0),
             ("(alpha OR missing)", 1),
             ("mtime:[0 TO 9999999999999]", 1),
@@ -1281,6 +1421,49 @@ mod tests {
             assert!(resolved.plan.support_probes.is_empty(), "{query}");
             assert_eq!(search(&data, query, 20).len(), expected_hits, "{query}");
         }
+    }
+
+    #[test]
+    fn spaced_and_unknown_field_syntax_never_broadens_into_ordinary_search() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("title.md"),
+            "---\ntitle: Alpha\n---\n\nbody without the token",
+        )
+        .unwrap();
+        fs::write(vault.join("body.md"), "title alpha").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let paths: Vec<_> = search(&data, "title : Alpha", 20)
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        assert_eq!(paths, ["title.md"]);
+
+        let error = search_index(
+            &data,
+            &LexicalSearchRequest {
+                query: "bogus:Alpha".to_owned(),
+                limit: 20,
+                vault_id: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Field does not exist"));
     }
 
     #[test]
@@ -1494,6 +1677,182 @@ mod tests {
         let cve = search(temporary.path(), "CVE-2026-1234 unfindablecontext", 20);
         assert!(cve.iter().any(|hit| hit.path == "cve-2026-1234.md"));
         assert!(search(temporary.path(), "CVE-2026-9999 unfindablecontext", 20).is_empty());
+    }
+
+    #[test]
+    fn relaxable_backend_tokenless_terms_do_not_abort_native_search() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("cache.md"), "cache").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let query = format!("cache {}", "z".repeat(41));
+        let hits = search(&data, &query, 20);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "cache.md");
+    }
+
+    #[test]
+    fn technical_identifier_anchor_requires_exact_identifier_evidence() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("separated.md"),
+            "CVE mitigation in 2026 addressed item 1234",
+        )
+        .unwrap();
+        fs::write(vault.join("exact.md"), "CVE-2026-1234 mitigation").unwrap();
+        fs::write(vault.join("spaced.md"), "CVE 2026 1234 mitigation").unwrap();
+        fs::write(vault.join("rfc-exact.md"), "RFC 9110 caching").unwrap();
+        fs::write(
+            vault.join("rfc-separated.md"),
+            "RFC caching guidance eventually mentions 9110",
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let paths: Vec<_> = search(&data, "CVE-2026-1234", 20)
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        assert_eq!(paths, ["exact.md"]);
+
+        let spaced_paths: Vec<_> = search(&data, "CVE 2026 1234", 20)
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        assert_eq!(spaced_paths, ["spaced.md"]);
+
+        let rfc_paths: Vec<_> = search(&data, "RFC 9110", 20)
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        assert_eq!(rfc_paths, ["rfc-exact.md"]);
+    }
+
+    #[test]
+    fn exact_metadata_does_not_collide_after_the_old_256_scalar_prefix() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        let prefix = format!("marker {}", "a".repeat(3_000));
+        fs::write(
+            vault.join("long.md"),
+            format!("---\ntitle: {prefix}x\n---\nbody"),
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved =
+            resolve_query_plan(std::slice::from_ref(&context), &format!("{prefix}y")).unwrap();
+        let exact_stage = resolved
+            .plan
+            .evidence_stages
+            .iter()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::ExactMetadata)
+            .unwrap();
+        let exact = compile_evidence_stage(
+            &index,
+            &fields,
+            &resolved.plan,
+            exact_stage,
+            &resolved.prefix_expansions,
+        )
+        .unwrap()
+        .unwrap();
+        let hits =
+            collect_stable_hits(&searcher, exact.as_ref(), &fields, None, 20, &searcher).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn ordinary_exact_support_and_prefix_search_are_accent_insensitive() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("accented.md"),
+            "---\ntitle: Résumé Cache\n---\n# Café\nnaïve e\u{301}lan",
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        for query in [
+            "Résumé Cache",
+            "Resume Cache",
+            "Re\u{301}sume\u{301} Cache",
+            "naive elan",
+            "NAÏVE ÉLAN",
+            "cafe*",
+            "café*",
+            "resu",
+            "résu",
+        ] {
+            let paths: Vec<_> = search(&data, query, 20)
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect();
+            assert_eq!(paths, ["accented.md"], "{query}");
+        }
+        assert!(search(&data, "cafeteria*", 20).is_empty());
     }
 
     #[test]
@@ -1907,34 +2266,40 @@ mod tests {
                     expected.path,
                     hit_paths
                 );
-                let first_tier = resolved
-                    .plan
-                    .evidence_stages
-                    .iter()
-                    .find_map(|stage| {
-                        let stage_query = compile_evidence_stage(
-                            &index,
-                            &fields,
-                            &resolved.plan,
-                            stage,
-                            &resolved.prefix_expansions,
-                        )
-                        .unwrap();
-                        let stage_hits = collect_stable_hits(
-                            &searcher,
-                            stage_query.as_ref(),
-                            &fields,
-                            None,
-                            stage.max_candidates,
-                            &searcher,
-                        )
-                        .unwrap();
-                        stage_hits
-                            .iter()
-                            .any(|hit| hit.path == expected.path)
-                            .then(|| enum_name(stage.kind))
-                    })
-                    .unwrap_or_else(|| panic!("{} had no tier for {}", case.id, expected.path));
+                let first_tier = if resolved.plan.execution
+                    == QueryExecutionDisposition::ExplicitBypass
+                {
+                    "explicit".to_owned()
+                } else {
+                    resolved
+                        .plan
+                        .evidence_stages
+                        .iter()
+                        .find_map(|stage| {
+                            let stage_query = compile_evidence_stage(
+                                &index,
+                                &fields,
+                                &resolved.plan,
+                                stage,
+                                &resolved.prefix_expansions,
+                            )
+                            .unwrap()?;
+                            let stage_hits = collect_stable_hits(
+                                &searcher,
+                                stage_query.as_ref(),
+                                &fields,
+                                None,
+                                stage.max_candidates,
+                                &searcher,
+                            )
+                            .unwrap();
+                            stage_hits
+                                .iter()
+                                .any(|hit| hit.path == expected.path)
+                                .then(|| enum_name(stage.kind))
+                        })
+                        .unwrap_or_else(|| panic!("{} had no tier for {}", case.id, expected.path))
+                };
                 assert_eq!(first_tier, expected.tier, "{} tier", case.id);
             }
             if case.id == "tier-dominance" {
@@ -1995,7 +2360,8 @@ mod tests {
             corpus.bounds.maximum_total_candidates,
             crate::query::MAX_TOTAL_CANDIDATES
         );
-        let maximum_terms = std::iter::repeat_n("boundterm", corpus.bounds.maximum_terms)
+        let maximum_terms = (0..corpus.bounds.maximum_terms)
+            .map(|index| format!("boundterm{index}"))
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(
@@ -2004,6 +2370,16 @@ mod tests {
                 .support_probes
                 .len(),
             corpus.bounds.maximum_terms
+        );
+        let duplicate_terms = std::iter::repeat_n("boundterm", corpus.bounds.maximum_terms)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            prepare_lexical_query(&duplicate_terms)
+                .unwrap()
+                .support_probes
+                .len(),
+            1
         );
         let over_limit_terms = std::iter::repeat_n("boundterm", corpus.bounds.over_limit_terms)
             .collect::<Vec<_>>()

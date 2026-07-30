@@ -29,8 +29,11 @@ export class InPluginWorkerSession {
     this.client = new WorkerRpcClient(worker, timeoutMs);
   }
 
-  initialize(): Promise<InitializeResult> {
-    return this.client.request({ operation: "initialize" }) as Promise<InitializeResult>;
+  initialize(vaultId: string): Promise<InitializeResult> {
+    return this.client.request({
+      operation: "initialize",
+      vault_id: vaultId,
+    }) as Promise<InitializeResult>;
   }
 
   beginBuild(generation: string): Promise<BuildResult> {

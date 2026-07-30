@@ -17,13 +17,10 @@ const production = process.argv[2] === "production";
 const rustRoot = resolve(root, "rust/kwiry-obsidian-wasm");
 const rustManifest = resolve(rustRoot, "Cargo.toml");
 const rustTarget = resolve(rustRoot, "target");
-const rustPackage = resolve(rustRoot, "pkg/production");
 const rustRawWasm = resolve(
   rustTarget,
   "wasm32-unknown-unknown/release/kwiry_obsidian_wasm.wasm",
 );
-const rustBindings = resolve(rustPackage, "kwiry_obsidian_wasm.js");
-const rustWasm = resolve(rustPackage, "kwiry_obsidian_wasm_bg.wasm");
 const sqlitePackagePath = require.resolve("@sqlite.org/sqlite-wasm/package.json");
 const sqliteWasm = require.resolve("@sqlite.org/sqlite-wasm/sqlite3.wasm");
 
@@ -66,12 +63,14 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function prepareRustAdapter() {
+function prepareRustAdapter(internalTypoPrototype) {
   const version = run("wasm-bindgen", ["--version"]);
   if (version !== "wasm-bindgen 0.2.126") {
     throw new Error("wasm-bindgen CLI must be exactly 0.2.126");
   }
-  run("cargo", [
+  const variant = internalTypoPrototype ? "internal-typo-prototype" : "production";
+  const rustPackage = resolve(rustRoot, `pkg/${variant}`);
+  const buildArgs = [
     "build",
     "--manifest-path",
     rustManifest,
@@ -79,7 +78,9 @@ function prepareRustAdapter() {
     "wasm32-unknown-unknown",
     "--release",
     "--lib",
-  ]);
+  ];
+  if (internalTypoPrototype) buildArgs.push("--features", "internal-typo-prototype");
+  run("cargo", buildArgs);
   rmSync(rustPackage, { recursive: true, force: true });
   run("wasm-bindgen", [
     rustRawWasm,
@@ -90,8 +91,14 @@ function prepareRustAdapter() {
     "--out-name",
     "kwiry_obsidian_wasm",
   ]);
-  const bytes = readFileSync(rustWasm);
-  return { bytes: bytes.byteLength, sha256: sha256(bytes) };
+  const bindings = resolve(rustPackage, "kwiry_obsidian_wasm.js");
+  const wasm = resolve(rustPackage, "kwiry_obsidian_wasm_bg.wasm");
+  const bytes = readFileSync(wasm);
+  return {
+    bindings,
+    wasm,
+    identity: { bytes: bytes.byteLength, sha256: sha256(bytes) },
+  };
 }
 
 function verifySqliteArtifact() {
@@ -125,15 +132,15 @@ function readPluginIdentity() {
   return { id: manifest.id, version: manifest.version };
 }
 
-function rustVirtualPlugin(identities) {
+function rustVirtualPlugin(identities, adapter) {
   return {
     name: "kwiry-rust-wasm",
     setup(build) {
       build.onResolve({ filter: /^virtual:kwiry-rust-wasm-bindings$/ }, () => ({
-        path: rustBindings,
+        path: adapter.bindings,
       }));
       build.onResolve({ filter: /^virtual:kwiry-rust-wasm-bytes$/ }, () => ({
-        path: rustWasm,
+        path: adapter.wasm,
       }));
       build.onResolve({ filter: /^virtual:kwiry-artifact-identities$/ }, () => ({
         path: "kwiry-artifact-identities",
@@ -172,6 +179,21 @@ function assertWorkerGraph(metafile) {
   }
 }
 
+function internalPrototypePlugin(enabled) {
+  return {
+    name: "kwiry-internal-prototype",
+    setup(build) {
+      build.onResolve({ filter: /^virtual:kwiry-internal-prototype$/ }, () => enabled
+        ? { path: resolve(root, "src/worker/typo-prototype.ts") }
+        : { path: "kwiry-disabled-internal-prototype", namespace: "kwiry-disabled-internal-prototype" });
+      build.onLoad({ filter: /.*/, namespace: "kwiry-disabled-internal-prototype" }, () => ({
+        contents: "export const createInternalPrototypeHandler=()=>async()=>false;",
+        loader: "js",
+      }));
+    },
+  };
+}
+
 function workerSourcePlugin(workerSource) {
   return {
     name: "kwiry-worker-source",
@@ -188,9 +210,14 @@ function workerSourcePlugin(workerSource) {
   };
 }
 
-export async function buildPlugin({ write = true, production: optimized = true } = {}) {
+export async function buildPlugin({
+  write = true,
+  production: optimized = true,
+  internalTypoPrototype = false,
+} = {}) {
+  const rustAdapter = prepareRustAdapter(Boolean(internalTypoPrototype));
   const identities = {
-    rust: prepareRustAdapter(),
+    rust: rustAdapter.identity,
     sqlite: verifySqliteArtifact(),
     plugin: readPluginIdentity(),
   };
@@ -208,7 +235,10 @@ export async function buildPlugin({ write = true, production: optimized = true }
     loader: { ".wasm": "binary" },
     metafile: true,
     logLevel: "silent",
-    plugins: [rustVirtualPlugin(identities)],
+    plugins: [
+      rustVirtualPlugin(identities, rustAdapter),
+      internalPrototypePlugin(Boolean(internalTypoPrototype)),
+    ],
   });
   if (workerBuild.outputFiles.length !== 1) {
     throw new Error(`Worker build emitted ${workerBuild.outputFiles.length} files`);

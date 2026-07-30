@@ -47,6 +47,8 @@ mod source;
 mod state;
 #[cfg(feature = "portable")]
 mod status;
+#[cfg(feature = "portable")]
+mod typo;
 #[cfg(feature = "native")]
 mod walk;
 
@@ -77,6 +79,8 @@ pub use error::{Error, Result};
 pub use generation::{DataRoot, DataRootLock, GenerationPaths};
 #[cfg(feature = "native")]
 pub use index::build_index;
+#[cfg(feature = "portable")]
+pub use lexical::normalize_lexical_value;
 #[cfg(feature = "native")]
 pub use manifest::{
     INDEX_FORMAT_VERSION, MANIFEST_VERSION, Manifest, ManifestFile, ManifestFileOutcome,
@@ -102,8 +106,8 @@ pub use query::{
     QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageKind, QueryExactIntent,
     QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryFieldGroups, QueryMatchOperator,
     QueryMetadataField, QueryMetadataProbe, QueryPhraseIntent, QueryPlanError, QueryPlanKind,
-    QueryTermIntent, QueryTermRole, QueryTermSupport, QueryTermSupportObservation,
-    QueryTermSupportProbe, QueryTypoStage, prepare_lexical_query,
+    QueryTermIntent, QueryTermProjection, QueryTermRole, QueryTermSupport,
+    QueryTermSupportObservation, QueryTermSupportProbe, QueryTypoStage, prepare_lexical_query,
 };
 #[cfg(feature = "native")]
 pub use reconcile::ReconcileScope;
@@ -127,6 +131,14 @@ pub use source::{
 #[cfg(feature = "portable")]
 pub use status::{
     DaemonState, DaemonStatus, IndexFreshness, IndexFreshnessState, ModelStatus, VaultStatus,
+};
+#[cfg(feature = "portable")]
+pub use typo::{
+    TYPO_MAX_CANDIDATE_BYTES, TYPO_MAX_EDIT_DISTANCE, TYPO_MAX_OUTPUT_SUGGESTIONS,
+    TYPO_MAX_TERM_BYTES, TYPO_MAX_VOCABULARY_CANDIDATES, TYPO_MAX_WORK_UNITS, TYPO_MIN_TERM_CHARS,
+    TYPO_PREFIX_CHARS, TYPO_PREFIX_LIMITATION, TYPO_SUGGESTION_SCHEMA_VERSION,
+    TypoSuggestionBounds, TypoSuggestionDisposition, TypoSuggestionPlan, TypoSuggestionResult,
+    TypoVocabularyCandidate, finalize_typo_suggestion, prepare_typo_suggestion,
 };
 
 #[cfg(feature = "native")]

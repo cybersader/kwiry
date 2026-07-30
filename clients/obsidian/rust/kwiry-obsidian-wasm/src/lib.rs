@@ -6,8 +6,14 @@ use kwiry_core::{
     CHUNKING_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_FILE_BYTES,
     QueryAssistanceEligibility, QueryEvidenceReport, QueryEvidenceStageKind,
     QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryMatchOperator, QueryPlanKind,
-    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation, prepare_lexical_query,
+    QueryTermProjection, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
+    normalize_lexical_value, prepare_lexical_query,
     prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
+};
+#[cfg(feature = "internal-typo-prototype")]
+use kwiry_core::{
+    TypoSuggestionPlan, TypoSuggestionResult, TypoVocabularyCandidate, finalize_typo_suggestion,
+    prepare_typo_suggestion,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -15,7 +21,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub const ADAPTER_ABI_VERSION: u32 = 2;
-pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 2;
+pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 3;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_SOURCE_BUFFER_BYTES: usize = MAX_FILE_BYTES as usize + 1;
 const MAX_MATCH_VALUE_BYTES: usize = 16 * 1024;
@@ -28,6 +34,10 @@ pub enum AdapterOperation {
     PrepareOversizedSource,
     PrepareQuery,
     FinalizeQuery,
+    #[cfg(feature = "internal-typo-prototype")]
+    PrepareTypoSuggestion,
+    #[cfg(feature = "internal-typo-prototype")]
+    FinalizeTypoSuggestion,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -67,15 +77,18 @@ pub struct PreparedQueryResult {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "plan_id", rename_all = "snake_case")]
 pub enum Fts5EvidenceProbePlan {
-    IdentifierMetadataV2 {
+    IdentifierMetadataV3 {
         schema_version: u32,
         match_value: String,
     },
-    TermSupportV2 {
+    TermSupportV3 {
         schema_version: u32,
         probe_id: u16,
         term_index: u16,
-        match_value: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        match_value: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exact_identifier: Option<String>,
         prefix_pattern: Option<String>,
         max_prefix_expansions: usize,
         max_prefix_term_bytes: usize,
@@ -101,12 +114,12 @@ pub enum Fts5ExecutionDisposition {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Fts5StagePlanId {
-    LexicalExplicitV2,
-    LexicalExactMetadataV2,
-    LexicalExactPhraseV2,
-    LexicalAllTermsV2,
-    LexicalPartialCoverageV2,
-    LexicalPrefixV2,
+    LexicalExplicitV3,
+    LexicalExactMetadataV3,
+    LexicalExactPhraseV3,
+    LexicalAllTermsV3,
+    LexicalPartialCoverageV3,
+    LexicalPrefixV3,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -117,6 +130,8 @@ pub struct Fts5StagePlan {
     pub match_value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exact_value: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_identifiers: Vec<String>,
     pub max_candidates: usize,
 }
 
@@ -133,6 +148,18 @@ pub struct Fts5ExecutionPlan {
 pub struct FinalizedQueryResult {
     pub plan: LexicalQueryPlan,
     pub execution_plan: Fts5ExecutionPlan,
+}
+
+#[cfg(feature = "internal-typo-prototype")]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreparedTypoSuggestionResult {
+    pub plan: TypoSuggestionPlan,
+}
+
+#[cfg(feature = "internal-typo-prototype")]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FinalizedTypoSuggestionResult {
+    pub suggestion: TypoSuggestionResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -210,6 +237,41 @@ struct FinalizeQueryRequest {
 #[serde(rename_all = "snake_case")]
 enum FinalizeQueryOperation {
     FinalizeQuery,
+}
+
+#[cfg(feature = "internal-typo-prototype")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrepareTypoSuggestionRequest {
+    abi_version: u32,
+    #[serde(rename = "operation")]
+    _operation: PrepareTypoSuggestionOperation,
+    query: String,
+}
+
+#[cfg(feature = "internal-typo-prototype")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PrepareTypoSuggestionOperation {
+    PrepareTypoSuggestion,
+}
+
+#[cfg(feature = "internal-typo-prototype")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FinalizeTypoSuggestionRequest {
+    abi_version: u32,
+    #[serde(rename = "operation")]
+    _operation: FinalizeTypoSuggestionOperation,
+    query: String,
+    candidates: Vec<TypoVocabularyCandidate>,
+}
+
+#[cfg(feature = "internal-typo-prototype")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FinalizeTypoSuggestionOperation {
+    FinalizeTypoSuggestion,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -370,6 +432,42 @@ pub fn finalize_query(request_json: &str) -> String {
     }
 }
 
+#[cfg(feature = "internal-typo-prototype")]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn prepare_typo_suggestion_probe(request_json: &str) -> String {
+    let operation = AdapterOperation::PrepareTypoSuggestion;
+    let request = match parse_request::<PrepareTypoSuggestionRequest>(request_json) {
+        Ok(request) => request,
+        Err(error) => return error_response(operation, error),
+    };
+    if let Err(error) = check_abi(request.abi_version) {
+        return error_response(operation, error);
+    }
+    success_response(
+        operation,
+        PreparedTypoSuggestionResult {
+            plan: prepare_typo_suggestion(&request.query),
+        },
+    )
+}
+
+#[cfg(feature = "internal-typo-prototype")]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn finalize_typo_suggestion_probe(request_json: &str) -> String {
+    let operation = AdapterOperation::FinalizeTypoSuggestion;
+    let request = match parse_request::<FinalizeTypoSuggestionRequest>(request_json) {
+        Ok(request) => request,
+        Err(error) => return error_response(operation, error),
+    };
+    if let Err(error) = check_abi(request.abi_version) {
+        return error_response(operation, error);
+    }
+    match finalize_typo_suggestion(&request.query, request.candidates) {
+        Ok(suggestion) => success_response(operation, FinalizedTypoSuggestionResult { suggestion }),
+        Err(message) => error_response(operation, adapter_error("invalid_typo_evidence", &message)),
+    }
+}
+
 fn parse_request<T: DeserializeOwned>(request_json: &str) -> Result<T, AdapterError> {
     if request_json.len() > MAX_ADAPTER_REQUEST_BYTES {
         return Err(adapter_error(
@@ -410,25 +508,37 @@ fn evidence_probe_plans(
     if let Some(probe) = &plan.metadata_probe {
         let terms = match_terms(&plan.terms, "AND")?;
         let fields = metadata_probe_fields(&probe.fields)?;
-        probes.push(Fts5EvidenceProbePlan::IdentifierMetadataV2 {
+        probes.push(Fts5EvidenceProbePlan::IdentifierMetadataV3 {
             schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
             match_value: bounded_match_value(format!("{{{fields}}} : ({terms})"))?,
         });
     }
     for (probe_index, probe) in plan.support_probes.iter().enumerate() {
-        let match_value = scoped_required_terms(
-            plan,
-            probe.field_group,
-            std::slice::from_ref(&probe.term_index),
-        )?;
-        let prefix_pattern = (probe_index < plan.bounds.max_prefix_terms)
+        let intent = plan
+            .term_intents
+            .get(probe.term_index as usize)
+            .ok_or_else(|| adapter_error("invalid_query_plan", "Unknown support probe term."))?;
+        let exact_identifier = (intent.projection == QueryTermProjection::ExactIdentifier)
+            .then(|| intent.text.clone());
+        let match_value = (intent.projection == QueryTermProjection::AnalyzedText)
+            .then(|| {
+                scoped_analyzed_terms(
+                    plan,
+                    probe.field_group,
+                    std::slice::from_ref(&probe.term_index),
+                )
+            })
+            .transpose()?;
+        let prefix_pattern = (intent.projection == QueryTermProjection::AnalyzedText
+            && probe_index < plan.bounds.max_prefix_terms)
             .then(|| prefix_pattern(&probe.term, plan.bounds.min_prefix_chars))
             .flatten();
-        probes.push(Fts5EvidenceProbePlan::TermSupportV2 {
+        probes.push(Fts5EvidenceProbePlan::TermSupportV3 {
             schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
             probe_id: probe.probe_id,
             term_index: probe.term_index,
             match_value,
+            exact_identifier,
             prefix_pattern,
             max_prefix_expansions: plan.bounds.max_prefix_expansions_per_term,
             max_prefix_term_bytes: MAX_PREFIX_TERM_BYTES,
@@ -467,19 +577,29 @@ fn validate_prefix_observations(
         .zip(&report.term_support)
         .zip(observations)
     {
+        let exact_identifier = plan
+            .term_intents
+            .get(probe.term_index as usize)
+            .is_some_and(|intent| intent.projection == QueryTermProjection::ExactIdentifier);
         if observation.probe_id != probe.probe_id
             || observation.term_index != probe.term_index
             || support.probe_id != probe.probe_id
             || support.term_index != probe.term_index
             || support.prefix_expansions != observation.terms.len()
             || observation.terms.len() > plan.bounds.max_prefix_expansions_per_term
+            || (exact_identifier && !observation.terms.is_empty())
         {
             return Err(adapter_error(
                 "invalid_request",
                 "Prefix observation does not match its requested probe.",
             ));
         }
-        let expected_prefix = probe.term.to_lowercase();
+        let expected_prefix = normalize_lexical_value(&probe.term).ok_or_else(|| {
+            adapter_error(
+                "invalid_query_plan",
+                "Prefix probe term is not normalizable.",
+            )
+        })?;
         let mut previous: Option<&str> = None;
         for term in &observation.terms {
             if term.is_empty()
@@ -523,9 +643,10 @@ fn fts5_execution_plan(
                 Fts5ExecutionDisposition::ExplicitBypass,
                 vec![Fts5StagePlan {
                     ordinal: 0,
-                    plan_id: Fts5StagePlanId::LexicalExplicitV2,
+                    plan_id: Fts5StagePlanId::LexicalExplicitV3,
                     match_value: Some(translate_explicit_query(&plan.query)?),
                     exact_value: None,
+                    required_identifiers: Vec::new(),
                     max_candidates: plan.bounds.max_total_candidates,
                 }],
             )
@@ -536,42 +657,43 @@ fn fts5_execution_plan(
         QueryExecutionDisposition::Ready => {
             let mut stages = Vec::with_capacity(plan.evidence_stages.len());
             for stage in &plan.evidence_stages {
+                let required_identifiers = exact_identifier_requirements(plan);
                 let (plan_id, match_value, exact_value) = match stage.kind {
                     QueryEvidenceStageKind::ExactMetadata => (
-                        Fts5StagePlanId::LexicalExactMetadataV2,
+                        Fts5StagePlanId::LexicalExactMetadataV3,
                         None,
                         Some(exact_stage_value(plan)?),
                     ),
                     QueryEvidenceStageKind::ExactPhrase => (
-                        Fts5StagePlanId::LexicalExactPhraseV2,
+                        Fts5StagePlanId::LexicalExactPhraseV3,
                         Some(scoped_phrase(plan, stage.field_group)?),
                         None,
                     ),
                     QueryEvidenceStageKind::AllTerms => (
-                        Fts5StagePlanId::LexicalAllTermsV2,
-                        Some(scoped_required_terms(
+                        Fts5StagePlanId::LexicalAllTermsV3,
+                        scoped_optional_analyzed_terms(
                             plan,
                             stage.field_group,
                             &stage.required_term_indexes,
-                        )?),
+                        )?,
                         None,
                     ),
                     QueryEvidenceStageKind::PartialCoverage => (
-                        Fts5StagePlanId::LexicalPartialCoverageV2,
-                        Some(scoped_required_terms(
+                        Fts5StagePlanId::LexicalPartialCoverageV3,
+                        scoped_optional_analyzed_terms(
                             plan,
                             stage.field_group,
                             &stage.required_term_indexes,
-                        )?),
+                        )?,
                         None,
                     ),
                     QueryEvidenceStageKind::Prefix => (
-                        Fts5StagePlanId::LexicalPrefixV2,
+                        Fts5StagePlanId::LexicalPrefixV3,
                         Some(scoped_prefix_terms(plan, stage, prefix_expansions)?),
                         None,
                     ),
                 };
-                if plan_id == Fts5StagePlanId::LexicalExactMetadataV2
+                if plan_id == Fts5StagePlanId::LexicalExactMetadataV3
                     && (exact_value.as_deref().is_none_or(str::is_empty) || match_value.is_some())
                 {
                     return Err(adapter_error(
@@ -579,11 +701,21 @@ fn fts5_execution_plan(
                         "Exact evidence stage has no exact value.",
                     ));
                 }
+                if plan_id != Fts5StagePlanId::LexicalExactMetadataV3
+                    && match_value.is_none()
+                    && required_identifiers.is_empty()
+                {
+                    return Err(adapter_error(
+                        "invalid_query_plan",
+                        "Evidence stage has no executable constraints.",
+                    ));
+                }
                 stages.push(Fts5StagePlan {
                     ordinal: stage.ordinal,
                     plan_id,
                     match_value: match_value.map(bounded_match_value).transpose()?,
                     exact_value,
+                    required_identifiers,
                     max_candidates: stage.max_candidates,
                 });
             }
@@ -626,22 +758,52 @@ fn scoped_phrase(plan: &LexicalQueryPlan, group: QueryFieldGroup) -> Result<Stri
     ))
 }
 
-fn scoped_required_terms(
+fn scoped_analyzed_terms(
     plan: &LexicalQueryPlan,
     group: QueryFieldGroup,
     indexes: &[u16],
 ) -> Result<String, AdapterError> {
+    scoped_optional_analyzed_terms(plan, group, indexes)?.ok_or_else(|| {
+        adapter_error(
+            "invalid_query_plan",
+            "Analyzed term probe has no analyzed term.",
+        )
+    })
+}
+
+fn scoped_optional_analyzed_terms(
+    plan: &LexicalQueryPlan,
+    group: QueryFieldGroup,
+    indexes: &[u16],
+) -> Result<Option<String>, AdapterError> {
     let terms = indexes
         .iter()
         .map(|index| {
             plan.term_intents
                 .get(*index as usize)
                 .ok_or_else(|| adapter_error("invalid_query_plan", "Unknown term index."))
-                .map(|intent| intent.text.clone())
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|intent| intent.projection == QueryTermProjection::AnalyzedText)
+        .map(|intent| intent.text.clone())
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return Ok(None);
+    }
     let fields = fts5_fields(plan, group)?;
-    Ok(format!("{{{fields}}} : ({})", match_terms(&terms, "AND")?))
+    Ok(Some(format!(
+        "{{{fields}}} : ({})",
+        match_terms(&terms, "AND")?
+    )))
+}
+
+fn exact_identifier_requirements(plan: &LexicalQueryPlan) -> Vec<String> {
+    plan.term_intents
+        .iter()
+        .filter(|intent| intent.projection == QueryTermProjection::ExactIdentifier)
+        .map(|intent| intent.text.clone())
+        .collect()
 }
 
 fn scoped_prefix_terms(
@@ -654,7 +816,9 @@ fn scoped_prefix_terms(
         let intent = plan.term_intents.get(*index as usize).ok_or_else(|| {
             adapter_error("invalid_query_plan", "Unknown required prefix term index.")
         })?;
-        clauses.push(quote_fts_phrase(&intent.text));
+        if intent.projection == QueryTermProjection::AnalyzedText {
+            clauses.push(quote_fts_phrase(&intent.text));
+        }
     }
     for index in &stage.prefix_term_indexes {
         let values = expansions.get(index).ok_or_else(|| {
@@ -970,18 +1134,20 @@ fn render_explicit_value(token: ExplicitToken) -> Result<String, ()> {
             if star_count == 0 {
                 return Ok(quote_fts_phrase(&value));
             }
-            let Some(prefix) = value.strip_suffix('*') else {
+            let Some(authored_prefix) = value.strip_suffix('*') else {
+                return Err(());
+            };
+            let Some(prefix) = normalize_lexical_value(authored_prefix) else {
                 return Err(());
             };
             if star_count != 1
-                || prefix.is_empty()
                 || !prefix
                     .chars()
                     .all(|character| character.is_alphanumeric() || character == '_')
             {
                 return Err(());
             }
-            Ok(format!("{}*", quote_fts_phrase(prefix)))
+            Ok(format!("{}*", quote_fts_phrase(&prefix)))
         }
         _ => Err(()),
     }
@@ -1118,6 +1284,61 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "internal-typo-prototype")]
+    #[test]
+    fn internal_typo_prototype_keeps_policy_in_rust_and_out_of_public_identity() {
+        let prepared = response(prepare_typo_suggestion_probe(
+            &serde_json::json!({
+                "abi_version": ADAPTER_ABI_VERSION,
+                "operation": "prepare_typo_suggestion",
+                "query": "retrievel",
+            })
+            .to_string(),
+        ));
+        assert_eq!(prepared["status"], "ok");
+        assert_eq!(prepared["result"]["plan"]["disposition"], "probe");
+        assert_eq!(prepared["result"]["plan"]["prefix_pattern"], "retr%");
+        assert_eq!(
+            prepared["result"]["plan"]["bounds"]["max_vocabulary_candidates"],
+            40
+        );
+
+        let finalized = response(finalize_typo_suggestion_probe(
+            &serde_json::json!({
+                "abi_version": ADAPTER_ABI_VERSION,
+                "operation": "finalize_typo_suggestion",
+                "query": "retrievel",
+                "candidates": [
+                    { "term": "retrieved", "document_frequency": 2 },
+                    { "term": "retrieval", "document_frequency": 7 }
+                ],
+            })
+            .to_string(),
+        ));
+        assert_eq!(finalized["status"], "ok");
+        assert_eq!(
+            finalized["result"]["suggestion"]["suggested_query"],
+            "retrieval"
+        );
+        assert_eq!(
+            finalized["result"]["suggestion"]["disposition"],
+            "suggestion"
+        );
+
+        let explicit = response(prepare_typo_suggestion_probe(
+            &serde_json::json!({
+                "abi_version": ADAPTER_ABI_VERSION,
+                "operation": "prepare_typo_suggestion",
+                "query": "title:retrievel",
+            })
+            .to_string(),
+        ));
+        assert_eq!(
+            explicit["result"]["plan"]["disposition"],
+            "explicit_syntax_bypass"
+        );
+    }
+
     #[test]
     fn oversized_preparation_records_metadata_without_a_buffer() {
         let request = serde_json::json!({
@@ -1157,7 +1378,7 @@ mod tests {
         assert_eq!(ordinary["result"]["execution_plan"]["disposition"], "ready");
         assert_eq!(
             ordinary["result"]["execution_plan"]["stages"][0]["plan_id"],
-            "lexical_exact_metadata_v2"
+            "lexical_exact_metadata_v3"
         );
         assert_eq!(
             ordinary["result"]["execution_plan"]["stages"][0]["exact_value"],
@@ -1186,7 +1407,7 @@ mod tests {
         assert_eq!(identifier["result"]["plan"]["kind"], "identifier");
         assert_eq!(
             identifier["result"]["execution_plan"]["stages"][3]["plan_id"],
-            "lexical_partial_coverage_v2"
+            "lexical_partial_coverage_v3"
         );
     }
 
@@ -1196,11 +1417,11 @@ mod tests {
         assert_eq!(prepared["result"]["plan"]["match_operator"], "any");
         assert_eq!(
             prepared["result"]["probes"][0]["plan_id"],
-            "identifier_metadata_v2"
+            "identifier_metadata_v3"
         );
         assert_eq!(
             prepared["result"]["probes"][1]["plan_id"],
-            "term_support_v2"
+            "term_support_v3"
         );
 
         let finalized = response(finalize_query(&finalize_request(
@@ -1242,7 +1463,7 @@ mod tests {
         let stages = prefix["result"]["execution_plan"]["stages"]
             .as_array()
             .expect("stages");
-        assert_eq!(stages.last().unwrap()["plan_id"], "lexical_prefix_v2");
+        assert_eq!(stages.last().unwrap()["plan_id"], "lexical_prefix_v3");
 
         let prepared = response(prepare_query(&query_request(
             "aaa bbb ccc ddd eee fff ggg hhh iii",
@@ -1272,12 +1493,32 @@ mod tests {
         )));
         assert_eq!(
             phrase["result"]["execution_plan"]["stages"][0]["plan_id"],
-            "lexical_explicit_v2"
+            "lexical_explicit_v3"
         );
         assert_eq!(
             phrase["result"]["execution_plan"]["stages"][0]["match_value"],
             "(title : \"IIA guide\" OR content : \"cache\"*)"
         );
+
+        let spaced = response(finalize_query(&finalize_request(
+            "title : notes",
+            None,
+            &[],
+            &[],
+        )));
+        assert_eq!(
+            spaced["result"]["execution_plan"]["stages"][0]["match_value"],
+            "title : \"notes\""
+        );
+
+        let unknown = response(finalize_query(&finalize_request(
+            "bogus:notes",
+            None,
+            &[],
+            &[],
+        )));
+        assert_eq!(unknown["status"], "error");
+        assert_eq!(unknown["error"]["code"], "explicit_query_unsupported");
 
         let sql = response(finalize_query(&finalize_request(
             "title:notes OR '); DROP TABLE chunks; --",
@@ -1288,6 +1529,102 @@ mod tests {
         assert_eq!(sql["status"], "error");
         assert_eq!(sql["error"]["code"], "explicit_query_unsupported");
         assert!(!sql.to_string().contains("DROP TABLE"));
+    }
+
+    #[test]
+    fn query_boundaries_are_normalized_and_classified_in_rust() {
+        for query in ["cache governance?", "cache governance (draft)"] {
+            let prepared = response(prepare_query(&query_request(query)));
+            assert_eq!(prepared["status"], "ok", "{query}");
+            assert_eq!(prepared["result"]["plan"]["kind"], "ordinary", "{query}");
+            assert_eq!(
+                prepared["result"]["plan"]["assistance"], "eligible",
+                "{query}"
+            );
+        }
+
+        let numeric_field = response(prepare_query(&query_request("title:2026")));
+        assert_eq!(numeric_field["result"]["plan"]["kind"], "explicit");
+        assert_eq!(
+            numeric_field["result"]["plan"]["assistance"],
+            "explicit_syntax_bypass"
+        );
+
+        for query in ["Résumé Cache", "Resume Cache", "Re\u{301}sume\u{301} Cache"] {
+            let prepared = response(prepare_query(&query_request(query)));
+            assert_eq!(
+                prepared["result"]["plan"]["normalized_exact"], "resume cache",
+                "{query}"
+            );
+            assert_eq!(
+                prepared["result"]["plan"]["terms"],
+                serde_json::json!(["resume", "cache"]),
+                "{query}"
+            );
+        }
+
+        let complete = "a".repeat(kwiry_core::MAX_QUERY_BYTES);
+        let prepared = response(prepare_query(&query_request(&complete)));
+        assert_eq!(
+            prepared["result"]["plan"]["normalized_exact"]
+                .as_str()
+                .unwrap()
+                .len(),
+            kwiry_core::MAX_QUERY_BYTES
+        );
+        let rejected = response(prepare_query(&query_request(&(complete + "a"))));
+        assert_eq!(rejected["error"]["code"], "invalid_query");
+    }
+
+    #[test]
+    fn exact_identifier_constraints_are_explicit_portable_plan_inputs() {
+        for (query, identifier) in [
+            ("RFC 9110", "rfc 9110"),
+            ("CVE-2026-1234", "cve-2026-1234"),
+            ("CVE 2026 1234", "cve 2026 1234"),
+            ("product/v2.4.1", "product/v2.4.1"),
+        ] {
+            let prepared = response(prepare_query(&query_request(query)));
+            let probe = &prepared["result"]["probes"][0];
+            assert_eq!(probe["plan_id"], "term_support_v3", "{query}");
+            assert_eq!(probe["exact_identifier"], identifier, "{query}");
+            assert!(probe.get("match_value").is_none(), "{query}");
+            assert!(probe["prefix_pattern"].is_null(), "{query}");
+
+            let finalized = response(finalize_query(&finalize_request(
+                query,
+                None,
+                &[1],
+                &[vec![]],
+            )));
+            assert_eq!(finalized["status"], "ok", "{query}");
+            for stage in finalized["result"]["execution_plan"]["stages"]
+                .as_array()
+                .unwrap()
+            {
+                assert_eq!(
+                    stage["required_identifiers"],
+                    serde_json::json!([identifier]),
+                    "{query}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_prefix_translation_is_accent_insensitive_and_bounded() {
+        for query in ["résu*", "re\u{301}su*", "resu*"] {
+            let finalized = response(finalize_query(&finalize_request(query, None, &[], &[])));
+            assert_eq!(finalized["status"], "ok", "{query}");
+            assert_eq!(
+                finalized["result"]["execution_plan"]["stages"][0]["match_value"], "\"resu\"*",
+                "{query}"
+            );
+        }
+        for query in ["re*su", "*resu", "re su*"] {
+            let finalized = response(finalize_query(&finalize_request(query, None, &[], &[])));
+            assert_eq!(finalized["status"], "error", "{query}");
+        }
     }
 
     #[test]

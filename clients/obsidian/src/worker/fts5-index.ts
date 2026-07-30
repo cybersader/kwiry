@@ -30,8 +30,55 @@ import type {
   SourcePreparation,
 } from "./rust-adapter";
 
-const MAX_INDEX_CHUNKS = 100_000;
+export const MAX_INDEX_CHUNKS = 100_000;
 export const DEFAULT_DATABASE_BYTE_LIMIT = 320 * 1024 * 1024;
+
+export type InternalLexicalTraceStageKind =
+  | "evidence_support"
+  | "evidence_prefix"
+  | "lexical_explicit_v3"
+  | "lexical_exact_metadata_v3"
+  | "lexical_exact_phrase_v3"
+  | "lexical_all_terms_v3"
+  | "lexical_partial_coverage_v3"
+  | "lexical_prefix_v3";
+
+export interface InternalLexicalTraceStage {
+  kind: InternalLexicalTraceStageKind;
+  mandatory: boolean;
+  status: "completed";
+  duration_ms: number;
+  input_count: number;
+  output_count: number;
+  candidate_count: number;
+}
+
+export interface InternalLexicalTrace {
+  schema_version: 1;
+  outcome: "complete";
+  total_duration_ms: number;
+  optional_duration_ms: number;
+  evidence_probe_count: number;
+  prefix_probe_count: number;
+  stage_count: number;
+  candidate_count: number;
+  result_count: number;
+  stages: InternalLexicalTraceStage[];
+}
+
+export interface InternalLexicalTraceHandle {
+  readonly clock: () => number;
+  readonly startedAtMs: number;
+  optionalDurationMs: number;
+  evidenceProbeCount: number;
+  prefixProbeCount: number;
+  candidateCount: number;
+  resultCount: number;
+  outcome: InternalLexicalTrace["outcome"];
+  stages: InternalLexicalTraceStage[];
+  finished: boolean;
+}
+
 // A skipped source costs no chunks, so chunk bounds cannot constrain how many
 // source rows a generation accumulates. The freshness table needs its own ceiling.
 const MAX_INDEX_SOURCES = 200_000;
@@ -199,6 +246,11 @@ export interface SQLiteApi {
 const SCHEMA_SQL = `
 PRAGMA user_version = ${requireSchemaVersionLiteral(CACHE_SCHEMA_VERSION)};
 
+CREATE TABLE generation_identity (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  vault_id TEXT NOT NULL
+);
+
 CREATE TABLE sources (
   source_key TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
@@ -251,6 +303,25 @@ CREATE INDEX sources_exact_stem ON sources(exact_stem, source_key)
   WHERE exact_stem IS NOT NULL;
 CREATE INDEX sources_exact_title ON sources(exact_title, source_key)
   WHERE exact_title IS NOT NULL;
+
+-- Exact aliases and technical identifiers are indexed relational projections.
+-- Their canonical JSON remains in sources/chunks for restore validation, while
+-- these WITHOUT ROWID tables prevent json_each from scanning the whole corpus.
+CREATE TABLE source_exact_aliases (
+  value TEXT NOT NULL,
+  source_key TEXT NOT NULL,
+  PRIMARY KEY(value, source_key)
+) WITHOUT ROWID;
+CREATE INDEX source_exact_aliases_by_source
+  ON source_exact_aliases(source_key, value);
+
+CREATE TABLE chunk_exact_identifiers (
+  value TEXT NOT NULL,
+  chunk_rowid INTEGER NOT NULL CHECK(chunk_rowid > 0),
+  PRIMARY KEY(value, chunk_rowid)
+) WITHOUT ROWID;
+CREATE INDEX chunk_exact_identifiers_by_chunk
+  ON chunk_exact_identifiers(chunk_rowid, value);
 
 -- One row per top-level property is the durable source-level projection. The
 -- canonical JSON is sufficient to rebuild a returned property bag; the root
@@ -374,8 +445,10 @@ interface ExpectedSchemaObject {
 // names alone would accept a semantically different FTS declaration or an
 // added trigger/table; comparing normalized SQL keeps the check fail-able.
 const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
+  { type: "index", name: "chunk_exact_identifiers_by_chunk", table: "chunk_exact_identifiers", sql: "CREATE INDEX chunk_exact_identifiers_by_chunk ON chunk_exact_identifiers(chunk_rowid, value)" },
   { type: "index", name: "chunks_by_source", table: "chunks", sql: "CREATE INDEX chunks_by_source ON chunks(source_key)" },
   { type: "index", name: "chunks_exact_heading", table: "chunks", sql: "CREATE INDEX chunks_exact_heading ON chunks(exact_heading) WHERE exact_heading IS NOT NULL" },
+  { type: "index", name: "source_exact_aliases_by_source", table: "source_exact_aliases", sql: "CREATE INDEX source_exact_aliases_by_source ON source_exact_aliases(source_key, value)" },
   { type: "index", name: "source_properties_presence", table: "source_properties", sql: "CREATE INDEX source_properties_presence ON source_properties(property_name, source_key)" },
   { type: "index", name: "source_property_scalars_date", table: "source_property_scalars", sql: "CREATE INDEX source_property_scalars_date ON source_property_scalars(property_name, date_value, source_key) WHERE date_value IS NOT NULL" },
   { type: "index", name: "source_property_scalars_exact", table: "source_property_scalars", sql: "CREATE INDEX source_property_scalars_exact ON source_property_scalars(property_name, scalar_type, exact_value, source_key)" },
@@ -389,12 +462,15 @@ const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "index", name: "sqlite_autoindex_source_property_scalars_1", table: "source_property_scalars", sql: null },
   { type: "index", name: "sqlite_autoindex_sources_1", table: "sources", sql: null },
   { type: "index", name: "sqlite_autoindex_sources_2", table: "sources", sql: null },
+  { type: "table", name: "chunk_exact_identifiers", table: "chunk_exact_identifiers", sql: "CREATE TABLE chunk_exact_identifiers (value TEXT NOT NULL,chunk_rowid INTEGER NOT NULL CHECK(chunk_rowid > 0),PRIMARY KEY(value, chunk_rowid)) WITHOUT ROWID" },
   { type: "table", name: "chunks", table: "chunks", sql: "CREATE TABLE chunks (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,chunk_id TEXT NOT NULL UNIQUE,vault_id TEXT NOT NULL,path TEXT NOT NULL,heading_path_json TEXT NOT NULL,frontmatter_json TEXT NOT NULL CHECK(json_valid(frontmatter_json)),heading_text TEXT NOT NULL,exact_heading TEXT,content TEXT NOT NULL,identifiers_json TEXT NOT NULL CHECK(json_valid(identifiers_json)))" },
   { type: "table", name: "chunks_fts", table: "chunks_fts", sql: "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename,stem,aliases,title,heading_text,path_text,tags,content,identifiers,content='chunk_search',content_rowid='rowid',tokenize='unicode61 remove_diacritics 2')" },
   { type: "table", name: "chunks_fts_config", table: "chunks_fts_config", sql: "CREATE TABLE 'chunks_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID" },
   { type: "table", name: "chunks_fts_data", table: "chunks_fts_data", sql: "CREATE TABLE 'chunks_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
   { type: "table", name: "chunks_fts_docsize", table: "chunks_fts_docsize", sql: "CREATE TABLE 'chunks_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)" },
   { type: "table", name: "chunks_fts_idx", table: "chunks_fts_idx", sql: "CREATE TABLE 'chunks_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
+  { type: "table", name: "generation_identity", table: "generation_identity", sql: "CREATE TABLE generation_identity (singleton INTEGER PRIMARY KEY CHECK(singleton = 1),vault_id TEXT NOT NULL)" },
+  { type: "table", name: "source_exact_aliases", table: "source_exact_aliases", sql: "CREATE TABLE source_exact_aliases (value TEXT NOT NULL,source_key TEXT NOT NULL,PRIMARY KEY(value, source_key)) WITHOUT ROWID" },
   { type: "table", name: "source_properties", table: "source_properties", sql: "CREATE TABLE source_properties (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,property_name TEXT NOT NULL,value_json TEXT NOT NULL CHECK(json_valid(value_json)),root_type TEXT NOT NULL CHECK(root_type IN ('null','boolean','i64','u64','real','string','date','array','object')),exact_value TEXT,numeric_value REAL,date_value TEXT,CHECK(root_type IN ('array','object') OR exact_value IS NOT NULL),CHECK(root_type NOT IN ('array','object') OR (exact_value IS NULL AND numeric_value IS NULL AND date_value IS NULL)),CHECK(root_type IN ('i64','u64','real') OR numeric_value IS NULL),CHECK(root_type = 'date' OR date_value IS NULL),UNIQUE(source_key, property_name))" },
   { type: "table", name: "source_property_scalars", table: "source_property_scalars", sql: "CREATE TABLE source_property_scalars (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,property_name TEXT NOT NULL,json_pointer TEXT NOT NULL,scalar_type TEXT NOT NULL CHECK(scalar_type IN ('null','boolean','i64','u64','real','string','date')),exact_value TEXT NOT NULL,numeric_value REAL,date_value TEXT,CHECK(scalar_type IN ('i64','u64','real') OR numeric_value IS NULL),CHECK(scalar_type = 'date' OR date_value IS NULL),UNIQUE(source_key, property_name, json_pointer))" },
   { type: "table", name: "source_property_text_fts", table: "source_property_text_fts", sql: "CREATE VIRTUAL TABLE source_property_text_fts USING fts5(string_value,integer_value,real_value,boolean_value,date_value,content='',contentless_delete=1,tokenize='unicode61 remove_diacritics 2')" },
@@ -470,6 +546,11 @@ INSERT INTO chunks_fts(
 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
+const INSERT_EXACT_ALIAS_SQL =
+  "INSERT INTO source_exact_aliases(value, source_key) VALUES(?, ?)";
+const INSERT_EXACT_IDENTIFIER_SQL =
+  "INSERT INTO chunk_exact_identifiers(value, chunk_rowid) VALUES(?, ?)";
+
 // Must run BEFORE the matching DELETE FROM chunks: the subquery reads the
 // rowids out of `chunks`, so deleting the metadata rows first would silently
 // orphan every FTS posting for that source.
@@ -482,6 +563,12 @@ DELETE FROM source_property_text_fts
 WHERE rowid IN (SELECT rowid FROM source_properties WHERE source_key = ?)
 `;
 
+const DELETE_SOURCE_EXACT_IDENTIFIERS_SQL = `
+DELETE FROM chunk_exact_identifiers
+WHERE chunk_rowid IN (SELECT rowid FROM chunks WHERE source_key = ?)
+`;
+const DELETE_SOURCE_EXACT_ALIASES_SQL =
+  "DELETE FROM source_exact_aliases WHERE source_key = ?";
 const DELETE_SOURCE_CHUNKS_SQL = "DELETE FROM chunks WHERE source_key = ?";
 const DELETE_SOURCE_PROPERTY_SCALARS_SQL =
   "DELETE FROM source_property_scalars WHERE source_key = ?";
@@ -520,6 +607,7 @@ SELECT MAX(
 // against the real chunk rows rather than assumed.
 const RECONCILE_SQL = `
 SELECT
+  (SELECT count(*) FROM generation_identity WHERE singleton = 1 AND vault_id = ?) AS identity,
   (SELECT count(*) FROM chunks) AS chunks,
   (SELECT count(*) FROM chunks WHERE rowid <= 0) AS nonpositive_chunks,
   (SELECT count(*) FROM chunks_fts_docsize) AS fts,
@@ -545,6 +633,14 @@ SELECT
   (SELECT COALESCE(SUM(chunk_count), 0) FROM sources) AS source_chunks,
   (SELECT COALESCE(SUM(property_count), 0) FROM sources) AS source_properties,
   (SELECT COALESCE(SUM(property_scalar_count), 0) FROM sources) AS source_property_scalars,
+  (SELECT count(*) FROM source_exact_aliases) AS exact_aliases,
+  (SELECT COALESCE(SUM(json_array_length(exact_aliases_json)), 0) FROM sources) AS source_exact_aliases,
+  (SELECT count(*) FROM chunk_exact_identifiers) AS exact_identifiers,
+  (SELECT COALESCE(SUM(json_array_length(identifiers_json)), 0) FROM chunks) AS chunk_exact_identifiers,
+  (SELECT count(*) FROM source_exact_aliases a LEFT JOIN sources s ON s.source_key = a.source_key
+     WHERE s.source_key IS NULL) AS orphan_exact_aliases,
+  (SELECT count(*) FROM chunk_exact_identifiers i LEFT JOIN chunks c ON c.rowid = i.chunk_rowid
+     WHERE c.rowid IS NULL) AS orphan_exact_identifiers,
   (SELECT count(*) FROM chunks c LEFT JOIN sources s ON s.source_key = c.source_key
      WHERE s.source_key IS NULL) AS orphan_chunks,
   (SELECT count(*) FROM source_properties p LEFT JOIN sources s ON s.source_key = p.source_key
@@ -572,6 +668,7 @@ interface ExistingGenerationState {
   chunks: number;
   sources: number;
   chunkingVersion: number;
+  vaultId: string;
   exportImage: () => Uint8Array;
   close: () => void;
 }
@@ -587,11 +684,13 @@ export class Fts5GenerationIndex {
   private readonly exportStrategy: (api: SQLiteApi) => Uint8Array;
   private readonly closeStrategy: () => void;
   private readonly compactOnExport: boolean;
+  private latestLexicalTrace: InternalLexicalTrace | null = null;
 
   constructor(
     private readonly db: SQLiteDatabase,
     limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
     existing?: ExistingGenerationState,
+    private readonly vaultId = "active",
   ) {
     this.limits = resolveIndexLimits(limits);
     this.effectiveDatabaseByteLimit = configureDatabasePageLimit(db, this.limits);
@@ -599,6 +698,9 @@ export class Fts5GenerationIndex {
       if (db.filename !== ":memory:") throw new Error("FTS5 generation is not in memory");
       try {
         db.exec(SCHEMA_SQL);
+        db.exec("INSERT INTO generation_identity(singleton, vault_id) VALUES(1, ?)", {
+          bind: [vaultId],
+        });
         installVocabularyTable(db);
       } catch (error) {
         throw translateSqliteCapacityError(error);
@@ -611,6 +713,7 @@ export class Fts5GenerationIndex {
     }
 
     installVocabularyTable(db);
+    if (existing.vaultId !== vaultId) throw new CacheImageInvalidError("cache vault identity differs");
     requireProjectedCounts(
       existing.documents,
       existing.chunks,
@@ -688,8 +791,16 @@ export class Fts5GenerationIndex {
       throw new Error("source change batch is empty");
     }
 
+    const authoredChunkCount = sumSafe(preparations
+      .filter((preparation) => preparation.kind === "indexed")
+      .map((preparation) => preparation.chunks.length));
+    if (authoredChunkCount > this.limits.maxChunks) throw new IndexCapacityError();
     const projected = preparations.map(projectPreparation);
     validateChangeIdentities(projected, removals);
+    if (projected.some((change) => change.preparation.vault_id !== this.vaultId)
+      || removals.some((removal) => removal.vault_id !== this.vaultId)) {
+      throw new Error("source change belongs to a different vault");
+    }
 
     const touched = new Map<string, StoredSource>();
     for (const removal of removals) {
@@ -746,6 +857,8 @@ export class Fts5GenerationIndex {
             // Contentless postings must be cleared before their metadata rows.
             this.db.exec(DELETE_SOURCE_FTS_SQL, { bind: [stored.source_key] });
             this.db.exec(DELETE_SOURCE_PROPERTY_FTS_SQL, { bind: [stored.source_key] });
+            this.db.exec(DELETE_SOURCE_EXACT_IDENTIFIERS_SQL, { bind: [stored.source_key] });
+            this.db.exec(DELETE_SOURCE_EXACT_ALIASES_SQL, { bind: [stored.source_key] });
             this.db.exec(DELETE_SOURCE_CHUNKS_SQL, { bind: [stored.source_key] });
             this.db.exec(DELETE_SOURCE_PROPERTY_SCALARS_SQL, { bind: [stored.source_key] });
             this.db.exec(DELETE_SOURCE_PROPERTIES_SQL, { bind: [stored.source_key] });
@@ -803,6 +916,14 @@ export class Fts5GenerationIndex {
                 bind: [rowid, change.preparation.source_key, ...row.metadataBind],
               });
               this.db.exec(INSERT_CHUNK_FTS_SQL, { bind: [rowid, ...row.ftsBind] });
+              for (const identifier of row.exactIdentifiers) {
+                this.db.exec(INSERT_EXACT_IDENTIFIER_SQL, { bind: [identifier, rowid] });
+              }
+            }
+            for (const alias of change.preparation.normalized_exact.aliases) {
+              this.db.exec(INSERT_EXACT_ALIAS_SQL, {
+                bind: [alias, change.preparation.source_key],
+              });
             }
             // The owning source row lands last, after its final deterministic tallies
             // are known. A SQLITE_FULL anywhere above rolls the complete source batch back.
@@ -856,6 +977,7 @@ export class Fts5GenerationIndex {
     current: readonly ReconciliationSourceMetadata[],
   ): Omit<ReconciliationPlanResult, "generation"> {
     this.requireOpen();
+    if (vaultId !== this.vaultId) throw new IndexIntegrityError("vault identity is invalid");
     const rows = this.db.selectObjects(
       SELECT_SOURCES_BY_VAULT_SQL,
       [vaultId, onePastLimit(MAX_RECONCILIATION_SOURCES)],
@@ -905,30 +1027,111 @@ export class Fts5GenerationIndex {
     };
   }
 
-  observeQuery(probes: readonly EvidenceProbePlan[]): QueryEvidenceObservation {
+  beginInternalLexicalTrace(
+    clock: () => number = monotonicMilliseconds,
+  ): InternalLexicalTraceHandle {
+    const startedAtMs = checkedClock(clock);
+    return {
+      clock,
+      startedAtMs,
+      optionalDurationMs: 0,
+      evidenceProbeCount: 0,
+      prefixProbeCount: 0,
+      candidateCount: 0,
+      resultCount: 0,
+      outcome: "complete",
+      stages: [],
+      finished: false,
+    };
+  }
+
+  finishInternalLexicalTrace(handle: InternalLexicalTraceHandle): InternalLexicalTrace {
+    if (handle.finished) throw new Error("internal lexical trace is already finished");
+    handle.finished = true;
+    const trace: InternalLexicalTrace = {
+      schema_version: 1,
+      outcome: handle.outcome,
+      total_duration_ms: elapsedMilliseconds(handle.startedAtMs, checkedClock(handle.clock)),
+      optional_duration_ms: roundedMilliseconds(handle.optionalDurationMs),
+      evidence_probe_count: handle.evidenceProbeCount,
+      prefix_probe_count: handle.prefixProbeCount,
+      stage_count: handle.stages.length,
+      candidate_count: handle.candidateCount,
+      result_count: handle.resultCount,
+      stages: handle.stages.map((stage) => ({ ...stage })),
+    };
+    if (!isInternalLexicalTrace(trace)) throw new Error("internal lexical trace is invalid");
+    this.latestLexicalTrace = trace;
+    return trace;
+  }
+
+  latestInternalLexicalTrace(): InternalLexicalTrace | null {
+    return this.latestLexicalTrace === null
+      ? null
+      : { ...this.latestLexicalTrace, stages: this.latestLexicalTrace.stages.map((stage) => ({ ...stage })) };
+  }
+
+  observeQuery(
+    probes: readonly EvidenceProbePlan[],
+    trace?: InternalLexicalTraceHandle,
+  ): QueryEvidenceObservation {
     this.requireOpen();
+    requireActiveTrace(trace);
+    const boundProbes = probes.map((probe) => ({ probe, bound: bindEvidenceProbe(probe) }));
     let identifierProbeMatched: boolean | null = null;
-    const termSupport: QueryEvidenceObservation["term_support"] = [];
-    const prefixExpansions: QueryEvidenceObservation["prefix_expansions"] = [];
-    for (const probe of probes) {
-      const bound = bindEvidenceProbe(probe);
+    const observedTerms: Array<{
+      probe: Extract<EvidenceProbePlan, { plan_id: "term_support_v3" }>;
+      bound: ReturnType<typeof bindEvidenceProbe>;
+      matched: boolean;
+    }> = [];
+    const supportStarted = trace === undefined ? 0 : checkedClock(trace.clock);
+    for (const { probe, bound } of boundProbes) {
       const matched = Number(this.db.selectValue(bound.exists.sql, bound.exists.bind)) === 1;
-      if (probe.plan_id === "identifier_metadata_v2") {
+      if (probe.plan_id === "identifier_metadata_v3") {
         if (identifierProbeMatched !== null) throw new Error("duplicate identifier metadata probe");
         identifierProbeMatched = matched;
-        continue;
+      } else {
+        observedTerms.push({ probe, bound, matched });
       }
-      const terms = bound.prefix === null
-        ? []
-        : this.db.selectObjects(bound.prefix.sql, bound.prefix.bind).map((row) => {
-            if (typeof row.term !== "string" || row.term.length === 0) {
-              throw new Error("SQLite returned an invalid prefix expansion");
-            }
-            return row.term;
-          });
-      if (terms.length > probe.max_prefix_expansions) {
-        terms.length = probe.max_prefix_expansions;
+    }
+    if (trace !== undefined) {
+      trace.evidenceProbeCount += probes.length;
+      pushTraceStage(trace, {
+        kind: "evidence_support",
+        mandatory: true,
+        status: "completed",
+        duration_ms: elapsedMilliseconds(supportStarted, checkedClock(trace.clock)),
+        input_count: probes.length,
+        output_count: Number(identifierProbeMatched === true)
+          + observedTerms.filter(({ matched }) => matched).length,
+        candidate_count: 0,
+      });
+    }
+
+    const termSupport: QueryEvidenceObservation["term_support"] = [];
+    const prefixExpansions: QueryEvidenceObservation["prefix_expansions"] = [];
+    let prefixDuration = 0;
+    let prefixProbeCount = 0;
+    let prefixOutputCount = 0;
+    for (const { probe, bound, matched } of observedTerms) {
+      let terms: string[] = [];
+      if (bound.prefix !== null && !matched) {
+        prefixProbeCount += 1;
+        const started = trace === undefined ? 0 : checkedClock(trace.clock);
+        terms = this.db.selectObjects(bound.prefix.sql, bound.prefix.bind).map((row) => {
+          if (typeof row.term !== "string" || row.term.length === 0) {
+            throw new Error("SQLite returned an invalid prefix expansion");
+          }
+          return row.term;
+        });
+        if (trace !== undefined) {
+          const duration = elapsedMilliseconds(started, checkedClock(trace.clock));
+          prefixDuration += duration;
+          trace.optionalDurationMs += duration;
+        }
       }
+      if (terms.length > probe.max_prefix_expansions) terms.length = probe.max_prefix_expansions;
+      prefixOutputCount += terms.length;
       termSupport.push({
         probe_id: probe.probe_id,
         term_index: probe.term_index,
@@ -941,6 +1144,18 @@ export class Fts5GenerationIndex {
         terms,
       });
     }
+    if (trace !== undefined && prefixProbeCount > 0) {
+      trace.prefixProbeCount += prefixProbeCount;
+      pushTraceStage(trace, {
+        kind: "evidence_prefix",
+        mandatory: false,
+        status: "completed",
+        duration_ms: roundedMilliseconds(prefixDuration),
+        input_count: prefixProbeCount,
+        output_count: prefixOutputCount,
+        candidate_count: 0,
+      });
+    }
     return {
       identifier_probe_matched: identifierProbeMatched,
       term_support: termSupport,
@@ -948,8 +1163,13 @@ export class Fts5GenerationIndex {
     };
   }
 
-  search(plan: ExecutionPlan, limit: number): WorkerSearchHit[] {
+  search(
+    plan: ExecutionPlan,
+    limit: number,
+    trace?: InternalLexicalTraceHandle,
+  ): WorkerSearchHit[] {
     this.requireOpen();
+    requireActiveTrace(trace);
     requireExecutionPlanIdentity(plan);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new Error("invalid FTS5 search limit");
@@ -965,8 +1185,16 @@ export class Fts5GenerationIndex {
         plan.max_total_candidates - candidates,
       );
       if (stageLimit < 1) break;
+      const mandatory = stage.plan_id !== "lexical_partial_coverage_v3"
+        && stage.plan_id !== "lexical_prefix_v3";
+      const started = trace === undefined ? 0 : checkedClock(trace.clock);
       const bound = bindSearchStage(stage, stageLimit);
       const rows = this.db.selectObjects(bound.sql, bound.bind).map(parseSearchRow);
+      const duration = trace === undefined
+        ? 0
+        : elapsedMilliseconds(started, checkedClock(trace.clock));
+      if (!mandatory && trace !== undefined) trace.optionalDurationMs += duration;
+      const previousHits = hits.length;
       candidates += rows.length;
       for (const hit of rows) {
         if (seen.has(hit.chunk_id)) continue;
@@ -974,6 +1202,21 @@ export class Fts5GenerationIndex {
         hits.push(hit);
         if (hits.length === limit) break;
       }
+      if (trace !== undefined) {
+        pushTraceStage(trace, {
+          kind: stage.plan_id,
+          mandatory,
+          status: "completed",
+          duration_ms: duration,
+          input_count: stageLimit,
+          output_count: hits.length - previousHits,
+          candidate_count: rows.length,
+        });
+      }
+    }
+    if (trace !== undefined) {
+      trace.candidateCount += candidates;
+      trace.resultCount = hits.length;
     }
     return hits;
   }
@@ -1079,12 +1322,13 @@ export class Fts5GenerationIndex {
     expectedDocuments: number,
     expectedSources: number,
   ): void {
-    const rows = this.db.selectObjects(RECONCILE_SQL);
+    const rows = this.db.selectObjects(RECONCILE_SQL, [this.vaultId]);
     if (rows.length !== 1) {
       throw new IndexIntegrityError("FTS5 reconciliation query returned no row");
     }
     const row = rows[0]!;
-    if (!isNonNegativeSafeInteger(row.chunks)
+    if (!isNonNegativeSafeInteger(row.identity)
+      || !isNonNegativeSafeInteger(row.chunks)
       || !isNonNegativeSafeInteger(row.nonpositive_chunks)
       || !isNonNegativeSafeInteger(row.fts)
       || !isNonNegativeSafeInteger(row.nonpositive_fts)
@@ -1103,6 +1347,12 @@ export class Fts5GenerationIndex {
       || !isNonNegativeSafeInteger(row.source_chunks)
       || !isNonNegativeSafeInteger(row.source_properties)
       || !isNonNegativeSafeInteger(row.source_property_scalars)
+      || !isNonNegativeSafeInteger(row.exact_aliases)
+      || !isNonNegativeSafeInteger(row.source_exact_aliases)
+      || !isNonNegativeSafeInteger(row.exact_identifiers)
+      || !isNonNegativeSafeInteger(row.chunk_exact_identifiers)
+      || !isNonNegativeSafeInteger(row.orphan_exact_aliases)
+      || !isNonNegativeSafeInteger(row.orphan_exact_identifiers)
       || !isNonNegativeSafeInteger(row.orphan_chunks)
       || !isNonNegativeSafeInteger(row.orphan_properties)
       || !isNonNegativeSafeInteger(row.orphan_property_scalars)
@@ -1110,7 +1360,8 @@ export class Fts5GenerationIndex {
       || !isNonNegativeSafeInteger(row.source_tally_mismatches)) {
       throw new IndexIntegrityError("FTS5 reconciliation query returned invalid counts");
     }
-    if (row.nonpositive_chunks !== 0
+    if (row.identity !== 1
+      || row.nonpositive_chunks !== 0
       || row.nonpositive_fts !== 0
       || row.nonpositive_properties !== 0
       || row.nonpositive_property_scalars !== 0
@@ -1128,6 +1379,10 @@ export class Fts5GenerationIndex {
       || row.source_chunks !== row.chunks
       || row.source_properties !== row.properties
       || row.source_property_scalars !== row.property_scalars
+      || row.exact_aliases !== row.source_exact_aliases
+      || row.exact_identifiers !== row.chunk_exact_identifiers
+      || row.orphan_exact_aliases !== 0
+      || row.orphan_exact_identifiers !== 0
       || row.orphan_chunks !== 0
       || row.orphan_properties !== 0
       || row.orphan_property_scalars !== 0
@@ -1154,8 +1409,14 @@ function installVocabularyTable(db: SQLiteDatabase): void {
 export function openFts5Generation(
   sqlite: SQLiteApi,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
+  vaultId = "active",
 ): Fts5GenerationIndex {
-  return new Fts5GenerationIndex(new sqlite.oo1.DB(":memory:", "c"), limits);
+  return new Fts5GenerationIndex(
+    new sqlite.oo1.DB(":memory:", "c"),
+    limits,
+    undefined,
+    vaultId,
+  );
 }
 
 /**
@@ -1168,11 +1429,15 @@ export function openRestoredFts5Generation(
   bytes: Uint8Array,
   chunkingVersion: number,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
+  expectedVaultId = "active",
 ): Fts5GenerationIndex {
   let handle: BlockVfsHandle | null = null;
   try {
     handle = openPlainBlockVfs(sqlite, bytes);
     const db = handle.db;
+    // Restore validation scans every canonical and derived row. Bound SQLite's
+    // page cache so those reads do not grow the shared WASM heap with image size.
+    db.exec("PRAGMA cache_size = -512");
     const storedVersion = Number(db.selectValue("PRAGMA user_version"));
     if (storedVersion !== CACHE_SCHEMA_VERSION) throw new CacheVersionMismatchError();
     validateExactSchema(db);
@@ -1198,7 +1463,7 @@ export function openRestoredFts5Generation(
       throw new CacheImageInvalidError("cache image failed FTS5 integrity validation");
     }
     validatePositiveRestoredRowids(db);
-    const inventory = readRestoredInventory(db, limits);
+    const inventory = readRestoredInventory(db, limits, expectedVaultId);
     validateChunkFtsBijection(db);
     validatePropertyFtsBijection(db);
     rebuildCanonicalPropertyFts(db);
@@ -1216,9 +1481,10 @@ export function openRestoredFts5Generation(
     const index = new Fts5GenerationIndex(db, limits, {
       ...inventory,
       chunkingVersion,
+      vaultId: expectedVaultId,
       exportImage: () => ownedHandle.exportImage(),
       close: () => ownedHandle.close(),
-    });
+    }, expectedVaultId);
     try {
       index.assertIntegrity();
     } catch {
@@ -1270,12 +1536,21 @@ function normalizeSchemaSql(value: string | null): string | null {
 function readRestoredInventory(
   db: SQLiteDatabase,
   limits: Fts5IndexLimits,
+  expectedVaultId: string,
 ): {
   documents: number;
   chunks: number;
   sources: number;
 } {
   const resolvedLimits = resolveIndexLimits(limits);
+  const identityRows = db.selectObjects(
+    "SELECT singleton, vault_id FROM generation_identity LIMIT 2",
+  );
+  if (identityRows.length !== 1
+    || identityRows[0]?.singleton !== 1
+    || identityRows[0]?.vault_id !== expectedVaultId) {
+    throw new CacheImageInvalidError("cache vault identity is invalid");
+  }
   const sourceRows = db.selectObjects(
     `SELECT ${SOURCE_COLUMNS_SQL} FROM sources ORDER BY source_key LIMIT ?`,
     [onePastLimit(resolvedLimits.maxSources)],
@@ -1291,7 +1566,11 @@ function readRestoredInventory(
     } catch {
       throw new CacheImageInvalidError("cache source inventory is invalid");
     }
-    if (source === null) throw new CacheImageInvalidError("cache source inventory is invalid");
+    if (source === null
+      || source.vault_id !== expectedVaultId
+      || sourcesByKey.has(source.source_key)) {
+      throw new CacheImageInvalidError("cache source inventory is invalid");
+    }
     sourcesByKey.set(source.source_key, source);
     if (source.outcome === "indexed") documents += 1;
   }
@@ -1306,28 +1585,27 @@ function readRestoredInventory(
       || source.tags_text !== legacy.tags) {
       throw new CacheImageInvalidError("cache source retrieval metadata is invalid");
     }
-    if (source.outcome === "indexed") {
-      const exact = expectedSourceExact(source.retrieval, legacy.title);
-      if (source.exact_filename !== exact.filename
-        || source.exact_stem !== exact.stem
-        || JSON.stringify(source.exact_aliases) !== JSON.stringify(exact.aliases)
-        || source.exact_title !== exact.title) {
-        throw new CacheImageInvalidError("cache source exact metadata is invalid");
-      }
+    const projectedAliases = readExactProjectionValues(
+      db,
+      "SELECT value FROM source_exact_aliases WHERE source_key = ? ORDER BY value",
+      [source.source_key],
+    );
+    if (!sameStringSet(projectedAliases, source.exact_aliases)) {
+      throw new CacheImageInvalidError("cache exact alias projection is invalid");
     }
   }
 
   // Do not count and trust chunk rows. Read at most one beyond the configured
   // ceiling, then validate every canonical chunk-local field before publication.
   const chunkRows = db.selectObjects(`
-    SELECT source_key, chunk_id, vault_id, path, heading_path_json, frontmatter_json,
+    SELECT rowid, source_key, chunk_id, vault_id, path, heading_path_json, frontmatter_json,
       heading_text, exact_heading, content, identifiers_json
     FROM chunks
     ORDER BY rowid
     LIMIT ?
   `, [onePastLimit(resolvedLimits.maxChunks)]);
   if (chunkRows.length > resolvedLimits.maxChunks) throw new IndexCapacityError();
-  for (const row of chunkRows) validateRestoredChunk(row, sourcesByKey, legacyBySource);
+  for (const row of chunkRows) validateRestoredChunk(db, row, sourcesByKey, legacyBySource);
 
   return {
     documents,
@@ -1337,12 +1615,14 @@ function readRestoredInventory(
 }
 
 function validateRestoredChunk(
+  db: SQLiteDatabase,
   row: Record<string, unknown>,
   sourcesByKey: ReadonlyMap<string, StoredSource>,
   legacyBySource: ReadonlyMap<string, LegacyProjection>,
 ): void {
   const identifiers = parseIdentifiersJson(row.identifiers_json);
-  if (!isBoundedString(row.source_key, 128)
+  if (!isPositiveSafeInteger(row.rowid)
+    || !isBoundedString(row.source_key, 128)
     || !isBoundedString(row.chunk_id, 128)
     || !isBoundedString(row.vault_id, 1_024)
     || row.vault_id.trim().length === 0
@@ -1361,11 +1641,30 @@ function validateRestoredChunk(
     || source.outcome !== "indexed"
     || row.vault_id !== source.vault_id
     || row.path !== source.path
-    || row.frontmatter_json !== displayFrontmatterJsonFromTitle(legacy.title)
-    || row.exact_heading !== normalizeExactForRestore(row.heading_text)
-    || JSON.stringify(identifiers) !== JSON.stringify(technicalIdentifiersForRestore(row.content))) {
+    || row.frontmatter_json !== displayFrontmatterJsonFromTitle(legacy.title)) {
     throw new CacheImageInvalidError("cache chunk identity does not match its source");
   }
+  const projectedIdentifiers = readExactProjectionValues(
+    db,
+    "SELECT value FROM chunk_exact_identifiers WHERE chunk_rowid = ? ORDER BY value",
+    [row.rowid],
+  );
+  if (!sameStringSet(projectedIdentifiers, identifiers)) {
+    throw new CacheImageInvalidError("cache exact identifier projection is invalid");
+  }
+}
+
+function readExactProjectionValues(
+  db: SQLiteDatabase,
+  sql: string,
+  bind: readonly unknown[],
+): string[] {
+  const values = db.selectObjects(sql, bind).map((row) => row.value);
+  if (!values.every(isBoundedNormalizedExact)
+    || new Set(values).size !== values.length) {
+    throw new CacheImageInvalidError("cache exact projection is invalid");
+  }
+  return values as string[];
 }
 
 function validatePositiveRestoredRowids(db: SQLiteDatabase): void {
@@ -1478,35 +1777,10 @@ function parseIdentifiersJson(value: unknown): string[] | null {
   }
   return Array.isArray(parsed)
     && parsed.every(isBoundedNormalizedExact)
+    && new Set(parsed).size === parsed.length
     && JSON.stringify(parsed) === value
     ? parsed as string[]
     : null;
-}
-
-function technicalIdentifiersForRestore(source: string): string[] {
-  const wordCharacters = "\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}\\u200C\\u200D";
-  const pattern = new RegExp(
-    `(^|[^${wordCharacters}])`
-      + "((?:cve-\\d{4}-\\d+|rfc(?:[- ]?\\d+)|[a-z0-9][a-z0-9._/:+\\-]{1,}[a-z0-9_]))"
-      + `(?=$|[^${wordCharacters}])`,
-    "giu",
-  );
-  const seen = new Set<string>();
-  const identifiers: string[] = [];
-  for (const match of source.matchAll(pattern)) {
-    const candidate = match[2];
-    if (candidate === undefined) continue;
-    const hasAlpha = /\p{Alphabetic}/u.test(candidate);
-    const hasDigit = /[0-9]/u.test(candidate);
-    const hasSeparator = /[-_./:+]/u.test(candidate);
-    if (!hasDigit || (!hasAlpha && !hasSeparator)) continue;
-    const identifier = normalizeExactForRestore(candidate);
-    if (identifier !== null && !seen.has(identifier)) {
-      seen.add(identifier);
-      identifiers.push(identifier);
-    }
-  }
-  return identifiers;
 }
 
 function validateRestoredProperties(
@@ -1661,52 +1935,6 @@ function expectedRetrieval(path: string, legacy: LegacyProjection): StoredSource
   return { filename, stem, aliases: legacy.aliases };
 }
 
-function expectedSourceExact(
-  retrieval: StoredSource["retrieval"],
-  title: string,
-): { filename: string | null; stem: string | null; aliases: string[]; title: string | null } {
-  return {
-    filename: normalizeExactForRestore(retrieval.filename),
-    stem: normalizeExactForRestore(retrieval.stem),
-    aliases: retrieval.aliases
-      .map(normalizeExactForRestore)
-      .filter((alias): alias is string => alias !== null),
-    title: normalizeExactForRestore(title),
-  };
-}
-
-function normalizeExactForRestore(value: string): string | null {
-  const words: string[] = [];
-  let word = "";
-  for (const character of value) {
-    if (isRustWhitespace(character.codePointAt(0)!)) {
-      if (word.length > 0) {
-        words.push(word);
-        word = "";
-      }
-    } else {
-      word += character;
-    }
-  }
-  if (word.length > 0) words.push(word);
-  if (words.length === 0) return null;
-  return [...words.join(" ").toLowerCase()].slice(0, 256).join("");
-}
-
-function isRustWhitespace(codePoint: number): boolean {
-  return (codePoint >= 0x0009 && codePoint <= 0x000d)
-    || codePoint === 0x0020
-    || codePoint === 0x0085
-    || codePoint === 0x00a0
-    || codePoint === 0x1680
-    || (codePoint >= 0x2000 && codePoint <= 0x200a)
-    || codePoint === 0x2028
-    || codePoint === 0x2029
-    || codePoint === 0x202f
-    || codePoint === 0x205f
-    || codePoint === 0x3000;
-}
-
 function propertyScalarIdentity(
   sourceKey: string,
   propertyName: string,
@@ -1728,6 +1956,7 @@ interface ProjectedChunk {
   metadataBind: readonly unknown[];
   /** The nine ordinary FTS field values, in declared column order. */
   ftsBind: readonly string[];
+  exactIdentifiers: readonly string[];
   chunkId: string;
   chunkingVersion: number;
 }
@@ -1866,6 +2095,7 @@ function projectChunk(
       JSON.stringify(prepared.technical_identifiers),
     ],
     ftsBind: fields,
+    exactIdentifiers: prepared.technical_identifiers,
     chunkId: chunk.chunk_id,
     chunkingVersion: chunk.chunking_version,
   };
@@ -2100,7 +2330,8 @@ function parseExactAliasesJson(value: unknown): string[] | null {
     return null;
   }
   if (!Array.isArray(parsed)
-    || !parsed.every(isBoundedNormalizedExact)) {
+    || !parsed.every(isBoundedNormalizedExact)
+    || new Set(parsed).size !== parsed.length) {
     return null;
   }
   return JSON.stringify(parsed) === value ? parsed : null;
@@ -2130,9 +2361,13 @@ function legacyTags(frontmatter: PreparedFrontmatter): string {
 
 function legacyAliases(frontmatter: PreparedFrontmatter): string[] {
   const aliases: string[] = [];
+  const seen = new Set<string>();
   for (const authored of legacyPropertyStrings(frontmatter.aliases)) {
     const alias = authored.trim();
-    if (alias.length > 0 && !aliases.includes(alias)) aliases.push(alias);
+    if (alias.length > 0 && !seen.has(alias)) {
+      seen.add(alias);
+      aliases.push(alias);
+    }
   }
   return aliases;
 }
@@ -2342,6 +2577,12 @@ function comparePaths(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const values = new Set(left);
+  return values.size === left.length && right.every((value) => values.has(value));
+}
+
 function sourceIdentity(vaultId: string, path: string): string {
   return JSON.stringify([vaultId, path]);
 }
@@ -2363,6 +2604,96 @@ function isNormalizedVaultRelativePath(value: unknown): value is string {
     ));
 }
 
+function monotonicMilliseconds(): number {
+  return typeof performance === "object" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+function checkedClock(clock: () => number): number {
+  const value = clock();
+  if (!Number.isFinite(value) || value < 0) throw new Error("lexical trace clock is invalid");
+  return value;
+}
+
+function elapsedMilliseconds(started: number, finished: number): number {
+  if (finished < started) throw new Error("lexical trace clock moved backwards");
+  return roundedMilliseconds(finished - started);
+}
+
+function roundedMilliseconds(value: number): number {
+  if (!Number.isFinite(value) || value < 0) throw new Error("lexical trace duration is invalid");
+  return Math.round(value * 1_000) / 1_000;
+}
+
+function requireActiveTrace(trace: InternalLexicalTraceHandle | undefined): void {
+  if (trace?.finished) throw new Error("internal lexical trace is already finished");
+}
+
+function pushTraceStage(
+  trace: InternalLexicalTraceHandle,
+  stage: InternalLexicalTraceStage,
+): void {
+  if (trace.stages.length >= 8) throw new Error("internal lexical trace stage bound exceeded");
+  trace.stages.push({ ...stage, duration_ms: roundedMilliseconds(stage.duration_ms) });
+}
+
+export function isInternalLexicalTrace(value: unknown): value is InternalLexicalTrace {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const trace = value as Record<string, unknown>;
+  const keys = [
+    "schema_version", "outcome", "total_duration_ms", "optional_duration_ms",
+    "evidence_probe_count", "prefix_probe_count", "stage_count", "candidate_count",
+    "result_count", "stages",
+  ];
+  if (Object.keys(trace).sort().join("\0") !== [...keys].sort().join("\0")
+    || trace.schema_version !== 1
+    || trace.outcome !== "complete"
+    || !isTraceNumber(trace.total_duration_ms)
+    || !isTraceNumber(trace.optional_duration_ms)
+    || !isTraceCount(trace.evidence_probe_count, 129)
+    || !isTraceCount(trace.prefix_probe_count, 8)
+    || !isTraceCount(trace.stage_count, 8)
+    || !isTraceCount(trace.candidate_count, 512)
+    || !isTraceCount(trace.result_count, 100)
+    || !Array.isArray(trace.stages)
+    || trace.stages.length !== trace.stage_count
+    || !trace.stages.every(isInternalLexicalTraceStage)) {
+    return false;
+  }
+  return trace.optional_duration_ms <= trace.total_duration_ms;
+}
+
+function isInternalLexicalTraceStage(value: unknown): value is InternalLexicalTraceStage {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const stage = value as Record<string, unknown>;
+  const keys = [
+    "kind", "mandatory", "status", "duration_ms", "input_count", "output_count",
+    "candidate_count",
+  ];
+  const kinds: readonly InternalLexicalTraceStageKind[] = [
+    "evidence_support", "evidence_prefix", "lexical_explicit_v3",
+    "lexical_exact_metadata_v3", "lexical_exact_phrase_v3", "lexical_all_terms_v3",
+    "lexical_partial_coverage_v3", "lexical_prefix_v3",
+  ];
+  return Object.keys(stage).sort().join("\0") === [...keys].sort().join("\0")
+    && kinds.includes(stage.kind as InternalLexicalTraceStageKind)
+    && typeof stage.mandatory === "boolean"
+    && stage.status === "completed"
+    && isTraceNumber(stage.duration_ms)
+    && isTraceCount(stage.input_count, 512)
+    && isTraceCount(stage.output_count, 512)
+    && isTraceCount(stage.candidate_count, 256);
+}
+
+function isTraceNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isTraceCount(value: unknown, maximum: number): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= maximum;
+}
+
 function isBoundedString(value: unknown, maximum: number, allowEmpty = false): value is string {
   return typeof value === "string"
     && value.length <= maximum
@@ -2372,7 +2703,7 @@ function isBoundedString(value: unknown, maximum: number, allowEmpty = false): v
 function isBoundedNormalizedExact(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
-    && [...value].length <= 256;
+    && new TextEncoder().encode(value).byteLength <= 4_096;
 }
 
 function parseHeadingPathJson(value: unknown): string[] | null {

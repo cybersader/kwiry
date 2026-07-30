@@ -17,7 +17,9 @@ use crate::api::SearchFilters;
 use crate::chunk::ingest_file;
 use crate::error::{Error, Result};
 use crate::generation::{DataRoot, DataRootLock};
-use crate::index::{Fields, build_schema, chunk_document, open_index_dir};
+use crate::index::{
+    Fields, build_schema, chunk_document, open_index_dir, register_lexical_analyzer,
+};
 use crate::manifest::{
     Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint, source_key,
 };
@@ -1390,6 +1392,7 @@ fn ensure_partition_index(index_dir: &Path) -> Result<(Index, Fields)> {
     let fields = Fields::from_schema(&schema)?;
     let index =
         Index::create_in_dir(index_dir, schema).map_err(|error| Error::Index(error.to_string()))?;
+    register_lexical_analyzer(&index);
     Ok((index, fields))
 }
 

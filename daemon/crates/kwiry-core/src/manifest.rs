@@ -14,7 +14,7 @@ pub use crate::source::source_key;
 use crate::state::{read_json, write_json_atomic};
 
 pub const MANIFEST_VERSION: u32 = 2;
-pub const INDEX_FORMAT_VERSION: u32 = 6;
+pub const INDEX_FORMAT_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
@@ -207,7 +207,7 @@ mod tests {
 
         let error = manifest.validate().unwrap_err();
         assert!(error.to_string().contains("found manifest=2, index=5"));
-        assert!(error.to_string().contains("expected manifest=2, index=6"));
+        assert!(error.to_string().contains("expected manifest=2, index=8"));
         assert!(error.to_string().contains("kwiry index"));
     }
 
