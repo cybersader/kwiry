@@ -157,6 +157,12 @@ interface Snapshot {
   cut: number;
 }
 
+interface SourceOmissions {
+  quarantinedSources: number;
+  unreadableSources: string[];
+  quarantineValidatorFields: SourcePreparationDefectField[];
+}
+
 type ReconciliationProbe =
   | { kind: "read"; inspection: SourceInspection; read: StableSourceRead }
   | { kind: "unreadable" };
@@ -383,6 +389,7 @@ export class InPluginIndexController {
     this.pendingUpserts.clear();
     this.pendingRemovals.clear();
     this.pendingRenames.clear();
+    this.blocked = false;
     this.rescanRequested = true;
   }
 
@@ -842,6 +849,7 @@ export class InPluginIndexController {
 
   private async buildGeneration(rebuilding: boolean): Promise<void> {
     const generation = this.allocateFreshGeneration();
+    const activeOmissions = rebuilding ? this.captureSourceOmissions() : null;
     let began = false;
     this.clearSourceOmissions();
     try {
@@ -860,6 +868,8 @@ export class InPluginIndexController {
 
       if (this.rescanRequested) {
         await this.worker.abortBuild(generation);
+        began = false;
+        if (activeOmissions) this.restoreSourceOmissions(activeOmissions);
         return;
       }
 
@@ -869,8 +879,28 @@ export class InPluginIndexController {
         this.syncWorkerQuarantines(counts);
         if (this.rescanRequested) {
           await this.worker.abortBuild(generation);
+          began = false;
+          if (activeOmissions) this.restoreSourceOmissions(activeOmissions);
           return;
         }
+      }
+
+      if (rebuilding && this.unreadableSources.size > 0) {
+        // A source-local read failure is not proof that the source disappeared.
+        // Keep the complete active generation searchable rather than publishing
+        // a replacement candidate known to omit at least one source. This is a
+        // degraded freshness verdict, not a Worker failure, so it remains locally
+        // recoverable through a later explicit rebuild without raising onFailure.
+        const unreadableEvidence = [...this.unreadableSources];
+        began = false;
+        await this.worker.abortBuild(generation);
+        this.requireActive();
+        if (activeOmissions) {
+          this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
+        }
+        this.blocked = !this.rebuildRequested && !this.rescanRequested;
+        this.emit("degraded", "sources_unreadable");
+        return;
       }
 
       counts = await this.worker.commitBuild(generation);
@@ -879,17 +909,22 @@ export class InPluginIndexController {
       this.completed = this.total ?? 0;
       this.emit(this.hasPendingChanges() ? "replay" : "ready");
     } catch (error) {
+      const unreadableEvidence = rebuilding ? [...this.unreadableSources] : [];
+      let failure = error;
       if (began) {
         try {
           await this.worker.abortBuild(generation);
         } catch (abortError) {
-          throw new AggregateError(
+          failure = new AggregateError(
             [error, abortError],
             "index build failed and staging abort did not complete",
           );
         }
       }
-      throw error;
+      if (activeOmissions) {
+        this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
+      }
+      throw failure;
     }
   }
 
@@ -1054,6 +1089,10 @@ export class InPluginIndexController {
     });
     this.requireActive();
     this.setActiveCounts(counts);
+    if (this.unreadableSources.size > 0 && !this.hasPendingChanges()) {
+      this.emit("degraded", "sources_unreadable");
+      return;
+    }
     this.emit(this.startupReconciling || this.hasPendingChanges() ? "replay" : "ready");
   }
 
@@ -1079,7 +1118,13 @@ export class InPluginIndexController {
         } catch (error) {
           if (!(error instanceof UnreadableVaultSourceError)) throw error;
           this.unreadableSources.add(path);
-          removals.set(path, { vault_id: ACTIVE_VAULT_ID, path });
+          if (changes.rename && nextGeneration !== null) {
+            // A rename must remain an atomic removal/reinsert. If the destination
+            // cannot be read, keep the old path searchable and require a fresh
+            // authoritative pass instead of publishing a generation with neither.
+            this.requestAuthoritativeRescan();
+            removals.clear();
+          }
           continue;
         }
         this.requireActive();
@@ -1236,6 +1281,28 @@ export class InPluginIndexController {
       return generation;
     }
     throw new Error("generation allocator did not produce a fresh identifier");
+  }
+
+  private captureSourceOmissions(): SourceOmissions {
+    return {
+      quarantinedSources: this.quarantinedSources,
+      unreadableSources: [...this.unreadableSources],
+      quarantineValidatorFields: [...this.quarantineValidatorFields],
+    };
+  }
+
+  private restoreSourceOmissions(
+    omissions: SourceOmissions,
+    unreadableEvidence: readonly string[] = [],
+  ): void {
+    this.quarantinedSources = omissions.quarantinedSources;
+    this.quarantineValidatorFields.clear();
+    for (const field of omissions.quarantineValidatorFields) {
+      this.quarantineValidatorFields.add(field);
+    }
+    this.unreadableSources.clear();
+    for (const path of omissions.unreadableSources) this.unreadableSources.add(path);
+    for (const path of unreadableEvidence) this.unreadableSources.add(path);
   }
 
   private clearSourceOmissions(): void {

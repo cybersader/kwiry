@@ -12,6 +12,7 @@ import {
   type VaultSourceEvent,
 } from "../src/active-vault-source";
 import type { CacheLoad, CacheStorePort, CacheWrite } from "../src/cache/cache-store";
+import { classifyFailure } from "../src/diagnostics/classify-failure";
 import {
   InPluginIndexController,
   type IndexControllerCacheOptions,
@@ -757,6 +758,11 @@ describe("InPluginIndexController", () => {
     await controller.whenIdle();
 
     expect(source.readAttempts.get("unreadable.md")).toBe(2);
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+      "commit:generation-1",
+    ]);
+    expect(worker.calls.filter((call) => call.startsWith("abort:"))).toEqual([]);
+    expect(worker.activeGeneration).toBe("generation-1");
     expect([...worker.activePaths].sort()).toEqual(["a.md", "b.md"]);
     expect(statuses.at(-1)).toMatchObject({
       stage: "ready",
@@ -817,6 +823,153 @@ describe("InPluginIndexController", () => {
       dirty: true,
       issue: "vault_read_failed",
     });
+  });
+
+  it.each(["inspection", "read"] as const)(
+    "keeps the complete active generation when one replacement snapshot %s is unreadable",
+    async (failureKind) => {
+      const source = new FakeSource();
+      source.set("a.md", "a");
+      source.set("b.md", "b");
+      source.set("unreadable.md", "last known good");
+      const { controller, worker, statuses, failures } = harness(source, new FakeWorker(), {
+        maxConcurrentReads: 3,
+        maxStableReadAttempts: 2,
+      });
+      controller.start();
+      await controller.whenIdle();
+      expect(worker.activeGeneration).toBe("generation-1");
+      expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "unreadable.md"]));
+
+      if (failureKind === "inspection") {
+        const originalInspect = source.inspectMarkdown.bind(source);
+        source.inspectMarkdown = vi.fn((path) => {
+          if (path === "unreadable.md") throw new Error("private SMB inspection detail");
+          return originalInspect(path);
+        });
+      } else {
+        source.remainingReadFailures.set("unreadable.md", 99);
+      }
+      controller.requestRebuild();
+      await controller.whenIdle();
+
+      expect(failures).toEqual([]);
+      expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+        "commit:generation-1",
+      ]);
+      expect(worker.calls).toContain("abort:generation-2");
+      expect(worker.activeGeneration).toBe("generation-1");
+      expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "unreadable.md"]));
+      expect(worker.stagingGeneration).toBeNull();
+      expect(worker.stagingPaths).toEqual(new Set());
+      expect(statuses.at(-1)).toEqual({
+        stage: "degraded",
+        searchable: true,
+        generation: "generation-1",
+        documents: 3,
+        chunks: 3,
+        quarantinedSources: 0,
+        unreadableSources: 1,
+        quarantineValidatorFields: [],
+        dirty: true,
+        rebuilding: false,
+        issue: "sources_unreadable",
+      });
+      expect(JSON.stringify(statuses.at(-1))).not.toContain("private SMB inspection detail");
+    },
+  );
+
+  it("publishes a complete authoritative replacement that proves a source was deleted", async () => {
+    const source = new FakeSource();
+    source.set("deleted.md", "delete me");
+    source.set("kept.md", "keep me");
+    const { controller, worker, statuses, failures } = harness(source);
+    controller.start();
+    await controller.whenIdle();
+    expect(worker.activeGeneration).toBe("generation-1");
+    expect(worker.activePaths).toEqual(new Set(["deleted.md", "kept.md"]));
+
+    source.records.delete("deleted.md");
+    controller.requestRebuild();
+    await controller.whenIdle();
+
+    expect(failures).toEqual([]);
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+      "commit:generation-1",
+      "commit:generation-2",
+    ]);
+    expect(worker.calls.filter((call) => call.startsWith("abort:"))).toEqual([]);
+    expect(worker.activeGeneration).toBe("generation-2");
+    expect(worker.activePaths).toEqual(new Set(["kept.md"]));
+    expect(statuses.at(-1)).toEqual({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-2",
+      documents: 1,
+      chunks: 1,
+      quarantinedSources: 0,
+      unreadableSources: 0,
+      quarantineValidatorFields: [],
+      dirty: false,
+      rebuilding: false,
+    });
+  });
+
+  it("aborts a systemically unreadable replacement without displacing the complete active generation", async () => {
+    const source = new FakeSource();
+    for (const path of ["Clients/Secret-A.md", "Clients/Secret-B.md", "healthy.md"]) {
+      source.set(path, path);
+    }
+    const { controller, worker, statuses, failures } = harness(source, new FakeWorker(), {
+      maxConcurrentReads: 3,
+      maxStableReadAttempts: 1,
+    });
+    controller.start();
+    await controller.whenIdle();
+    expect(worker.activeGeneration).toBe("generation-1");
+    expect(worker.activePaths).toEqual(new Set([
+      "Clients/Secret-A.md",
+      "Clients/Secret-B.md",
+      "healthy.md",
+    ]));
+
+    source.remainingReadFailures.set("Clients/Secret-A.md", 99);
+    source.remainingReadFailures.set("Clients/Secret-B.md", 99);
+    controller.requestRebuild();
+    await controller.whenIdle();
+
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+      "commit:generation-1",
+    ]);
+    expect(worker.calls).toContain("abort:generation-2");
+    expect(worker.activeGeneration).toBe("generation-1");
+    expect(worker.activePaths).toEqual(new Set([
+      "Clients/Secret-A.md",
+      "Clients/Secret-B.md",
+      "healthy.md",
+    ]));
+    expect(failures).toHaveLength(1);
+    const diagnostic = classifyFailure(failures[0]);
+    expect(diagnostic).toEqual({
+      subsystem: "vault_source",
+      reason: "vault_read_failed",
+      errorName: "VaultSourceReadError",
+      nonError: false,
+    });
+    expect(statuses.at(-1)).toEqual({
+      stage: "degraded",
+      searchable: true,
+      generation: "generation-1",
+      documents: 3,
+      chunks: 3,
+      quarantinedSources: 0,
+      unreadableSources: 2,
+      quarantineValidatorFields: [],
+      dirty: true,
+      rebuilding: false,
+      issue: "vault_read_failed",
+    });
+    expect(JSON.stringify({ diagnostic, status: statuses.at(-1) })).not.toContain("Secret-");
   });
 
   it("binds before awaits, audits metadata matches, and mutates only changed sources", async () => {
@@ -1186,6 +1339,55 @@ describe("InPluginIndexController", () => {
     },
   );
 
+  it("never exports an unreadable replacement and exports the later clean generation", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("a.md", "a", 1);
+      source.set("b.md", "b", 1);
+      source.set("unreadable.md", "last known good", 1);
+      const worker = new FakeCacheWorker();
+      const store = new FakeCacheStore({ kind: "miss", reason: "absent" });
+      const { controller, statuses } = harness(source, worker, {
+        maxConcurrentReads: 3,
+        maxStableReadAttempts: 1,
+      }, {
+        openStore: async () => ({ kind: "available", store }),
+      });
+
+      controller.start();
+      await controller.whenIdle();
+      source.remainingReadFailures.set("unreadable.md", 99);
+      controller.requestRebuild();
+      await controller.whenIdle();
+
+      expect(worker.activeGeneration).toBe("generation-1");
+      expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "unreadable.md"]));
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "degraded",
+        generation: "generation-1",
+        unreadableSources: 1,
+        dirty: true,
+        issue: "sources_unreadable",
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(worker.exportCalls).toEqual([]);
+      expect(store.puts).toEqual([]);
+
+      source.remainingReadFailures.set("unreadable.md", 0);
+      controller.requestRebuild();
+      await controller.whenIdle();
+      expect(worker.activeGeneration).toBe("generation-3");
+      expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "unreadable.md"]));
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect(worker.exportCalls).toEqual(["generation-3"]));
+      await vi.waitFor(() => expect(store.puts).toHaveLength(1));
+      expect(store.puts[0]!.generationId).toBe("generation-3");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("exports only after two clean idle seconds and degrades durability without dirtying search", async () => {
     vi.useFakeTimers();
     try {
@@ -1499,7 +1701,7 @@ describe("InPluginIndexController", () => {
     });
   });
 
-  it("omits one pending source after thrown read retries are exhausted", async () => {
+  it("keeps the last known-good active source after pending read retries are exhausted", async () => {
     const source = new FakeSource();
     source.set("a.md", "a", 1);
     source.set("b.md", "b", 1);
@@ -1518,23 +1720,68 @@ describe("InPluginIndexController", () => {
 
     expect((source.readAttempts.get("unreadable.md") ?? 0) - attemptsBeforeUpdate).toBe(2);
     expect(failures).toEqual([]);
-    expect(worker.applyCalls.at(-1)).toEqual({
+    expect(worker.applyCalls).toEqual([]);
+    expect(worker.activeGeneration).toBe("generation-1");
+    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "unreadable.md"]));
+    expect(statuses.at(-1)).toEqual({
+      stage: "degraded",
+      searchable: true,
       generation: "generation-1",
-      nextGeneration: "generation-2",
-      upserts: [],
-      removals: ["unreadable.md"],
+      documents: 3,
+      chunks: 3,
+      quarantinedSources: 0,
+      unreadableSources: 1,
+      quarantineValidatorFields: [],
+      dirty: true,
+      rebuilding: false,
+      issue: "sources_unreadable",
     });
-    expect(worker.activeGeneration).toBe("generation-2");
-    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md"]));
+  });
+
+  it("keeps an unreadable rename atomic and recovers on an authoritative rescan", async () => {
+    const source = new FakeSource();
+    source.set("old.md", "last known good", 1);
+    const { controller, worker, statuses, failures } = harness(source, new FakeWorker(), {
+      maxStableReadAttempts: 1,
+    });
+    controller.start();
+    await controller.whenIdle();
+
+    source.remainingReadFailures.set("new.md", 99);
+    source.rename("old.md", "new.md");
+    await controller.whenIdle();
+
+    expect(failures).toEqual([]);
+    expect(worker.applyCalls).toEqual([]);
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+      "commit:generation-1",
+    ]);
+    expect(worker.calls).toContain("abort:generation-3");
+    expect(worker.activeGeneration).toBe("generation-1");
+    expect(worker.activePaths).toEqual(new Set(["old.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "degraded",
+      generation: "generation-1",
+      unreadableSources: 1,
+      dirty: true,
+      issue: "sources_unreadable",
+    });
+
+    source.remainingReadFailures.set("new.md", 0);
+    source.emit({ kind: "rescan" });
+    await controller.whenIdle();
+
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+      "commit:generation-1",
+      "commit:generation-4",
+    ]);
+    expect(worker.activeGeneration).toBe("generation-4");
+    expect(worker.activePaths).toEqual(new Set(["new.md"]));
     expect(statuses.at(-1)).toMatchObject({
       stage: "ready",
-      searchable: true,
-      generation: "generation-2",
-      documents: 2,
-      chunks: 2,
-      unreadableSources: 1,
+      generation: "generation-4",
+      unreadableSources: 0,
       dirty: false,
-      issue: "sources_unreadable",
     });
   });
 
