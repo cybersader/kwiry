@@ -9,10 +9,13 @@ export type SearchShortcutAction =
   | "open-new-tab"
   | "open-new-split"
   | "open-background"
-  | "insert-link"
+  | "insert-note-link"
+  | "insert-section-link"
+  | "move-down"
+  | "move-up"
   | "cycle-mode";
 
-export type SearchShortcutModifier = "Mod" | "Alt";
+export type SearchShortcutModifier = "Mod" | "Ctrl" | "Alt" | "Shift";
 export type SearchShortcutPlatform = "macos" | "other";
 
 export interface SearchShortcutBinding {
@@ -70,9 +73,33 @@ export const SEARCH_SHORTCUT_BINDINGS: readonly SearchShortcutBinding[] = [
   {
     modifiers: ["Alt"],
     key: "Enter",
-    action: "insert-link",
+    action: "insert-note-link",
     command: "alt ↵",
-    purpose: "insert link",
+    purpose: "insert note link",
+    register: true,
+  },
+  {
+    modifiers: ["Alt", "Shift"],
+    key: "Enter",
+    action: "insert-section-link",
+    command: "alt shift ↵",
+    purpose: "insert matched section link",
+    register: true,
+  },
+  {
+    modifiers: ["Ctrl"],
+    key: "j",
+    action: "move-down",
+    command: "ctrl J",
+    purpose: "next result",
+    register: true,
+  },
+  {
+    modifiers: ["Ctrl"],
+    key: "k",
+    action: "move-up",
+    command: "ctrl K",
+    purpose: "previous result",
     register: true,
   },
   {
@@ -105,12 +132,13 @@ function matchesModifiers(
   event: SearchShortcutEvent,
   platform: SearchShortcutPlatform,
 ): boolean {
-  const mod = platform === "macos" ? event.metaKey : event.ctrlKey;
-  const nonMod = platform === "macos" ? event.ctrlKey : event.metaKey;
-  return mod === modifiers.includes("Mod")
+  const expectsMod = modifiers.includes("Mod");
+  const expectsCtrl = modifiers.includes("Ctrl") || (platform === "other" && expectsMod);
+  const expectsMeta = platform === "macos" && expectsMod;
+  return event.ctrlKey === expectsCtrl
+    && event.metaKey === expectsMeta
     && event.altKey === modifiers.includes("Alt")
-    && !event.shiftKey
-    && !nonMod;
+    && event.shiftKey === modifiers.includes("Shift");
 }
 
 function normalizeKey(key: string): string {

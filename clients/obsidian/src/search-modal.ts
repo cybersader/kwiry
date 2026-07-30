@@ -5,12 +5,17 @@
 // (https://github.com/scambier/obsidian-omnisearch), GPL-3.0.
 
 import { Notice, Platform, SuggestModal, TFile } from "obsidian";
-import type { Editor, EditorPosition } from "obsidian";
-
 import type { SearchMode } from "./api";
 import type { BackendSearchHit, BackendStatus, SearchBackend } from "./backend";
 import type KwiryPlugin from "./main";
 import { emptyStateMessage } from "./empty-state";
+import {
+  captureLinkInsertionTarget,
+  deepestMatchedHeading,
+  insertMarkdownLink,
+  type LinkInsertionKind,
+  type LinkInsertionTarget,
+} from "./link-insertion";
 import { validateOpenResult } from "./open-result";
 import { progressLine } from "./progress-line";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
@@ -24,13 +29,6 @@ import { SearchSessionController } from "./search-session";
 
 interface ModalResult {
   hit: BackendSearchHit;
-}
-
-interface LinkInsertionTarget {
-  editor: Editor;
-  sourcePath: string;
-  from: EditorPosition;
-  to: EditorPosition;
 }
 
 type OpenPlacement = "current" | "tab" | "split";
@@ -75,7 +73,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       this.scope.register([...binding.modifiers], binding.key, (event) => {
         event.preventDefault();
         const action = this.shortcutAction(event);
-        if (action === "cycle-mode") {
+        if (action === "move-down" || action === "move-up") {
+          this.moveActiveSuggestion(action);
+        } else if (action === "cycle-mode") {
           this.selectMode(nextSearchMode(this.mode, this.session.supportedModes));
         } else if (action !== null) {
           this.selectActiveSuggestion(event);
@@ -182,8 +182,11 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       case "open-new-split":
         this.openResult(result, "split");
         break;
-      case "insert-link":
-        this.insertResultLink(result);
+      case "insert-note-link":
+        this.insertResultLink(result, "note");
+        break;
+      case "insert-section-link":
+        this.insertResultLink(result, "section");
         break;
       default:
         // Preserve modified mouse selection from the previous implementation;
@@ -200,17 +203,20 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     return searchShortcutAction(event, this.shortcutPlatform);
   }
 
+  private moveActiveSuggestion(action: "move-down" | "move-up"): void {
+    this.inputEl.dispatchEvent(new KeyboardEvent("keydown", {
+      key: action === "move-down" ? "ArrowDown" : "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    }));
+  }
+
   private captureLinkInsertionTarget(): LinkInsertionTarget | null {
     const activeEditor = this.app.workspace.activeEditor;
     const editor = activeEditor?.editor;
     const sourceFile = activeEditor?.file;
     if (!editor || !sourceFile) return null;
-    return {
-      editor,
-      sourcePath: sourceFile.path,
-      from: { ...editor.getCursor("from") },
-      to: { ...editor.getCursor("to") },
-    };
+    return captureLinkInsertionTarget(editor, sourceFile.path);
   }
 
   private openResult(result: ModalResult, placement: OpenPlacement): void {
@@ -226,7 +232,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     });
   }
 
-  private insertResultLink(result: ModalResult): void {
+  private insertResultLink(result: ModalResult, kind: LinkInsertionKind): void {
     const validated = this.validatedResult(result);
     if (!validated) return;
     const target = this.linkInsertionTarget;
@@ -234,13 +240,14 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       new Notice("Kwiry: open this search from a Markdown editor to insert a link.");
       return;
     }
-    const subpath = validated.heading ? `#${validated.heading}` : undefined;
-    const link = this.app.fileManager.generateMarkdownLink(
+    const outcome = insertMarkdownLink(
+      this.app.fileManager,
       validated.file,
-      target.sourcePath,
-      subpath,
+      target,
+      validated.heading,
+      kind,
     );
-    target.editor.replaceRange(link, target.from, target.to);
+    if (!outcome.ok) new Notice(`Kwiry: ${outcome.safeMessage}`);
   }
 
   private validatedResult(result: ModalResult): { file: TFile; heading: string | undefined } | null {
@@ -263,7 +270,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       new Notice("Kwiry: this result is not present in the current vault.");
       return null;
     }
-    return { file, heading: result.hit.heading_path.at(-1) };
+    return { file, heading: deepestMatchedHeading(result.hit.heading_path) };
   }
 
   onClose(): void {
