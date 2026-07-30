@@ -51,10 +51,10 @@ function resultFor(message: WorkerRequest): WorkerResult {
   switch (message.operation) {
     case "initialize":
       return {
-        rustAbiVersion: 1,
-        sourceSchemaVersion: 1,
-        querySchemaVersion: 2,
-        matchPlanSchemaVersion: 1,
+        rustAbiVersion: 2,
+        sourceSchemaVersion: 3,
+        querySchemaVersion: 3,
+        matchPlanSchemaVersion: 2,
         sqliteVersion: "3.53.0",
         fts5Enabled: 1,
       };
@@ -271,7 +271,7 @@ describe("InPluginWorkerSession", () => {
     const revoke = vi.fn();
     const session = new InPluginWorkerSession(worker, "blob:kwiry", revoke, 1_000);
 
-    await expect(session.initialize()).resolves.toMatchObject({ rustAbiVersion: 1 });
+    await expect(session.initialize()).resolves.toMatchObject({ rustAbiVersion: 2 });
     await expect(session.dispose()).resolves.toEqual({ closed: true });
     session.forceDispose();
 

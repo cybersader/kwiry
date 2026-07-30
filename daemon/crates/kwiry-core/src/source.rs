@@ -8,14 +8,23 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::frontmatter::parse_frontmatter;
-use crate::lexical::technical_identifiers;
+use crate::lexical::{normalize_raw, technical_identifiers};
 use crate::links::extract_wikilinks;
 use crate::model::{
     CHUNK_OVERLAP_CHARS, CHUNKING_VERSION, Chunk, Frontmatter, MAX_CHUNK_CHARS, MAX_FILE_BYTES,
     PreparedChunk, PropertyBag, RetrievalMetadata,
 };
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 2;
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceExactMetadata {
+    pub filename: Option<String>,
+    pub stem: Option<String>,
+    pub aliases: Vec<String>,
+    pub title: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +69,7 @@ pub struct SourcePreparation {
     #[serde(with = "decimal_u128")]
     pub mtime_nanos: u128,
     pub retrieval: RetrievalMetadata,
+    pub normalized_exact: SourceExactMetadata,
     /// Canonical source-level properties. The Obsidian ABI serializes this bag
     /// with explicit numeric variants so JavaScript cannot round unsafe integers
     /// or reclassify integral floats before the durable projection is built.
@@ -86,6 +96,7 @@ struct SourcePreparationWire {
     #[serde(with = "decimal_u128")]
     mtime_nanos: u128,
     retrieval: RetrievalMetadata,
+    normalized_exact: SourceExactMetadata,
     #[serde(with = "frontmatter_abi")]
     frontmatter: PropertyBag,
     chunks: Vec<PreparedChunk>,
@@ -117,6 +128,7 @@ impl<'de> Deserialize<'de> for SourcePreparation {
             mtime: wire.mtime,
             mtime_nanos: wire.mtime_nanos,
             retrieval: wire.retrieval,
+            normalized_exact: wire.normalized_exact,
             frontmatter: wire.frontmatter,
             chunks: wire.chunks,
             kind: wire.kind,
@@ -157,6 +169,7 @@ pub fn prepare_oversized_source(
             "oversized source does not exceed the file limit",
         ));
     }
+    let retrieval = retrieval_metadata(&descriptor.path, Vec::new());
     Ok(SourcePreparation {
         schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
         source_key: source_key(&descriptor.vault_id, &descriptor.path),
@@ -168,7 +181,8 @@ pub fn prepare_oversized_source(
         byte_length: descriptor.byte_length,
         mtime: descriptor.mtime,
         mtime_nanos: descriptor.mtime_nanos,
-        retrieval: retrieval_metadata(&descriptor.path, Vec::new()),
+        normalized_exact: source_exact_metadata(&retrieval, &Frontmatter::default()),
+        retrieval,
         frontmatter: Default::default(),
         chunks: Vec::new(),
         kind: SourcePreparationKind::Skipped,
@@ -231,6 +245,7 @@ pub fn prepare_source_buffer(
         ),
     };
     let retrieval = retrieval_metadata(&descriptor.path, aliases);
+    let normalized_exact = source_exact_metadata(&retrieval, &frontmatter);
     let source_frontmatter = Arc::new(frontmatter);
     let links_out = extract_wikilinks(body);
     let sections = match descriptor.format {
@@ -266,8 +281,10 @@ pub fn prepare_source_buffer(
                 content_hash: content_hash.clone(),
                 chunking_version: CHUNKING_VERSION,
             };
+            let heading_text = chunk.heading_path.join(" ");
             chunks.push(PreparedChunk {
-                heading_text: chunk.heading_path.join(" "),
+                normalized_heading: normalize_raw(&heading_text),
+                heading_text,
                 technical_identifiers: technical_identifiers(&chunk.content),
                 source_properties: properties.clone(),
                 source_frontmatter: Arc::clone(&source_frontmatter),
@@ -295,6 +312,7 @@ pub fn prepare_source_buffer(
         };
         chunks.push(PreparedChunk {
             heading_text: String::new(),
+            normalized_heading: None,
             technical_identifiers: Vec::new(),
             source_properties: properties.clone(),
             source_frontmatter: Arc::clone(&source_frontmatter),
@@ -314,6 +332,7 @@ pub fn prepare_source_buffer(
         mtime: descriptor.mtime,
         mtime_nanos: descriptor.mtime_nanos,
         retrieval,
+        normalized_exact,
         frontmatter: properties,
         chunks,
         kind: SourcePreparationKind::Indexed,
@@ -382,6 +401,7 @@ fn skipped_preparation(
         byte_length: descriptor.byte_length,
         mtime: descriptor.mtime,
         mtime_nanos: descriptor.mtime_nanos,
+        normalized_exact: source_exact_metadata(&retrieval, &Frontmatter::default()),
         retrieval,
         frontmatter: Default::default(),
         chunks: Vec::new(),
@@ -400,6 +420,22 @@ pub(crate) fn retrieval_metadata(path: &str, aliases: Vec<String>) -> RetrievalM
         filename,
         stem,
         aliases,
+    }
+}
+
+fn source_exact_metadata(
+    retrieval: &RetrievalMetadata,
+    frontmatter: &Frontmatter,
+) -> SourceExactMetadata {
+    SourceExactMetadata {
+        filename: normalize_raw(&retrieval.filename),
+        stem: normalize_raw(&retrieval.stem),
+        aliases: retrieval
+            .aliases
+            .iter()
+            .filter_map(|alias| normalize_raw(alias))
+            .collect(),
+        title: frontmatter.title().and_then(normalize_raw),
     }
 }
 
@@ -794,6 +830,42 @@ mod tests {
                 .unwrap();
         assert_eq!(prepared.chunks.len(), 1);
         assert!(prepared.chunks[0].heading_path.is_empty());
+    }
+
+    #[test]
+    fn projects_rust_normalized_exact_metadata_with_unicode_scalar_bounds() {
+        let rockets = "🚀".repeat(260);
+        let source = format!(
+            "---\ntitle: 'RÉSUMÉ   Cache'\naliases:\n  - '  Mixed   Alias  '\n  - '{rockets}'\n---\n# API   Surface\nBody\n"
+        );
+        let prepared = prepare_source_buffer(
+            &descriptor(
+                "Folder/RÉSUMÉ   Cache.md",
+                SourceFormat::Markdown,
+                source.as_bytes(),
+            ),
+            source.as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.schema_version, SOURCE_PREPARATION_SCHEMA_VERSION);
+        assert_eq!(
+            prepared.normalized_exact,
+            SourceExactMetadata {
+                filename: Some("résumé cache.md".to_owned()),
+                stem: Some("résumé cache".to_owned()),
+                aliases: vec!["mixed alias".to_owned(), "🚀".repeat(256)],
+                title: Some("résumé cache".to_owned()),
+            }
+        );
+        assert_eq!(
+            prepared.chunks[0].normalized_heading.as_deref(),
+            Some("api surface")
+        );
+
+        let bounded = normalize_raw(&rockets).unwrap();
+        assert_eq!(bounded.chars().count(), 256);
+        assert!(bounded.chars().all(|character| character == '🚀'));
     }
 
     #[test]

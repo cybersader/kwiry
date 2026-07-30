@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "50a4522ffd926fbf2ab7738bd88ab2f8d90c615078eec37bfc51bd21473d8531",
   "vault_id": "golden-vault",
   "room": "fixture-room",
@@ -13,6 +13,12 @@
     "filename": "Thousands of Wikilinks.md",
     "stem": "Thousands of Wikilinks",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "thousands of wikilinks.md",
+    "stem": "thousands of wikilinks",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {},
   "chunks": [
@@ -5034,6 +5040,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "10a",
         "10b",
@@ -10217,6 +10224,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "1e2",
         "1e3",
@@ -15537,6 +15545,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "3a3",
         "3a4",
@@ -20861,6 +20870,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "56a",
         "56b",
@@ -26188,6 +26198,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "72a",
         "72b",
@@ -31515,6 +31526,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "8e6",
         "8e7",
@@ -36917,6 +36929,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "aa7",
         "aa8",
@@ -42365,6 +42378,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "c68",
         "c69",
@@ -47813,6 +47827,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "e29",
         "e2a",
@@ -53239,6 +53254,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "ff0",
         "ff1",
@@ -58494,6 +58510,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "117c",
         "117d",
@@ -63801,6 +63818,7 @@
         "chunking_version": 2
       },
       "heading_text": "Link map",
+      "normalized_heading": "link map",
       "technical_identifiers": [
         "130b",
         "130c",

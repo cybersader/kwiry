@@ -95,9 +95,15 @@ pub use model::{
 };
 #[cfg(feature = "portable")]
 pub use query::{
-    LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_QUERY_BYTES, MAX_QUERY_TERMS,
-    QueryMatchOperator, QueryMetadataField, QueryMetadataProbe, QueryPlanError, QueryPlanKind,
-    prepare_lexical_query,
+    LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_CANDIDATES_PER_STAGE,
+    MAX_EVIDENCE_STAGES, MAX_PARTIAL_COVERAGE_TERMS, MAX_PREFIX_EXPANSIONS_PER_TERM,
+    MAX_PREFIX_TERMS, MAX_QUERY_BYTES, MAX_QUERY_TERMS, MAX_TERM_SUPPORT_PROBES,
+    MAX_TOTAL_CANDIDATES, MIN_PREFIX_CHARS, QueryAssistanceEligibility, QueryBounds,
+    QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageKind, QueryExactIntent,
+    QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryFieldGroups, QueryMatchOperator,
+    QueryMetadataField, QueryMetadataProbe, QueryPhraseIntent, QueryPlanError, QueryPlanKind,
+    QueryTermIntent, QueryTermRole, QueryTermSupport, QueryTermSupportObservation,
+    QueryTermSupportProbe, QueryTypoStage, prepare_lexical_query,
 };
 #[cfg(feature = "native")]
 pub use reconcile::ReconcileScope;
@@ -114,9 +120,9 @@ pub use semantic::{
 };
 #[cfg(feature = "portable")]
 pub use source::{
-    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourceFormat, SourcePreparation,
-    SourcePreparationError, SourcePreparationKind, prepare_oversized_source, prepare_source_buffer,
-    source_key,
+    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourceExactMetadata, SourceFormat,
+    SourcePreparation, SourcePreparationError, SourcePreparationKind, prepare_oversized_source,
+    prepare_source_buffer, source_key,
 };
 #[cfg(feature = "portable")]
 pub use status::{

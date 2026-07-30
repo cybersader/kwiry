@@ -119,6 +119,11 @@ function source(
   return sourceAt(sourceKey, `${sourceKey}.md`, chunkId, content, title);
 }
 
+function normalizedFixtureExact(value: string): string | null {
+  const normalized = value.trim().split(/\s+/u).join(" ").toLowerCase();
+  return normalized.length === 0 ? null : [...normalized].slice(0, 256).join("");
+}
+
 function sourceAt(
   sourceKey: string,
   path: string,
@@ -128,7 +133,7 @@ function sourceAt(
   frontmatter: PropertyBag = { title, tags: ["test"] },
 ): SourcePreparation {
   return {
-    schema_version: 2,
+    schema_version: 3,
     source_key: sourceKey,
     vault_id: "active",
     path,
@@ -141,6 +146,12 @@ function sourceAt(
       filename: path,
       stem: sourceKey,
       aliases: [],
+    },
+    normalized_exact: {
+      filename: normalizedFixtureExact(path),
+      stem: normalizedFixtureExact(sourceKey),
+      aliases: [],
+      title: normalizedFixtureExact(title),
     },
     frontmatter: prepareFrontmatter(frontmatter),
     chunks: [{
@@ -158,28 +169,42 @@ function sourceAt(
         chunking_version: 1,
       },
       heading_text: "Heading",
+      normalized_heading: "heading",
       technical_identifiers: [],
     }],
     kind: "indexed",
   };
 }
 
-const anyPlan = (term: string) => ({
-  schema_version: 1 as const,
-  plan_id: "lexical_any_v1" as const,
-  match_value: `"${term}"`,
+const matchPlan = (
+  planId: "lexical_explicit_v2" | "lexical_exact_phrase_v2" | "lexical_all_terms_v2"
+    | "lexical_partial_coverage_v2" | "lexical_prefix_v2",
+  matchValue: string,
+) => ({
+  schema_version: 2 as const,
+  profile_id: "lexical-v1" as const,
+  disposition: planId === "lexical_explicit_v2" ? "explicit_bypass" as const : "ready" as const,
+  max_total_candidates: 512 as const,
+  stages: [{
+    ordinal: 0,
+    plan_id: planId,
+    match_value: matchValue,
+    max_candidates: 256,
+  }],
 });
+
+const anyPlan = (term: string) => matchPlan("lexical_all_terms_v2", `"${term}"`);
 
 describe("Fts5GenerationIndex", () => {
   it("indexes prepared chunks, probes metadata, and returns stored result identity", () => {
     index.replaceSource(source("alpha", "chunk-a", "portable quasar text", "Quasar Guide"));
     expect(index.documents).toBe(1);
     expect(index.chunks).toBe(1);
-    expect(index.metadataProbe({
-      schema_version: 1,
-      plan_id: "metadata_probe_v1",
+    expect(index.observeQuery([{
+      schema_version: 2,
+      plan_id: "identifier_metadata_v2",
       match_value: "{filename stem aliases title heading_text} : (\"quasar\")",
-    })).toBe(true);
+    }]).identifier_probe_matched).toBe(true);
 
     const hits = index.search(anyPlan("quasar"), 20);
     expect(hits).toHaveLength(1);
@@ -193,6 +218,206 @@ describe("Fts5GenerationIndex", () => {
     // The index is contentless: it can rank and locate, but it stores no text
     // and must not pretend to have produced excerpt text.
     expect(hits[0]!.excerpt).toBe("");
+  });
+
+  it("executes exact metadata before weaker FTS tiers and deduplicates", () => {
+    index.replaceSource(source("exact", "chunk-exact", "ordinary body", "Quasar Guide"));
+    index.replaceSource(source("phrase", "chunk-phrase", "quasar guide quasar guide quasar guide"));
+    const hits = index.search({
+      schema_version: 2,
+      profile_id: "lexical-v1",
+      disposition: "ready",
+      max_total_candidates: 512,
+      stages: [
+        {
+          ordinal: 0,
+          plan_id: "lexical_exact_metadata_v2",
+          exact_value: "quasar guide",
+          max_candidates: 256,
+        },
+        {
+          ordinal: 1,
+          plan_id: "lexical_exact_phrase_v2",
+          match_value: "{filename stem aliases title heading_text content} : \"quasar guide\"",
+          max_candidates: 256,
+        },
+      ],
+    }, 20);
+    expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-exact", "chunk-phrase"]);
+  });
+
+  it("uses Rust-normalized Unicode and collapsed whitespace for exact metadata", () => {
+    index.replaceSource(sourceAt(
+      "unicode-exact",
+      "unicode-exact.md",
+      "chunk-unicode-exact",
+      "ordinary body",
+      "RÉSUMÉ   Cache",
+    ));
+
+    const hits = index.search({
+      schema_version: 2,
+      profile_id: "lexical-v1",
+      disposition: "ready",
+      max_total_candidates: 512,
+      stages: [{
+        ordinal: 0,
+        plan_id: "lexical_exact_metadata_v2",
+        exact_value: "résumé cache",
+        max_candidates: 256,
+      }],
+    }, 20);
+
+    expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-unicode-exact"]);
+  });
+
+  it("matches tokenless Rust-truncated exact metadata without an FTS candidate", () => {
+    const raw = `${"!".repeat(256)}a`;
+    const exact = "!".repeat(256);
+    index.replaceSource(sourceAt(
+      "bounded-exact",
+      "bounded-exact.md",
+      "chunk-bounded-exact",
+      "ordinary body",
+      raw,
+    ));
+
+    const hits = index.search({
+      schema_version: 2,
+      profile_id: "lexical-v1",
+      disposition: "ready",
+      max_total_candidates: 512,
+      stages: [{
+        ordinal: 0,
+        plan_id: "lexical_exact_metadata_v2",
+        exact_value: exact,
+        max_candidates: 256,
+      }],
+    }, 20);
+
+    expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-bounded-exact"]);
+  });
+
+  it("does not lose an exact metadata hit behind the per-stage candidate cutoff", () => {
+    for (let value = 0; value < 300; value += 1) {
+      const suffix = String(value).padStart(3, "0");
+      index.replaceSource(sourceAt(
+        `needle-signal-decoy-${suffix}`,
+        `needle-signal-decoy-${suffix}.md`,
+        `chunk-decoy-${suffix}`,
+        "needle signal ".repeat(20),
+        `Needle Signal decoy ${suffix}`,
+        { title: `Needle Signal decoy ${suffix}`, aliases: [`Needle Signal decoy ${suffix}`] },
+      ));
+    }
+    index.replaceSource(source("needle-exact", "chunk-needle-exact", "ordinary body", "Needle Signal"));
+
+    const hits = index.search({
+      schema_version: 2,
+      profile_id: "lexical-v1",
+      disposition: "ready",
+      max_total_candidates: 512,
+      stages: [{
+        ordinal: 0,
+        plan_id: "lexical_exact_metadata_v2",
+        exact_value: "needle signal",
+        max_candidates: 256,
+      }],
+    }, 20);
+    expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-needle-exact"]);
+  });
+
+  it("keeps exact filename and title candidates in the same metadata score tier at cutoff", () => {
+    index.replaceSource(sourceAt(
+      "primary-filename",
+      "needle.md",
+      "000-primary",
+      "ordinary body",
+      "Unrelated title",
+    ));
+    for (let value = 0; value < 256; value += 1) {
+      const suffix = String(value).padStart(3, "0");
+      index.replaceSource(sourceAt(
+        `title-decoy-${suffix}`,
+        `title-decoy-${suffix}.md`,
+        `chunk-title-${suffix}`,
+        "ordinary body",
+        "Needle.md",
+      ));
+    }
+
+    const hits = index.search({
+      schema_version: 2,
+      profile_id: "lexical-v1",
+      disposition: "ready",
+      max_total_candidates: 512,
+      stages: [{
+        ordinal: 0,
+        plan_id: "lexical_exact_metadata_v2",
+        exact_value: "needle.md",
+        max_candidates: 256,
+      }],
+    }, 100);
+
+    expect(hits).toHaveLength(100);
+    expect(hits[0]?.chunk_id).toBe("000-primary");
+  });
+
+  it("orders equal-score ties by chunk ID then path independently of insertion order", () => {
+    const chunkIds = ["chunk-z", "chunk-a", "chunk-m", "chunk-b", "chunk-y"];
+    for (const [indexValue, chunkId] of chunkIds.entries()) {
+      index.replaceSource(sourceAt(
+        `stable-${indexValue}`,
+        `stable-${indexValue}.md`,
+        chunkId,
+        "portabletie",
+      ));
+    }
+    const first = index.search(anyPlan("portabletie"), 20);
+    const repeated = index.search(anyPlan("portabletie"), 20);
+    const expected = [...chunkIds].sort();
+    expect(first.map((hit) => hit.chunk_id)).toEqual(expected);
+    expect(repeated).toEqual(first);
+  });
+
+  it("returns no rows for a typed no-evidence execution plan", () => {
+    index.replaceSource(source("alpha", "chunk-a", "popular common document"));
+    expect(index.search({
+      schema_version: 2,
+      profile_id: "lexical-v1",
+      disposition: "empty_no_evidence",
+      max_total_candidates: 512,
+      stages: [],
+    }, 20)).toEqual([]);
+  });
+
+  it("observes support only in canonical fields and bounds sorted prefix terms", () => {
+    const words = Array.from({ length: 20 }, (_, value) => `quasar${String(value).padStart(2, "0")}`);
+    index.replaceSource(sourceAt(
+      "support",
+      "path-only-quasar.md",
+      "chunk-support",
+      words.join(" "),
+      "Support",
+      { tags: ["tag-only-nebula"] },
+    ));
+    const observed = index.observeQuery([{
+      schema_version: 2,
+      plan_id: "term_support_v2",
+      probe_id: 0,
+      term_index: 0,
+      match_value: "{filename stem aliases title heading_text content} : (\"nebula\")",
+      prefix_pattern: "quasar%",
+      max_prefix_expansions: 16,
+      max_prefix_term_bytes: 96,
+    }]);
+    expect(observed.term_support).toEqual([{
+      probe_id: 0,
+      term_index: 0,
+      document_frequency: 0,
+      prefix_expansions: 16,
+    }]);
+    expect(observed.prefix_expansions[0]?.terms).toEqual(["quasar", ...words.slice(0, 15)]);
   });
 
   it("coerces legacy title and tags exactly like the Rust projection", () => {
@@ -581,26 +806,10 @@ describe("Fts5GenerationIndex", () => {
         ['"quasar"'],
       )).toContain("[quasar]");
 
-      expect(scoped.search({
-        schema_version: 1,
-        plan_id: "lexical_explicit_v1",
-        match_value: "\"quasar cache\"",
-      }, 20)).toHaveLength(1);
-      expect(scoped.search({
-        schema_version: 1,
-        plan_id: "lexical_explicit_v1",
-        match_value: "\"cache quasar\"",
-      }, 20)).toEqual([]);
-      expect(scoped.search({
-        schema_version: 1,
-        plan_id: "lexical_explicit_v1",
-        match_value: "title : \"quasar\"",
-      }, 20)).toHaveLength(1);
-      expect(scoped.search({
-        schema_version: 1,
-        plan_id: "lexical_explicit_v1",
-        match_value: "tags : \"quasar\"",
-      }, 20)).toEqual([]);
+      expect(scoped.search(matchPlan("lexical_explicit_v2", "\"quasar cache\""), 20)).toHaveLength(1);
+      expect(scoped.search(matchPlan("lexical_explicit_v2", "\"cache quasar\""), 20)).toEqual([]);
+      expect(scoped.search(matchPlan("lexical_explicit_v2", "title : \"quasar\""), 20)).toHaveLength(1);
+      expect(scoped.search(matchPlan("lexical_explicit_v2", "tags : \"quasar\""), 20)).toEqual([]);
     } finally {
       scoped.close();
     }
@@ -800,6 +1009,7 @@ describe("Fts5GenerationIndex", () => {
       skipped.chunks = [];
       skipped.kind = "skipped";
       skipped.content_hash = "hash-binary";
+      skipped.normalized_exact.title = null;
       skipped.byte_length = 4;
       skipped.mtime_nanos = "170000000000000000123456789";
       scoped.replaceSource(skipped);
@@ -816,6 +1026,10 @@ describe("Fts5GenerationIndex", () => {
         // INTEGER, and a truncated value would corrupt the freshness compare.
         mtime_nanos: "170000000000000000123456789",
         retrieval_json: '{"filename":"binary.md","stem":"binary","aliases":[]}',
+        exact_filename: "binary.md",
+        exact_stem: "binary",
+        exact_aliases_json: "[]",
+        exact_title: null,
         aliases_text: "",
         // A skipped source retains freshness evidence only; it cannot claim
         // searchable metadata that Rust did not index.
@@ -883,6 +1097,10 @@ describe("Fts5GenerationIndex", () => {
         byte_length: 10,
         mtime_nanos: "99999999999999999999999999999999999999",
         retrieval_json: '{"filename":"alpha.md","stem":"alpha","aliases":[]}',
+        exact_filename: "alpha.md",
+        exact_stem: "alpha",
+        exact_aliases_json: "[]",
+        exact_title: "title",
         aliases_text: "",
         title_text: "Title",
         tags_text: "test",
@@ -952,7 +1170,8 @@ describe("Fts5GenerationIndex", () => {
     [
       "an invented source row",
       "INSERT INTO sources VALUES('ghost','active','ghost.md','skipped',NULL,0,'1',"
-        + "'{\"filename\":\"ghost.md\",\"stem\":\"ghost\",\"aliases\":[]}','','','',0,0,0)",
+        + "'{\"filename\":\"ghost.md\",\"stem\":\"ghost\",\"aliases\":[]}',"
+        + "'ghost.md','ghost','[]',NULL,'','','',0,0,0)",
     ],
   ])("fails the integrity gate on %s", (_name, corruption) => {
     const db = new sqlite.oo1.DB(":memory:", "c");
@@ -1273,6 +1492,72 @@ describe("Fts5GenerationIndex", () => {
     }
   });
 
+  it("restores Rust-normalized Unicode whitespace exact fields without drift", () => {
+    const prepared = sourceAt(
+      "unicode-restore",
+      "unicode-restore.md",
+      "chunk-unicode-restore",
+      "ordinary body",
+      "RÉSUMÉ\u0085\u3000Cache",
+    );
+    prepared.normalized_exact.title = "r\u00e9sum\u00e9 cache";
+    prepared.chunks[0]!.heading_text = "API\u202f\u2003Surface";
+    prepared.chunks[0]!.normalized_heading = "api surface";
+    index.replaceSource(prepared);
+
+    const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
+    try {
+      const hits = restored.search({
+        schema_version: 2,
+        profile_id: "lexical-v1",
+        disposition: "ready",
+        max_total_candidates: 512,
+        stages: [{
+          ordinal: 0,
+          plan_id: "lexical_exact_metadata_v2",
+          exact_value: "résumé cache",
+          max_candidates: 256,
+        }],
+      }, 20);
+      expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-unicode-restore"]);
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("restores only technical identifiers derivable from canonical chunk content", () => {
+    const prepared = source(
+      "identifier-restore",
+      "chunk-identifier-restore",
+      "CVE-2026-1234 RFC9110 product/v2.4.1 CVE-2026-1234 ordinary words",
+    );
+    prepared.chunks[0]!.technical_identifiers = [
+      "cve-2026-1234",
+      "rfc9110",
+      "product/v2.4.1",
+    ];
+    index.replaceSource(prepared);
+
+    const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
+    try {
+      const hits = restored.search({
+        schema_version: 2,
+        profile_id: "lexical-v1",
+        disposition: "ready",
+        max_total_candidates: 512,
+        stages: [{
+          ordinal: 0,
+          plan_id: "lexical_exact_metadata_v2",
+          exact_value: "cve-2026-1234",
+          max_candidates: 256,
+        }],
+      }, 20);
+      expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-identifier-restore"]);
+    } finally {
+      restored.close();
+    }
+  });
+
   it("completes restore, mutate, VFS export, and second restore", () => {
     index.applySourceChanges([
       source("old", "chunk-old", "oldterm"),
@@ -1311,10 +1596,10 @@ describe("Fts5GenerationIndex", () => {
       .toThrow(CacheVersionMismatchError);
   });
 
-  it("rejects a schema-v1 cache instead of attempting to read it as the property projection", () => {
+  it("rejects the legacy schema-v5 cache inside the disposable migration boundary", () => {
     index.replaceSource(source("alpha", "chunk-a", "quasar"));
     const oldImage = mutateExportedImage(index.exportImage(sqlite), (db) => {
-      db.exec("PRAGMA user_version = 1");
+      db.exec("PRAGMA user_version = 5");
     });
     expect(() => openRestoredFts5Generation(sqlite, oldImage, 1))
       .toThrow(CacheVersionMismatchError);
@@ -1451,6 +1736,25 @@ describe("Fts5GenerationIndex", () => {
     }],
     ["chunk/source identity disagreement", (db: SQLiteDatabase) => {
       db.exec("UPDATE chunks SET vault_id = 'another-vault'");
+    }],
+    ["malformed normalized source alias", (db: SQLiteDatabase) => {
+      db.exec("UPDATE sources SET exact_aliases_json = '[\"\"]'");
+    }],
+    ["oversized normalized heading", (db: SQLiteDatabase) => {
+      db.exec(`UPDATE chunks SET exact_heading = '${"x".repeat(257)}'`);
+      db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+    }],
+    ["semantically forged normalized title", (db: SQLiteDatabase) => {
+      db.exec("UPDATE sources SET exact_title = 'forged title'");
+      db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+    }],
+    ["semantically forged normalized heading", (db: SQLiteDatabase) => {
+      db.exec("UPDATE chunks SET exact_heading = 'forged heading'");
+      db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+    }],
+    ["semantically forged technical identifier", (db: SQLiteDatabase) => {
+      db.exec("UPDATE chunks SET identifiers_json = '[\"cve-2026-1234\"]'");
+      db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
     }],
   ])("refuses digest-valid %s even when SQLite and FTS integrity stay green", (_name, mutate) => {
     index.replaceSource(source("alpha", "chunk-a", "quasar"));

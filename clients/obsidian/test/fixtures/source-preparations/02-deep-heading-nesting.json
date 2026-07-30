@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "7355fc5a771229cfc09ecc97863925716ab78d5c9d3e235d025b57ead16e3075",
   "vault_id": "golden-vault",
   "path": "Golden/Deep Heading Nesting.md",
@@ -12,6 +12,12 @@
     "filename": "Deep Heading Nesting.md",
     "stem": "Deep Heading Nesting",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "deep heading nesting.md",
+    "stem": "deep heading nesting",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {},
   "chunks": [
@@ -32,6 +38,7 @@
         "chunking_version": 2
       },
       "heading_text": "Level One",
+      "normalized_heading": "level one",
       "technical_identifiers": []
     },
     {
@@ -52,6 +59,7 @@
         "chunking_version": 2
       },
       "heading_text": "Level One Level Two",
+      "normalized_heading": "level one level two",
       "technical_identifiers": []
     },
     {
@@ -73,6 +81,7 @@
         "chunking_version": 2
       },
       "heading_text": "Level One Level Two Level Three",
+      "normalized_heading": "level one level two level three",
       "technical_identifiers": []
     },
     {
@@ -95,6 +104,7 @@
         "chunking_version": 2
       },
       "heading_text": "Level One Level Two Level Three Level Four",
+      "normalized_heading": "level one level two level three level four",
       "technical_identifiers": []
     },
     {
@@ -118,6 +128,7 @@
         "chunking_version": 2
       },
       "heading_text": "Level One Level Two Level Three Level Four Level Five",
+      "normalized_heading": "level one level two level three level four level five",
       "technical_identifiers": []
     },
     {
@@ -142,6 +153,7 @@
         "chunking_version": 2
       },
       "heading_text": "Level One Level Two Level Three Level Four Level Five Level Six",
+      "normalized_heading": "level one level two level three level four level five level six",
       "technical_identifiers": []
     }
   ],

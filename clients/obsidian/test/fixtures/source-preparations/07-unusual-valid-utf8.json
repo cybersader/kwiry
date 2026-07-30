@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "4aa6fadab99c7e1fd2cc3f3343548909300f1b6a59600863479b8843616d9f83",
   "vault_id": "golden-vault",
   "room": "fixture-room",
@@ -13,6 +13,12 @@
     "filename": "Unusual Valid UTF-8.md",
     "stem": "Unusual Valid UTF-8",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "unusual valid utf-8.md",
+    "stem": "unusual valid utf-8",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {},
   "chunks": [
@@ -33,6 +39,7 @@
         "chunking_version": 2
       },
       "heading_text": "Καλημέρα 世界",
+      "normalized_heading": "καλημέρα 世界",
       "technical_identifiers": []
     }
   ],

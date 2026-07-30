@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "1cf7799f26377840ecf0bd295af8c3d8b793b0d90b7208966341cb622da6e6ca",
   "vault_id": "golden-vault",
   "path": "Golden/Large Property Array.md",
@@ -12,6 +12,12 @@
     "filename": "Large Property Array.md",
     "stem": "Large Property Array",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "large property array.md",
+    "stem": "large property array",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {
     "items": {
@@ -4838,6 +4844,7 @@
         "chunking_version": 2
       },
       "heading_text": "Body",
+      "normalized_heading": "body",
       "technical_identifiers": []
     }
   ],

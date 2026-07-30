@@ -5,7 +5,7 @@
 // free of the WASM import so it is directly testable. The adapter cannot be
 // imported in a unit test because it pulls in the Rust binary.
 
-const SOURCE_SCHEMA_VERSION = 2;
+const SOURCE_SCHEMA_VERSION = 3;
 
 // This mirrors Rust's call-stack safety boundary. It is deliberately the only
 // property-bag bound: source byte limits already protect allocation, while a
@@ -33,6 +33,7 @@ export function sourcePreparationDefect(value: unknown): string | null {
     "mtime",
     "mtime_nanos",
     "retrieval",
+    "normalized_exact",
     "frontmatter",
     "chunks",
     "kind",
@@ -55,6 +56,7 @@ export function sourcePreparationDefect(value: unknown): string | null {
     ["mtime_nanos", () => typeof value.mtime_nanos === "string"
       && /^[0-9]{1,39}$/u.test(value.mtime_nanos)],
     ["retrieval", () => isRetrieval(value.retrieval)],
+    ["normalized_exact", () => isNormalizedExact(value.normalized_exact)],
     ["chunks_shape", () => Array.isArray(value.chunks) && value.chunks.length <= 100_000],
   ];
   for (const [name, check] of checks) {
@@ -259,7 +261,9 @@ function preparedChunkDefect(
   owner: Record<string, unknown>,
 ): string | null {
   if (!isRecord(value)
-    || !hasExactKeys(value, ["chunk", "heading_text", "technical_identifiers"])
+    || !hasExactKeys(value, [
+      "chunk", "heading_text", "normalized_heading", "technical_identifiers",
+    ])
     || !isRecord(value.chunk)) {
     return "chunks_contents";
   }
@@ -288,6 +292,8 @@ function preparedChunkDefect(
     || !isBoundedString(chunk.content_hash, 128)
     || !isNonNegativeSafeInteger(chunk.chunking_version)
     || !isBoundedString(value.heading_text, 8_192, true)
+    || !(value.normalized_heading === null
+      || isBoundedNormalizedExact(value.normalized_heading))
     || !isStringArray(value.technical_identifiers)) {
     return "chunks_contents";
   }
@@ -321,6 +327,22 @@ function isRetrieval(value: unknown): boolean {
     && isBoundedString(value.filename, 4_096)
     && isBoundedString(value.stem, 4_096)
     && isStringArray(value.aliases);
+}
+
+function isNormalizedExact(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ["filename", "stem", "aliases", "title"])
+    && (value.filename === null || isBoundedNormalizedExact(value.filename))
+    && (value.stem === null || isBoundedNormalizedExact(value.stem))
+    && (value.title === null || isBoundedNormalizedExact(value.title))
+    && Array.isArray(value.aliases)
+    && value.aliases.every(isBoundedNormalizedExact);
+}
+
+function isBoundedNormalizedExact(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && [...value].length <= 256;
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

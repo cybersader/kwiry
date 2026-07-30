@@ -169,6 +169,27 @@ describe("WorkerRpcClient", () => {
     });
   });
 
+  it("poisons the client when initialization claims the legacy source schema", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, 1_000);
+    const pending = client.request({ operation: "initialize" });
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "initialize",
+      ok: true,
+      result: {
+        rustAbiVersion: 2,
+        sourceSchemaVersion: 2,
+        querySchemaVersion: 3,
+        matchPlanSchemaVersion: 2,
+        sqliteVersion: "3.53.0",
+        fts5Enabled: 1,
+      },
+    });
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
   it("poisons the client on an uncorrelated build generation", async () => {
     const worker = new MockWorker();
     const client = new WorkerRpcClient(worker, 1_000);

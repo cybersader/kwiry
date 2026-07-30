@@ -110,11 +110,20 @@ if (nativeJson !== wasmJson) {
 }
 
 const byName = Object.fromEntries(wasmOutput.map((fixture) => [fixture.name, fixture.output]));
-if (byName["abi-identity"].abi_version !== 1
-  || byName["ordinary-any-match"].result.match_plan.plan_id !== "lexical_any_v1"
-  || byName["identifier-all-match"].result.match_plan.plan_id !== "lexical_all_v1"
+if (byName["abi-identity"].abi_version !== 2
+  || byName["abi-identity"].lexical_query_plan_schema_version !== 3
+  || byName["abi-identity"].fts5_match_plan_schema_version !== 2
+  || byName["ordinary-any-match"].result.execution_plan.stages[0].plan_id
+    !== "lexical_exact_metadata_v2"
+  || byName["ordinary-any-match"].result.execution_plan.stages[0].match_value !== undefined
+  || byName["ordinary-any-match"].result.execution_plan.stages[0].exact_value
+    !== "dungeons and dragons"
+  || byName["identifier-all-match"].result.plan.kind !== "identifier"
   || byName["metadata-promoted-match"].result.plan.kind !== "identifier"
-  || byName["allowlisted-explicit-match"].result.match_plan.plan_id !== "lexical_explicit_v1"
+  || byName["allowlisted-explicit-match"].result.execution_plan.stages[0].plan_id
+    !== "lexical_explicit_v2"
+  || byName["no-evidence-empty"].result.execution_plan.disposition !== "empty_no_evidence"
+  || byName["bounded-prefix"].result.execution_plan.stages.at(-1).plan_id !== "lexical_prefix_v2"
   || byName["inert-sql-looking-query"].error.code !== "explicit_query_unsupported"
   || JSON.stringify(byName["inert-sql-looking-query"]).includes("DROP TABLE")
   || byName["invalid-source-envelope"].error.code !== "invalid_request"

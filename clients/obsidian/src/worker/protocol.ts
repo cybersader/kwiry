@@ -28,6 +28,7 @@ export const SOURCE_PREPARATION_DEFECT_FIELDS = [
   "mtime",
   "mtime_nanos",
   "retrieval",
+  "normalized_exact",
   "chunks_shape",
   "chunks_contents",
   "chunks_source_correlation",
@@ -48,7 +49,7 @@ export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIEL
  * `PRAGMA user_version`). Any schema edit must bump it: an image whose value
  * differs from the running build's is not restorable.
  */
-export const CACHE_SCHEMA_VERSION = 5;
+export const CACHE_SCHEMA_VERSION = 6;
 
 /**
  * Independent ceiling on a transported generation image. The SQLite adapter's
@@ -222,10 +223,10 @@ export type WorkerRequest =
   | (RequestBase & { operation: "dispose" });
 
 export interface InitializeResult {
-  rustAbiVersion: 1;
-  sourceSchemaVersion: number;
-  querySchemaVersion: number;
-  matchPlanSchemaVersion: 1;
+  rustAbiVersion: 2;
+  sourceSchemaVersion: 3;
+  querySchemaVersion: 3;
+  matchPlanSchemaVersion: 2;
   sqliteVersion: "3.53.0";
   fts5Enabled: 1;
 }
@@ -648,10 +649,10 @@ function isInitializeResult(value: unknown): value is InitializeResult {
       "sqliteVersion",
       "fts5Enabled",
     ])
-    && value.rustAbiVersion === 1
-    && isNonNegativeSafeInteger(value.sourceSchemaVersion)
-    && isNonNegativeSafeInteger(value.querySchemaVersion)
-    && value.matchPlanSchemaVersion === 1
+    && value.rustAbiVersion === 2
+    && value.sourceSchemaVersion === 3
+    && value.querySchemaVersion === 3
+    && value.matchPlanSchemaVersion === 2
     && value.sqliteVersion === "3.53.0"
     && value.fts5Enabled === 1;
 }

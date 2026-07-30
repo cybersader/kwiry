@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "3c47a35af57764e0226b2e2383dbbb3fcbba10ece8c83e27860aab44892beaeb",
   "vault_id": "golden-vault",
   "path": "Golden/Property Key and Scalar Edges.md",
@@ -12,6 +12,12 @@
     "filename": "Property Key and Scalar Edges.md",
     "stem": "Property Key and Scalar Edges",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "property key and scalar edges.md",
+    "stem": "property key and scalar edges",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {
     "chunk_id": {
@@ -91,6 +97,7 @@
         "chunking_version": 2
       },
       "heading_text": "Body",
+      "normalized_heading": "body",
       "technical_identifiers": []
     }
   ],

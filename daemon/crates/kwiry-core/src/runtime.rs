@@ -2366,6 +2366,132 @@ mod tests {
     }
 
     #[test]
+    fn unauthorized_partition_cannot_change_support_prefixes_or_order() {
+        let temporary = tempdir().unwrap();
+        let allowed = temporary.path().join("allowed");
+        let forbidden = temporary.path().join("forbidden");
+        let data = temporary.path().join("enterprise-data");
+        let baseline_data = temporary.path().join("baseline-data");
+        fs::create_dir(&allowed).unwrap();
+        fs::create_dir(&forbidden).unwrap();
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/retrieval/lexical-conformance/cases.json"
+        ))
+        .unwrap();
+        for document in corpus["documents"].as_array().unwrap() {
+            let scope = document["scope"].as_str().unwrap();
+            if !matches!(scope, "allowed" | "forbidden") {
+                continue;
+            }
+            let root = if scope == "allowed" {
+                &allowed
+            } else {
+                &forbidden
+            };
+            fs::write(
+                root.join(document["path"].as_str().unwrap()),
+                document["markdown"].as_str().unwrap(),
+            )
+            .unwrap();
+        }
+
+        let allowed_registration = VaultRegistration {
+            id: "allowed".into(),
+            path: allowed.clone(),
+            room: Some("room-allowed".into()),
+        };
+        let config = openclast_config(vec![
+            allowed_registration.clone(),
+            VaultRegistration {
+                id: "forbidden".into(),
+                path: forbidden,
+                room: Some("room-forbidden".into()),
+            },
+        ]);
+        build_index(&config, &data).unwrap();
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let allowed_resource = config.resource_key(&config.vaults[0]).unwrap();
+        let forbidden_resource = config.resource_key(&config.vaults[1]).unwrap();
+
+        let authorized = runtime
+            .search_authorized(
+                "scopeanchor forbiddenterm",
+                20,
+                &SearchFilters::default(),
+                std::slice::from_ref(&allowed_resource),
+            )
+            .unwrap();
+        assert_eq!(authorized.len(), 1);
+        assert_eq!(authorized[0].path, "scope-allowed.md");
+        assert!(
+            runtime
+                .search_authorized(
+                    "secretpre",
+                    20,
+                    &SearchFilters::default(),
+                    std::slice::from_ref(&allowed_resource),
+                )
+                .unwrap()
+                .is_empty()
+        );
+
+        let combined = runtime
+            .search_authorized(
+                "secretpre",
+                20,
+                &SearchFilters::default(),
+                &[allowed_resource.clone(), forbidden_resource.clone()],
+            )
+            .unwrap();
+        assert!(!combined.is_empty());
+        assert!(combined.iter().all(|hit| hit.vault_id == "forbidden"));
+        let reversed = runtime
+            .search_authorized(
+                "secretpre",
+                20,
+                &SearchFilters::default(),
+                &[forbidden_resource, allowed_resource.clone()],
+            )
+            .unwrap();
+        assert_eq!(
+            combined
+                .iter()
+                .map(|hit| (&hit.chunk_id, hit.score, &hit.path))
+                .collect::<Vec<_>>(),
+            reversed
+                .iter()
+                .map(|hit| (&hit.chunk_id, hit.score, &hit.path))
+                .collect::<Vec<_>>()
+        );
+
+        let baseline = Config {
+            vaults: vec![allowed_registration],
+            ..Config::default()
+        };
+        build_index(&baseline, &baseline_data).unwrap();
+        let baseline_runtime = SearchRuntime::new();
+        let baseline_manager =
+            IndexManager::open(baseline, &baseline_data, baseline_runtime.clone()).unwrap();
+        let baseline_hits = baseline_runtime
+            .search(&request("scopeanchor forbiddenterm"))
+            .unwrap();
+        assert_eq!(
+            authorized
+                .iter()
+                .map(|hit| (&hit.chunk_id, hit.score, &hit.path))
+                .collect::<Vec<_>>(),
+            baseline_hits
+                .iter()
+                .map(|hit| (&hit.chunk_id, hit.score, &hit.path))
+                .collect::<Vec<_>>()
+        );
+
+        baseline_manager.shutdown().unwrap();
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
     fn openclast_opens_only_request_authorized_partitions() {
         let temporary = tempdir().unwrap();
         let x = temporary.path().join("x");

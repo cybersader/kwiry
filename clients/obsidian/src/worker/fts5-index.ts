@@ -15,10 +15,15 @@ import type {
   WorkerSearchHit,
 } from "./protocol";
 import { isPreparedPropertyBag } from "./source-defect";
-import { bindMetadataProbe, bindSearchPlan } from "./query-binder";
+import {
+  bindEvidenceProbe,
+  bindSearchStage,
+  requireExecutionPlanIdentity,
+} from "./query-binder";
 import type {
-  MatchPlan,
-  MetadataProbePlan,
+  EvidenceProbePlan,
+  ExecutionPlan,
+  QueryEvidenceObservation,
   PreparedChunk,
   PreparedFrontmatter,
   PreparedPropertyValue,
@@ -204,6 +209,10 @@ CREATE TABLE sources (
   mtime_nanos TEXT NOT NULL
     CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),
   retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),
+  exact_filename TEXT,
+  exact_stem TEXT,
+  exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),
+  exact_title TEXT,
   aliases_text TEXT NOT NULL,
   title_text TEXT NOT NULL,
   tags_text TEXT NOT NULL,
@@ -228,11 +237,20 @@ CREATE TABLE chunks (
   heading_path_json TEXT NOT NULL,
   frontmatter_json TEXT NOT NULL CHECK(json_valid(frontmatter_json)),
   heading_text TEXT NOT NULL,
+  exact_heading TEXT,
   content TEXT NOT NULL,
-  identifiers_text TEXT NOT NULL
+  identifiers_json TEXT NOT NULL CHECK(json_valid(identifiers_json))
 );
 
 CREATE INDEX chunks_by_source ON chunks(source_key);
+CREATE INDEX chunks_exact_heading ON chunks(exact_heading)
+  WHERE exact_heading IS NOT NULL;
+CREATE INDEX sources_exact_filename ON sources(exact_filename, source_key)
+  WHERE exact_filename IS NOT NULL;
+CREATE INDEX sources_exact_stem ON sources(exact_stem, source_key)
+  WHERE exact_stem IS NOT NULL;
+CREATE INDEX sources_exact_title ON sources(exact_title, source_key)
+  WHERE exact_title IS NOT NULL;
 
 -- One row per top-level property is the durable source-level projection. The
 -- canonical JSON is sufficient to rebuild a returned property bag; the root
@@ -322,7 +340,7 @@ SELECT
   s.path AS path_text,
   s.tags_text AS tags,
   c.content AS content,
-  c.identifiers_text AS identifiers
+  c.identifiers_json AS identifiers
 FROM chunks c JOIN sources s ON s.source_key = c.source_key;
 
 -- External content lets FTS5's rank-1 integrity check compare every posting to
@@ -342,6 +360,7 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
   content_rowid='rowid',
   tokenize='unicode61 remove_diacritics 2'
 );
+
 `;
 
 interface ExpectedSchemaObject {
@@ -356,17 +375,21 @@ interface ExpectedSchemaObject {
 // added trigger/table; comparing normalized SQL keeps the check fail-able.
 const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "index", name: "chunks_by_source", table: "chunks", sql: "CREATE INDEX chunks_by_source ON chunks(source_key)" },
+  { type: "index", name: "chunks_exact_heading", table: "chunks", sql: "CREATE INDEX chunks_exact_heading ON chunks(exact_heading) WHERE exact_heading IS NOT NULL" },
   { type: "index", name: "source_properties_presence", table: "source_properties", sql: "CREATE INDEX source_properties_presence ON source_properties(property_name, source_key)" },
   { type: "index", name: "source_property_scalars_date", table: "source_property_scalars", sql: "CREATE INDEX source_property_scalars_date ON source_property_scalars(property_name, date_value, source_key) WHERE date_value IS NOT NULL" },
   { type: "index", name: "source_property_scalars_exact", table: "source_property_scalars", sql: "CREATE INDEX source_property_scalars_exact ON source_property_scalars(property_name, scalar_type, exact_value, source_key)" },
   { type: "index", name: "source_property_scalars_numeric", table: "source_property_scalars", sql: "CREATE INDEX source_property_scalars_numeric ON source_property_scalars(property_name, numeric_value, source_key) WHERE numeric_value IS NOT NULL" },
   { type: "index", name: "source_property_scalars_path_exact", table: "source_property_scalars", sql: "CREATE INDEX source_property_scalars_path_exact ON source_property_scalars(property_name, json_pointer, scalar_type, exact_value, source_key)" },
+  { type: "index", name: "sources_exact_filename", table: "sources", sql: "CREATE INDEX sources_exact_filename ON sources(exact_filename, source_key) WHERE exact_filename IS NOT NULL" },
+  { type: "index", name: "sources_exact_stem", table: "sources", sql: "CREATE INDEX sources_exact_stem ON sources(exact_stem, source_key) WHERE exact_stem IS NOT NULL" },
+  { type: "index", name: "sources_exact_title", table: "sources", sql: "CREATE INDEX sources_exact_title ON sources(exact_title, source_key) WHERE exact_title IS NOT NULL" },
   { type: "index", name: "sqlite_autoindex_chunks_1", table: "chunks", sql: null },
   { type: "index", name: "sqlite_autoindex_source_properties_1", table: "source_properties", sql: null },
   { type: "index", name: "sqlite_autoindex_source_property_scalars_1", table: "source_property_scalars", sql: null },
   { type: "index", name: "sqlite_autoindex_sources_1", table: "sources", sql: null },
   { type: "index", name: "sqlite_autoindex_sources_2", table: "sources", sql: null },
-  { type: "table", name: "chunks", table: "chunks", sql: "CREATE TABLE chunks (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,chunk_id TEXT NOT NULL UNIQUE,vault_id TEXT NOT NULL,path TEXT NOT NULL,heading_path_json TEXT NOT NULL,frontmatter_json TEXT NOT NULL CHECK(json_valid(frontmatter_json)),heading_text TEXT NOT NULL,content TEXT NOT NULL,identifiers_text TEXT NOT NULL)" },
+  { type: "table", name: "chunks", table: "chunks", sql: "CREATE TABLE chunks (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,chunk_id TEXT NOT NULL UNIQUE,vault_id TEXT NOT NULL,path TEXT NOT NULL,heading_path_json TEXT NOT NULL,frontmatter_json TEXT NOT NULL CHECK(json_valid(frontmatter_json)),heading_text TEXT NOT NULL,exact_heading TEXT,content TEXT NOT NULL,identifiers_json TEXT NOT NULL CHECK(json_valid(identifiers_json)))" },
   { type: "table", name: "chunks_fts", table: "chunks_fts", sql: "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename,stem,aliases,title,heading_text,path_text,tags,content,identifiers,content='chunk_search',content_rowid='rowid',tokenize='unicode61 remove_diacritics 2')" },
   { type: "table", name: "chunks_fts_config", table: "chunks_fts_config", sql: "CREATE TABLE 'chunks_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID" },
   { type: "table", name: "chunks_fts_data", table: "chunks_fts_data", sql: "CREATE TABLE 'chunks_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
@@ -379,14 +402,14 @@ const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "table", name: "source_property_text_fts_data", table: "source_property_text_fts_data", sql: "CREATE TABLE 'source_property_text_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
   { type: "table", name: "source_property_text_fts_docsize", table: "source_property_text_fts_docsize", sql: "CREATE TABLE 'source_property_text_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)" },
   { type: "table", name: "source_property_text_fts_idx", table: "source_property_text_fts_idx", sql: "CREATE TABLE 'source_property_text_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
-  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
-  { type: "view", name: "chunk_search", table: "chunk_search", sql: "CREATE VIEW chunk_search AS SELECT c.rowid AS rowid,json_extract(s.retrieval_json,'$.filename') AS filename,json_extract(s.retrieval_json,'$.stem') AS stem,s.aliases_text AS aliases,s.title_text AS title,c.heading_text AS heading_text,s.path AS path_text,s.tags_text AS tags,c.content AS content,c.identifiers_text AS identifiers FROM chunks c JOIN sources s ON s.source_key = c.source_key" },
+  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),exact_filename TEXT,exact_stem TEXT,exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),exact_title TEXT,aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
+  { type: "view", name: "chunk_search", table: "chunk_search", sql: "CREATE VIEW chunk_search AS SELECT c.rowid AS rowid,json_extract(s.retrieval_json,'$.filename') AS filename,json_extract(s.retrieval_json,'$.stem') AS stem,s.aliases_text AS aliases,s.title_text AS title,c.heading_text AS heading_text,s.path AS path_text,s.tags_text AS tags,c.content AS content,c.identifiers_json AS identifiers FROM chunks c JOIN sources s ON s.source_key = c.source_key" },
 ];
 
 const SOURCE_COLUMNS_SQL = `
 source_key, vault_id, path, outcome, content_hash, byte_length,
-mtime_nanos, retrieval_json, aliases_text, title_text, tags_text,
-chunk_count, property_count, property_scalar_count
+mtime_nanos, retrieval_json, exact_filename, exact_stem, exact_aliases_json, exact_title,
+aliases_text, title_text, tags_text, chunk_count, property_count, property_scalar_count
 `;
 
 const SELECT_SOURCE_BY_KEY_SQL = `
@@ -410,7 +433,7 @@ LIMIT ?
 `;
 
 const INSERT_SOURCE_SQL = `
-INSERT INTO sources(${SOURCE_COLUMNS_SQL}) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO sources(${SOURCE_COLUMNS_SQL}) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 const INSERT_PROPERTY_SQL = `
@@ -436,8 +459,8 @@ INSERT INTO source_property_text_fts(
 const INSERT_CHUNK_SQL = `
 INSERT INTO chunks(
   rowid, source_key, chunk_id, vault_id, path, heading_path_json, frontmatter_json,
-  heading_text, content, identifiers_text
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  heading_text, exact_heading, content, identifiers_json
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 const INSERT_CHUNK_FTS_SQL = `
@@ -576,6 +599,7 @@ export class Fts5GenerationIndex {
       if (db.filename !== ":memory:") throw new Error("FTS5 generation is not in memory");
       try {
         db.exec(SCHEMA_SQL);
+        installVocabularyTable(db);
       } catch (error) {
         throw translateSqliteCapacityError(error);
       }
@@ -586,6 +610,7 @@ export class Fts5GenerationIndex {
       return;
     }
 
+    installVocabularyTable(db);
     requireProjectedCounts(
       existing.documents,
       existing.chunks,
@@ -791,6 +816,10 @@ export class Fts5GenerationIndex {
                 change.preparation.byte_length,
                 change.preparation.mtime_nanos,
                 retrievalJson(change.preparation),
+                change.preparation.normalized_exact.filename,
+                change.preparation.normalized_exact.stem,
+                JSON.stringify(change.preparation.normalized_exact.aliases),
+                change.preparation.normalized_exact.title,
                 change.preparation.kind === "indexed"
                   ? change.preparation.retrieval.aliases.join(" ")
                   : "",
@@ -876,17 +905,77 @@ export class Fts5GenerationIndex {
     };
   }
 
-  metadataProbe(plan: MetadataProbePlan): boolean {
+  observeQuery(probes: readonly EvidenceProbePlan[]): QueryEvidenceObservation {
     this.requireOpen();
-    const bound = bindMetadataProbe(plan);
-    return Number(this.db.selectValue(bound.sql, bound.bind)) === 1;
+    let identifierProbeMatched: boolean | null = null;
+    const termSupport: QueryEvidenceObservation["term_support"] = [];
+    const prefixExpansions: QueryEvidenceObservation["prefix_expansions"] = [];
+    for (const probe of probes) {
+      const bound = bindEvidenceProbe(probe);
+      const matched = Number(this.db.selectValue(bound.exists.sql, bound.exists.bind)) === 1;
+      if (probe.plan_id === "identifier_metadata_v2") {
+        if (identifierProbeMatched !== null) throw new Error("duplicate identifier metadata probe");
+        identifierProbeMatched = matched;
+        continue;
+      }
+      const terms = bound.prefix === null
+        ? []
+        : this.db.selectObjects(bound.prefix.sql, bound.prefix.bind).map((row) => {
+            if (typeof row.term !== "string" || row.term.length === 0) {
+              throw new Error("SQLite returned an invalid prefix expansion");
+            }
+            return row.term;
+          });
+      if (terms.length > probe.max_prefix_expansions) {
+        terms.length = probe.max_prefix_expansions;
+      }
+      termSupport.push({
+        probe_id: probe.probe_id,
+        term_index: probe.term_index,
+        document_frequency: matched ? 1 : 0,
+        prefix_expansions: terms.length,
+      });
+      prefixExpansions.push({
+        probe_id: probe.probe_id,
+        term_index: probe.term_index,
+        terms,
+      });
+    }
+    return {
+      identifier_probe_matched: identifierProbeMatched,
+      term_support: termSupport,
+      prefix_expansions: prefixExpansions,
+    };
   }
 
-  search(plan: MatchPlan, limit: number): WorkerSearchHit[] {
+  search(plan: ExecutionPlan, limit: number): WorkerSearchHit[] {
     this.requireOpen();
-    const bound = bindSearchPlan(plan, limit);
-    const rows = this.db.selectObjects(bound.sql, bound.bind);
-    return rows.map(parseSearchRow);
+    requireExecutionPlanIdentity(plan);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("invalid FTS5 search limit");
+    }
+    if (plan.disposition === "empty_no_evidence") return [];
+    const hits: WorkerSearchHit[] = [];
+    const seen = new Set<string>();
+    let candidates = 0;
+    for (const stage of plan.stages) {
+      if (hits.length === limit || candidates === plan.max_total_candidates) break;
+      const stageLimit = Math.min(
+        stage.max_candidates,
+        plan.max_total_candidates - candidates,
+      );
+      if (stageLimit < 1) break;
+      const bound = bindSearchStage(stage, stageLimit);
+      const rows = this.db.selectObjects(bound.sql, bound.bind).map(parseSearchRow);
+      candidates += rows.length;
+      for (const hit of rows) {
+        if (seen.has(hit.chunk_id)) continue;
+        seen.add(hit.chunk_id);
+        hits.push(hit);
+        if (hits.length === limit) break;
+      }
+    }
+    return hits;
   }
 
   assertIntegrity(): void {
@@ -1055,6 +1144,13 @@ export class Fts5GenerationIndex {
   }
 }
 
+function installVocabularyTable(db: SQLiteDatabase): void {
+  db.exec(
+    "CREATE VIRTUAL TABLE temp.chunks_fts_vocab "
+      + "USING fts5vocab(main, chunks_fts, 'col')",
+  );
+}
+
 export function openFts5Generation(
   sqlite: SQLiteApi,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
@@ -1210,13 +1306,22 @@ function readRestoredInventory(
       || source.tags_text !== legacy.tags) {
       throw new CacheImageInvalidError("cache source retrieval metadata is invalid");
     }
+    if (source.outcome === "indexed") {
+      const exact = expectedSourceExact(source.retrieval, legacy.title);
+      if (source.exact_filename !== exact.filename
+        || source.exact_stem !== exact.stem
+        || JSON.stringify(source.exact_aliases) !== JSON.stringify(exact.aliases)
+        || source.exact_title !== exact.title) {
+        throw new CacheImageInvalidError("cache source exact metadata is invalid");
+      }
+    }
   }
 
   // Do not count and trust chunk rows. Read at most one beyond the configured
   // ceiling, then validate every canonical chunk-local field before publication.
   const chunkRows = db.selectObjects(`
     SELECT source_key, chunk_id, vault_id, path, heading_path_json, frontmatter_json,
-      heading_text, content, identifiers_text
+      heading_text, exact_heading, content, identifiers_json
     FROM chunks
     ORDER BY rowid
     LIMIT ?
@@ -1236,6 +1341,7 @@ function validateRestoredChunk(
   sourcesByKey: ReadonlyMap<string, StoredSource>,
   legacyBySource: ReadonlyMap<string, LegacyProjection>,
 ): void {
+  const identifiers = parseIdentifiersJson(row.identifiers_json);
   if (!isBoundedString(row.source_key, 128)
     || !isBoundedString(row.chunk_id, 128)
     || !isBoundedString(row.vault_id, 1_024)
@@ -1244,8 +1350,9 @@ function validateRestoredChunk(
     || parseHeadingPathJson(row.heading_path_json) === null
     || parseDisplayFrontmatterJson(row.frontmatter_json) === null
     || typeof row.heading_text !== "string"
+    || !(row.exact_heading === null || isBoundedNormalizedExact(row.exact_heading))
     || typeof row.content !== "string"
-    || typeof row.identifiers_text !== "string") {
+    || identifiers === null) {
     throw new CacheImageInvalidError("cache chunk inventory is invalid");
   }
   const source = sourcesByKey.get(row.source_key);
@@ -1254,7 +1361,9 @@ function validateRestoredChunk(
     || source.outcome !== "indexed"
     || row.vault_id !== source.vault_id
     || row.path !== source.path
-    || row.frontmatter_json !== displayFrontmatterJsonFromTitle(legacy.title)) {
+    || row.frontmatter_json !== displayFrontmatterJsonFromTitle(legacy.title)
+    || row.exact_heading !== normalizeExactForRestore(row.heading_text)
+    || JSON.stringify(identifiers) !== JSON.stringify(technicalIdentifiersForRestore(row.content))) {
     throw new CacheImageInvalidError("cache chunk identity does not match its source");
   }
 }
@@ -1357,6 +1466,47 @@ function rebuildCanonicalPropertyFts(db: SQLiteDatabase): void {
     if (error instanceof CacheImageInvalidError) throw error;
     throw translateSqliteCapacityError(error);
   }
+}
+
+function parseIdentifiersJson(value: unknown): string[] | null {
+  if (typeof value !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  return Array.isArray(parsed)
+    && parsed.every(isBoundedNormalizedExact)
+    && JSON.stringify(parsed) === value
+    ? parsed as string[]
+    : null;
+}
+
+function technicalIdentifiersForRestore(source: string): string[] {
+  const wordCharacters = "\\p{Alphabetic}\\p{M}\\p{Nd}\\p{Pc}\\u200C\\u200D";
+  const pattern = new RegExp(
+    `(^|[^${wordCharacters}])`
+      + "((?:cve-\\d{4}-\\d+|rfc(?:[- ]?\\d+)|[a-z0-9][a-z0-9._/:+\\-]{1,}[a-z0-9_]))"
+      + `(?=$|[^${wordCharacters}])`,
+    "giu",
+  );
+  const seen = new Set<string>();
+  const identifiers: string[] = [];
+  for (const match of source.matchAll(pattern)) {
+    const candidate = match[2];
+    if (candidate === undefined) continue;
+    const hasAlpha = /\p{Alphabetic}/u.test(candidate);
+    const hasDigit = /[0-9]/u.test(candidate);
+    const hasSeparator = /[-_./:+]/u.test(candidate);
+    if (!hasDigit || (!hasAlpha && !hasSeparator)) continue;
+    const identifier = normalizeExactForRestore(candidate);
+    if (identifier !== null && !seen.has(identifier)) {
+      seen.add(identifier);
+      identifiers.push(identifier);
+    }
+  }
+  return identifiers;
 }
 
 function validateRestoredProperties(
@@ -1511,6 +1661,52 @@ function expectedRetrieval(path: string, legacy: LegacyProjection): StoredSource
   return { filename, stem, aliases: legacy.aliases };
 }
 
+function expectedSourceExact(
+  retrieval: StoredSource["retrieval"],
+  title: string,
+): { filename: string | null; stem: string | null; aliases: string[]; title: string | null } {
+  return {
+    filename: normalizeExactForRestore(retrieval.filename),
+    stem: normalizeExactForRestore(retrieval.stem),
+    aliases: retrieval.aliases
+      .map(normalizeExactForRestore)
+      .filter((alias): alias is string => alias !== null),
+    title: normalizeExactForRestore(title),
+  };
+}
+
+function normalizeExactForRestore(value: string): string | null {
+  const words: string[] = [];
+  let word = "";
+  for (const character of value) {
+    if (isRustWhitespace(character.codePointAt(0)!)) {
+      if (word.length > 0) {
+        words.push(word);
+        word = "";
+      }
+    } else {
+      word += character;
+    }
+  }
+  if (word.length > 0) words.push(word);
+  if (words.length === 0) return null;
+  return [...words.join(" ").toLowerCase()].slice(0, 256).join("");
+}
+
+function isRustWhitespace(codePoint: number): boolean {
+  return (codePoint >= 0x0009 && codePoint <= 0x000d)
+    || codePoint === 0x0020
+    || codePoint === 0x0085
+    || codePoint === 0x00a0
+    || codePoint === 0x1680
+    || (codePoint >= 0x2000 && codePoint <= 0x200a)
+    || codePoint === 0x2028
+    || codePoint === 0x2029
+    || codePoint === 0x202f
+    || codePoint === 0x205f
+    || codePoint === 0x3000;
+}
+
 function propertyScalarIdentity(
   sourceKey: string,
   propertyName: string,
@@ -1530,7 +1726,7 @@ function onePastLimit(limit: number): number {
 interface ProjectedChunk {
   /** Chunk identity, display metadata, and canonical chunk-local lexical inputs. */
   metadataBind: readonly unknown[];
-  /** The nine FTS field values, in declared column order. */
+  /** The nine ordinary FTS field values, in declared column order. */
   ftsBind: readonly string[];
   chunkId: string;
   chunkingVersion: number;
@@ -1555,6 +1751,10 @@ interface StoredSource {
     stem: string;
     aliases: string[];
   };
+  exact_filename: string | null;
+  exact_stem: string | null;
+  exact_aliases: string[];
+  exact_title: string | null;
   aliases_text: string;
   title_text: string;
   tags_text: string;
@@ -1651,7 +1851,7 @@ function projectChunk(
     chunk.path,
     tags,
     chunk.content,
-    prepared.technical_identifiers.join(" "),
+    JSON.stringify(prepared.technical_identifiers),
   ];
   return {
     metadataBind: [
@@ -1661,8 +1861,9 @@ function projectChunk(
       JSON.stringify(chunk.heading_path),
       displayFrontmatterJson(sourceFrontmatter),
       prepared.heading_text,
+      prepared.normalized_heading,
       chunk.content,
-      prepared.technical_identifiers.join(" "),
+      JSON.stringify(prepared.technical_identifiers),
     ],
     ftsBind: fields,
     chunkId: chunk.chunk_id,
@@ -1890,6 +2091,21 @@ function parseRetrievalJson(value: unknown): StoredSource["retrieval"] | null {
   return JSON.stringify(retrieval) === value ? retrieval : null;
 }
 
+function parseExactAliasesJson(value: unknown): string[] | null {
+  if (typeof value !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)
+    || !parsed.every(isBoundedNormalizedExact)) {
+    return null;
+  }
+  return JSON.stringify(parsed) === value ? parsed : null;
+}
+
 function canonicalJson(value: PreparedPropertyValue): string {
   if (value.type === "null") return '{"type":"null"}';
   if (value.type === "sequence") {
@@ -1992,6 +2208,10 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
     || typeof row.mtime_nanos !== "string"
     || !/^[0-9]{1,39}$/u.test(row.mtime_nanos)
     || retrieval === null
+    || !(row.exact_filename === null || isBoundedNormalizedExact(row.exact_filename))
+    || !(row.exact_stem === null || isBoundedNormalizedExact(row.exact_stem))
+    || parseExactAliasesJson(row.exact_aliases_json) === null
+    || !(row.exact_title === null || isBoundedNormalizedExact(row.exact_title))
     || typeof row.aliases_text !== "string"
     || typeof row.title_text !== "string"
     || typeof row.tags_text !== "string"
@@ -2015,6 +2235,10 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
     byte_length: row.byte_length,
     mtime_nanos: row.mtime_nanos,
     retrieval,
+    exact_filename: row.exact_filename,
+    exact_stem: row.exact_stem,
+    exact_aliases: parseExactAliasesJson(row.exact_aliases_json)!,
+    exact_title: row.exact_title,
     aliases_text: row.aliases_text,
     title_text: row.title_text,
     tags_text: row.tags_text,
@@ -2143,6 +2367,12 @@ function isBoundedString(value: unknown, maximum: number, allowEmpty = false): v
   return typeof value === "string"
     && value.length <= maximum
     && (allowEmpty || value.length > 0);
+}
+
+function isBoundedNormalizedExact(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && [...value].length <= 256;
 }
 
 function parseHeadingPathJson(value: unknown): string[] | null {

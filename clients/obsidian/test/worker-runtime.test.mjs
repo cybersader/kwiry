@@ -1329,10 +1329,10 @@ describe("exact generated production Worker", () => {
       await expect(request(worker, { id: 1, operation: "initialize" })).resolves.toMatchObject({
         ok: true,
         result: {
-          rustAbiVersion: 1,
-          sourceSchemaVersion: 2,
-          querySchemaVersion: 2,
-          matchPlanSchemaVersion: 1,
+          rustAbiVersion: 2,
+          sourceSchemaVersion: 3,
+          querySchemaVersion: 3,
+          matchPlanSchemaVersion: 2,
           sqliteVersion: "3.53.0",
           fts5Enabled: 1,
         },
@@ -1392,16 +1392,22 @@ describe("exact generated production Worker", () => {
         query: "title:\"IIA 2 line guide\" OR content:cache*",
         limit: 20,
       })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "alpha.md" }] } });
+      await expect(request(worker, {
+        id: 9,
+        operation: "search",
+        query: `${"🚀".repeat(128)}a`,
+        limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [] } });
 
-      await request(worker, { id: 9, operation: "begin_build", generation: "generation-2" });
+      await request(worker, { id: 10, operation: "begin_build", generation: "generation-2" });
       await request(worker, {
-        id: 10,
+        id: 11,
         operation: "add_source_batch",
         generation: "generation-2",
         sources: [source("beta.md", "# Beta\nstagingterm")],
       });
       await expect(request(worker, {
-        id: 11,
+        id: 12,
         operation: "search",
         query: "quasar",
         limit: 20,
@@ -1409,12 +1415,127 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: { generation: "generation-1", hits: [{ path: "alpha.md" }] },
       });
-      await request(worker, { id: 12, operation: "abort_build", generation: "generation-2" });
+      await request(worker, { id: 13, operation: "abort_build", generation: "generation-2" });
 
-      await expect(request(worker, { id: 13, operation: "dispose" })).resolves.toMatchObject({
+      await expect(request(worker, { id: 14, operation: "dispose" })).resolves.toMatchObject({
         ok: true,
         result: { closed: true },
       });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("executes the Rust-owned evidence ladder across exact, partial, prefix, anchor, and empty branches", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "ladder" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "ladder",
+        sources: [
+          source("exact.md", "---\ntitle: Quasar Guide\n---\n# Exact\nordinary body"),
+          source("phrase.md", "# Phrase\nquasar guide quasar guide quasar guide"),
+          source("prefix.md", "# Prefix\nprefixevidence"),
+          source("all.md", "# All\nalpha beta"),
+          source("rfc.md", "# RFC\nRFC 9110 archival"),
+        ],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "ladder" });
+
+      const exact = await request(worker, {
+        id: 5, operation: "search", query: "quasar guide", limit: 20,
+      });
+      expect(exact).toMatchObject({ ok: true, result: { hits: [
+        { path: "exact.md" },
+        { path: "phrase.md" },
+      ] } });
+
+      await expect(request(worker, {
+        id: 6, operation: "search", query: "quasar missingcontext", limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: expect.arrayContaining([
+        expect.objectContaining({ path: "exact.md" }),
+      ]) } });
+      await expect(request(worker, {
+        id: 7, operation: "search", query: "alpha beta", limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "all.md" }] } });
+      await expect(request(worker, {
+        id: 8, operation: "search", query: "prefixevid", limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "prefix.md" }] } });
+      await expect(request(worker, {
+        id: 9, operation: "search", query: "RFC 9110 missingcontext", limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "rfc.md" }] } });
+      await expect(request(worker, {
+        id: 10, operation: "search", query: "RFC 9999 quasar", limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [] } });
+      await expect(request(worker, {
+        id: 11, operation: "search", query: "zzzznoevidence", limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [] } });
+      await expect(request(worker, {
+        id: 12, operation: "search", query: "title:\"Quasar Guide\"", limit: 20,
+      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "exact.md" }] } });
+
+      const first = await request(worker, {
+        id: 13, operation: "search", query: "quasar guide", limit: 20,
+      });
+      const second = await request(worker, {
+        id: 14, operation: "search", query: "quasar guide", limit: 20,
+      });
+      expect(second.result.hits).toEqual(first.result.hits);
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("refuses a finalized execution plan corrupted across the exact validator boundary", async () => {
+    const needle = "function isFinalizedQuery(value) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  if (value?.plan?.query === "validatorprobe") value.execution_plan.stages[0].ordinal = 1;`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "validator" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "validator",
+        sources: [source("validator.md", "# Validator\nvalidatorprobe")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "validator" });
+      await expect(request(worker, {
+        id: 5, operation: "search", query: "validatorprobe", limit: 20,
+      })).resolves.toMatchObject({ ok: false, error: { code: "query_rejected" } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("refuses a finalized plan that relaxes a required identifier anchor", async () => {
+    const needle = "function isFinalizedQuery(value) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  if (value?.plan?.query === "RFC 9110 missingcontext") { const partial = value.plan.evidence_stages.find((stage) => stage.kind === "partial_coverage"); if (partial) partial.required_term_indexes = [2]; }`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "anchor-validator" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "anchor-validator",
+        sources: [source("rfc.md", "# RFC\nRFC 9110 authority")],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "anchor-validator" });
+      await expect(request(worker, {
+        id: 5, operation: "search", query: "RFC 9110 missingcontext", limit: 20,
+      })).resolves.toMatchObject({ ok: false, error: { code: "query_rejected" } });
     } finally {
       await worker.terminate();
     }

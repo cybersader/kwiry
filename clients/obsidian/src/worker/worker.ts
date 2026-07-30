@@ -663,13 +663,11 @@ function search(query: string, limit: number): SearchResult {
   }
   try {
     const prepared = prepareQueryWithRust(query);
-    const matched = prepared.metadata_probe
-      ? active.index.metadataProbe(prepared.metadata_probe)
-      : false;
-    const finalized = finalizeQueryWithRust(query, matched);
+    const evidence = active.index.observeQuery(prepared.probes);
+    const finalized = finalizeQueryWithRust(query, evidence);
     return {
       generation: active.id,
-      hits: active.index.search(finalized.match_plan, limit),
+      hits: active.index.search(finalized.execution_plan, limit),
     };
   } catch (error) {
     if (error instanceof RustAdapterError) {
@@ -828,7 +826,7 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
   const filename = descriptor.path.split("/").at(-1) ?? descriptor.path;
   const separator = filename.lastIndexOf(".");
   return {
-    schema_version: 2,
+    schema_version: 3,
     source_key: await sourceKey(descriptor.vault_id, descriptor.path),
     vault_id: descriptor.vault_id,
     ...(descriptor.room === undefined ? {} : { room: descriptor.room }),
@@ -842,6 +840,12 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
       filename,
       stem: separator > 0 ? filename.slice(0, separator) : filename,
       aliases: [],
+    },
+    normalized_exact: {
+      filename: null,
+      stem: null,
+      aliases: [],
+      title: null,
     },
     frontmatter: {},
     chunks: [],

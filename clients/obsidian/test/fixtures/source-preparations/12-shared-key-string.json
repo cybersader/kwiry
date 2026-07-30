@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "92ee9075935525a64b9e9ca43e67d2bb2186980f4f49191c70fc528ae03787c4",
   "vault_id": "golden-vault",
   "room": "fixture-room",
@@ -13,6 +13,12 @@
     "filename": "Shared Key String.md",
     "stem": "Shared Key String",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "shared key string.md",
+    "stem": "shared key string",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {
     "shared_signal": {
@@ -38,6 +44,7 @@
         "chunking_version": 2
       },
       "heading_text": "Body",
+      "normalized_heading": "body",
       "technical_identifiers": []
     }
   ],

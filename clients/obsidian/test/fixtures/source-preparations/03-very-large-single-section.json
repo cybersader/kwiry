@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "2a376ae7f4ab462ccbd5a869e571e213d33c85fe7c702bdd355b0219dfea4535",
   "vault_id": "golden-vault",
   "room": "fixture-room",
@@ -13,6 +13,12 @@
     "filename": "Very Large Single Section.md",
     "stem": "Very Large Single Section",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "very large single section.md",
+    "stem": "very large single section",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {},
   "chunks": [
@@ -33,6 +39,7 @@
         "chunking_version": 2
       },
       "heading_text": "Oversized section",
+      "normalized_heading": "oversized section",
       "technical_identifiers": [
         "segment-0000",
         "segment-0001",
@@ -359,6 +366,7 @@
         "chunking_version": 2
       },
       "heading_text": "Oversized section",
+      "normalized_heading": "oversized section",
       "technical_identifiers": [
         "gment-0275",
         "segment-0276",
@@ -686,6 +694,7 @@
         "chunking_version": 2
       },
       "heading_text": "Oversized section",
+      "normalized_heading": "oversized section",
       "technical_identifiers": [
         "gment-0551",
         "segment-0552",
@@ -1013,6 +1022,7 @@
         "chunking_version": 2
       },
       "heading_text": "Oversized section",
+      "normalized_heading": "oversized section",
       "technical_identifiers": [
         "gment-0827",
         "segment-0828",
@@ -1340,6 +1350,7 @@
         "chunking_version": 2
       },
       "heading_text": "Oversized section",
+      "normalized_heading": "oversized section",
       "technical_identifiers": [
         "gment-1103",
         "segment-1104",
@@ -1667,6 +1678,7 @@
         "chunking_version": 2
       },
       "heading_text": "Oversized section",
+      "normalized_heading": "oversized section",
       "technical_identifiers": [
         "gment-1379",
         "segment-1380",
@@ -1994,6 +2006,7 @@
         "chunking_version": 2
       },
       "heading_text": "Oversized section",
+      "normalized_heading": "oversized section",
       "technical_identifiers": [
         "gment-1655",
         "segment-1656",
@@ -2321,6 +2334,7 @@
         "chunking_version": 2
       },
       "heading_text": "Oversized section",
+      "normalized_heading": "oversized section",
       "technical_identifiers": [
         "gment-1931",
         "segment-1932",

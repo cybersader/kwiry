@@ -525,6 +525,7 @@ pub struct RetrievalMetadata {
 pub struct PreparedChunk {
     pub chunk: Chunk,
     pub heading_text: String,
+    pub normalized_heading: Option<String>,
     pub technical_identifiers: Vec<String>,
     // Native indexing needs the source-level projections while reconciliation still transports
     // chunks independently. Both are non-serialized shared views owned once by the preparation.

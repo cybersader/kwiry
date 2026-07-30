@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "9ec1b0389985d78e57b3ff6c48d9bb7c9a814c9408c32ed18bc77ea99b72bcea",
   "vault_id": "golden-vault",
   "room": "fixture-room",
@@ -13,6 +13,12 @@
     "filename": "Shared Key Boolean.md",
     "stem": "Shared Key Boolean",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "shared key boolean.md",
+    "stem": "shared key boolean",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {
     "shared_signal": {
@@ -38,6 +44,7 @@
         "chunking_version": 2
       },
       "heading_text": "Body",
+      "normalized_heading": "body",
       "technical_identifiers": []
     }
   ],

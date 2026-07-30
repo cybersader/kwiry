@@ -13,18 +13,18 @@ import {
 
 import type { PropertyBag, SourceDescriptorInput } from "./protocol";
 
-const ABI_VERSION = 1;
-const SOURCE_SCHEMA_VERSION = 2;
-const QUERY_SCHEMA_VERSION = 2;
-const MATCH_PLAN_SCHEMA_VERSION = 1;
+const ABI_VERSION = 2;
+const SOURCE_SCHEMA_VERSION = 3;
+const QUERY_SCHEMA_VERSION = 3;
+const MATCH_PLAN_SCHEMA_VERSION = 2;
 
 export interface RustIdentity {
-  abi_version: 1;
+  abi_version: 2;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
-  source_preparation_schema_version: 2;
-  lexical_query_plan_schema_version: 2;
-  fts5_match_plan_schema_version: 1;
+  source_preparation_schema_version: 3;
+  lexical_query_plan_schema_version: 3;
+  fts5_match_plan_schema_version: 2;
   /**
    * The chunking contract the adapter applies. Chunk rows carry it per chunk,
    * but a generation with no chunks still has to name the contract its cached
@@ -64,11 +64,12 @@ export interface PreparedChunk {
     chunking_version: number;
   };
   heading_text: string;
+  normalized_heading: string | null;
   technical_identifiers: string[];
 }
 
 export interface SourcePreparation {
-  schema_version: 2;
+  schema_version: 3;
   source_key: string;
   vault_id: string;
   room?: string;
@@ -83,47 +84,148 @@ export interface SourcePreparation {
     stem: string;
     aliases: string[];
   };
+  normalized_exact: {
+    filename: string | null;
+    stem: string | null;
+    aliases: string[];
+    title: string | null;
+  };
   frontmatter: PreparedFrontmatter;
   chunks: PreparedChunk[];
   kind: "indexed" | "skipped";
   warning?: string;
 }
 
+export type QueryField =
+  | "filename" | "stem" | "aliases" | "title" | "heading" | "content"
+  | "content_identifiers";
+export type QueryFieldGroup = "searchable_text" | "metadata" | "exact" | "phrase" | "prefix";
+export type QueryEvidenceStageKind =
+  | "exact_metadata" | "exact_phrase" | "all_terms" | "partial_coverage" | "prefix";
+
 export interface LexicalQueryPlan {
-  schema_version: 2;
+  schema_version: 3;
   query: string;
   kind: "explicit" | "ordinary" | "identifier";
   match_operator: "explicit" | "any" | "all";
+  assistance: "explicit_syntax_bypass" | "eligible";
+  execution: "explicit_bypass" | "awaiting_evidence" | "ready" | "empty_no_evidence";
   terms: string[];
+  term_intents: Array<{
+    index: number;
+    text: string;
+    role: "required_identifier_anchor" | "optional_context";
+    support: "unknown" | "useful" | "unsupported";
+  }>;
   normalized_exact: string | null;
+  exact_intent: { normalized: string; field_group: "exact" } | null;
   phrase_boost: boolean;
-  metadata_probe?: {
+  phrase_intent: { terms: string[]; field_group: "phrase" } | null;
+  field_groups: {
+    searchable_text: QueryField[];
+    metadata: QueryField[];
+    exact: QueryField[];
+    phrase: QueryField[];
+    prefix: QueryField[];
+  };
+  bounds: {
+    max_query_bytes: 4096;
+    max_query_terms: 128;
+    max_term_support_probes: 128;
+    max_evidence_stages: 5;
+    max_partial_coverage_terms: 128;
+    min_prefix_chars: 3;
+    max_prefix_terms: 8;
+    max_prefix_expansions_per_term: 16;
+    max_candidates_per_stage: 256;
+    max_total_candidates: 512;
+  };
+  typo_stage: "disabled";
+  support_probes: Array<{
+    probe_id: number;
+    term_index: number;
+    term: string;
+    field_group: "searchable_text";
+  }>;
+  evidence_stages: Array<{
+    ordinal: number;
+    kind: QueryEvidenceStageKind;
+    field_group: QueryFieldGroup;
+    required_term_indexes: number[];
+    prefix_term_indexes: number[];
+    max_candidates: number;
+  }>;
+  metadata_probe: {
     query: string;
     fields: ["filename", "stem", "aliases", "title", "heading"];
     conjunction: true;
-  };
+  } | null;
 }
 
-export interface MetadataProbePlan {
-  schema_version: 1;
-  plan_id: "metadata_probe_v1";
-  match_value: string;
+export type EvidenceProbePlan =
+  | {
+      schema_version: 2;
+      plan_id: "identifier_metadata_v2";
+      match_value: string;
+    }
+  | {
+      schema_version: 2;
+      plan_id: "term_support_v2";
+      probe_id: number;
+      term_index: number;
+      match_value: string;
+      prefix_pattern: string | null;
+      max_prefix_expansions: 16;
+      max_prefix_term_bytes: 96;
+    };
+
+export interface QueryEvidenceObservation {
+  identifier_probe_matched: boolean | null;
+  term_support: Array<{
+    probe_id: number;
+    term_index: number;
+    document_frequency: number;
+    prefix_expansions: number;
+  }>;
+  prefix_expansions: Array<{
+    probe_id: number;
+    term_index: number;
+    terms: string[];
+  }>;
 }
 
-export interface MatchPlan {
-  schema_version: 1;
-  plan_id: "lexical_any_v1" | "lexical_all_v1" | "lexical_explicit_v1";
-  match_value: string;
+export type StagePlanId =
+  | "lexical_explicit_v2"
+  | "lexical_exact_metadata_v2"
+  | "lexical_exact_phrase_v2"
+  | "lexical_all_terms_v2"
+  | "lexical_partial_coverage_v2"
+  | "lexical_prefix_v2";
+
+export interface StagePlan {
+  ordinal: number;
+  plan_id: StagePlanId;
+  match_value?: string;
+  exact_value?: string;
+  max_candidates: number;
+}
+
+export interface ExecutionPlan {
+  schema_version: 2;
+  profile_id: "lexical-v1";
+  disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
+  max_total_candidates: 512;
+  stages: StagePlan[];
 }
 
 export interface PreparedQuery {
   plan: LexicalQueryPlan;
-  metadata_probe?: MetadataProbePlan;
+  probes: EvidenceProbePlan[];
 }
 
 export interface FinalizedQuery {
   plan: LexicalQueryPlan;
-  match_plan: MatchPlan;
+  execution_plan: ExecutionPlan;
 }
 
 export class RustAdapterError extends Error {
@@ -223,13 +325,21 @@ export function prepareQueryWithRust(query: string): PreparedQuery {
   return response.result;
 }
 
-export function finalizeQueryWithRust(query: string, metadataProbeMatched: boolean): FinalizedQuery {
+export function finalizeQueryWithRust(
+  query: string,
+  evidence: QueryEvidenceObservation,
+): FinalizedQuery {
   const response = parseResponse(
     finalize_query(JSON.stringify({
       abi_version: ABI_VERSION,
       operation: "finalize_query",
       query,
-      metadata_probe_matched: metadataProbeMatched,
+      evidence_report: {
+        schema_version: QUERY_SCHEMA_VERSION,
+        identifier_probe_matched: evidence.identifier_probe_matched,
+        term_support: evidence.term_support,
+      },
+      prefix_expansions: evidence.prefix_expansions,
     })),
     "finalize_query",
   );
@@ -312,76 +422,375 @@ function isRustIdentity(value: unknown): value is RustIdentity {
     ]);
 }
 
+const SEARCHABLE_FIELDS = [
+  "filename", "stem", "aliases", "title", "heading", "content",
+] as const;
+const METADATA_FIELDS = ["filename", "stem", "aliases", "title", "heading"] as const;
+const EXACT_FIELDS = [
+  "filename", "stem", "aliases", "title", "heading", "content_identifiers",
+] as const;
+const QUERY_BOUNDS = Object.freeze({
+  max_query_bytes: 4_096,
+  max_query_terms: 128,
+  max_term_support_probes: 128,
+  max_evidence_stages: 5,
+  max_partial_coverage_terms: 128,
+  min_prefix_chars: 3,
+  max_prefix_terms: 8,
+  max_prefix_expansions_per_term: 16,
+  max_candidates_per_stage: 256,
+  max_total_candidates: 512,
+});
+
 function isPreparedQuery(value: unknown): value is PreparedQuery {
-  if (!isRecord(value)
-    || !hasRequiredAndOptionalKeys(value, ["plan"], ["metadata_probe"])
-    || !isLexicalQueryPlan(value.plan)) {
-    return false;
+  return isRecord(value)
+    && hasExactKeys(value, ["plan", "probes"])
+    && isLexicalQueryPlan(value.plan)
+    && Array.isArray(value.probes)
+    && value.probes.length <= 129
+    && value.probes.every(isEvidenceProbePlan)
+    && probesMatchPlan(value.probes, value.plan);
+}
+
+function probesMatchPlan(probes: EvidenceProbePlan[], plan: LexicalQueryPlan): boolean {
+  if (plan.assistance === "explicit_syntax_bypass" || plan.execution === "empty_no_evidence") {
+    return probes.length === 0;
   }
-  return value.metadata_probe === undefined || isMetadataProbePlan(value.metadata_probe);
+  let cursor = 0;
+  if (plan.metadata_probe !== null) {
+    if (probes[0]?.plan_id !== "identifier_metadata_v2") return false;
+    cursor = 1;
+  }
+  if (probes.length - cursor !== plan.support_probes.length) return false;
+  return plan.support_probes.every((probe, index) => {
+    const actual = probes[index + cursor];
+    return actual?.plan_id === "term_support_v2"
+      && actual.probe_id === probe.probe_id
+      && actual.term_index === probe.term_index;
+  });
 }
 
 function isFinalizedQuery(value: unknown): value is FinalizedQuery {
   return isRecord(value)
-    && hasExactKeys(value, ["plan", "match_plan"])
+    && hasExactKeys(value, ["plan", "execution_plan"])
     && isLexicalQueryPlan(value.plan)
-    && isMatchPlan(value.match_plan);
+    && isExecutionPlan(value.execution_plan, value.plan);
 }
 
 function isLexicalQueryPlan(value: unknown): value is LexicalQueryPlan {
-  if (!isRecord(value)) return false;
-  const required = [
-    "schema_version",
-    "query",
-    "kind",
-    "match_operator",
-    "terms",
-    "normalized_exact",
-    "phrase_boost",
-  ];
-  if (!hasRequiredAndOptionalKeys(value, required, ["metadata_probe"])
+  if (!isRecord(value)
+    || !hasExactKeys(value, [
+      "schema_version", "query", "kind", "match_operator", "assistance", "execution",
+      "terms", "term_intents", "normalized_exact", "exact_intent", "phrase_boost",
+      "phrase_intent", "field_groups", "bounds", "typo_stage", "support_probes",
+      "evidence_stages", "metadata_probe",
+    ])
     || value.schema_version !== QUERY_SCHEMA_VERSION
     || !isBoundedString(value.query, 4_096)
     || (value.kind !== "explicit" && value.kind !== "ordinary" && value.kind !== "identifier")
-    || (value.match_operator !== "explicit"
-      && value.match_operator !== "any"
+    || (value.match_operator !== "explicit" && value.match_operator !== "any"
       && value.match_operator !== "all")
+    || (value.assistance !== "explicit_syntax_bypass" && value.assistance !== "eligible")
+    || (value.execution !== "explicit_bypass" && value.execution !== "awaiting_evidence"
+      && value.execution !== "ready" && value.execution !== "empty_no_evidence")
     || !isBoundedStrings(value.terms, 128, 4_096)
-    || (value.normalized_exact !== null
-      && !isBoundedString(value.normalized_exact, 4_096, true))
-    || typeof value.phrase_boost !== "boolean") {
+    || !Array.isArray(value.term_intents)
+    || value.term_intents.length !== value.terms.length
+    || !value.term_intents.every((intent, index) => isTermIntent(intent, index, (value.terms as string[])[index]))
+    || !(value.normalized_exact === null
+      || isBoundedUnicodeScalarString(value.normalized_exact, 256))
+    || !isExactIntent(value.exact_intent, value.normalized_exact)
+    || typeof value.phrase_boost !== "boolean"
+    || !isPhraseIntent(value.phrase_intent, value.terms, value.phrase_boost)
+    || !isFieldGroups(value.field_groups)
+    || !isExactRecord(value.bounds, QUERY_BOUNDS)
+    || value.typo_stage !== "disabled"
+    || !Array.isArray(value.support_probes)
+    || value.support_probes.length > 128
+    || !value.support_probes.every((probe, index) => isSupportProbe(probe, index, (value.terms as string[])[index]))
+    || !isEvidenceStages(
+      value.evidence_stages,
+      value.term_intents as LexicalQueryPlan["term_intents"],
+      value.exact_intent !== null,
+      value.phrase_intent !== null,
+      value.execution as LexicalQueryPlan["execution"],
+    )
+    || !isMetadataProbe(value.metadata_probe)) {
     return false;
   }
-  if (value.metadata_probe === undefined) return true;
-  return isRecord(value.metadata_probe)
-    && hasExactKeys(value.metadata_probe, ["query", "fields", "conjunction"])
-    && isBoundedString(value.metadata_probe.query, 4_096)
-    && JSON.stringify(value.metadata_probe.fields) === JSON.stringify([
-      "filename",
-      "stem",
-      "aliases",
-      "title",
-      "heading",
+  const kindOperator = value.kind === "explicit" ? "explicit" : value.kind === "ordinary" ? "any" : "all";
+  if (value.match_operator !== kindOperator) return false;
+  if (value.kind === "explicit") {
+    return value.assistance === "explicit_syntax_bypass"
+      && value.execution === "explicit_bypass"
+      && value.terms.length === 0
+      && value.term_intents.length === 0
+      && value.normalized_exact === null
+      && value.exact_intent === null
+      && value.phrase_boost === false
+      && value.phrase_intent === null
+      && value.support_probes.length === 0
+      && (value.evidence_stages as unknown[]).length === 0
+      && value.metadata_probe === null;
+  }
+  if (value.assistance !== "eligible") return false;
+  if (value.execution === "awaiting_evidence") {
+    return value.terms.length > 0
+      && value.support_probes.length === value.terms.length
+      && (value.evidence_stages as unknown[]).length === 0
+      && value.term_intents.every((intent) => intent.support === "unknown");
+  }
+  if (value.execution === "ready") {
+    return value.support_probes.length === 0
+      && (value.evidence_stages as unknown[]).length > 0
+      && value.term_intents.every((intent) => intent.support !== "unknown");
+  }
+  return value.execution === "empty_no_evidence"
+    && value.support_probes.length === 0
+    && (value.evidence_stages as unknown[]).length === 0
+    && (value.terms.length === 0 || value.term_intents.every((intent) => intent.support !== "unknown"));
+}
+
+function isTermIntent(value: unknown, index: number, term: string | undefined): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ["index", "text", "role", "support"])
+    && value.index === index
+    && value.text === term
+    && (value.role === "required_identifier_anchor" || value.role === "optional_context")
+    && (value.support === "unknown" || value.support === "useful" || value.support === "unsupported");
+}
+
+function isExactIntent(value: unknown, normalized: unknown): boolean {
+  if (value === null) return normalized === null;
+  return isRecord(value)
+    && hasExactKeys(value, ["normalized", "field_group"])
+    && value.normalized === normalized
+    && value.field_group === "exact";
+}
+
+function isPhraseIntent(value: unknown, terms: unknown, boost: boolean): boolean {
+  if (value === null) return boost === false;
+  return boost === true
+    && isRecord(value)
+    && hasExactKeys(value, ["terms", "field_group"])
+    && JSON.stringify(value.terms) === JSON.stringify(terms)
+    && Array.isArray(value.terms)
+    && value.terms.length >= 2
+    && value.field_group === "phrase";
+}
+
+function isFieldGroups(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ["searchable_text", "metadata", "exact", "phrase", "prefix"])
+    && JSON.stringify(value.searchable_text) === JSON.stringify(SEARCHABLE_FIELDS)
+    && JSON.stringify(value.metadata) === JSON.stringify(METADATA_FIELDS)
+    && JSON.stringify(value.exact) === JSON.stringify(EXACT_FIELDS)
+    && JSON.stringify(value.phrase) === JSON.stringify(SEARCHABLE_FIELDS)
+    && JSON.stringify(value.prefix) === JSON.stringify(SEARCHABLE_FIELDS);
+}
+
+function isSupportProbe(value: unknown, index: number, term: string | undefined): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ["probe_id", "term_index", "term", "field_group"])
+    && value.probe_id === index
+    && value.term_index === index
+    && value.term === term
+    && value.field_group === "searchable_text";
+}
+
+function isEvidenceStages(
+  value: unknown,
+  termIntents: LexicalQueryPlan["term_intents"],
+  hasExactIntent: boolean,
+  hasPhraseIntent: boolean,
+  execution: LexicalQueryPlan["execution"],
+): boolean {
+  if (!Array.isArray(value) || value.length > 5) return false;
+  if (execution !== "ready") return value.length === 0;
+  const termCount = termIntents.length;
+  const kinds = ["exact_metadata", "exact_phrase", "all_terms", "partial_coverage", "prefix"];
+  const allIndexes = termIntents.map((intent) => intent.index);
+  const relaxedIndexes = termIntents
+    .filter((intent) => intent.role === "required_identifier_anchor" || intent.support === "useful")
+    .map((intent) => intent.index)
+    .slice(0, 128);
+  const hasUnsupportedContext = termIntents.some((intent) =>
+    intent.role === "optional_context" && intent.support === "unsupported");
+  const expectedNonPrefixKinds = [
+    ...(hasExactIntent ? ["exact_metadata"] : []),
+    ...(hasPhraseIntent ? ["exact_phrase"] : []),
+    "all_terms",
+    ...(hasUnsupportedContext
+      && relaxedIndexes.length > 0
+      && JSON.stringify(relaxedIndexes) !== JSON.stringify(allIndexes)
+      ? ["partial_coverage"]
+      : []),
+  ];
+  const actualNonPrefixKinds: string[] = [];
+  let previousKind = -1;
+  for (let ordinal = 0; ordinal < value.length; ordinal += 1) {
+    const stage = value[ordinal];
+    if (!isRecord(stage)
+      || !hasExactKeys(stage, [
+        "ordinal", "kind", "field_group", "required_term_indexes", "prefix_term_indexes",
+        "max_candidates",
+      ])
+      || stage.ordinal !== ordinal
+      || !kinds.includes(String(stage.kind))
+      || kinds.indexOf(String(stage.kind)) <= previousKind
+      || !isTermIndexes(stage.required_term_indexes, termCount, 128)
+      || !isTermIndexes(stage.prefix_term_indexes, termCount, 8)
+      || !isPositiveSafeInteger(stage.max_candidates)
+      || stage.max_candidates > 256) {
+      return false;
+    }
+    previousKind = kinds.indexOf(String(stage.kind));
+    if (stage.kind !== "prefix") actualNonPrefixKinds.push(String(stage.kind));
+    const required = stage.required_term_indexes as number[];
+    const prefixes = stage.prefix_term_indexes as number[];
+    if (stage.kind === "exact_metadata"
+      && (stage.field_group !== "exact" || required.length !== 0 || prefixes.length !== 0)) {
+      return false;
+    }
+    if (stage.kind === "exact_phrase"
+      && (stage.field_group !== "phrase" || required.length !== 0 || prefixes.length !== 0)) {
+      return false;
+    }
+    if (stage.kind === "all_terms"
+      && (stage.field_group !== "searchable_text"
+        || prefixes.length !== 0
+        || required.length !== termCount
+        || required.some((index, position) => index !== position))) {
+      return false;
+    }
+    if (stage.kind === "partial_coverage"
+      && (stage.field_group !== "searchable_text"
+        || required.length === 0
+        || required.length >= termCount
+        || prefixes.length !== 0
+        || JSON.stringify(required) !== JSON.stringify(relaxedIndexes))) {
+      return false;
+    }
+    if (stage.kind === "prefix"
+      && (stage.field_group !== "prefix"
+        || prefixes.length === 0
+        || JSON.stringify(required) !== JSON.stringify(relaxedIndexes)
+        || prefixes.some((index) => {
+          const intent = termIntents[index];
+          return intent === undefined
+            || intent.role !== "optional_context"
+            || intent.support !== "unsupported"
+            || required.includes(index);
+        }))) {
+      return false;
+    }
+  }
+  return JSON.stringify(actualNonPrefixKinds) === JSON.stringify(expectedNonPrefixKinds);
+}
+
+function isTermIndexes(value: unknown, termCount: number, maximum: number): boolean {
+  return Array.isArray(value)
+    && value.length <= maximum
+    && value.every((item, index) => Number.isSafeInteger(item)
+      && item >= 0 && item < termCount && (index === 0 || value[index - 1] < item));
+}
+
+function isMetadataProbe(value: unknown): boolean {
+  return value === null || (isRecord(value)
+    && hasExactKeys(value, ["query", "fields", "conjunction"])
+    && isBoundedString(value.query, 4_096)
+    && JSON.stringify(value.fields) === JSON.stringify(METADATA_FIELDS)
+    && value.conjunction === true);
+}
+
+function isEvidenceProbePlan(value: unknown): value is EvidenceProbePlan {
+  if (!isRecord(value) || value.schema_version !== MATCH_PLAN_SCHEMA_VERSION
+    || !isBoundedString(value.match_value, 16_384)) return false;
+  if (value.plan_id === "identifier_metadata_v2") {
+    return hasExactKeys(value, ["plan_id", "schema_version", "match_value"]);
+  }
+  return value.plan_id === "term_support_v2"
+    && hasExactKeys(value, [
+      "plan_id", "schema_version", "probe_id", "term_index", "match_value",
+      "prefix_pattern", "max_prefix_expansions", "max_prefix_term_bytes",
     ])
-    && value.metadata_probe.conjunction === true;
+    && isNonNegativeSafeInteger(value.probe_id)
+    && value.probe_id < 128
+    && isNonNegativeSafeInteger(value.term_index)
+    && value.term_index < 128
+    && (value.prefix_pattern === null || isBoundedString(value.prefix_pattern, 4_096))
+    && value.max_prefix_expansions === 16
+    && value.max_prefix_term_bytes === 96;
 }
 
-function isMetadataProbePlan(value: unknown): value is MetadataProbePlan {
-  return isRecord(value)
-    && hasExactKeys(value, ["schema_version", "plan_id", "match_value"])
-    && value.schema_version === MATCH_PLAN_SCHEMA_VERSION
-    && value.plan_id === "metadata_probe_v1"
+function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is ExecutionPlan {
+  if (!isRecord(value)
+    || !hasExactKeys(value, [
+      "schema_version", "profile_id", "disposition", "max_total_candidates", "stages",
+    ])
+    || value.schema_version !== MATCH_PLAN_SCHEMA_VERSION
+    || value.profile_id !== "lexical-v1"
+    || (value.disposition !== "explicit_bypass" && value.disposition !== "ready"
+      && value.disposition !== "empty_no_evidence")
+    || value.max_total_candidates !== 512
+    || !Array.isArray(value.stages)
+    || value.stages.length > 5
+    || !value.stages.every((stage, index) => isStagePlan(stage, index))) {
+    return false;
+  }
+  if (value.disposition === "empty_no_evidence") {
+    return queryPlan.execution === "empty_no_evidence" && value.stages.length === 0;
+  }
+  if (value.disposition === "explicit_bypass") {
+    return queryPlan.execution === "explicit_bypass"
+      && value.stages.length === 1
+      && value.stages[0]?.plan_id === "lexical_explicit_v2";
+  }
+  const stagePlanIds: Readonly<Record<QueryEvidenceStageKind, StagePlanId>> = {
+    exact_metadata: "lexical_exact_metadata_v2",
+    exact_phrase: "lexical_exact_phrase_v2",
+    all_terms: "lexical_all_terms_v2",
+    partial_coverage: "lexical_partial_coverage_v2",
+    prefix: "lexical_prefix_v2",
+  };
+  return queryPlan.execution === "ready"
+    && value.stages.length === queryPlan.evidence_stages.length
+    && value.stages.every((stage, index) => {
+      const evidenceStage = queryPlan.evidence_stages[index];
+      return evidenceStage !== undefined
+        && stage.ordinal === evidenceStage.ordinal
+        && stage.plan_id === stagePlanIds[evidenceStage.kind]
+        && stage.max_candidates === evidenceStage.max_candidates;
+    });
+}
+
+function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
+  if (!isRecord(value)
+    || !hasRequiredAndOptionalKeys(
+      value,
+      ["ordinal", "plan_id", "max_candidates"],
+      ["match_value", "exact_value"],
+    )
+    || value.ordinal !== ordinal
+    || !isPositiveSafeInteger(value.max_candidates)
+    || value.max_candidates > 512) return false;
+  const matchIds = [
+    "lexical_explicit_v2", "lexical_exact_phrase_v2", "lexical_all_terms_v2",
+    "lexical_partial_coverage_v2", "lexical_prefix_v2",
+  ];
+  if (value.plan_id === "lexical_exact_metadata_v2") {
+    return value.match_value === undefined
+      && isBoundedUnicodeScalarString(value.exact_value, 256);
+  }
+  return matchIds.includes(String(value.plan_id))
+    && value.exact_value === undefined
     && isBoundedString(value.match_value, 16_384);
 }
 
-function isMatchPlan(value: unknown): value is MatchPlan {
+function isExactRecord(value: unknown, expected: Readonly<Record<string, number>>): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ["schema_version", "plan_id", "match_value"])
-    && value.schema_version === MATCH_PLAN_SCHEMA_VERSION
-    && (value.plan_id === "lexical_any_v1"
-      || value.plan_id === "lexical_all_v1"
-      || value.plan_id === "lexical_explicit_v1")
-    && isBoundedString(value.match_value, 16_384);
+    && hasExactKeys(value, Object.keys(expected))
+    && Object.entries(expected).every(([key, expectedValue]) => value[key] === expectedValue);
 }
 
 function isBoundedStrings(
@@ -399,6 +808,10 @@ function isBoundedString(value: unknown, maximum: number, allowEmpty = false): v
   return typeof value === "string"
     && value.length <= maximum
     && (allowEmpty || value.length > 0);
+}
+
+function isBoundedUnicodeScalarString(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length > 0 && [...value].length <= maximum;
 }
 
 function isPositiveSafeInteger(value: unknown): value is number {

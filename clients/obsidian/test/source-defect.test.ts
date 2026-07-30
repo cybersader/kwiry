@@ -7,7 +7,7 @@ import { sourcePreparationDefect } from "../src/worker/source-defect";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
 
 const VALID = {
-  schema_version: 2,
+  schema_version: 3,
   source_key: "a".repeat(64),
   vault_id: "active-vault",
   path: "Notes/Example.md",
@@ -17,6 +17,12 @@ const VALID = {
   mtime: 1785253671659,
   mtime_nanos: "1785253671659000000",
   retrieval: { filename: "Example.md", stem: "Example", aliases: [] },
+  normalized_exact: {
+    filename: "example.md",
+    stem: "example",
+    aliases: [],
+    title: null,
+  },
   frontmatter: {},
   chunks: [],
   kind: "skipped",
@@ -38,6 +44,22 @@ describe("sourcePreparationDefect", () => {
     expect(sourcePreparationDefect({ ...VALID, byte_length: 1.5 })).toBe("byte_length");
     expect(sourcePreparationDefect({ ...VALID, kind: "indexed", content_hash: null }))
       .toBe("indexed_missing_hash");
+  });
+
+  it("validates normalized exact values by Unicode scalar count", () => {
+    const bounded = "🚀".repeat(256);
+    expect(sourcePreparationDefect({
+      ...VALID,
+      normalized_exact: { ...VALID.normalized_exact, title: bounded },
+    })).toBeNull();
+    expect(sourcePreparationDefect({
+      ...VALID,
+      normalized_exact: { ...VALID.normalized_exact, title: `${bounded}🚀` },
+    })).toBe("normalized_exact");
+    expect(sourcePreparationDefect({
+      ...VALID,
+      normalized_exact: { ...VALID.normalized_exact, aliases: [""] },
+    })).toBe("normalized_exact");
   });
 
   it("never throws on a hostile value", () => {
@@ -68,6 +90,7 @@ describe("chunk/source correlation", () => {
         chunking_version: 1,
       },
       heading_text: "",
+      normalized_heading: null,
       technical_identifiers: [],
     }],
   });
@@ -142,6 +165,7 @@ describe("open property bag validation", () => {
         chunking_version: 1,
       },
       heading_text: "",
+      normalized_heading: null,
       technical_identifiers: [],
     }],
   });
@@ -245,6 +269,7 @@ describe("caps reflect the Rust contract, not an invented policy", () => {
         chunking_version: 1,
       },
       heading_text: "",
+      normalized_heading: null,
       technical_identifiers: [],
     };
     expect(sourcePreparationDefect({ ...VALID, kind: "indexed", chunks: [chunk] })).toBeNull();
@@ -275,6 +300,7 @@ describe("no count ceiling is enforced anywhere", () => {
       ...over,
     },
     heading_text: "",
+    normalized_heading: null,
     technical_identifiers: [],
   });
 

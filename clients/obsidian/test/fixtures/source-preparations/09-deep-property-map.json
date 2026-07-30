@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_key": "89bdc68d2f9ba3c5d1f9d9c38eee2b045b994fafcf83ae9d0c805cfce412e058",
   "vault_id": "golden-vault",
   "room": "fixture-room",
@@ -13,6 +13,12 @@
     "filename": "Deep Property Map.md",
     "stem": "Deep Property Map",
     "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "deep property map.md",
+    "stem": "deep property map",
+    "aliases": [],
+    "title": null
   },
   "frontmatter": {
     "nested": {
@@ -203,6 +209,7 @@
         "chunking_version": 2
       },
       "heading_text": "Body",
+      "normalized_heading": "body",
       "technical_identifiers": []
     }
   ],
