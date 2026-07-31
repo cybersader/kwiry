@@ -27,9 +27,12 @@ const scriptRoot = dirname(fileURLToPath(import.meta.url));
 /** Occurs in the beacon line of every generated note, so it fills a result page. */
 const HYDRATION_QUERY = "synthetic";
 const HYDRATION_SAMPLES = 20;
+const WORKER_PROTOCOL_VERSION = 6;
+const PERFORMANCE_VAULT_ID = "gate5-performance-vault";
 
-main().catch(() => {
-  process.stderr.write("Gate 5 generated performance capture failed.\n");
+main().catch((error) => {
+  const diagnostic = safeFailureDiagnostic(error);
+  process.stderr.write(`Gate 5 generated performance capture failed (${diagnostic}).\n`);
   process.exitCode = 1;
 });
 
@@ -48,13 +51,19 @@ async function main() {
     worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     let requestId = 0;
     const send = (message) => request(worker, { id: ++requestId, ...message });
-    const initialized = await send({ operation: "initialize" });
+    const initialized = await send({
+      operation: "initialize",
+      vault_id: PERFORMANCE_VAULT_ID,
+    });
     requireOk(initialized);
     const initializeMs = performance.now() - startup;
     requireOk(await send({ operation: "begin_build", generation: "generation-0" }));
 
     const buildStart = performance.now();
     let firstBatchMs = null;
+    let lastSuccessfulDocuments = 0;
+    let lastSuccessfulChunks = 0;
+    let lastSuccessfulDatabaseBytes = 0;
     for (let offset = 0; offset < PERFORMANCE_NOTE_COUNT; offset += 16) {
       const sources = [];
       const end = Math.min(PERFORMANCE_NOTE_COUNT, offset + 16);
@@ -63,11 +72,20 @@ async function main() {
         const bytes = await readFile(join(corpusRoot, path));
         sources.push(source(path, bytes));
       }
-      requireOk(await send({
+      const batch = await send({
         operation: "add_source_batch",
         generation: "generation-0",
         sources,
-      }));
+      });
+      if (!batch?.ok && batch?.error?.code === "index_limit_exceeded") {
+        throw new Error(
+          `capacity-${lastSuccessfulDocuments}-${lastSuccessfulChunks}-${lastSuccessfulDatabaseBytes}`,
+        );
+      }
+      requireOk(batch);
+      lastSuccessfulDocuments = batch.result.documents;
+      lastSuccessfulChunks = batch.result.chunks;
+      lastSuccessfulDatabaseBytes = batch.result.database_bytes;
       if (firstBatchMs === null) firstBatchMs = performance.now() - buildStart;
     }
     const committed = await send({ operation: "commit_build", generation: "generation-0" });
@@ -284,14 +302,14 @@ function request(worker, message, timeoutMs = 120_000) {
     };
     worker.on("message", onMessage);
     worker.on("error", onError);
-    worker.postMessage({ version: 2, ...message });
+    worker.postMessage({ version: WORKER_PROTOCOL_VERSION, ...message });
   });
 }
 
 function source(path, bytes, mtime = 1) {
   return {
     descriptor: {
-      vault_id: "active-vault",
+      vault_id: PERFORMANCE_VAULT_ID,
       path,
       format: "markdown",
       byte_length: bytes.byteLength,
@@ -323,7 +341,19 @@ function percentile95(values) {
 }
 
 function requireOk(response) {
-  if (!response?.ok) throw new Error("Worker operation failed");
+  if (response?.ok) return;
+  const stage = typeof response?.error?.stage === "string" ? response.error.stage : "unknown";
+  const code = typeof response?.error?.code === "string" ? response.error.code : "unknown";
+  throw new Error(`worker-${stage}-${code}`);
+}
+
+function safeFailureDiagnostic(error) {
+  if (!(error instanceof Error)
+    || (!/^worker-[a-z_]+-[a-z_]+$/u.test(error.message)
+      && !/^capacity-[0-9]+-[0-9]+-[0-9]+$/u.test(error.message))) {
+    return "unspecified";
+  }
+  return error.message;
 }
 
 /**
