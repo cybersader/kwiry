@@ -20,12 +20,18 @@ let workerSource;
 let guardWorkerSource;
 let prototypeWorkerSource;
 let artifactIdentities;
+let rustArtifactBytes;
 let prototypeArtifactIdentities;
 let workerMetafile;
 let prototypeWorkerMetafile;
 
 beforeAll(async () => {
-  ({ workerSource, identities: artifactIdentities, workerMetafile } = await buildPlugin({
+  ({
+    workerSource,
+    identities: artifactIdentities,
+    rustArtifactBytes,
+    workerMetafile,
+  } = await buildPlugin({
     write: false,
     production: true,
   }));
@@ -486,10 +492,7 @@ describe("exported cache generation", () => {
         .update(readFileSync(require.resolve("@sqlite.org/sqlite-wasm/sqlite3.wasm")))
         .digest("hex"));
       expect(envelope.rust_wasm_sha256).toBe(createHash("sha256")
-        .update(readFileSync(new URL(
-          "../rust/kwiry-obsidian-wasm/pkg/production/kwiry_obsidian_wasm_bg.wasm",
-          import.meta.url,
-        )))
+        .update(rustArtifactBytes)
         .digest("hex"));
 
       const restored = await openExportedImage(bytes);

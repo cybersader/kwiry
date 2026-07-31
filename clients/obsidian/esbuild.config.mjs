@@ -127,6 +127,7 @@ function prepareRustAdapter(variant) {
     return {
       bindings,
       wasm,
+      bytes,
       identity: { bytes: bytes.byteLength, sha256: sha256(bytes) },
       cleanup: () => rmSync(rustPackage, { recursive: true, force: true }),
     };
@@ -484,6 +485,7 @@ export async function buildPlugin({
     : mainBuild.outputFiles[0].text;
   return {
     identities,
+    rustArtifactBytes: rustAdapter.bytes,
     workerSource,
     workerMetafile: workerBuild.metafile,
     mainText,

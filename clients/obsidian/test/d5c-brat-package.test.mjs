@@ -119,7 +119,7 @@ describe("D5C BRAT package", () => {
       `https://github.com/cybersader/kwiry/tree/${packaged.attestation.source.commit}`,
     );
     expect(packaged.mainText).not.toContain(
-      "https://github.com/cybersader/kwiry/tree/d5c-balanced-playground-0.0.1-source",
+      `https://github.com/cybersader/kwiry/tree/${packaged.config.source.tag}`,
     );
     for (const marker of [
       "open-private-d5c-balanced-playground",

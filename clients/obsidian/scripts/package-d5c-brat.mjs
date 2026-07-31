@@ -174,6 +174,9 @@ export async function packageD5cBrat({
 }
 
 function validateConfig(value) {
+  const sourceTagMatch = typeof value?.source?.tag === "string"
+    ? /^d5c-balanced-playground-([0-9]+\.[0-9]+\.[0-9]+)(?:-r[1-9][0-9]*)?-source$/u.exec(value.source.tag)
+    : null;
   if (!isRecord(value)
     || !hasExactKeys(value, [
       "schema_version",
@@ -206,8 +209,7 @@ function validateConfig(value) {
     || !isRecord(value.source)
     || !hasExactKeys(value.source, ["repository", "tag"])
     || value.source.repository !== "https://github.com/cybersader/kwiry"
-    || value.source.tag !== `d5c-balanced-playground-${value.plugin.version}-source`
-    || !/^d5c-balanced-playground-[0-9]+\.[0-9]+\.[0-9]+-source$/u.test(value.source.tag)
+    || sourceTagMatch?.[1] !== value.plugin.version
     || value.distribution_repository !== "cybersader/kwiry-d5c-balanced-playground") {
     throw new Error("D5C BRAT package configuration is invalid");
   }
