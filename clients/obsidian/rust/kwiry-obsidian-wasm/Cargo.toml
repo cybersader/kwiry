@@ -18,6 +18,7 @@ path = "src/bin/fixtures.rs"
 [features]
 default = []
 internal-typo-prototype = []
+internal-d5c-preview = ["kwiry-core/internal-d5c-preview"]
 
 [dependencies]
 kwiry-core = { path = "../../../../daemon/crates/kwiry-core", default-features = false, features = ["portable"] }

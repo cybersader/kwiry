@@ -34,6 +34,11 @@ fastembed = { workspace = true, optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, optional = true }
 
+[[example]]
+name = "d5c_balanced_playground"
+path = "examples/d5c_balanced_playground.rs"
+required-features = ["internal-d5c-preview", "native"]
+
 [features]
 default = ["native"]
 portable = [
@@ -68,6 +73,8 @@ native = [
 # Enables the fastembed/ONNX embedder. Native sqlite-vec state and RRF remain
 # covered without ONNX so tests do not need to load the model.
 semantic-onnx = ["native", "dep:fastembed"]
+# Exposes the test-only D5C profile contract to explicit preview adapters.
+internal-d5c-preview = ["portable"]
 
 [dev-dependencies]
 filetime.workspace = true

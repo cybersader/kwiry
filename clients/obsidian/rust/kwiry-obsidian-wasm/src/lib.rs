@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::collections::BTreeMap;
+#[cfg(feature = "internal-d5c-preview")]
+use std::collections::BTreeSet;
 
+#[cfg(feature = "internal-d5c-preview")]
+use kwiry_core::{
+    BalancedComparisonEnvelope, BalancedPlaygroundCase, BalancedPlaygroundConfiguration,
+    D5cRelevanceProfile, MAX_PROPERTY_VALUES_PER_SOURCE_OBSERVATION, MAX_RERANK_CANDIDATES,
+    PropertyScalarObservation, QualifiedSourceId, RERANK_INPUT_SCHEMA_VERSION, RelevanceProfile,
+    RerankCandidate, RerankEvidence, RerankInput, SourceSignalObservation,
+    evaluate_balanced_playground, rerank_candidates,
+};
 use kwiry_core::{
     CHUNKING_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_FILE_BYTES,
     QueryAssistanceEligibility, QueryEvidenceReport, QueryEvidenceStageKind,
@@ -23,6 +33,8 @@ use wasm_bindgen::prelude::*;
 pub const ADAPTER_ABI_VERSION: u32 = 2;
 pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 3;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
+#[cfg(feature = "internal-d5c-preview")]
+pub const MAX_D5C_PREVIEW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_BUFFER_BYTES: usize = MAX_FILE_BYTES as usize + 1;
 const MAX_MATCH_VALUE_BYTES: usize = 16 * 1024;
 const MAX_PREFIX_TERM_BYTES: usize = 96;
@@ -34,6 +46,12 @@ pub enum AdapterOperation {
     PrepareOversizedSource,
     PrepareQuery,
     FinalizeQuery,
+    #[cfg(feature = "internal-d5c-preview")]
+    PrepareD5cPreview,
+    #[cfg(feature = "internal-d5c-preview")]
+    FinalizeD5cPreview,
+    #[cfg(feature = "internal-d5c-preview")]
+    InternalD5cEvaluate,
     #[cfg(feature = "internal-typo-prototype")]
     PrepareTypoSuggestion,
     #[cfg(feature = "internal-typo-prototype")]
@@ -150,6 +168,55 @@ pub struct FinalizedQueryResult {
     pub execution_plan: Fts5ExecutionPlan,
 }
 
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct D5cPreviewSignalPlan {
+    pub schema_version: u32,
+    pub requires_source_mtime: bool,
+    pub property_names: Vec<String>,
+    pub max_candidates: usize,
+    pub max_candidates_per_stage: usize,
+    pub max_property_values_per_source: usize,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PreparedD5cPreviewResult {
+    pub signal_plan: D5cPreviewSignalPlan,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct D5cPreviewCandidateObservation {
+    pub source: QualifiedSourceId,
+    pub chunk_id: String,
+    pub path: String,
+    pub evidence_tier: kwiry_core::LexicalEvidenceTier,
+    pub lexical_score: f32,
+    pub lexical_ordinal: usize,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct D5cPreviewSourceObservation {
+    pub source: QualifiedSourceId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_mtime_epoch_seconds: Option<String>,
+    #[serde(default)]
+    pub present_properties: Vec<String>,
+    #[serde(default)]
+    pub property_values: Vec<PropertyScalarObservation>,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FinalizedD5cPreviewResult {
+    pub ordered_candidate_ordinals: Vec<usize>,
+    pub evidence: RerankEvidence,
+}
+
 #[cfg(feature = "internal-typo-prototype")]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PreparedTypoSuggestionResult {
@@ -237,6 +304,61 @@ struct FinalizeQueryRequest {
 #[serde(rename_all = "snake_case")]
 enum FinalizeQueryOperation {
     FinalizeQuery,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrepareD5cPreviewRequest {
+    abi_version: u32,
+    #[serde(rename = "operation")]
+    _operation: PrepareD5cPreviewOperation,
+    profile: D5cRelevanceProfile,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PrepareD5cPreviewOperation {
+    PrepareD5cPreview,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FinalizeD5cPreviewRequest {
+    abi_version: u32,
+    #[serde(rename = "operation")]
+    _operation: FinalizeD5cPreviewOperation,
+    profile: D5cRelevanceProfile,
+    query_time_epoch_seconds: String,
+    candidates: Vec<D5cPreviewCandidateObservation>,
+    source_signals: Vec<D5cPreviewSourceObservation>,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FinalizeD5cPreviewOperation {
+    FinalizeD5cPreview,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InternalD5cEvaluateRequest {
+    abi_version: u32,
+    #[serde(rename = "operation")]
+    _operation: InternalD5cEvaluateOperation,
+    configuration: BalancedPlaygroundConfiguration,
+    case: BalancedPlaygroundCase,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InternalD5cEvaluateOperation {
+    InternalD5cEvaluate,
 }
 
 #[cfg(feature = "internal-typo-prototype")]
@@ -432,6 +554,239 @@ pub fn finalize_query(request_json: &str) -> String {
     }
 }
 
+#[cfg(feature = "internal-d5c-preview")]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn prepare_d5c_preview(request_json: &str) -> String {
+    let operation = AdapterOperation::PrepareD5cPreview;
+    let request = match parse_d5c_request::<PrepareD5cPreviewRequest>(request_json) {
+        Ok(request) => request,
+        Err(error) => return error_response(operation, error),
+    };
+    if let Err(error) = check_abi(request.abi_version) {
+        return error_response(operation, error);
+    }
+    if let Err(error) = request.profile.validate() {
+        return error_response(
+            operation,
+            AdapterError {
+                code: error.code,
+                message: error.message,
+            },
+        );
+    }
+    let property_names = request
+        .profile
+        .property_rules
+        .iter()
+        .map(|rule| rule.property.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    success_response(
+        operation,
+        PreparedD5cPreviewResult {
+            signal_plan: D5cPreviewSignalPlan {
+                schema_version: RERANK_INPUT_SCHEMA_VERSION,
+                requires_source_mtime: request.profile.recency.is_some(),
+                property_names,
+                max_candidates: MAX_RERANK_CANDIDATES,
+                max_candidates_per_stage: kwiry_core::MAX_CANDIDATES_PER_STAGE,
+                max_property_values_per_source: MAX_PROPERTY_VALUES_PER_SOURCE_OBSERVATION,
+            },
+        },
+    )
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn finalize_d5c_preview(request_json: &str) -> String {
+    let operation = AdapterOperation::FinalizeD5cPreview;
+    let request = match parse_d5c_request::<FinalizeD5cPreviewRequest>(request_json) {
+        Ok(request) => request,
+        Err(error) => return error_response(operation, error),
+    };
+    if let Err(error) = check_abi(request.abi_version) {
+        return error_response(operation, error);
+    }
+    if let Err(error) = request.profile.validate() {
+        return error_response(
+            operation,
+            AdapterError {
+                code: error.code,
+                message: error.message,
+            },
+        );
+    }
+    let query_time_epoch_seconds = match parse_canonical_u64(&request.query_time_epoch_seconds) {
+        Some(value) => value,
+        None => {
+            return error_response(
+                operation,
+                adapter_error(
+                    "invalid_rerank_input",
+                    "D5C query time is not a canonical unsigned integer.",
+                ),
+            );
+        }
+    };
+    if request
+        .candidates
+        .iter()
+        .enumerate()
+        .any(|(ordinal, candidate)| candidate.lexical_ordinal != ordinal)
+    {
+        return error_response(
+            operation,
+            adapter_error(
+                "invalid_rerank_input",
+                "D5C candidate lexical ordinals are incomplete.",
+            ),
+        );
+    }
+
+    let candidates = request
+        .candidates
+        .iter()
+        .map(|candidate| RerankCandidate {
+            source: candidate.source.clone(),
+            chunk_id: candidate.chunk_id.clone(),
+            path: candidate.path.clone(),
+            evidence_tier: candidate.evidence_tier,
+            lexical_score: candidate.lexical_score,
+        })
+        .collect::<Vec<_>>();
+    let candidate_sources = candidates
+        .iter()
+        .map(|candidate| candidate.source.clone())
+        .collect::<BTreeSet<_>>();
+    let mut observed_sources = BTreeSet::new();
+    let mut source_signals = Vec::with_capacity(request.source_signals.len());
+    for signal in request.source_signals {
+        if !candidate_sources.contains(&signal.source)
+            || !observed_sources.insert(signal.source.clone())
+        {
+            return error_response(
+                operation,
+                adapter_error(
+                    "invalid_rerank_input",
+                    "D5C source observations escaped the candidate source set.",
+                ),
+            );
+        }
+        let source_mtime_epoch_seconds = match signal.source_mtime_epoch_seconds {
+            Some(value) => match parse_canonical_u64(&value) {
+                Some(value) => Some(value),
+                None => {
+                    return error_response(
+                        operation,
+                        adapter_error(
+                            "invalid_rerank_input",
+                            "D5C source mtime is not a canonical unsigned integer.",
+                        ),
+                    );
+                }
+            },
+            None => None,
+        };
+        source_signals.push(SourceSignalObservation {
+            source: signal.source,
+            source_mtime_epoch_seconds,
+            matched_property_rule_ids: Vec::new(),
+            present_properties: signal.present_properties,
+            property_values: signal.property_values,
+        });
+    }
+    if observed_sources != candidate_sources {
+        return error_response(
+            operation,
+            adapter_error(
+                "incomplete_rerank_input",
+                "D5C source observations are incomplete.",
+            ),
+        );
+    }
+
+    let input = RerankInput {
+        schema_version: RERANK_INPUT_SCHEMA_VERSION,
+        query_time_epoch_seconds,
+        candidates,
+        source_signals,
+    };
+    let result = match rerank_candidates(&RelevanceProfile::D5cPreviewV1(request.profile), &input) {
+        Ok(result) => result,
+        Err(error) => {
+            return error_response(
+                operation,
+                AdapterError {
+                    code: error.code,
+                    message: error.message,
+                },
+            );
+        }
+    };
+    let ordinals = input
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(ordinal, candidate)| {
+            (
+                (
+                    candidate.source.clone(),
+                    candidate.chunk_id.clone(),
+                    candidate.path.clone(),
+                ),
+                ordinal,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let ordered_candidate_ordinals = match result
+        .candidates()
+        .iter()
+        .map(|candidate| {
+            ordinals
+                .get(&(
+                    candidate.source.clone(),
+                    candidate.chunk_id.clone(),
+                    candidate.path.clone(),
+                ))
+                .copied()
+                .ok_or_else(|| {
+                    adapter_error(
+                        "invalid_rerank_result",
+                        "D5C reranker returned an unknown candidate.",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(ordinals) => ordinals,
+        Err(error) => return error_response(operation, error),
+    };
+    success_response(
+        operation,
+        FinalizedD5cPreviewResult {
+            ordered_candidate_ordinals,
+            evidence: result.evidence().clone(),
+        },
+    )
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn internal_d5c_evaluate(request_json: &str) -> String {
+    let operation = AdapterOperation::InternalD5cEvaluate;
+    let request = match parse_d5c_request::<InternalD5cEvaluateRequest>(request_json) {
+        Ok(request) => request,
+        Err(error) => return error_response(operation, error),
+    };
+    if let Err(error) = check_abi(request.abi_version) {
+        return error_response(operation, error);
+    }
+    let envelope: BalancedComparisonEnvelope =
+        evaluate_balanced_playground(&request.configuration, &request.case);
+    success_response(operation, envelope)
+}
+
 #[cfg(feature = "internal-typo-prototype")]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub fn prepare_typo_suggestion_probe(request_json: &str) -> String {
@@ -477,6 +832,24 @@ fn parse_request<T: DeserializeOwned>(request_json: &str) -> Result<T, AdapterEr
     }
     serde_json::from_str(request_json)
         .map_err(|_| adapter_error("invalid_request", "Invalid adapter request."))
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn parse_d5c_request<T: DeserializeOwned>(request_json: &str) -> Result<T, AdapterError> {
+    if request_json.len() > MAX_D5C_PREVIEW_REQUEST_BYTES {
+        return Err(adapter_error(
+            "invalid_request",
+            "D5C adapter request exceeds the supported size.",
+        ));
+    }
+    serde_json::from_str(request_json)
+        .map_err(|_| adapter_error("invalid_request", "Invalid D5C adapter request."))
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn parse_canonical_u64(value: &str) -> Option<u64> {
+    let parsed = value.parse::<u64>().ok()?;
+    (parsed.to_string() == value).then_some(parsed)
 }
 
 fn check_abi(abi_version: u32) -> Result<(), AdapterError> {
@@ -1281,6 +1654,188 @@ mod tests {
                 "prepare_query",
                 "finalize_query"
             ])
+        );
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    #[test]
+    fn internal_d5c_preview_validates_profiles_reranks_and_returns_private_evidence() {
+        let profile = serde_json::json!({
+            "schema_version": 1,
+            "profile_id": "d5c-preview-v1",
+            "retrieval_profile_id": "lexical-v1",
+            "hierarchy": {
+                "authority_folders": [],
+                "archive_folders": []
+            },
+            "property_rules": [{
+                "id": "priority-rule",
+                "property": "priority",
+                "predicate": {
+                    "kind": "exact",
+                    "pointer": "",
+                    "value": { "type": "i64", "value": "7" }
+                },
+                "effect": "boost",
+                "strength": "standard"
+            }]
+        });
+        let prepared = response(prepare_d5c_preview(
+            &serde_json::json!({
+                "abi_version": ADAPTER_ABI_VERSION,
+                "operation": "prepare_d5c_preview",
+                "profile": profile
+            })
+            .to_string(),
+        ));
+        assert_eq!(prepared["status"], "ok");
+        assert_eq!(
+            prepared["result"]["signal_plan"]["property_names"],
+            serde_json::json!(["priority"])
+        );
+        assert_eq!(prepared["result"]["signal_plan"]["max_candidates"], 512);
+        assert_eq!(
+            prepared["result"]["signal_plan"]["max_candidates_per_stage"],
+            256
+        );
+        assert_eq!(
+            response(abi_identity())["operations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+
+        let source_a = serde_json::json!({
+            "authorization_scope": "obsidian-active-vault",
+            "source_key": "a"
+        });
+        let source_b = serde_json::json!({
+            "authorization_scope": "obsidian-active-vault",
+            "source_key": "b"
+        });
+        let request = serde_json::json!({
+            "abi_version": ADAPTER_ABI_VERSION,
+            "operation": "finalize_d5c_preview",
+            "profile": profile,
+            "query_time_epoch_seconds": "2000000000",
+            "candidates": [
+                {
+                    "source": source_a,
+                    "chunk_id": "chunk-a",
+                    "path": "a.md",
+                    "evidence_tier": "all_terms",
+                    "lexical_score": 2.0,
+                    "lexical_ordinal": 0
+                },
+                {
+                    "source": source_b,
+                    "chunk_id": "chunk-b",
+                    "path": "b.md",
+                    "evidence_tier": "all_terms",
+                    "lexical_score": 1.0,
+                    "lexical_ordinal": 1
+                }
+            ],
+            "source_signals": [
+                {
+                    "source": source_a,
+                    "present_properties": [],
+                    "property_values": []
+                },
+                {
+                    "source": source_b,
+                    "present_properties": ["priority"],
+                    "property_values": [{
+                        "property": "priority",
+                        "pointer": "",
+                        "value": { "type": "i64", "value": "7" }
+                    }]
+                }
+            ]
+        });
+        let finalized = response(finalize_d5c_preview(&request.to_string()));
+        assert_eq!(finalized["status"], "ok");
+        assert_eq!(
+            finalized["result"]["ordered_candidate_ordinals"],
+            serde_json::json!([1, 0])
+        );
+        assert_eq!(finalized["result"]["evidence"]["entries"][0]["points"], 2);
+        let evidence = finalized["result"]["evidence"].to_string();
+        for forbidden in [
+            "priority",
+            "chunk-a",
+            "chunk-b",
+            "a.md",
+            "b.md",
+            "source_key",
+        ] {
+            assert!(!evidence.contains(forbidden));
+        }
+
+        let mut incomplete = request.clone();
+        incomplete["source_signals"] = serde_json::json!([]);
+        let refused = response(finalize_d5c_preview(&incomplete.to_string()));
+        assert_eq!(refused["status"], "error");
+        assert_eq!(refused["error"]["code"], "incomplete_rerank_input");
+
+        let mut malformed = profile;
+        malformed["profile_id"] = serde_json::json!("unapproved");
+        let refused = response(prepare_d5c_preview(
+            &serde_json::json!({
+                "abi_version": ADAPTER_ABI_VERSION,
+                "operation": "prepare_d5c_preview",
+                "profile": malformed
+            })
+            .to_string(),
+        ));
+        assert_eq!(refused["status"], "error");
+        assert_eq!(refused["error"]["code"], "invalid_relevance_profile");
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    #[test]
+    fn internal_balanced_evaluation_returns_the_rust_envelope_and_fails_closed() {
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../../../../fixtures/retrieval/d5c-balanced/corpus.json"
+        ))
+        .unwrap();
+        let evaluations = corpus["evaluations"].as_array().unwrap();
+        let strict = evaluations
+            .iter()
+            .find(|evaluation| evaluation["id"] == "stronger-text-counterexample-native")
+            .unwrap();
+        let strict = response(internal_d5c_evaluate(&strict["request"].to_string()));
+        assert_eq!(strict["status"], "ok");
+        assert_eq!(strict["operation"], "internal_d5c_evaluate");
+        assert_eq!(strict["result"]["disposition"]["kind"], "strict_balanced");
+        assert_eq!(strict["result"]["text_results"]["label"], "text");
+        assert_eq!(
+            strict["result"]["balanced_results"]["ordered_candidate_ordinals"],
+            serde_json::json!([0, 1])
+        );
+
+        let fatal = evaluations
+            .iter()
+            .find(|evaluation| evaluation["id"] == "discrepancy-malformed")
+            .unwrap();
+        let fatal = response(internal_d5c_evaluate(&fatal["request"].to_string()));
+        assert_eq!(fatal["status"], "ok");
+        assert_eq!(fatal["result"]["disposition"]["kind"], "fatal");
+        assert!(fatal["result"].get("balanced_results").is_none());
+        assert!(fatal["result"].get("explanation").is_none());
+
+        let unknown = response(internal_d5c_evaluate(
+            r#"{"abi_version":2,"operation":"internal_d5c_evaluate","configuration":{},"case":{},"extra":true}"#,
+        ));
+        assert_eq!(unknown["status"], "error");
+        assert_eq!(unknown["error"]["code"], "invalid_request");
+        assert_eq!(
+            response(abi_identity())["operations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
         );
     }
 

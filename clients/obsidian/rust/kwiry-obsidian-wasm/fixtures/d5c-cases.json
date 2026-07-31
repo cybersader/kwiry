@@ -1,0 +1,808 @@
+[
+  {
+    "name": "prepare-full-profile",
+    "operation": "prepare_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "prepare_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "depth": {
+            "id": "01-depth",
+            "predicate": {
+              "kind": "at_most",
+              "segments": 1
+            },
+            "effect": "boost",
+            "strength": "low"
+          },
+          "authority_folders": [
+            {
+              "id": "02-authority",
+              "prefix": "authority",
+              "strength": "standard"
+            }
+          ],
+          "archive_folders": [
+            {
+              "id": "03-archive",
+              "prefix": "archive",
+              "strength": "high"
+            }
+          ]
+        },
+        "property_rules": [
+          {
+            "id": "04-priority",
+            "property": "priority",
+            "predicate": {
+              "kind": "exact",
+              "pointer": "",
+              "value": {
+                "type": "i64",
+                "value": "7"
+              }
+            },
+            "effect": "boost",
+            "strength": "standard"
+          }
+        ],
+        "recency": {
+          "id": "00-recent",
+          "clock": "source_mtime",
+          "horizon": "week",
+          "strength": "high"
+        }
+      }
+    }
+  },
+  {
+    "name": "tier-dominance",
+    "operation": "finalize_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "finalize_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "authority_folders": [],
+          "archive_folders": []
+        },
+        "property_rules": [],
+        "recency": {
+          "id": "recent",
+          "clock": "source_mtime",
+          "horizon": "week",
+          "strength": "high"
+        }
+      },
+      "query_time_epoch_seconds": "2000000000",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "old"
+          },
+          "chunk_id": "old",
+          "path": "old.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 1.0,
+          "lexical_ordinal": 0
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "recent"
+          },
+          "chunk_id": "recent",
+          "path": "recent.md",
+          "evidence_tier": "prefix",
+          "lexical_score": 100.0,
+          "lexical_ordinal": 1
+        }
+      ],
+      "source_signals": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "old"
+          },
+          "present_properties": [],
+          "property_values": [],
+          "source_mtime_epoch_seconds": "1"
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "recent"
+          },
+          "present_properties": [],
+          "property_values": [],
+          "source_mtime_epoch_seconds": "1999999999"
+        }
+      ]
+    }
+  },
+  {
+    "name": "same-tier-recency",
+    "operation": "finalize_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "finalize_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "authority_folders": [],
+          "archive_folders": []
+        },
+        "property_rules": [],
+        "recency": {
+          "id": "recent",
+          "clock": "source_mtime",
+          "horizon": "week",
+          "strength": "high"
+        }
+      },
+      "query_time_epoch_seconds": "2000000000",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "old"
+          },
+          "chunk_id": "old",
+          "path": "old.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 2.0,
+          "lexical_ordinal": 0
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "recent"
+          },
+          "chunk_id": "recent",
+          "path": "recent.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 1.0,
+          "lexical_ordinal": 1
+        }
+      ],
+      "source_signals": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "old"
+          },
+          "present_properties": [],
+          "property_values": [],
+          "source_mtime_epoch_seconds": "1"
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "recent"
+          },
+          "present_properties": [],
+          "property_values": [],
+          "source_mtime_epoch_seconds": "1999999999"
+        }
+      ]
+    }
+  },
+  {
+    "name": "source-fanout",
+    "operation": "finalize_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "finalize_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "authority_folders": [],
+          "archive_folders": []
+        },
+        "property_rules": [
+          {
+            "id": "priority",
+            "property": "priority",
+            "predicate": {
+              "kind": "exact",
+              "pointer": "",
+              "value": {
+                "type": "i64",
+                "value": "7"
+              }
+            },
+            "effect": "boost",
+            "strength": "standard"
+          }
+        ]
+      },
+      "query_time_epoch_seconds": "2000000000",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "other"
+          },
+          "chunk_id": "other",
+          "path": "other.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 3.0,
+          "lexical_ordinal": 0
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "typed"
+          },
+          "chunk_id": "typed-1",
+          "path": "typed.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 2.0,
+          "lexical_ordinal": 1
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "typed"
+          },
+          "chunk_id": "typed-2",
+          "path": "typed.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 1.0,
+          "lexical_ordinal": 2
+        }
+      ],
+      "source_signals": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "other"
+          },
+          "present_properties": [],
+          "property_values": []
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "typed"
+          },
+          "present_properties": [
+            "priority"
+          ],
+          "property_values": [
+            {
+              "property": "priority",
+              "pointer": "",
+              "value": {
+                "type": "i64",
+                "value": "7"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "mixed-full-range-types",
+    "operation": "finalize_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "finalize_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "authority_folders": [],
+          "archive_folders": []
+        },
+        "property_rules": [
+          {
+            "id": "00-i64",
+            "property": "score",
+            "predicate": {
+              "kind": "i64_range",
+              "pointer": "",
+              "min": "-9223372036854775808",
+              "max": "-9223372036854775808"
+            },
+            "effect": "boost",
+            "strength": "low"
+          },
+          {
+            "id": "01-u64",
+            "property": "limit",
+            "predicate": {
+              "kind": "u64_range",
+              "pointer": "",
+              "min": "18446744073709551615",
+              "max": "18446744073709551615"
+            },
+            "effect": "boost",
+            "strength": "low"
+          },
+          {
+            "id": "02-f64",
+            "property": "ratio",
+            "predicate": {
+              "kind": "f64_range",
+              "pointer": "",
+              "min": "3ff8000000000000",
+              "max": "3ff8000000000000"
+            },
+            "effect": "boost",
+            "strength": "low"
+          },
+          {
+            "id": "03-date",
+            "property": "reviewed",
+            "predicate": {
+              "kind": "date_range",
+              "pointer": "",
+              "min": "2026-07-01",
+              "max": "2026-07-31"
+            },
+            "effect": "boost",
+            "strength": "low"
+          }
+        ]
+      },
+      "query_time_epoch_seconds": "2000000000",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "string"
+          },
+          "chunk_id": "string",
+          "path": "string.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 3.0,
+          "lexical_ordinal": 0
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "missing"
+          },
+          "chunk_id": "missing",
+          "path": "missing.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 2.0,
+          "lexical_ordinal": 1
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "typed"
+          },
+          "chunk_id": "typed",
+          "path": "typed.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 1.0,
+          "lexical_ordinal": 2
+        }
+      ],
+      "source_signals": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "missing"
+          },
+          "present_properties": [],
+          "property_values": []
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "string"
+          },
+          "present_properties": [
+            "limit",
+            "ratio",
+            "reviewed",
+            "score"
+          ],
+          "property_values": [
+            {
+              "property": "limit",
+              "pointer": "",
+              "value": {
+                "type": "string",
+                "value": "18446744073709551615"
+              }
+            },
+            {
+              "property": "ratio",
+              "pointer": "",
+              "value": {
+                "type": "string",
+                "value": "1.5"
+              }
+            },
+            {
+              "property": "reviewed",
+              "pointer": "",
+              "value": {
+                "type": "string",
+                "value": "not-a-date"
+              }
+            },
+            {
+              "property": "score",
+              "pointer": "",
+              "value": {
+                "type": "string",
+                "value": "-9223372036854775808"
+              }
+            }
+          ]
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "typed"
+          },
+          "present_properties": [
+            "limit",
+            "ratio",
+            "reviewed",
+            "score"
+          ],
+          "property_values": [
+            {
+              "property": "limit",
+              "pointer": "",
+              "value": {
+                "type": "u64",
+                "value": "18446744073709551615"
+              }
+            },
+            {
+              "property": "ratio",
+              "pointer": "",
+              "value": {
+                "type": "f64",
+                "value": "3ff8000000000000"
+              }
+            },
+            {
+              "property": "reviewed",
+              "pointer": "",
+              "value": {
+                "type": "date",
+                "value": "2026-07-31"
+              }
+            },
+            {
+              "property": "score",
+              "pointer": "",
+              "value": {
+                "type": "i64",
+                "value": "-9223372036854775808"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "component-hierarchy",
+    "operation": "finalize_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "finalize_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "depth": {
+            "id": "depth",
+            "predicate": {
+              "kind": "at_most",
+              "segments": 1
+            },
+            "effect": "boost",
+            "strength": "low"
+          },
+          "authority_folders": [
+            {
+              "id": "authority",
+              "prefix": "authority",
+              "strength": "standard"
+            }
+          ],
+          "archive_folders": [
+            {
+              "id": "archive",
+              "prefix": "archive",
+              "strength": "high"
+            }
+          ]
+        },
+        "property_rules": []
+      },
+      "query_time_epoch_seconds": "2000000000",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "archive"
+          },
+          "chunk_id": "archive",
+          "path": "archive/note.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 4.0,
+          "lexical_ordinal": 0
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "archive-old"
+          },
+          "chunk_id": "archive-old",
+          "path": "archive-old/note.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 3.0,
+          "lexical_ordinal": 1
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "authority"
+          },
+          "chunk_id": "authority",
+          "path": "authority/topic/note.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 2.0,
+          "lexical_ordinal": 2
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "shallow"
+          },
+          "chunk_id": "shallow",
+          "path": "inbox/note.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 1.0,
+          "lexical_ordinal": 3
+        }
+      ],
+      "source_signals": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "archive"
+          },
+          "present_properties": [],
+          "property_values": []
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "archive-old"
+          },
+          "present_properties": [],
+          "property_values": []
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "authority"
+          },
+          "present_properties": [],
+          "property_values": []
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "shallow"
+          },
+          "present_properties": [],
+          "property_values": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "stable-ties",
+    "operation": "finalize_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "finalize_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "authority_folders": [],
+          "archive_folders": []
+        },
+        "property_rules": []
+      },
+      "query_time_epoch_seconds": "2000000000",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "b"
+          },
+          "chunk_id": "chunk-b",
+          "path": "b.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 2.0,
+          "lexical_ordinal": 0
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "a"
+          },
+          "chunk_id": "chunk-a",
+          "path": "a.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 1.0,
+          "lexical_ordinal": 1
+        }
+      ],
+      "source_signals": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "a"
+          },
+          "present_properties": [],
+          "property_values": []
+        },
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "b"
+          },
+          "present_properties": [],
+          "property_values": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "qualified-authorization",
+    "operation": "finalize_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "finalize_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "authority_folders": [],
+          "archive_folders": []
+        },
+        "property_rules": [
+          {
+            "id": "priority",
+            "property": "priority",
+            "predicate": {
+              "kind": "presence"
+            },
+            "effect": "boost",
+            "strength": "high"
+          }
+        ]
+      },
+      "query_time_epoch_seconds": "2000000000",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "room-a",
+            "source_key": "shared"
+          },
+          "chunk_id": "a",
+          "path": "a.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 2.0,
+          "lexical_ordinal": 0
+        },
+        {
+          "source": {
+            "authorization_scope": "room-b",
+            "source_key": "shared"
+          },
+          "chunk_id": "b",
+          "path": "b.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 1.0,
+          "lexical_ordinal": 1
+        }
+      ],
+      "source_signals": [
+        {
+          "source": {
+            "authorization_scope": "room-a",
+            "source_key": "shared"
+          },
+          "present_properties": [],
+          "property_values": []
+        },
+        {
+          "source": {
+            "authorization_scope": "room-b",
+            "source_key": "shared"
+          },
+          "present_properties": [
+            "priority"
+          ],
+          "property_values": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "malformed-profile",
+    "operation": "prepare_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "prepare_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "unapproved",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "authority_folders": [],
+          "archive_folders": []
+        },
+        "property_rules": []
+      }
+    }
+  },
+  {
+    "name": "incomplete-observations",
+    "operation": "finalize_d5c_preview",
+    "request": {
+      "abi_version": 2,
+      "operation": "finalize_d5c_preview",
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "d5c-preview-v1",
+        "retrieval_profile_id": "lexical-v1",
+        "hierarchy": {
+          "authority_folders": [],
+          "archive_folders": []
+        },
+        "property_rules": []
+      },
+      "query_time_epoch_seconds": "2000000000",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "allowed",
+            "source_key": "a"
+          },
+          "chunk_id": "a",
+          "path": "a.md",
+          "evidence_tier": "all_terms",
+          "lexical_score": 1.0,
+          "lexical_ordinal": 0
+        }
+      ],
+      "source_signals": []
+    }
+  }
+]

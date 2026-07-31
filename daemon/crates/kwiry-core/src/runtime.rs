@@ -28,11 +28,20 @@ use crate::model::{
     LexicalSearchRequest, PreparedChunk, ResourceKey, RetrievalMetadata, SearchHit,
 };
 use crate::partition::{GenerationLayout, partition_index_dir};
+#[cfg(feature = "internal-d5c-preview")]
+use crate::ranking::RelevanceProfile;
+#[cfg(feature = "internal-d5c-preview")]
+use crate::ranking_eval::{
+    BalancedComparisonEnvelope, BalancedPlaygroundCase, BalancedPlaygroundConfiguration,
+    evaluate_balanced_playground,
+};
 use crate::reconcile::{
     AuditBudget, ObservationDecision, ObservationPolicy, PartitionScope, ReadReason, ReconcilePlan,
     ReconcileScope, RetentionReason, SourceSignals, plan_observation,
 };
 use crate::search::{PartitionReader, search_partitions, search_reader};
+#[cfg(feature = "internal-d5c-preview")]
+use crate::search::{ProfileExecution, search_partitions_with_profile, search_reader_with_profile};
 use crate::semantic::{SemanticRuntime, embedding_text, rrf_fuse_traced};
 use crate::walk::{EnumerationResult, discover_vault};
 
@@ -79,6 +88,17 @@ impl SearchRuntime {
         self.search_filtered(&request.query, request.limit.clamp(1, 100), &filters)
     }
 
+    /// Evaluates one bounded playground case without consulting the active vault.
+    /// This method exists only in explicit internal preview builds.
+    #[cfg(feature = "internal-d5c-preview")]
+    pub fn internal_d5c_evaluate(
+        &self,
+        configuration: &BalancedPlaygroundConfiguration,
+        case: &BalancedPlaygroundCase,
+    ) -> BalancedComparisonEnvelope {
+        evaluate_balanced_playground(configuration, case)
+    }
+
     pub fn search_filtered(
         &self,
         query: &str,
@@ -88,6 +108,26 @@ impl SearchRuntime {
         Ok(self
             .search_filtered_with_generation(query, limit, filters)?
             .hits)
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    pub fn search_filtered_with_profile(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+        profile: &RelevanceProfile,
+        query_time_epoch_seconds: u64,
+    ) -> Result<Vec<SearchHit>> {
+        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
+        match active.as_ref() {
+            ActiveSearchIndex::Desktop(index) => {
+                index.search_with_profile(query, limit, filters, profile, query_time_epoch_seconds)
+            }
+            ActiveSearchIndex::OpenClast(_) => Err(Error::Auth(
+                "openclast search requires an explicit authorized resource set".to_owned(),
+            )),
+        }
     }
 
     pub fn search_filtered_with_generation(
@@ -118,6 +158,32 @@ impl SearchRuntime {
         Ok(self
             .search_authorized_with_generation(query, limit, filters, resources)?
             .hits)
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    pub fn search_authorized_with_profile(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+        profile: &RelevanceProfile,
+        query_time_epoch_seconds: u64,
+    ) -> Result<Vec<SearchHit>> {
+        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
+        match active.as_ref() {
+            ActiveSearchIndex::Desktop(_) => Err(Error::Auth(
+                "authorized resource search is unavailable in the desktop profile".to_owned(),
+            )),
+            ActiveSearchIndex::OpenClast(index) => index.search_with_profile(
+                query,
+                limit,
+                filters,
+                resources,
+                profile,
+                query_time_epoch_seconds,
+            ),
+        }
     }
 
     pub fn search_authorized_with_generation(
@@ -403,6 +469,70 @@ impl PartitionedSearchIndex {
             .collect::<Vec<_>>();
         search_partitions(&readers, query, limit, filters)
     }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    fn search_with_profile(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+        profile: &RelevanceProfile,
+        query_time_epoch_seconds: u64,
+    ) -> Result<Vec<SearchHit>> {
+        if matches!(profile, RelevanceProfile::LexicalV1) {
+            return self.search(query, limit, filters, resources);
+        }
+
+        let mut selected = Vec::new();
+        let mut unique = BTreeSet::new();
+        for resource in resources {
+            if !unique.insert(resource) {
+                continue;
+            }
+            if filters
+                .vault_id
+                .as_deref()
+                .is_some_and(|vault_id| vault_id != resource.vault_id)
+                || filters
+                    .room
+                    .as_deref()
+                    .is_some_and(|room| room != resource.room_id)
+            {
+                continue;
+            }
+            let Some(index_dir) = self.partition_dirs.get(resource) else {
+                continue;
+            };
+            selected.push((resource, index_dir));
+        }
+
+        let opened = selected
+            .into_iter()
+            .map(|(resource, index_dir)| {
+                Ok((resource, self.authorized_reader(resource, index_dir)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let readers = opened
+            .iter()
+            .map(|(resource, partition)| PartitionReader {
+                index: &partition.index,
+                fields: &partition.fields,
+                reader: &partition.reader,
+                resource,
+            })
+            .collect::<Vec<_>>();
+        search_partitions_with_profile(
+            &readers,
+            query,
+            limit,
+            filters,
+            ProfileExecution {
+                profile,
+                query_time_epoch_seconds,
+            },
+        )
+    }
 }
 
 struct SearchIndex {
@@ -436,6 +566,29 @@ impl SearchIndex {
             query,
             limit,
             filters,
+        )
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    fn search_with_profile(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+        profile: &RelevanceProfile,
+        query_time_epoch_seconds: u64,
+    ) -> Result<Vec<SearchHit>> {
+        search_reader_with_profile(
+            &self.index,
+            &self.fields,
+            &self.reader,
+            query,
+            limit,
+            filters,
+            ProfileExecution {
+                profile,
+                query_time_epoch_seconds,
+            },
         )
     }
 
@@ -2492,6 +2645,145 @@ mod tests {
 
         baseline_manager.shutdown().unwrap();
         manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    #[test]
+    fn d5c_openclast_hydrates_and_reranks_only_authorized_partitions() {
+        let temporary = tempdir().unwrap();
+        let allowed = temporary.path().join("allowed");
+        let forbidden = temporary.path().join("forbidden");
+        let data = temporary.path().join("enterprise-data");
+        let baseline_data = temporary.path().join("baseline-data");
+        fs::create_dir(&allowed).unwrap();
+        fs::create_dir(&forbidden).unwrap();
+        fs::write(
+            allowed.join("preferred.md"),
+            "---\npriority: 7\n---\nauthorizedrank",
+        )
+        .unwrap();
+        fs::write(allowed.join("neutral.md"), "authorizedrank authorizedrank").unwrap();
+        for index in 0..12 {
+            fs::write(
+                forbidden.join(format!("forbidden-{index:02}.md")),
+                "---\npriority: 7\n---\nauthorizedrank authorizedrank authorizedrank",
+            )
+            .unwrap();
+        }
+
+        let allowed_registration = VaultRegistration {
+            id: "allowed".into(),
+            path: allowed.clone(),
+            room: Some("room-allowed".into()),
+        };
+        let config = openclast_config(vec![
+            allowed_registration.clone(),
+            VaultRegistration {
+                id: "forbidden".into(),
+                path: forbidden,
+                room: Some("room-forbidden".into()),
+            },
+        ]);
+        build_index(&config, &data).unwrap();
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let allowed_resource = config.resource_key(&config.vaults[0]).unwrap();
+
+        let baseline = Config {
+            vaults: vec![VaultRegistration {
+                room: None,
+                ..allowed_registration
+            }],
+            ..Config::default()
+        };
+        build_index(&baseline, &baseline_data).unwrap();
+        let baseline_runtime = SearchRuntime::new();
+        let baseline_manager =
+            IndexManager::open(baseline, &baseline_data, baseline_runtime.clone()).unwrap();
+
+        let mut profile = crate::ranking::D5cRelevanceProfile::preview();
+        profile.property_rules = vec![crate::ranking::PropertyRule {
+            id: "priority".into(),
+            property: "priority".into(),
+            predicate: crate::ranking::PropertyPredicate::Exact {
+                pointer: Some(String::new()),
+                value: crate::ranking::RankingScalar::i64(7),
+            },
+            effect: crate::ranking::RuleEffect::Boost,
+            strength: crate::ranking::RuleStrength::High,
+        }];
+        let profile = RelevanceProfile::D5cPreviewV1(profile);
+        let authorized = runtime
+            .search_authorized_with_profile(
+                "authorizedrank",
+                20,
+                &SearchFilters::default(),
+                std::slice::from_ref(&allowed_resource),
+                &profile,
+                2_000_000_000,
+            )
+            .unwrap();
+        let physical_baseline = baseline_runtime
+            .search_filtered_with_profile(
+                "authorizedrank",
+                20,
+                &SearchFilters::default(),
+                &profile,
+                2_000_000_000,
+            )
+            .unwrap();
+        assert_eq!(authorized[0].path, "preferred.md");
+        assert_eq!(
+            authorized
+                .iter()
+                .map(|hit| (&hit.chunk_id, &hit.path, hit.score))
+                .collect::<Vec<_>>(),
+            physical_baseline
+                .iter()
+                .map(|hit| (&hit.chunk_id, &hit.path, hit.score))
+                .collect::<Vec<_>>()
+        );
+        assert!(authorized.iter().all(|hit| hit.vault_id == "allowed"));
+
+        baseline_manager.shutdown().unwrap();
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    #[test]
+    fn balanced_playground_evaluates_fixture_cases_without_consulting_the_active_index() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/retrieval/d5c-balanced/corpus.json"
+        ))
+        .unwrap();
+        let evaluations = corpus["evaluations"].as_array().unwrap();
+        let runtime = SearchRuntime::new();
+        assert!(runtime.generation().is_none());
+
+        for (id, expected_kind) in [
+            ("same-tier-recency-native", "strict_balanced"),
+            (
+                "future-untrusted-clock-native",
+                "neutralized_counterfactual",
+            ),
+            ("candidate-cardinality-over-limit", "fatal"),
+        ] {
+            let request = &evaluations
+                .iter()
+                .find(|evaluation| evaluation["id"] == id)
+                .unwrap()["request"];
+            let configuration: BalancedPlaygroundConfiguration =
+                serde_json::from_value(request["configuration"].clone()).unwrap();
+            let case: BalancedPlaygroundCase =
+                serde_json::from_value(request["case"].clone()).unwrap();
+            let envelope = runtime.internal_d5c_evaluate(&configuration, &case);
+            assert_eq!(
+                serde_json::to_value(&envelope).unwrap()["disposition"]["kind"],
+                expected_kind,
+                "{id}"
+            );
+        }
+        assert!(runtime.generation().is_none());
     }
 
     #[test]

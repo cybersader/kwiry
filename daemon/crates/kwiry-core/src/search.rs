@@ -2,7 +2,11 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+#[cfg(feature = "internal-d5c-preview")]
+use tantivy::collector::DocSetCollector;
 use tantivy::collector::{Collector, Count, SegmentCollector, TopDocs};
+#[cfg(feature = "internal-d5c-preview")]
+use tantivy::query::TermSetQuery;
 use tantivy::query::{
     Bm25StatisticsProvider, BooleanQuery, BoostQuery, ConstScoreQuery, DisjunctionMaxQuery, Occur,
     PhraseQuery, Query, QueryParser, RegexQuery, TermQuery,
@@ -16,6 +20,14 @@ use tantivy::{DocId, Index, IndexReader, Score, Searcher, SegmentOrdinal, Segmen
 use crate::api::SearchFilters;
 use crate::error::{Error, Result};
 use crate::index::{Fields, open_index};
+#[cfg(feature = "internal-d5c-preview")]
+use crate::index::{
+    property_date_term, property_exact_term, property_f64_term, property_i64_term,
+    property_name_term, property_path_date_term, property_path_exact_term, property_path_f64_term,
+    property_path_i64_term, property_path_u64_term, property_u64_term,
+};
+#[cfg(feature = "internal-d5c-preview")]
+use crate::model::PropertyValue;
 use crate::model::{LexicalSearchRequest, ResourceKey, SearchHit};
 #[cfg(test)]
 use crate::query::classify_query;
@@ -24,6 +36,12 @@ use crate::query::{
     QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageKind, QueryExecutionDisposition,
     QueryField, QueryFieldGroup, QueryMatchOperator, QueryMetadataField, QueryMetadataProbe,
     QueryPlanKind, QueryTermProjection, QueryTermSupportObservation, prepare_lexical_query,
+};
+#[cfg(feature = "internal-d5c-preview")]
+use crate::ranking::{
+    D5cRelevanceProfile, LexicalEvidenceTier, MAX_RANKING_WORK_UNITS, PropertyPredicate,
+    PropertyRule, QualifiedSourceId, RERANK_INPUT_SCHEMA_VERSION, RankingScalar, RelevanceProfile,
+    RerankCandidate, RerankInput, SourceSignalObservation, rerank_candidates_with_initial_work,
 };
 
 const MAX_RESULTS: usize = 100;
@@ -36,6 +54,8 @@ const BOOST_CONTENT: f32 = 1.0;
 const BOOST_EXACT_METADATA: f32 = 12.0;
 const BOOST_PHRASE: f32 = 4.0;
 const BOOST_CONTENT_IDENTIFIER: f32 = 5.0;
+#[cfg(feature = "internal-d5c-preview")]
+const DESKTOP_AUTHORIZATION_SCOPE: &str = "desktop";
 
 pub fn search_index(data_dir: &Path, request: &LexicalSearchRequest) -> Result<Vec<SearchHit>> {
     let (index, fields) = open_index(data_dir)?;
@@ -82,6 +102,49 @@ pub(crate) fn search_reader(
         limit.min(MAX_RESULTS),
         filters,
         &searcher,
+    )
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+pub(crate) struct ProfileExecution<'a> {
+    pub profile: &'a RelevanceProfile,
+    pub query_time_epoch_seconds: u64,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+pub(crate) fn search_reader_with_profile(
+    index: &Index,
+    fields: &Fields,
+    reader: &IndexReader,
+    query_text: &str,
+    limit: usize,
+    filters: &SearchFilters,
+    execution: ProfileExecution<'_>,
+) -> Result<Vec<SearchHit>> {
+    if matches!(execution.profile, RelevanceProfile::LexicalV1) {
+        return search_reader(index, fields, reader, query_text, limit, filters);
+    }
+    validate_d5c_profile(execution.profile)?;
+    if query_text.trim().is_empty() {
+        return Err(Error::Query("query must not be empty".into()));
+    }
+
+    let searcher = reader.searcher();
+    let context = NativeSearchContext {
+        index,
+        fields,
+        searcher: &searcher,
+        resource: None,
+    };
+    let resolved = resolve_query_plan(std::slice::from_ref(&context), query_text)?;
+    execute_d5c_profile(
+        std::slice::from_ref(&context),
+        &resolved,
+        limit.min(MAX_RESULTS),
+        filters,
+        &searcher,
+        execution.profile,
+        execution.query_time_epoch_seconds,
     )
 }
 
@@ -167,6 +230,56 @@ pub(crate) fn search_partitions(
         limit.min(MAX_RESULTS),
         filters,
         &statistics,
+    )
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+pub(crate) fn search_partitions_with_profile(
+    partitions: &[PartitionReader<'_>],
+    query_text: &str,
+    limit: usize,
+    filters: &SearchFilters,
+    execution: ProfileExecution<'_>,
+) -> Result<Vec<SearchHit>> {
+    if matches!(execution.profile, RelevanceProfile::LexicalV1) {
+        return search_partitions(partitions, query_text, limit, filters);
+    }
+    validate_d5c_profile(execution.profile)?;
+    if query_text.trim().is_empty() {
+        return Err(Error::Query("query must not be empty".into()));
+    }
+    if partitions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut ordered_partitions: Vec<_> = partitions.iter().collect();
+    ordered_partitions.sort_by(|left, right| left.resource.cmp(right.resource));
+    let searchers: Vec<_> = ordered_partitions
+        .iter()
+        .map(|partition| partition.reader.searcher())
+        .collect();
+    let contexts: Vec<_> = ordered_partitions
+        .iter()
+        .zip(&searchers)
+        .map(|(partition, searcher)| NativeSearchContext {
+            index: partition.index,
+            fields: partition.fields,
+            searcher,
+            resource: Some(partition.resource),
+        })
+        .collect();
+    let statistics = AuthorizedStatistics {
+        searchers: searchers.clone(),
+    };
+    let resolved = resolve_query_plan(&contexts, query_text)?;
+    execute_d5c_profile(
+        &contexts,
+        &resolved,
+        limit.min(MAX_RESULTS),
+        filters,
+        &statistics,
+        execution.profile,
+        execution.query_time_epoch_seconds,
     )
 }
 
@@ -393,6 +506,726 @@ fn execute_lexical_plan(
             "query plan reached execution without finalized evidence".to_owned(),
         )),
     }
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "internal-d5c-preview")]
+struct NativeRerankHit {
+    source: QualifiedSourceId,
+    mtime: u64,
+    hit: SearchHit,
+    evidence_tier: LexicalEvidenceTier,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg(feature = "internal-d5c-preview")]
+struct NativeRerankIdentity {
+    source: QualifiedSourceId,
+    chunk_id: String,
+    path: String,
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+impl NativeRerankHit {
+    fn identity(&self) -> NativeRerankIdentity {
+        NativeRerankIdentity {
+            source: self.source.clone(),
+            chunk_id: self.hit.chunk_id.clone(),
+            path: self.hit.path.clone(),
+        }
+    }
+
+    fn rerank_candidate(&self) -> RerankCandidate {
+        RerankCandidate {
+            source: self.source.clone(),
+            chunk_id: self.hit.chunk_id.clone(),
+            path: self.hit.path.clone(),
+            evidence_tier: self.evidence_tier,
+            lexical_score: self.hit.score,
+        }
+    }
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn execute_d5c_profile(
+    contexts: &[NativeSearchContext<'_>],
+    resolved: &ResolvedLexicalPlan,
+    limit: usize,
+    filters: &SearchFilters,
+    statistics: &dyn Bm25StatisticsProvider,
+    profile: &RelevanceProfile,
+    query_time_epoch_seconds: u64,
+) -> Result<Vec<SearchHit>> {
+    let RelevanceProfile::D5cPreviewV1(d5c) = profile else {
+        return Err(Error::Query(
+            "D5C execution requires the d5c-preview-v1 profile".to_owned(),
+        ));
+    };
+    d5c.validate().map_err(ranking_error)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let candidates = execute_lexical_candidates(
+        contexts,
+        resolved,
+        crate::ranking::MAX_RERANK_CANDIDATES,
+        filters,
+        statistics,
+    )?;
+    let (source_signals, hydration_work_units) =
+        hydrate_source_signals(contexts, &candidates, d5c)?;
+    let input = RerankInput {
+        schema_version: RERANK_INPUT_SCHEMA_VERSION,
+        query_time_epoch_seconds,
+        candidates: candidates
+            .iter()
+            .map(NativeRerankHit::rerank_candidate)
+            .collect(),
+        source_signals,
+    };
+    let ranked = rerank_candidates_with_initial_work(profile, &input, hydration_work_units)
+        .map_err(ranking_error)?;
+
+    let mut hits_by_identity = BTreeMap::new();
+    for candidate in candidates {
+        if hits_by_identity
+            .insert(candidate.identity(), candidate.hit)
+            .is_some()
+        {
+            return Err(Error::Index(
+                "D5C candidate pool contains a duplicate qualified chunk".to_owned(),
+            ));
+        }
+    }
+    let mut hits = Vec::with_capacity(ranked.candidates().len().min(limit));
+    for candidate in ranked.into_candidates().into_iter().take(limit) {
+        let identity = NativeRerankIdentity {
+            source: candidate.source,
+            chunk_id: candidate.chunk_id,
+            path: candidate.path,
+        };
+        let hit = hits_by_identity.remove(&identity).ok_or_else(|| {
+            Error::Index("D5C reranker returned an unknown qualified chunk".to_owned())
+        })?;
+        hits.push(hit);
+    }
+    Ok(hits)
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn execute_lexical_candidates(
+    contexts: &[NativeSearchContext<'_>],
+    resolved: &ResolvedLexicalPlan,
+    limit: usize,
+    filters: &SearchFilters,
+    statistics: &dyn Bm25StatisticsProvider,
+) -> Result<Vec<NativeRerankHit>> {
+    resolved
+        .plan
+        .validate()
+        .map_err(|error| Error::Query(error.to_string()))?;
+    match resolved.plan.execution {
+        QueryExecutionDisposition::EmptyNoEvidence => Ok(Vec::new()),
+        QueryExecutionDisposition::ExplicitBypass => {
+            execute_explicit_candidates(contexts, &resolved.plan, limit, filters, statistics)
+        }
+        QueryExecutionDisposition::Ready => {
+            execute_evidence_candidates(contexts, resolved, limit, filters, statistics)
+        }
+        QueryExecutionDisposition::AwaitingEvidence => Err(Error::Query(
+            "query plan reached D5C execution without finalized evidence".to_owned(),
+        )),
+    }
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn execute_explicit_candidates(
+    contexts: &[NativeSearchContext<'_>],
+    plan: &LexicalQueryPlan,
+    limit: usize,
+    filters: &SearchFilters,
+    statistics: &dyn Bm25StatisticsProvider,
+) -> Result<Vec<NativeRerankHit>> {
+    if plan.assistance != QueryAssistanceEligibility::ExplicitSyntaxBypass
+        || plan.kind != QueryPlanKind::Explicit
+        || plan.match_operator != QueryMatchOperator::Explicit
+    {
+        return Err(Error::Query(
+            "explicit query plan is not an unassisted bypass".to_owned(),
+        ));
+    }
+
+    let mut hits = Vec::new();
+    for context in contexts {
+        let parsed = if let Some(prefix) =
+            simple_explicit_prefix_query(context.index, context.fields, &plan.query)?
+        {
+            prefix
+        } else {
+            let parser = lexical_parser(context.index, context.fields);
+            parser
+                .parse_query(&plan.query)
+                .map_err(|error| Error::Query(error.to_string()))?
+        };
+        let query = filtered_query(parsed, filters, context.fields)?;
+        let partition_hits = collect_stable_rerank_hits(
+            context,
+            query.as_ref(),
+            limit,
+            statistics,
+            LexicalEvidenceTier::Explicit,
+        )?;
+        merge_bounded_rerank_hits(&mut hits, partition_hits, limit);
+    }
+    Ok(hits)
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn execute_evidence_candidates(
+    contexts: &[NativeSearchContext<'_>],
+    resolved: &ResolvedLexicalPlan,
+    limit: usize,
+    filters: &SearchFilters,
+    statistics: &dyn Bm25StatisticsProvider,
+) -> Result<Vec<NativeRerankHit>> {
+    let plan = &resolved.plan;
+    let mut hits = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut collected_candidates = 0_usize;
+
+    for stage in &plan.evidence_stages {
+        if hits.len() == limit || collected_candidates == plan.bounds.max_total_candidates {
+            break;
+        }
+        let stage_limit = stage
+            .max_candidates
+            .min(plan.bounds.max_total_candidates - collected_candidates);
+        if stage_limit == 0 {
+            break;
+        }
+
+        let mut stage_hits = Vec::new();
+        for context in contexts {
+            let Some(stage_query) = compile_evidence_stage(
+                context.index,
+                context.fields,
+                plan,
+                stage,
+                &resolved.prefix_expansions,
+            )?
+            else {
+                continue;
+            };
+            let query = filtered_query(stage_query, filters, context.fields)?;
+            let partition_hits = collect_stable_rerank_hits(
+                context,
+                query.as_ref(),
+                stage_limit,
+                statistics,
+                stage.kind.into(),
+            )?;
+            merge_bounded_rerank_hits(&mut stage_hits, partition_hits, stage_limit);
+        }
+        collected_candidates += stage_hits.len();
+        for hit in stage_hits {
+            if seen.insert(hit.identity()) {
+                hits.push(hit);
+                if hits.len() == limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(hits)
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn collect_stable_rerank_hits(
+    context: &NativeSearchContext<'_>,
+    query: &dyn Query,
+    limit: usize,
+    statistics: &dyn Bm25StatisticsProvider,
+    evidence_tier: LexicalEvidenceTier,
+) -> Result<Vec<NativeRerankHit>> {
+    let source_key_field = context.fields.source_key.ok_or_else(|| {
+        Error::Index("active generation is missing the source_key field".to_owned())
+    })?;
+    let collector = StableDocCollector {
+        limit,
+        chunk_id: context.fields.chunk_id,
+        path: context.fields.path,
+    };
+    let documents = context
+        .searcher
+        .search_with_statistics_provider(query, &collector, statistics)
+        .map_err(|error| Error::Query(error.to_string()))?;
+    let snippet_generator =
+        SnippetGenerator::create(context.searcher, query, context.fields.content)
+            .map_err(|error| Error::Query(error.to_string()))?;
+    let mut hits = Vec::with_capacity(documents.len());
+    for ranked in documents {
+        validate_document_resource(&ranked.document, context.fields, context.resource)?;
+        let source_key = text(&ranked.document, source_key_field)?.to_owned();
+        let mtime = u64_value(&ranked.document, context.fields.mtime)?;
+        let hit = hit_from_document(
+            &ranked.document,
+            context.fields,
+            ranked.score,
+            Some(&snippet_generator),
+        )?;
+        hits.push(NativeRerankHit {
+            source: QualifiedSourceId {
+                authorization_scope: authorization_scope(context.resource),
+                source_key,
+            },
+            mtime,
+            hit,
+            evidence_tier,
+        });
+    }
+    Ok(hits)
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn merge_bounded_rerank_hits(
+    target: &mut Vec<NativeRerankHit>,
+    incoming: Vec<NativeRerankHit>,
+    limit: usize,
+) {
+    target.extend(incoming);
+    target.sort_by(|left, right| compare_hits(&left.hit, &right.hit));
+    let mut seen = BTreeSet::new();
+    target.retain(|hit| seen.insert(hit.identity()));
+    target.truncate(limit);
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn hydrate_source_signals(
+    contexts: &[NativeSearchContext<'_>],
+    candidates: &[NativeRerankHit],
+    profile: &D5cRelevanceProfile,
+) -> Result<(Vec<SourceSignalObservation>, usize)> {
+    let mut signals = BTreeMap::<QualifiedSourceId, SourceSignalObservation>::new();
+    let mut candidate_paths = BTreeMap::<QualifiedSourceId, String>::new();
+    for candidate in candidates {
+        if candidate_paths
+            .insert(candidate.source.clone(), candidate.hit.path.clone())
+            .is_some_and(|previous| previous != candidate.hit.path)
+        {
+            return Err(Error::Index(
+                "D5C candidate source maps to inconsistent paths".to_owned(),
+            ));
+        }
+        let signal =
+            signals
+                .entry(candidate.source.clone())
+                .or_insert_with(|| SourceSignalObservation {
+                    source: candidate.source.clone(),
+                    source_mtime_epoch_seconds: Some(candidate.mtime),
+                    matched_property_rule_ids: Vec::new(),
+                    present_properties: Vec::new(),
+                    property_values: Vec::new(),
+                });
+        if signal.source_mtime_epoch_seconds != Some(candidate.mtime) {
+            return Err(Error::Index(
+                "D5C candidate source maps to inconsistent mtimes".to_owned(),
+            ));
+        }
+    }
+
+    let mut hydration_work_units = 0_usize;
+    for context in contexts {
+        let scope = authorization_scope(context.resource);
+        let source_keys: BTreeSet<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.source.authorization_scope == scope)
+            .map(|candidate| candidate.source.source_key.clone())
+            .collect();
+        if source_keys.is_empty() {
+            continue;
+        }
+        hydrate_context_source_signals(
+            context,
+            &source_keys,
+            &candidate_paths,
+            profile,
+            &mut signals,
+            &mut hydration_work_units,
+        )?;
+    }
+
+    Ok((signals.into_values().collect(), hydration_work_units))
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn hydrate_context_source_signals(
+    context: &NativeSearchContext<'_>,
+    source_keys: &BTreeSet<String>,
+    candidate_paths: &BTreeMap<QualifiedSourceId, String>,
+    profile: &D5cRelevanceProfile,
+    signals: &mut BTreeMap<QualifiedSourceId, SourceSignalObservation>,
+    hydration_work_units: &mut usize,
+) -> Result<()> {
+    let source_key_field = context.fields.source_key.ok_or_else(|| {
+        Error::Index("active generation is missing the source_key field".to_owned())
+    })?;
+    let source_filter = || {
+        Box::new(TermSetQuery::new(
+            source_keys
+                .iter()
+                .map(|key| Term::from_field_text(source_key_field, key)),
+        )) as Box<dyn Query>
+    };
+    let owner_filter = || {
+        Box::new(TermQuery::new(
+            Term::from_field_u64(context.fields.source_property_owner, 1),
+            IndexRecordOption::Basic,
+        )) as Box<dyn Query>
+    };
+    let owner_query = BooleanQuery::new(vec![
+        (Occur::Must, source_filter()),
+        (Occur::Must, owner_filter()),
+    ]);
+    let owner_addresses = context
+        .searcher
+        .search(&owner_query, &DocSetCollector)
+        .map_err(|error| Error::Index(error.to_string()))?;
+    let mut owners_seen = BTreeSet::new();
+    for address in owner_addresses {
+        let document = context
+            .searcher
+            .doc::<TantivyDocument>(address)
+            .map_err(|error| Error::Index(error.to_string()))?;
+        validate_document_resource(&document, context.fields, context.resource)?;
+        let source_key = text(&document, source_key_field)?.to_owned();
+        if !source_keys.contains(&source_key) || !owners_seen.insert(source_key.clone()) {
+            return Err(Error::Index(
+                "D5C source-owner hydration returned an unexpected duplicate".to_owned(),
+            ));
+        }
+        let source = QualifiedSourceId {
+            authorization_scope: authorization_scope(context.resource),
+            source_key,
+        };
+        let expected_path = candidate_paths.get(&source).ok_or_else(|| {
+            Error::Index("D5C source-owner hydration escaped the candidate set".to_owned())
+        })?;
+        if text(&document, context.fields.path)? != expected_path {
+            return Err(Error::Index(
+                "D5C source-owner path disagrees with its candidates".to_owned(),
+            ));
+        }
+        let signal = signals.get_mut(&source).ok_or_else(|| {
+            Error::Index("D5C source-owner hydration has no candidate signal".to_owned())
+        })?;
+        signal.source_mtime_epoch_seconds = Some(u64_value(&document, context.fields.mtime)?);
+    }
+    if owners_seen.len() != source_keys.len() {
+        return Err(Error::Index(
+            "D5C source-owner hydration is incomplete".to_owned(),
+        ));
+    }
+
+    for rule in &profile.property_rules {
+        let property_query = compile_property_rule_query(context, rule, hydration_work_units)?;
+        let query = BooleanQuery::new(vec![
+            (Occur::Must, source_filter()),
+            (Occur::Must, owner_filter()),
+            (Occur::Must, property_query),
+        ]);
+        let addresses = context
+            .searcher
+            .search(&query, &DocSetCollector)
+            .map_err(|error| Error::Index(error.to_string()))?;
+        for address in addresses {
+            let document = context
+                .searcher
+                .doc::<TantivyDocument>(address)
+                .map_err(|error| Error::Index(error.to_string()))?;
+            validate_document_resource(&document, context.fields, context.resource)?;
+            let source = QualifiedSourceId {
+                authorization_scope: authorization_scope(context.resource),
+                source_key: text(&document, source_key_field)?.to_owned(),
+            };
+            let signal = signals.get_mut(&source).ok_or_else(|| {
+                Error::Index("D5C property hydration escaped the candidate set".to_owned())
+            })?;
+            signal.matched_property_rule_ids.push(rule.id.clone());
+        }
+    }
+    for signal in signals.values_mut() {
+        if signal.source.authorization_scope == authorization_scope(context.resource) {
+            signal.matched_property_rule_ids.sort();
+            signal.matched_property_rule_ids.dedup();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn compile_property_rule_query(
+    context: &NativeSearchContext<'_>,
+    rule: &PropertyRule,
+    hydration_work_units: &mut usize,
+) -> Result<Box<dyn Query>> {
+    charge_native_ranking_work(hydration_work_units, 1)?;
+    let fields = context.fields;
+    match &rule.predicate {
+        PropertyPredicate::Presence => Ok(Box::new(TermQuery::new(
+            Term::from_field_text(fields.property_names, &property_name_term(&rule.property)),
+            IndexRecordOption::Basic,
+        ))),
+        PropertyPredicate::Exact { pointer, value } => {
+            let value = property_value_from_ranking_scalar(value)?;
+            let (field, term) = if let Some(pointer) = pointer {
+                (
+                    fields.property_path_exact,
+                    property_path_exact_term(&rule.property, pointer, &value),
+                )
+            } else {
+                (
+                    fields.property_exact,
+                    property_exact_term(&rule.property, &value),
+                )
+            };
+            Ok(Box::new(TermQuery::new(
+                Term::from_field_text(field, &term),
+                IndexRecordOption::Basic,
+            )))
+        }
+        PropertyPredicate::I64Range { pointer, min, max } => {
+            let min = min
+                .as_deref()
+                .map(parse_i64)
+                .transpose()?
+                .unwrap_or(i64::MIN);
+            let max = max
+                .as_deref()
+                .map(parse_i64)
+                .transpose()?
+                .unwrap_or(i64::MAX);
+            let (field, lower, upper) = if let Some(pointer) = pointer {
+                (
+                    fields.property_path_i64,
+                    property_path_i64_term(&rule.property, pointer, min),
+                    property_path_i64_term(&rule.property, pointer, max),
+                )
+            } else {
+                (
+                    fields.property_i64,
+                    property_i64_term(&rule.property, min),
+                    property_i64_term(&rule.property, max),
+                )
+            };
+            bounded_string_range_query(context.searcher, field, lower, upper, hydration_work_units)
+        }
+        PropertyPredicate::U64Range { pointer, min, max } => {
+            let min = min.as_deref().map(parse_u64).transpose()?.unwrap_or(0);
+            let max = max
+                .as_deref()
+                .map(parse_u64)
+                .transpose()?
+                .unwrap_or(u64::MAX);
+            let (field, lower, upper) = if let Some(pointer) = pointer {
+                (
+                    fields.property_path_u64,
+                    property_path_u64_term(&rule.property, pointer, min),
+                    property_path_u64_term(&rule.property, pointer, max),
+                )
+            } else {
+                (
+                    fields.property_u64,
+                    property_u64_term(&rule.property, min),
+                    property_u64_term(&rule.property, max),
+                )
+            };
+            bounded_string_range_query(context.searcher, field, lower, upper, hydration_work_units)
+        }
+        PropertyPredicate::F64Range { pointer, min, max } => {
+            let mut min = min
+                .as_deref()
+                .map(parse_f64_bits)
+                .transpose()?
+                .unwrap_or(-f64::MAX);
+            let mut max = max
+                .as_deref()
+                .map(parse_f64_bits)
+                .transpose()?
+                .unwrap_or(f64::MAX);
+            if min == 0.0 {
+                min = -0.0;
+            }
+            if max == 0.0 {
+                max = 0.0;
+            }
+            let (field, lower, upper) = if let Some(pointer) = pointer {
+                (
+                    fields.property_path_f64,
+                    property_path_f64_term(&rule.property, pointer, min),
+                    property_path_f64_term(&rule.property, pointer, max),
+                )
+            } else {
+                (
+                    fields.property_f64,
+                    property_f64_term(&rule.property, min),
+                    property_f64_term(&rule.property, max),
+                )
+            };
+            bounded_string_range_query(context.searcher, field, lower, upper, hydration_work_units)
+        }
+        PropertyPredicate::DateRange { pointer, min, max } => {
+            let min = min.as_deref().unwrap_or("0000-01-01");
+            let max = max.as_deref().unwrap_or("9999-12-31");
+            let (field, lower, upper) = if let Some(pointer) = pointer {
+                (
+                    fields.property_path_date,
+                    property_path_date_term(&rule.property, pointer, min),
+                    property_path_date_term(&rule.property, pointer, max),
+                )
+            } else {
+                (
+                    fields.property_date,
+                    property_date_term(&rule.property, min),
+                    property_date_term(&rule.property, max),
+                )
+            };
+            bounded_string_range_query(context.searcher, field, lower, upper, hydration_work_units)
+        }
+    }
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn bounded_string_range_query(
+    searcher: &Searcher,
+    field: Field,
+    lower: String,
+    upper: String,
+    hydration_work_units: &mut usize,
+) -> Result<Box<dyn Query>> {
+    let mut terms = BTreeSet::new();
+    for segment in searcher.segment_readers() {
+        let inverted = segment
+            .inverted_index(field)
+            .map_err(|error| Error::Index(error.to_string()))?;
+        let mut stream = inverted
+            .terms()
+            .range()
+            .ge(lower.as_bytes())
+            .le(upper.as_bytes())
+            .into_stream()
+            .map_err(|error| Error::Index(error.to_string()))?;
+        while stream.advance() {
+            charge_native_ranking_work(hydration_work_units, 1)?;
+            let value = std::str::from_utf8(stream.key()).map_err(|_| {
+                Error::Index("D5C property range encountered a non-UTF-8 term".to_owned())
+            })?;
+            terms.insert(value.to_owned());
+        }
+    }
+    Ok(Box::new(TermSetQuery::new(
+        terms
+            .into_iter()
+            .map(|value| Term::from_field_text(field, &value)),
+    )))
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn charge_native_ranking_work(work_units: &mut usize, amount: usize) -> Result<()> {
+    *work_units = work_units
+        .checked_add(amount)
+        .filter(|work| *work <= MAX_RANKING_WORK_UNITS)
+        .ok_or_else(|| {
+            Error::Query(
+                "ranking_work_limit_exceeded: native signal hydration exceeded its deterministic limit"
+                    .to_owned(),
+            )
+        })?;
+    Ok(())
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn property_value_from_ranking_scalar(value: &RankingScalar) -> Result<PropertyValue> {
+    match value {
+        RankingScalar::Null => Ok(PropertyValue::Null),
+        RankingScalar::Boolean(value) => Ok(PropertyValue::Bool(*value)),
+        RankingScalar::I64(value) => Ok(PropertyValue::I64(parse_i64(value)?)),
+        RankingScalar::U64(value) => Ok(PropertyValue::U64(parse_u64(value)?)),
+        RankingScalar::F64(value) => Ok(PropertyValue::F64(parse_f64_bits(value)?)),
+        RankingScalar::String(value) => Ok(PropertyValue::String(value.clone())),
+        RankingScalar::Date(value) => Ok(PropertyValue::String(value.clone())),
+    }
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn parse_i64(value: &str) -> Result<i64> {
+    value.parse().map_err(|_| {
+        Error::Query("invalid_relevance_profile: malformed i64 ranking value".to_owned())
+    })
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn parse_u64(value: &str) -> Result<u64> {
+    value.parse().map_err(|_| {
+        Error::Query("invalid_relevance_profile: malformed u64 ranking value".to_owned())
+    })
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn parse_f64_bits(value: &str) -> Result<f64> {
+    let bits = u64::from_str_radix(value, 16).map_err(|_| {
+        Error::Query("invalid_relevance_profile: malformed f64 ranking value".to_owned())
+    })?;
+    let value = f64::from_bits(bits);
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(Error::Query(
+            "invalid_relevance_profile: non-finite f64 ranking value".to_owned(),
+        ))
+    }
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn authorization_scope(resource: Option<&ResourceKey>) -> String {
+    resource.map_or_else(
+        || DESKTOP_AUTHORIZATION_SCOPE.to_owned(),
+        |resource| format!("openclast:{}", crate::partition::partition_id(resource)),
+    )
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn validate_document_resource(
+    document: &TantivyDocument,
+    fields: &Fields,
+    resource: Option<&ResourceKey>,
+) -> Result<()> {
+    if let Some(resource) = resource {
+        let vault_id = text(document, fields.vault_id)?;
+        let room_id = text(document, fields.room)?;
+        if vault_id != resource.vault_id || room_id != resource.room_id {
+            return Err(Error::Index(format!(
+                "document resource mismatch in partition {}/{}/{}",
+                resource.tenant_id, resource.vault_id, resource.room_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn validate_d5c_profile(profile: &RelevanceProfile) -> Result<()> {
+    let RelevanceProfile::D5cPreviewV1(profile) = profile else {
+        return Err(Error::Query(
+            "D5C execution requires the d5c-preview-v1 profile".to_owned(),
+        ));
+    };
+    profile.validate().map_err(ranking_error)
+}
+
+#[cfg(feature = "internal-d5c-preview")]
+fn ranking_error(error: crate::ranking::RankingError) -> Error {
+    Error::Query(format!("{}: {}", error.code, error.message))
 }
 
 fn execute_explicit(
@@ -1272,6 +2105,14 @@ fn text(document: &TantivyDocument, field: Field) -> Result<&str> {
         .ok_or_else(|| Error::Index(format!("stored field {field:?} is missing or not text")))
 }
 
+#[cfg(feature = "internal-d5c-preview")]
+fn u64_value(document: &TantivyDocument, field: Field) -> Result<u64> {
+    document
+        .get_first(field)
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| Error::Index(format!("stored field {field:?} is missing or not u64")))
+}
+
 fn decode_json<T: serde::de::DeserializeOwned>(source: &str, field: &str) -> Result<T> {
     serde_json::from_str(source)
         .map_err(|error| Error::Index(format!("invalid stored {field}: {error}")))
@@ -1291,6 +2132,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    #[cfg(feature = "internal-d5c-preview")]
+    use filetime::{FileTime, set_file_mtime};
     use serde::Deserialize;
     use tempfile::tempdir;
 
@@ -1350,6 +2193,47 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    fn d5c_search(
+        data: &Path,
+        query: &str,
+        limit: usize,
+        profile: D5cRelevanceProfile,
+        query_time_epoch_seconds: u64,
+        filters: &SearchFilters,
+    ) -> Vec<SearchHit> {
+        let (index, fields) = open_index(data).unwrap();
+        let reader = index.reader().unwrap();
+        let profile = RelevanceProfile::D5cPreviewV1(profile);
+        search_reader_with_profile(
+            &index,
+            &fields,
+            &reader,
+            query,
+            limit,
+            filters,
+            ProfileExecution {
+                profile: &profile,
+                query_time_epoch_seconds,
+            },
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "internal-d5c-preview")]
+    fn property_boost(id: &str, property: &str, value: RankingScalar) -> PropertyRule {
+        PropertyRule {
+            id: id.to_owned(),
+            property: property.to_owned(),
+            predicate: PropertyPredicate::Exact {
+                pointer: Some(String::new()),
+                value,
+            },
+            effect: crate::ranking::RuleEffect::Boost,
+            strength: crate::ranking::RuleStrength::High,
+        }
     }
 
     #[test]
@@ -2057,6 +2941,750 @@ mod tests {
         )
         .unwrap();
         assert!(explicit_and.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn native_lexical_v1_profile_is_exact_and_invalid_d5c_never_falls_back() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("note.md"), "profilecompat profilecompat").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let legacy = search_reader(
+            &index,
+            &fields,
+            &reader,
+            "profilecompat",
+            20,
+            &SearchFilters::default(),
+        )
+        .unwrap();
+        let profiled = search_reader_with_profile(
+            &index,
+            &fields,
+            &reader,
+            "profilecompat",
+            20,
+            &SearchFilters::default(),
+            ProfileExecution {
+                profile: &RelevanceProfile::LexicalV1,
+                query_time_epoch_seconds: 2_000_000_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&profiled).unwrap(),
+            serde_json::to_vec(&legacy).unwrap()
+        );
+
+        let mut invalid = D5cRelevanceProfile::preview();
+        invalid.profile_id = "malformed-preview".into();
+        let error = search_reader_with_profile(
+            &index,
+            &fields,
+            &reader,
+            "profilecompat",
+            20,
+            &SearchFilters::default(),
+            ProfileExecution {
+                profile: &RelevanceProfile::D5cPreviewV1(invalid),
+                query_time_epoch_seconds: 2_000_000_000,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid_relevance_profile"));
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn native_d5c_recency_reorders_only_within_lexical_evidence_bands() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        let old_exact = vault.join("old-exact.md");
+        let recent_phrase = vault.join("recent-phrase.md");
+        let old_same_tier = vault.join("old-same-tier.md");
+        let recent_same_tier = vault.join("recent-same-tier.md");
+        fs::write(
+            &old_exact,
+            "---\ntitle: Native Ranking\n---\ncanonical material",
+        )
+        .unwrap();
+        fs::write(&recent_phrase, "native ranking in a recent body").unwrap();
+        fs::write(&old_same_tier, "same intervening words recency").unwrap();
+        fs::write(&recent_same_tier, "same different words recency").unwrap();
+        let old_time = FileTime::from_unix_time(1_600_000_000, 0);
+        let recent_time = FileTime::from_unix_time(1_999_999_900, 0);
+        set_file_mtime(&old_exact, old_time).unwrap();
+        set_file_mtime(&old_same_tier, old_time).unwrap();
+        set_file_mtime(&recent_phrase, recent_time).unwrap();
+        set_file_mtime(&recent_same_tier, recent_time).unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let mut profile = D5cRelevanceProfile::preview();
+        profile.recency = Some(crate::ranking::RecencyRule {
+            id: "recent".into(),
+            clock: crate::ranking::RecencyClock::SourceMtime,
+            horizon: crate::ranking::RecencyHorizon::Week,
+            strength: crate::ranking::RuleStrength::High,
+        });
+        let lexical = search(&data, "native ranking", 20);
+        let reranked = d5c_search(
+            &data,
+            "native ranking",
+            20,
+            profile.clone(),
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(reranked[0].path, "old-exact.md");
+        assert_eq!(reranked[1].path, "recent-phrase.md");
+        let lexical_scores: BTreeMap<_, _> = lexical
+            .iter()
+            .map(|hit| (hit.chunk_id.as_str(), hit.score))
+            .collect();
+        assert!(
+            reranked.iter().all(|hit| {
+                lexical_scores.get(hit.chunk_id.as_str()).copied() == Some(hit.score)
+            })
+        );
+
+        let same_tier = d5c_search(
+            &data,
+            "same recency",
+            20,
+            profile,
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(same_tier[0].path, "recent-same-tier.md");
+        assert_eq!(same_tier[1].path, "old-same-tier.md");
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn native_d5c_typed_property_fans_out_to_a_non_owner_chunk() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("typed.md"),
+            format!(
+                "---\npriority: 7\n---\n# Intro\n{}\n# Target\nfanoutneedle",
+                "filler ".repeat(2_000)
+            ),
+        )
+        .unwrap();
+        fs::write(
+            vault.join("string.md"),
+            "---\npriority: \"7\"\n---\nfanoutneedle fanoutneedle fanoutneedle",
+        )
+        .unwrap();
+        fs::write(vault.join("missing.md"), "fanoutneedle fanoutneedle").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let lexical = search(&data, "fanoutneedle", 20);
+        assert_ne!(lexical[0].path, "typed.md");
+        let neutral_order: Vec<_> = lexical
+            .iter()
+            .filter(|hit| matches!(hit.path.as_str(), "string.md" | "missing.md"))
+            .map(|hit| hit.path.clone())
+            .collect();
+        let mut profile = D5cRelevanceProfile::preview();
+        profile.property_rules = vec![property_boost(
+            "priority-i64",
+            "priority",
+            RankingScalar::i64(7),
+        )];
+        let reranked = d5c_search(
+            &data,
+            "fanoutneedle",
+            20,
+            profile,
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(reranked[0].path, "typed.md");
+        assert_eq!(reranked[0].heading_path, ["Target"]);
+        let reranked_neutral_order: Vec<_> = reranked
+            .iter()
+            .filter(|hit| matches!(hit.path.as_str(), "string.md" | "missing.md"))
+            .map(|hit| hit.path.clone())
+            .collect();
+        assert_eq!(reranked_neutral_order, neutral_order);
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn native_d5c_property_ranges_preserve_mixed_scalar_types() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("typed.md"),
+            "---\nscore: 7\nlimit: 18446744073709551615\nratio: 1.5\nreviewed: 2026-07-31\n---\ntypedrangeneedle",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("strings.md"),
+            "---\nscore: \"7\"\nlimit: \"18446744073709551615\"\nratio: \"1.5\"\nreviewed: not-a-date\n---\ntypedrangeneedle typedrangeneedle",
+        )
+        .unwrap();
+        fs::write(vault.join("missing.md"), "typedrangeneedle").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let mut profile = D5cRelevanceProfile::preview();
+        profile.property_rules = vec![
+            PropertyRule {
+                id: "00-score".into(),
+                property: "score".into(),
+                predicate: PropertyPredicate::I64Range {
+                    pointer: Some(String::new()),
+                    min: Some("7".into()),
+                    max: Some("7".into()),
+                },
+                effect: crate::ranking::RuleEffect::Boost,
+                strength: crate::ranking::RuleStrength::Low,
+            },
+            PropertyRule {
+                id: "01-limit".into(),
+                property: "limit".into(),
+                predicate: PropertyPredicate::U64Range {
+                    pointer: Some(String::new()),
+                    min: Some(u64::MAX.to_string()),
+                    max: Some(u64::MAX.to_string()),
+                },
+                effect: crate::ranking::RuleEffect::Boost,
+                strength: crate::ranking::RuleStrength::Low,
+            },
+            PropertyRule {
+                id: "02-ratio".into(),
+                property: "ratio".into(),
+                predicate: PropertyPredicate::F64Range {
+                    pointer: Some(String::new()),
+                    min: Some(match RankingScalar::f64(1.5) {
+                        RankingScalar::F64(value) => value,
+                        _ => unreachable!(),
+                    }),
+                    max: Some(match RankingScalar::f64(1.5) {
+                        RankingScalar::F64(value) => value,
+                        _ => unreachable!(),
+                    }),
+                },
+                effect: crate::ranking::RuleEffect::Boost,
+                strength: crate::ranking::RuleStrength::Low,
+            },
+            PropertyRule {
+                id: "03-reviewed".into(),
+                property: "reviewed".into(),
+                predicate: PropertyPredicate::DateRange {
+                    pointer: Some(String::new()),
+                    min: Some("2026-07-01".into()),
+                    max: Some("2026-07-31".into()),
+                },
+                effect: crate::ranking::RuleEffect::Boost,
+                strength: crate::ranking::RuleStrength::Low,
+            },
+        ];
+        let hits = d5c_search(
+            &data,
+            "typedrangeneedle",
+            20,
+            profile,
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(hits[0].path, "typed.md");
+        let neutral: Vec<_> = hits
+            .iter()
+            .filter(|hit| matches!(hit.path.as_str(), "strings.md" | "missing.md"))
+            .map(|hit| hit.path.clone())
+            .collect();
+        let lexical: Vec<_> = search(&data, "typedrangeneedle", 20)
+            .into_iter()
+            .filter(|hit| matches!(hit.path.as_str(), "strings.md" | "missing.md"))
+            .map(|hit| hit.path)
+            .collect();
+        assert_eq!(neutral, lexical);
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn native_d5c_range_term_expansion_is_work_bounded() {
+        let mut schema_builder = tantivy::schema::Schema::builder();
+        let field = schema_builder.add_text_field("range", tantivy::schema::STRING);
+        let index = Index::create_in_ram(schema_builder.build());
+        let mut writer = index.writer(50_000_000).unwrap();
+        let mut document = TantivyDocument::default();
+        for ordinal in 0..=MAX_RANKING_WORK_UNITS {
+            document.add_text(field, format!("value-{ordinal:05}"));
+        }
+        writer.add_document(document).unwrap();
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let mut work_units = 0;
+        let result = bounded_string_range_query(
+            &searcher,
+            field,
+            "value-00000".to_owned(),
+            "value-99999".to_owned(),
+            &mut work_units,
+        );
+        assert!(matches!(
+            result,
+            Err(Error::Query(message)) if message.starts_with("ranking_work_limit_exceeded:")
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn native_d5c_f64_ranges_treat_signed_zero_numerically() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("negative-zero.md"),
+            "---\nratio: -0.0\n---\nzerorangeneedle",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("positive-zero.md"),
+            "---\nratio: 0.0\n---\nzerorangeneedle",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("missing.md"),
+            "zerorangeneedle zerorangeneedle zerorangeneedle",
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let zero = match RankingScalar::f64(0.0) {
+            RankingScalar::F64(value) => value,
+            _ => unreachable!(),
+        };
+        let mut profile = D5cRelevanceProfile::preview();
+        profile.property_rules = vec![PropertyRule {
+            id: "zero-range".into(),
+            property: "ratio".into(),
+            predicate: PropertyPredicate::F64Range {
+                pointer: Some(String::new()),
+                min: Some(zero.clone()),
+                max: Some(zero),
+            },
+            effect: crate::ranking::RuleEffect::Boost,
+            strength: crate::ranking::RuleStrength::High,
+        }];
+        let hits = d5c_search(
+            &data,
+            "zerorangeneedle",
+            20,
+            profile,
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(hits.last().unwrap().path, "missing.md");
+        assert_eq!(
+            hits[..2]
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["negative-zero.md", "positive-zero.md"])
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn native_d5c_folder_rules_are_component_bounded() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        for folder in ["authority", "authority-old", "archive", "archive-old"] {
+            fs::create_dir_all(vault.join(folder)).unwrap();
+            fs::write(vault.join(folder).join("note.md"), "hierarchyneedle").unwrap();
+        }
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let mut profile = D5cRelevanceProfile::preview();
+        profile.hierarchy.authority_folders = vec![crate::ranking::FolderRule {
+            id: "authority".into(),
+            prefix: "authority".into(),
+            strength: crate::ranking::RuleStrength::Standard,
+        }];
+        profile.hierarchy.archive_folders = vec![crate::ranking::FolderRule {
+            id: "archive".into(),
+            prefix: "archive".into(),
+            strength: crate::ranking::RuleStrength::High,
+        }];
+        let hits = d5c_search(
+            &data,
+            "hierarchyneedle",
+            20,
+            profile,
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(hits.first().unwrap().path, "authority/note.md");
+        assert_eq!(hits.last().unwrap().path, "archive/note.md");
+        assert!(
+            hits.iter()
+                .position(|hit| hit.path == "authority-old/note.md")
+                .unwrap()
+                < hits
+                    .iter()
+                    .position(|hit| hit.path == "archive/note.md")
+                    .unwrap()
+        );
+        assert!(
+            hits.iter()
+                .position(|hit| hit.path == "archive-old/note.md")
+                .unwrap()
+                < hits
+                    .iter()
+                    .position(|hit| hit.path == "archive/note.md")
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn balanced_source_shaped_markdown_fixture_runs_through_native_tantivy() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/retrieval/d5c-balanced/corpus.json"
+        ))
+        .unwrap();
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/retrieval/d5c-balanced");
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        for source in corpus["sources"].as_array().unwrap() {
+            if source["provider"]["kind"] != "markdown" {
+                continue;
+            }
+            let relative_path = source["path"].as_str().unwrap();
+            let destination = vault.join(relative_path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(
+                fixture_root.join(source["provider"]["fixture_path"].as_str().unwrap()),
+                &destination,
+            )
+            .unwrap();
+            let source_key = source["source"]["source_key"].as_str().unwrap();
+            let mtime = match source_key {
+                "md-recent" | "md-recent-plain" => 1_999_999_900,
+                "md-old" | "md-old-authority" | "md-strong" => 1_600_000_000,
+                _ => 1_700_000_000,
+            };
+            set_file_mtime(&destination, FileTime::from_unix_time(mtime, 0)).unwrap();
+        }
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "balanced-fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let mut profile = D5cRelevanceProfile::preview();
+        profile.recency = Some(crate::ranking::RecencyRule {
+            id: "00-balanced-recency".into(),
+            clock: crate::ranking::RecencyClock::SourceMtime,
+            horizon: crate::ranking::RecencyHorizon::Quarter,
+            strength: crate::ranking::RuleStrength::Low,
+        });
+        profile.hierarchy.authority_folders = vec![crate::ranking::FolderRule {
+            id: "10-authority".into(),
+            prefix: "reference".into(),
+            strength: crate::ranking::RuleStrength::Standard,
+        }];
+        profile.hierarchy.archive_folders = vec![crate::ranking::FolderRule {
+            id: "20-archive".into(),
+            prefix: "archive".into(),
+            strength: crate::ranking::RuleStrength::Standard,
+        }];
+        profile.property_rules = vec![PropertyRule {
+            id: "30-approved".into(),
+            property: "approved".into(),
+            predicate: PropertyPredicate::Exact {
+                pointer: Some(String::new()),
+                value: RankingScalar::Boolean(true),
+            },
+            effect: crate::ranking::RuleEffect::Boost,
+            strength: crate::ranking::RuleStrength::Low,
+        }];
+
+        let recency = d5c_search(
+            &data,
+            "same tier recency evidence",
+            20,
+            profile.clone(),
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(recency[0].path, "notes/recent.md");
+        assert_eq!(recency[1].path, "notes/old.md");
+
+        let authority = d5c_search(
+            &data,
+            "authority note evidence",
+            20,
+            profile.clone(),
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(authority[0].path, "reference/old-authority.md");
+        assert_eq!(authority[1].path, "notes/recent-plain.md");
+
+        let hierarchy = d5c_search(
+            &data,
+            "hierarchy lookalike evidence",
+            20,
+            profile.clone(),
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(hierarchy[0].path, "reference/canonical.md");
+        assert_eq!(hierarchy.last().unwrap().path, "archive/real.md");
+        assert!(
+            hierarchy
+                .iter()
+                .position(|hit| hit.path == "archive-old/lookalike.md")
+                .unwrap()
+                < hierarchy
+                    .iter()
+                    .position(|hit| hit.path == "archive/real.md")
+                    .unwrap()
+        );
+
+        let fanout = d5c_search(
+            &data,
+            "fanout balanced evidence",
+            20,
+            profile,
+            2_000_000_000,
+            &SearchFilters::default(),
+        );
+        assert_eq!(
+            fanout
+                .iter()
+                .filter(|hit| hit.path == "notes/multi-chunk.md")
+                .count(),
+            2
+        );
+        assert!(
+            fanout
+                .iter()
+                .take(2)
+                .all(|hit| hit.path == "notes/multi-chunk.md")
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "internal-d5c-preview")]
+    fn native_d5c_filters_before_a_deeper_bounded_pool_and_rebuilds_stably() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let first_data = temporary.path().join("first-data");
+        let second_data = temporary.path().join("second-data");
+        fs::create_dir_all(vault.join("allowed")).unwrap();
+        fs::create_dir_all(vault.join("excluded")).unwrap();
+        for index in 0..300 {
+            fs::write(
+                vault.join(format!("allowed/note-{index:03}.md")),
+                format!("---\npriority: {index}\n---\ncutoffneedle"),
+            )
+            .unwrap();
+        }
+        fs::write(
+            vault.join("excluded/special.md"),
+            "---\npriority: 999\n---\ncutoffneedle",
+        )
+        .unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &first_data).unwrap();
+        build_index(&config, &second_data).unwrap();
+
+        let (index, fields) = open_index(&first_data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved = resolve_query_plan(std::slice::from_ref(&context), "cutoffneedle").unwrap();
+        let pool = execute_lexical_candidates(
+            std::slice::from_ref(&context),
+            &resolved,
+            crate::ranking::MAX_RERANK_CANDIDATES,
+            &SearchFilters::default(),
+            &searcher,
+        )
+        .unwrap();
+        assert_eq!(pool.len(), crate::query::MAX_CANDIDATES_PER_STAGE);
+        let promoted = pool[150].hit.path.clone();
+        let promoted_value = promoted
+            .strip_prefix("allowed/note-")
+            .and_then(|value| value.strip_suffix(".md"))
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        let mut profile = D5cRelevanceProfile::preview();
+        profile.property_rules = vec![property_boost(
+            "promote-deep-candidate",
+            "priority",
+            RankingScalar::i64(promoted_value),
+        )];
+        let filters = SearchFilters {
+            path_prefix: Some("allowed/".into()),
+            ..SearchFilters::default()
+        };
+        let first = d5c_search(
+            &first_data,
+            "cutoffneedle",
+            5,
+            profile.clone(),
+            2_000_000_000,
+            &filters,
+        );
+        assert_eq!(first[0].path, promoted);
+        assert!(first.iter().all(|hit| hit.path.starts_with("allowed/")));
+        assert_eq!(first.len(), 5);
+
+        let rebuilt = d5c_search(
+            &second_data,
+            "cutoffneedle",
+            5,
+            profile,
+            2_000_000_000,
+            &filters,
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|hit| (&hit.chunk_id, &hit.path, hit.score))
+                .collect::<Vec<_>>(),
+            rebuilt
+                .iter()
+                .map(|hit| (&hit.chunk_id, &hit.path, hit.score))
+                .collect::<Vec<_>>()
+        );
+
+        let outside_pool = (0..300)
+            .map(|index| format!("allowed/note-{index:03}.md"))
+            .find(|path| !pool.iter().any(|candidate| candidate.hit.path == *path))
+            .unwrap();
+        let outside_value = outside_pool
+            .strip_prefix("allowed/note-")
+            .and_then(|value| value.strip_suffix(".md"))
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        let mut outside_profile = D5cRelevanceProfile::preview();
+        outside_profile.property_rules = vec![property_boost(
+            "outside-cutoff",
+            "priority",
+            RankingScalar::i64(outside_value),
+        )];
+        let cutoff = d5c_search(
+            &first_data,
+            "cutoffneedle",
+            100,
+            outside_profile,
+            2_000_000_000,
+            &filters,
+        );
+        assert!(cutoff.iter().all(|hit| hit.path != outside_pool));
     }
 
     #[derive(Deserialize)]

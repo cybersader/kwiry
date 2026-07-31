@@ -3,6 +3,8 @@
 use std::{env, fs, process};
 
 use kwiry_obsidian_wasm::{abi_identity, finalize_query, prepare_query, prepare_source};
+#[cfg(feature = "internal-d5c-preview")]
+use kwiry_obsidian_wasm::{finalize_d5c_preview, internal_d5c_evaluate, prepare_d5c_preview};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -22,6 +24,21 @@ enum FixtureCase {
         request: Value,
     },
     FinalizeQuery {
+        name: String,
+        request: Value,
+    },
+    #[cfg(feature = "internal-d5c-preview")]
+    PrepareD5cPreview {
+        name: String,
+        request: Value,
+    },
+    #[cfg(feature = "internal-d5c-preview")]
+    FinalizeD5cPreview {
+        name: String,
+        request: Value,
+    },
+    #[cfg(feature = "internal-d5c-preview")]
+    InternalD5cEvaluate {
         name: String,
         request: Value,
     },
@@ -57,25 +74,50 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let path = env::args()
-        .nth(1)
+    let mut arguments = env::args().skip(1);
+    let path = arguments
+        .next()
         .ok_or_else(|| "expected fixture path".to_owned())?;
+    let raw_adapter_output = arguments.next().as_deref() == Some("--raw-adapter-output");
     let source = fs::read_to_string(path).map_err(|_| "could not read fixtures".to_owned())?;
     let cases: Vec<FixtureCase> =
         serde_json::from_str(&source).map_err(|_| "could not parse fixtures".to_owned())?;
-    let output = cases
-        .into_iter()
-        .map(execute)
-        .collect::<Result<Vec<_>, _>>()?;
-    println!(
-        "{}",
-        serde_json::to_string(&output).map_err(|_| "could not serialize output".to_owned())?
-    );
+    if raw_adapter_output {
+        let output = cases
+            .into_iter()
+            .map(execute_raw)
+            .collect::<Result<Vec<_>, _>>()?;
+        println!("[{}]", output.join(","));
+    } else {
+        let output = cases
+            .into_iter()
+            .map(execute)
+            .collect::<Result<Vec<_>, _>>()?;
+        println!(
+            "{}",
+            serde_json::to_string(&output).map_err(|_| "could not serialize output".to_owned())?
+        );
+    }
     Ok(())
 }
 
 fn execute(case: FixtureCase) -> Result<FixtureOutput, String> {
-    let (name, raw_output) = match case {
+    let (name, raw_output) = execute_adapter(case);
+    let output = serde_json::from_str(&raw_output)
+        .map_err(|_| "adapter returned invalid JSON".to_owned())?;
+    Ok(FixtureOutput { name, output })
+}
+
+fn execute_raw(case: FixtureCase) -> Result<String, String> {
+    let (name, raw_output) = execute_adapter(case);
+    serde_json::from_str::<Value>(&raw_output)
+        .map_err(|_| "adapter returned invalid JSON".to_owned())?;
+    let name = serde_json::to_string(&name).map_err(|_| "could not serialize name".to_owned())?;
+    Ok(format!(r#"{{"name":{name},"output":{raw_output}}}"#))
+}
+
+fn execute_adapter(case: FixtureCase) -> (String, String) {
+    match case {
         FixtureCase::Identity { name } => (name, abi_identity()),
         FixtureCase::PrepareSource {
             name,
@@ -89,8 +131,17 @@ fn execute(case: FixtureCase) -> Result<FixtureOutput, String> {
         FixtureCase::FinalizeQuery { name, request } => {
             (name, finalize_query(&request.to_string()))
         }
-    };
-    let output = serde_json::from_str(&raw_output)
-        .map_err(|_| "adapter returned invalid JSON".to_owned())?;
-    Ok(FixtureOutput { name, output })
+        #[cfg(feature = "internal-d5c-preview")]
+        FixtureCase::PrepareD5cPreview { name, request } => {
+            (name, prepare_d5c_preview(&request.to_string()))
+        }
+        #[cfg(feature = "internal-d5c-preview")]
+        FixtureCase::FinalizeD5cPreview { name, request } => {
+            (name, finalize_d5c_preview(&request.to_string()))
+        }
+        #[cfg(feature = "internal-d5c-preview")]
+        FixtureCase::InternalD5cEvaluate { name, request } => {
+            (name, internal_d5c_evaluate(&request.to_string()))
+        }
+    }
 }

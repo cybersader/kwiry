@@ -33,6 +33,10 @@ mod model;
 mod partition;
 #[cfg(feature = "portable")]
 mod query;
+#[cfg(feature = "internal-d5c-preview")]
+mod ranking;
+#[cfg(feature = "internal-d5c-preview")]
+mod ranking_eval;
 #[cfg(feature = "native")]
 mod reconcile;
 #[cfg(feature = "native")]
@@ -108,6 +112,36 @@ pub use query::{
     QueryMetadataField, QueryMetadataProbe, QueryPhraseIntent, QueryPlanError, QueryPlanKind,
     QueryTermIntent, QueryTermProjection, QueryTermRole, QueryTermSupport,
     QueryTermSupportObservation, QueryTermSupportProbe, QueryTypoStage, prepare_lexical_query,
+};
+#[cfg(feature = "internal-d5c-preview")]
+pub use ranking::{
+    D5C_PREVIEW_PROFILE_ID, D5cRelevanceProfile, FolderRule, HierarchyRules,
+    LEXICAL_RELEVANCE_PROFILE_ID, LexicalEvidenceTier, MAX_ABSOLUTE_METADATA_POINTS,
+    MAX_FOLDER_RANKING_RULES_PER_FAMILY, MAX_PROPERTY_RANKING_RULES,
+    MAX_PROPERTY_VALUES_PER_SOURCE_OBSERVATION, MAX_RANKING_FOLDER_PREFIX_BYTES,
+    MAX_RANKING_JSON_POINTER_BYTES, MAX_RANKING_PATH_DEPTH, MAX_RANKING_PROPERTY_NAME_BYTES,
+    MAX_RANKING_RULE_ID_BYTES, MAX_RANKING_VALUE_BYTES, MAX_RANKING_WORK_UNITS,
+    MAX_RELEVANCE_PROFILE_BYTES, MAX_RERANK_CANDIDATES, MAX_RERANK_SOURCE_OBSERVATIONS,
+    MAX_TOTAL_RANKING_RULES, PathDepthPredicate, PathDepthRule, PropertyPredicate, PropertyRule,
+    PropertyScalarObservation, QualifiedSourceId, RELEVANCE_PROFILE_SCHEMA_VERSION,
+    RERANK_INPUT_SCHEMA_VERSION, RankingError, RankingScalar, RecencyClock, RecencyHorizon,
+    RecencyRule, RelevanceProfile, RerankCandidate, RerankEvidence, RerankEvidenceEntry,
+    RerankInput, RerankResult, RuleEffect, RuleStrength, SourceSignalObservation,
+    rerank_candidates,
+};
+#[cfg(feature = "internal-d5c-preview")]
+pub use ranking_eval::{
+    BALANCED_COMPARISON_ENVELOPE_SCHEMA_VERSION, BALANCED_EVALUATION_SOURCE_FACTS_SCHEMA_VERSION,
+    BALANCED_EXPLANATION_SCHEMA_VERSION, BALANCED_PLAYGROUND_CASE_SCHEMA_VERSION,
+    BALANCED_PLAYGROUND_CONFIGURATION_SCHEMA_VERSION, BALANCED_PLAYGROUND_SCENARIO_ID,
+    BalancedCandidateRuleExplanation, BalancedComparisonEnvelope, BalancedEvaluationDisposition,
+    BalancedExplanationLevel, BalancedExplanationProjection, BalancedExplanationSummary,
+    BalancedFatalReason, BalancedPlaygroundCase, BalancedPlaygroundConfiguration,
+    BalancedPropertyFixturePack, BalancedSafeRuleExplanation, BalancedSafeRuleKind,
+    BalancedSafeSignalOutcome, ComparisonRanking, ComparisonRankingEntry, ComparisonRankingLabel,
+    DISCREPANCY_DECISION_TABLE, DiscrepancyDecision, EvaluationPropertySignal,
+    EvaluationSignalState, EvaluationSourceFacts, MAX_BALANCED_PROPERTY_RULES, balanced_case_hash,
+    balanced_configuration_hash, discrepancy_decision, evaluate_balanced_playground,
 };
 #[cfg(feature = "native")]
 pub use reconcile::ReconcileScope;
