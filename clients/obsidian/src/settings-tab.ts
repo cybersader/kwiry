@@ -77,6 +77,7 @@ export class KwirySettingTab extends PluginSettingTab {
       );
 
     this.renderDiagnosticsSettings(containerEl);
+    this.plugin.renderPrivateSettings(containerEl);
   }
 
   private renderDiagnosticsSettings(containerEl: HTMLElement): void {

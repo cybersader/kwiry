@@ -18,6 +18,18 @@ declare module "virtual:kwiry-internal-prototype" {
   }): (value: unknown) => Promise<boolean>;
 }
 
+declare module "virtual:kwiry-internal-d5c-preview" {
+  export function createInternalD5cPreviewHandler(context: {
+    scope: DedicatedWorkerGlobalScope;
+    getActive(): { id: string; index: import("./worker/fts5-index").Fts5GenerationIndex } | null;
+    getInitializedVaultId(): string;
+    requireInitialized(): void;
+    getLastRequestId(): number;
+    setLastRequestId(id: number): void;
+    mapError(error: unknown): import("./worker/protocol").WorkerError;
+  }): (value: unknown) => Promise<boolean>;
+}
+
 declare module "virtual:kwiry-rust-wasm-bindings" {
   export function initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
   export function abi_identity(): string;
@@ -27,6 +39,9 @@ declare module "virtual:kwiry-rust-wasm-bindings" {
   export function finalize_query(requestJson: string): string;
   export function prepare_typo_suggestion_probe(requestJson: string): string;
   export function finalize_typo_suggestion_probe(requestJson: string): string;
+  export function prepare_d5c_preview(requestJson: string): string;
+  export function finalize_d5c_preview(requestJson: string): string;
+  export function internal_d5c_evaluate(requestJson: string): string;
 }
 
 declare module "virtual:kwiry-rust-wasm-bytes" {

@@ -5,6 +5,7 @@
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import sqliteWasmBytes from "@sqlite.org/sqlite-wasm/sqlite3.wasm";
 import rustWasmBytes from "virtual:kwiry-rust-wasm-bytes";
+import { createInternalD5cPreviewHandler } from "virtual:kwiry-internal-d5c-preview";
 import { createInternalPrototypeHandler } from "virtual:kwiry-internal-prototype";
 import {
   PLUGIN_ID,
@@ -112,6 +113,17 @@ const handleInternalPrototypeMessage = createInternalPrototypeHandler({
   mapError: (error) => isWorkerError(error)
     ? error
     : fixedWorkerError("internal_error", "query", "Internal prototype failed.", false),
+});
+const handleInternalD5cPreviewMessage = createInternalD5cPreviewHandler({
+  scope,
+  getActive: () => active,
+  getInitializedVaultId: requireInitializedVaultId,
+  requireInitialized,
+  getLastRequestId: () => lastRequestId,
+  setLastRequestId: (id) => { lastRequestId = id; },
+  mapError: (error) => isWorkerError(error)
+    ? error
+    : fixedWorkerError("internal_error", "query", "Internal preview failed.", false),
 });
 
 async function initialize(vaultId: string): Promise<InitializeResult> {
@@ -1008,6 +1020,7 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
 }
 
 async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
+  if (await handleInternalD5cPreviewMessage(event.data)) return;
   if (await handleInternalPrototypeMessage(event.data)) return;
   const parsed = parseWorkerRequest(event.data);
   const identity = responseIdentity(event.data);

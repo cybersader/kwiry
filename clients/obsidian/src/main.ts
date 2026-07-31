@@ -19,7 +19,7 @@ import {
 } from "./backend";
 import { DaemonBackend } from "./backends/daemon-backend";
 import { InPluginLexicalBackend } from "./backends/in-plugin-lexical-backend";
-import { openVaultCacheStore } from "./cache/local-cache-store";
+import { createInPluginCacheOptions } from "./cache/build-cache-options";
 import { readDaemonToken } from "./credentials";
 import { PluginDiagnostics } from "./diagnostics/plugin-diagnostics";
 import type {
@@ -29,6 +29,7 @@ import type {
   DiagnosticLevel,
   DiagnosticTextValue,
 } from "./diagnostics/log";
+import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
 import { LatestRequestEpoch } from "./latest-request-epoch";
 import { KwirySearchModal } from "./search-modal";
 import { formatStatus } from "./status-format";
@@ -58,12 +59,15 @@ export default class KwiryPlugin extends Plugin {
   private lastDiagnosticStatus = "";
   private readonly statusRefresh = new LatestRequestEpoch();
   private readonly diagnostics = new PluginDiagnostics(DEFAULT_SETTINGS.diagnosticsLogLevel);
+  private privateTools: PrivateTools = createPrivateTools(this, undefined);
 
   async onload(): Promise<void> {
     const pluginEpoch = ++this.pluginEpoch;
     await this.diagnostics.capture("info", "plugin.load", { pluginEpoch }, async (event) => {
       try {
-        this.settings = loadSettings(await this.loadData());
+        const storedData = await this.loadData();
+        this.settings = loadSettings(storedData);
+        this.privateTools = createPrivateTools(this, storedData);
         this.diagnostics.setLevel(this.settings.diagnosticsLogLevel);
         event.set({ profile: this.settings.backendProfile });
         if (pluginEpoch !== this.pluginEpoch) {
@@ -78,37 +82,36 @@ export default class KwiryPlugin extends Plugin {
             tokenProvider: () => readDaemonToken(this.settings.tokenFilePath),
             transport: obsidianTransport,
           }),
-          in_plugin: (instanceId) => new InPluginLexicalBackend({
-            instanceId,
-            activeVaultId: ACTIVE_VAULT_ID,
-            source: new ObsidianActiveVaultSource(this.app.vault),
-            workerSource,
-            cache: {
-              openStore: () => openVaultCacheStore({
-                adapter: this.app.vault.adapter,
-                vaultConfigDirName: this.app.vault.configDir,
-              }),
-            },
-            onDiagnosticFailure: (
-              { subsystem, reason, errorName, workerCode, workerStage, defectField, nonError },
-            ) => {
-              void this.diagnostics.capture("error", "failure.caught", {
-                profile: "in_plugin",
-                subsystem,
-                reason,
-                // A Worker protocol code names the fault exactly; the error
-                // class name is only a fallback for a thrown Error.
-                code: workerCode ?? "other",
-                ...(workerStage === undefined ? {} : { stage: workerStage }),
-                errorName: defectField ?? errorName,
-                operation: "build",
-                recoverable: !nonError,
-              }, () => undefined);
-            },
-          }),
+          in_plugin: (instanceId) => {
+            const cache = createInPluginCacheOptions(this.app.vault);
+            return new InPluginLexicalBackend({
+              instanceId,
+              activeVaultId: ACTIVE_VAULT_ID,
+              source: new ObsidianActiveVaultSource(this.app.vault),
+              workerSource,
+              ...(cache === undefined ? {} : { cache }),
+              onDiagnosticFailure: (
+                { subsystem, reason, errorName, workerCode, workerStage, defectField, nonError },
+              ) => {
+                void this.diagnostics.capture("error", "failure.caught", {
+                  profile: "in_plugin",
+                  subsystem,
+                  reason,
+                  // A Worker protocol code names the fault exactly; the error
+                  // class name is only a fallback for a thrown Error.
+                  code: workerCode ?? "other",
+                  ...(workerStage === undefined ? {} : { stage: workerStage }),
+                  errorName: defectField ?? errorName,
+                  operation: "build",
+                  recoverable: !nonError,
+                }, () => undefined);
+              },
+            });
+          },
         }, this.diagnostics);
 
         this.addSettingTab(new KwirySettingTab(this.app, this));
+        this.privateTools.register();
         this.addCommand({
           id: "open-search",
           name: "Search notes",
@@ -153,6 +156,7 @@ export default class KwiryPlugin extends Plugin {
     this.statusUnsubscribe = null;
     this.activeBackendIdentity = null;
     this.lastDiagnosticStatus = "";
+    this.privateTools.dispose();
     const disposal = this.backendManager?.dispose();
     this.diagnostics.setLevel("off");
     this.diagnostics.clear();
@@ -161,11 +165,15 @@ export default class KwiryPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     try {
-      await this.saveData(this.settings);
+      await this.saveData(this.privateTools.prepareStoredData(this.settings));
     } catch (error) {
       this.recordCaughtFailure("settings", "save", error);
       throw error;
     }
+  }
+
+  renderPrivateSettings(containerEl: HTMLElement): void {
+    this.privateTools.renderSettings(containerEl);
   }
 
   setDiagnosticsLogLevel(level: DiagnosticsLogLevel): void {

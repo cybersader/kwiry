@@ -61,6 +61,19 @@ describe("loadSettings", () => {
     expect(loadSettings({ diagnosticsLogLevel: "verbose" }).diagnosticsLogLevel).toBe("info");
   });
 
+  it("keeps normal settings unaware of private-build namespaces", () => {
+    const loaded = loadSettings({
+      backendProfile: "in_plugin",
+      __kwiry_internal_d5c_playground: {
+        schema_version: 1,
+        explanation_level: "rules",
+      },
+    });
+    expect(loaded.backendProfile).toBe("in_plugin");
+    expect(loaded).not.toHaveProperty("__kwiry_internal_d5c_playground");
+    expect(DEFAULT_SETTINGS).not.toHaveProperty("__kwiry_internal_d5c_playground");
+  });
+
   it("never contains a token value field", () => {
     const keys = Object.keys(DEFAULT_SETTINGS);
     expect(keys.some((key) => key === "token" || key === "bearerToken")).toBe(false);

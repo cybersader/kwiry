@@ -1171,7 +1171,7 @@ export class Fts5GenerationIndex {
     this.requireOpen();
     requireActiveTrace(trace);
     requireExecutionPlanIdentity(plan);
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 512) {
       throw new Error("invalid FTS5 search limit");
     }
     if (plan.disposition === "empty_no_evidence") return [];

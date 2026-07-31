@@ -6,8 +6,11 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
+    "dev:d5c": "node esbuild.config.mjs d5c",
     "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "package:d5c:brat": "node scripts/package-d5c-brat.mjs",
     "test": "vitest run",
+    "test:d5c": "vitest run test/d5c-playground.test.ts test/d5c-preview.test.mjs test/d5c-worker-isolation.test.mjs test/d5c-brat-package.test.mjs",
     "typecheck": "tsc --noEmit",
     "evidence": "node scripts/gate5-evidence.mjs",
     "evidence:gate4": "node scripts/gate4-evidence.mjs",
