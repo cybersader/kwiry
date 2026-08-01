@@ -237,8 +237,8 @@ function assertWorkerGraph(metafile) {
 function assertD5cPlaygroundGraph(metafile) {
   const inputs = Object.keys(metafile.inputs).map((input) => input.replaceAll("\\", "/"));
   if (!inputs.some((input) => input.endsWith("src/worker/d5c-playground-worker.ts"))
-    || !inputs.some((input) => input.endsWith("src/worker/d5c-preview.ts"))) {
-    throw new Error("D5C playground Worker omitted its explicit entry or evaluation adapter");
+    || !inputs.some((input) => input.endsWith("src/worker/d5c-evaluation.ts"))) {
+    throw new Error("D5C playground Worker omitted its explicit entry or fixture evaluator");
   }
   if (inputs.some((input) => input.includes("@sqlite.org/sqlite-wasm")
     || input.endsWith("src/worker/worker.ts"))) {
@@ -249,6 +249,61 @@ function assertD5cPlaygroundGraph(metafile) {
     || !wasmInputs[0].endsWith("kwiry_obsidian_wasm_bg.wasm")
     || !wasmInputs[0].includes("pkg/internal-d5c-preview")) {
     throw new Error("D5C playground Worker expected only the preview Rust WASM input");
+  }
+}
+
+function assertD5cOwnerWorkerGraph(metafile) {
+  const inputs = Object.keys(metafile.inputs).map((input) => input.replaceAll("\\", "/"));
+  for (const required of [
+    "src/worker/worker.ts",
+    "src/worker/d5c-preview.ts",
+    "src/worker/d5c-compare-protocol.ts",
+    "src/worker/d5c-owner-protocol.ts",
+  ]) {
+    if (!inputs.some((input) => input.endsWith(required))) {
+      throw new Error(`D5C owner Worker omitted required input: ${required}`);
+    }
+  }
+  for (const forbidden of [
+    "src/worker/d5c-playground-worker.ts",
+    "src/worker/d5c-evaluation.ts",
+    "src/worker/block-vfs.ts",
+    "src/worker/image-header.ts",
+  ]) {
+    if (inputs.some((input) => input.endsWith(forbidden))) {
+      throw new Error(`D5C owner Worker selected fixture input: ${forbidden}`);
+    }
+  }
+  const rustWasm = inputs.find((input) => input.endsWith("kwiry_obsidian_wasm_bg.wasm"));
+  if (!rustWasm?.includes("pkg/internal-d5c-preview")) {
+    throw new Error("D5C owner Worker did not select preview Rust WASM");
+  }
+}
+
+function assertD5cOwnerMainGraph(metafile) {
+  const inputs = Object.keys(metafile.inputs).map((input) => input.replaceAll("\\", "/"));
+  if (!inputs.some((input) => input.endsWith("src/internal/d5c-playground/live-main.ts"))) {
+    throw new Error("D5C owner build omitted its dedicated entry point");
+  }
+  const forbidden = [
+    "src/main.ts",
+    "src/api.ts",
+    "src/backend-manager.ts",
+    "src/backends/daemon-backend.ts",
+    "src/credentials.ts",
+    "src/settings.ts",
+    "src/settings-tab.ts",
+    "src/internal/private-tools.ts",
+    "src/internal/d5c-playground/index.ts",
+    "src/internal/d5c-playground/modal.ts",
+    "src/internal/d5c-playground/session.ts",
+    "src/internal/d5c-playground/settings.ts",
+    "src/worker/d5c-playground-worker.ts",
+  ];
+  for (const input of inputs) {
+    if (forbidden.some((path) => input.endsWith(path)) || input.includes("/src/cache/")) {
+      throw new Error(`D5C owner build selected forbidden input: ${input}`);
+    }
   }
 }
 
@@ -279,6 +334,64 @@ function internalD5cPreviewPlugin(enabled) {
           });
       build.onLoad({ filter: /.*/, namespace: "kwiry-disabled-internal-d5c-preview" }, () => ({
         contents: "export const createInternalD5cPreviewHandler=()=>async()=>false;",
+        loader: "js",
+      }));
+    },
+  };
+}
+
+function ownerWorkerProtocolPlugin(enabled) {
+  return {
+    name: "kwiry-owner-worker-protocol",
+    setup(build) {
+      build.onResolve({ filter: /^virtual:kwiry-owner-worker-protocol$/ }, () => enabled
+        ? { path: resolve(root, "src/worker/d5c-owner-protocol.ts") }
+        : {
+            path: "kwiry-disabled-owner-worker-protocol",
+            namespace: "kwiry-disabled-owner-worker-protocol",
+          });
+      build.onLoad({
+        filter: /.*/,
+        namespace: "kwiry-disabled-owner-worker-protocol",
+      }, () => ({
+        contents: [
+          "export const isD5cOwnerWorkerOperation=()=>false;",
+          "export const parseD5cOwnerWorkerRequest=()=>null;",
+        ].join("\n"),
+        loader: "js",
+      }));
+    },
+  };
+}
+
+function ownerWorkerCapabilityPlugin(enabled) {
+  return {
+    name: "kwiry-owner-worker-capabilities",
+    setup(build) {
+      if (!enabled) return;
+      build.onResolve({ filter: /^\.\/block-vfs$/ }, () => ({
+        path: "kwiry-disabled-block-vfs",
+        namespace: "kwiry-disabled-worker-capability",
+      }));
+      build.onResolve({ filter: /^\.\/image-header$/ }, () => ({
+        path: "kwiry-disabled-image-header",
+        namespace: "kwiry-disabled-worker-capability",
+      }));
+      build.onLoad({
+        filter: /^kwiry-disabled-block-vfs$/,
+        namespace: "kwiry-disabled-worker-capability",
+      }, () => ({
+        contents: [
+          "export class BlockVfsUnavailableError extends Error{}",
+          "export function openPlainBlockVfs(){throw new BlockVfsUnavailableError();}",
+        ].join("\n"),
+        loader: "js",
+      }));
+      build.onLoad({
+        filter: /^kwiry-disabled-image-header$/,
+        namespace: "kwiry-disabled-worker-capability",
+      }, () => ({
+        contents: "export function validateSQLiteImage(){throw new Error('unavailable');}",
         loader: "js",
       }));
     },
@@ -353,12 +466,21 @@ export async function buildPlugin({
   production: optimized = true,
   internalTypoPrototype = false,
   internalD5cPlayground = false,
+  internalD5cOwnerHost = false,
   pluginIdentity,
   sourceUrl = PRODUCTION_SOURCE_URL,
   activeVaultCache = true,
 } = {}) {
-  if (internalTypoPrototype && internalD5cPlayground) {
+  const internalVariants = [
+    internalTypoPrototype,
+    internalD5cPlayground,
+    internalD5cOwnerHost,
+  ].filter(Boolean).length;
+  if (internalVariants > 1) {
     throw new Error("internal Worker variants must be built separately");
+  }
+  if (internalD5cOwnerHost && activeVaultCache) {
+    throw new Error("D5C owner host must compile without the active-vault cache");
   }
   if (typeof activeVaultCache !== "boolean") {
     throw new Error("activeVaultCache must be boolean");
@@ -369,7 +491,11 @@ export async function buildPlugin({
   const resolvedSourceUrl = validateSourceUrl(sourceUrl);
   const sqliteIdentity = verifySqliteArtifact();
   const rustAdapter = prepareRustAdapter(
-    internalTypoPrototype ? "internal-typo-prototype" : "production",
+    internalTypoPrototype
+      ? "internal-typo-prototype"
+      : internalD5cOwnerHost
+        ? "internal-d5c-preview"
+        : "production",
   );
   const identities = {
     rust: rustAdapter.identity,
@@ -390,19 +516,25 @@ export async function buildPlugin({
       minify: optimized,
       sourcemap: false,
       legalComments: "inline",
+      define: {
+        __KWIRY_D5C_OWNER_WORKER__: JSON.stringify(Boolean(internalD5cOwnerHost)),
+      },
       loader: { ".wasm": "binary" },
       metafile: true,
       logLevel: "silent",
       plugins: [
         rustVirtualPlugin(identities, rustAdapter),
         internalPrototypePlugin(Boolean(internalTypoPrototype)),
-        internalD5cPreviewPlugin(false),
+        internalD5cPreviewPlugin(Boolean(internalD5cOwnerHost)),
+        ownerWorkerProtocolPlugin(Boolean(internalD5cOwnerHost)),
+        ownerWorkerCapabilityPlugin(Boolean(internalD5cOwnerHost)),
       ],
     });
     if (workerBuild.outputFiles.length !== 1) {
       throw new Error(`Worker build emitted ${workerBuild.outputFiles.length} files`);
     }
     assertWorkerGraph(workerBuild.metafile);
+    if (internalD5cOwnerHost) assertD5cOwnerWorkerGraph(workerBuild.metafile);
     workerSource = workerBuild.outputFiles[0].text;
     if (/\bimport\s*\(|\bimportScripts\s*\(/u.test(workerSource)) {
       throw new Error("Worker bundle contains a runtime import");
@@ -459,7 +591,9 @@ export async function buildPlugin({
 
   const mainBuild = await esbuild.build({
     absWorkingDir: root,
-    entryPoints: ["src/main.ts"],
+    entryPoints: [internalD5cOwnerHost
+      ? "src/internal/d5c-playground/live-main.ts"
+      : "src/main.ts"],
     bundle: true,
     platform: "browser",
     external: ["obsidian", "electron", ...builtins],
@@ -480,6 +614,7 @@ export async function buildPlugin({
       privateToolsPlugin(Boolean(internalD5cPlayground), playgroundSource),
     ],
   });
+  if (internalD5cOwnerHost) assertD5cOwnerMainGraph(mainBuild.metafile);
   const mainText = write
     ? readFileSync(resolve(root, "main.js"), "utf8")
     : mainBuild.outputFiles[0].text;
@@ -494,6 +629,7 @@ export async function buildPlugin({
       production: optimized,
       write,
       activeVaultCache,
+      internalD5cOwnerHost: Boolean(internalD5cOwnerHost),
       sourceUrl: resolvedSourceUrl,
       plugin: resolvedPluginIdentity,
     }),

@@ -51,7 +51,7 @@ export async function packageD5cBrat({
   const buildOptions = {
     write: false,
     production: true,
-    internalD5cPlayground: true,
+    internalD5cOwnerHost: true,
     pluginIdentity: {
       id: config.plugin.id,
       version: config.plugin.version,
@@ -62,13 +62,14 @@ export async function packageD5cBrat({
   const first = await buildPlugin(buildOptions);
   const second = await buildPlugin(buildOptions);
   if (first.mainText !== second.mainText
-    || JSON.stringify(first.identities) !== JSON.stringify(second.identities)
-    || JSON.stringify(first.internalD5cPlayground?.identities)
-      !== JSON.stringify(second.internalD5cPlayground?.identities)) {
-    throw new Error("D5C BRAT package build is not deterministic");
+    || first.workerSource !== second.workerSource
+    || JSON.stringify(first.identities) !== JSON.stringify(second.identities)) {
+    throw new Error("D5C BRAT package build is not repeatable in this environment");
   }
-  if (first.internalD5cPlayground === null) {
-    throw new Error("D5C BRAT package is missing the playground Worker");
+  if (!first.buildProfile.internalD5cOwnerHost
+    || first.buildProfile.activeVaultCache
+    || first.internalD5cPlayground !== null) {
+    throw new Error("D5C BRAT package did not use the isolated owner-host profile");
   }
 
   const packageRoot = resolve(outputRoot, config.plugin.version);
@@ -79,7 +80,10 @@ export async function packageD5cBrat({
   await mkdir(supportRoot, { recursive: true });
 
   const manifestText = `${JSON.stringify(config.plugin, null, 2)}\n`;
-  const stylesText = await readFile(resolve(root, "styles.css"), "utf8");
+  const stylesText = [
+    await readFile(resolve(root, "styles.css"), "utf8"),
+    await readFile(resolve(root, "d5c-live.css"), "utf8"),
+  ].join("\n");
   const runtime = {
     "main.js": Buffer.from(first.mainText, "utf8"),
     "manifest.json": Buffer.from(manifestText, "utf8"),
@@ -125,19 +129,24 @@ export async function packageD5cBrat({
     build: {
       production: true,
       write: false,
+      host_profile: "local_active_vault_owner_preview",
       active_vault_cache: "disabled",
-      deterministic: true,
+      network_access: "compiled_out",
+      credential_access: "compiled_out",
+      persistence: "disabled",
+      same_environment_repeatable: true,
       loose_runtime_assets: 0,
-      embedded_workers: 2,
+      embedded_workers: 1,
     },
     runtime: runtimeIdentity,
     embedded: {
-      production_rust_wasm: first.identities.rust,
+      d5c_rust_wasm: first.identities.rust,
       sqlite_wasm: first.identities.sqlite,
-      d5c_rust_wasm: first.internalD5cPlayground.identities.rust,
     },
     known_limits: [
-      "fixture_only_no_live_connectors",
+      "reads_markdown_from_the_active_vault",
+      "initial_cold_search_is_partial_and_explicitly_labeled",
+      "index_is_in_memory_and_rebuilt_after_restart",
       "balanced_profile_not_owner_accepted",
       "general_gate5_capacity_regression_tracked_separately",
     ],
@@ -168,7 +177,7 @@ export async function packageD5cBrat({
     mainMetafile: first.mainMetafile,
     workerSource: first.workerSource,
     workerMetafile: first.workerMetafile,
-    playground: first.internalD5cPlayground,
+    buildProfile: first.buildProfile,
     attestation,
   };
 }

@@ -390,6 +390,7 @@ function harness(
   worker = new FakeWorker(),
   limits: ConstructorParameters<typeof InPluginIndexController>[0]["limits"] = {},
   cache?: IndexControllerCacheOptions,
+  initialColdPreview = false,
 ): {
     controller: InPluginIndexController;
     worker: FakeWorker;
@@ -408,6 +409,7 @@ function harness(
     yieldControl: () => Promise.resolve(),
     limits,
     ...(cache ? { cache } : {}),
+    ...(initialColdPreview ? { initialColdPreview: { enabled: true as const } } : {}),
   });
   return { controller, worker, statuses, failures };
 }
@@ -439,6 +441,161 @@ describe("InPluginIndexController", () => {
       documents: 2,
       dirty: false,
     });
+  });
+
+  it("keeps initial cold staging unavailable unless preview is explicitly enabled", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    const { controller, statuses } = harness(source, new FakeWorker(), { maxBatchSources: 1 });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(statuses.every((status) => status.initialColdPreview === undefined)).toBe(true);
+  });
+
+  it("offers revisioned initial cold preview only after completed source batches", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    const { controller, statuses } = harness(
+      source,
+      new FakeWorker(),
+      { maxBatchSources: 1 },
+      undefined,
+      true,
+    );
+
+    controller.start();
+    await controller.whenIdle();
+
+    const leases = [...new Map(statuses.flatMap((status) =>
+      status.initialColdPreview === undefined
+        ? []
+        : [[status.initialColdPreview.revision, status.initialColdPreview] as const])).values()];
+    expect(leases).toEqual([
+      {
+        generation: "generation-1",
+        revision: 1,
+        processed: 1,
+        total: 2,
+        documents: 1,
+        chunks: 1,
+        quarantinedSources: 0,
+        unreadableSources: 0,
+      },
+      {
+        generation: "generation-1",
+        revision: 2,
+        processed: 2,
+        total: 2,
+        documents: 2,
+        chunks: 2,
+        quarantinedSources: 0,
+        unreadableSources: 0,
+      },
+    ]);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-1",
+    });
+    expect(statuses.at(-1)).not.toHaveProperty("initialColdPreview");
+  });
+
+  it("reports only sources represented by an acknowledged byte-limited batch", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "aaaa");
+    source.set("b.md", "bbbb");
+    const originalInspect = source.inspectMarkdown.bind(source);
+    source.inspectMarkdown = vi.fn((path) => {
+      const inspection = originalInspect(path);
+      return inspection.kind === "candidate" ? { ...inspection, size: 2 } : inspection;
+    });
+    source.readMarkdown = vi.fn(async (inspection) => {
+      const record = source.records.get(inspection.path)!;
+      return {
+        kind: "source" as const,
+        source: sourceInput(inspection.path, record.bytes, record.mtime),
+      };
+    });
+    const { controller, statuses } = harness(
+      source,
+      new FakeWorker(),
+      { maxBatchBytes: 6, maxConcurrentReads: 2 },
+      undefined,
+      true,
+    );
+
+    controller.start();
+    await controller.whenIdle();
+
+    const firstLease = statuses.find((status) => status.initialColdPreview?.revision === 1)
+      ?.initialColdPreview;
+    expect(firstLease).toMatchObject({ processed: 1, documents: 1, chunks: 1 });
+  });
+
+  it("never offers replacement staging through the initial cold preview seam", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    const { controller, statuses } = harness(
+      source,
+      new FakeWorker(),
+      { maxBatchSources: 1 },
+      undefined,
+      true,
+    );
+    controller.start();
+    await controller.whenIdle();
+    statuses.length = 0;
+
+    source.set("b.md", "b", 2);
+    controller.requestRebuild();
+    await controller.whenIdle();
+
+    expect(statuses.every((status) => status.initialColdPreview === undefined)).toBe(true);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-2",
+      documents: 2,
+    });
+  });
+
+  it("withdraws initial cold preview when a vault mutation arrives before publication", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    let emitted = false;
+    source.onRead = (path) => {
+      if (path !== "b.md" || emitted) return;
+      emitted = true;
+      source.set("c.md", "c", 2);
+      source.emit({ kind: "upsert", path: "c.md" });
+    };
+    const { controller, statuses } = harness(
+      source,
+      new FakeWorker(),
+      { maxBatchSources: 1, maxConcurrentReads: 1 },
+      undefined,
+      true,
+    );
+
+    controller.start();
+    await controller.whenIdle();
+
+    const mutationStatusIndex = statuses.findIndex((status) =>
+      status.progress?.path === "b.md" && status.initialColdPreview === undefined);
+    expect(mutationStatusIndex).toBeGreaterThanOrEqual(0);
+    expect(statuses.slice(mutationStatusIndex).every((status) =>
+      status.initialColdPreview === undefined)).toBe(true);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      documents: 3,
+    });
+    expect(statuses.at(-1)).not.toHaveProperty("initialColdPreview");
   });
 
   it("omits a source that vanishes after enumeration and publishes the remaining counts", async () => {
@@ -579,7 +736,27 @@ describe("InPluginIndexController", () => {
     const source = new FakeSource();
     source.set("a.md", "a");
     source.set("b.md", "b");
-    const worker = new FakeWorker();
+    let releaseReplacement!: () => void;
+    const replacementGate = new Promise<void>((resolve) => {
+      releaseReplacement = resolve;
+    });
+    let replacementEntered!: () => void;
+    const enteredReplacement = new Promise<void>((resolve) => {
+      replacementEntered = resolve;
+    });
+    class GatedReplacementWorker extends FakeWorker {
+      override async addSourceBatch(
+        generation: string,
+        sources: SourceUpsert[],
+      ): Promise<IndexCounts> {
+        if (generation === "generation-2") {
+          replacementEntered();
+          await replacementGate;
+        }
+        return super.addSourceBatch(generation, sources);
+      }
+    }
+    const worker = new GatedReplacementWorker();
     worker.quarantinedSources = 1;
     worker.quarantineFields = ["chunks_contents"];
     const { controller, statuses } = harness(source, worker);
@@ -606,6 +783,14 @@ describe("InPluginIndexController", () => {
       quarantinedSources: 1,
       quarantineValidatorFields: ["chunks_contents"],
     });
+    await enteredReplacement;
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "rebuild",
+      generation: "generation-1",
+      quarantinedSources: 1,
+      quarantineValidatorFields: ["chunks_contents"],
+    });
+    releaseReplacement();
     await controller.whenIdle();
 
     expect(statuses.at(-1)).toMatchObject({
@@ -619,6 +804,85 @@ describe("InPluginIndexController", () => {
       ["a.md", 2],
       ["b.md", 2],
     ]));
+  });
+
+  it("keeps active omissions visible through replacement replay until publication", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    let releaseReplay!: () => void;
+    const replayGate = new Promise<void>((resolve) => {
+      releaseReplay = resolve;
+    });
+    let replayEntered!: () => void;
+    const enteredReplay = new Promise<void>((resolve) => {
+      replayEntered = resolve;
+    });
+    class GatedReplayWorker extends FakeWorker {
+      override async applySourceChanges(
+        generation: string,
+        nextGeneration: string | null,
+        upserts: SourceUpsert[],
+        removals: SourceRemoval[],
+      ): Promise<IndexCounts> {
+        if (generation === "generation-2" && nextGeneration === null) {
+          replayEntered();
+          await replayGate;
+        }
+        return super.applySourceChanges(generation, nextGeneration, upserts, removals);
+      }
+    }
+    const worker = new GatedReplayWorker();
+    worker.quarantinedSources = 1;
+    worker.quarantineFields = ["chunks_contents"];
+    const { controller, statuses } = harness(source, worker);
+
+    controller.start();
+    await controller.whenIdle();
+    expect(statuses.at(-1)).toMatchObject({
+      generation: "generation-1",
+      quarantinedSources: 1,
+      issue: "sources_quarantined",
+    });
+
+    worker.quarantinedSources = 0;
+    worker.quarantineFields = [];
+    let queuedReplay = false;
+    source.onRead = () => {
+      if (queuedReplay) return;
+      queuedReplay = true;
+      source.set("c.md", "c");
+      source.emit({ kind: "upsert", path: "c.md" });
+    };
+    const replacementStatusStart = statuses.length;
+    controller.requestRebuild();
+    await enteredReplay;
+    source.set("d.md", "d");
+    source.emit({ kind: "upsert", path: "d.md" });
+
+    const servingStatuses = statuses.slice(replacementStatusStart).filter(
+      (status) => status.searchable && status.generation === "generation-1",
+    );
+    expect(statuses.at(-1)).toMatchObject({ stage: "rebuild" });
+    expect(servingStatuses).not.toHaveLength(0);
+    for (const status of servingStatuses) {
+      expect(status).toMatchObject({
+        quarantinedSources: 1,
+        quarantineValidatorFields: ["chunks_contents"],
+        issue: "sources_quarantined",
+      });
+    }
+
+    releaseReplay();
+    await controller.whenIdle();
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      generation: "generation-2",
+      quarantinedSources: 0,
+      unreadableSources: 0,
+      quarantineValidatorFields: [],
+    });
+    expect(statuses.at(-1)).not.toHaveProperty("issue");
   });
 
   it("retries snapshot reads before quarantining one unreadable source", async () => {
@@ -873,6 +1137,7 @@ describe("InPluginIndexController", () => {
         quarantineValidatorFields: [],
         dirty: true,
         rebuilding: false,
+        mutationEpoch: expect.any(Number),
         issue: "sources_unreadable",
       });
       expect(JSON.stringify(statuses.at(-1))).not.toContain("private SMB inspection detail");
@@ -912,6 +1177,7 @@ describe("InPluginIndexController", () => {
       quarantineValidatorFields: [],
       dirty: false,
       rebuilding: false,
+      mutationEpoch: expect.any(Number),
     });
   });
 
@@ -967,6 +1233,7 @@ describe("InPluginIndexController", () => {
       quarantineValidatorFields: [],
       dirty: true,
       rebuilding: false,
+      mutationEpoch: expect.any(Number),
       issue: "vault_read_failed",
     });
     expect(JSON.stringify({ diagnostic, status: statuses.at(-1) })).not.toContain("Secret-");
@@ -1734,6 +2001,7 @@ describe("InPluginIndexController", () => {
       quarantineValidatorFields: [],
       dirty: true,
       rebuilding: false,
+      mutationEpoch: expect.any(Number),
       issue: "sources_unreadable",
     });
   });

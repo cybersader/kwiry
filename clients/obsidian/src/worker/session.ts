@@ -14,10 +14,14 @@ import type {
   SourceRemoval,
   StatusResult,
 } from "./protocol";
-import { WorkerRpcClient, type WorkerLike } from "./rpc-client";
+import {
+  WorkerRpcClient,
+  type WorkerLike,
+} from "./rpc-client";
+import { PRODUCTION_RPC_PROTOCOL } from "./production-rpc-protocol";
 
 export class InPluginWorkerSession {
-  private readonly client: WorkerRpcClient;
+  protected readonly client: WorkerRpcClient;
   private cleaned = false;
 
   constructor(
@@ -26,7 +30,11 @@ export class InPluginWorkerSession {
     private readonly revokeObjectUrl: (url: string) => void,
     timeoutMs?: number,
   ) {
-    this.client = new WorkerRpcClient(worker, timeoutMs);
+    this.client = new WorkerRpcClient(
+      worker,
+      PRODUCTION_RPC_PROTOCOL,
+      timeoutMs,
+    );
   }
 
   initialize(vaultId: string): Promise<InitializeResult> {

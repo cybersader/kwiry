@@ -3,17 +3,20 @@
 
 import {
   finalize_d5c_preview,
-  internal_d5c_evaluate,
   prepare_d5c_preview,
 } from "virtual:kwiry-rust-wasm-bindings";
 
+import {
+  D5C_COMPARE_SCHEMA_VERSION,
+  INTERNAL_D5C_COMPARE_OPERATION,
+  isD5cCompareRequest,
+  type D5cCompareRequest,
+  type D5cCompareResult,
+} from "./d5c-compare-protocol";
 import type { Fts5GenerationIndex, SQLiteDatabase } from "./fts5-index";
 import {
-  MAX_QUERY_CHARACTERS,
-  MAX_SEARCH_HITS,
   WORKER_PROTOCOL_VERSION,
   fixedWorkerError,
-  type SearchResult,
   type WorkerError,
   type WorkerSearchHit,
 } from "./protocol";
@@ -25,8 +28,27 @@ import {
 } from "./rust-adapter";
 
 const ABI_VERSION = 2;
-const PREVIEW_OPERATION = "internal_d5c_preview" as const;
 const AUTHORIZATION_SCOPE = "obsidian-active-vault" as const;
+const BALANCED_PROFILE = Object.freeze({
+  schema_version: 1,
+  profile_id: "d5c-preview-v1",
+  retrieval_profile_id: "lexical-v1",
+  recency: Object.freeze({
+    id: "00-balanced-recency",
+    clock: "source_mtime",
+    horizon: "quarter",
+    strength: "low",
+  }),
+  hierarchy: Object.freeze({
+    authority_folders: Object.freeze([
+      Object.freeze({ id: "10-authority", prefix: "reference", strength: "standard" }),
+    ]),
+    archive_folders: Object.freeze([
+      Object.freeze({ id: "20-archive", prefix: "archive", strength: "standard" }),
+    ]),
+  }),
+  property_rules: Object.freeze([]),
+});
 const MAX_PROFILE_BYTES = 64 * 1024;
 const MAX_ADAPTER_REQUEST_BYTES = 64 * 1024 * 1024;
 const MAX_HYDRATED_SIGNAL_BYTES = MAX_ADAPTER_REQUEST_BYTES / 4;
@@ -117,16 +139,16 @@ interface RankingEvidence {
   entries: Array<{ tier: EvidenceTier; ordinal: number; points: number }>;
 }
 
-interface PreviewResult {
-  schema_version: 1;
-  generation: string;
-  hits: WorkerSearchHit[];
-  evidence: RankingEvidence;
+interface ComparisonTarget {
+  id: string;
+  index: Fts5GenerationIndex;
+  publication: "active" | "initial_staging";
+  revision: number | null;
 }
 
 interface PreviewContext {
   scope: DedicatedWorkerGlobalScope;
-  getActive(): { id: string; index: Fts5GenerationIndex } | null;
+  resolveTarget(generation: string, revision: number | null): ComparisonTarget | null;
   getInitializedVaultId(): string;
   requireInitialized(): void;
   getLastRequestId(): number;
@@ -141,24 +163,17 @@ class D5cPreviewFailure extends Error {
   }
 }
 
-export function evaluateInternalD5cCase(request: unknown): unknown {
-  return parseAdapterResponse(
-    internal_d5c_evaluate(stringifyBounded(request, MAX_ADAPTER_REQUEST_BYTES)),
-    "internal_d5c_evaluate",
-  );
-}
-
 export function createInternalD5cPreviewHandler(
   context: PreviewContext,
 ): (value: unknown) => Promise<boolean> {
   return async (value: unknown): Promise<boolean> => {
-    if (!isRecord(value) || value.operation !== PREVIEW_OPERATION) return false;
+    if (!isRecord(value) || value.operation !== INTERNAL_D5C_COMPARE_OPERATION) return false;
     const id = Number.isSafeInteger(value.id) && Number(value.id) > 0 ? Number(value.id) : 1;
-    if (!isPreviewRequest(value) || id <= context.getLastRequestId()) {
+    if (!isD5cCompareRequest(value) || id <= context.getLastRequestId()) {
       context.scope.postMessage({
         version: WORKER_PROTOCOL_VERSION,
         id,
-        operation: PREVIEW_OPERATION,
+        operation: INTERNAL_D5C_COMPARE_OPERATION,
         ok: false,
         error: fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false),
       });
@@ -166,11 +181,11 @@ export function createInternalD5cPreviewHandler(
     }
     context.setLastRequestId(id);
     try {
-      const result = runPreview(value, context);
+      const result = runComparison(value, context);
       context.scope.postMessage({
         version: WORKER_PROTOCOL_VERSION,
         id,
-        operation: PREVIEW_OPERATION,
+        operation: INTERNAL_D5C_COMPARE_OPERATION,
         ok: true,
         result,
       });
@@ -181,7 +196,7 @@ export function createInternalD5cPreviewHandler(
       context.scope.postMessage({
         version: WORKER_PROTOCOL_VERSION,
         id,
-        operation: PREVIEW_OPERATION,
+        operation: INTERNAL_D5C_COMPARE_OPERATION,
         ok: false,
         error: mapped,
       });
@@ -190,46 +205,69 @@ export function createInternalD5cPreviewHandler(
   };
 }
 
-function runPreview(
-  request: Extract<ReturnType<typeof parsePreviewRequest>, { ok: true }>["value"],
+function runComparison(
+  request: D5cCompareRequest,
   context: PreviewContext,
-): PreviewResult {
+): D5cCompareResult {
   context.requireInitialized();
   const authorizedVaultId = context.getInitializedVaultId();
-  if (request.vault_id !== authorizedVaultId) {
-    throw new D5cPreviewFailure("authorization_refused");
-  }
-  const active = context.getActive();
-  if (active === null) throw new D5cPreviewFailure("index_building");
+  const target = context.resolveTarget(request.generation, request.revision);
+  if (target === null) throw new D5cPreviewFailure("index_changed");
 
-  const signalPlan = prepareSignalPlan(request.profile);
+  const signalPlan = prepareSignalPlan(BALANCED_PROFILE);
   const prepared = prepareQueryWithRust(request.query);
-  const observation = active.index.observeQuery(prepared.probes);
+  const observation = target.index.observeQuery(prepared.probes);
   const finalized = finalizeQueryWithRust(request.query, observation);
-  const candidates = collectCandidates(active.index, finalized.execution_plan, signalPlan);
+  const candidates = collectCandidates(target.index, finalized.execution_plan, signalPlan);
   if (candidates.some((candidate) => candidate.hit.vault_id !== authorizedVaultId)) {
     throw new D5cPreviewFailure("authorization_refused");
   }
-  hydrateCandidateIdentities(active.index, candidates, authorizedVaultId, signalPlan);
-  const sourceSignals = hydrateSourceSignals(active.index, candidates, signalPlan);
+  hydrateCandidateIdentities(target.index, candidates, authorizedVaultId, signalPlan);
+  const sourceSignals = hydrateSourceSignals(target.index, candidates, signalPlan);
   const finalizedRanking = finalizeRanking(
-    request.profile,
+    BALANCED_PROFILE,
     request.query_time_epoch_seconds,
     candidates,
     sourceSignals,
   );
-  const hits = finalizedRanking.ordered_candidate_ordinals
-    .slice(0, request.limit)
-    .map((ordinal) => candidates[ordinal]?.hit)
-    .filter((hit): hit is WorkerSearchHit => hit !== undefined);
-  if (hits.length !== Math.min(request.limit, candidates.length)) {
+  const displayedCount = Math.min(request.limit, candidates.length);
+  const textOrder = candidates.slice(0, displayedCount).map((candidate) => candidate.lexical_ordinal);
+  const balancedOrder = finalizedRanking.ordered_candidate_ordinals.slice(0, displayedCount);
+  if (balancedOrder.length !== displayedCount) {
     throw new D5cPreviewFailure("invalid_rerank_result");
   }
+  const displayedOrdinals = [...new Set([...textOrder, ...balancedOrder])].sort((left, right) =>
+    left - right);
+  const displayCandidates = displayedOrdinals.map((ordinal) => {
+    const candidate = candidates[ordinal];
+    if (!candidate) throw new D5cPreviewFailure("invalid_rerank_result");
+    return {
+      ordinal,
+      hit: {
+        path: candidate.hit.path,
+        heading_path: candidate.hit.heading_path,
+        frontmatter: candidate.hit.frontmatter,
+      },
+    };
+  });
+  const textRanks = new Map(textOrder.map((ordinal, rank) => [ordinal, rank]));
+  const balancedRanks = new Map(balancedOrder.map((ordinal, rank) => [ordinal, rank]));
+  const movedCandidateCount = displayedOrdinals.filter((ordinal) =>
+    textRanks.get(ordinal) !== balancedRanks.get(ordinal)).length;
+  const topNOverlap = textOrder.filter((ordinal) => balancedRanks.has(ordinal)).length;
   return {
-    schema_version: 1,
-    generation: active.id,
-    hits,
-    evidence: finalizedRanking.evidence,
+    schema_version: D5C_COMPARE_SCHEMA_VERSION,
+    generation: target.id,
+    publication: target.publication,
+    revision: target.revision,
+    candidate_pool_count: candidates.length,
+    display_candidates: displayCandidates,
+    text_order: textOrder,
+    balanced_order: balancedOrder,
+    aggregate: {
+      moved_candidate_count: movedCandidateCount,
+      top_n_overlap: topNOverlap,
+    },
   };
 }
 
@@ -530,63 +568,6 @@ function stringifyBounded(value: unknown, maximumBytes: number): string {
     throw new D5cPreviewFailure("invalid_request");
   }
   return serialized;
-}
-
-function isPreviewRequest(value: Record<string, unknown>): value is {
-  version: typeof WORKER_PROTOCOL_VERSION;
-  id: number;
-  operation: typeof PREVIEW_OPERATION;
-  vault_id: string;
-  query: string;
-  limit: number;
-  query_time_epoch_seconds: string;
-  profile: Record<string, unknown>;
-} {
-  const parsed = parsePreviewRequest(value);
-  return parsed.ok;
-}
-
-function parsePreviewRequest(value: Record<string, unknown>): {
-  ok: true;
-  value: {
-    version: typeof WORKER_PROTOCOL_VERSION;
-    id: number;
-    operation: typeof PREVIEW_OPERATION;
-    vault_id: string;
-    query: string;
-    limit: number;
-    query_time_epoch_seconds: string;
-    profile: Record<string, unknown>;
-  };
-} | { ok: false } {
-  if (!hasExactKeys(value, [
-    "version", "id", "operation", "vault_id", "query", "limit",
-    "query_time_epoch_seconds", "profile",
-  ])
-    || value.version !== WORKER_PROTOCOL_VERSION
-    || !Number.isSafeInteger(value.id)
-    || Number(value.id) < 1
-    || !isBoundedString(value.vault_id, 1_024)
-    || typeof value.query !== "string"
-    || value.query.trim().length === 0
-    || value.query.length > MAX_QUERY_CHARACTERS
-    || !Number.isSafeInteger(value.limit)
-    || Number(value.limit) < 1
-    || Number(value.limit) > MAX_SEARCH_HITS
-    || typeof value.query_time_epoch_seconds !== "string"
-    || !/^(0|[1-9][0-9]{0,19})$/u.test(value.query_time_epoch_seconds)
-    || BigInt(value.query_time_epoch_seconds) > U64_MAX
-    || !isRecord(value.profile)) {
-    return { ok: false };
-  }
-  try {
-    if (new TextEncoder().encode(JSON.stringify(value.profile)).byteLength > MAX_PROFILE_BYTES) {
-      return { ok: false };
-    }
-  } catch {
-    return { ok: false };
-  }
-  return { ok: true, value: value as never };
 }
 
 function isSignalPlan(value: unknown): value is SignalPlan {

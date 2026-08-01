@@ -3,11 +3,15 @@
 
 import { describe, expect, it, vi } from "vitest";
 
+import { INTERNAL_D5C_COMPARE_OPERATION } from "../src/worker/d5c-compare-protocol";
+import { D5C_OWNER_RPC_PROTOCOL } from "../src/worker/d5c-owner-protocol";
+import { D5C_RPC_EXTENSION } from "../src/worker/d5c-session";
 import {
   CACHE_SCHEMA_VERSION,
   WORKER_PROTOCOL_VERSION,
   type WorkerRequest,
 } from "../src/worker/protocol";
+import { PRODUCTION_RPC_PROTOCOL } from "../src/worker/production-rpc-protocol";
 import { WorkerRpcClient, type WorkerLike } from "../src/worker/rpc-client";
 
 class MockWorker implements WorkerLike {
@@ -16,8 +20,8 @@ class MockWorker implements WorkerLike {
   readonly listeners = new Map<string, Set<(event: never) => void>>();
   terminate = vi.fn();
 
-  postMessage(message: WorkerRequest, transfer?: Transferable[]): void {
-    this.posted.push(message);
+  postMessage(message: unknown, transfer?: Transferable[]): void {
+    this.posted.push(message as WorkerRequest);
     this.transfers.push(transfer);
   }
 
@@ -60,6 +64,34 @@ function statusResponse(id: number): unknown {
       database_byte_limit: 1,
       dirty: true,
       rebuilding: false,
+    },
+  };
+}
+
+function compareResponse(
+  id: number,
+  generation: string,
+  revision: number | null,
+  publication: "active" | "initial_staging",
+): unknown {
+  return {
+    version: WORKER_PROTOCOL_VERSION,
+    id,
+    operation: INTERNAL_D5C_COMPARE_OPERATION,
+    ok: true,
+    result: {
+      schema_version: 2,
+      generation,
+      publication,
+      revision,
+      candidate_pool_count: 1,
+      display_candidates: [{
+        ordinal: 0,
+        hit: { path: "note.md", heading_path: [], frontmatter: { title: "Note" } },
+      }],
+      text_order: [0],
+      balanced_order: [0],
+      aggregate: { moved_candidate_count: 0, top_n_overlap: 1 },
     },
   };
 }
@@ -109,7 +141,7 @@ function restoreCommand(generation = "g1") {
 describe("WorkerRpcClient", () => {
   it("correlates responses and removes completed requests", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const pending = client.request({ operation: "status" });
     expect(worker.posted[0]).toEqual({
       version: WORKER_PROTOCOL_VERSION,
@@ -123,7 +155,7 @@ describe("WorkerRpcClient", () => {
 
   it("serializes source changes and correlates their published generation", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const pending = client.request({
       operation: "apply_source_changes",
       generation: "g1",
@@ -160,7 +192,7 @@ describe("WorkerRpcClient", () => {
 
   it("poisons the client on an uncorrelated response", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const pending = client.request({ operation: "status" });
     worker.emitMessage(statusResponse(2));
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
@@ -171,7 +203,7 @@ describe("WorkerRpcClient", () => {
 
   it("poisons the client when initialization claims the legacy source schema", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const pending = client.request({ operation: "initialize", vault_id: "active-vault" });
     worker.emitMessage({
       version: WORKER_PROTOCOL_VERSION,
@@ -192,7 +224,7 @@ describe("WorkerRpcClient", () => {
 
   it("poisons the client on an uncorrelated build generation", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const pending = client.request({
       operation: "apply_source_changes",
       generation: "g1",
@@ -223,7 +255,7 @@ describe("WorkerRpcClient", () => {
   // envelope describing a different one is a protocol failure, not a result.
   it("poisons the client on an export envelope for another generation", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const identity = "d".repeat(64);
     const pending = client.request({
       operation: "export_generation",
@@ -253,7 +285,7 @@ describe("WorkerRpcClient", () => {
 
   it("resolves an export envelope correlated to the requested generation", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const identity = "e".repeat(64);
     const pending = client.request({
       operation: "export_generation",
@@ -275,7 +307,7 @@ describe("WorkerRpcClient", () => {
 
   it("transfers only the restore image buffer and correlates its generation", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const command = restoreCommand();
     const buffer = command.bytes.buffer;
     const pending = client.request(command);
@@ -304,11 +336,11 @@ describe("WorkerRpcClient", () => {
   ])("%s the inbound restore transfer list", async (_name, honourTransfer, remainingBytes) => {
     const worker = new MockWorker();
     worker.postMessage = (message, transfer) => {
-      worker.posted.push(honourTransfer
+      worker.posted.push((honourTransfer
         ? structuredClone(message, { transfer: transfer as Transferable[] })
-        : structuredClone(message));
+        : structuredClone(message)) as WorkerRequest);
     };
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const command = restoreCommand();
     const pending = client.request(command);
     expect(command.bytes.byteLength).toBe(remainingBytes);
@@ -332,7 +364,7 @@ describe("WorkerRpcClient", () => {
 
   it("poisons the client on a restore result for another generation", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const pending = client.request(restoreCommand("g1"));
     worker.emitMessage({
       version: WORKER_PROTOCOL_VERSION,
@@ -352,9 +384,118 @@ describe("WorkerRpcClient", () => {
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
   });
 
+  it("refuses private operations when no extension is installed", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
+
+    await expect(client.request({
+      operation: INTERNAL_D5C_COMPARE_OPERATION,
+      generation: "g1",
+      revision: null,
+      query: "needle",
+      limit: 20,
+      query_time_epoch_seconds: "2000000000",
+    })).rejects.toMatchObject({ code: "invalid_request" });
+    expect(worker.posted).toEqual([]);
+  });
+
+  it("routes public and private operations through one monotonic request sequence", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(
+      worker,
+      D5C_OWNER_RPC_PROTOCOL,
+      1_000,
+      D5C_RPC_EXTENSION,
+    );
+    const status = client.request({ operation: "status" });
+    const comparison = client.request({
+      operation: INTERNAL_D5C_COMPARE_OPERATION,
+      generation: "g1",
+      revision: 2,
+      query: "needle",
+      limit: 20,
+      query_time_epoch_seconds: "2000000000",
+    });
+
+    expect(worker.posted).toEqual([
+      { version: WORKER_PROTOCOL_VERSION, id: 1, operation: "status" },
+      {
+        version: WORKER_PROTOCOL_VERSION,
+        id: 2,
+        operation: INTERNAL_D5C_COMPARE_OPERATION,
+        generation: "g1",
+        revision: 2,
+        query: "needle",
+        limit: 20,
+        query_time_epoch_seconds: "2000000000",
+      },
+    ]);
+    worker.emitMessage(statusResponse(1));
+    worker.emitMessage(compareResponse(2, "g1", 2, "initial_staging"));
+
+    await expect(status).resolves.toMatchObject({ phase: "building" });
+    await expect(comparison).resolves.toMatchObject({
+      generation: "g1",
+      publication: "initial_staging",
+      revision: 2,
+      text_order: [0],
+      balanced_order: [0],
+    });
+    expect(client.pendingCount).toBe(0);
+  });
+
+  it("poisons the shared client on an uncorrelated private revision", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(
+      worker,
+      D5C_OWNER_RPC_PROTOCOL,
+      1_000,
+      D5C_RPC_EXTENSION,
+    );
+    const comparison = client.request({
+      operation: INTERNAL_D5C_COMPARE_OPERATION,
+      generation: "g1",
+      revision: 2,
+      query: "needle",
+      limit: 20,
+      query_time_epoch_seconds: "2000000000",
+    });
+    worker.emitMessage(compareResponse(1, "g1", 3, "initial_staging"));
+
+    await expect(comparison).rejects.toMatchObject({ code: "invalid_request" });
+    await expect(client.request({ operation: "status" })).rejects.toMatchObject({
+      code: "disposed",
+    });
+  });
+
+  it("poisons the shared client on a malformed private response", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(
+      worker,
+      D5C_OWNER_RPC_PROTOCOL,
+      1_000,
+      D5C_RPC_EXTENSION,
+    );
+    const comparison = client.request({
+      operation: INTERNAL_D5C_COMPARE_OPERATION,
+      generation: "g1",
+      revision: null,
+      query: "needle",
+      limit: 20,
+      query_time_epoch_seconds: "2000000000",
+    });
+    const malformed = compareResponse(1, "g1", null, "active") as {
+      result: { evidence?: unknown };
+    };
+    malformed.result.evidence = { points: 99 };
+    worker.emitMessage(malformed);
+
+    await expect(comparison).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
   it("rejects pending work on crashes and all later work", async () => {
     const worker = new MockWorker();
-    const client = new WorkerRpcClient(worker, 1_000);
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const pending = client.request({ operation: "status" });
     worker.emitError();
     await expect(pending).rejects.toMatchObject({ code: "worker_crashed" });
@@ -367,7 +508,7 @@ describe("WorkerRpcClient", () => {
     vi.useFakeTimers();
     try {
       const worker = new MockWorker();
-      const client = new WorkerRpcClient(worker, 10);
+      const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 10);
       const first = client.request({ operation: "status" });
       const second = client.request({ operation: "search", query: "query", limit: 20 });
       const firstRejected = expect(first).rejects.toMatchObject({ code: "timeout" });

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+declare const __KWIRY_D5C_OWNER_WORKER__: boolean;
+
 declare module "virtual:kwiry-worker-source" {
   const source: string;
   export default source;
@@ -18,10 +20,25 @@ declare module "virtual:kwiry-internal-prototype" {
   }): (value: unknown) => Promise<boolean>;
 }
 
+declare module "virtual:kwiry-owner-worker-protocol" {
+  export {
+    isD5cOwnerWorkerOperation,
+    parseD5cOwnerWorkerRequest,
+    type D5cOwnerWorkerOperation,
+    type D5cOwnerWorkerRequest,
+    type D5cOwnerWorkerResponse,
+  } from "./worker/d5c-owner-protocol";
+}
+
 declare module "virtual:kwiry-internal-d5c-preview" {
   export function createInternalD5cPreviewHandler(context: {
     scope: DedicatedWorkerGlobalScope;
-    getActive(): { id: string; index: import("./worker/fts5-index").Fts5GenerationIndex } | null;
+    resolveTarget(generation: string, revision: number | null): {
+      id: string;
+      index: import("./worker/fts5-index").Fts5GenerationIndex;
+      publication: "active" | "initial_staging";
+      revision: number | null;
+    } | null;
     getInitializedVaultId(): string;
     requireInitialized(): void;
     getLastRequestId(): number;

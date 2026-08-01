@@ -80,10 +80,22 @@ export type IndexControllerIssue =
   | "cache_discard_failed"
   | "cache_save_failed";
 
+export interface InitialColdPreviewLease {
+  generation: string;
+  revision: number;
+  processed: number;
+  total: number;
+  documents: number;
+  chunks: number;
+  quarantinedSources: number;
+  unreadableSources: number;
+}
+
 export interface IndexControllerStatus {
   stage: IndexControllerStage;
   searchable: boolean;
   generation: string | null;
+  initialColdPreview?: InitialColdPreviewLease;
   documents: number;
   chunks: number;
   quarantinedSources: number;
@@ -91,6 +103,7 @@ export interface IndexControllerStatus {
   quarantineValidatorFields: readonly SourcePreparationDefectField[];
   dirty: boolean;
   rebuilding: boolean;
+  mutationEpoch?: number;
   progress?: {
     completed: number;
     total: number | null;
@@ -125,6 +138,7 @@ export interface InPluginIndexControllerOptions {
   yieldControl?: () => Promise<void>;
   limits?: Partial<IndexControllerLimits>;
   cache?: IndexControllerCacheOptions;
+  initialColdPreview?: { enabled: true };
 }
 
 const DEFAULT_LIMITS: IndexControllerLimits = {
@@ -176,6 +190,7 @@ export class InPluginIndexController {
   private readonly yieldControl: () => Promise<void>;
   private readonly limits: IndexControllerLimits;
   private readonly cache: IndexControllerCacheOptions | null;
+  private readonly initialColdPreviewEnabled: boolean;
   private readonly idleExportMs: number;
   private readonly setTimer: NonNullable<IndexControllerCacheOptions["setTimer"]>;
   private readonly clearTimer: NonNullable<IndexControllerCacheOptions["clearTimer"]>;
@@ -197,6 +212,7 @@ export class InPluginIndexController {
   private startupDecided = false;
   private startupReconciling = false;
   private rebuildRequested = false;
+  private replacementBuildInProgress = false;
   private rescanRequested = false;
   private rescanSequence = 0;
   private eventSequence = 0;
@@ -209,10 +225,17 @@ export class InPluginIndexController {
   private quarantinedSources = 0;
   private readonly unreadableSources = new Set<string>();
   private readonly quarantineValidatorFields = new Set<SourcePreparationDefectField>();
+  private activeQuarantinedSources = 0;
+  private activeUnreadableSources = 0;
+  private readonly activeQuarantineValidatorFields = new Set<SourcePreparationDefectField>();
   private stage: IndexControllerStage = "starting";
   private completed = 0;
   private total: number | null = null;
   private currentPath: string | null = null;
+  private initialColdPreview: InitialColdPreviewLease | null = null;
+  private initialColdPreviewGeneration: string | null = null;
+  private initialColdPreviewRevision = 0;
+  private initialColdPreviewProcessed = 0;
   private cacheStore: CacheStorePort | null = null;
   private cacheIssue: IndexControllerIssue | null = null;
   private lastPersistedGeneration: string | null = null;
@@ -226,6 +249,7 @@ export class InPluginIndexController {
     this.yieldControl = options.yieldControl ?? (() => Promise.resolve());
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.cache = options.cache ?? null;
+    this.initialColdPreviewEnabled = options.initialColdPreview?.enabled === true;
     this.idleExportMs = options.cache?.idleExportMs ?? DEFAULT_IDLE_EXPORT_MS;
     this.setTimer = options.cache?.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.clearTimer = options.cache?.clearTimer ?? ((timer) => clearTimeout(timer));
@@ -261,6 +285,7 @@ export class InPluginIndexController {
     this.completed = 0;
     this.currentPath = null;
     this.total = null;
+    this.clearInitialColdPreview();
     this.emit(this.activeGeneration === null ? "starting" : "rebuild");
     this.scheduleWork();
   }
@@ -285,7 +310,9 @@ export class InPluginIndexController {
     this.pendingRemovals.clear();
     this.pendingRenames.clear();
     this.rebuildRequested = false;
+    this.replacementBuildInProgress = false;
     this.rescanRequested = false;
+    this.clearInitialColdPreview();
     this.emit("disposed");
     const store = this.cacheStore;
     this.cacheStore = null;
@@ -305,6 +332,7 @@ export class InPluginIndexController {
     this.mutationEpoch += 1;
     if (this.cacheIssue === "cache_save_failed") this.cacheIssue = null;
     this.cancelExportTimer();
+    this.clearInitialColdPreview();
     switch (event.kind) {
       case "upsert":
         this.lastTouchedSequence.set(event.path, sequence);
@@ -391,6 +419,7 @@ export class InPluginIndexController {
     this.pendingRenames.clear();
     this.blocked = false;
     this.rescanRequested = true;
+    this.clearInitialColdPreview();
   }
 
   private enforcePendingBound(): void {
@@ -851,7 +880,12 @@ export class InPluginIndexController {
     const generation = this.allocateFreshGeneration();
     const activeOmissions = rebuilding ? this.captureSourceOmissions() : null;
     let began = false;
+    this.replacementBuildInProgress = rebuilding;
     this.clearSourceOmissions();
+    this.clearInitialColdPreview();
+    this.initialColdPreviewGeneration = rebuilding ? null : generation;
+    this.initialColdPreviewRevision = 0;
+    this.initialColdPreviewProcessed = 0;
     try {
       this.emit(rebuilding ? "rebuild" : "snapshot");
       let counts = await this.worker.beginBuild(generation);
@@ -867,20 +901,25 @@ export class InPluginIndexController {
       counts = await this.addSnapshotSources(generation, snapshot, counts, rebuilding);
 
       if (this.rescanRequested) {
+        this.clearInitialColdPreview();
         await this.worker.abortBuild(generation);
         began = false;
         if (activeOmissions) this.restoreSourceOmissions(activeOmissions);
+        this.replacementBuildInProgress = false;
         return;
       }
 
+      this.clearInitialColdPreview();
       this.emit(rebuilding ? "rebuild" : "replay");
       while (this.hasPendingChanges()) {
         counts = await this.applyPendingChanges(generation, null, counts);
         this.syncWorkerQuarantines(counts);
         if (this.rescanRequested) {
+          this.clearInitialColdPreview();
           await this.worker.abortBuild(generation);
           began = false;
           if (activeOmissions) this.restoreSourceOmissions(activeOmissions);
+          this.replacementBuildInProgress = false;
           return;
         }
       }
@@ -893,22 +932,27 @@ export class InPluginIndexController {
         // recoverable through a later explicit rebuild without raising onFailure.
         const unreadableEvidence = [...this.unreadableSources];
         began = false;
+        this.clearInitialColdPreview();
         await this.worker.abortBuild(generation);
         this.requireActive();
         if (activeOmissions) {
           this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
         }
         this.blocked = !this.rebuildRequested && !this.rescanRequested;
+        this.replacementBuildInProgress = false;
         this.emit("degraded", "sources_unreadable");
         return;
       }
 
+      this.clearInitialColdPreview();
       counts = await this.worker.commitBuild(generation);
       this.requireActive();
       this.setActiveCounts(counts);
       this.completed = this.total ?? 0;
+      this.replacementBuildInProgress = false;
       this.emit(this.hasPendingChanges() ? "replay" : "ready");
     } catch (error) {
+      this.clearInitialColdPreview();
       const unreadableEvidence = rebuilding ? [...this.unreadableSources] : [];
       let failure = error;
       if (began) {
@@ -924,6 +968,7 @@ export class InPluginIndexController {
       if (activeOmissions) {
         this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
       }
+      this.replacementBuildInProgress = false;
       throw failure;
     }
   }
@@ -981,16 +1026,25 @@ export class InPluginIndexController {
     let counts = initialCounts;
     let batch: SourceUpsert[] = [];
     let batchBytes = 0;
+    let batchProcessedThrough = 0;
     let attemptedCandidateReads = 0;
     let unreadableCandidateReads = 0;
 
     const flush = async (): Promise<void> => {
       if (batch.length === 0) return;
+      const previewWasAvailable = this.initialColdPreview !== null;
+      this.clearInitialColdPreview();
+      if (previewWasAvailable) this.emit(rebuilding ? "rebuild" : "snapshot");
       counts = await this.worker.addSourceBatch(generation, batch);
       this.requireActive();
       this.syncWorkerQuarantines(counts);
       batch = [];
       batchBytes = 0;
+      if (!rebuilding) {
+        this.initialColdPreviewRevision += 1;
+        this.initialColdPreviewProcessed = batchProcessedThrough;
+        this.offerInitialColdPreview(generation, counts);
+      }
       this.emit(rebuilding ? "rebuild" : "snapshot");
     };
 
@@ -1032,6 +1086,7 @@ export class InPluginIndexController {
           firstUnreadableError ??= result.reason;
           unreadableCandidateReads += 1;
           this.unreadableSources.add(entry.path);
+          batchProcessedThrough = this.completed;
           this.emit(rebuilding ? "rebuild" : "snapshot");
           continue;
         }
@@ -1056,6 +1111,7 @@ export class InPluginIndexController {
             this.queueRemoval(entry.path);
           }
         }
+        batchProcessedThrough = this.completed;
         this.emit(rebuilding ? "rebuild" : "snapshot");
         if (batch.length >= this.limits.maxBatchSources) await flush();
       }
@@ -1303,6 +1359,7 @@ export class InPluginIndexController {
     this.unreadableSources.clear();
     for (const path of omissions.unreadableSources) this.unreadableSources.add(path);
     for (const path of unreadableEvidence) this.unreadableSources.add(path);
+    this.syncActiveOmissionsFromCurrent();
   }
 
   private clearSourceOmissions(): void {
@@ -1317,6 +1374,46 @@ export class InPluginIndexController {
     for (const field of counts.quarantine_fields) this.quarantineValidatorFields.add(field);
   }
 
+  private offerInitialColdPreview(generation: string, counts: IndexCounts): void {
+    if (!this.initialColdPreviewEnabled
+      || this.activeGeneration !== null
+      || this.initialColdPreviewGeneration !== generation
+      || this.initialColdPreviewRevision < 1
+      || counts.documents < 1
+      || counts.chunks < 1
+      || this.total === null
+      || this.hasPendingChanges()
+      || this.rebuildRequested
+      || this.rescanRequested
+      || this.disposed) {
+      this.initialColdPreview = null;
+      return;
+    }
+    this.initialColdPreview = Object.freeze({
+      generation,
+      revision: this.initialColdPreviewRevision,
+      processed: this.initialColdPreviewProcessed,
+      total: this.total,
+      documents: counts.documents,
+      chunks: counts.chunks,
+      quarantinedSources: this.quarantinedSources,
+      unreadableSources: this.unreadableSources.size,
+    });
+  }
+
+  private clearInitialColdPreview(): void {
+    this.initialColdPreview = null;
+  }
+
+  private syncActiveOmissionsFromCurrent(): void {
+    this.activeQuarantinedSources = this.quarantinedSources;
+    this.activeUnreadableSources = this.unreadableSources.size;
+    this.activeQuarantineValidatorFields.clear();
+    for (const field of this.quarantineValidatorFields) {
+      this.activeQuarantineValidatorFields.add(field);
+    }
+  }
+
   private setActiveCounts(counts: IndexCounts): void {
     const changed = this.activeGeneration !== counts.generation;
     this.activeGeneration = counts.generation;
@@ -1326,6 +1423,7 @@ export class InPluginIndexController {
     this.databaseBytes = counts.database_bytes;
     this.databaseByteLimit = counts.database_byte_limit;
     this.syncWorkerQuarantines(counts);
+    this.syncActiveOmissionsFromCurrent();
     if (changed) {
       this.mutationEpoch += 1;
       this.cancelExportTimer();
@@ -1366,9 +1464,20 @@ export class InPluginIndexController {
         ...(this.currentPath === null ? {} : { path: this.currentPath }),
       }
       : undefined;
-    const omissionIssue = this.quarantinedSources > 0
+    const hasActive = this.activeGeneration !== null;
+    const servingPriorDuringReplacement = hasActive && this.replacementBuildInProgress;
+    const visibleQuarantinedSources = servingPriorDuringReplacement
+      ? this.activeQuarantinedSources
+      : this.quarantinedSources;
+    const visibleUnreadableSources = servingPriorDuringReplacement
+      ? this.activeUnreadableSources
+      : this.unreadableSources.size;
+    const visibleQuarantineFields = servingPriorDuringReplacement
+      ? this.activeQuarantineValidatorFields
+      : this.quarantineValidatorFields;
+    const omissionIssue = visibleQuarantinedSources > 0
       ? "sources_quarantined"
-      : this.unreadableSources.size > 0
+      : visibleUnreadableSources > 0
         ? "sources_unreadable"
         : undefined;
     const issue = explicitIssue
@@ -1379,13 +1488,17 @@ export class InPluginIndexController {
       stage,
       searchable: this.activeGeneration !== null && stage !== "disposed",
       generation: this.activeGeneration,
+      ...(this.initialColdPreview === null
+        ? {}
+        : { initialColdPreview: this.initialColdPreview }),
       documents: this.documents,
       chunks: this.chunks,
-      quarantinedSources: this.quarantinedSources,
-      unreadableSources: this.unreadableSources.size,
-      quarantineValidatorFields: [...this.quarantineValidatorFields].sort(),
+      quarantinedSources: visibleQuarantinedSources,
+      unreadableSources: visibleUnreadableSources,
+      quarantineValidatorFields: [...visibleQuarantineFields].sort(),
       dirty,
       rebuilding: stage === "rebuild",
+      mutationEpoch: this.mutationEpoch,
       ...(progress ? { progress } : {}),
       ...(issue ? { issue } : {}),
     };

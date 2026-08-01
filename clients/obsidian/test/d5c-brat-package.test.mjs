@@ -63,22 +63,19 @@ function sha256(value) {
 }
 
 describe("D5C BRAT package", () => {
-  it("uses a unique conspicuous fixture-only identity", async () => {
+  it("uses a distinct local owner-search identity", async () => {
     const manifest = JSON.parse(await readFile(resolve(packaged.pluginRoot, "manifest.json"), "utf8"));
     expect(manifest).toEqual({
       id: "kwiry-d5c-balanced-playground",
       name: "Kwiry D5C Balanced Playground",
-      version: "0.0.1",
+      version: "0.0.2",
       minAppVersion: "1.7.2",
-      description: "Fixture-only private Balanced ranking playground. Not a production Kwiry release.",
+      description: "Local active-vault Text vs Balanced search experiment. Not a production Kwiry release.",
       author: "cybersader",
       authorUrl: "https://github.com/cybersader/kwiry",
       isDesktopOnly: true,
     });
-    expect(packaged.attestation.plugin).toEqual({
-      id: manifest.id,
-      version: manifest.version,
-    });
+    expect(packaged.attestation.plugin).toEqual({ id: manifest.id, version: manifest.version });
     expect(packaged.config.plugin.id).toBe(manifest.id);
     expect(packaged.config.plugin.version).toBe(manifest.version);
   });
@@ -110,7 +107,21 @@ describe("D5C BRAT package", () => {
     expect(apache).toContain("Version 2.0, January 2004");
   });
 
-  it("is a minified source-mapped-free private playground build", () => {
+  it("ships owner-only styles without adding them to production CSS", async () => {
+    const productionStyles = await readFile(resolve(root, "styles.css"), "utf8");
+    const ownerStyles = await readFile(resolve(packaged.pluginRoot, "styles.css"), "utf8");
+    expect(productionStyles).not.toContain(".kwiry-d5c-live");
+    expect(ownerStyles).toContain(".kwiry-d5c-live");
+    expect(ownerStyles).toContain(".kwiry-result-title");
+  });
+
+  it("builds the live Text-versus-Balanced owner host instead of the fixture UI", () => {
+    expect(packaged.buildProfile).toMatchObject({
+      production: true,
+      write: false,
+      activeVaultCache: false,
+      internalD5cOwnerHost: true,
+    });
     expect(packaged.mainText.slice(0, 1_500)).toContain("GNU General Public License");
     expect(packaged.mainText).toContain("module.exports");
     expect(packaged.mainText).not.toContain("sourceMappingURL=");
@@ -122,29 +133,84 @@ describe("D5C BRAT package", () => {
       `https://github.com/cybersader/kwiry/tree/${packaged.config.source.tag}`,
     );
     for (const marker of [
+      "open-text-vs-balanced",
+      "Open Text vs Balanced search",
+      "live-text-balanced-v1",
+      "internal_d5c_compare",
+    ]) {
+      expect(packaged.mainText).toContain(marker);
+    }
+    for (const oldFixtureMarker of [
       "open-private-d5c-balanced-playground",
       "Private D5C Balanced playground",
       "balanced-playground-v1",
-      "internalD5cPlayground",
       "fixture_evaluate",
     ]) {
-      expect(packaged.mainText).toContain(marker);
+      expect(packaged.mainText).not.toContain(oldFixtureMarker);
     }
     expect(Buffer.byteLength(packaged.mainText, "utf8")).toBeGreaterThan(1_000_000);
   });
 
-  it("compiles normal host cache access out of the test build", () => {
-    expect(packaged.attestation.build.active_vault_cache).toBe("disabled");
-    const inputs = normalizedInputs(packaged.mainMetafile);
-    expect(inputs.some((input) => input.endsWith("cache/local-cache-store.ts"))).toBe(false);
-    expect(inputs.some((input) => input.endsWith("cache/cache-root.ts"))).toBe(false);
-    expect(inputs.some((input) => input.endsWith("cache/build-cache-options.ts"))).toBe(false);
-    expect(inputs.some((input) => input.includes("kwiry-disabled-cache-profile"))).toBe(true);
+  it("compiles cache, daemon, network, credentials, settings, and fixture tools out", () => {
+    expect(packaged.attestation.build).toMatchObject({
+      host_profile: "local_active_vault_owner_preview",
+      active_vault_cache: "disabled",
+      network_access: "compiled_out",
+      credential_access: "compiled_out",
+      persistence: "disabled",
+      same_environment_repeatable: true,
+      embedded_workers: 1,
+    });
+    expect(packaged.attestation.build).not.toHaveProperty("deterministic");
+    const mainInputs = normalizedInputs(packaged.mainMetafile);
+    const workerInputs = normalizedInputs(packaged.workerMetafile);
+    for (const forbidden of [
+      "/src/main.ts",
+      "/src/api.ts",
+      "/src/backend-manager.ts",
+      "/src/backends/daemon-backend.ts",
+      "/src/credentials.ts",
+      "/src/settings.ts",
+      "/src/settings-tab.ts",
+      "/src/cache/",
+      "/src/worker/d5c-playground-worker.ts",
+      "/src/worker/d5c-evaluation.ts",
+    ]) {
+      expect(mainInputs.some((input) => input.includes(forbidden))).toBe(false);
+      expect(workerInputs.some((input) => input.includes(forbidden))).toBe(false);
+    }
+    expect(mainInputs.some((input) => input.endsWith("internal/d5c-playground/live-main.ts"))).toBe(true);
+    expect(workerInputs.some((input) => input.endsWith("worker/d5c-preview.ts"))).toBe(true);
+    expect(workerInputs.some((input) => input.endsWith("worker/d5c-compare-protocol.ts"))).toBe(true);
+    expect(workerInputs.some((input) => input.endsWith("worker/d5c-owner-protocol.ts"))).toBe(true);
+    for (const forbidden of [
+      "export_generation",
+      "restore_generation",
+      "plan_reconciliation",
+      "cache_schema_version",
+    ]) {
+      expect(packaged.workerSource).not.toContain(forbidden);
+      if (forbidden !== "cache_schema_version") {
+        expect(packaged.mainText).not.toContain(forbidden);
+      }
+    }
+    expect(workerInputs.some((input) => input.endsWith("worker/block-vfs.ts"))).toBe(false);
+    expect(workerInputs.some((input) => input.endsWith("worker/image-header.ts"))).toBe(false);
+  });
+
+  it("fails closed if the owner host is combined with the active-vault cache", async () => {
+    await expect(buildPlugin({
+      write: false,
+      production: true,
+      internalD5cOwnerHost: true,
+      activeVaultCache: true,
+    })).rejects.toThrow("D5C owner host must compile without the active-vault cache");
   });
 
   it("preserves the normal production build identity and D5C exclusion", async () => {
     const production = await buildPlugin({ write: false, production: true });
     expect(production.buildProfile.activeVaultCache).toBe(true);
+    expect(production.buildProfile.internalD5cOwnerHost).toBe(false);
     const productionManifest = JSON.parse(await readFile(resolve(root, "manifest.json"), "utf8"));
     expect(productionManifest.id).toBe("kwiry-search");
     expect(production.identities.plugin).toEqual({
@@ -152,19 +218,23 @@ describe("D5C BRAT package", () => {
       version: productionManifest.version,
     });
     const inputs = normalizedInputs(production.mainMetafile);
+    const workerInputs = normalizedInputs(production.workerMetafile);
     expect(inputs.some((input) => input.endsWith("cache/build-cache-options.ts"))).toBe(true);
     expect(inputs.some((input) => input.endsWith("cache/local-cache-store.ts"))).toBe(true);
+    expect(workerInputs.some((input) => input.endsWith("worker/d5c-preview.ts"))).toBe(false);
+    expect(workerInputs.some((input) => input.endsWith("worker/d5c-owner-protocol.ts"))).toBe(false);
     for (const marker of [
       "kwiry-d5c-balanced-playground",
-      "open-private-d5c-balanced-playground",
-      "balanced-playground-v1",
-      "internalD5cPlayground",
+      "open-text-vs-balanced",
+      "live-text-balanced-v1",
+      "internal_d5c_compare",
     ]) {
       expect(production.mainText).not.toContain(marker);
+      expect(production.workerSource).not.toContain(marker);
     }
   }, 180_000);
 
-  it("attests independently recomputable runtime hashes without private paths", async () => {
+  it("attests hashes and the local-only runtime boundary without private paths", async () => {
     const attestationText = await readFile(
       resolve(packaged.supportRoot, "d5c-balanced-playground.attestation.json"),
       "utf8",
@@ -179,10 +249,14 @@ describe("D5C BRAT package", () => {
     }
     expect(packaged.attestation.publishable).toBe(false);
     expect(packaged.attestation.source.tag_verified).toBe(false);
+    expect(packaged.attestation.known_limits).toEqual(expect.arrayContaining([
+      "reads_markdown_from_the_active_vault",
+      "initial_cold_search_is_partial_and_explicitly_labeled",
+      "index_is_in_memory_and_rebuilt_after_restart",
+      "general_gate5_capacity_regression_tracked_separately",
+    ]));
     expect(attestationText).not.toMatch(/\/home\/|\/Users\/|\/mnt\/[a-z]\//u);
-    expect(attestationText).not.toContain("query");
     expect(attestationText).not.toContain("authorization");
-    expect(attestationText).not.toContain("fixture_contents");
 
     // Emscripten intentionally embeds its fixed virtual home. Reject every
     // other host-shaped home plus literal credential and attribution patterns.

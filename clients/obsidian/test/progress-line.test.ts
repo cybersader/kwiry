@@ -49,10 +49,11 @@ describe("progressLine", () => {
     expect(line).toBe("Indexing 250/1000 (25%) · Projects/Alpha");
   });
 
-  it("omits the percentage when the total is not yet known", () => {
+  it("shows a starting state until the total is known", () => {
     const line = progressLine(status({ stage: "snapshot", completed: 7, total: null }));
 
-    expect(line).toBe("Indexing 7");
+    expect(line).toBe("Starting index…");
+    expect(line).not.toContain("?");
   });
 
   it("names reconciliation distinctly from a first build", () => {
@@ -78,7 +79,7 @@ describe("progressLine", () => {
   it("does not divide by zero on an empty vault", () => {
     const line = progressLine(status({ stage: "snapshot", completed: 0, total: 0 }));
 
-    expect(line).toBe("Indexing 0/0");
+    expect(line).toBe("Indexing 0/0 (0%)");
   });
 
   it("renders nothing for explicit zero omission counts", () => {

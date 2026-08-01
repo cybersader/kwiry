@@ -71,7 +71,7 @@ describe("D5C playground Worker isolation", () => {
     expect(internalInputs.some((input) => input.endsWith("internal/d5c-playground/settings.ts"))).toBe(true);
   });
 
-  it("places evaluation and preview code only in the explicit second Worker", () => {
+  it("places fixture evaluation code only in the explicit second Worker", () => {
     const playground = internalBuild.internalD5cPlayground;
     expect(playground).not.toBeNull();
     expect(playground.identities.rust.sha256).not.toBe(internalBuild.identities.rust.sha256);
@@ -97,7 +97,7 @@ describe("D5C playground Worker isolation", () => {
 
     const inputs = normalizedInputs(playground.workerMetafile);
     expect(inputs.some((input) => input.endsWith("src/worker/d5c-playground-worker.ts"))).toBe(true);
-    expect(inputs.some((input) => input.endsWith("src/worker/d5c-preview.ts"))).toBe(true);
+    expect(inputs.some((input) => input.endsWith("src/worker/d5c-evaluation.ts"))).toBe(true);
     expect(inputs.some((input) => input.includes("pkg/internal-d5c-preview"))).toBe(true);
     expect(inputs.some((input) => input.endsWith("src/worker/worker.ts"))).toBe(false);
     expect(inputs.some((input) => input.includes("@sqlite.org/sqlite-wasm"))).toBe(false);

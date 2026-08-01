@@ -12,7 +12,7 @@ import {
   RUST_WASM_SIZE,
 } from "virtual:kwiry-artifact-identities";
 
-import { evaluateInternalD5cCase } from "./d5c-preview";
+import { evaluateInternalD5cCase } from "./d5c-evaluation";
 
 const INTERNAL_PROTOCOL_VERSION = 1;
 const WORKER_NAME = "internalD5cPlayground" as const;

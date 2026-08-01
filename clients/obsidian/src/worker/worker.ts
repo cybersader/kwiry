@@ -18,6 +18,11 @@ import {
 
 import { BlockVfsUnavailableError } from "./block-vfs";
 import {
+  isD5cOwnerWorkerOperation,
+  parseD5cOwnerWorkerRequest,
+  type D5cOwnerWorkerRequest,
+} from "virtual:kwiry-owner-worker-protocol";
+import {
   CacheImageInvalidError,
   CacheVersionMismatchError,
   DEFAULT_DATABASE_BYTE_LIMIT,
@@ -95,6 +100,9 @@ let state: WorkerState = "cold";
 let sqlite: SQLiteApi | null = null;
 let active: Generation | null = null;
 let staging: Generation | null = null;
+let stagingIsInitialCold = false;
+let stagingPreviewEligible = false;
+let stagingRevision = 0;
 const usedGenerations = new Set<string>();
 let lastRequestId = 0;
 let guards: GuardCounters | null = null;
@@ -114,17 +122,32 @@ const handleInternalPrototypeMessage = createInternalPrototypeHandler({
     ? error
     : fixedWorkerError("internal_error", "query", "Internal prototype failed.", false),
 });
-const handleInternalD5cPreviewMessage = createInternalD5cPreviewHandler({
-  scope,
-  getActive: () => active,
-  getInitializedVaultId: requireInitializedVaultId,
-  requireInitialized,
-  getLastRequestId: () => lastRequestId,
-  setLastRequestId: (id) => { lastRequestId = id; },
-  mapError: (error) => isWorkerError(error)
-    ? error
-    : fixedWorkerError("internal_error", "query", "Internal preview failed.", false),
-});
+const handleInternalD5cPreviewMessage = __KWIRY_D5C_OWNER_WORKER__
+  ? createInternalD5cPreviewHandler({
+      scope,
+      resolveTarget: (generation, revision) => {
+        if (active !== null) {
+          return active.id === generation && revision === null
+            ? { ...active, publication: "active" as const, revision: null }
+            : null;
+        }
+        return staging !== null
+          && stagingIsInitialCold
+          && stagingPreviewEligible
+          && staging.id === generation
+          && revision === stagingRevision
+          ? { ...staging, publication: "initial_staging" as const, revision: stagingRevision }
+          : null;
+      },
+      getInitializedVaultId: requireInitializedVaultId,
+      requireInitialized,
+      getLastRequestId: () => lastRequestId,
+      setLastRequestId: (id) => { lastRequestId = id; },
+      mapError: (error) => isWorkerError(error)
+        ? error
+        : fixedWorkerError("internal_error", "query", "Internal preview failed.", false),
+    })
+  : async () => false;
 
 async function initialize(vaultId: string): Promise<InitializeResult> {
   if (state !== "cold") {
@@ -240,6 +263,9 @@ function beginBuild(generation: string): BuildResult {
     index: openFts5Generation(sqlite, undefined, requireInitializedVaultId()),
     quarantinedSources: new Map(),
   };
+  stagingIsInitialCold = active === null;
+  stagingPreviewEligible = false;
+  stagingRevision = 0;
   usedGenerations.add(generation);
   state = "building";
   return generationResult(staging);
@@ -254,6 +280,10 @@ async function addSourceBatch(
     const prepared = await prepareSourceBatch(sources);
     target.index.applySourceChanges(prepared.preparations, []);
     updateQuarantinedSources(target, sources, [], prepared.quarantined);
+    if (stagingIsInitialCold) {
+      stagingRevision += 1;
+      stagingPreviewEligible = target.index.documents > 0 && target.index.chunks > 0;
+    }
     return generationResult(target);
   } catch (error) {
     abortStaging();
@@ -277,6 +307,8 @@ async function applySourceChanges(
         request.removals,
         prepared.quarantined,
       );
+      stagingRevision += 1;
+      stagingPreviewEligible = false;
       return generationResult(target);
     } catch (error) {
       abortStaging();
@@ -393,6 +425,9 @@ function publishStaging(target: Generation, compact: boolean): BuildResult {
 
   active = target;
   staging = null;
+  stagingIsInitialCold = false;
+  stagingPreviewEligible = false;
+  stagingRevision = 0;
   state = "ready";
   return result;
 }
@@ -769,6 +804,9 @@ function dispose(): DisposeResult {
   active?.index.close();
   staging = null;
   active = null;
+  stagingIsInitialCold = false;
+  stagingPreviewEligible = false;
+  stagingRevision = 0;
   usedGenerations.clear();
   sqlite = null;
   declaredChunkingVersion = null;
@@ -812,6 +850,9 @@ function abortStaging(): void {
   // Detach first so even an injected or runtime close failure cannot leave a
   // rejected generation visible as retained STAGING state.
   staging = null;
+  stagingIsInitialCold = false;
+  stagingPreviewEligible = false;
+  stagingRevision = 0;
   state = "ready";
   target?.index.close();
 }
@@ -981,7 +1022,7 @@ function sourceChangeError(error: unknown): WorkerError {
   );
 }
 
-async function dispatch(request: WorkerRequest): Promise<unknown> {
+async function dispatchProduction(request: WorkerRequest): Promise<unknown> {
   if (request.id <= lastRequestId) {
     throw fixedWorkerError(
       "invalid_request",
@@ -1019,10 +1060,46 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
   }
 }
 
+async function dispatchOwner(
+  request: D5cOwnerWorkerRequest,
+): Promise<unknown> {
+  if (request.id <= lastRequestId) {
+    throw fixedWorkerError(
+      "invalid_request",
+      "protocol",
+      "Worker request ID is duplicate or stale.",
+      false,
+    );
+  }
+  lastRequestId = request.id;
+  switch (request.operation) {
+    case "initialize":
+      return initialize(request.vault_id);
+    case "begin_build":
+      return beginBuild(request.generation);
+    case "add_source_batch":
+      return addSourceBatch(request.generation, request.sources);
+    case "apply_source_changes":
+      return applySourceChanges(request);
+    case "commit_build":
+      return commitBuild(request.generation);
+    case "abort_build":
+      return abortBuild(request.generation);
+    case "search":
+      return search(request.query, request.limit);
+    case "status":
+      return status();
+    case "dispose":
+      return dispose();
+  }
+}
+
 async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
   if (await handleInternalD5cPreviewMessage(event.data)) return;
   if (await handleInternalPrototypeMessage(event.data)) return;
-  const parsed = parseWorkerRequest(event.data);
+  const parsed = __KWIRY_D5C_OWNER_WORKER__
+    ? parseD5cOwnerWorkerRequest(event.data)
+    : parseWorkerRequest(event.data);
   const identity = responseIdentity(event.data);
   let response: WorkerResponse;
   if (isWorkerError(parsed)) {
@@ -1034,7 +1111,9 @@ async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
     };
   } else {
     try {
-      const result = await dispatch(parsed);
+      const result = __KWIRY_D5C_OWNER_WORKER__
+        ? await dispatchOwner(parsed as D5cOwnerWorkerRequest)
+        : await dispatchProduction(parsed as WorkerRequest);
       response = {
         version: WORKER_PROTOCOL_VERSION,
         id: parsed.id,
@@ -1097,9 +1176,19 @@ async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
  * quietly accepted.
  */
 function transferListFor(response: WorkerResponse): Transferable[] {
+  return __KWIRY_D5C_OWNER_WORKER__
+    ? []
+    : productionTransferListFor(response);
+}
+
+function productionTransferListFor(
+  response: WorkerResponse,
+): Transferable[] {
   if (!response.ok || response.operation !== "export_generation") return [];
   const result = response.result as Partial<ExportGenerationResult>;
-  return result.bytes instanceof Uint8Array ? [result.bytes.buffer as ArrayBuffer] : [];
+  return result.bytes instanceof Uint8Array
+    ? [result.bytes.buffer as ArrayBuffer]
+    : [];
 }
 
 function responseIdentity(value: unknown): { id: number; operation: WorkerOperation } {
@@ -1110,7 +1199,13 @@ function responseIdentity(value: unknown): { id: number; operation: WorkerOperat
       && candidate.id >= 1
       ? candidate.id
       : 1;
-    const operation = isOperation(candidate.operation) ? candidate.operation : "status";
+    const operation = (__KWIRY_D5C_OWNER_WORKER__
+      ? isD5cOwnerWorkerOperation(candidate.operation)
+        ? candidate.operation
+        : "status"
+      : isOperation(candidate.operation)
+        ? candidate.operation
+        : "status") as WorkerOperation;
     return { id, operation };
   }
   return { id: 1, operation: "status" };

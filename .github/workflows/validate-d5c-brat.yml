@@ -94,7 +94,9 @@ jobs:
           import os
           import pathlib
 
-          path = pathlib.Path("d5c-brat.tmp/0.0.1/support/d5c-balanced-playground.attestation.json")
+          config = json.loads(pathlib.Path("d5c-brat.config.json").read_text())
+          package = pathlib.Path("d5c-brat.tmp") / config["plugin"]["version"]
+          path = package / "support/d5c-balanced-playground.attestation.json"
           attestation = json.loads(path.read_text())
           expected = os.environ["REF_TYPE"] == "tag"
           if attestation["publishable"] is not expected:
@@ -103,14 +105,15 @@ jobs:
               raise SystemExit("candidate source-tag verification does not match the source ref")
           revision = attestation["source"]["tag"] if expected else attestation["source"]["commit"]
           source_url = f'{attestation["source"]["repository"]}/tree/{revision}'
-          main = pathlib.Path("d5c-brat.tmp/0.0.1/plugin/main.js").read_text()
+          main = (package / "plugin/main.js").read_text()
           if source_url not in main[:2_000]:
               raise SystemExit("candidate corresponding-source banner does not match the verified ref")
           PY
       - name: Verify candidate privacy and exact file boundary
         run: |
           set -euo pipefail
-          package=d5c-brat.tmp/0.0.1
+          version=$(node -p "require('./d5c-brat.config.json').plugin.version")
+          package="d5c-brat.tmp/$version"
           test "$(find "$package/plugin" -maxdepth 1 -type f | wc -l)" -eq 3
           test "$(find "$package/support" -maxdepth 1 -type f | wc -l)" -eq 5
           ! find "$package/plugin" -type f \( -name '*.wasm' -o -name '*.map' -o -name '*.db' -o -name '*worker*.js' \) | grep -q .
@@ -142,7 +145,7 @@ jobs:
         if: matrix.node == 22
         uses: actions/upload-artifact@v4
         with:
-          name: kwiry-d5c-balanced-playground-0.0.1
-          path: clients/obsidian/d5c-brat.tmp/0.0.1/
+          name: kwiry-d5c-balanced-playground-candidate
+          path: clients/obsidian/d5c-brat.tmp/*/
           retention-days: 14
           if-no-files-found: error

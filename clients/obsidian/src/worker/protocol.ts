@@ -519,7 +519,7 @@ export function isGeneration(value: unknown): value is string {
     && /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value);
 }
 
-function isSourceBatch(value: unknown, allowEmpty = false): value is SourceUpsert[] {
+export function isSourceBatch(value: unknown, allowEmpty = false): value is SourceUpsert[] {
   if (!Array.isArray(value)
     || (!allowEmpty && value.length < 1)
     || value.length > MAX_BATCH_SOURCES) {
@@ -568,7 +568,7 @@ function isReconciliationSources(value: unknown): value is ReconciliationSourceM
   return true;
 }
 
-function isSourceChanges(upserts: unknown, removals: unknown): boolean {
+export function isSourceChanges(upserts: unknown, removals: unknown): boolean {
   if (!isSourceBatch(upserts, true)
     || !Array.isArray(removals)
     || !removals.every(isSourceRemoval)
@@ -644,7 +644,7 @@ function isResultForOperation(operation: WorkerOperation, value: unknown): boole
   }
 }
 
-function isInitializeResult(value: unknown): value is InitializeResult {
+export function isInitializeResult(value: unknown): value is InitializeResult {
   return isRecord(value)
     && hasExactKeys(value, [
       "rustAbiVersion",
@@ -662,7 +662,7 @@ function isInitializeResult(value: unknown): value is InitializeResult {
     && value.fts5Enabled === 1;
 }
 
-function isBuildResult(value: unknown): value is BuildResult {
+export function isBuildResult(value: unknown): value is BuildResult {
   return isRecord(value)
     && hasExactKeys(value, [
       "generation",
@@ -770,7 +770,7 @@ function isReconciliationPlanResult(value: unknown): value is ReconciliationPlan
     && value.matched_source_count + remove.length === value.stored_source_count;
 }
 
-function isStatusResult(value: unknown): value is StatusResult {
+export function isStatusResult(value: unknown): value is StatusResult {
   return isRecord(value)
     && hasExactKeys(value, [
       "phase",
@@ -803,7 +803,7 @@ function isStatusResult(value: unknown): value is StatusResult {
     && typeof value.rebuilding === "boolean";
 }
 
-function isSearchResult(value: unknown): value is SearchResult {
+export function isSearchResult(value: unknown): value is SearchResult {
   return isRecord(value)
     && hasExactKeys(value, ["generation", "hits"])
     && isGeneration(value.generation)
@@ -845,7 +845,7 @@ function isFrontmatter(value: unknown): value is WorkerFrontmatter {
     && (value.title === undefined || isBoundedString(value.title, 1_024, true));
 }
 
-function isWorkerError(value: unknown): value is WorkerError {
+export function isWorkerError(value: unknown): value is WorkerError {
   if (!isRecord(value)
     || !hasExactKeys(value, ["code", "stage", "message", "retryable"])
     || typeof value.code !== "string"
@@ -907,7 +907,7 @@ export function isSourcePreparationDefectField(
     && (SOURCE_PREPARATION_DEFECT_FIELDS as readonly string[]).includes(value);
 }
 
-function isRequestId(value: unknown): value is number {
+export function isRequestId(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
@@ -919,7 +919,7 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
-function isBoundedString(value: unknown, maximum: number, allowEmpty = false): value is string {
+export function isBoundedString(value: unknown, maximum: number, allowEmpty = false): value is string {
   return typeof value === "string"
     && value.length <= maximum
     && (allowEmpty || value.length > 0);
@@ -938,11 +938,11 @@ function isNormalizedVaultRelativePath(value: unknown): value is string {
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+export function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && actual.every((key) => keys.includes(key));
 }

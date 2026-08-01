@@ -3,16 +3,16 @@
   "plugin": {
     "id": "kwiry-d5c-balanced-playground",
     "name": "Kwiry D5C Balanced Playground",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "minAppVersion": "1.7.2",
-    "description": "Fixture-only private Balanced ranking playground. Not a production Kwiry release.",
+    "description": "Local active-vault Text vs Balanced search experiment. Not a production Kwiry release.",
     "author": "cybersader",
     "authorUrl": "https://github.com/cybersader/kwiry",
     "isDesktopOnly": true
   },
   "source": {
     "repository": "https://github.com/cybersader/kwiry",
-    "tag": "d5c-balanced-playground-0.0.1-r2-source"
+    "tag": "d5c-balanced-playground-0.0.2-source"
   },
   "distribution_repository": "cybersader/kwiry-d5c-balanced-playground",
   "active_vault_cache": false
