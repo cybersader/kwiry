@@ -161,6 +161,10 @@ function selectReleaseLicense(candidate) {
     requirePackage(candidate, "1.0.24", "(MIT OR Apache-2.0) AND Unicode-3.0");
     return "Apache-2.0 AND Unicode-3.0";
   }
+  if (candidate.name === "granit-parser") {
+    requirePackage(candidate, "0.0.7", "MIT OR Apache-2.0");
+    return "Apache-2.0";
+  }
   const unlicensedVersions = {
     "aho-corasick": "1.1.4",
     memchr: "2.8.3",

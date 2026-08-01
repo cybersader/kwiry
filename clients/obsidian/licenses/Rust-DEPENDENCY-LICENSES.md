@@ -126,6 +126,66 @@ OTHER DEALINGS IN THE SOFTWARE.
 For more information, please refer to <http://unlicense.org/>
 ```
 
+## granit-parser 0.0.7 — inherited and modification notices
+
+This distribution selects Apache-2.0 for granit-parser and its inherited components. The complete Apache License 2.0 terms are distributed as `Apache-2.0.txt`. The crate's upstream notice and the component-specific Apache attribution notices are reproduced below.
+
+### Upstream granit-parser notice
+
+```text
+Inherited license notices:
+
+Code up to and including commit `da52a68615f2ecdd6b7e4567019f280c433c1521` is licensed by Chen Yuheng under either of:
+  - [Apache License, Version 2.0](.licenses/ChenYuheng-Apache) (http://www.apache.org/licenses/LICENSE-2.0)
+  - [MIT License](.licenses/ChenYuheng-MIT) (http://opensource.org/licenses/MIT)
+
+Code modifications starting with commit `1d71a23b151dcc12b289d0f06d8207dd9c764216` (included) are licensed by Ethiraric under either of:
+  - [Apache License, Version 2.0](.licenses/Ethiraric-Apache) (http://www.apache.org/licenses/LICENSE-2.0)
+  - [MIT License](.licenses/Ethiraric-MIT) (http://opensource.org/licenses/MIT)
+
+granit-parser modification notice:
+
+Modifications after commit `825edf857426d034954523fed19599635cbb5043` are Copyright (c) 2026 Bourumir Wyngs and licensed under MIT OR Apache-2.0.
+
+Redistributions of this Work must include all inherited and new license notices, including the notices for Chen Yuheng, Ethiraric, and Bourumir Wyngs.
+```
+
+### Chen Yuheng — selected Apache-2.0 notice
+
+```text
+Copyright (c) 2015 Chen Yuheng
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+### Ethiraric — selected Apache-2.0 notice
+
+```text
+Copyright (c) 2023 Ethiraric
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
 ## encoding_rs 0.8.35 — copyright and license selection
 
 This distribution selects Apache-2.0 for the crate code and also preserves the required WHATWG-derived data notice.

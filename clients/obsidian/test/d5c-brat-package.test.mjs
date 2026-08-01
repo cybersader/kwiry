@@ -138,6 +138,15 @@ describe("D5C BRAT package", () => {
     expect(rustDependencies).toContain(
       "This is free and unencumbered software released into the public domain.",
     );
+    expect(rustDependencies).toContain(
+      "granit-parser 0.0.7 — inherited and modification notices",
+    );
+    expect(rustDependencies).toContain("Copyright (c) 2015 Chen Yuheng");
+    expect(rustDependencies).toContain("Copyright (c) 2023 Ethiraric");
+    expect(rustDependencies).toContain("Copyright (c) 2026 Bourumir Wyngs");
+    expect(rustDependencies).toContain(
+      "Redistributions of this Work must include all inherited and new license notices",
+    );
     expect(rustDependencies).toContain("Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).");
     expect(rustDependencies).toContain("UNICODE LICENSE V3");
     expect(rustDependencies).toContain("Copyright © 1991-2023 Unicode, Inc.");

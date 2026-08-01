@@ -4,7 +4,7 @@
   "features": [
     "internal-d5c-preview"
   ],
-  "notice_bundle_sha256": "a3d7dabc4bd423c46298a1ba190829606bbd912fef0a5656e6c915a365ce1eaf",
+  "notice_bundle_sha256": "2b4a748524d7c3695e35326400ab7160da7d4a684505d108154e4c53bcaa74c6",
   "dependencies": [
     {
       "name": "ahash",
