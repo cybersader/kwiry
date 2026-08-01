@@ -69,7 +69,7 @@ describe("D5C BRAT package", () => {
     expect(manifest).toEqual({
       id: "kwiry-d5c-balanced-playground",
       name: "Kwiry D5C Balanced Playground",
-      version: "0.0.2",
+      version: "0.0.3",
       minAppVersion: "1.7.2",
       description: "Local active-vault Text vs Balanced search experiment. Not a production Kwiry release.",
       author: "cybersader",

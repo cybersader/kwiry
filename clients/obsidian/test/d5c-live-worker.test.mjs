@@ -19,7 +19,7 @@ beforeAll(async () => {
     production: true,
     internalD5cOwnerHost: true,
     activeVaultCache: false,
-    pluginIdentity: { id: "kwiry-d5c-balanced-playground", version: "0.0.2" },
+    pluginIdentity: { id: "kwiry-d5c-balanced-playground", version: "0.0.3" },
   }));
 }, 180_000);
 
@@ -298,6 +298,12 @@ describe("live D5C comparison Worker", () => {
       expect(first.result.candidate_pool_count).toBeGreaterThan(2);
       expect(first.result.text_order).toHaveLength(2);
       expect(first.result.balanced_order).toHaveLength(2);
+      expect(first.result.aggregate.moved_candidate_count).toBe(
+        first.result.text_order.filter(
+          (ordinal, rank) => first.result.balanced_order[rank] !== ordinal,
+        ).length,
+      );
+      expect(isD5cCompareResponse(first)).toBe(true);
       expect(new Set(first.result.text_order).size).toBe(2);
       expect(new Set(first.result.balanced_order).size).toBe(2);
       for (const ordinal of [

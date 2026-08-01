@@ -10,7 +10,7 @@ The plugin uses the distinct ID `kwiry-d5c-balanced-playground`, so it can be in
 2. Install and enable BRAT.
 3. Run **BRAT: Plugins: Add a beta plugin for testing (with or without version)**.
 4. Enter `cybersader/kwiry-d5c-balanced-playground`.
-5. Select the owner-authorized `0.0.2` test release.
+5. Select the owner-authorized `0.0.3` test release.
 6. Confirm Obsidian lists **Kwiry D5C Balanced Playground**, not the normal **Kwiry Search** plugin.
 7. Run **Kwiry D5C Balanced Playground: Open Text vs Balanced search**.
 

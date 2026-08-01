@@ -250,10 +250,9 @@ function runComparison(
       },
     };
   });
-  const textRanks = new Map(textOrder.map((ordinal, rank) => [ordinal, rank]));
   const balancedRanks = new Map(balancedOrder.map((ordinal, rank) => [ordinal, rank]));
-  const movedCandidateCount = displayedOrdinals.filter((ordinal) =>
-    textRanks.get(ordinal) !== balancedRanks.get(ordinal)).length;
+  const movedCandidateCount = textOrder.filter((ordinal, rank) =>
+    balancedOrder[rank] !== ordinal).length;
   const topNOverlap = textOrder.filter((ordinal) => balancedRanks.has(ordinal)).length;
   return {
     schema_version: D5C_COMPARE_SCHEMA_VERSION,
