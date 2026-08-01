@@ -14,7 +14,7 @@ const noticeBundlePath = resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md");
 const TARGET = "wasm32-unknown-unknown";
 const FEATURES = Object.freeze(["internal-d5c-preview"]);
 
-export async function validateD5cRustLicenses() {
+export async function readD5cRustLicenseInventory() {
   const [inventoryText, noticeBundle] = await Promise.all([
     readFile(inventoryPath, "utf8"),
     readFile(noticeBundlePath),
@@ -25,7 +25,19 @@ export async function validateD5cRustLicenses() {
     !== inventory.notice_bundle_sha256) {
     throw new Error("D5C Rust dependency notice bundle does not match its inventory");
   }
+  return Object.freeze({
+    schema_version: inventory.schema_version,
+    target: inventory.target,
+    features: Object.freeze([...inventory.features]),
+    notice_bundle_sha256: inventory.notice_bundle_sha256,
+    dependencies: Object.freeze(
+      inventory.dependencies.map((dependency) => Object.freeze({ ...dependency })),
+    ),
+  });
+}
 
+export async function validateD5cRustLicenses() {
+  const inventory = await readD5cRustLicenseInventory();
   const result = spawnSync("cargo", [
     "metadata",
     "--locked",
@@ -88,13 +100,7 @@ export async function validateD5cRustLicenses() {
   if (JSON.stringify(actual) !== JSON.stringify(inventory.dependencies)) {
     throw new Error("D5C Rust dependency license inventory does not match Cargo.lock");
   }
-  return Object.freeze({
-    schema_version: inventory.schema_version,
-    target: inventory.target,
-    features: Object.freeze([...inventory.features]),
-    notice_bundle_sha256: inventory.notice_bundle_sha256,
-    dependencies: Object.freeze(actual.map((dependency) => Object.freeze(dependency))),
-  });
+  return inventory;
 }
 
 function validateInventoryShape(inventory) {

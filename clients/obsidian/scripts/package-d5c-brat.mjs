@@ -15,7 +15,10 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildPlugin } from "../esbuild.config.mjs";
-import { validateD5cRustLicenses } from "./validate-d5c-rust-licenses.mjs";
+import {
+  readD5cRustLicenseInventory,
+  validateD5cRustLicenses,
+} from "./validate-d5c-rust-licenses.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultConfigPath = resolve(root, "d5c-brat.config.json");
@@ -36,9 +39,15 @@ export async function packageD5cBrat({
   outputRoot = defaultOutputRoot,
   requireClean = true,
   sourceRef,
+  validateLockedRustGraph = true,
 } = {}) {
   const config = validateConfig(JSON.parse(await readFile(configPath, "utf8")));
-  const rustLicenseInventory = await validateD5cRustLicenses();
+  if (!validateLockedRustGraph && requireClean) {
+    throw new Error("D5C BRAT publication cannot skip locked Rust license validation");
+  }
+  const rustLicenseInventory = validateLockedRustGraph
+    ? await validateD5cRustLicenses()
+    : await readD5cRustLicenseInventory();
   if (sourceRef !== undefined && !isBoundedString(sourceRef, 256)) {
     throw new Error("D5C BRAT source ref is invalid or unbounded");
   }

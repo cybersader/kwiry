@@ -35,6 +35,7 @@ beforeAll(async () => {
   packaged = await packageD5cBrat({
     outputRoot: temporaryRoot,
     requireClean: false,
+    validateLockedRustGraph: false,
   });
 }, 300_000);
 
@@ -252,6 +253,13 @@ describe("D5C BRAT package", () => {
     }
     expect(workerInputs.some((input) => input.endsWith("worker/block-vfs.ts"))).toBe(false);
     expect(workerInputs.some((input) => input.endsWith("worker/image-header.ts"))).toBe(false);
+  });
+
+  it("never permits a publication package to skip locked Rust license validation", async () => {
+    await expect(packageD5cBrat({
+      outputRoot: temporaryRoot,
+      validateLockedRustGraph: false,
+    })).rejects.toThrow("publication cannot skip locked Rust license validation");
   });
 
   it("fails closed if the owner host is combined with the active-vault cache", async () => {
