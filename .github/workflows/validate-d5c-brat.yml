@@ -115,7 +115,7 @@ jobs:
           version=$(node -p "require('./d5c-brat.config.json').plugin.version")
           package="d5c-brat.tmp/$version"
           test "$(find "$package/plugin" -maxdepth 1 -type f | wc -l)" -eq 3
-          test "$(find "$package/support" -maxdepth 1 -type f | wc -l)" -eq 5
+          test "$(find "$package/support" -maxdepth 1 -type f | wc -l)" -eq 6
           ! find "$package/plugin" -type f \( -name '*.wasm' -o -name '*.map' -o -name '*.db' -o -name '*worker*.js' \) | grep -q .
           PACKAGE_ROOT="$package" python3 - <<'PY'
           import os

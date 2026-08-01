@@ -22,6 +22,7 @@ const defaultOutputRoot = resolve(root, "d5c-brat.tmp");
 const RUNTIME_FILES = Object.freeze(["main.js", "manifest.json", "styles.css"]);
 const SUPPORT_FILES = Object.freeze([
   "Apache-2.0.txt",
+  "Emscripten-LICENSE.txt",
   "LICENSE",
   "THIRD_PARTY_NOTICES.md",
   "SHA256SUMS",
@@ -97,13 +98,24 @@ export async function packageD5cBrat({
     resolve(root, "licenses/Apache-2.0.txt"),
     resolve(supportRoot, "Apache-2.0.txt"),
   );
-  const noticeSource = await readFile(resolve(root, "THIRD_PARTY_NOTICES.md"), "utf8");
-  const noticeText = noticeSource.replace(
-    "[`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt)",
-    "`Apache-2.0.txt`",
+  await copyFile(
+    resolve(root, "licenses/Emscripten-LICENSE.txt"),
+    resolve(supportRoot, "Emscripten-LICENSE.txt"),
   );
-  if (noticeText === noticeSource) {
-    throw new Error("D5C BRAT notices did not contain the expected Apache license link");
+  const noticeSource = await readFile(resolve(root, "THIRD_PARTY_NOTICES.md"), "utf8");
+  const noticeText = noticeSource
+    .replace(
+      "[`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt)",
+      "`Apache-2.0.txt`",
+    )
+    .replace(
+      "[`licenses/Emscripten-LICENSE.txt`](licenses/Emscripten-LICENSE.txt)",
+      "`Emscripten-LICENSE.txt`",
+    );
+  if (noticeText === noticeSource
+    || noticeText.includes("licenses/Apache-2.0.txt")
+    || noticeText.includes("licenses/Emscripten-LICENSE.txt")) {
+    throw new Error("D5C BRAT notices did not contain the expected release-local license links");
   }
   await writeFile(resolve(supportRoot, "THIRD_PARTY_NOTICES.md"), noticeText);
 

@@ -88,6 +88,7 @@ describe("D5C BRAT package", () => {
     ]);
     expect((await readdir(packaged.supportRoot)).sort()).toEqual([
       "Apache-2.0.txt",
+      "Emscripten-LICENSE.txt",
       "LICENSE",
       "SHA256SUMS",
       "THIRD_PARTY_NOTICES.md",
@@ -101,10 +102,20 @@ describe("D5C BRAT package", () => {
     expect(allNames.some((name) => /worker.*\.js$/u.test(name))).toBe(false);
     const notices = await readFile(resolve(packaged.supportRoot, "THIRD_PARTY_NOTICES.md"), "utf8");
     const apache = await readFile(resolve(packaged.supportRoot, "Apache-2.0.txt"), "utf8");
+    const emscripten = await readFile(
+      resolve(packaged.supportRoot, "Emscripten-LICENSE.txt"),
+      "utf8",
+    );
     expect(notices).toContain("`Apache-2.0.txt`");
+    expect(notices).toContain("`Emscripten-LICENSE.txt`");
+    expect(notices).toContain("University of Illinois/NCSA Open Source License");
     expect(notices).not.toContain("(licenses/Apache-2.0.txt)");
+    expect(notices).not.toContain("(licenses/Emscripten-LICENSE.txt)");
     expect(apache).toContain("Apache License");
     expect(apache).toContain("Version 2.0, January 2004");
+    expect(emscripten).toContain("Emscripten is available under 2 licenses");
+    expect(emscripten).toContain("Permission is hereby granted");
+    expect(emscripten).toContain("University of Illinois/NCSA Open Source License");
   });
 
   it("ships owner-only styles without adding them to production CSS", async () => {

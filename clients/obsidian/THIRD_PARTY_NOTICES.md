@@ -16,6 +16,7 @@ This plugin bundles `@sqlite.org/sqlite-wasm` version `3.53.0-build1`.
 
 - Package wrapper: Apache License 2.0.
 - SQLite core: public-domain dedication as distributed by the SQLite project.
+- Emscripten-generated glue code: MIT License and University of Illinois/NCSA Open Source License. The complete upstream terms are included at [`licenses/Emscripten-LICENSE.txt`](licenses/Emscripten-LICENSE.txt).
 - Official `sqlite3.wasm` byte length: `864752`.
 - Official `sqlite3.wasm` SHA-256: `02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312`.
 
