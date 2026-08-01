@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildPlugin } from "../esbuild.config.mjs";
+import { validateD5cRustLicenses } from "./validate-d5c-rust-licenses.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultConfigPath = resolve(root, "d5c-brat.config.json");
@@ -24,6 +25,7 @@ const SUPPORT_FILES = Object.freeze([
   "Apache-2.0.txt",
   "Emscripten-LICENSE.txt",
   "LICENSE",
+  "Rust-DEPENDENCY-LICENSES.md",
   "THIRD_PARTY_NOTICES.md",
   "SHA256SUMS",
   "d5c-balanced-playground.attestation.json",
@@ -36,6 +38,7 @@ export async function packageD5cBrat({
   sourceRef,
 } = {}) {
   const config = validateConfig(JSON.parse(await readFile(configPath, "utf8")));
+  const rustLicenseInventory = await validateD5cRustLicenses();
   if (sourceRef !== undefined && !isBoundedString(sourceRef, 256)) {
     throw new Error("D5C BRAT source ref is invalid or unbounded");
   }
@@ -102,6 +105,10 @@ export async function packageD5cBrat({
     resolve(root, "licenses/Emscripten-LICENSE.txt"),
     resolve(supportRoot, "Emscripten-LICENSE.txt"),
   );
+  await copyFile(
+    resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md"),
+    resolve(supportRoot, "Rust-DEPENDENCY-LICENSES.md"),
+  );
   const noticeSource = await readFile(resolve(root, "THIRD_PARTY_NOTICES.md"), "utf8");
   const noticeText = noticeSource
     .replace(
@@ -111,10 +118,15 @@ export async function packageD5cBrat({
     .replace(
       "[`licenses/Emscripten-LICENSE.txt`](licenses/Emscripten-LICENSE.txt)",
       "`Emscripten-LICENSE.txt`",
+    )
+    .replace(
+      "[`licenses/Rust-DEPENDENCY-LICENSES.md`](licenses/Rust-DEPENDENCY-LICENSES.md)",
+      "`Rust-DEPENDENCY-LICENSES.md`",
     );
   if (noticeText === noticeSource
     || noticeText.includes("licenses/Apache-2.0.txt")
-    || noticeText.includes("licenses/Emscripten-LICENSE.txt")) {
+    || noticeText.includes("licenses/Emscripten-LICENSE.txt")
+    || noticeText.includes("licenses/Rust-DEPENDENCY-LICENSES.md")) {
     throw new Error("D5C BRAT notices did not contain the expected release-local license links");
   }
   await writeFile(resolve(supportRoot, "THIRD_PARTY_NOTICES.md"), noticeText);
@@ -190,6 +202,7 @@ export async function packageD5cBrat({
     workerSource: first.workerSource,
     workerMetafile: first.workerMetafile,
     buildProfile: first.buildProfile,
+    rustLicenseInventory,
     attestation,
   };
 }

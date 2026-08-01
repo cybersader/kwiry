@@ -5,10 +5,10 @@ Kwiry Search bundles portable Rust code and the official SQLite WebAssembly runt
 ## Kwiry portable core and Rust WebAssembly support
 
 - `kwiry-core` is available under the MIT License or Apache License 2.0.
-- `wasm-bindgen` and the Rust dependencies linked into the portable adapter retain their respective upstream MIT, Apache-2.0, or MIT-or-Apache licensing.
-- Source and dependency identities are preserved by `daemon/Cargo.lock` and `rust/kwiry-obsidian-wasm/Cargo.lock` in the Kwiry source repository.
+- `wasm-bindgen` and the Rust dependencies linked into the portable adapter retain their respective upstream license terms.
+- Source and dependency identities are preserved by `daemon/Cargo.lock`, `rust/kwiry-obsidian-wasm/Cargo.lock`, and `d5c-rust-license-inventory.json` in the Kwiry source repository.
 
-The Apache License 2.0 text is included at [`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt). The MIT License text is available from <https://opensource.org/license/mit>.
+The Apache License 2.0 text is included at [`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt). Exact Rust dependency selections and required MIT, Unlicense, WHATWG BSD-3-Clause, and Unicode License v3 notices are included at [`licenses/Rust-DEPENDENCY-LICENSES.md`](licenses/Rust-DEPENDENCY-LICENSES.md).
 
 ## Official SQLite WASM package
 

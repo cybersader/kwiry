@@ -90,6 +90,7 @@ describe("D5C BRAT package", () => {
       "Apache-2.0.txt",
       "Emscripten-LICENSE.txt",
       "LICENSE",
+      "Rust-DEPENDENCY-LICENSES.md",
       "SHA256SUMS",
       "THIRD_PARTY_NOTICES.md",
       "d5c-balanced-playground.attestation.json",
@@ -106,16 +107,60 @@ describe("D5C BRAT package", () => {
       resolve(packaged.supportRoot, "Emscripten-LICENSE.txt"),
       "utf8",
     );
+    const rustDependencies = await readFile(
+      resolve(packaged.supportRoot, "Rust-DEPENDENCY-LICENSES.md"),
+      "utf8",
+    );
     expect(notices).toContain("`Apache-2.0.txt`");
     expect(notices).toContain("`Emscripten-LICENSE.txt`");
+    expect(notices).toContain("`Rust-DEPENDENCY-LICENSES.md`");
     expect(notices).toContain("University of Illinois/NCSA Open Source License");
     expect(notices).not.toContain("(licenses/Apache-2.0.txt)");
     expect(notices).not.toContain("(licenses/Emscripten-LICENSE.txt)");
+    expect(notices).not.toContain("(licenses/Rust-DEPENDENCY-LICENSES.md)");
     expect(apache).toContain("Apache License");
     expect(apache).toContain("Version 2.0, January 2004");
     expect(emscripten).toContain("Emscripten is available under 2 licenses");
     expect(emscripten).toContain("Permission is hereby granted");
     expect(emscripten).toContain("University of Illinois/NCSA Open Source License");
+    expect(rustDependencies).toContain("generic-array 0.14.7 — MIT");
+    expect(rustDependencies).toContain("Copyright (c) 2015 Bartłomiej Kamiński");
+    expect(rustDependencies).toContain(
+      "pulldown-cmark 0.13.4 and pulldown-cmark-escape 0.11.0 — MIT",
+    );
+    expect(rustDependencies).toContain("Copyright 2015 Google Inc. All rights reserved.");
+    expect(rustDependencies).toContain("zmij 1.0.23 — MIT");
+    expect(rustDependencies).toContain("David Tolnay as the author");
+    expect(rustDependencies).toContain(
+      "aho-corasick 1.1.4 and memchr 2.8.3 — Unlicense",
+    );
+    expect(rustDependencies).toContain(
+      "This is free and unencumbered software released into the public domain.",
+    );
+    expect(rustDependencies).toContain("Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).");
+    expect(rustDependencies).toContain("UNICODE LICENSE V3");
+    expect(rustDependencies).toContain("Copyright © 1991-2023 Unicode, Inc.");
+  });
+
+  it("validates the exact locked Rust release dependency inventory", async () => {
+    const tracked = JSON.parse(
+      await readFile(resolve(root, "d5c-rust-license-inventory.json"), "utf8"),
+    );
+    expect(packaged.rustLicenseInventory).toEqual(tracked);
+    expect(tracked).toMatchObject({
+      schema_version: 1,
+      target: "wasm32-unknown-unknown",
+      features: ["internal-d5c-preview"],
+    });
+    expect(tracked.dependencies).toHaveLength(59);
+    expect(tracked.dependencies.filter(({ release_license: license }) => license === "MIT"))
+      .toEqual([
+        expect.objectContaining({ name: "generic-array", version: "0.14.7" }),
+        expect.objectContaining({ name: "pulldown-cmark", version: "0.13.4" }),
+        expect.objectContaining({ name: "pulldown-cmark-escape", version: "0.11.0" }),
+        expect.objectContaining({ name: "zmij", version: "1.0.23" }),
+      ]);
+    expect(JSON.stringify(tracked)).not.toMatch(/\/home\/|\/Users\/|\/mnt\/[a-z]\//u);
   });
 
   it("ships owner-only styles without adding them to production CSS", async () => {
