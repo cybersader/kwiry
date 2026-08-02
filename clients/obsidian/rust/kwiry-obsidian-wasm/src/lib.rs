@@ -1263,6 +1263,7 @@ fn fts5_fields(plan: &LexicalQueryPlan, group: QueryFieldGroup) -> Result<String
             QueryField::Aliases => Ok("aliases"),
             QueryField::Title => Ok("title"),
             QueryField::Heading => Ok("heading_text"),
+            QueryField::Tags => Ok("tags"),
             QueryField::Content => Ok("content"),
             QueryField::ContentIdentifiers => Ok("identifiers"),
         })
@@ -1284,6 +1285,7 @@ fn metadata_probe_fields(
             kwiry_core::QueryMetadataField::Aliases => "aliases",
             kwiry_core::QueryMetadataField::Title => "title",
             kwiry_core::QueryMetadataField::Heading => "heading_text",
+            kwiry_core::QueryMetadataField::Tags => "tags",
         })
         .collect::<Vec<_>>();
     if rendered.is_empty() {
@@ -1946,11 +1948,11 @@ mod tests {
         );
         assert_eq!(
             ordinary["result"]["execution_plan"]["stages"][1]["match_value"],
-            "{filename stem aliases title heading_text content} : \"dungeons and dragons\""
+            "{filename stem aliases title heading_text tags content} : \"dungeons and dragons\""
         );
         assert_eq!(
             ordinary["result"]["execution_plan"]["stages"][2]["match_value"],
-            "{filename stem aliases title heading_text content} : (\"dungeons\" AND \"and\" AND \"dragons\")"
+            "{filename stem aliases title heading_text tags content} : (\"dungeons\" AND \"and\" AND \"dragons\")"
         );
 
         let identifier = response(finalize_query(&finalize_request(

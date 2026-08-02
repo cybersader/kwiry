@@ -50,6 +50,7 @@ const BOOST_STEM: f32 = 6.0;
 const BOOST_ALIAS: f32 = 6.0;
 const BOOST_TITLE: f32 = 6.0;
 const BOOST_HEADING: f32 = 3.0;
+const BOOST_TAGS: f32 = 2.0;
 const BOOST_CONTENT: f32 = 1.0;
 const BOOST_EXACT_METADATA: f32 = 12.0;
 const BOOST_PHRASE: f32 = 4.0;
@@ -1299,6 +1300,7 @@ fn simple_explicit_prefix_query(
             QueryField::Aliases,
             QueryField::Title,
             QueryField::Heading,
+            QueryField::Tags,
             QueryField::Content,
         ],
         QueryFieldGroup::SearchableText,
@@ -1689,6 +1691,7 @@ fn field_bindings(
             (_, QueryField::Aliases) => (fields.aliases, BOOST_ALIAS),
             (_, QueryField::Title) => (fields.title, BOOST_TITLE),
             (_, QueryField::Heading) => (fields.heading_text, BOOST_HEADING),
+            (_, QueryField::Tags) => (fields.tags_text, BOOST_TAGS),
             (_, QueryField::Content) => (fields.content, BOOST_CONTENT),
             (_, QueryField::ContentIdentifiers) => {
                 (fields.content_identifiers, BOOST_CONTENT_IDENTIFIER)
@@ -1707,6 +1710,7 @@ fn metadata_probe_fields(fields: &Fields, probe: &QueryMetadataProbe) -> Vec<Fie
             QueryMetadataField::Aliases => fields.aliases,
             QueryMetadataField::Title => fields.title,
             QueryMetadataField::Heading => fields.heading_text,
+            QueryMetadataField::Tags => fields.tags_text,
         })
         .collect()
 }
@@ -1720,6 +1724,7 @@ fn lexical_parser(index: &Index, fields: &Fields) -> QueryParser {
             fields.aliases,
             fields.title,
             fields.heading_text,
+            fields.tags_text,
             fields.content,
         ],
     );
@@ -1728,6 +1733,7 @@ fn lexical_parser(index: &Index, fields: &Fields) -> QueryParser {
     parser.set_field_boost(fields.aliases, BOOST_ALIAS);
     parser.set_field_boost(fields.title, BOOST_TITLE);
     parser.set_field_boost(fields.heading_text, BOOST_HEADING);
+    parser.set_field_boost(fields.tags_text, BOOST_TAGS);
     parser.set_field_boost(fields.content, BOOST_CONTENT);
     parser
 }
@@ -2305,6 +2311,50 @@ mod tests {
             assert!(resolved.plan.support_probes.is_empty(), "{query}");
             assert_eq!(search(&data, query, 20).len(), expected_hits, "{query}");
         }
+    }
+
+    #[test]
+    fn frontmatter_tags_are_searchable_without_outranking_stronger_text() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("tagged.md"),
+            "---\ntags: [tagbeacon]\n---\n# Tag witness\nSynthetic tag field.",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("titled.md"),
+            "---\ntitle: tagbeacon\n---\n# Title witness\nSynthetic title field.",
+        )
+        .unwrap();
+        fs::write(vault.join("plain.md"), "# Plain\nNo beacon term here.").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let paths: Vec<_> = search(&data, "tagbeacon", 20)
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        assert!(paths.contains(&"tagged.md".to_owned()));
+        assert!(paths.contains(&"titled.md".to_owned()));
+        assert!(!paths.contains(&"plain.md".to_owned()));
+        // Title evidence carries a higher boost than tag evidence, so the
+        // title match must not fall below the tag-only match.
+        let title_rank = paths.iter().position(|path| path == "titled.md").unwrap();
+        let tag_rank = paths.iter().position(|path| path == "tagged.md").unwrap();
+        assert!(title_rank < tag_rank);
     }
 
     #[test]

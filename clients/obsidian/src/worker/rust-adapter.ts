@@ -97,7 +97,7 @@ export interface SourcePreparation {
 }
 
 export type QueryField =
-  | "filename" | "stem" | "aliases" | "title" | "heading" | "content"
+  | "filename" | "stem" | "aliases" | "title" | "heading" | "tags" | "content"
   | "content_identifiers";
 export type QueryFieldGroup = "searchable_text" | "metadata" | "exact" | "phrase" | "prefix";
 export type QueryEvidenceStageKind =
@@ -158,7 +158,7 @@ export interface LexicalQueryPlan {
   }>;
   metadata_probe: {
     query: string;
-    fields: ["filename", "stem", "aliases", "title", "heading"];
+    fields: ["filename", "stem", "aliases", "title", "heading", "tags"];
     conjunction: true;
   } | null;
 }
@@ -426,9 +426,9 @@ function isRustIdentity(value: unknown): value is RustIdentity {
 }
 
 const SEARCHABLE_FIELDS = [
-  "filename", "stem", "aliases", "title", "heading", "content",
+  "filename", "stem", "aliases", "title", "heading", "tags", "content",
 ] as const;
-const METADATA_FIELDS = ["filename", "stem", "aliases", "title", "heading"] as const;
+const METADATA_FIELDS = ["filename", "stem", "aliases", "title", "heading", "tags"] as const;
 const EXACT_FIELDS = [
   "filename", "stem", "aliases", "title", "heading", "content_identifiers",
 ] as const;

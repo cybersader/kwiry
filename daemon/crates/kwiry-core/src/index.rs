@@ -138,6 +138,7 @@ pub(crate) struct Fields {
     pub property_text_boolean: Field,
     pub property_text_date: Field,
     pub tags: Field,
+    pub tags_text: Field,
     pub links_out: Field,
     pub mtime: Field,
     pub content_hash: Field,
@@ -189,6 +190,7 @@ impl Fields {
             property_text_boolean: field(schema, "property_text_boolean")?,
             property_text_date: field(schema, "property_text_date")?,
             tags: field(schema, "tags")?,
+            tags_text: field(schema, "tags_text")?,
             links_out: field(schema, "links_out")?,
             mtime: field(schema, "mtime")?,
             content_hash: field(schema, "content_hash")?,
@@ -493,6 +495,7 @@ pub(crate) fn build_schema() -> Schema {
     builder.add_json_field("property_text_boolean", property_text_options.clone());
     builder.add_json_field("property_text_date", property_text_options);
     builder.add_text_field("tags", STRING | STORED);
+    builder.add_text_field("tags_text", TEXT);
     builder.add_text_field("links_out", STORED);
     builder.add_u64_field("mtime", INDEXED | STORED | FAST);
     builder.add_text_field("content_hash", STRING | STORED);
@@ -568,6 +571,7 @@ pub(crate) fn chunk_document(
     }
     for tag in frontmatter.tags() {
         document.add_text(fields.tags, tag);
+        document.add_text(fields.tags_text, tag);
     }
     document.add_text(
         fields.links_out,

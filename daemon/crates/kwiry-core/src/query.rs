@@ -78,6 +78,7 @@ pub enum QueryField {
     Aliases,
     Title,
     Heading,
+    Tags,
     Content,
     ContentIdentifiers,
 }
@@ -110,10 +111,11 @@ impl QueryFieldGroups {
             QueryField::Aliases,
             QueryField::Title,
             QueryField::Heading,
+            QueryField::Tags,
             QueryField::Content,
         ];
         Self {
-            metadata: searchable_text[..5].to_vec(),
+            metadata: searchable_text[..6].to_vec(),
             exact: vec![
                 QueryField::Filename,
                 QueryField::Stem,
@@ -246,6 +248,7 @@ pub enum QueryMetadataField {
     Aliases,
     Title,
     Heading,
+    Tags,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -509,6 +512,7 @@ pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanE
             QueryMetadataField::Aliases,
             QueryMetadataField::Title,
             QueryMetadataField::Heading,
+            QueryMetadataField::Tags,
         ],
         conjunction: true,
     });

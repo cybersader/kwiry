@@ -398,6 +398,30 @@ describe("Fts5GenerationIndex", () => {
     expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-exact", "chunk-phrase"]);
   });
 
+  it("matches frontmatter tags through the tags FTS column", () => {
+    index.replaceSource(sourceAt(
+      "tagged",
+      "tagged.md",
+      "chunk-tagged",
+      "ordinary body",
+      "Plain Title",
+      { title: "Plain Title", tags: ["tagbeacon"] },
+    ));
+    index.replaceSource(sourceAt(
+      "untagged",
+      "untagged.md",
+      "chunk-untagged",
+      "ordinary body",
+      "Other Title",
+      { title: "Other Title" },
+    ));
+    const hits = index.search(matchPlan(
+      "lexical_all_terms_v3",
+      '{filename stem aliases title heading_text tags content} : ("tagbeacon")',
+    ), 20);
+    expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-tagged"]);
+  });
+
   it("uses Rust-normalized Unicode and collapsed whitespace for exact metadata", () => {
     index.replaceSource(sourceAt(
       "unicode-exact",
