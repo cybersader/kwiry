@@ -3,6 +3,7 @@
 
 export interface IndexProgressLike {
   stage: "snapshot" | "replay" | "rebuild";
+  subphase?: "planning" | "verifying" | "applying";
   completed: number;
   total: number | null;
   path?: string;
@@ -12,9 +13,24 @@ export function formatIndexProgress(
   progress: IndexProgressLike,
   options: { includePath?: boolean } = {},
 ): string {
-  if (progress.total === null) return "Starting index…";
+  if (progress.stage === "replay" && progress.subphase === "planning") {
+    return "Planning reconciliation…";
+  }
+  if (progress.total === null) {
+    if (progress.stage === "replay" && progress.subphase === "verifying") {
+      return "Verifying reconciliation…";
+    }
+    if (progress.stage === "replay" && progress.subphase === "applying") {
+      return "Applying changes…";
+    }
+    return "Starting index…";
+  }
   const verb = progress.stage === "replay"
-    ? "Reconciling"
+    ? progress.subphase === "verifying"
+      ? "Verifying"
+      : progress.subphase === "applying"
+        ? "Applying changes"
+        : "Reconciling"
     : progress.stage === "rebuild"
       ? "Rebuilding"
       : "Indexing";

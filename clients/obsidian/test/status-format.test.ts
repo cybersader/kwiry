@@ -44,16 +44,36 @@ describe("formatStatus", () => {
     const cases = [
       ["snapshot", "Kwiry: Indexing 42/900 (4%)"],
       ["rebuild", "Kwiry: Rebuilding 42/900 (4%)"],
-      ["replay", "Kwiry: Reconciling 42/900 (4%)"],
     ] as const;
 
     for (const [stage, expected] of cases) {
       expect(formatStatus({
         ...base,
         phase: "building",
-        searchable: stage === "replay",
+        searchable: false,
         dirty: true,
         progress: { stage, completed: 42, total: 900 },
+      })).toBe(expected);
+    }
+  });
+
+  it("reports reconciliation planning, verification, and application honestly", () => {
+    const cases: Array<[NonNullable<BackendStatus["progress"]>, string]> = [
+      [{ stage: "replay", subphase: "planning", completed: 0, total: null },
+        "Kwiry: Planning reconciliation…"],
+      [{ stage: "replay", subphase: "verifying", completed: 42, total: 900 },
+        "Kwiry: Verifying 42/900 (4%)"],
+      [{ stage: "replay", subphase: "applying", completed: 2, total: 5 },
+        "Kwiry: Applying changes 2/5 (40%)"],
+    ];
+
+    for (const [progress, expected] of cases) {
+      expect(formatStatus({
+        ...base,
+        phase: "building",
+        searchable: true,
+        dirty: true,
+        progress,
       })).toBe(expected);
     }
   });

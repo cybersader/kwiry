@@ -70,6 +70,7 @@ const GENERATED_PERFORMANCE_KEYS = [
   "artifact",
   "corpus",
   "index",
+  "storage",
   "measurements",
   "samples",
   "targets",
@@ -85,7 +86,24 @@ const PERFORMANCE_CORPUS_KEYS = [
   "expected_documents",
   "seed_u32",
 ];
-const PERFORMANCE_INDEX_KEYS = ["documents", "chunks"];
+const PERFORMANCE_INDEX_KEYS = ["documents", "chunks", "sources"];
+const PERFORMANCE_STORAGE_KEYS = [
+  "page_size",
+  "page_count",
+  "freelist_count",
+  "max_page_count",
+  "peak_database_bytes",
+  "final_database_bytes",
+  "database_byte_limit",
+  "export_blob_bytes",
+  "export_blob_limit",
+  "main_chunks_bytes",
+  "main_fts_bytes",
+  "exact_identifier_fts_bytes",
+  "properties_bytes",
+  "sources_bytes",
+  "other_indexes_bytes",
+];
 const PERFORMANCE_MEASUREMENT_KEYS = [
   "worker_initialize_ms",
   "first_batch_ms",
@@ -194,7 +212,43 @@ export function validateGate5GeneratedPerformanceEvidence(value) {
   exactKeys(value.index, PERFORMANCE_INDEX_KEYS, "index");
   positiveInteger(value.index.documents, "index.documents");
   positiveInteger(value.index.chunks, "index.chunks");
+  positiveInteger(value.index.sources, "index.sources");
   requireEqual(value.index.documents, value.corpus.expected_documents, "index.documents");
+  requireEqual(value.index.chunks, value.corpus.expected_documents * 5, "index.chunks");
+  requireEqual(value.index.sources, value.corpus.note_count, "index.sources");
+
+  requireRecord(value.storage, "storage");
+  exactKeys(value.storage, PERFORMANCE_STORAGE_KEYS, "storage");
+  for (const key of PERFORMANCE_STORAGE_KEYS) {
+    nonNegativeInteger(value.storage[key], `storage.${key}`);
+  }
+  positiveInteger(value.storage.page_size, "storage.page_size");
+  positiveInteger(value.storage.page_count, "storage.page_count");
+  positiveInteger(value.storage.max_page_count, "storage.max_page_count");
+  requireEqual(value.storage.database_byte_limit, 320 * 1024 * 1024, "storage.database_byte_limit");
+  requireEqual(value.storage.export_blob_limit, 384 * 1024 * 1024, "storage.export_blob_limit");
+  requireEqual(
+    value.storage.final_database_bytes,
+    value.storage.page_size * value.storage.page_count,
+    "storage.final_database_bytes",
+  );
+  requireEqual(value.storage.export_blob_bytes, value.storage.final_database_bytes, "storage.export_blob_bytes");
+  if (value.storage.peak_database_bytes > value.storage.database_byte_limit
+    || value.storage.final_database_bytes > value.storage.database_byte_limit
+    || value.storage.export_blob_bytes > value.storage.export_blob_limit) {
+    throw new Error("storage limit exceeded");
+  }
+  const categorizedBytes = value.storage.main_chunks_bytes
+    + value.storage.main_fts_bytes
+    + value.storage.exact_identifier_fts_bytes
+    + value.storage.properties_bytes
+    + value.storage.sources_bytes
+    + value.storage.other_indexes_bytes;
+  requireEqual(
+    categorizedBytes,
+    (value.storage.page_count - value.storage.freelist_count) * value.storage.page_size,
+    "storage categorized bytes",
+  );
 
   requireRecord(value.measurements, "measurements");
   exactKeys(value.measurements, PERFORMANCE_MEASUREMENT_KEYS, "measurements");

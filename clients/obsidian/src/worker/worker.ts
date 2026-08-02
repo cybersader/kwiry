@@ -359,7 +359,10 @@ function commitBuild(generation: string): BuildResult {
  */
 function publishStaging(target: Generation, compact: boolean): BuildResult {
   try {
-    target.index.assertIntegrity();
+    // The staging index was assembled only through allocator-owned transactions.
+    // Do the cheap structural gate before compaction and the full canonical exact
+    // projection comparison after compaction, immediately before publication.
+    target.index.assertIntegrity(false);
   } catch {
     abortStaging();
     throw fixedWorkerError(
@@ -474,7 +477,7 @@ async function exportGeneration(
   // skip VACUUM because it would ratchet the non-shrinking WASM heap; they are
   // still rechecked immediately before their JS blocks are exported.
   try {
-    target.index.assertIntegrity();
+    target.index.assertIntegrity(false);
     if (target.index.requiresPreExportCompaction) target.index.compact();
     target.index.assertIntegrity();
   } catch {

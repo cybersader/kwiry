@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { performance } from "node:perf_hooks";
 
+import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import esbuild from "esbuild";
 
 import { buildPlugin } from "../esbuild.config.mjs";
@@ -29,6 +30,8 @@ const HYDRATION_QUERY = "synthetic";
 const HYDRATION_SAMPLES = 20;
 const WORKER_PROTOCOL_VERSION = 6;
 const PERFORMANCE_VAULT_ID = "gate5-performance-vault";
+const CACHE_IDENTITY = "c".repeat(64);
+const EXPORT_BLOB_LIMIT = 384 * 1024 * 1024;
 
 main().catch((error) => {
   const diagnostic = safeFailureDiagnostic(error);
@@ -39,6 +42,7 @@ main().catch((error) => {
 async function main() {
   const corpusRoot = await mkdtemp(resolve(tmpdir(), "kwiry-gate5-performance-"));
   let worker;
+  let restoreWorker;
   let loopDelay;
   try {
     const corpus = await generatePerformanceCorpus(corpusRoot);
@@ -64,6 +68,7 @@ async function main() {
     let lastSuccessfulDocuments = 0;
     let lastSuccessfulChunks = 0;
     let lastSuccessfulDatabaseBytes = 0;
+    let peakDatabaseBytes = 0;
     for (let offset = 0; offset < PERFORMANCE_NOTE_COUNT; offset += 16) {
       const sources = [];
       const end = Math.min(PERFORMANCE_NOTE_COUNT, offset + 16);
@@ -86,10 +91,12 @@ async function main() {
       lastSuccessfulDocuments = batch.result.documents;
       lastSuccessfulChunks = batch.result.chunks;
       lastSuccessfulDatabaseBytes = batch.result.database_bytes;
+      peakDatabaseBytes = Math.max(peakDatabaseBytes, batch.result.database_bytes);
       if (firstBatchMs === null) firstBatchMs = performance.now() - buildStart;
     }
     const committed = await send({ operation: "commit_build", generation: "generation-0" });
     requireOk(committed);
+    peakDatabaseBytes = Math.max(peakDatabaseBytes, committed.result.database_bytes);
     const buildDurationMs = performance.now() - buildStart;
 
     for (let index = 0; index < 5; index += 1) {
@@ -148,13 +155,15 @@ async function main() {
       const bytes = Buffer.concat([original, Buffer.from(marker)]);
       const nextGeneration = `generation-${index + 1}`;
       const started = performance.now();
-      requireOk(await send({
+      const updated = await send({
         operation: "apply_source_changes",
         generation,
         next_generation: nextGeneration,
         upserts: [source(path, bytes, index + 2)],
         removals: [],
-      }));
+      });
+      requireOk(updated);
+      peakDatabaseBytes = Math.max(peakDatabaseBytes, updated.result.database_bytes);
       const visible = await send({
         operation: "search",
         query: `updatebeacon${String(index).padStart(2, "0")}`,
@@ -170,8 +179,55 @@ async function main() {
     await collectWorkerGarbage(worker);
     await collectMainGarbage();
     const addedRssMiB = Math.max(0, process.memoryUsage().rss - baselineRss) / (1024 * 1024);
+
+    const exported = await send({
+      operation: "export_generation",
+      generation,
+      cache_identity: CACHE_IDENTITY,
+    });
+    requireOk(exported);
+    const envelope = exported.result;
+    if (!(envelope.bytes instanceof Uint8Array)
+      || envelope.bytes.byteLength !== envelope.blob_byte_length
+      || envelope.blob_byte_length > EXPORT_BLOB_LIMIT) {
+      throw new Error("worker-export-invalid");
+    }
+    const storage = await inspectExportedStorage(envelope.bytes, peakDatabaseBytes);
+
+    restoreWorker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    let restoreRequestId = 0;
+    const sendRestored = (message) => request(
+      restoreWorker,
+      { id: ++restoreRequestId, ...message },
+      300_000,
+    );
+    requireOk(await sendRestored({
+      operation: "initialize",
+      vault_id: PERFORMANCE_VAULT_ID,
+    }));
+    requireOk(await sendRestored(restoreRequest(envelope, generation)));
+    for (const [probe, query] of [
+      ["ordinary", "performancebeacon00000"],
+      ["exact", "w0001"],
+      ["combined", "synthetic performancebeacon00000"],
+      ["update", "updatebeacon00"],
+    ]) {
+      const restoredSearch = await sendRestored({ operation: "search", query, limit: 20 });
+      requireOk(restoredSearch);
+      if (restoredSearch.result.hits.length === 0) {
+        throw new Error(`worker-restore_search-${probe}_empty`);
+      }
+    }
+    const restoredStatus = await sendRestored({ operation: "status" });
+    requireOk(restoredStatus);
+
     const status = await send({ operation: "status" });
     requireOk(status);
+    if (status.result.documents !== restoredStatus.result.documents
+      || status.result.chunks !== restoredStatus.result.chunks
+      || status.result.active_database_bytes !== storage.bytes.final_database_bytes) {
+      throw new Error("worker-status-invalid");
+    }
     const measurements = {
       worker_initialize_ms: round(initializeMs),
       first_batch_ms: round(firstBatchMs ?? 0),
@@ -202,8 +258,17 @@ async function main() {
         seed_u32: corpus.seed_u32,
       },
       index: {
-        documents: status.result.documents,
-        chunks: status.result.chunks,
+        documents: restoredStatus.result.documents,
+        chunks: restoredStatus.result.chunks,
+        sources: storage.sources,
+      },
+      storage: {
+        ...storage.bytes,
+        max_page_count: Math.floor(
+          status.result.database_byte_limit / storage.bytes.page_size,
+        ),
+        database_byte_limit: status.result.database_byte_limit,
+        export_blob_limit: EXPORT_BLOB_LIMIT,
       },
       measurements,
       samples: {
@@ -219,6 +284,7 @@ async function main() {
     requireOk(await send({ operation: "dispose" }));
   } finally {
     loopDelay?.stop();
+    await restoreWorker?.terminate();
     await worker?.terminate();
     await rm(corpusRoot, { recursive: true, force: true });
   }
@@ -243,6 +309,108 @@ function nodeWorkerSource(sourceText) {
     globalThis.close = () => process.exit(0);
     ${sourceText}
   `;
+}
+
+function restoreRequest(envelope, generation) {
+  return {
+    operation: "restore_generation",
+    generation,
+    bytes: envelope.bytes.slice(),
+    blob_byte_length: envelope.blob_byte_length,
+    blob_sha256: envelope.blob_sha256,
+    digest_verified: false,
+    protocol_version: envelope.protocol_version,
+    cache_schema_version: envelope.cache_schema_version,
+    chunking_version: envelope.chunking_version,
+    sqlite_version: envelope.sqlite_version,
+    sqlite_wasm_sha256: envelope.sqlite_wasm_sha256,
+    rust_wasm_sha256: envelope.rust_wasm_sha256,
+    plugin_id: envelope.plugin_id,
+    plugin_version: envelope.plugin_version,
+    cache_identity: envelope.cache_identity,
+    expected_cache_identity: envelope.cache_identity,
+  };
+}
+
+async function inspectExportedStorage(image, peakDatabaseBytes) {
+  const sqlite = await sqlite3InitModule({ print: () => undefined, printErr: () => undefined });
+  const db = deserialize(sqlite, image);
+  try {
+    const pageSize = Number(db.selectValue("PRAGMA page_size"));
+    const pageCount = Number(db.selectValue("PRAGMA page_count"));
+    const freelistCount = Number(db.selectValue("PRAGMA freelist_count"));
+    const categories = {
+      main_chunks_bytes: 0,
+      main_fts_bytes: 0,
+      exact_identifier_fts_bytes: 0,
+      properties_bytes: 0,
+      sources_bytes: 0,
+      other_indexes_bytes: 0,
+    };
+    for (const row of db.selectObjects(
+      "SELECT name, sum(pgsize) AS bytes FROM dbstat GROUP BY name ORDER BY name",
+    )) {
+      if (typeof row.name !== "string" || !Number.isSafeInteger(row.bytes) || row.bytes < 0) {
+        throw new Error("worker-storage-invalid");
+      }
+      categories[storageCategory(row.name)] += row.bytes;
+    }
+    return {
+      sources: Number(db.selectValue("SELECT count(*) FROM sources")),
+      bytes: {
+        page_size: pageSize,
+        page_count: pageCount,
+        freelist_count: freelistCount,
+        peak_database_bytes: peakDatabaseBytes,
+        final_database_bytes: pageSize * pageCount,
+        export_blob_bytes: image.byteLength,
+        ...categories,
+      },
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function storageCategory(name) {
+  if (name === "chunks") return "main_chunks_bytes";
+  if (name.startsWith("chunks_fts_")) return "main_fts_bytes";
+  if (name.startsWith("chunk_exact_identifier_fts_")) {
+    return "exact_identifier_fts_bytes";
+  }
+  if (name.startsWith("source_properties")
+    || name.startsWith("source_property_scalars")
+    || name.startsWith("source_property_text_fts")
+    || name.startsWith("sqlite_autoindex_source_properties_")
+    || name.startsWith("sqlite_autoindex_source_property_scalars_")) {
+    return "properties_bytes";
+  }
+  if (name === "sources"
+    || name.startsWith("sources_")
+    || name.startsWith("source_exact_aliases")
+    || name.startsWith("sqlite_autoindex_sources_")) {
+    return "sources_bytes";
+  }
+  return "other_indexes_bytes";
+}
+
+function deserialize(sqlite, image) {
+  const db = new sqlite.oo1.DB(":memory:", "c");
+  const pointer = sqlite.wasm.allocFromTypedArray(image);
+  const rc = sqlite.capi.sqlite3_deserialize(
+    db.pointer,
+    "main",
+    pointer,
+    image.byteLength,
+    image.byteLength,
+    sqlite.capi.SQLITE_DESERIALIZE_FREEONCLOSE
+      | sqlite.capi.SQLITE_DESERIALIZE_RESIZEABLE,
+  );
+  if (rc !== 0) {
+    db.close();
+    throw new Error("worker-storage-invalid");
+  }
+  return db;
 }
 
 async function collectMainGarbage() {
@@ -284,7 +452,7 @@ function request(worker, message, timeoutMs = 120_000) {
   return new Promise((resolvePromise, rejectPromise) => {
     const timeout = setTimeout(() => {
       cleanup();
-      rejectPromise(new Error("Worker request timed out"));
+      rejectPromise(new Error(`Worker request timed out: ${message.operation}`));
     }, timeoutMs);
     const onMessage = (response) => {
       if (response?.id !== message.id) return;
@@ -348,12 +516,16 @@ function requireOk(response) {
 }
 
 function safeFailureDiagnostic(error) {
-  if (!(error instanceof Error)
-    || (!/^worker-[a-z_]+-[a-z_]+$/u.test(error.message)
-      && !/^capacity-[0-9]+-[0-9]+-[0-9]+$/u.test(error.message))) {
-    return "unspecified";
+  if (!(error instanceof Error)) return "unspecified";
+  if (/^worker-[a-z_]+-[a-z_]+$/u.test(error.message)
+    || /^capacity-[0-9]+-[0-9]+-[0-9]+$/u.test(error.message)) {
+    return error.message;
   }
-  return error.message;
+  return error.message.length <= 200
+    && /^[A-Za-z0-9 _().:'-]+$/u.test(error.message)
+    && !/\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA|MATCH)\b/iu.test(error.message)
+    ? error.message
+    : "unspecified";
 }
 
 /**

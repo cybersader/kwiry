@@ -1334,6 +1334,83 @@ describe("InPluginIndexController", () => {
     });
   });
 
+  it("enters applying before a verified change mutates and never verifies at 100%", async () => {
+    const source = new FakeSource();
+    source.set("changed.md", "new value", 2);
+    const worker = new FakeCacheWorker();
+    worker.restoredLedger.set("changed.md", {
+      path: "changed.md",
+      byte_length: 3,
+      mtime_nanos: "1000000",
+      indexable: true,
+    });
+    let releasePlan!: () => void;
+    const planGate = new Promise<void>((resolve) => {
+      releasePlan = resolve;
+    });
+    const originalPlan = worker.planReconciliation.bind(worker);
+    worker.planReconciliation = vi.fn(async (generation, vaultId, currentSources) => {
+      await planGate;
+      return originalPlan(generation, vaultId, currentSources);
+    });
+    let reportApplyEntered!: () => void;
+    const applyEntered = new Promise<void>((resolve) => {
+      reportApplyEntered = resolve;
+    });
+    let releaseApply!: () => void;
+    const applyGate = new Promise<void>((resolve) => {
+      releaseApply = resolve;
+    });
+    const originalApply = worker.applySourceChanges.bind(worker);
+    worker.applySourceChanges = vi.fn(async (
+      generation,
+      nextGeneration,
+      upserts,
+      removals,
+    ) => {
+      reportApplyEntered();
+      await applyGate;
+      return originalApply(generation, nextGeneration, upserts, removals);
+    });
+    const { controller, statuses } = harness(source, worker, {}, {
+      openStore: async () => ({
+        kind: "available",
+        store: new FakeCacheStore(cacheHit()),
+      }),
+    });
+
+    controller.start();
+    await vi.waitFor(() => expect(worker.planReconciliation).toHaveBeenCalledTimes(1));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "replay",
+      progress: { subphase: "planning", completed: 0, total: null },
+    });
+
+    releasePlan();
+    await applyEntered;
+
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "replay",
+      progress: { subphase: "applying", completed: 0, total: 1 },
+    });
+    expect(statuses).not.toContainEqual(expect.objectContaining({
+      stage: "replay",
+      progress: expect.objectContaining({
+        subphase: "verifying",
+        completed: 1,
+        total: 1,
+      }),
+    }));
+
+    releaseApply();
+    await controller.whenIdle();
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      generation: "generation-1",
+      dirty: false,
+    });
+  });
+
   it("refreshes a same-size same-mtime source when its authoritative hash changed", async () => {
     const source = new FakeSource();
     source.set("property.md", "008", 1);

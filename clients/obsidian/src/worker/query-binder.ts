@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "./exact-identifier-token";
 import type { EvidenceProbePlan, ExecutionPlan, StagePlan } from "./rust-adapter";
 
 export const FTS5_PROFILE_ID = "lexical-v1" as const;
-export const FTS5_WEIGHTS = [5, 6, 6, 6, 3, 1, 2, 1, 5] as const;
+export const FTS5_WEIGHTS = [5, 6, 6, 6, 3, 1, 2, 1] as const;
 
 const SEARCH_SQL = `
 SELECT
@@ -22,13 +23,10 @@ LIMIT ?
 `;
 
 const REQUIRED_IDENTIFIER_SEARCH_SQL = `
-WITH required(value) AS (SELECT value FROM json_each(?)),
-eligible(rowid) AS (
-  SELECT identifier.chunk_rowid
-  FROM chunk_exact_identifiers AS identifier
-  JOIN required ON required.value = identifier.value
-  GROUP BY identifier.chunk_rowid
-  HAVING count(*) = (SELECT count(*) FROM required)
+WITH eligible(rowid) AS (
+  SELECT rowid
+  FROM chunk_exact_identifier_fts
+  WHERE chunk_exact_identifier_fts MATCH ?
 )
 SELECT
   c.chunk_id,
@@ -46,13 +44,10 @@ LIMIT ?
 `;
 
 const IDENTIFIER_ONLY_SEARCH_SQL = `
-WITH required(value) AS (SELECT value FROM json_each(?)),
-eligible(rowid) AS (
-  SELECT identifier.chunk_rowid
-  FROM chunk_exact_identifiers AS identifier
-  JOIN required ON required.value = identifier.value
-  GROUP BY identifier.chunk_rowid
-  HAVING count(*) = (SELECT count(*) FROM required)
+WITH eligible(rowid) AS (
+  SELECT rowid
+  FROM chunk_exact_identifier_fts
+  WHERE chunk_exact_identifier_fts MATCH ?
 )
 SELECT
   c.chunk_id,
@@ -86,12 +81,17 @@ const EXACT_CANDIDATES_SQL = `
   SELECT c.rowid, 3.0
   FROM exact JOIN chunks AS c ON c.exact_heading = exact.value
   UNION ALL
-  SELECT identifier.chunk_rowid, 5.0
-  FROM exact JOIN chunk_exact_identifiers AS identifier ON identifier.value = exact.value
+  SELECT rowid, 5.0
+  FROM exact_identifier_matches
 `;
 
 const EXACT_SEARCH_SQL = `
 WITH exact(value) AS (VALUES (?)),
+exact_identifier_matches(rowid) AS (
+  SELECT rowid
+  FROM chunk_exact_identifier_fts
+  WHERE chunk_exact_identifier_fts MATCH ?
+),
 candidates(rowid, score) AS (
 ${EXACT_CANDIDATES_SQL}
 ),
@@ -112,13 +112,15 @@ LIMIT ?
 
 const REQUIRED_IDENTIFIER_EXACT_SEARCH_SQL = `
 WITH exact(value) AS (VALUES (?)),
-required(value) AS (SELECT value FROM json_each(?)),
 eligible(rowid) AS (
-  SELECT identifier.chunk_rowid
-  FROM chunk_exact_identifiers AS identifier
-  JOIN required ON required.value = identifier.value
-  GROUP BY identifier.chunk_rowid
-  HAVING count(*) = (SELECT count(*) FROM required)
+  SELECT rowid
+  FROM chunk_exact_identifier_fts
+  WHERE chunk_exact_identifier_fts MATCH ?
+),
+exact_identifier_matches(rowid) AS (
+  SELECT rowid
+  FROM chunk_exact_identifier_fts
+  WHERE chunk_exact_identifier_fts MATCH ?
 ),
 candidates(rowid, score) AS (
 ${EXACT_CANDIDATES_SQL}
@@ -152,8 +154,8 @@ SELECT EXISTS(
 const EXACT_IDENTIFIER_EXISTS_SQL = `
 SELECT EXISTS(
   SELECT 1
-  FROM chunk_exact_identifiers
-  WHERE value = ?
+  FROM chunk_exact_identifier_fts
+  WHERE chunk_exact_identifier_fts MATCH ?
   LIMIT 1
 )
 `;
@@ -230,11 +232,17 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
     if (!isOpaqueUnicodeScalarValue(stage.exact_value, 4_096) || stage.match_value !== undefined) {
       throw new Error("unsupported Rust FTS5 exact stage");
     }
+    const exactIdentifierToken = encodeExactIdentifierToken(stage.exact_value);
     return required.length === 0
-      ? { sql: EXACT_SEARCH_SQL, bind: [stage.exact_value, limit] }
+      ? { sql: EXACT_SEARCH_SQL, bind: [stage.exact_value, exactIdentifierToken, limit] }
       : {
           sql: REQUIRED_IDENTIFIER_EXACT_SEARCH_SQL,
-          bind: [stage.exact_value, JSON.stringify(required), limit],
+          bind: [
+            stage.exact_value,
+            encodeExactIdentifierMatch(required),
+            exactIdentifierToken,
+            limit,
+          ],
         };
   }
   if (!MATCH_STAGE_IDS.has(stage.plan_id) || stage.exact_value !== undefined) {
@@ -249,7 +257,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
     }
     return {
       sql: IDENTIFIER_ONLY_SEARCH_SQL,
-      bind: [JSON.stringify(required), limit],
+      bind: [encodeExactIdentifierMatch(required), limit],
     };
   }
   if (!isOpaqueValue(stage.match_value, 16_384)) {
@@ -259,7 +267,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
     ? { sql: SEARCH_SQL, bind: [stage.match_value, limit] }
     : {
         sql: REQUIRED_IDENTIFIER_SEARCH_SQL,
-        bind: [JSON.stringify(required), stage.match_value, limit],
+        bind: [encodeExactIdentifierMatch(required), stage.match_value, limit],
       };
 }
 
@@ -300,7 +308,10 @@ export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
   }
   return {
     exists: hasIdentifier
-      ? { sql: EXACT_IDENTIFIER_EXISTS_SQL, bind: [plan.exact_identifier as string] }
+      ? {
+          sql: EXACT_IDENTIFIER_EXISTS_SQL,
+          bind: [encodeExactIdentifierToken(plan.exact_identifier as string)],
+        }
       : { sql: FTS_EXISTS_SQL, bind: [plan.match_value as string] },
     prefix,
   };

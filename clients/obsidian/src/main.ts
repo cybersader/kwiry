@@ -19,9 +19,11 @@ import {
 } from "./backend";
 import { DaemonBackend } from "./backends/daemon-backend";
 import { InPluginLexicalBackend } from "./backends/in-plugin-lexical-backend";
+import type { IndexControllerStartupObservation } from "./backends/in-plugin-index-controller";
 import { createInPluginCacheOptions } from "./cache/build-cache-options";
 import { readDaemonToken } from "./credentials";
 import { PluginDiagnostics } from "./diagnostics/plugin-diagnostics";
+import { StartupTimeline } from "./diagnostics/startup-timeline";
 import type {
   DiagnosticDetails,
   DiagnosticEventBuilder,
@@ -59,19 +61,23 @@ export default class KwiryPlugin extends Plugin {
   private lastDiagnosticStatus = "";
   private readonly statusRefresh = new LatestRequestEpoch();
   private readonly diagnostics = new PluginDiagnostics(DEFAULT_SETTINGS.diagnosticsLogLevel);
+  private startupTimeline: StartupTimeline | null = null;
   private privateTools: PrivateTools = createPrivateTools(this, undefined);
 
   async onload(): Promise<void> {
     const pluginEpoch = ++this.pluginEpoch;
+    this.startupTimeline = this.createStartupTimeline(pluginEpoch);
     await this.diagnostics.capture("info", "plugin.load", { pluginEpoch }, async (event) => {
       try {
         const storedData = await this.loadData();
         this.settings = loadSettings(storedData);
         this.privateTools = createPrivateTools(this, storedData);
         this.diagnostics.setLevel(this.settings.diagnosticsLogLevel);
+        this.startupTimeline?.setProfile(this.settings.backendProfile);
         event.set({ profile: this.settings.backendProfile });
         if (pluginEpoch !== this.pluginEpoch) {
           event.set({ outcome: "cancelled" });
+          this.startupTimeline?.finish("cancelled", "plugin_unloaded");
           return;
         }
         this.backendManager = new BackendManager({
@@ -84,6 +90,7 @@ export default class KwiryPlugin extends Plugin {
           }),
           in_plugin: (instanceId) => {
             const cache = createInPluginCacheOptions(this.app.vault);
+            const activationEpoch = this.activationEpoch;
             return new InPluginLexicalBackend({
               instanceId,
               activeVaultId: ACTIVE_VAULT_ID,
@@ -105,6 +112,9 @@ export default class KwiryPlugin extends Plugin {
                   operation: "build",
                   recoverable: !nonError,
                 }, () => undefined);
+              },
+              onStartupObservation: (observation) => {
+                this.observeInPluginStartup(observation, pluginEpoch, activationEpoch);
               },
             });
           },
@@ -139,9 +149,12 @@ export default class KwiryPlugin extends Plugin {
         // Vault event listeners are still registered inside the backend before its
         // first await, so changes during the wait are not lost.
         this.app.workspace.onLayoutReady(() => {
+          this.startupTimeline?.markLayoutReady();
           void this.activateBackendProfile();
         });
+        this.startupTimeline?.markPluginLoadComplete();
       } catch (error) {
+        this.startupTimeline?.finish("failed", "plugin_load_failed");
         event.set(diagnosticErrorDetails(error));
         throw error;
       }
@@ -149,6 +162,7 @@ export default class KwiryPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.startupTimeline?.finish("cancelled", "plugin_unloaded");
     this.pluginEpoch += 1;
     this.activationEpoch += 1;
     this.statusRefresh.invalidate();
@@ -232,6 +246,7 @@ export default class KwiryPlugin extends Plugin {
   async activateBackendProfile(): Promise<void> {
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = ++this.activationEpoch;
+    this.startupTimeline?.beginActivation(this.settings.backendProfile, activationEpoch);
     this.statusRefresh.invalidate();
     this.statusUnsubscribe?.();
     this.statusUnsubscribe = null;
@@ -264,6 +279,7 @@ export default class KwiryPlugin extends Plugin {
           activationEpoch,
         });
         if (this.isCurrent(pluginEpoch, activationEpoch)) {
+          this.startupTimeline?.finish("failed", "activation_failed");
           this.statusBar?.setText("kwiry: backend unavailable");
         }
       }
@@ -394,6 +410,14 @@ export default class KwiryPlugin extends Plugin {
     const quarantinedSources = status.quarantinedSources ?? 0;
     const unreadableSources = status.unreadableSources ?? 0;
     const quarantineFields = status.quarantineValidatorFields ?? [];
+    if (status.identity.profile === "daemon" && this.isCurrent(pluginEpoch, activationEpoch)) {
+      if (status.phase === "ready" && status.searchable && !status.dirty
+        && quarantinedSources === 0 && unreadableSources === 0) {
+        this.startupTimeline?.markFullyCurrent();
+      } else if (status.phase === "unavailable") {
+        this.startupTimeline?.finish("failed", "backend_unavailable");
+      }
+    }
     const omissionCode = quarantinedSources > 0
       ? diagnosticErrorCode("sources_quarantined")
       : unreadableSources > 0
@@ -455,6 +479,36 @@ export default class KwiryPlugin extends Plugin {
         sourcesFailed: unreadableSources,
       }, () => undefined);
     }
+  }
+
+  private createStartupTimeline(pluginEpoch: number): StartupTimeline | null {
+    try {
+      return new StartupTimeline({
+        profile: this.settings.backendProfile,
+        pluginEpoch,
+        activationEpoch: this.activationEpoch,
+        record: (record) => this.diagnostics.recordStartup(record),
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private observeInPluginStartup(
+    observation: IndexControllerStartupObservation,
+    pluginEpoch: number,
+    activationEpoch: number,
+  ): void {
+    if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
+    if (observation.kind === "cache_searchable") {
+      this.startupTimeline?.markCacheSearchable(observation.cacheBytes);
+      return;
+    }
+    if (observation.kind === "fully_current") {
+      this.startupTimeline?.markFullyCurrent();
+      return;
+    }
+    this.startupTimeline?.finish(observation.outcome, observation.reason);
   }
 
   private isCurrent(pluginEpoch: number, activationEpoch: number): boolean {

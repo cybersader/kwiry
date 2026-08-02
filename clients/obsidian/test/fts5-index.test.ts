@@ -4,6 +4,7 @@
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { encodeExactIdentifierToken } from "../src/worker/exact-identifier-token";
 import {
   CacheImageInvalidError,
   CacheVersionMismatchError,
@@ -273,6 +274,104 @@ describe("Fts5GenerationIndex", () => {
     expect(identifierOnly.map((hit) => hit.chunk_id)).toEqual(["chunk-beta"]);
   });
 
+  it("stores exactly one dense exact-identifier FTS row per chunk", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const empty = source("empty-identifiers", "chunk-empty-identifiers", "ordinary body");
+      const one = source("one-identifier", "chunk-one-identifier", "ordinary body");
+      one.chunks[0]!.technical_identifiers = ["rfc 9110"];
+      const many = source("many-identifiers", "chunk-many-identifiers", "ordinary body");
+      many.chunks[0]!.technical_identifiers = Array.from(
+        { length: 256 },
+        (_unused, value) => `cve-2026-${String(value).padStart(4, "0")}`,
+      );
+
+      scoped.applySourceChanges([empty, one, many], [], true);
+
+      expect(db.selectValue("SELECT count(*) FROM chunks")).toBe(3);
+      expect(db.selectValue("SELECT count(*) FROM chunk_exact_identifier_fts_docsize")).toBe(3);
+      const postings = db.selectObjects(`
+        SELECT doc, count(*) AS terms
+        FROM chunk_exact_identifier_fts_vocab
+        GROUP BY doc
+        ORDER BY doc
+      `);
+      expect(postings).toEqual([
+        { doc: 2, terms: 1 },
+        { doc: 3, terms: 256 },
+      ]);
+      expect(() => scoped.assertIntegrity()).not.toThrow();
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("exposes detail-none vocabulary instances in deterministic term/document order", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const alpha = source("vocab-alpha", "chunk-vocab-alpha", "ordinary body");
+      alpha.chunks[0]!.technical_identifiers = ["zeta identifier", "alpha identifier"];
+      const beta = source("vocab-beta", "chunk-vocab-beta", "ordinary body");
+      beta.chunks[0]!.technical_identifiers = ["alpha identifier"];
+      scoped.applySourceChanges([alpha, beta], []);
+
+      expect(db.selectObjects(
+        "SELECT term, doc, col, offset FROM chunk_exact_identifier_fts_vocab",
+      )).toEqual([
+        {
+          term: encodeExactIdentifierToken("alpha identifier"),
+          doc: 1,
+          col: null,
+          offset: null,
+        },
+        {
+          term: encodeExactIdentifierToken("alpha identifier"),
+          doc: 2,
+          col: null,
+          offset: null,
+        },
+        {
+          term: encodeExactIdentifierToken("zeta identifier"),
+          doc: 1,
+          col: null,
+          offset: null,
+        },
+      ]);
+      expect(() => scoped.assertIntegrity()).not.toThrow();
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("matches lossless Unicode and punctuation identifiers without query syntax interpretation", () => {
+    const prepared = source("unicode-identifiers", "chunk-unicode-identifiers", "ordinary body");
+    prepared.chunks[0]!.technical_identifiers = [
+      "résumé api",
+      "product/v2.4.1",
+      "emoji🚀identifier",
+      "field:value OR forged",
+    ];
+    index.replaceSource(prepared);
+
+    for (const exactValue of prepared.chunks[0]!.technical_identifiers) {
+      const hits = index.search({
+        schema_version: 3,
+        profile_id: "lexical-v1",
+        disposition: "ready",
+        max_total_candidates: 512,
+        stages: [{
+          ordinal: 0,
+          plan_id: "lexical_exact_metadata_v3",
+          exact_value: exactValue,
+          max_candidates: 256,
+        }],
+      }, 20);
+      expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-unicode-identifiers"]);
+    }
+  });
+
   it("executes exact metadata before weaker FTS tiers and deduplicates", () => {
     index.replaceSource(source("exact", "chunk-exact", "ordinary body", "Quasar Guide"));
     index.replaceSource(source("phrase", "chunk-phrase", "quasar guide quasar guide quasar guide"));
@@ -368,7 +467,7 @@ describe("Fts5GenerationIndex", () => {
       scoped.replaceSource(prepared);
 
       expect(db.selectValue("SELECT count(*) FROM source_exact_aliases")).toBe(1);
-      expect(db.selectValue("SELECT count(*) FROM chunk_exact_identifiers")).toBe(1);
+      expect(db.selectValue("SELECT count(*) FROM chunk_exact_identifier_fts_docsize")).toBe(1);
       const exactPlan = (value: string) => ({
         schema_version: 3 as const,
         profile_id: "lexical-v1" as const,
@@ -389,17 +488,73 @@ describe("Fts5GenerationIndex", () => {
       expect(() => openRestoredFts5Generation(sqlite, scoped.exportImage(sqlite), 1))
         .toThrow(CacheImageInvalidError);
       db.exec("UPDATE source_exact_aliases SET value = 'alias signal'");
-      db.exec("UPDATE chunk_exact_identifiers SET value = 'cve-2026-9999'");
+      db.exec("DELETE FROM chunk_exact_identifier_fts WHERE rowid = 1");
+      db.exec("INSERT INTO chunk_exact_identifier_fts(rowid, token) VALUES(1, ?)", {
+        bind: [encodeExactIdentifierToken("cve-2026-9999")],
+      });
       expect(() => openRestoredFts5Generation(sqlite, scoped.exportImage(sqlite), 1))
         .toThrow(CacheImageInvalidError);
-      db.exec("UPDATE chunk_exact_identifiers SET value = 'cve-2026-1234'");
+      db.exec("DELETE FROM chunk_exact_identifier_fts WHERE rowid = 1");
+      db.exec("INSERT INTO chunk_exact_identifier_fts(rowid, token) VALUES(1, ?)", {
+        bind: [encodeExactIdentifierToken("cve-2026-1234")],
+      });
       expect(() => scoped.assertIntegrity()).not.toThrow();
 
       scoped.applySourceChanges([], [{ vault_id: "active", path: "exact-projection.md" }], true);
       expect(db.selectValue("SELECT count(*) FROM source_exact_aliases")).toBe(0);
-      expect(db.selectValue("SELECT count(*) FROM chunk_exact_identifiers")).toBe(0);
+      expect(db.selectValue("SELECT count(*) FROM chunk_exact_identifier_fts_docsize")).toBe(0);
     } finally {
       scoped.close();
+    }
+  });
+
+  it("rejects missing, extra, and misassigned exact identifier postings", () => {
+    const missingDb = new sqlite.oo1.DB(":memory:", "c");
+    const missing = new Fts5GenerationIndex(missingDb);
+    try {
+      const prepared = source("missing-exact", "chunk-missing-exact", "ordinary body");
+      prepared.chunks[0]!.technical_identifiers = ["rfc 9110"];
+      missing.replaceSource(prepared);
+      missingDb.exec("DELETE FROM chunk_exact_identifier_fts WHERE rowid = 1");
+      expect(() => missing.assertIntegrity()).toThrow(/integrity check failed/);
+    } finally {
+      missing.close();
+    }
+
+    const extraDb = new sqlite.oo1.DB(":memory:", "c");
+    const extra = new Fts5GenerationIndex(extraDb);
+    try {
+      const prepared = source("extra-exact", "chunk-extra-exact", "ordinary body");
+      prepared.chunks[0]!.technical_identifiers = ["rfc 9110"];
+      extra.replaceSource(prepared);
+      extraDb.exec("INSERT INTO chunk_exact_identifier_fts(rowid, token) VALUES(1, ?)", {
+        bind: [encodeExactIdentifierToken("forged extra")],
+      });
+      expect(() => extra.assertIntegrity()).toThrow(/integrity check failed/);
+    } finally {
+      extra.close();
+    }
+
+    const swappedDb = new sqlite.oo1.DB(":memory:", "c");
+    const swapped = new Fts5GenerationIndex(swappedDb);
+    try {
+      const alpha = source("alpha-swap", "chunk-alpha-swap", "ordinary body");
+      alpha.chunks[0]!.technical_identifiers = ["alpha identifier"];
+      const beta = source("beta-swap", "chunk-beta-swap", "ordinary body");
+      beta.chunks[0]!.technical_identifiers = ["beta identifier"];
+      swapped.applySourceChanges([alpha, beta], []);
+      swappedDb.exec("DELETE FROM chunk_exact_identifier_fts");
+      swappedDb.exec("INSERT INTO chunk_exact_identifier_fts(rowid, token) VALUES(1, ?)", {
+        bind: [encodeExactIdentifierToken("beta identifier")],
+      });
+      swappedDb.exec("INSERT INTO chunk_exact_identifier_fts(rowid, token) VALUES(2, ?)", {
+        bind: [encodeExactIdentifierToken("alpha identifier")],
+      });
+      expect(() => swapped.assertIntegrity()).toThrow(/integrity check failed/);
+      expect(() => openRestoredFts5Generation(sqlite, swapped.exportImage(sqlite), 1))
+        .toThrow(CacheImageInvalidError);
+    } finally {
+      swapped.close();
     }
   });
 
@@ -1526,6 +1681,7 @@ describe("Fts5GenerationIndex", () => {
 
       expect(recorder.statements).toEqual([
         "INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')",
+        "INSERT INTO chunk_exact_identifier_fts(chunk_exact_identifier_fts) VALUES('optimize')",
         "INSERT INTO source_property_text_fts(source_property_text_fts) VALUES('optimize')",
         "VACUUM",
       ]);
@@ -1581,6 +1737,25 @@ describe("Fts5GenerationIndex", () => {
 
       expect(db.selectValue("SELECT min(rowid) FROM chunks")).toBe(2);
       expect(db.selectValue("SELECT count(*) FROM chunks_fts_docsize")).toBe(2);
+      expect(() => scoped.assertIntegrity()).toThrow(/integrity check failed/);
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("allocates chunk rowids above an exact-FTS-only posting so it stays visible", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      db.exec(
+        "INSERT INTO chunk_exact_identifier_fts(rowid, token) VALUES(1, ?)",
+        { bind: [encodeExactIdentifierToken("orphan identifier")] },
+      );
+
+      scoped.replaceSource(source("alpha", "chunk-a", "quasar"));
+
+      expect(db.selectValue("SELECT min(rowid) FROM chunks")).toBe(2);
+      expect(db.selectValue("SELECT count(*) FROM chunk_exact_identifier_fts_docsize")).toBe(2);
       expect(() => scoped.assertIntegrity()).toThrow(/integrity check failed/);
     } finally {
       scoped.close();
@@ -1795,10 +1970,10 @@ describe("Fts5GenerationIndex", () => {
       .toThrow(CacheVersionMismatchError);
   });
 
-  it("rejects the legacy schema-v5 cache inside the disposable migration boundary", () => {
+  it("rejects the schema-v7 cache inside the disposable migration boundary", () => {
     index.replaceSource(source("alpha", "chunk-a", "quasar"));
     const oldImage = mutateExportedImage(index.exportImage(sqlite), (db) => {
-      db.exec("PRAGMA user_version = 5");
+      db.exec("PRAGMA user_version = 7");
     });
     expect(() => openRestoredFts5Generation(sqlite, oldImage, 1))
       .toThrow(CacheVersionMismatchError);

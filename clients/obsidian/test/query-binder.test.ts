@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "../src/worker/exact-identifier-token";
 import {
   bindEvidenceProbe,
   bindSearchStage,
@@ -32,7 +33,8 @@ describe("fixed FTS5 query binder", () => {
     expect(bound.sql).not.toContain("snippet(");
     expect(bound.sql).not.toContain("highlight(");
     expect(bound.sql).not.toContain("excerpt");
-    expect(bound.sql).toContain("bm25(chunks_fts, 5, 6, 6, 6, 3, 1, 2, 1, 5)");
+    expect(bound.sql).toContain("bm25(chunks_fts, 5, 6, 6, 6, 3, 1, 2, 1)");
+    expect(bound.sql).not.toContain("identifiers");
   });
 
   it("binds exact metadata through normalized equality, not FTS tokenization", () => {
@@ -49,9 +51,14 @@ describe("fixed FTS5 query binder", () => {
     expect(bound.sql).toContain("s.exact_filename = exact.value");
     expect(bound.sql).toContain("source_exact_aliases AS alias");
     expect(bound.sql).toContain("c.exact_heading = exact.value");
-    expect(bound.sql).toContain("chunk_exact_identifiers AS identifier");
+    expect(bound.sql).toContain("FROM chunk_exact_identifier_fts");
+    expect(bound.sql).toContain("chunk_exact_identifier_fts MATCH ?");
     expect(bound.sql).not.toContain("json_each(");
-    expect(bound.bind).toEqual(["quasar guide", 20]);
+    expect(bound.bind).toEqual([
+      "quasar guide",
+      encodeExactIdentifierToken("quasar guide"),
+      20,
+    ]);
   });
 
   it("uses separate fixed support and bounded prefix statements", () => {
@@ -71,7 +78,7 @@ describe("fixed FTS5 query binder", () => {
     expect(bound.prefix?.bind).toEqual(["que%", 96, 17]);
   });
 
-  it("binds exact identifier probes and intersections only through relational projections", () => {
+  it("binds encoded exact identifier probes and hard intersections through dedicated FTS", () => {
     const probe = bindEvidenceProbe({
       schema_version: 3,
       plan_id: "term_support_v3",
@@ -82,9 +89,10 @@ describe("fixed FTS5 query binder", () => {
       max_prefix_expansions: 16,
       max_prefix_term_bytes: 96,
     });
-    expect(probe.exists.sql).toContain("FROM chunk_exact_identifiers");
+    expect(probe.exists.sql).toContain("FROM chunk_exact_identifier_fts");
     expect(probe.exists.sql).not.toContain("chunks_fts");
-    expect(probe.exists.bind).toEqual(["rfc 9110"]);
+    expect(probe.exists.sql).not.toContain("rfc 9110");
+    expect(probe.exists.bind).toEqual([encodeExactIdentifierToken("rfc 9110")]);
     expect(probe.prefix).toBeNull();
 
     const combined = bindSearchStage({
@@ -94,11 +102,12 @@ describe("fixed FTS5 query binder", () => {
       required_identifiers: ["rfc 9110", "cve-2026-1234"],
       max_candidates: 256,
     }, 20);
-    expect(combined.sql).toContain("json_each(?)");
-    expect(combined.sql).toContain("chunk_exact_identifiers");
+    expect(combined.sql).not.toContain("json_each(?)");
+    expect(combined.sql).toContain("chunk_exact_identifier_fts MATCH ?");
     expect(combined.sql).toContain("chunks_fts MATCH ?");
+    expect(combined.sql).not.toContain("rfc 9110");
     expect(combined.bind).toEqual([
-      JSON.stringify(["rfc 9110", "cve-2026-1234"]),
+      encodeExactIdentifierMatch(["rfc 9110", "cve-2026-1234"]),
       "{content} : (\"cache\")",
       20,
     ]);
@@ -110,7 +119,9 @@ describe("fixed FTS5 query binder", () => {
       max_candidates: 256,
     }, 20);
     expect(identifierOnly.sql).not.toContain("chunks_fts MATCH");
-    expect(identifierOnly.bind).toEqual([JSON.stringify(["rfc 9110"]), 20]);
+    expect(identifierOnly.sql).toContain("chunk_exact_identifier_fts MATCH ?");
+    expect(identifierOnly.sql).toContain("5.0 AS score");
+    expect(identifierOnly.bind).toEqual([encodeExactIdentifierToken("rfc 9110"), 20]);
   });
 
   it("rejects unknown plan identities, profiles, schemas, and invalid limits", () => {
@@ -161,7 +172,7 @@ describe("fixed FTS5 query binder", () => {
       plan_id: "lexical_exact_metadata_v3",
       exact_value: exact,
       max_candidates: 256,
-    }, 20).bind).toEqual([exact, 20]);
+    }, 20).bind).toEqual([exact, encodeExactIdentifierToken(exact), 20]);
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_exact_metadata_v3",

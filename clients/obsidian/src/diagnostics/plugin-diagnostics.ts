@@ -14,6 +14,7 @@ import {
   type DiagnosticLevel,
 } from "./log";
 import type { DiagnosticsLogLevel } from "../settings";
+import type { StartupTimelineRecord } from "./startup-timeline";
 
 const NOOP_EVENT: DiagnosticEventBuilder = {
   set: () => undefined,
@@ -22,9 +23,14 @@ const NOOP_EVENT: DiagnosticEventBuilder = {
 };
 
 export class PluginDiagnostics {
-  private log = new DiagnosticLog();
+  private log: DiagnosticLog;
 
-  constructor(private level: DiagnosticsLogLevel) {}
+  constructor(
+    private level: DiagnosticsLogLevel,
+    private readonly createLog: () => DiagnosticLog = () => new DiagnosticLog(),
+  ) {
+    this.log = this.createLog();
+  }
 
   setLevel(level: DiagnosticsLogLevel): void {
     this.level = level;
@@ -62,6 +68,21 @@ export class PluginDiagnostics {
     }
   }
 
+  recordStartup(record: StartupTimelineRecord): void {
+    if (!this.shouldCapture("info")) return;
+    try {
+      this.log.record(
+        "info",
+        "startup.lifecycle",
+        record.startedAtMs,
+        record.durationMs,
+        record.details,
+      );
+    } catch {
+      // Diagnostics failures cannot affect startup or teardown.
+    }
+  }
+
   format(context: DiagnosticExportContext): string {
     try {
       return formatDiagnosticLog(this.log, context, minimumLevel(this.level));
@@ -73,7 +94,7 @@ export class PluginDiagnostics {
   clear(): void {
     // Replacing the ring also isolates it from operations that finish after
     // unload; their old captures cannot repopulate the cleared report.
-    this.log = new DiagnosticLog();
+    this.log = this.createLog();
   }
 
   private shouldCapture(level: DiagnosticLevel): boolean {

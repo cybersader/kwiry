@@ -29,7 +29,11 @@ async function capture(
 
 describe("DiagnosticLog", () => {
   it("evicts the oldest wide events and reports every dropped entry", async () => {
-    const log = new DiagnosticLog(2, clock(1, 2, 3, 4, 5, 6, 7, 8));
+    const log = new DiagnosticLog(
+      2,
+      clock(1, 2, 3, 4),
+      clock(10, 11, 20, 21, 30, 31, 40, 41),
+    );
 
     await capture(log, "debug", "plugin.load");
     await capture(log, "info", "backend.activate", { outcome: "started" });
@@ -43,7 +47,11 @@ describe("DiagnosticLog", () => {
   });
 
   it("keeps insertion order after the ring wraps", async () => {
-    const log = new DiagnosticLog(3, clock(10, 11, 20, 21, 30, 31, 40, 41, 50, 51));
+    const log = new DiagnosticLog(
+      3,
+      clock(10, 20, 30, 40, 50),
+      clock(0, 1, 10, 11, 20, 21, 30, 31, 40, 41),
+    );
     for (let count = 1; count <= 5; count += 1) {
       await capture(log, "info", "index.lifecycle", { count });
     }
@@ -59,7 +67,11 @@ describe("DiagnosticLog", () => {
   });
 
   it("filters by minimum level without hiding the truncation count", async () => {
-    const log = new DiagnosticLog(3, clock(1, 2, 3, 4, 5, 6, 7, 8));
+    const log = new DiagnosticLog(
+      3,
+      clock(1, 2, 3, 4),
+      clock(10, 11, 20, 21, 30, 31, 40, 41),
+    );
     await capture(log, "debug", "plugin.load");
     await capture(log, "info", "backend.activate");
     await capture(log, "warn", "failure.caught");
@@ -71,7 +83,11 @@ describe("DiagnosticLog", () => {
   });
 
   it("commits one context-rich event on success and on failure", async () => {
-    const log = new DiagnosticLog(4, clock(100, 145, 200, 280));
+    const log = new DiagnosticLog(
+      4,
+      clock(100, 200),
+      clock(0, 45, 100, 180),
+    );
     await log.capture("info", "index.lifecycle", {
       operation: "build",
       generationId: diagnosticGenerationId("in_plugin-1-generation-1"),
@@ -115,8 +131,70 @@ describe("DiagnosticLog", () => {
     expect(JSON.stringify(failed)).not.toContain(failure.message);
   });
 
+  it("uses wall time only for display metadata and monotonic time for duration", async () => {
+    const log = new DiagnosticLog(
+      2,
+      clock(1_700_000_000_000),
+      clock(500, 575),
+    );
+
+    await capture(log, "info", "plugin.load");
+
+    expect(log.snapshot().entries[0]).toMatchObject({
+      startedAtMs: 1_700_000_000_000,
+      durationMs: 75,
+    });
+  });
+
+  it("records the fixed-schema startup aggregate without arbitrary text", () => {
+    const log = new DiagnosticLog(2);
+    log.record("info", "startup.lifecycle", 1_700_000_000_000, 321, {
+      profile: "in_plugin",
+      outcome: "succeeded",
+      reason: "fully_current",
+      pluginEpoch: 2,
+      activationEpoch: 4,
+      pluginLoadCompleteMs: 10,
+      layoutReadyMs: 20,
+      firstCacheSearchableMs: 100,
+      fullyCurrentMs: 320,
+      cacheHit: true,
+      cacheBytes: 8_192,
+    });
+
+    expect(log.snapshot().entries[0]).toMatchObject({
+      startedAtMs: 1_700_000_000_000,
+      durationMs: 321,
+      code: "startup.lifecycle",
+      details: {
+        outcome: "succeeded",
+        firstCacheSearchableMs: 100,
+        fullyCurrentMs: 320,
+        cacheHit: true,
+        cacheBytes: 8_192,
+      },
+    });
+    expect(() => log.record("info", "startup.lifecycle", 0, 1, {
+      // @ts-expect-error Startup diagnostics cannot carry vault paths.
+      vaultPath: "smb://server/private-vault",
+    })).toThrow("Invalid diagnostic details");
+    expect(() => log.record("info", "startup.lifecycle", 0, 1, {
+      profile: "in_plugin",
+      outcome: "failed",
+      reason: "activation_failed",
+      pluginEpoch: 1,
+      activationEpoch: 1,
+      pluginLoadCompleteMs: null,
+      layoutReadyMs: null,
+      firstCacheSearchableMs: null,
+      fullyCurrentMs: null,
+      cacheHit: false,
+      pathHash: diagnosticHash(`sha256:${"b".repeat(64)}`),
+    })).toThrow("Invalid startup diagnostic details");
+  });
+
   it("renders both a pasteable summary and the structured JSON records", async () => {
-    const log = new DiagnosticLog(4, clock(0, 1_000));
+    const log = new DiagnosticLog(4, clock(0), clock(0, 1_000));
     await log.capture("error", "failure.caught", {
       profile: "in_plugin",
       subsystem: "cache_store",
@@ -169,7 +247,7 @@ describe("DiagnosticLog", () => {
     };
     void unsafeDetails;
 
-    const log = new DiagnosticLog(4, clock(0, 1));
+    const log = new DiagnosticLog(4, clock(0), clock(0, 1));
     const structurallySmuggled = {
       profile: "in_plugin" as const,
       queryText: "confidential acquisition notes",
@@ -192,7 +270,7 @@ describe("DiagnosticLog", () => {
     // string, which a single cast through `any` then exploits.
     const secret = "Clients/Acme — Q3 layoffs, confidential";
     for (const field of ["code", "reason", "outcome", "phase", "stage", "operation", "subsystem"]) {
-      const log = new DiagnosticLog(4, clock(0, 1));
+      const log = new DiagnosticLog(4, clock(0), clock(0, 1));
       await expect(
         log.capture("info", "search.lifecycle", { [field]: secret } as never, () => undefined),
       ).rejects.toThrow("Invalid diagnostic details");

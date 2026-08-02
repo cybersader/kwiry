@@ -56,10 +56,25 @@ describe("progressLine", () => {
     expect(line).not.toContain("?");
   });
 
-  it("names reconciliation distinctly from a first build", () => {
-    const line = progressLine(status({ stage: "replay", completed: 3, total: 4 }));
-
-    expect(line).toBe("Reconciling 3/4 (75%)");
+  it("names each reconciliation phase distinctly", () => {
+    expect(progressLine(status({
+      stage: "replay",
+      subphase: "planning",
+      completed: 0,
+      total: null,
+    }))).toBe("Planning reconciliation…");
+    expect(progressLine(status({
+      stage: "replay",
+      subphase: "verifying",
+      completed: 3,
+      total: 4,
+    }))).toBe("Verifying 3/4 (75%)");
+    expect(progressLine(status({
+      stage: "replay",
+      subphase: "applying",
+      completed: 1,
+      total: 2,
+    }))).toBe("Applying changes 1/2 (50%)");
   });
 
   it("truncates a long path from the head so the filename stays visible", () => {

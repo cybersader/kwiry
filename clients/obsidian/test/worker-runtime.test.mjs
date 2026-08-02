@@ -1032,7 +1032,7 @@ describe("restored cache generation", () => {
 
   it.each([
     ["protocol_version", 1, "cache_version_mismatch"],
-    ["cache_schema_version", CACHE_SCHEMA_VERSION + 1, "cache_version_mismatch"],
+    ["cache_schema_version", 7, "cache_version_mismatch"],
     ["chunking_version", 999, "cache_version_mismatch"],
     ["sqlite_version", "3.52.0", "cache_version_mismatch"],
     ["sqlite_wasm_sha256", "a".repeat(64), "cache_version_mismatch"],

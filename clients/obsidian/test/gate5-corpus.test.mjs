@@ -8,10 +8,14 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   CORPUS_HASH_ALGORITHM,
+  PERFORMANCE_CORPUS_BYTES,
+  PERFORMANCE_NOTE_COUNT,
+  PERFORMANCE_SEED,
   PERFORMANCE_VOCABULARY_SIZE,
   functionalOracles,
   generateFunctionalCorpus,
   generatePerformanceCorpus,
+  performanceNoteBytes,
 } from "../scripts/gate5-corpus.mjs";
 
 const temporary = [];
@@ -88,6 +92,27 @@ describe("Gate 5 deterministic corpora", () => {
       .map((match) => Number(match[1]));
     expect(vocabularyIds.length).toBeGreaterThan(0);
     expect(Math.max(...vocabularyIds)).toBeLessThan(PERFORMANCE_VOCABULARY_SIZE);
+  });
+
+  it("keeps the combined restore probe within one generated heading section", async () => {
+    const note = performanceNoteBytes(
+      0,
+      Math.ceil(PERFORMANCE_CORPUS_BYTES / PERFORMANCE_NOTE_COUNT),
+      PERFORMANCE_SEED,
+    ).toString("utf8");
+    const sectionStart = note.indexOf("# Performance Note 00000");
+    const sectionEnd = note.indexOf("## Section one");
+    expect(sectionStart).toBeGreaterThanOrEqual(0);
+    expect(sectionEnd).toBeGreaterThan(sectionStart);
+    expect(note.slice(sectionStart, sectionEnd))
+      .toContain("performancebeacon00000 synthetic generated corpus");
+
+    const performanceScript = await readFile(
+      new URL("../scripts/gate5-performance.mjs", import.meta.url),
+      "utf8",
+    );
+    expect(performanceScript)
+      .toContain('["combined", "synthetic performancebeacon00000"]');
   });
 
   it("rejects a performance byte target too small for deterministic notes", async () => {

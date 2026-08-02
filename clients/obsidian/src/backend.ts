@@ -51,6 +51,7 @@ export interface BackendStatus {
   rebuilding: boolean;
   progress?: {
     stage: "snapshot" | "replay" | "rebuild";
+    subphase?: "planning" | "verifying" | "applying";
     completed: number;
     total: number | null;
     /// Most recently processed source path, when the backend reports one.

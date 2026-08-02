@@ -24,6 +24,7 @@ import {
 import {
   InPluginIndexController,
   type IndexControllerCacheOptions,
+  type IndexControllerStartupObservation,
   type IndexControllerStatus,
 } from "./in-plugin-index-controller";
 
@@ -40,6 +41,7 @@ export interface InPluginLexicalBackendOptions {
   /// controller's catch-all `index_build_failed` reaches a field report with
   /// no indication of which subsystem broke.
   onDiagnosticFailure?: (classification: FailureClassification) => void;
+  onStartupObservation?: (observation: IndexControllerStartupObservation) => void;
 }
 
 const MAX_CONCURRENT_EXCERPT_READS = 4;
@@ -63,6 +65,7 @@ export class InPluginLexicalBackend implements SearchBackend {
   private readonly yieldControl: () => Promise<void>;
   private readonly cache: IndexControllerCacheOptions | null;
   private readonly onDiagnosticFailure: (classification: FailureClassification) => void;
+  private readonly onStartupObservation: (observation: IndexControllerStartupObservation) => void;
   private readonly statusListeners = new Set<(status: BackendStatus) => void>();
   private session: InPluginWorkerSession | null = null;
   private controller: InPluginIndexController | null = null;
@@ -88,6 +91,7 @@ export class InPluginLexicalBackend implements SearchBackend {
     this.yieldControl = options.yieldControl ?? yieldToBrowser;
     this.cache = options.cache ?? null;
     this.onDiagnosticFailure = options.onDiagnosticFailure ?? (() => undefined);
+    this.onStartupObservation = options.onStartupObservation ?? (() => undefined);
     this.cachedStatus = baseStatus(this.identity);
   }
 
@@ -299,6 +303,14 @@ export class InPluginLexicalBackend implements SearchBackend {
             this.publish(mapControllerStatus(this.identity, latestStatus, false));
           }
         },
+        onStartupObservation: (observation) => {
+          if (this.disposed || epoch !== this.epoch || controller !== this.controller) return;
+          try {
+            this.onStartupObservation(observation);
+          } catch {
+            // Startup instrumentation cannot interrupt backend publication.
+          }
+        },
         yieldControl: this.yieldControl,
         ...(this.cache ? { cache: this.cache } : {}),
       });
@@ -309,6 +321,15 @@ export class InPluginLexicalBackend implements SearchBackend {
       this.stopCurrentSession();
       this.recovering = false;
       this.publish(unavailableStatus(this.identity, "worker_failed", "In-plugin search Worker failed."));
+      try {
+        this.onStartupObservation({
+          kind: "terminal",
+          outcome: "failed",
+          reason: "backend_unavailable",
+        });
+      } catch {
+        // Startup instrumentation cannot interrupt backend failure handling.
+      }
     }
   }
 
@@ -395,6 +416,9 @@ function mapControllerStatus(
         stage: status.stage,
         completed: status.progress.completed,
         total: status.progress.total,
+        ...(status.progress.subphase === undefined
+          ? {}
+          : { subphase: status.progress.subphase }),
         ...(status.progress.path === undefined ? {} : { path: status.progress.path }),
       }
     : undefined;

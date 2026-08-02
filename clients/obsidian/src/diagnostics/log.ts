@@ -14,6 +14,7 @@ export type DiagnosticLevel = "debug" | "info" | "warn" | "error";
 export type DiagnosticEventCode =
   | "plugin.load"
   | "plugin.unload"
+  | "startup.lifecycle"
   | "backend.activate"
   | "backend.dispose"
   | "worker.lifecycle"
@@ -172,7 +173,15 @@ export type DiagnosticTextValue =
   | "cache_image_invalid"
   | "cache_blob_too_large"
   | "worker_crashed"
-  | "timeout";
+  | "timeout"
+  | "fully_current"
+  | "sources_omitted"
+  | "vault_unavailable"
+  | "index_capacity"
+  | "backend_unavailable"
+  | "plugin_load_failed"
+  | "activation_failed"
+  | "plugin_unloaded";
 
 declare const diagnosticHashBrand: unique symbol;
 declare const diagnosticGenerationBrand: unique symbol;
@@ -225,6 +234,10 @@ export interface DiagnosticDetails {
   removals?: number;
   resultCount?: number;
   cacheBytes?: number;
+  pluginLoadCompleteMs?: number | null;
+  layoutReadyMs?: number | null;
+  firstCacheSearchableMs?: number | null;
+  fullyCurrentMs?: number | null;
   retryable?: boolean;
   recoverable?: boolean;
   searchable?: boolean;
@@ -287,6 +300,7 @@ const LEVELS: readonly DiagnosticLevel[] = ["debug", "info", "warn", "error"];
 const EVENT_CODES: readonly DiagnosticEventCode[] = [
   "plugin.load",
   "plugin.unload",
+  "startup.lifecycle",
   "backend.activate",
   "backend.dispose",
   "worker.lifecycle",
@@ -327,13 +341,16 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "WorkerRpcError", "RustAdapterError", "TypeError", "RangeError",
   "ReferenceError", "SyntaxError", "Error", "other", "rust", "sqlite", "artifact",
   "fts5_unavailable", "rust_init_failed", "sqlite_init_failed", "artifact_mismatch", "protocol_mismatch", "invalid_request", "invalid_state", "source_rejected", "query_rejected", "integrity_failed", "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch", "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
+  "fully_current", "sources_omitted", "vault_unavailable", "index_capacity", "backend_unavailable",
+  "plugin_load_failed", "activation_failed", "plugin_unloaded",
 ];
 const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
   "profile", "phase", "stage", "liveness", "mode", "outcome", "code", "reason", "errorName", "operation",
   "subsystem", "generationId", "pathHash", "pluginEpoch", "activationEpoch", "mutationEpoch",
   "count", "limit", "documents", "chunks", "completed", "total", "warningCount", "pending",
   "sourcesEnumerated", "sourcesRead", "sourcesSkipped", "sourcesOversized", "sourcesFailed",
-  "bytesRead", "batchCount", "upserts", "removals", "resultCount", "cacheBytes", "retryable",
+  "bytesRead", "batchCount", "upserts", "removals", "resultCount", "cacheBytes",
+  "pluginLoadCompleteMs", "layoutReadyMs", "firstCacheSearchableMs", "fullyCurrentMs", "retryable",
   "recoverable", "searchable", "dirty", "rebuilding", "cacheHit", "recovery",
 ];
 const NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
@@ -342,8 +359,26 @@ const NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "sourcesOversized", "sourcesFailed", "bytesRead", "batchCount", "upserts", "removals",
   "resultCount", "cacheBytes",
 ]);
+const NULLABLE_NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
+  "pluginLoadCompleteMs", "layoutReadyMs", "firstCacheSearchableMs", "fullyCurrentMs",
+]);
 const BOOLEAN_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "retryable", "recoverable", "searchable", "dirty", "rebuilding", "cacheHit", "recovery",
+]);
+const STARTUP_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
+  "profile", "outcome", "reason", "pluginEpoch", "activationEpoch", "pluginLoadCompleteMs",
+  "layoutReadyMs", "firstCacheSearchableMs", "fullyCurrentMs", "cacheHit", "cacheBytes",
+]);
+const REQUIRED_STARTUP_DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
+  "profile", "outcome", "reason", "pluginEpoch", "activationEpoch", "pluginLoadCompleteMs",
+  "layoutReadyMs", "firstCacheSearchableMs", "fullyCurrentMs", "cacheHit",
+];
+const STARTUP_OUTCOMES = new Set<DiagnosticTextValue>([
+  "succeeded", "degraded", "failed", "cancelled",
+]);
+const STARTUP_REASONS = new Set<DiagnosticTextValue>([
+  "fully_current", "sources_omitted", "vault_unavailable", "index_capacity",
+  "backend_unavailable", "plugin_load_failed", "activation_failed", "plugin_unloaded",
 ]);
 const COUNTERS = new Set<DiagnosticCounter>([
   "count", "documents", "chunks", "completed", "warningCount", "pending", "sourcesEnumerated",
@@ -391,7 +426,8 @@ export class DiagnosticLog {
   // entries without pretending an evicted prefix is still present.
   constructor(
     public readonly capacity = DEFAULT_DIAGNOSTIC_CAPACITY,
-    private readonly now: () => number = Date.now,
+    private readonly wallNow: () => number = Date.now,
+    private readonly monotonicNow: () => number = defaultMonotonicNow,
   ) {
     if (!Number.isSafeInteger(capacity) || capacity <= 0 || capacity > MAX_DIAGNOSTIC_CAPACITY) {
       throw new RangeError("Diagnostic capacity is out of bounds");
@@ -408,7 +444,8 @@ export class DiagnosticLog {
     if (!LEVEL_SET.has(level) || !EVENT_CODE_SET.has(code)) {
       throw new TypeError("Invalid diagnostic event");
     }
-    const startedAtMs = this.readClock();
+    const startedAtMs = this.readWallClock();
+    const monotonicStartedAtMs = this.readMonotonicClock();
     const event = new MutableDiagnosticEvent(level, initialDetails);
     try {
       const result = await operation(event);
@@ -420,11 +457,31 @@ export class DiagnosticLog {
       event.defaultCode("internal_error");
       throw error;
     } finally {
-      // A broken clock must not erase the operation record that the wrapper
-      // exists to guarantee; zero duration is safer than losing partial context.
-      const endedAtMs = this.readClockOr(startedAtMs);
-      this.append(event.finish(code, startedAtMs, Math.max(0, endedAtMs - startedAtMs)));
+      // A broken monotonic clock must not erase the operation record that the
+      // wrapper exists to guarantee; zero duration is safer than wall-clock skew.
+      const endedAtMs = this.readMonotonicClockOr(monotonicStartedAtMs);
+      const durationMs = Math.max(0, Math.round(endedAtMs - monotonicStartedAtMs));
+      this.append(event.finish(code, startedAtMs, durationMs));
     }
+  }
+
+  record(
+    level: DiagnosticLevel,
+    code: DiagnosticEventCode,
+    startedAtMs: number,
+    durationMs: number,
+    details: Readonly<DiagnosticDetails>,
+  ): void {
+    if (!LEVEL_SET.has(level) || !EVENT_CODE_SET.has(code)) {
+      throw new TypeError("Invalid diagnostic event");
+    }
+    const event = new MutableDiagnosticEvent(level, details);
+    event.defaultOutcome("succeeded");
+    this.append(event.finish(
+      code,
+      validDiagnosticTimestamp(startedAtMs),
+      nonNegativeSafeInteger(durationMs, "Invalid diagnostic duration"),
+    ));
   }
 
   snapshot(minimumLevel: DiagnosticLevel = "debug"): DiagnosticSnapshot {
@@ -462,17 +519,21 @@ export class DiagnosticLog {
     }
   }
 
-  private readClock(): number {
-    const timestamp = this.now();
-    if (!Number.isFinite(timestamp) || timestamp < 0 || timestamp > 8.64e15) {
-      throw new TypeError("Invalid diagnostic timestamp");
+  private readWallClock(): number {
+    return validDiagnosticTimestamp(this.wallNow());
+  }
+
+  private readMonotonicClock(): number {
+    const timestamp = this.monotonicNow();
+    if (!Number.isFinite(timestamp) || timestamp < 0) {
+      throw new TypeError("Invalid diagnostic monotonic timestamp");
     }
     return timestamp;
   }
 
-  private readClockOr(fallback: number): number {
+  private readMonotonicClockOr(fallback: number): number {
     try {
-      return this.readClock();
+      return this.readMonotonicClock();
     } catch {
       return fallback;
     }
@@ -585,13 +646,45 @@ class MutableDiagnosticEvent implements DiagnosticEventBuilder {
       durationMs,
       level: this.level,
       code,
-      details: validateDetails(this.details),
+      details: validateEventDetails(code, this.details),
     });
   }
 
   private requireOpen(): void {
     if (this.finished) throw new Error("Diagnostic event is already committed");
   }
+}
+
+function validateEventDetails(
+  code: DiagnosticEventCode,
+  details: Readonly<DiagnosticDetails>,
+): Readonly<DiagnosticDetails> {
+  const validated = validateDetails(details);
+  if (code !== "startup.lifecycle") return validated;
+  const keys = Object.keys(validated) as Array<keyof DiagnosticDetails>;
+  if (keys.some((key) => !STARTUP_DETAIL_KEYS.has(key))
+    || REQUIRED_STARTUP_DETAIL_KEYS.some((key) => validated[key] === undefined)) {
+    throw new TypeError("Invalid startup diagnostic details");
+  }
+  if (!STARTUP_OUTCOMES.has(validated.outcome as DiagnosticTextValue)
+    || !STARTUP_REASONS.has(validated.reason as DiagnosticTextValue)) {
+    throw new TypeError("Invalid startup diagnostic details");
+  }
+  if (validated.cacheHit === true) {
+    if (validated.firstCacheSearchableMs === null || validated.cacheBytes === undefined) {
+      throw new TypeError("Invalid startup diagnostic details");
+    }
+  } else if (validated.firstCacheSearchableMs !== null || validated.cacheBytes !== undefined) {
+    throw new TypeError("Invalid startup diagnostic details");
+  }
+  if (validated.outcome === "succeeded") {
+    if (validated.reason !== "fully_current" || validated.fullyCurrentMs === null) {
+      throw new TypeError("Invalid startup diagnostic details");
+    }
+  } else if (validated.reason === "fully_current" || validated.fullyCurrentMs !== null) {
+    throw new TypeError("Invalid startup diagnostic details");
+  }
+  return validated;
 }
 
 function validateDetails(details: Readonly<DiagnosticDetails>): Readonly<DiagnosticDetails> {
@@ -626,7 +719,9 @@ function isValidDetailValue(key: keyof DiagnosticDetails, value: unknown): boole
     return typeof value === "string"
       && (IN_PLUGIN_GENERATION_PATTERN.test(value) || DAEMON_GENERATION_PATTERN.test(value));
   }
-  if (key === "total") return value === null || isNonNegativeInteger(value);
+  if (key === "total" || NULLABLE_NUMERIC_DETAIL_KEYS.has(key)) {
+    return value === null || isNonNegativeInteger(value);
+  }
   if (NUMERIC_DETAIL_KEYS.has(key)) return isNonNegativeInteger(value);
   if (BOOLEAN_DETAIL_KEYS.has(key)) return typeof value === "boolean";
   return typeof value === "string" && TEXT_VALUE_SET.has(value as DiagnosticTextValue);
@@ -634,6 +729,22 @@ function isValidDetailValue(key: keyof DiagnosticDetails, value: unknown): boole
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function validDiagnosticTimestamp(value: number): number {
+  if (!Number.isFinite(value) || value < 0 || value > 8.64e15) {
+    throw new TypeError("Invalid diagnostic timestamp");
+  }
+  return value;
+}
+
+function nonNegativeSafeInteger(value: number, message: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(message);
+  return value;
+}
+
+function defaultMonotonicNow(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
 }
 
 function headerToken(value: string): string {

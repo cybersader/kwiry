@@ -236,6 +236,7 @@ function backend(
   source: FakeSource,
   sessions: InPluginWorkerSession[],
   cache?: ConstructorParameters<typeof InPluginLexicalBackend>[0]["cache"],
+  onStartupObservation?: ConstructorParameters<typeof InPluginLexicalBackend>[0]["onStartupObservation"],
 ): InPluginLexicalBackend {
   let generation = 0;
   return new InPluginLexicalBackend({
@@ -251,6 +252,7 @@ function backend(
     nextGeneration: () => `generation-${++generation}`,
     yieldControl: () => Promise.resolve(),
     ...(cache ? { cache } : {}),
+    ...(onStartupObservation ? { onStartupObservation } : {}),
   });
 }
 
@@ -300,7 +302,13 @@ describe("InPluginLexicalBackend", () => {
         quarantine_fields: ["chunks_contents"],
       }),
     });
-    const inPlugin = backend(source, [session]);
+    const startupObservations: unknown[] = [];
+    const inPlugin = backend(
+      source,
+      [session],
+      undefined,
+      (observation) => startupObservations.push(observation),
+    );
 
     await inPlugin.initialize();
     await vi.waitFor(async () => {
@@ -319,6 +327,11 @@ describe("InPluginLexicalBackend", () => {
         },
       });
     });
+    expect(startupObservations).toEqual([{
+      kind: "terminal",
+      outcome: "degraded",
+      reason: "sources_omitted",
+    }]);
   });
 
   it("publishes a restored generation as searchable but stale until reconciliation completes", async () => {
@@ -343,17 +356,25 @@ describe("InPluginLexicalBackend", () => {
       search: async () => ({ generation: "cached-generation", hits: [] }),
     });
     const store = new FakeCacheStore(cacheHit());
+    const startupObservations: unknown[] = [];
     const inPlugin = backend(source, [session], {
       openStore: async () => ({ kind: "available", store }),
-    });
+    }, (observation) => startupObservations.push(observation));
 
     await inPlugin.initialize();
     await vi.waitFor(() => expect(session.planReconciliation).toHaveBeenCalledTimes(1));
+    expect(startupObservations).toEqual([{ kind: "cache_searchable", cacheBytes: 4 }]);
     await expect(inPlugin.status()).resolves.toMatchObject({
       phase: "building",
       searchable: true,
       generation: "cached-generation",
       dirty: true,
+      progress: {
+        stage: "replay",
+        subphase: "planning",
+        completed: 0,
+        total: null,
+      },
       issue: {
         code: "index_reconciling",
         safeMessage: "Cached index searchable; reconciling vault changes…",
@@ -372,6 +393,10 @@ describe("InPluginLexicalBackend", () => {
         dirty: false,
       });
     });
+    expect(startupObservations).toEqual([
+      { kind: "cache_searchable", cacheBytes: 4 },
+      { kind: "fully_current" },
+    ]);
   });
 
   it("keeps cache unavailability observable after an explicit clean build", async () => {

@@ -64,6 +64,8 @@ export type IndexControllerStage =
   | "failed"
   | "disposed";
 
+export type IndexControllerReplaySubphase = "planning" | "verifying" | "applying";
+
 export type IndexControllerIssue =
   | "vault_read_failed"
   | "index_build_failed"
@@ -107,6 +109,7 @@ export interface IndexControllerStatus {
   progress?: {
     completed: number;
     total: number | null;
+    subphase?: IndexControllerReplaySubphase;
     /// Most recently processed source path. Reported so a long first build on
     /// a network vault visibly advances instead of looking stalled.
     path?: string;
@@ -129,12 +132,22 @@ export interface IndexControllerCacheOptions {
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
 }
 
+export type IndexControllerStartupObservation =
+  | { kind: "cache_searchable"; cacheBytes: number }
+  | { kind: "fully_current" }
+  | {
+      kind: "terminal";
+      outcome: "degraded" | "failed" | "cancelled";
+      reason: "sources_omitted" | "vault_unavailable" | "index_capacity" | "backend_unavailable";
+    };
+
 export interface InPluginIndexControllerOptions {
   source: ActiveVaultSource;
   worker: IndexWorkerPort;
   nextGeneration: () => string;
   onStatus: (status: IndexControllerStatus) => void;
   onFailure?: (error: unknown) => void;
+  onStartupObservation?: (observation: IndexControllerStartupObservation) => void;
   yieldControl?: () => Promise<void>;
   limits?: Partial<IndexControllerLimits>;
   cache?: IndexControllerCacheOptions;
@@ -187,6 +200,7 @@ export class InPluginIndexController {
   private readonly nextGeneration: () => string;
   private readonly onStatus: (status: IndexControllerStatus) => void;
   private readonly onFailure: (error: unknown) => void;
+  private readonly onStartupObservation: (observation: IndexControllerStartupObservation) => void;
   private readonly yieldControl: () => Promise<void>;
   private readonly limits: IndexControllerLimits;
   private readonly cache: IndexControllerCacheOptions | null;
@@ -211,6 +225,8 @@ export class InPluginIndexController {
   private workerInitialized = false;
   private startupDecided = false;
   private startupReconciling = false;
+  private startupObservationFinished = false;
+  private cacheSearchableObserved = false;
   private rebuildRequested = false;
   private replacementBuildInProgress = false;
   private rescanRequested = false;
@@ -232,6 +248,7 @@ export class InPluginIndexController {
   private completed = 0;
   private total: number | null = null;
   private currentPath: string | null = null;
+  private replaySubphase: IndexControllerReplaySubphase | null = null;
   private initialColdPreview: InitialColdPreviewLease | null = null;
   private initialColdPreviewGeneration: string | null = null;
   private initialColdPreviewRevision = 0;
@@ -246,6 +263,7 @@ export class InPluginIndexController {
     this.nextGeneration = options.nextGeneration;
     this.onStatus = options.onStatus;
     this.onFailure = options.onFailure ?? (() => undefined);
+    this.onStartupObservation = options.onStartupObservation ?? (() => undefined);
     this.yieldControl = options.yieldControl ?? (() => Promise.resolve());
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.cache = options.cache ?? null;
@@ -285,6 +303,7 @@ export class InPluginIndexController {
     this.completed = 0;
     this.currentPath = null;
     this.total = null;
+    this.replaySubphase = null;
     this.clearInitialColdPreview();
     this.emit(this.activeGeneration === null ? "starting" : "rebuild");
     this.scheduleWork();
@@ -471,6 +490,7 @@ export class InPluginIndexController {
 
     if (this.startupReconciling) {
       this.startupReconciling = false;
+      this.replaySubphase = null;
       if (this.cacheIssue === "index_reconciling") this.cacheIssue = null;
       this.emit("ready");
     }
@@ -566,7 +586,15 @@ export class InPluginIndexController {
     this.lastPersistedGeneration = counts.generation;
     this.startupReconciling = true;
     this.cacheIssue = "index_reconciling";
+    this.replaySubphase = "planning";
+    this.completed = 0;
+    this.total = null;
+    this.currentPath = null;
     this.emit("replay");
+    if (!this.cacheSearchableObserved) {
+      this.cacheSearchableObserved = true;
+      this.observeStartup({ kind: "cache_searchable", cacheBytes: loaded.record.byteLength });
+    }
     await this.reconcileRestoredGeneration();
   }
 
@@ -610,9 +638,10 @@ export class InPluginIndexController {
     let expectedGeneration = generation;
     let expectedEpoch = this.mutationEpoch;
     const snapshot = this.captureSnapshot();
+    this.replaySubphase = "planning";
     this.completed = 0;
     this.currentPath = null;
-    this.total = snapshot.entries.length;
+    this.total = null;
     this.emit("replay");
     const current = snapshot.entries.map(({ inspection }) => inspectionMetadata(inspection));
     const plan = await worker.planReconciliation(generation, ACTIVE_VAULT_ID, current);
@@ -644,13 +673,18 @@ export class InPluginIndexController {
       bufferedProbeBytes += bytes;
     };
 
+    this.replaySubphase = "verifying";
+    this.completed = 0;
+    this.currentPath = null;
+    this.total = new Set([...refresh, ...audit.keys()]).size + plan.remove.length;
+    if (this.total > 0) this.emit("replay");
+
     // Probe the whole pass before publishing. Successful reads are retained up to
     // the ordinary path and byte budgets; overflow is safely reread after verdict.
     for (const entry of snapshot.entries) {
-      this.completed += 1;
-      this.currentPath = entry.path;
       if ((refresh.has(entry.path) || audit.has(entry.path))
         && !this.wasTouchedAfter(entry.path, snapshot.cut)) {
+        this.currentPath = entry.path;
         if (entry.inspection.kind === "candidate") attemptedRefreshChecks += 1;
         const probe = await this.probeSnapshotRefresh(entry);
         if (probe.kind === "unreadable") {
@@ -666,13 +700,14 @@ export class InPluginIndexController {
             retainProbe(entry.path, probe);
           }
         }
+        this.completed += 1;
         this.requireActive();
         if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
           this.retrySupersededReconciliation();
           return;
         }
+        if (this.total !== null && this.completed < this.total) this.emit("replay");
       }
-      this.emit("replay");
       await this.yieldControl();
       this.requireActive();
       if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
@@ -686,15 +721,18 @@ export class InPluginIndexController {
     // transiently incomplete inventory or failed first inspection.
     for (const path of plan.remove) {
       if (this.wasTouchedAfter(path, snapshot.cut)) continue;
+      this.currentPath = path;
       attemptedRemovalChecks += 1;
       const probe = await this.probePotentialRemoval(path);
       if (probe.kind === "unreadable") unreadableRemovalChecks += 1;
       else retainProbe(path, probe);
+      this.completed += 1;
       this.requireActive();
       if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
         this.retrySupersededReconciliation();
         return;
       }
+      if (this.total !== null && this.completed < this.total) this.emit("replay");
       await this.yieldControl();
       this.requireActive();
       if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
@@ -710,10 +748,18 @@ export class InPluginIndexController {
       throw new VaultUnavailableError(new Error("active vault became unreadable"));
     }
 
+    this.replaySubphase = "applying";
+    this.completed = 0;
+    this.currentPath = null;
+    this.total = refresh.size + plan.remove.length;
+    if (this.total > 0) this.emit("replay");
+
     // Publish only after the verdict. Retained reads avoid a second network trip;
     // probes beyond the configured budgets are reread one at a time here.
     for (const entry of snapshot.entries) {
       if (refresh.has(entry.path) && !this.wasTouchedAfter(entry.path, snapshot.cut)) {
+        this.currentPath = entry.path;
+        const generationBeforeApply: string | null = this.activeGeneration;
         if (!await this.applySnapshotRefresh(
           entry,
           snapshot.cut,
@@ -724,10 +770,11 @@ export class InPluginIndexController {
           this.retrySupersededReconciliation();
           return;
         }
+        if (this.activeGeneration !== generationBeforeApply) this.completed += 1;
         expectedGeneration = this.activeGeneration ?? expectedGeneration;
         expectedEpoch = this.mutationEpoch;
+        if (this.total !== null && this.completed < this.total) this.emit("replay");
       }
-      this.emit("replay");
       await this.yieldControl();
       this.requireActive();
       if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
@@ -738,6 +785,7 @@ export class InPluginIndexController {
 
     for (const path of plan.remove) {
       if (this.wasTouchedAfter(path, snapshot.cut)) continue;
+      this.currentPath = path;
       const buffered = bufferedProbes.get(path);
       let inspection: SourceInspection;
       if (buffered) {
@@ -748,7 +796,7 @@ export class InPluginIndexController {
         } catch (error) {
           if (!(error instanceof UnreadableVaultSourceError)) throw error;
           this.unreadableSources.add(path);
-          this.emit("replay");
+          if (this.total !== null && this.completed < this.total) this.emit("replay");
           continue;
         }
       }
@@ -757,6 +805,7 @@ export class InPluginIndexController {
         this.retrySupersededReconciliation();
         return;
       }
+      const generationBeforeApply: string | null = this.activeGeneration;
       if (inspection.kind === "missing") {
         this.unreadableSources.delete(path);
         await this.applyReconciliationChange([], [{ vault_id: ACTIVE_VAULT_ID, path }]);
@@ -770,9 +819,10 @@ export class InPluginIndexController {
         this.retrySupersededReconciliation();
         return;
       }
+      if (this.activeGeneration !== generationBeforeApply) this.completed += 1;
       expectedGeneration = this.activeGeneration ?? expectedGeneration;
       expectedEpoch = this.mutationEpoch;
-      this.emit("replay");
+      if (this.total !== null && this.completed < this.total) this.emit("replay");
       await this.yieldControl();
       this.requireActive();
       if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) {
@@ -780,6 +830,7 @@ export class InPluginIndexController {
         return;
       }
     }
+    if (this.hasPendingChanges()) this.currentPath = null;
   }
 
   private async probeSnapshotRefresh(entry: SnapshotEntry): Promise<ReconciliationProbe> {
@@ -877,6 +928,7 @@ export class InPluginIndexController {
   }
 
   private async buildGeneration(rebuilding: boolean): Promise<void> {
+    this.replaySubphase = null;
     const generation = this.allocateFreshGeneration();
     const activeOmissions = rebuilding ? this.captureSourceOmissions() : null;
     let began = false;
@@ -1134,6 +1186,7 @@ export class InPluginIndexController {
   private async flushActiveChanges(): Promise<void> {
     const generation = this.activeGeneration;
     if (generation === null) return;
+    this.currentPath = null;
     const counts = await this.applyPendingChanges(generation, this.allocateFreshGeneration(), {
       generation,
       documents: this.documents,
@@ -1144,11 +1197,20 @@ export class InPluginIndexController {
       quarantine_fields: [...this.quarantineValidatorFields],
     });
     this.requireActive();
+    const applied = counts.generation !== generation;
     this.setActiveCounts(counts);
+    if (this.startupReconciling && this.replaySubphase === "applying" && applied) {
+      this.completed += 1;
+    }
     if (this.unreadableSources.size > 0 && !this.hasPendingChanges()) {
       this.emit("degraded", "sources_unreadable");
       return;
     }
+    if (this.startupReconciling
+      && this.replaySubphase === "applying"
+      && !this.hasPendingChanges()
+      && this.total !== null
+      && this.completed >= this.total) return;
     this.emit(this.startupReconciling || this.hasPendingChanges() ? "replay" : "ready");
   }
 
@@ -1461,6 +1523,9 @@ export class InPluginIndexController {
       ? {
         completed: this.completed,
         total: this.total,
+        ...(stage === "replay" && this.replaySubphase !== null
+          ? { subphase: this.replaySubphase }
+          : {}),
         ...(this.currentPath === null ? {} : { path: this.currentPath }),
       }
       : undefined;
@@ -1503,7 +1568,50 @@ export class InPluginIndexController {
       ...(issue ? { issue } : {}),
     };
     this.onStatus(status);
+    this.observePublishedStartupStatus(status);
     this.updateExportSchedule(status);
+  }
+
+  private observePublishedStartupStatus(status: IndexControllerStatus): void {
+    if (this.startupObservationFinished) return;
+    if (isCleanStatus(status)) {
+      this.startupObservationFinished = true;
+      this.observeStartup({ kind: "fully_current" });
+      return;
+    }
+    if (status.stage === "disposed") {
+      this.startupObservationFinished = true;
+      this.observeStartup({
+        kind: "terminal",
+        outcome: "cancelled",
+        reason: "backend_unavailable",
+      });
+      return;
+    }
+    const hasOmissions = status.quarantinedSources > 0 || status.unreadableSources > 0;
+    if (status.stage !== "failed" && status.stage !== "degraded"
+      && !(status.stage === "ready" && hasOmissions)) return;
+    this.startupObservationFinished = true;
+    const reason = status.issue === "index_limit_exceeded"
+      ? "index_capacity"
+      : status.issue === "vault_read_failed"
+        ? "vault_unavailable"
+        : hasOmissions || status.issue === "sources_quarantined" || status.issue === "sources_unreadable"
+          ? "sources_omitted"
+          : "backend_unavailable";
+    this.observeStartup({
+      kind: "terminal",
+      outcome: status.stage === "failed" ? "failed" : "degraded",
+      reason,
+    });
+  }
+
+  private observeStartup(observation: IndexControllerStartupObservation): void {
+    try {
+      this.onStartupObservation(observation);
+    } catch {
+      // Instrumentation cannot interrupt indexing, publication, or disposal.
+    }
   }
 
   private updateExportSchedule(status: IndexControllerStatus): void {

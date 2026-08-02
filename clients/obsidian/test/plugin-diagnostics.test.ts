@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { DiagnosticLog } from "../src/diagnostics/log";
 import { PluginDiagnostics } from "../src/diagnostics/plugin-diagnostics";
 
 const CONTEXT = {
@@ -46,6 +47,47 @@ describe("PluginDiagnostics", () => {
     expect(report).toContain("ERROR backend.activate");
     expect(report).toContain("code=daemon_unreachable");
     expect(report).not.toContain("private transport detail");
+  });
+
+  it("records a bounded startup aggregate and isolates invalid diagnostics", () => {
+    const diagnostics = new PluginDiagnostics(
+      "info",
+      () => new DiagnosticLog(4, () => 0, () => 0),
+    );
+
+    diagnostics.recordStartup({
+      startedAtMs: 1_700_000_000_000,
+      durationMs: 250,
+      details: {
+        profile: "in_plugin",
+        outcome: "degraded",
+        reason: "sources_omitted",
+        pluginEpoch: 1,
+        activationEpoch: 2,
+        pluginLoadCompleteMs: 5,
+        layoutReadyMs: 15,
+        firstCacheSearchableMs: 40,
+        fullyCurrentMs: null,
+        cacheHit: true,
+        cacheBytes: 4_096,
+      },
+    });
+    diagnostics.recordStartup({
+      startedAtMs: 0,
+      durationMs: 1,
+      details: {
+        profile: "in_plugin",
+        // Deliberately bypass the type boundary to exercise safe runtime rejection.
+        vaultPath: "smb://server/private-vault",
+      } as never,
+    });
+
+    const report = diagnostics.format(CONTEXT);
+    expect(report).toContain("stored_entries: 1");
+    expect(report).toContain("startup.lifecycle");
+    expect(report).toContain("firstCacheSearchableMs=40");
+    expect(report).toContain("fullyCurrentMs=null");
+    expect(report).not.toContain("private-vault");
   });
 
   it("runs operations without retaining events when disabled", async () => {

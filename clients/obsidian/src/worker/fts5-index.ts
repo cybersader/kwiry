@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { openPlainBlockVfs, type BlockVfsHandle } from "./block-vfs";
+import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "./exact-identifier-token";
 import {
   CACHE_SCHEMA_VERSION,
   MAX_EXPORT_BLOB_BYTES,
@@ -304,9 +305,10 @@ CREATE INDEX sources_exact_stem ON sources(exact_stem, source_key)
 CREATE INDEX sources_exact_title ON sources(exact_title, source_key)
   WHERE exact_title IS NOT NULL;
 
--- Exact aliases and technical identifiers are indexed relational projections.
--- Their canonical JSON remains in sources/chunks for restore validation, while
--- these WITHOUT ROWID tables prevent json_each from scanning the whole corpus.
+-- Exact aliases remain a relational projection because there are few per source.
+-- Technical identifiers are much denser: one contentless detail-none FTS row per
+-- chunk stores lossless single-token encodings without positions or a reverse
+-- relational index. Canonical JSON remains in chunks for restore validation.
 CREATE TABLE source_exact_aliases (
   value TEXT NOT NULL,
   source_key TEXT NOT NULL,
@@ -315,13 +317,13 @@ CREATE TABLE source_exact_aliases (
 CREATE INDEX source_exact_aliases_by_source
   ON source_exact_aliases(source_key, value);
 
-CREATE TABLE chunk_exact_identifiers (
-  value TEXT NOT NULL,
-  chunk_rowid INTEGER NOT NULL CHECK(chunk_rowid > 0),
-  PRIMARY KEY(value, chunk_rowid)
-) WITHOUT ROWID;
-CREATE INDEX chunk_exact_identifiers_by_chunk
-  ON chunk_exact_identifiers(chunk_rowid, value);
+CREATE VIRTUAL TABLE chunk_exact_identifier_fts USING fts5(
+  token,
+  content='',
+  contentless_delete=1,
+  detail=none,
+  tokenize='ascii'
+);
 
 -- One row per top-level property is the durable source-level projection. The
 -- canonical JSON is sufficient to rebuild a returned property bag; the root
@@ -410,8 +412,7 @@ SELECT
   c.heading_text AS heading_text,
   s.path AS path_text,
   s.tags_text AS tags,
-  c.content AS content,
-  c.identifiers_json AS identifiers
+  c.content AS content
 FROM chunks c JOIN sources s ON s.source_key = c.source_key;
 
 -- External content lets FTS5's rank-1 integrity check compare every posting to
@@ -426,7 +427,6 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
   path_text,
   tags,
   content,
-  identifiers,
   content='chunk_search',
   content_rowid='rowid',
   tokenize='unicode61 remove_diacritics 2'
@@ -445,7 +445,6 @@ interface ExpectedSchemaObject {
 // names alone would accept a semantically different FTS declaration or an
 // added trigger/table; comparing normalized SQL keeps the check fail-able.
 const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
-  { type: "index", name: "chunk_exact_identifiers_by_chunk", table: "chunk_exact_identifiers", sql: "CREATE INDEX chunk_exact_identifiers_by_chunk ON chunk_exact_identifiers(chunk_rowid, value)" },
   { type: "index", name: "chunks_by_source", table: "chunks", sql: "CREATE INDEX chunks_by_source ON chunks(source_key)" },
   { type: "index", name: "chunks_exact_heading", table: "chunks", sql: "CREATE INDEX chunks_exact_heading ON chunks(exact_heading) WHERE exact_heading IS NOT NULL" },
   { type: "index", name: "source_exact_aliases_by_source", table: "source_exact_aliases", sql: "CREATE INDEX source_exact_aliases_by_source ON source_exact_aliases(source_key, value)" },
@@ -462,9 +461,13 @@ const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "index", name: "sqlite_autoindex_source_property_scalars_1", table: "source_property_scalars", sql: null },
   { type: "index", name: "sqlite_autoindex_sources_1", table: "sources", sql: null },
   { type: "index", name: "sqlite_autoindex_sources_2", table: "sources", sql: null },
-  { type: "table", name: "chunk_exact_identifiers", table: "chunk_exact_identifiers", sql: "CREATE TABLE chunk_exact_identifiers (value TEXT NOT NULL,chunk_rowid INTEGER NOT NULL CHECK(chunk_rowid > 0),PRIMARY KEY(value, chunk_rowid)) WITHOUT ROWID" },
+  { type: "table", name: "chunk_exact_identifier_fts", table: "chunk_exact_identifier_fts", sql: "CREATE VIRTUAL TABLE chunk_exact_identifier_fts USING fts5(token,content='',contentless_delete=1,detail=none,tokenize='ascii')" },
+  { type: "table", name: "chunk_exact_identifier_fts_config", table: "chunk_exact_identifier_fts_config", sql: "CREATE TABLE 'chunk_exact_identifier_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID" },
+  { type: "table", name: "chunk_exact_identifier_fts_data", table: "chunk_exact_identifier_fts_data", sql: "CREATE TABLE 'chunk_exact_identifier_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
+  { type: "table", name: "chunk_exact_identifier_fts_docsize", table: "chunk_exact_identifier_fts_docsize", sql: "CREATE TABLE 'chunk_exact_identifier_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)" },
+  { type: "table", name: "chunk_exact_identifier_fts_idx", table: "chunk_exact_identifier_fts_idx", sql: "CREATE TABLE 'chunk_exact_identifier_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
   { type: "table", name: "chunks", table: "chunks", sql: "CREATE TABLE chunks (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,chunk_id TEXT NOT NULL UNIQUE,vault_id TEXT NOT NULL,path TEXT NOT NULL,heading_path_json TEXT NOT NULL,frontmatter_json TEXT NOT NULL CHECK(json_valid(frontmatter_json)),heading_text TEXT NOT NULL,exact_heading TEXT,content TEXT NOT NULL,identifiers_json TEXT NOT NULL CHECK(json_valid(identifiers_json)))" },
-  { type: "table", name: "chunks_fts", table: "chunks_fts", sql: "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename,stem,aliases,title,heading_text,path_text,tags,content,identifiers,content='chunk_search',content_rowid='rowid',tokenize='unicode61 remove_diacritics 2')" },
+  { type: "table", name: "chunks_fts", table: "chunks_fts", sql: "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename,stem,aliases,title,heading_text,path_text,tags,content,content='chunk_search',content_rowid='rowid',tokenize='unicode61 remove_diacritics 2')" },
   { type: "table", name: "chunks_fts_config", table: "chunks_fts_config", sql: "CREATE TABLE 'chunks_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID" },
   { type: "table", name: "chunks_fts_data", table: "chunks_fts_data", sql: "CREATE TABLE 'chunks_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
   { type: "table", name: "chunks_fts_docsize", table: "chunks_fts_docsize", sql: "CREATE TABLE 'chunks_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)" },
@@ -479,7 +482,7 @@ const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "table", name: "source_property_text_fts_docsize", table: "source_property_text_fts_docsize", sql: "CREATE TABLE 'source_property_text_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)" },
   { type: "table", name: "source_property_text_fts_idx", table: "source_property_text_fts_idx", sql: "CREATE TABLE 'source_property_text_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
   { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),exact_filename TEXT,exact_stem TEXT,exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),exact_title TEXT,aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
-  { type: "view", name: "chunk_search", table: "chunk_search", sql: "CREATE VIEW chunk_search AS SELECT c.rowid AS rowid,json_extract(s.retrieval_json,'$.filename') AS filename,json_extract(s.retrieval_json,'$.stem') AS stem,s.aliases_text AS aliases,s.title_text AS title,c.heading_text AS heading_text,s.path AS path_text,s.tags_text AS tags,c.content AS content,c.identifiers_json AS identifiers FROM chunks c JOIN sources s ON s.source_key = c.source_key" },
+  { type: "view", name: "chunk_search", table: "chunk_search", sql: "CREATE VIEW chunk_search AS SELECT c.rowid AS rowid,json_extract(s.retrieval_json,'$.filename') AS filename,json_extract(s.retrieval_json,'$.stem') AS stem,s.aliases_text AS aliases,s.title_text AS title,c.heading_text AS heading_text,s.path AS path_text,s.tags_text AS tags,c.content AS content FROM chunks c JOIN sources s ON s.source_key = c.source_key" },
 ];
 
 const SOURCE_COLUMNS_SQL = `
@@ -542,14 +545,14 @@ INSERT INTO chunks(
 const INSERT_CHUNK_FTS_SQL = `
 INSERT INTO chunks_fts(
   rowid, filename, stem, aliases, title, heading_text,
-  path_text, tags, content, identifiers
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  path_text, tags, content
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 const INSERT_EXACT_ALIAS_SQL =
   "INSERT INTO source_exact_aliases(value, source_key) VALUES(?, ?)";
-const INSERT_EXACT_IDENTIFIER_SQL =
-  "INSERT INTO chunk_exact_identifiers(value, chunk_rowid) VALUES(?, ?)";
+const INSERT_EXACT_IDENTIFIER_FTS_SQL =
+  "INSERT INTO chunk_exact_identifier_fts(rowid, token) VALUES(?, ?)";
 
 // Must run BEFORE the matching DELETE FROM chunks: the subquery reads the
 // rowids out of `chunks`, so deleting the metadata rows first would silently
@@ -564,8 +567,8 @@ WHERE rowid IN (SELECT rowid FROM source_properties WHERE source_key = ?)
 `;
 
 const DELETE_SOURCE_EXACT_IDENTIFIERS_SQL = `
-DELETE FROM chunk_exact_identifiers
-WHERE chunk_rowid IN (SELECT rowid FROM chunks WHERE source_key = ?)
+DELETE FROM chunk_exact_identifier_fts
+WHERE rowid IN (SELECT rowid FROM chunks WHERE source_key = ?)
 `;
 const DELETE_SOURCE_EXACT_ALIASES_SQL =
   "DELETE FROM source_exact_aliases WHERE source_key = ?";
@@ -586,7 +589,8 @@ const DELETE_SOURCE_SQL = "DELETE FROM sources WHERE source_key = ?";
 const SELECT_MAX_CHUNK_ROWID_SQL = `
 SELECT MAX(
   (SELECT COALESCE(MAX(rowid), 0) FROM chunks),
-  (SELECT COALESCE(MAX(id), 0) FROM chunks_fts_docsize)
+  (SELECT COALESCE(MAX(id), 0) FROM chunks_fts_docsize),
+  (SELECT COALESCE(MAX(id), 0) FROM chunk_exact_identifier_fts_docsize)
 )
 `;
 
@@ -635,12 +639,17 @@ SELECT
   (SELECT COALESCE(SUM(property_scalar_count), 0) FROM sources) AS source_property_scalars,
   (SELECT count(*) FROM source_exact_aliases) AS exact_aliases,
   (SELECT COALESCE(SUM(json_array_length(exact_aliases_json)), 0) FROM sources) AS source_exact_aliases,
-  (SELECT count(*) FROM chunk_exact_identifiers) AS exact_identifiers,
-  (SELECT COALESCE(SUM(json_array_length(identifiers_json)), 0) FROM chunks) AS chunk_exact_identifiers,
+  (SELECT count(*) FROM chunk_exact_identifier_fts_docsize) AS exact_identifier_fts,
+  (SELECT count(*) FROM chunk_exact_identifier_fts_docsize WHERE id <= 0)
+    AS nonpositive_exact_identifier_fts,
+  (SELECT count(*) FROM chunk_exact_identifier_fts_docsize f
+     LEFT JOIN chunks c ON c.rowid = f.id WHERE c.rowid IS NULL)
+    AS orphan_exact_identifier_fts,
+  (SELECT count(*) FROM chunks c
+     LEFT JOIN chunk_exact_identifier_fts_docsize f ON f.id = c.rowid WHERE f.id IS NULL)
+    AS missing_exact_identifier_fts,
   (SELECT count(*) FROM source_exact_aliases a LEFT JOIN sources s ON s.source_key = a.source_key
      WHERE s.source_key IS NULL) AS orphan_exact_aliases,
-  (SELECT count(*) FROM chunk_exact_identifiers i LEFT JOIN chunks c ON c.rowid = i.chunk_rowid
-     WHERE c.rowid IS NULL) AS orphan_exact_identifiers,
   (SELECT count(*) FROM chunks c LEFT JOIN sources s ON s.source_key = c.source_key
      WHERE s.source_key IS NULL) AS orphan_chunks,
   (SELECT count(*) FROM source_properties p LEFT JOIN sources s ON s.source_key = p.source_key
@@ -916,9 +925,9 @@ export class Fts5GenerationIndex {
                 bind: [rowid, change.preparation.source_key, ...row.metadataBind],
               });
               this.db.exec(INSERT_CHUNK_FTS_SQL, { bind: [rowid, ...row.ftsBind] });
-              for (const identifier of row.exactIdentifiers) {
-                this.db.exec(INSERT_EXACT_IDENTIFIER_SQL, { bind: [identifier, rowid] });
-              }
+              this.db.exec(INSERT_EXACT_IDENTIFIER_FTS_SQL, {
+                bind: [rowid, row.exactIdentifierMatch],
+              });
             }
             for (const alias of change.preparation.normalized_exact.aliases) {
               this.db.exec(INSERT_EXACT_ALIAS_SQL, {
@@ -954,7 +963,16 @@ export class Fts5GenerationIndex {
           }
           if (verifyIntegrity) {
             this.runIntegrityCheck();
-            this.runReconciliationCheck(nextChunks, nextDocuments, nextSources);
+            // A published generation already passed the full canonical posting
+            // comparison. This transaction changes only allocator-owned rows;
+            // structural reconciliation catches incomplete deletion/insertion
+            // without rescanning millions of unchanged terms on every update.
+            this.runReconciliationCheck(
+              nextChunks,
+              nextDocuments,
+              nextSources,
+              false,
+            );
           }
           requireDatabaseWithinLimit(this.db, this.effectiveDatabaseByteLimit);
         } catch (error) {
@@ -1221,7 +1239,7 @@ export class Fts5GenerationIndex {
     return hits;
   }
 
-  assertIntegrity(): void {
+  assertIntegrity(validateExactProjection = true): void {
     this.requireOpen();
     try {
       this.runIntegrityCheck();
@@ -1229,6 +1247,7 @@ export class Fts5GenerationIndex {
         this.chunkCount,
         this.documentCount,
         this.sourceCount,
+        validateExactProjection,
       );
       requireDatabaseWithinLimit(this.db, this.effectiveDatabaseByteLimit);
     } catch {
@@ -1261,6 +1280,9 @@ export class Fts5GenerationIndex {
     this.requireOpen();
     try {
       this.db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('optimize')");
+      this.db.exec(
+        "INSERT INTO chunk_exact_identifier_fts(chunk_exact_identifier_fts) VALUES('optimize')",
+      );
       this.db.exec(
         "INSERT INTO source_property_text_fts(source_property_text_fts) VALUES('optimize')",
       );
@@ -1303,6 +1325,10 @@ export class Fts5GenerationIndex {
     try {
       this.db.exec("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)");
       this.db.exec(
+        "INSERT INTO chunk_exact_identifier_fts(chunk_exact_identifier_fts, rank) "
+          + "VALUES('integrity-check', 1)",
+      );
+      this.db.exec(
         "INSERT INTO source_property_text_fts(source_property_text_fts, rank) "
           + "VALUES('integrity-check', 1)",
       );
@@ -1321,6 +1347,7 @@ export class Fts5GenerationIndex {
     expectedChunks: number,
     expectedDocuments: number,
     expectedSources: number,
+    validateExactProjection = true,
   ): void {
     const rows = this.db.selectObjects(RECONCILE_SQL, [this.vaultId]);
     if (rows.length !== 1) {
@@ -1349,10 +1376,11 @@ export class Fts5GenerationIndex {
       || !isNonNegativeSafeInteger(row.source_property_scalars)
       || !isNonNegativeSafeInteger(row.exact_aliases)
       || !isNonNegativeSafeInteger(row.source_exact_aliases)
-      || !isNonNegativeSafeInteger(row.exact_identifiers)
-      || !isNonNegativeSafeInteger(row.chunk_exact_identifiers)
+      || !isNonNegativeSafeInteger(row.exact_identifier_fts)
+      || !isNonNegativeSafeInteger(row.nonpositive_exact_identifier_fts)
+      || !isNonNegativeSafeInteger(row.orphan_exact_identifier_fts)
+      || !isNonNegativeSafeInteger(row.missing_exact_identifier_fts)
       || !isNonNegativeSafeInteger(row.orphan_exact_aliases)
-      || !isNonNegativeSafeInteger(row.orphan_exact_identifiers)
       || !isNonNegativeSafeInteger(row.orphan_chunks)
       || !isNonNegativeSafeInteger(row.orphan_properties)
       || !isNonNegativeSafeInteger(row.orphan_property_scalars)
@@ -1380,9 +1408,11 @@ export class Fts5GenerationIndex {
       || row.source_properties !== row.properties
       || row.source_property_scalars !== row.property_scalars
       || row.exact_aliases !== row.source_exact_aliases
-      || row.exact_identifiers !== row.chunk_exact_identifiers
+      || row.exact_identifier_fts !== row.chunks
+      || row.nonpositive_exact_identifier_fts !== 0
+      || row.orphan_exact_identifier_fts !== 0
+      || row.missing_exact_identifier_fts !== 0
       || row.orphan_exact_aliases !== 0
-      || row.orphan_exact_identifiers !== 0
       || row.orphan_chunks !== 0
       || row.orphan_properties !== 0
       || row.orphan_property_scalars !== 0
@@ -1392,6 +1422,12 @@ export class Fts5GenerationIndex {
       || row.source_tally_mismatches !== 0) {
       throw new IndexIntegrityError("FTS5 index and chunk metadata disagree");
     }
+    if (validateExactProjection) {
+      validateExactIdentifierProjection(
+        this.db,
+        (message) => new IndexIntegrityError(message),
+      );
+    }
   }
 
   private requireOpen(): void {
@@ -1400,9 +1436,17 @@ export class Fts5GenerationIndex {
 }
 
 function installVocabularyTable(db: SQLiteDatabase): void {
+  // The exact-posting validator orders millions of instance rows by document.
+  // Keep SQLite's sorter file-backed and its page cache bounded instead of
+  // growing the shared WASM heap with the corpus.
+  db.exec("PRAGMA temp_store = FILE");
   db.exec(
-    "CREATE VIRTUAL TABLE temp.chunks_fts_vocab "
+    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.chunks_fts_vocab "
       + "USING fts5vocab(main, chunks_fts, 'col')",
+  );
+  db.exec(
+    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.chunk_exact_identifier_fts_vocab "
+      + "USING fts5vocab(main, chunk_exact_identifier_fts, 'instance')",
   );
 }
 
@@ -1441,6 +1485,7 @@ export function openRestoredFts5Generation(
     const storedVersion = Number(db.selectValue("PRAGMA user_version"));
     if (storedVersion !== CACHE_SCHEMA_VERSION) throw new CacheVersionMismatchError();
     validateExactSchema(db);
+    installVocabularyTable(db);
     const resolvedLimits = resolveIndexLimits(limits);
     const effectiveDatabaseByteLimit = configureDatabasePageLimit(db, resolvedLimits);
     requireDatabaseWithinLimit(db, effectiveDatabaseByteLimit);
@@ -1456,6 +1501,10 @@ export function openRestoredFts5Generation(
     try {
       db.exec("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)");
       db.exec(
+        "INSERT INTO chunk_exact_identifier_fts(chunk_exact_identifier_fts, rank) "
+          + "VALUES('integrity-check', 1)",
+      );
+      db.exec(
         "INSERT INTO source_property_text_fts(source_property_text_fts, rank) "
           + "VALUES('integrity-check', 1)",
       );
@@ -1465,10 +1514,15 @@ export function openRestoredFts5Generation(
     validatePositiveRestoredRowids(db);
     const inventory = readRestoredInventory(db, limits, expectedVaultId);
     validateChunkFtsBijection(db);
+    validateExactIdentifierFtsBijection(db);
     validatePropertyFtsBijection(db);
     rebuildCanonicalPropertyFts(db);
     try {
       db.exec("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)");
+      db.exec(
+        "INSERT INTO chunk_exact_identifier_fts(chunk_exact_identifier_fts, rank) "
+          + "VALUES('integrity-check', 1)",
+      );
       db.exec(
         "INSERT INTO source_property_text_fts(source_property_text_fts, rank) "
           + "VALUES('integrity-check', 1)",
@@ -1605,7 +1659,7 @@ function readRestoredInventory(
     LIMIT ?
   `, [onePastLimit(resolvedLimits.maxChunks)]);
   if (chunkRows.length > resolvedLimits.maxChunks) throw new IndexCapacityError();
-  for (const row of chunkRows) validateRestoredChunk(db, row, sourcesByKey, legacyBySource);
+  for (const row of chunkRows) validateRestoredChunk(row, sourcesByKey, legacyBySource);
 
   return {
     documents,
@@ -1615,7 +1669,6 @@ function readRestoredInventory(
 }
 
 function validateRestoredChunk(
-  db: SQLiteDatabase,
   row: Record<string, unknown>,
   sourcesByKey: ReadonlyMap<string, StoredSource>,
   legacyBySource: ReadonlyMap<string, LegacyProjection>,
@@ -1644,14 +1697,6 @@ function validateRestoredChunk(
     || row.frontmatter_json !== displayFrontmatterJsonFromTitle(legacy.title)) {
     throw new CacheImageInvalidError("cache chunk identity does not match its source");
   }
-  const projectedIdentifiers = readExactProjectionValues(
-    db,
-    "SELECT value FROM chunk_exact_identifiers WHERE chunk_rowid = ? ORDER BY value",
-    [row.rowid],
-  );
-  if (!sameStringSet(projectedIdentifiers, identifiers)) {
-    throw new CacheImageInvalidError("cache exact identifier projection is invalid");
-  }
 }
 
 function readExactProjectionValues(
@@ -1672,6 +1717,8 @@ function validatePositiveRestoredRowids(db: SQLiteDatabase): void {
     SELECT
       EXISTS(SELECT 1 FROM chunks WHERE rowid <= 0) AS chunks,
       EXISTS(SELECT 1 FROM chunks_fts_docsize WHERE id <= 0) AS chunks_fts,
+      EXISTS(SELECT 1 FROM chunk_exact_identifier_fts_docsize WHERE id <= 0)
+        AS exact_identifier_fts,
       EXISTS(SELECT 1 FROM source_properties WHERE rowid <= 0) AS properties,
       EXISTS(SELECT 1 FROM source_property_scalars WHERE rowid <= 0) AS scalars,
       EXISTS(SELECT 1 FROM source_property_text_fts WHERE rowid <= 0) AS property_fts
@@ -1702,6 +1749,30 @@ function validateChunkFtsBijection(db: SQLiteDatabase): void {
     || row.missing !== 0
     || row.orphaned !== 0) {
     throw new CacheImageInvalidError("cache chunk postings do not match canonical rows");
+  }
+}
+
+function validateExactIdentifierFtsBijection(db: SQLiteDatabase): void {
+  const row = db.selectObjects(`
+    SELECT
+      (SELECT count(*) FROM chunks) AS chunks,
+      (SELECT count(*) FROM chunk_exact_identifier_fts_docsize) AS exact_fts,
+      (SELECT count(*) FROM chunks c
+       LEFT JOIN chunk_exact_identifier_fts_docsize f ON f.id = c.rowid
+       WHERE f.id IS NULL) AS missing,
+      (SELECT count(*) FROM chunk_exact_identifier_fts_docsize f
+       LEFT JOIN chunks c ON c.rowid = f.id
+       WHERE c.rowid IS NULL) AS orphaned
+  `)[0];
+  if (!row
+    || !isNonNegativeSafeInteger(row.chunks)
+    || !isNonNegativeSafeInteger(row.exact_fts)
+    || !isNonNegativeSafeInteger(row.missing)
+    || !isNonNegativeSafeInteger(row.orphaned)
+    || row.chunks !== row.exact_fts
+    || row.missing !== 0
+    || row.orphaned !== 0) {
+    throw new CacheImageInvalidError("cache exact identifier rows do not match canonical chunks");
   }
 }
 
@@ -1765,6 +1836,100 @@ function rebuildCanonicalPropertyFts(db: SQLiteDatabase): void {
     if (error instanceof CacheImageInvalidError) throw error;
     throw translateSqliteCapacityError(error);
   }
+}
+
+interface ExactIdentifierPosting {
+  doc: number;
+  term: string;
+}
+
+function validateExactIdentifierProjection(
+  db: SQLiteDatabase,
+  invalid: (message: string) => Error,
+): void {
+  const expectedTable = "expected_exact_identifier_fts";
+  const expectedVocabulary = "expected_exact_identifier_fts_vocab";
+  const preparedDb = db as SQLiteDatabase & {
+    prepare(sql: string): {
+      step(): boolean;
+      get(target: Record<string, unknown>): Record<string, unknown>;
+      finalize(): void;
+    };
+  };
+  let actualStatement: ReturnType<typeof preparedDb.prepare> | null = null;
+  let expectedStatement: ReturnType<typeof preparedDb.prepare> | null = null;
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE temp.${expectedTable} USING fts5(
+        token,
+        content='',
+        contentless_delete=1,
+        detail=none,
+        tokenize='ascii'
+      )
+    `);
+    let afterRowid = 0;
+    while (true) {
+      const rows = db.selectObjects(`
+        SELECT rowid, identifiers_json
+        FROM chunks
+        WHERE rowid > ?
+        ORDER BY rowid
+        LIMIT 100
+      `, [afterRowid]);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const identifiers = parseIdentifiersJson(row.identifiers_json);
+        if (!isPositiveSafeInteger(row.rowid) || identifiers === null) {
+          throw invalid("exact identifier canonical inventory is invalid");
+        }
+        db.exec(`INSERT INTO temp.${expectedTable}(rowid, token) VALUES(?, ?)`, {
+          bind: [row.rowid, encodeExactIdentifierMatch(identifiers)],
+        });
+        afterRowid = row.rowid;
+      }
+    }
+    db.exec(
+      `CREATE VIRTUAL TABLE temp.${expectedVocabulary} `
+        + `USING fts5vocab(temp, ${expectedTable}, 'instance')`,
+    );
+
+    actualStatement = preparedDb.prepare(
+      "SELECT term, doc FROM chunk_exact_identifier_fts_vocab",
+    );
+    expectedStatement = preparedDb.prepare(
+      `SELECT term, doc FROM temp.${expectedVocabulary}`,
+    );
+    while (true) {
+      const hasActual = actualStatement.step();
+      const hasExpected = expectedStatement.step();
+      if (hasActual !== hasExpected) {
+        throw invalid("exact identifier postings disagree with canonical chunks");
+      }
+      if (!hasActual) return;
+      const actual = actualStatement.get({});
+      const expected = expectedStatement.get({});
+      if (!isExactIdentifierPosting(actual)
+        || !isExactIdentifierPosting(expected)
+        || actual.doc !== expected.doc
+        || actual.term !== expected.term) {
+        throw invalid("exact identifier postings disagree with canonical chunks");
+      }
+    }
+  } finally {
+    actualStatement?.finalize();
+    expectedStatement?.finalize();
+    db.exec(`DROP TABLE IF EXISTS temp.${expectedVocabulary}`);
+    db.exec(`DROP TABLE IF EXISTS temp.${expectedTable}`);
+  }
+}
+
+function isExactIdentifierPosting(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & ExactIdentifierPosting {
+  return isPositiveSafeInteger(value.doc)
+    && typeof value.term === "string"
+    && /^z[a-z2-7]+$/u.test(value.term);
 }
 
 function parseIdentifiersJson(value: unknown): string[] | null {
@@ -1954,9 +2119,10 @@ function onePastLimit(limit: number): number {
 interface ProjectedChunk {
   /** Chunk identity, display metadata, and canonical chunk-local lexical inputs. */
   metadataBind: readonly unknown[];
-  /** The nine ordinary FTS field values, in declared column order. */
+  /** The eight ordinary FTS field values, in declared column order. */
   ftsBind: readonly string[];
-  exactIdentifiers: readonly string[];
+  /** Space-separated lossless single-token encodings, or empty for no identifiers. */
+  exactIdentifierMatch: string;
   chunkId: string;
   chunkingVersion: number;
 }
@@ -2080,7 +2246,6 @@ function projectChunk(
     chunk.path,
     tags,
     chunk.content,
-    JSON.stringify(prepared.technical_identifiers),
   ];
   return {
     metadataBind: [
@@ -2095,7 +2260,7 @@ function projectChunk(
       JSON.stringify(prepared.technical_identifiers),
     ],
     ftsBind: fields,
-    exactIdentifiers: prepared.technical_identifiers,
+    exactIdentifierMatch: encodeExactIdentifierMatch(prepared.technical_identifiers),
     chunkId: chunk.chunk_id,
     chunkingVersion: chunk.chunking_version,
   };
