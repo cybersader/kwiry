@@ -28,7 +28,7 @@ const scriptRoot = dirname(fileURLToPath(import.meta.url));
 /** Occurs in the beacon line of every generated note, so it fills a result page. */
 const HYDRATION_QUERY = "synthetic";
 const HYDRATION_SAMPLES = 20;
-const WORKER_PROTOCOL_VERSION = 6;
+const WORKER_PROTOCOL_VERSION = 7;
 const PERFORMANCE_VAULT_ID = "gate5-performance-vault";
 const CACHE_IDENTITY = "c".repeat(64);
 const EXPORT_BLOB_LIMIT = 384 * 1024 * 1024;
@@ -58,6 +58,7 @@ async function main() {
     const initialized = await send({
       operation: "initialize",
       vault_id: PERFORMANCE_VAULT_ID,
+      source_policy_hash: CACHE_IDENTITY,
     });
     requireOk(initialized);
     const initializeMs = performance.now() - startup;
@@ -204,6 +205,7 @@ async function main() {
     requireOk(await sendRestored({
       operation: "initialize",
       vault_id: PERFORMANCE_VAULT_ID,
+      source_policy_hash: CACHE_IDENTITY,
     }));
     requireOk(await sendRestored(restoreRequest(envelope, generation)));
     for (const [probe, query] of [
@@ -329,6 +331,8 @@ function restoreRequest(envelope, generation) {
     plugin_version: envelope.plugin_version,
     cache_identity: envelope.cache_identity,
     expected_cache_identity: envelope.cache_identity,
+    source_policy_hash: envelope.source_policy_hash,
+    expected_source_policy_hash: envelope.source_policy_hash,
   };
 }
 

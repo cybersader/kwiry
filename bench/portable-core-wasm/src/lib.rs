@@ -134,13 +134,19 @@ mod wasm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kwiry_core::LEXICAL_QUERY_PLAN_SCHEMA_VERSION;
 
     #[test]
     fn adapter_returns_versioned_portable_data() {
         let input = r#"[{"operation":"prepare_query","name":"identifier","query":"IIA 2 line"}]"#;
         let output = run_cases_json(input).expect("fixture should execute");
-        assert!(output.contains("\"schema_version\":2"));
-        assert!(output.contains("\"kind\":\"identifier\""));
+        let output: serde_json::Value =
+            serde_json::from_str(&output).expect("fixture output should deserialize");
+        assert_eq!(
+            output[0]["plan"]["schema_version"],
+            LEXICAL_QUERY_PLAN_SCHEMA_VERSION
+        );
+        assert_eq!(output[0]["plan"]["kind"], "identifier");
     }
 
     #[test]

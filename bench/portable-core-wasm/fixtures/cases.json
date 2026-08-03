@@ -287,9 +287,53 @@
       "state": "ready",
       "version": "0.1.0",
       "generation": "generation-0001",
-      "chunking_version": 1,
+      "chunking_version": 2,
       "documents": 3,
       "chunks": 7,
+      "source_format_counts": {
+        "markdown": {
+          "indexed-complete": 2,
+          "indexed-partial": 0,
+          "skipped-no-extractable-text": 0,
+          "unreadable": 0,
+          "quarantined": 0
+        },
+        "text": {
+          "indexed-complete": 1,
+          "indexed-partial": 0,
+          "skipped-no-extractable-text": 0,
+          "unreadable": 0,
+          "quarantined": 0
+        },
+        "base": {
+          "indexed-complete": 0,
+          "indexed-partial": 0,
+          "skipped-no-extractable-text": 0,
+          "unreadable": 0,
+          "quarantined": 0
+        },
+        "canvas": {
+          "indexed-complete": 0,
+          "indexed-partial": 0,
+          "skipped-no-extractable-text": 0,
+          "unreadable": 0,
+          "quarantined": 0
+        },
+        "docx": {
+          "indexed-complete": 0,
+          "indexed-partial": 0,
+          "skipped-no-extractable-text": 0,
+          "unreadable": 0,
+          "quarantined": 0
+        },
+        "pdf": {
+          "indexed-complete": 0,
+          "indexed-partial": 0,
+          "skipped-no-extractable-text": 0,
+          "unreadable": 0,
+          "quarantined": 0
+        }
+      },
       "last_sync": null,
       "dirty": false,
       "rebuilding": false,
