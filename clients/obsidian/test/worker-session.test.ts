@@ -55,7 +55,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
     case "initialize":
       return {
         rustAbiVersion: 2,
-        sourceSchemaVersion: 5,
+        sourceSchemaVersion: 6,
         querySchemaVersion: 4,
         matchPlanSchemaVersion: 3,
         sqliteVersion: "3.53.0",

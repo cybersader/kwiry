@@ -24,6 +24,7 @@ const expectedFixtureNames = [
   "13-shared-key-boolean.json",
   "14-property-key-and-scalar-edges.json",
   "15-base-project-dashboard.json",
+  "16-canvas-research-board.json",
 ] as const;
 
 const fixtureDirectory = fileURLToPath(
@@ -52,6 +53,52 @@ describe("Rust SourcePreparation golden fixtures", () => {
     // byte-exact, so whitespace or ordering drift in the Rust ABI is visible to Vitest.
     expect(sourcePreparationDefect(preparation)).toBeNull();
     expect(`${JSON.stringify(preparation, null, 2)}\n`).toBe(bytes);
+  });
+
+  it("preserves Canvas node-then-edge order, Markdown headings, and typed authored JSON", () => {
+    const canvas = fixtures.find(({ name }) => name === "16-canvas-research-board.json")
+      ?.preparation as {
+        schema_version?: unknown;
+        format?: unknown;
+        coverage?: unknown;
+        normalized_exact?: { title?: unknown };
+        frontmatter?: Record<string, unknown>;
+        chunks?: Array<{
+          chunk?: { heading_path?: unknown; content?: unknown; frontmatter?: unknown };
+          source_locator?: unknown;
+        }>;
+      } | undefined;
+
+    expect(canvas).toMatchObject({
+      schema_version: 6,
+      format: "canvas",
+      coverage: "indexed-complete",
+      normalized_exact: { title: null },
+    });
+    expect(canvas?.chunks?.map(({ chunk }) => ({
+      heading_path: chunk?.heading_path,
+      content: chunk?.content,
+    }))).toEqual([
+      { heading_path: [], content: "---\ntitle: Card-only title\ntags: [nested, card]\n---\nAuthored card preamble." },
+      { heading_path: ["Alpha"], content: "# Alpha\nAlpha body." },
+      { heading_path: ["Alpha", "Detail"], content: "## Detail\nDetail body." },
+      { heading_path: [], content: "Research Cluster" },
+      { heading_path: [], content: "https://example.com/canvas-source" },
+      { heading_path: [], content: "References/target.md\n#Only Authored Subpath" },
+      { heading_path: ["Closing"], content: "## Closing\nFinal card body." },
+      { heading_path: [], content: "supports source" },
+      { heading_path: [], content: "resolves into" },
+    ]);
+    expect(canvas?.chunks?.every((chunk) => chunk.source_locator === undefined)).toBe(true);
+    expect(canvas?.chunks?.every((chunk) =>
+      JSON.stringify(chunk.chunk?.frontmatter) === "{}")).toBe(true);
+    expect(canvas?.frontmatter).toHaveProperty("canvas");
+    expect(canvas?.frontmatter).not.toHaveProperty("title");
+    expect(canvas?.frontmatter).not.toHaveProperty("tags");
+    const typedCanvas = JSON.stringify(canvas?.frontmatter?.canvas);
+    expect(typedCanvas).toContain('"id":{"type":"string","value":"1111111111111111"}');
+    expect(typedCanvas).toContain('"id":{"type":"string","value":"aaaaaaaaaaaaaaaa"}');
+    expect(typedCanvas).toContain('"max_items":{"type":"u64","value":"18446744073709551615"}');
   });
 
   it("preserves Base format, view order, and authored locator in the Rust golden", () => {

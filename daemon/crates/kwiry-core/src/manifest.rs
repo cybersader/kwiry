@@ -15,7 +15,7 @@ pub use crate::source::source_key;
 use crate::state::{read_json, write_json_atomic};
 
 pub const MANIFEST_VERSION: u32 = 3;
-pub const INDEX_FORMAT_VERSION: u32 = 10;
+pub const INDEX_FORMAT_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
@@ -227,9 +227,17 @@ mod tests {
     }
 
     #[test]
+    fn canvas_wave_versions_are_explicit_and_narrow() {
+        assert_eq!(MANIFEST_VERSION, 3);
+        assert_eq!(INDEX_FORMAT_VERSION, 11);
+        assert_eq!(CHUNKING_VERSION, 2);
+        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 6);
+    }
+
+    #[test]
     fn incompatible_index_manifest_requires_an_explicit_rebuild() {
         let manifest = Manifest {
-            index_format_version: 5,
+            index_format_version: 10,
             ..Manifest::default()
         };
 
@@ -237,7 +245,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains(&format!("found manifest={MANIFEST_VERSION}, index=5"))
+                .contains(&format!("found manifest={MANIFEST_VERSION}, index=10"))
         );
         assert!(error.to_string().contains(&format!(
             "expected manifest={MANIFEST_VERSION}, index={INDEX_FORMAT_VERSION}"

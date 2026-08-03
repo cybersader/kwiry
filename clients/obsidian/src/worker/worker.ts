@@ -153,7 +153,7 @@ const handleInternalD5cPreviewMessage = __KWIRY_D5C_OWNER_WORKER__
 
 async function initialize(
   vaultId: string,
-  sourcePolicyHash = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b",
+  sourcePolicyHash = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97",
 ): Promise<InitializeResult> {
   if (state !== "cold") {
     throw fixedWorkerError("invalid_state", "lifecycle", "Worker is already initialized.", false);
@@ -954,7 +954,7 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
   const filename = descriptor.path.split("/").at(-1) ?? descriptor.path;
   const separator = filename.lastIndexOf(".");
   return {
-    schema_version: 5,
+    schema_version: 6,
     source_key: await sourceKey(descriptor.vault_id, descriptor.path),
     vault_id: descriptor.vault_id,
     ...(descriptor.room === undefined ? {} : { room: descriptor.room }),

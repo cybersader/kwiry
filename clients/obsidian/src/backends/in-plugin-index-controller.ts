@@ -171,7 +171,7 @@ const DEFAULT_LIMITS: IndexControllerLimits = {
   maxStableReadAttempts: 3,
 };
 const DEFAULT_IDLE_EXPORT_MS = 2_000;
-const DEFAULT_SOURCE_POLICY_HASH = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b";
+const DEFAULT_SOURCE_POLICY_HASH = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97";
 const MAX_GENERATION_ALLOCATION_ATTEMPTS = 32;
 // A network share that disappears midway can yield a plausible-looking partial
 // index. Requiring more than half of attempted reads to fail avoids publishing

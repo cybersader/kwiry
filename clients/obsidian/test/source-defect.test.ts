@@ -7,7 +7,7 @@ import { sourcePreparationDefect } from "../src/worker/source-defect";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
 
 const VALID = {
-  schema_version: 5,
+  schema_version: 6,
   source_key: "a".repeat(64),
   vault_id: "active-vault",
   path: "Notes/Example.md",
@@ -126,6 +126,8 @@ describe("chunk/source correlation", () => {
     expect(sourcePreparationDefect(preparation)).toBeNull();
 
     preparation.format = "markdown";
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+    preparation.format = "canvas";
     expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
   });
 });

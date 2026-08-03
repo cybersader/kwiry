@@ -896,12 +896,12 @@ mod tests {
     fn incompatible_index_pointer_is_rejected_without_mutation() {
         let temporary = tempdir().unwrap();
         let current_path = temporary.path().join("current.json");
-        let source = r#"{"layout_version":2,"index_format_version":5,"generation":"old"}"#;
+        let source = r#"{"layout_version":2,"index_format_version":10,"generation":"old"}"#;
         fs::write(&current_path, source).unwrap();
         let root = DataRoot::new(temporary.path());
 
         let error = root.active().unwrap_err();
-        assert!(error.to_string().contains("found layout=2, index=5"));
+        assert!(error.to_string().contains("found layout=2, index=10"));
         assert!(error.to_string().contains(&format!(
             "expected layout={LAYOUT_VERSION}, index={INDEX_FORMAT_VERSION}"
         )));

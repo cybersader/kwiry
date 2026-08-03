@@ -46,7 +46,7 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         format: SourceFormat::Canvas,
         name: "canvas",
         extensions: &["canvas"],
-        extraction_supported: false,
+        extraction_supported: true,
     },
     FormatSpec {
         format: SourceFormat::Docx,
@@ -138,6 +138,9 @@ mod tests {
             Some(SourceFormat::Pdf)
         );
         assert_eq!(SourceFormat::from_path("image.png"), None);
+        assert!(SourceFormat::Canvas.spec().extraction_supported);
+        assert!(!SourceFormat::Docx.spec().extraction_supported);
+        assert!(!SourceFormat::Pdf.spec().extraction_supported);
 
         for spec in format_specs() {
             assert_eq!(spec.format.spec(), spec);

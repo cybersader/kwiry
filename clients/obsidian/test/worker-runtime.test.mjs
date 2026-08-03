@@ -127,7 +127,10 @@ function source(path, text) {
 }
 
 function sourceWithFormat(path, format, text) {
-  const bytes = Buffer.from(text, "utf8");
+  return sourceBytesWithFormat(path, format, Buffer.from(text, "utf8"));
+}
+
+function sourceBytesWithFormat(path, format, bytes) {
   return {
     descriptor: {
       vault_id: "active-vault",
@@ -1613,7 +1616,7 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: {
           rustAbiVersion: 2,
-          sourceSchemaVersion: 5,
+          sourceSchemaVersion: 6,
           querySchemaVersion: 4,
           matchPlanSchemaVersion: 3,
           sqliteVersion: "3.53.0",
@@ -1780,6 +1783,156 @@ describe("exact generated production Worker", () => {
           },
         },
       });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("projects Rust Canvas fixtures through the real Worker without structural ranking signals", async () => {
+    const fixtureRoot = new URL(
+      "../../../daemon/crates/kwiry-core/tests/fixtures/canvas/",
+      import.meta.url,
+    );
+    const wellFormed = readFileSync(new URL("well-formed.canvas", fixtureRoot));
+    const partial = readFileSync(new URL("partial.canvas", fixtureRoot));
+    const empty = readFileSync(new URL("empty.canvas", fixtureRoot));
+    const malformed = readFileSync(new URL("malformed.canvas", fixtureRoot));
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "canvas-parity" });
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "canvas-parity",
+        sources: [
+          sourceBytesWithFormat("research-board.canvas", "canvas", wellFormed),
+          sourceBytesWithFormat("partial.canvas", "canvas", partial),
+          sourceBytesWithFormat("empty.canvas", "canvas", empty),
+          sourceBytesWithFormat("malformed.canvas", "canvas", malformed),
+          sourceBytesWithFormat("unreadable.canvas", "canvas", Buffer.from([0xff])),
+          source(
+            "References/target.md",
+            "# Only Authored Subpath\nreferencedbodysentinelqzx stays in the referenced note",
+          ),
+        ],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { documents: 3, chunks: 13 },
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "canvas-parity" });
+
+      let requestId = 5;
+      for (const query of [
+        "Alpha body",
+        "Research Cluster",
+        "supports source",
+        "canvas-source",
+        "References target",
+        "Only Authored Subpath",
+      ]) {
+        const response = await request(worker, {
+          id: requestId++, operation: "search", query, limit: 20,
+        });
+        expect(response).toMatchObject({ ok: true, result: { generation: "canvas-parity" } });
+        const canvasHit = response.result.hits.find((hit) => hit.path === "research-board.canvas");
+        expect(canvasHit, `Canvas query must match authored evidence: ${query}`).toMatchObject({
+          format: "canvas",
+          coverage: "indexed-complete",
+          locator: null,
+        });
+        expect(canvasHit.excerpt.length).toBeGreaterThan(0);
+        expect(canvasHit.excerpt.length).toBeLessThanOrEqual(240);
+      }
+
+      const referencedBody = await request(worker, {
+        id: requestId++, operation: "search", query: "referencedbodysentinelqzx", limit: 20,
+      });
+      expect(referencedBody).toMatchObject({
+        ok: true,
+        result: { hits: [{ path: "References/target.md", format: "markdown" }] },
+      });
+      expect(referencedBody.result.hits.some((hit) => hit.path === "research-board.canvas")).toBe(false);
+
+      for (const structuralQuery of ["1111111111111111", "geometrysentinelqzx"]) {
+        await expect(request(worker, {
+          id: requestId++, operation: "search", query: structuralQuery, limit: 20,
+        })).resolves.toMatchObject({ ok: true, result: { hits: [] } });
+      }
+
+      await expect(request(worker, { id: requestId++, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          documents: 3,
+          chunks: 13,
+          source_format_counts: {
+            canvas: {
+              "indexed-complete": 1,
+              "indexed-partial": 1,
+              "skipped-no-extractable-text": 1,
+              unreadable: 1,
+              quarantined: 1,
+            },
+          },
+        },
+      });
+
+      const exported = await request(worker, {
+        id: requestId++,
+        operation: "export_generation",
+        generation: "canvas-parity",
+        cache_identity: CACHE_IDENTITY,
+      });
+      const db = await openExportedImage(exported.result.bytes);
+      try {
+        const canvasProperty = db.selectObjects(`
+          SELECT p.value_json
+          FROM source_properties AS p
+          JOIN sources AS s ON s.source_key = p.source_key
+          WHERE s.path = 'research-board.canvas' AND p.property_name = 'canvas'
+        `);
+        expect(canvasProperty).toHaveLength(1);
+        expect(String(canvasProperty[0].value_json)).toContain("1111111111111111");
+        expect(String(canvasProperty[0].value_json)).toContain("aaaaaaaaaaaaaaaa");
+        expect(db.selectValue(`
+          SELECT count(*)
+          FROM source_property_scalars AS scalar
+          JOIN sources AS s ON s.source_key = scalar.source_key
+          WHERE s.source_format = 'canvas'
+        `)).toBe(0);
+        expect(db.selectValue(`
+          SELECT count(*)
+          FROM source_property_text_fts
+          WHERE source_property_text_fts MATCH 'geometrysentinelqzx'
+        `)).toBe(0);
+      } finally {
+        db.close();
+      }
+
+      const restoredWorker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+      try {
+        await request(restoredWorker, {
+          id: 1, operation: "initialize", vault_id: "active-vault",
+        });
+        await expect(request(restoredWorker, restoreFromExport(exported.result, {
+          id: 2,
+          generation: "canvas-restored",
+        }))).resolves.toMatchObject({
+          ok: true,
+          result: { generation: "canvas-restored", documents: 3, chunks: 13 },
+        });
+        await expect(request(restoredWorker, {
+          id: 3, operation: "search", query: "Research Cluster", limit: 20,
+        })).resolves.toMatchObject({
+          ok: true,
+          result: {
+            generation: "canvas-restored",
+            hits: [{ path: "research-board.canvas", format: "canvas", locator: null }],
+          },
+        });
+      } finally {
+        await restoredWorker.terminate();
+      }
     } finally {
       await worker.terminate();
     }

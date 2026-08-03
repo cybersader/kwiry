@@ -15,7 +15,10 @@ export type SourceFormat = typeof SOURCE_FORMATS[number];
 // Mirrors kwiry_core::source::SOURCE_PREPARATION_SCHEMA_VERSION. This belongs in
 // the policy fingerprint so a preparation-schema change always invalidates a
 // cache even when the enabled extension set is unchanged.
-export const SOURCE_PREPARATION_SCHEMA_VERSION = 5 as const;
+export const SOURCE_PREPARATION_SCHEMA_VERSION = 6 as const;
+
+export const IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION =
+  "Indexes enabled sources from the active vault. Markdown, plain text, Base, and Canvas are extractable; PDF and DOCX are admitted but reported as not yet supported. This profile is lexical-only and never reads the daemon token.";
 
 export interface EnabledSourceFormats {
   markdown: boolean;
@@ -60,6 +63,22 @@ export function isSourceFormatEnabled(
   enabled: Readonly<EnabledSourceFormats>,
 ): boolean {
   return enabled[format];
+}
+
+export function sourceFormatDescription(format: SourceFormat): string {
+  switch (format) {
+    case "markdown":
+      return "Extract and index Markdown notes.";
+    case "text":
+      return "Extract and index plain-text files.";
+    case "base":
+      return "Extract authored YAML configuration and named views; materialized query rows are never indexed.";
+    case "canvas":
+      return "Extract authored text cards, group and edge labels, URLs, and file-reference paths without reading referenced files.";
+    case "docx":
+    case "pdf":
+      return "Admit this format, but report it as not yet supported with no extracted text in this wave.";
+  }
 }
 
 export function isEnabledSourcePath(

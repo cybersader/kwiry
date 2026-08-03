@@ -18,6 +18,7 @@ use unicode_normalization::char::is_combining_mark;
 
 use crate::chunk::ingest_vault_files;
 use crate::error::{Error, Result};
+use crate::format::SourceFormat;
 use crate::generation::DataRoot;
 use crate::lexical::{fold_lexical, normalize_raw};
 use crate::manifest::{Manifest, registration_fingerprint, source_key};
@@ -617,7 +618,7 @@ pub(crate) fn chunk_document(
         fields.frontmatter,
         serde_json::to_string(frontmatter).map_err(|error| Error::Index(error.to_string()))?,
     );
-    if owns_source_properties {
+    if owns_source_properties && source_format != SourceFormat::Canvas {
         add_property_projection(&mut document, fields, &prepared.source_properties);
     }
     for tag in frontmatter.tags() {
@@ -1464,6 +1465,134 @@ mod tests {
     }
 
     #[test]
+    fn canvas_fixture_projects_authored_text_through_tantivy_without_structural_signals() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let index_path = temporary.path().join("index");
+        fs::create_dir(&vault_path).unwrap();
+        fs::write(
+            vault_path.join("research.canvas"),
+            include_bytes!("../tests/fixtures/canvas/well-formed.canvas"),
+        )
+        .unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+
+        let stats = build_index(&config, &index_path).unwrap();
+        assert_eq!(stats.documents, 1);
+        assert_eq!(stats.chunks, 9);
+
+        for query in [
+            "Alpha body",
+            "Research Cluster",
+            "example canvas source",
+            "References target",
+            "Only Authored Subpath",
+            "supports source",
+            "resolves into",
+        ] {
+            let hits = search_index(
+                &index_path,
+                &LexicalSearchRequest {
+                    query: query.to_owned(),
+                    limit: 20,
+                    vault_id: None,
+                },
+            )
+            .unwrap();
+            assert!(
+                !hits.is_empty(),
+                "authored Canvas query must match: {query}"
+            );
+            assert!(hits.iter().all(|hit| {
+                hit.path == "research.canvas"
+                    && hit.format == SourceFormat::Canvas
+                    && hit.coverage == ExtractionCoverage::IndexedComplete
+                    && hit.locator.is_none()
+            }));
+        }
+
+        for structural_query in [
+            "1111111111111111",
+            "aaaaaaaaaaaaaaaa",
+            "geometrysentinelqzx",
+            "18446744073709551615",
+        ] {
+            assert!(
+                search_index(
+                    &index_path,
+                    &LexicalSearchRequest {
+                        query: structural_query.to_owned(),
+                        limit: 20,
+                        vault_id: None,
+                    },
+                )
+                .unwrap()
+                .is_empty(),
+                "Canvas structural value must not be lexical evidence: {structural_query}"
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_properties_are_not_projected_into_native_property_fields() {
+        let source = include_bytes!("../tests/fixtures/canvas/well-formed.canvas");
+        let preparation = prepare_source_buffer(
+            &SourceDescriptor {
+                vault_id: "fixture".to_owned(),
+                room: None,
+                path: "research.canvas".to_owned(),
+                format: SourceFormat::Canvas,
+                byte_length: source.len() as u64,
+                mtime: 1,
+                mtime_nanos: 1,
+            },
+            source,
+        )
+        .unwrap();
+        let schema = build_schema();
+        let fields = Fields::from_schema(&schema).unwrap();
+        let index = Index::create_in_ram(schema);
+        register_lexical_analyzer(&index);
+        let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
+        for chunk in &preparation.chunks {
+            writer
+                .add_document(chunk_document(&fields, chunk, &preparation.retrieval).unwrap())
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let searcher = index.reader().unwrap().searcher();
+
+        let property_name = TermQuery::new(
+            Term::from_field_text(fields.property_names, &property_name_term("canvas")),
+            IndexRecordOption::Basic,
+        );
+        let structural_id = TermQuery::new(
+            Term::from_field_text(
+                fields.property_exact,
+                &property_exact_term(
+                    "canvas",
+                    &PropertyValue::String("1111111111111111".to_owned()),
+                ),
+            ),
+            IndexRecordOption::Basic,
+        );
+        let owners = TermQuery::new(
+            Term::from_field_u64(fields.source_property_owner, 1),
+            IndexRecordOption::Basic,
+        );
+        assert_eq!(searcher.search(&property_name, &Count).unwrap(), 0);
+        assert_eq!(searcher.search(&structural_id, &Count).unwrap(), 0);
+        assert_eq!(searcher.search(&owners, &Count).unwrap(), 1);
+    }
+
+    #[test]
     fn native_index_stats_account_for_every_persisted_format_coverage() {
         let temporary = tempdir().unwrap();
         let vault_path = temporary.path().join("vault");
@@ -1478,7 +1607,27 @@ mod tests {
         .unwrap();
         fs::write(vault_path.join("empty.base"), "{}").unwrap();
         fs::write(vault_path.join("broken.base"), "not: [valid").unwrap();
-        fs::write(vault_path.join("unsupported.canvas"), "{}").unwrap();
+        fs::write(
+            vault_path.join("complete.canvas"),
+            include_bytes!("../tests/fixtures/canvas/well-formed.canvas"),
+        )
+        .unwrap();
+        fs::write(
+            vault_path.join("partial.canvas"),
+            include_bytes!("../tests/fixtures/canvas/partial.canvas"),
+        )
+        .unwrap();
+        fs::write(
+            vault_path.join("empty.canvas"),
+            include_bytes!("../tests/fixtures/canvas/empty.canvas"),
+        )
+        .unwrap();
+        fs::write(
+            vault_path.join("broken.canvas"),
+            include_bytes!("../tests/fixtures/canvas/malformed.canvas"),
+        )
+        .unwrap();
+        fs::write(vault_path.join("unreadable.canvas"), [0xff]).unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
                 id: "fixture".into(),
@@ -1490,17 +1639,21 @@ mod tests {
 
         let stats = build_index(&config, &data_path).unwrap();
 
-        assert_eq!(stats.documents, 2);
-        assert_eq!(stats.source_format_counts.indexed_documents(), 2);
-        assert_eq!(stats.source_format_counts.total_sources(), 6);
+        assert_eq!(stats.documents, 4);
+        assert_eq!(stats.source_format_counts.indexed_documents(), 4);
+        assert_eq!(stats.source_format_counts.total_sources(), 10);
         assert_eq!(stats.source_format_counts.markdown.indexed_complete, 1);
+        assert_eq!(stats.source_format_counts.markdown.unreadable, 1);
         assert_eq!(stats.source_format_counts.base.indexed_partial, 1);
         assert_eq!(stats.source_format_counts.base.quarantined, 1);
         assert_eq!(
             stats.source_format_counts.base.skipped_no_extractable_text,
             1
         );
-        assert_eq!(stats.source_format_counts.markdown.unreadable, 1);
+        assert_eq!(stats.source_format_counts.canvas.indexed_complete, 1);
+        assert_eq!(stats.source_format_counts.canvas.indexed_partial, 1);
+        assert_eq!(stats.source_format_counts.canvas.unreadable, 1);
+        assert_eq!(stats.source_format_counts.canvas.quarantined, 1);
         assert_eq!(
             stats
                 .source_format_counts
@@ -1567,7 +1720,7 @@ mod tests {
         assert_eq!(baseline.len(), 2);
         assert_eq!(baseline[0].score, baseline[1].score);
 
-        let mutated = ranked(SourceFormat::Text, SourceFormat::Markdown);
+        let mutated = ranked(SourceFormat::Canvas, SourceFormat::Markdown);
         assert_eq!(
             baseline
                 .iter()
@@ -1588,7 +1741,7 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         assert_eq!(baseline_formats["alpha.md"], SourceFormat::Markdown);
         assert_eq!(baseline_formats["beta.txt"], SourceFormat::Text);
-        assert_eq!(mutated_formats["alpha.md"], SourceFormat::Text);
+        assert_eq!(mutated_formats["alpha.md"], SourceFormat::Canvas);
         assert_eq!(mutated_formats["beta.txt"], SourceFormat::Markdown);
     }
 
@@ -1640,7 +1793,7 @@ mod tests {
         fs::write(vault_path.join("note.md"), "# Retrieval\nrebuildterm").unwrap();
         fs::write(
             data_root.join("current.json"),
-            r#"{"layout_version":1,"index_format_version":2,"generation":"old"}"#,
+            r#"{"layout_version":1,"index_format_version":10,"generation":"old"}"#,
         )
         .unwrap();
         let config = Config {

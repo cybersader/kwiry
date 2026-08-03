@@ -18,7 +18,8 @@ const OPEN_PROPERTY_COUNT: usize = 1_000;
 const PROPERTY_ARRAY_COUNT: usize = 1_200;
 const PROPERTY_MAP_DEPTH: usize = 32;
 const BASE_SOURCE: &str = include_str!("fixtures/base/well-formed.base");
-const FIXTURE_COUNT: usize = 15;
+const CANVAS_SOURCE: &str = include_str!("fixtures/canvas/well-formed.canvas");
+const FIXTURE_COUNT: usize = 16;
 
 struct Fixture {
     file_name: &'static str,
@@ -145,6 +146,13 @@ fn fixtures() -> Vec<Fixture> {
             BASE_SOURCE.to_owned(),
             Some("fixture-room"),
             SourceFormat::Base,
+        ),
+        prepare_format(
+            "16-canvas-research-board.json",
+            "Golden/Research Board.canvas",
+            CANVAS_SOURCE.to_owned(),
+            Some("fixture-room"),
+            SourceFormat::Canvas,
         ),
     ]
 }
@@ -484,6 +492,53 @@ fn assert_adversarial_shape(fixture: &Fixture) {
                 Some(kwiry_core::SourceLocator::BaseView {
                     view: "Active".to_owned()
                 })
+            );
+        }
+        "16-canvas-research-board.json" => {
+            assert_eq!(fixture.preparation.schema_version, 6);
+            assert_eq!(fixture.preparation.format, SourceFormat::Canvas);
+            assert_eq!(
+                fixture.preparation.coverage,
+                kwiry_core::ExtractionCoverage::IndexedComplete
+            );
+            assert_eq!(fixture.preparation.chunks.len(), 9);
+            assert_eq!(fixture.preparation.chunks[1].heading_path, ["Alpha"]);
+            assert_eq!(
+                fixture.preparation.chunks[2].heading_path,
+                ["Alpha", "Detail"]
+            );
+            assert_eq!(fixture.preparation.chunks[6].heading_path, ["Closing"]);
+            assert!(
+                fixture
+                    .preparation
+                    .chunks
+                    .iter()
+                    .all(|chunk| chunk.source_locator.is_none())
+            );
+            assert!(fixture.preparation.frontmatter.get("title").is_none());
+            let Some(PropertyValue::Map(canvas)) = fixture.preparation.frontmatter.get("canvas")
+            else {
+                panic!("Canvas golden must retain its complete typed JSON root");
+            };
+            let Some(PropertyValue::Sequence(nodes)) = canvas.get("nodes") else {
+                panic!("Canvas golden must retain its node sequence");
+            };
+            let PropertyValue::Map(first_node) = &nodes[0] else {
+                panic!("Canvas golden first node must remain an object");
+            };
+            assert_eq!(
+                first_node.get("id"),
+                Some(&PropertyValue::String("1111111111111111".to_owned()))
+            );
+            let Some(PropertyValue::Sequence(edges)) = canvas.get("edges") else {
+                panic!("Canvas golden must retain its edge sequence");
+            };
+            let PropertyValue::Map(first_edge) = &edges[0] else {
+                panic!("Canvas golden first edge must remain an object");
+            };
+            assert_eq!(
+                first_edge.get("id"),
+                Some(&PropertyValue::String("aaaaaaaaaaaaaaaa".to_owned()))
             );
         }
         _ => unreachable!("every fixture has an adversarial shape assertion"),

@@ -5,8 +5,10 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, loadSettings } from "../src/settings";
 import {
   DEFAULT_ENABLED_SOURCE_FORMATS,
+  IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
   classifySourcePath,
   formatPolicyFingerprint,
+  sourceFormatDescription,
 } from "../src/source-formats";
 
 describe("loadSettings", () => {
@@ -100,7 +102,17 @@ describe("loadSettings", () => {
     expect(loaded.enabledSourceFormats).not.toBe(DEFAULT_SETTINGS.enabledSourceFormats);
   });
 
-  it("fingerprints format policy deterministically and changes on a toggle", async () => {
+  it("describes Canvas as extractable while DOCX and PDF remain admitted-only", () => {
+    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("Base, and Canvas are extractable");
+    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain(
+      "PDF and DOCX are admitted but reported as not yet supported",
+    );
+    expect(sourceFormatDescription("canvas")).toContain("without reading referenced files");
+    expect(sourceFormatDescription("docx")).toContain("not yet supported");
+    expect(sourceFormatDescription("pdf")).toContain("not yet supported");
+  });
+
+  it("fingerprints schema-6 format policy deterministically and changes on a toggle", async () => {
     const first = await formatPolicyFingerprint({ ...DEFAULT_ENABLED_SOURCE_FORMATS });
     const reordered = await formatPolicyFingerprint({
       pdf: true,
@@ -114,7 +126,8 @@ describe("loadSettings", () => {
       ...DEFAULT_ENABLED_SOURCE_FORMATS,
       text: false,
     });
-    expect(first).toMatch(/^[0-9a-f]{64}$/u);
+    expect(first).toBe("c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97");
+    expect(first).not.toBe("9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b");
     expect(reordered).toBe(first);
     expect(withoutText).not.toBe(first);
   });

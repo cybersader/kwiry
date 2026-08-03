@@ -78,10 +78,11 @@ SELECT
   scalar.scalar_type,
   scalar.exact_value
 FROM source_properties AS p
+JOIN sources AS source ON source.source_key = p.source_key
 JOIN requested_property ON requested_property.property_name = p.property_name
 LEFT JOIN source_property_scalars AS scalar
   ON scalar.source_key = p.source_key AND scalar.property_name = p.property_name
-WHERE p.source_key = ?
+WHERE p.source_key = ? AND source.source_format <> 'canvas'
 ORDER BY p.property_name, scalar.json_pointer
 LIMIT ?
 `;

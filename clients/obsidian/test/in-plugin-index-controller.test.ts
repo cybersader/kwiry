@@ -221,7 +221,8 @@ class FakeWorker implements IndexWorkerPort {
 }
 
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
-const SOURCE_POLICY_HASH = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b";
+const OLD_SOURCE_POLICY_HASH = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b";
+const SOURCE_POLICY_HASH = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97";
 
 async function sha256Text(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -1305,7 +1306,7 @@ describe("InPluginIndexController", () => {
       const source = new FakeSource();
       source.set("note.md", "fresh", 1);
       const worker = new FakeCacheWorker();
-      const store = new FakeCacheStore(cacheHit("old-generation", "e".repeat(64)));
+      const store = new FakeCacheStore(cacheHit("old-generation", OLD_SOURCE_POLICY_HASH));
       const { controller } = harness(source, worker, {}, {
         sourcePolicyHash: SOURCE_POLICY_HASH,
         openStore: async () => ({ kind: "available", store }),

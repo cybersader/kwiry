@@ -3,8 +3,8 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::extract::{
-    ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionError, ExtractionNotice,
-    MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE, MAX_EXTRACTED_SECTIONS_PER_SOURCE,
+    ExtractedSection, ExtractedSource, ExtractionBudget, ExtractionCompleteness, ExtractionError,
+    ExtractionNotice,
 };
 use crate::frontmatter::parse_frontmatter;
 use crate::links::extract_wikilinks;
@@ -50,10 +50,16 @@ pub(super) fn extract(bytes: &[u8]) -> Result<ExtractedSource, ExtractionError> 
 }
 
 fn markdown_sections(source: &str) -> Result<Vec<ExtractedSection>, ExtractionError> {
+    markdown_sections_with_budget(source, &mut ExtractionBudget::default())
+}
+
+pub(super) fn markdown_sections_with_budget(
+    source: &str,
+    budget: &mut ExtractionBudget,
+) -> Result<Vec<ExtractedSection>, ExtractionError> {
     let mut markers = Vec::new();
     let mut heading_stack: Vec<(usize, String)> = Vec::new();
     let mut active_heading: Option<(usize, usize, String)> = None;
-    let mut prepared_path_bytes = 0_usize;
 
     for (event, range) in Parser::new_ext(source, Options::all()).into_offset_iter() {
         match event {
@@ -79,34 +85,20 @@ fn markdown_sections(source: &str) -> Result<Vec<ExtractedSection>, ExtractionEr
                         heading_stack.pop();
                     }
                     heading_stack.push((level, heading.trim().to_owned()));
-                    if markers.len() == MAX_EXTRACTED_SECTIONS_PER_SOURCE {
-                        return Err(section_inventory_error());
-                    }
-                    let path_bytes = heading_stack
+                    let path = heading_stack
                         .iter()
-                        .map(|(_, heading)| heading.len())
-                        .sum::<usize>();
-                    prepared_path_bytes = prepared_path_bytes
-                        .checked_add(path_bytes)
-                        .filter(|total| *total <= MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE)
-                        .ok_or_else(heading_inventory_error)?;
-                    markers.push(HeadingMarker {
-                        start,
-                        path: heading_stack
-                            .iter()
-                            .map(|(_, heading)| heading.clone())
-                            .collect(),
-                    });
+                        .map(|(_, heading)| heading.clone())
+                        .collect::<Vec<_>>();
+                    budget.reserve_section(&path)?;
+                    markers.push(HeadingMarker { start, path });
                 }
             }
             _ => {}
         }
     }
 
-    if markers.first().is_some_and(|marker| {
-        marker.start > 0 && markers.len() == MAX_EXTRACTED_SECTIONS_PER_SOURCE
-    }) {
-        return Err(section_inventory_error());
+    if markers.is_empty() || markers[0].start > 0 {
+        budget.reserve_section(&[])?;
     }
     Ok(sections_from_markers(source, markers))
 }
@@ -154,12 +146,4 @@ fn heading_level(level: pulldown_cmark::HeadingLevel) -> usize {
         pulldown_cmark::HeadingLevel::H5 => 5,
         pulldown_cmark::HeadingLevel::H6 => 6,
     }
-}
-
-fn section_inventory_error() -> ExtractionError {
-    ExtractionError::limit("prepared source exceeds the chunk inventory limit")
-}
-
-fn heading_inventory_error() -> ExtractionError {
-    ExtractionError::limit("prepared source exceeds the heading-path memory limit")
 }

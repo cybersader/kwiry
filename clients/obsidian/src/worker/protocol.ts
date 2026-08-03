@@ -261,7 +261,7 @@ export type WorkerRequest =
 
 export interface InitializeResult {
   rustAbiVersion: 2;
-  sourceSchemaVersion: 5;
+  sourceSchemaVersion: 6;
   querySchemaVersion: 4;
   matchPlanSchemaVersion: 3;
   sqliteVersion: "3.53.0";
@@ -703,7 +703,7 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
       "fts5Enabled",
     ])
     && value.rustAbiVersion === 2
-    && value.sourceSchemaVersion === 5
+    && value.sourceSchemaVersion === 6
     && value.querySchemaVersion === 4
     && value.matchPlanSchemaVersion === 3
     && value.sqliteVersion === "3.53.0"

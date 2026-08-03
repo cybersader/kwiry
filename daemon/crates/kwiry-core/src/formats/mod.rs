@@ -18,7 +18,7 @@ pub fn extract_source(
         SourceFormat::Markdown => markdown::extract(bytes),
         SourceFormat::Text => text::extract(bytes),
         SourceFormat::Base => base::extract(bytes),
-        SourceFormat::Canvas => Ok(canvas::extract(bytes)),
+        SourceFormat::Canvas => canvas::extract(bytes),
         SourceFormat::Docx => Ok(docx::extract(bytes)),
         SourceFormat::Pdf => Ok(pdf::extract(bytes)),
     }

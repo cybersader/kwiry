@@ -1,0 +1,46 @@
+{
+  "nodes": [
+    {
+      "id": "1111111111111111",
+      "type": "text",
+      "x": 0,
+      "y": 0,
+      "width": 300,
+      "height": 160,
+      "text": "# Usable card\nPartial Canvas evidence.\n"
+    },
+    {
+      "id": "2222222222222222",
+      "type": "group",
+      "x": 400,
+      "y": 0,
+      "width": 300,
+      "height": 160,
+      "label": "Usable group"
+    },
+    "not-a-node",
+    {
+      "id": "3333333333333333",
+      "type": "future-node",
+      "x": 800,
+      "y": 0,
+      "width": 300,
+      "height": 160,
+      "payload": "must not become ordinary text"
+    }
+  ],
+  "edges": [
+    {
+      "id": "aaaaaaaaaaaaaaaa",
+      "fromNode": "1111111111111111",
+      "toNode": "2222222222222222",
+      "label": "usable relation"
+    },
+    {
+      "id": "bbbbbbbbbbbbbbbb",
+      "fromNode": "1111111111111111",
+      "toNode": "missing-node",
+      "label": "must not be extracted"
+    }
+  ]
+}

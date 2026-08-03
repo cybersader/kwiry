@@ -727,7 +727,7 @@ export class Fts5GenerationIndex {
     limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
     existing?: ExistingGenerationState,
     private readonly vaultId = "active",
-    private readonly sourcePolicyHash = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b",
+    private readonly sourcePolicyHash = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97",
   ) {
     this.limits = resolveIndexLimits(limits);
     this.effectiveDatabaseByteLimit = configureDatabasePageLimit(db, this.limits);
@@ -936,20 +936,22 @@ export class Fts5GenerationIndex {
                   ],
                 });
                 const aggregate = emptyPropertyTextAggregate();
-                for (const leaf of iteratePropertyScalars(value)) {
-                  addPropertyText(aggregate, leaf.scalar);
-                  this.db.exec(INSERT_PROPERTY_SCALAR_SQL, {
-                    bind: [
-                      change.preparation.source_key,
-                      propertyName,
-                      leaf.jsonPointer,
-                      leaf.scalar.type,
-                      leaf.scalar.exactValue,
-                      leaf.scalar.numericValue,
-                      leaf.scalar.dateValue,
-                    ],
-                  });
-                  propertyScalarCount += 1;
+                if (projectsSourcePropertySignals(change.preparation.format)) {
+                  for (const leaf of iteratePropertyScalars(value)) {
+                    addPropertyText(aggregate, leaf.scalar);
+                    this.db.exec(INSERT_PROPERTY_SCALAR_SQL, {
+                      bind: [
+                        change.preparation.source_key,
+                        propertyName,
+                        leaf.jsonPointer,
+                        leaf.scalar.type,
+                        leaf.scalar.exactValue,
+                        leaf.scalar.numericValue,
+                        leaf.scalar.dateValue,
+                      ],
+                    });
+                    propertyScalarCount += 1;
+                  }
                 }
                 this.db.exec(INSERT_PROPERTY_TEXT_FTS_SQL, {
                   bind: [rowid, ...finishPropertyTextAggregate(aggregate)],
@@ -1539,7 +1541,7 @@ export function openFts5Generation(
   sqlite: SQLiteApi,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   vaultId = "active",
-  sourcePolicyHash = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b",
+  sourcePolicyHash = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97",
 ): Fts5GenerationIndex {
   return new Fts5GenerationIndex(
     new sqlite.oo1.DB(":memory:", "c"),
@@ -1561,7 +1563,7 @@ export function openRestoredFts5Generation(
   chunkingVersion: number,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   expectedVaultId = "active",
-  expectedSourcePolicyHash = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b",
+  expectedSourcePolicyHash = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97",
 ): Fts5GenerationIndex {
   let handle: BlockVfsHandle | null = null;
   try {
@@ -1911,15 +1913,18 @@ function rebuildCanonicalPropertyFts(db: SQLiteDatabase): void {
       let afterRowid = 0;
       while (true) {
         const rows = db.selectObjects(`
-          SELECT rowid, value_json
-          FROM source_properties
-          WHERE rowid > ?
-          ORDER BY rowid
+          SELECT p.rowid, p.value_json, s.source_format
+          FROM source_properties AS p
+          JOIN sources AS s ON s.source_key = p.source_key
+          WHERE p.rowid > ?
+          ORDER BY p.rowid
           LIMIT ?
         `, [afterRowid, pageSize]);
         if (rows.length === 0) break;
         for (const row of rows) {
-          if (!isPositiveSafeInteger(row.rowid) || typeof row.value_json !== "string") {
+          if (!isPositiveSafeInteger(row.rowid)
+            || typeof row.value_json !== "string"
+            || !isSourceFormat(row.source_format)) {
             throw new CacheImageInvalidError("cache property inventory is invalid");
           }
           const value = parsePropertyValueJson(row.value_json);
@@ -1927,7 +1932,9 @@ function rebuildCanonicalPropertyFts(db: SQLiteDatabase): void {
             throw new CacheImageInvalidError("cache property inventory is invalid");
           }
           const aggregate = emptyPropertyTextAggregate();
-          for (const leaf of iteratePropertyScalars(value)) addPropertyText(aggregate, leaf.scalar);
+          if (projectsSourcePropertySignals(row.source_format)) {
+            for (const leaf of iteratePropertyScalars(value)) addPropertyText(aggregate, leaf.scalar);
+          }
           db.exec(INSERT_PROPERTY_TEXT_FTS_SQL, {
             bind: [row.rowid, ...finishPropertyTextAggregate(aggregate)],
           });
@@ -2091,11 +2098,13 @@ function validateRestoredProperties(
         || row.date_value !== root.dateValue) {
         throw new CacheImageInvalidError("cache property projection is invalid");
       }
-      for (const leaf of iteratePropertyScalars(value)) {
-        expectedScalars.set(
-          propertyScalarIdentity(row.source_key, row.property_name, leaf.jsonPointer),
-          leaf.scalar,
-        );
+      if (projectsSourcePropertySignals(source.source_format)) {
+        for (const leaf of iteratePropertyScalars(value)) {
+          expectedScalars.set(
+            propertyScalarIdentity(row.source_key, row.property_name, leaf.jsonPointer),
+            leaf.scalar,
+          );
+        }
       }
       clauses.push("(source_key = ? AND property_name = ?)");
       bind.push(row.source_key, row.property_name);
@@ -2263,6 +2272,12 @@ interface StoredSource {
   chunk_count: number;
   property_count: number;
   property_scalar_count: number;
+}
+
+function projectsSourcePropertySignals(format: SourceFormat): boolean {
+  // Canvas keeps its complete authored JSON for display and cache fidelity, but
+  // IDs, geometry, and other structural metadata are not lexical or D5C evidence.
+  return format !== "canvas";
 }
 
 function projectPreparation(preparation: SourcePreparation): ProjectedPreparation {

@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "source_key": "3c47a35af57764e0226b2e2383dbbb3fcbba10ece8c83e27860aab44892beaeb",
   "vault_id": "golden-vault",
   "path": "Golden/Property Key and Scalar Edges.md",

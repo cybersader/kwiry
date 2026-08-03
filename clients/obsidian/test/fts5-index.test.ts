@@ -137,7 +137,7 @@ function sourceAt(
   frontmatter: PropertyBag = { title, tags: ["test"] },
 ): SourcePreparation {
   return {
-    schema_version: 5,
+    schema_version: 6,
     source_key: sourceKey,
     vault_id: "active",
     path,
@@ -252,6 +252,69 @@ describe("Fts5GenerationIndex", () => {
     })]);
     expect(index.sourceFormatCounts.base["indexed-complete"]).toBe(1);
     expect(index.sourceFormatCounts.markdown["indexed-complete"]).toBe(0);
+  });
+
+  it("persists Canvas JSON without projecting structural properties into search or D5C rows", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const canvas = sourceAt(
+        "research-canvas",
+        "research.canvas",
+        "chunk-research-canvas",
+        "authored canvas evidence",
+        "Canvas",
+        {},
+      );
+      canvas.format = "canvas";
+      canvas.normalized_exact.title = null;
+      canvas.frontmatter = {
+        canvas: preparePropertyValue({
+          nodes: [{
+            id: "1111111111111111",
+            type: "group",
+            x: 17,
+            label: "authored canvas evidence",
+            background: "geometrysentinelqzx.png",
+          }],
+          edges: [{ id: "aaaaaaaaaaaaaaaa", fromNode: "1111111111111111" }],
+        }),
+      };
+      canvas.chunks[0]!.chunk.frontmatter = {};
+
+      scoped.replaceSource(canvas);
+
+      const stored = db.selectObjects(`
+        SELECT p.property_name, p.value_json, s.property_count, s.property_scalar_count
+        FROM source_properties AS p
+        JOIN sources AS s ON s.source_key = p.source_key
+      `);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({
+        property_name: "canvas",
+        property_count: 1,
+        property_scalar_count: 0,
+      });
+      expect(String(stored[0]!.value_json)).toContain("1111111111111111");
+      expect(String(stored[0]!.value_json)).toContain("aaaaaaaaaaaaaaaa");
+      expect(db.selectValue("SELECT count(*) FROM source_property_scalars")).toBe(0);
+      expect(db.selectValue(
+        "SELECT count(*) FROM source_property_text_fts WHERE source_property_text_fts MATCH 'geometrysentinelqzx'",
+      )).toBe(0);
+
+      expect(scoped.search(anyPlan("authored"), 20)).toEqual([
+        expect.objectContaining({
+          path: "research.canvas",
+          format: "canvas",
+          coverage: "indexed-complete",
+          locator: null,
+        }),
+      ]);
+      expect(scoped.search(anyPlan("geometrysentinelqzx"), 20)).toEqual([]);
+      scoped.assertIntegrity();
+    } finally {
+      scoped.close();
+    }
   });
 
   it("intersects exact identifiers with ordinary FTS terms and identifier-only stages", () => {
@@ -693,13 +756,13 @@ describe("Fts5GenerationIndex", () => {
       expect(baseline).toHaveLength(2);
       expect(baseline[0]!.score).toBe(baseline[1]!.score);
 
-      db.exec("UPDATE sources SET source_format = 'base' WHERE source_key = 'neutral-beta'");
+      db.exec("UPDATE sources SET source_format = 'canvas' WHERE source_key = 'neutral-beta'");
       const mutated = scoped.search(anyPlan("formatneutral"), 20);
 
       expect(mutated.map(({ format, ...hit }) => hit))
         .toEqual(baseline.map(({ format, ...hit }) => hit));
       expect(mutated.find((hit) => hit.path === "neutral-alpha.md")?.format).toBe("markdown");
-      expect(mutated.find((hit) => hit.path === "neutral-beta.md")?.format).toBe("base");
+      expect(mutated.find((hit) => hit.path === "neutral-beta.md")?.format).toBe("canvas");
       expect(mutated[0]!.score).toBe(mutated[1]!.score);
     } finally {
       scoped.close();

@@ -5,7 +5,12 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 
 import type KwiryPlugin from "./main";
 import type { SearchMode } from "./api";
-import { SOURCE_FORMATS, type SourceFormat } from "./source-formats";
+import {
+  IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
+  SOURCE_FORMATS,
+  sourceFormatDescription,
+  type SourceFormat,
+} from "./source-formats";
 
 export class KwirySettingTab extends PluginSettingTab {
   constructor(
@@ -39,9 +44,7 @@ export class KwirySettingTab extends PluginSettingTab {
     } else {
       new Setting(containerEl)
         .setName("In-plugin · Lexical")
-        .setDesc(
-          "Indexes enabled sources from the active vault. Markdown, plain text, and Base are extractable; Canvas, PDF, and DOCX are admitted but reported as not yet supported. This profile is lexical-only and never reads the daemon token.",
-        );
+        .setDesc(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION);
       this.renderSourceFormatSettings(containerEl);
       new Setting(containerEl)
         .setName("Rebuild in-plugin lexical index")
@@ -227,20 +230,5 @@ function sourceFormatLabel(format: SourceFormat): string {
     case "canvas": return "Canvas";
     case "docx": return "DOCX";
     case "pdf": return "PDF";
-  }
-}
-
-function sourceFormatDescription(format: SourceFormat): string {
-  switch (format) {
-    case "markdown":
-      return "Extract and index Markdown notes.";
-    case "text":
-      return "Extract and index plain-text files.";
-    case "base":
-      return "Extract authored YAML configuration and named views; materialized query rows are never indexed.";
-    case "canvas":
-    case "docx":
-    case "pdf":
-      return "Admit this format, but report it as not yet supported with no extracted text in this wave.";
   }
 }

@@ -18,7 +18,7 @@ use crate::model::{
     PreparedChunk, PropertyBag, RetrievalMetadata,
 };
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 5;
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 6;
 pub const MAX_PREPARED_CHUNKS_PER_SOURCE: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
 pub const MAX_PREPARED_HEADING_BYTES_PER_SOURCE: usize = MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE;
 
@@ -861,9 +861,8 @@ views:
     }
 
     #[test]
-    fn unsupported_wave_one_formats_skip_without_text_decoding() {
+    fn unsupported_document_formats_skip_without_text_decoding() {
         for (path, format) in [
-            ("board.canvas", SourceFormat::Canvas),
             ("report.docx", SourceFormat::Docx),
             ("paper.pdf", SourceFormat::Pdf),
         ] {

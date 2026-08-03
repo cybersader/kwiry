@@ -7,6 +7,36 @@ use crate::model::{Frontmatter, MAX_FILE_BYTES, PropertyBag};
 pub(crate) const MAX_EXTRACTED_SECTIONS_PER_SOURCE: usize = 100_000;
 pub(crate) const MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE: usize = MAX_FILE_BYTES as usize;
 
+#[derive(Debug, Default)]
+pub(crate) struct ExtractionBudget {
+    sections: usize,
+    heading_bytes: usize,
+}
+
+impl ExtractionBudget {
+    pub(crate) fn reserve_section(
+        &mut self,
+        heading_path: &[String],
+    ) -> Result<(), ExtractionError> {
+        if self.sections == MAX_EXTRACTED_SECTIONS_PER_SOURCE {
+            return Err(ExtractionError::limit(
+                "prepared source exceeds the chunk inventory limit",
+            ));
+        }
+        let heading_bytes = heading_path
+            .iter()
+            .try_fold(0_usize, |total, heading| total.checked_add(heading.len()));
+        self.heading_bytes = heading_bytes
+            .and_then(|heading_bytes| self.heading_bytes.checked_add(heading_bytes))
+            .filter(|total| *total <= MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE)
+            .ok_or_else(|| {
+                ExtractionError::limit("prepared source exceeds the heading-path memory limit")
+            })?;
+        self.sections += 1;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExtractionCoverage {
