@@ -5,6 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CACHE_SCHEMA_VERSION,
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   WORKER_PROTOCOL_VERSION,
   emptySourceFormatCounts,
   type WorkerRequest,
@@ -76,6 +79,21 @@ function resultFor(message: WorkerRequest): WorkerResult {
         quarantine_fields: [],
         source_format_counts: emptySourceFormatCounts(),
       };
+    case "restore_initial_build_checkpoint":
+      return {
+        generation: message.generation,
+        documents: 0,
+        chunks: 0,
+        database_bytes: 0,
+        database_byte_limit: 1,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(),
+        record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+        publication: "initial_staging",
+        searchable: false,
+        cursor: message.cursor,
+      };
     case "apply_source_changes":
       return {
         generation: message.next_generation ?? message.generation,
@@ -97,11 +115,53 @@ function resultFor(message: WorkerRequest): WorkerResult {
         stored_source_count: 0,
         matched_source_count: 0,
       };
+    case "plan_initial_build_checkpoint_reconciliation":
+      return {
+        generation: message.generation,
+        publication: "initial_staging",
+        searchable: false,
+        unchanged: [],
+        audit: [],
+        refresh: message.current_sources.map((source) => source.path),
+        remove: [],
+        stored_source_count: 0,
+        matched_source_count: 0,
+      };
     case "export_generation":
       return {
         generation: message.generation,
         documents: 1,
         chunks: 1,
+        bytes: new Uint8Array([1, 2, 3]),
+        blob_byte_length: 3,
+        blob_sha256: "a".repeat(64),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        cache_schema_version: CACHE_SCHEMA_VERSION,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        sqlite_wasm_sha256: "b".repeat(64),
+        rust_wasm_sha256: "c".repeat(64),
+        plugin_id: "kwiry-search",
+        plugin_version: "0.1.0",
+        cache_identity: message.cache_identity,
+        source_policy_hash: SOURCE_POLICY_HASH,
+      };
+    case "export_initial_build_checkpoint":
+      return {
+        generation: message.generation,
+        documents: 0,
+        chunks: 0,
+        database_bytes: 1,
+        database_byte_limit: 2,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(),
+        record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+        checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+        checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+        publication: "initial_staging",
+        searchable: false,
+        cursor: message.cursor,
         bytes: new Uint8Array([1, 2, 3]),
         blob_byte_length: 3,
         blob_sha256: "a".repeat(64),
@@ -274,6 +334,113 @@ describe("InPluginWorkerSession", () => {
       vault_id: "active-vault",
       current_sources: current,
     }]);
+  });
+
+  it("posts exact initial-build checkpoint export, restore, and planning requests", async () => {
+    const worker = new MockWorker();
+    const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 1_000);
+    const identity = "7".repeat(64);
+    const cursor = {
+      snapshot_source_count: 2,
+      acknowledged_add_batches: 1,
+      acknowledged_prefix_sources: 1,
+      last_acknowledged_path: "alpha.md",
+    };
+
+    await expect(session.exportInitialBuildCheckpoint("g1", identity, cursor)).resolves.toMatchObject({
+      record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+      publication: "initial_staging",
+      searchable: false,
+      cursor,
+    });
+    const bytes = new Uint8Array([1, 2, 3]);
+    await expect(session.restoreInitialBuildCheckpoint({
+      kind: "hit",
+      record: {
+        recordKind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+        recordVersion: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+        imageVersion: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+        orderingVersion: 1,
+        generationId: "g1",
+        byteLength: 3,
+        sha256: "a".repeat(64),
+        identity: {
+          protocol_version: WORKER_PROTOCOL_VERSION,
+          cache_schema_version: CACHE_SCHEMA_VERSION,
+          chunking_version: 1,
+          sqlite_version: "3.53.0",
+          sqlite_wasm_sha256: "b".repeat(64),
+          rust_wasm_sha256: "c".repeat(64),
+          plugin_id: "kwiry-search",
+          plugin_version: "0.1.0",
+          cache_identity: identity,
+          source_policy_hash: SOURCE_POLICY_HASH,
+        },
+        cursor,
+      },
+      bytes,
+      digestVerified: false,
+    }, identity, SOURCE_POLICY_HASH)).resolves.toMatchObject({
+      record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+      publication: "initial_staging",
+      searchable: false,
+    });
+    const current = [{
+      path: "alpha.md",
+      byte_length: 4,
+      mtime_nanos: "1000000",
+      indexable: true,
+    }];
+    await expect(session.planInitialBuildCheckpointReconciliation(
+      "g1",
+      "active-vault",
+      current,
+    )).resolves.toMatchObject({ publication: "initial_staging", searchable: false });
+
+    expect(worker.posted).toEqual([
+      {
+        version: WORKER_PROTOCOL_VERSION,
+        id: 1,
+        operation: "export_initial_build_checkpoint",
+        generation: "g1",
+        cache_identity: identity,
+        cursor,
+      },
+      {
+        version: WORKER_PROTOCOL_VERSION,
+        id: 2,
+        operation: "restore_initial_build_checkpoint",
+        record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+        checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+        checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+        generation: "g1",
+        cursor,
+        bytes,
+        blob_byte_length: 3,
+        blob_sha256: "a".repeat(64),
+        digest_verified: false,
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        cache_schema_version: CACHE_SCHEMA_VERSION,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        sqlite_wasm_sha256: "b".repeat(64),
+        rust_wasm_sha256: "c".repeat(64),
+        plugin_id: "kwiry-search",
+        plugin_version: "0.1.0",
+        cache_identity: identity,
+        source_policy_hash: SOURCE_POLICY_HASH,
+        expected_cache_identity: identity,
+        expected_source_policy_hash: SOURCE_POLICY_HASH,
+      },
+      {
+        version: WORKER_PROTOCOL_VERSION,
+        id: 3,
+        operation: "plan_initial_build_checkpoint_reconciliation",
+        generation: "g1",
+        vault_id: "active-vault",
+        current_sources: current,
+      },
+    ]);
   });
 
   it("terminates its Worker and revokes the Blob URL exactly once", async () => {

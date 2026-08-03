@@ -37,14 +37,20 @@ import {
 import { validateSQLiteImage } from "./image-header";
 import {
   CACHE_SCHEMA_VERSION,
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   MAX_EXPORT_BLOB_BYTES,
   SOURCE_QUARANTINE_WARNING_CODE,
   WORKER_PROTOCOL_VERSION,
   type BuildResult,
   type DisposeResult,
   type ExportGenerationResult,
+  type InitialBuildCheckpointExportResult,
+  type InitialBuildCheckpointReconciliationPlanResult,
   type InitializeResult,
   type ReconciliationPlanResult,
+  type RestoreInitialBuildCheckpointResult,
   type SearchResult,
   type SourcePreparationDefectField,
   type SourceRemoval,
@@ -96,12 +102,18 @@ interface GuardCounters {
   helperWorkerAttempts: number;
 }
 
+const INITIAL_BUILD_CHECKPOINT_MAGIC = Uint8Array.of(
+  0x4b, 0x57, 0x49, 0x52, 0x59, 0x43, 0x50, 0x00,
+);
+const INITIAL_BUILD_CHECKPOINT_HEADER_BYTES = INITIAL_BUILD_CHECKPOINT_MAGIC.byteLength + 8;
+
 const scope = self as DedicatedWorkerGlobalScope;
 let state: WorkerState = "cold";
 let sqlite: SQLiteApi | null = null;
 let active: Generation | null = null;
 let staging: Generation | null = null;
 let stagingIsInitialCold = false;
+let stagingRestoredCheckpoint = false;
 let stagingPreviewEligible = false;
 let stagingRevision = 0;
 const usedGenerations = new Set<string>();
@@ -276,6 +288,7 @@ function beginBuild(generation: string): BuildResult {
     quarantinedSources: new Map(),
   };
   stagingIsInitialCold = active === null;
+  stagingRestoredCheckpoint = false;
   stagingPreviewEligible = false;
   stagingRevision = 0;
   usedGenerations.add(generation);
@@ -294,7 +307,9 @@ async function addSourceBatch(
     updateQuarantinedSources(target, sources, [], prepared.quarantined);
     if (stagingIsInitialCold) {
       stagingRevision += 1;
-      stagingPreviewEligible = target.index.documents > 0 && target.index.chunks > 0;
+      stagingPreviewEligible = !stagingRestoredCheckpoint
+        && target.index.documents > 0
+        && target.index.chunks > 0;
     }
     return generationResult(target);
   } catch (error) {
@@ -441,6 +456,7 @@ function publishStaging(target: Generation, compact: boolean): BuildResult {
   active = target;
   staging = null;
   stagingIsInitialCold = false;
+  stagingRestoredCheckpoint = false;
   stagingPreviewEligible = false;
   stagingRevision = 0;
   state = "ready";
@@ -543,6 +559,106 @@ async function exportGeneration(
     plugin_id: PLUGIN_ID,
     plugin_version: PLUGIN_VERSION,
     cache_identity: cacheIdentity,
+    source_policy_hash: requireInitializedSourcePolicyHash(),
+  };
+}
+
+async function exportInitialBuildCheckpoint(
+  request: Extract<WorkerRequest, { operation: "export_initial_build_checkpoint" }>,
+): Promise<InitialBuildCheckpointExportResult> {
+  requireInitialized();
+  if (!sqlite
+    || active !== null
+    || !staging
+    || staging.id !== request.generation
+    || !stagingIsInitialCold) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Requested generation is not an initial-cold staging generation.",
+      true,
+    );
+  }
+  if (declaredChunkingVersion === null) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Portable Rust chunking identity is unavailable.",
+      true,
+    );
+  }
+  const target = staging;
+
+  try {
+    target.index.assertIntegrity(false);
+    target.index.assertIntegrity();
+  } catch {
+    throw fixedWorkerError(
+      "integrity_failed",
+      "index",
+      "Initial-build checkpoint failed its integrity check.",
+      false,
+    );
+  }
+
+  const observedChunkingVersion = target.index.chunkingVersion;
+  if (observedChunkingVersion !== null && observedChunkingVersion !== declaredChunkingVersion) {
+    throw fixedWorkerError(
+      "integrity_failed",
+      "index",
+      "Initial-build checkpoint was chunked by a different chunker.",
+      false,
+    );
+  }
+
+  let payload: Uint8Array;
+  try {
+    payload = target.index.exportImage(sqlite);
+  } catch (error) {
+    if (error instanceof IndexCapacityError) throw indexCapacityError();
+    throw fixedWorkerError(
+      "internal_error",
+      "index",
+      "Initial-build checkpoint could not be exported.",
+      false,
+    );
+  }
+
+  let bytes: Uint8Array;
+  try {
+    bytes = wrapInitialBuildCheckpoint(payload);
+  } catch (error) {
+    if (error instanceof IndexCapacityError) {
+      throw fixedWorkerError(
+        "checkpoint_blob_too_large",
+        "index",
+        "Initial-build checkpoint exceeds the export limit.",
+        false,
+      );
+    }
+    throw error;
+  }
+  const blobSha256 = await sha256Hex(bytes);
+  return {
+    ...generationResult(target),
+    record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+    checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+    checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+    publication: "initial_staging",
+    searchable: false,
+    cursor: request.cursor,
+    bytes,
+    blob_byte_length: bytes.byteLength,
+    blob_sha256: blobSha256,
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: declaredChunkingVersion,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: SQLITE_WASM_SHA256,
+    rust_wasm_sha256: RUST_WASM_SHA256,
+    plugin_id: PLUGIN_ID,
+    plugin_version: PLUGIN_VERSION,
+    cache_identity: request.cache_identity,
     source_policy_hash: requireInitializedSourcePolicyHash(),
   };
 }
@@ -692,6 +808,166 @@ async function restoreGeneration(
   }
 }
 
+async function restoreInitialBuildCheckpoint(
+  request: Extract<WorkerRequest, { operation: "restore_initial_build_checkpoint" }>,
+): Promise<RestoreInitialBuildCheckpointResult> {
+  requireInitialized();
+  if (!sqlite
+    || declaredChunkingVersion === null
+    || active !== null
+    || staging !== null
+    || usedGenerations.has(request.generation)) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Requested initial-build checkpoint generation is unavailable.",
+      true,
+    );
+  }
+
+  if (request.record_kind !== INITIAL_BUILD_CHECKPOINT_RECORD_KIND) {
+    throw fixedWorkerError(
+      "checkpoint_kind_mismatch",
+      "index",
+      "Initial-build checkpoint has the wrong record kind.",
+      false,
+    );
+  }
+  if (request.cache_identity !== request.expected_cache_identity
+    || request.source_policy_hash !== request.expected_source_policy_hash
+    || request.source_policy_hash !== requireInitializedSourcePolicyHash()
+    || request.plugin_id !== PLUGIN_ID) {
+    throw fixedWorkerError(
+      "checkpoint_identity_mismatch",
+      "index",
+      "Initial-build checkpoint belongs to a different identity.",
+      false,
+    );
+  }
+  if (request.checkpoint_record_version !== INITIAL_BUILD_CHECKPOINT_RECORD_VERSION
+    || request.checkpoint_image_version !== INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION
+    || request.protocol_version !== WORKER_PROTOCOL_VERSION
+    || request.cache_schema_version !== CACHE_SCHEMA_VERSION
+    || request.chunking_version !== declaredChunkingVersion
+    || request.sqlite_version !== "3.53.0"
+    || request.sqlite_wasm_sha256 !== SQLITE_WASM_SHA256
+    || request.rust_wasm_sha256 !== RUST_WASM_SHA256
+    || request.plugin_version !== PLUGIN_VERSION) {
+    throw fixedWorkerError(
+      "checkpoint_version_mismatch",
+      "index",
+      "Initial-build checkpoint is incompatible with this build.",
+      false,
+    );
+  }
+  if (request.bytes.byteLength > MAX_EXPORT_BLOB_BYTES
+    || request.blob_byte_length > MAX_EXPORT_BLOB_BYTES) {
+    throw fixedWorkerError(
+      "checkpoint_blob_too_large",
+      "protocol",
+      "Initial-build checkpoint exceeds the restore limit.",
+      false,
+    );
+  }
+  if (request.bytes.byteLength === 0
+    || request.blob_byte_length !== request.bytes.byteLength) {
+    throw fixedWorkerError(
+      "checkpoint_image_invalid",
+      "index",
+      "Initial-build checkpoint has an invalid length.",
+      false,
+    );
+  }
+  if (await sha256Hex(request.bytes) !== request.blob_sha256) {
+    throw fixedWorkerError(
+      "checkpoint_digest_mismatch",
+      "index",
+      "Initial-build checkpoint failed digest verification.",
+      false,
+    );
+  }
+
+  let payload: Uint8Array;
+  try {
+    payload = unwrapInitialBuildCheckpoint(request.bytes);
+    const header = validateSQLiteImage(payload);
+    if (header.wal) throw new CacheImageInvalidError("WAL images require unsupported VFS methods");
+  } catch {
+    throw fixedWorkerError(
+      "checkpoint_image_invalid",
+      "index",
+      "Initial-build checkpoint is not a valid staged SQLite image.",
+      false,
+    );
+  }
+
+  let candidate: Fts5GenerationIndex | null = null;
+  try {
+    candidate = openRestoredFts5Generation(
+      sqlite,
+      payload,
+      declaredChunkingVersion,
+      undefined,
+      requireInitializedVaultId(),
+      requireInitializedSourcePolicyHash(),
+    );
+    const restored: Generation = {
+      id: request.generation,
+      index: candidate,
+      quarantinedSources: new Map(),
+    };
+    const result: RestoreInitialBuildCheckpointResult = {
+      ...generationResult(restored),
+      record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+      publication: "initial_staging",
+      searchable: false,
+      cursor: request.cursor,
+    };
+    staging = restored;
+    candidate = null;
+    stagingIsInitialCold = true;
+    stagingRestoredCheckpoint = true;
+    stagingPreviewEligible = false;
+    stagingRevision = 0;
+    usedGenerations.add(request.generation);
+    state = "building";
+    return result;
+  } catch (error) {
+    candidate?.close();
+    if (error instanceof CacheVersionMismatchError) {
+      throw fixedWorkerError(
+        "checkpoint_version_mismatch",
+        "index",
+        "Initial-build checkpoint schema is incompatible with this build.",
+        false,
+      );
+    }
+    if (error instanceof CacheImageInvalidError || error instanceof IndexCapacityError) {
+      throw fixedWorkerError(
+        "checkpoint_image_invalid",
+        "index",
+        "Initial-build checkpoint failed staged validation.",
+        false,
+      );
+    }
+    if (error instanceof BlockVfsUnavailableError) {
+      throw fixedWorkerError(
+        "internal_error",
+        "sqlite",
+        "Required SQLite restore capability is unavailable.",
+        false,
+      );
+    }
+    if (isWorkerError(error)) throw error;
+    throw fixedWorkerError(
+      "checkpoint_image_invalid",
+      "index",
+      "Initial-build checkpoint could not be opened safely.",
+      false,
+    );
+  }
+}
+
 function planReconciliation(
   request: Extract<WorkerRequest, { operation: "plan_reconciliation" }>,
 ): ReconciliationPlanResult {
@@ -723,6 +999,50 @@ function planReconciliation(
       "internal_error",
       "index",
       "Active generation could not be reconciled.",
+      false,
+    );
+  }
+}
+
+function planInitialBuildCheckpointReconciliation(
+  request: Extract<WorkerRequest, {
+    operation: "plan_initial_build_checkpoint_reconciliation";
+  }>,
+): InitialBuildCheckpointReconciliationPlanResult {
+  requireInitialized();
+  if (active !== null
+    || !staging
+    || staging.id !== request.generation
+    || !stagingIsInitialCold
+    || !stagingRestoredCheckpoint) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "index",
+      "Requested generation is not a restored initial-build checkpoint.",
+      true,
+    );
+  }
+  try {
+    return {
+      generation: staging.id,
+      publication: "initial_staging",
+      searchable: false,
+      ...staging.index.planReconciliation(request.vault_id, request.current_sources),
+    };
+  } catch (error) {
+    if (error instanceof IndexCapacityError) throw indexCapacityError();
+    if (error instanceof IndexIntegrityError) {
+      throw fixedWorkerError(
+        "integrity_failed",
+        "index",
+        "Initial-build checkpoint source inventory is invalid.",
+        false,
+      );
+    }
+    throw fixedWorkerError(
+      "internal_error",
+      "index",
+      "Initial-build checkpoint could not be reconciled.",
       false,
     );
   }
@@ -826,6 +1146,7 @@ function dispose(): DisposeResult {
   staging = null;
   active = null;
   stagingIsInitialCold = false;
+  stagingRestoredCheckpoint = false;
   stagingPreviewEligible = false;
   stagingRevision = 0;
   usedGenerations.clear();
@@ -880,6 +1201,7 @@ function abortStaging(): void {
   // rejected generation visible as retained STAGING state.
   staging = null;
   stagingIsInitialCold = false;
+  stagingRestoredCheckpoint = false;
   stagingPreviewEligible = false;
   stagingRevision = 0;
   state = "ready";
@@ -1082,6 +1404,12 @@ async function dispatchProduction(request: WorkerRequest): Promise<unknown> {
       return restoreGeneration(request);
     case "plan_reconciliation":
       return planReconciliation(request);
+    case "export_initial_build_checkpoint":
+      return exportInitialBuildCheckpoint(request);
+    case "restore_initial_build_checkpoint":
+      return restoreInitialBuildCheckpoint(request);
+    case "plan_initial_build_checkpoint_reconciliation":
+      return planInitialBuildCheckpointReconciliation(request);
     case "search":
       return search(request.query, request.limit);
     case "status":
@@ -1215,8 +1543,12 @@ function transferListFor(response: WorkerResponse): Transferable[] {
 function productionTransferListFor(
   response: WorkerResponse,
 ): Transferable[] {
-  if (!response.ok || response.operation !== "export_generation") return [];
-  const result = response.result as Partial<ExportGenerationResult>;
+  if (!response.ok
+    || (response.operation !== "export_generation"
+      && response.operation !== "export_initial_build_checkpoint")) {
+    return [];
+  }
+  const result = response.result as Partial<ExportGenerationResult | InitialBuildCheckpointExportResult>;
   return result.bytes instanceof Uint8Array
     ? [result.bytes.buffer as ArrayBuffer]
     : [];
@@ -1252,6 +1584,9 @@ function isOperation(value: unknown): value is WorkerOperation {
     || value === "export_generation"
     || value === "restore_generation"
     || value === "plan_reconciliation"
+    || value === "export_initial_build_checkpoint"
+    || value === "restore_initial_build_checkpoint"
+    || value === "plan_initial_build_checkpoint_reconciliation"
     || value === "search"
     || value === "status"
     || value === "dispose";
@@ -1278,6 +1613,40 @@ async function verifyArtifact(
   if (actual !== expectedSha256) {
     throw fixedWorkerError("artifact_mismatch", "artifact", "Embedded WASM artifact mismatch.", false);
   }
+}
+
+function wrapInitialBuildCheckpoint(payload: Uint8Array): Uint8Array {
+  const byteLength = INITIAL_BUILD_CHECKPOINT_HEADER_BYTES + payload.byteLength;
+  if (byteLength > MAX_EXPORT_BLOB_BYTES) throw new IndexCapacityError();
+  const wrapped = new Uint8Array(byteLength);
+  wrapped.set(INITIAL_BUILD_CHECKPOINT_MAGIC, 0);
+  const view = new DataView(wrapped.buffer);
+  view.setUint32(INITIAL_BUILD_CHECKPOINT_MAGIC.byteLength, INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION, true);
+  view.setUint32(INITIAL_BUILD_CHECKPOINT_MAGIC.byteLength + 4, payload.byteLength, true);
+  wrapped.set(payload, INITIAL_BUILD_CHECKPOINT_HEADER_BYTES);
+  return wrapped;
+}
+
+function unwrapInitialBuildCheckpoint(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength <= INITIAL_BUILD_CHECKPOINT_HEADER_BYTES) {
+    throw new CacheImageInvalidError("checkpoint image is truncated");
+  }
+  for (let index = 0; index < INITIAL_BUILD_CHECKPOINT_MAGIC.byteLength; index += 1) {
+    if (bytes[index] !== INITIAL_BUILD_CHECKPOINT_MAGIC[index]) {
+      throw new CacheImageInvalidError("checkpoint image has the wrong kind");
+    }
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(INITIAL_BUILD_CHECKPOINT_MAGIC.byteLength, true)
+    !== INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION) {
+    throw new CacheImageInvalidError("checkpoint image version is incompatible");
+  }
+  const payloadByteLength = view.getUint32(INITIAL_BUILD_CHECKPOINT_MAGIC.byteLength + 4, true);
+  if (payloadByteLength === 0
+    || payloadByteLength !== bytes.byteLength - INITIAL_BUILD_CHECKPOINT_HEADER_BYTES) {
+    throw new CacheImageInvalidError("checkpoint payload length is invalid");
+  }
+  return bytes.subarray(INITIAL_BUILD_CHECKPOINT_HEADER_BYTES);
 }
 
 async function sha256Hex(data: Uint8Array): Promise<string> {

@@ -10,13 +10,26 @@ import {
   type StableSourceRead,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
-import type { CacheLoad, CacheStorePort, CacheWrite } from "../src/cache/cache-store";
+import {
+  INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+  type CacheLoad,
+  type CacheStoreBundlePort,
+  type CacheWrite,
+  type InitialBuildCheckpointLoad,
+  type InitialBuildCheckpointToken,
+  type InitialBuildCheckpointWrite,
+} from "../src/cache/cache-store";
 import { InPluginLexicalBackend } from "../src/backends/in-plugin-lexical-backend";
 import {
   CACHE_SCHEMA_VERSION,
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
   WORKER_PROTOCOL_VERSION,
   emptySourceFormatCounts,
   type ExportGenerationResult,
+  type InitialBuildCheckpointCursor,
+  type InitialBuildCheckpointExportResult,
 } from "../src/worker/protocol";
 import { WorkerRpcError } from "../src/worker/rpc-client";
 import type { InPluginWorkerSession } from "../src/worker/session";
@@ -27,6 +40,7 @@ class FakeSource implements ActiveVaultSource {
   unsubscriptions = 0;
   readonly excerptTexts = new Map<string, string>();
   readonly excerptReads: string[] = [];
+  readonly records = new Map<string, { bytes: Uint8Array; mtime: number }>();
   excerptFailures = new Set<string>();
 
   subscribe(listener: (event: VaultSourceEvent) => void): () => void {
@@ -41,17 +55,40 @@ class FakeSource implements ActiveVaultSource {
   }
 
   listSourcePaths(): readonly string[] {
-    return [];
+    return [...this.records.keys()];
   }
 
   inspectSource(path: string): SourceInspection {
-    return { kind: "missing", path };
+    const record = this.records.get(path);
+    if (!record) return { kind: "missing", path };
+    return {
+      kind: "candidate",
+      path,
+      format: "markdown",
+      size: record.bytes.byteLength,
+      mtime: record.mtime,
+    };
   }
 
   async readSource(
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
   ): Promise<StableSourceRead> {
-    return { kind: "missing", path: inspection.path };
+    const record = this.records.get(inspection.path);
+    if (!record) return { kind: "missing", path: inspection.path };
+    return {
+      kind: "source",
+      source: {
+        descriptor: {
+          vault_id: "active-vault",
+          path: inspection.path,
+          format: "markdown",
+          byte_length: record.bytes.byteLength,
+          mtime: Math.floor(record.mtime / 1_000),
+          mtime_nanos: (BigInt(record.mtime) * 1_000_000n).toString(),
+        },
+        bytes: record.bytes,
+      },
+    };
   }
 
   async readExcerptText(path: string): Promise<ExcerptRead> {
@@ -64,6 +101,10 @@ class FakeSource implements ActiveVaultSource {
 
   emit(event: VaultSourceEvent): void {
     this.listener?.(event);
+  }
+
+  set(path: string, text: string, mtime = 1): void {
+    this.records.set(path, { bytes: new TextEncoder().encode(text), mtime });
   }
 }
 
@@ -116,14 +157,53 @@ function exportResult(generation: string): ExportGenerationResult {
   };
 }
 
-class FakeCacheStore implements CacheStorePort {
+function checkpointExportResult(
+  generation: string,
+  cursor: InitialBuildCheckpointCursor,
+): InitialBuildCheckpointExportResult {
+  return {
+    generation,
+    documents: cursor.acknowledged_prefix_sources,
+    chunks: cursor.acknowledged_prefix_sources,
+    database_bytes: 1,
+    database_byte_limit: 1_000_000,
+    quarantined_sources: 0,
+    quarantine_fields: [],
+    source_format_counts: emptySourceFormatCounts(),
+    record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+    checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+    checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+    publication: "initial_staging",
+    searchable: false,
+    cursor,
+    bytes: new Uint8Array([5, 6, 7, 8]),
+    blob_byte_length: 4,
+    blob_sha256: "f".repeat(64),
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: 1,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: "b".repeat(64),
+    rust_wasm_sha256: "c".repeat(64),
+    plugin_id: "kwiry-search",
+    plugin_version: "0.1.0",
+    cache_identity: CACHE_IDENTITY,
+    source_policy_hash: SOURCE_POLICY_HASH,
+  };
+}
+
+class FakeCacheStore implements CacheStoreBundlePort {
   readonly vaultCacheIdentity = CACHE_IDENTITY;
   readonly puts: CacheWrite[] = [];
   readonly discards: Array<"corrupt" | "incompatible" | "requested"> = [];
+  readonly checkpointPuts: InitialBuildCheckpointWrite[] = [];
   putError: unknown = null;
   discardError: unknown = null;
 
-  constructor(readonly loaded: CacheLoad) {}
+  constructor(
+    readonly loaded: CacheLoad,
+    private readonly events: string[] | null = null,
+  ) {}
   async load(): Promise<CacheLoad> { return this.loaded; }
   async put(write: CacheWrite) {
     this.puts.push(write);
@@ -139,16 +219,36 @@ class FakeCacheStore implements CacheStorePort {
     this.discards.push(reason);
     if (this.discardError) throw this.discardError;
   }
-  async dispose(): Promise<void> {}
+  async loadInitialBuildCheckpoint(): Promise<InitialBuildCheckpointLoad> {
+    return { kind: "miss", reason: "absent" };
+  }
+  async putInitialBuildCheckpoint(write: InitialBuildCheckpointWrite) {
+    this.events?.push("store-put");
+    this.checkpointPuts.push(write);
+    const { bytes: _bytes, ...record } = write;
+    return record;
+  }
+  async discardInitialBuildCheckpoint(
+    _reason: "corrupt" | "incompatible" | "completed" | "requested",
+    _expected: InitialBuildCheckpointToken,
+  ): Promise<void> {}
+  async dispose(): Promise<void> {
+    this.events?.push("store-dispose");
+  }
 }
 
 function fakeSession(options: {
   initialize?: () => Promise<unknown>;
+  add?: (generation: string) => Promise<unknown>;
   commit?: (generation: string) => Promise<unknown>;
   search?: () => Promise<unknown>;
   restore?: (hit: Extract<CacheLoad, { kind: "hit" }>) => Promise<unknown>;
   plan?: () => Promise<unknown>;
   export?: (generation: string) => Promise<unknown>;
+  checkpointExport?: (
+    generation: string,
+    cursor: InitialBuildCheckpointCursor,
+  ) => Promise<unknown>;
 } = {}): InPluginWorkerSession {
   return {
     initialize: vi.fn(options.initialize ?? (async () => ({}))),
@@ -162,7 +262,7 @@ function fakeSession(options: {
       quarantine_fields: [],
       source_format_counts: emptySourceFormatCounts(),
     })),
-    addSourceBatch: vi.fn(async (generation: string) => ({
+    addSourceBatch: vi.fn(options.add ?? (async (generation: string) => ({
       generation,
       documents: 0,
       chunks: 0,
@@ -171,7 +271,7 @@ function fakeSession(options: {
       quarantined_sources: 0,
       quarantine_fields: [],
       source_format_counts: emptySourceFormatCounts(),
-    })),
+    }))),
     applySourceChanges: vi.fn(async (
       generation: string,
       nextGeneration: string | null,
@@ -225,6 +325,15 @@ function fakeSession(options: {
       matched_source_count: 0,
     }))),
     exportGeneration: vi.fn(options.export ?? (async (generation: string) => exportResult(generation))),
+    exportInitialBuildCheckpoint: vi.fn(async (
+      generation: string,
+      _cacheIdentity: string,
+      cursor: InitialBuildCheckpointCursor,
+    ) => options.checkpointExport
+      ? options.checkpointExport(generation, cursor)
+      : checkpointExportResult(generation, cursor)),
+    restoreInitialBuildCheckpoint: vi.fn(),
+    planInitialBuildCheckpointReconciliation: vi.fn(),
     search: vi.fn(options.search ?? (async () => ({
       generation: "generation-1",
       hits: [{
@@ -1084,6 +1193,71 @@ describe("InPluginLexicalBackend", () => {
         generation: "generation-2",
       });
     });
+  });
+
+  it("persists the last acknowledged initial-build cursor before Worker termination and store disposal", async () => {
+    const events: string[] = [];
+    let reportAddEntered!: () => void;
+    const addEntered = new Promise<void>((resolve) => {
+      reportAddEntered = resolve;
+    });
+    let releaseAdd!: () => void;
+    const addGate = new Promise<void>((resolve) => {
+      releaseAdd = resolve;
+    });
+    const source = new FakeSource();
+    source.set("note.md", "note", 1);
+    const session = fakeSession({
+      add: async (generation) => {
+        events.push("add-start");
+        reportAddEntered();
+        await addGate;
+        events.push("add-ack");
+        return {
+          generation,
+          documents: 1,
+          chunks: 1,
+          database_bytes: 1,
+          database_byte_limit: 1_000_000,
+          quarantined_sources: 0,
+          quarantine_fields: [],
+          source_format_counts: emptySourceFormatCounts(),
+        };
+      },
+      checkpointExport: async (generation, cursor) => {
+        events.push("checkpoint-export");
+        return checkpointExportResult(generation, cursor);
+      },
+    });
+    vi.mocked(session.forceDispose).mockImplementation(() => {
+      events.push("worker-force-dispose");
+    });
+    const store = new FakeCacheStore({ kind: "miss", reason: "absent" }, events);
+    const inPlugin = backend(source, [session], {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    await inPlugin.initialize();
+    await addEntered;
+    const disposing = inPlugin.dispose();
+    releaseAdd();
+    await disposing;
+
+    expect(store.checkpointPuts).toHaveLength(1);
+    expect(store.checkpointPuts[0]?.cursor).toEqual({
+      snapshot_source_count: 1,
+      acknowledged_add_batches: 1,
+      acknowledged_prefix_sources: 1,
+      last_acknowledged_path: "note.md",
+    });
+    expect(events).toEqual([
+      "add-start",
+      "add-ack",
+      "checkpoint-export",
+      "store-put",
+      "worker-force-dispose",
+      "store-dispose",
+    ]);
   });
 
   it("prevents a held initial commit from publishing after disposal", async () => {

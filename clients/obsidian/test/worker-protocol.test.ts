@@ -5,6 +5,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   CACHE_SCHEMA_VERSION,
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   MAX_EXPORT_BLOB_BYTES,
   MAX_RECONCILIATION_SOURCES,
   MAX_SOURCE_BYTES,
@@ -73,6 +76,58 @@ function restoreRequest(overrides: Record<string, unknown> = {}): Record<string,
   };
 }
 
+const CHECKPOINT_CURSOR = {
+  snapshot_source_count: 2,
+  acknowledged_add_batches: 1,
+  acknowledged_prefix_sources: 1,
+  last_acknowledged_path: "alpha.md",
+} as const;
+
+function checkpointRestoreRequest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...restoreRequest(),
+    operation: "restore_initial_build_checkpoint",
+    record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+    checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+    checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+    cursor: CHECKPOINT_CURSOR,
+    ...overrides,
+  };
+}
+
+function checkpointExportEnvelope(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    generation: "g1",
+    documents: 1,
+    chunks: 2,
+    database_bytes: 65_536,
+    database_byte_limit: 1024 * 1024,
+    quarantined_sources: 0,
+    quarantine_fields: [],
+    source_format_counts: sourceFormatCounts(1),
+    record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+    checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+    checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+    publication: "initial_staging",
+    searchable: false,
+    cursor: CHECKPOINT_CURSOR,
+    bytes: new Uint8Array([1, 2, 3, 4]),
+    blob_byte_length: 4,
+    blob_sha256: "a".repeat(64),
+    protocol_version: WORKER_PROTOCOL_VERSION,
+    cache_schema_version: CACHE_SCHEMA_VERSION,
+    chunking_version: 1,
+    sqlite_version: "3.53.0",
+    sqlite_wasm_sha256: "b".repeat(64),
+    rust_wasm_sha256: "c".repeat(64),
+    plugin_id: "kwiry-search",
+    plugin_version: "0.1.0",
+    cache_identity: CACHE_IDENTITY,
+    source_policy_hash: CACHE_IDENTITY,
+    ...overrides,
+  };
+}
+
 function source(path = "note.md", vaultId = "active"): SourceInput {
   const bytes = new Uint8Array([35, 32, 65]);
   return {
@@ -89,8 +144,8 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
-  it("publishes protocol 7, cache schema 9, and the closed six-format set", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(7);
+  it("publishes protocol 8, cache schema 9, and the closed six-format set", () => {
+    expect(WORKER_PROTOCOL_VERSION).toBe(8);
     expect(CACHE_SCHEMA_VERSION).toBe(9);
     expect(SOURCE_FORMATS).toEqual(["markdown", "text", "base", "canvas", "docx", "pdf"]);
   });
@@ -285,7 +340,7 @@ describe("Worker protocol", () => {
   });
 
   it("distinguishes incompatible versions from malformed requests", () => {
-    expect(parseWorkerRequest({ version: 1, id: 1, operation: "status" })).toMatchObject({
+    expect(parseWorkerRequest({ version: 7, id: 1, operation: "status" })).toMatchObject({
       code: "protocol_mismatch",
     });
     expect(parseWorkerRequest({
@@ -424,6 +479,118 @@ describe("Worker protocol", () => {
       bytes: oversized,
       blob_byte_length: MAX_EXPORT_BLOB_BYTES + 1,
     }))).toMatchObject({ code: "cache_blob_too_large", stage: "protocol" });
+  });
+
+  it("holds initial-build checkpoint requests and results to distinct exact shapes", () => {
+    const exportRequest = {
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_initial_build_checkpoint",
+      generation: "g1",
+      cache_identity: CACHE_IDENTITY,
+      cursor: CHECKPOINT_CURSOR,
+    } as const;
+    expect(parseWorkerRequest(exportRequest)).toMatchObject({
+      operation: "export_initial_build_checkpoint",
+    });
+    expect(parseWorkerRequest({ ...exportRequest, cursor: { ...CHECKPOINT_CURSOR, extra: true } }))
+      .toMatchObject({ code: "invalid_request" });
+    expect(parseWorkerRequest({
+      ...exportRequest,
+      cursor: { ...CHECKPOINT_CURSOR, acknowledged_prefix_sources: 0 },
+    })).toMatchObject({ code: "invalid_request" });
+    expect(parseWorkerRequest({
+      ...exportRequest,
+      cursor: { ...CHECKPOINT_CURSOR, acknowledged_add_batches: 0 },
+    })).toMatchObject({ code: "invalid_request" });
+
+    expect(parseWorkerRequest(checkpointRestoreRequest())).toMatchObject({
+      operation: "restore_initial_build_checkpoint",
+    });
+    for (const overrides of [
+      { record_kind: "complete_generation" },
+      { checkpoint_record_version: -1 },
+      { checkpoint_image_version: 1.5 },
+      { cursor: { ...CHECKPOINT_CURSOR, last_acknowledged_path: "../alpha.md" } },
+      { digest_verified: true },
+      { extra: true },
+    ]) {
+      const parsed = parseWorkerRequest(checkpointRestoreRequest(overrides));
+      if (overrides.record_kind === "complete_generation") {
+        expect(parsed).toMatchObject({ operation: "restore_initial_build_checkpoint" });
+      } else {
+        expect(parsed).toMatchObject({ code: "invalid_request" });
+      }
+    }
+
+    const exportResponse = (result: unknown) => ({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_initial_build_checkpoint" as const,
+      ok: true as const,
+      result,
+    });
+    expect(isWorkerResponse(exportResponse(checkpointExportEnvelope()))).toBe(true);
+    expect(isWorkerResponse(exportResponse(checkpointExportEnvelope({
+      record_kind: "complete_generation",
+    })))).toBe(false);
+    expect(isWorkerResponse(exportResponse(checkpointExportEnvelope({ searchable: true })))).toBe(false);
+    expect(isWorkerResponse(exportResponse(checkpointExportEnvelope({ extra: true })))).toBe(false);
+
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 2,
+      operation: "restore_initial_build_checkpoint",
+      ok: true,
+      result: {
+        generation: "g1",
+        documents: 1,
+        chunks: 2,
+        database_bytes: 65_536,
+        database_byte_limit: 1024 * 1024,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+        source_format_counts: sourceFormatCounts(1),
+        record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+        publication: "initial_staging",
+        searchable: false,
+        cursor: CHECKPOINT_CURSOR,
+      },
+    })).toBe(true);
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 3,
+      operation: "plan_initial_build_checkpoint_reconciliation",
+      ok: true,
+      result: {
+        generation: "g1",
+        publication: "initial_staging",
+        searchable: false,
+        unchanged: [],
+        audit: [{ path: "alpha.md", content_hash: "a".repeat(64) }],
+        refresh: [],
+        remove: [],
+        stored_source_count: 1,
+        matched_source_count: 1,
+      },
+    })).toBe(true);
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 4,
+      operation: "plan_reconciliation",
+      ok: true,
+      result: {
+        generation: "g1",
+        publication: "initial_staging",
+        searchable: false,
+        unchanged: [],
+        audit: [],
+        refresh: [],
+        remove: [],
+        stored_source_count: 0,
+        matched_source_count: 0,
+      },
+    })).toBe(false);
   });
 
   it("validates restore responses and typed refusal envelopes", () => {

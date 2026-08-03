@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 7 as const;
+export const WORKER_PROTOCOL_VERSION = 8 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -52,6 +52,9 @@ export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIEL
  * differs from the running build's is not restorable.
  */
 export const CACHE_SCHEMA_VERSION = 9;
+export const INITIAL_BUILD_CHECKPOINT_RECORD_VERSION = 1 as const;
+export const INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION = 1 as const;
+export const INITIAL_BUILD_CHECKPOINT_RECORD_KIND = "initial_build_checkpoint" as const;
 
 /**
  * Independent ceiling on a transported generation image. The SQLite adapter's
@@ -107,6 +110,9 @@ export type WorkerOperation =
   | "export_generation"
   | "restore_generation"
   | "plan_reconciliation"
+  | "export_initial_build_checkpoint"
+  | "restore_initial_build_checkpoint"
+  | "plan_initial_build_checkpoint_reconciliation"
   | "search"
   | "status"
   | "dispose";
@@ -129,6 +135,12 @@ export type WorkerErrorCode =
   | "cache_digest_mismatch"
   | "cache_image_invalid"
   | "cache_blob_too_large"
+  | "checkpoint_kind_mismatch"
+  | "checkpoint_identity_mismatch"
+  | "checkpoint_version_mismatch"
+  | "checkpoint_digest_mismatch"
+  | "checkpoint_image_invalid"
+  | "checkpoint_blob_too_large"
   | "worker_crashed"
   | "timeout"
   | "disposed"
@@ -185,6 +197,19 @@ export interface ReconciliationPlanResult {
   matched_source_count: number;
 }
 
+export interface InitialBuildCheckpointCursor {
+  snapshot_source_count: number;
+  acknowledged_add_batches: number;
+  acknowledged_prefix_sources: number;
+  last_acknowledged_path: string | null;
+}
+
+export interface InitialBuildCheckpointReconciliationPlanResult
+  extends ReconciliationPlanResult {
+  publication: "initial_staging";
+  searchable: false;
+}
+
 export interface SourceRemoval {
   vault_id: string;
   path: string;
@@ -211,6 +236,13 @@ export interface RestoreGenerationInput {
   expected_cache_identity: string;
   /** Independently computed from the currently enabled source formats and source schema. */
   expected_source_policy_hash: string;
+}
+
+export interface RestoreInitialBuildCheckpointInput extends RestoreGenerationInput {
+  record_kind: string;
+  checkpoint_record_version: number;
+  checkpoint_image_version: number;
+  cursor: InitialBuildCheckpointCursor;
 }
 
 interface RequestBase {
@@ -247,6 +279,21 @@ export type WorkerRequest =
   | (RequestBase & RestoreGenerationInput & { operation: "restore_generation" })
   | (RequestBase & {
       operation: "plan_reconciliation";
+      generation: string;
+      vault_id: string;
+      current_sources: ReconciliationSourceMetadata[];
+    })
+  | (RequestBase & {
+      operation: "export_initial_build_checkpoint";
+      generation: string;
+      cache_identity: string;
+      cursor: InitialBuildCheckpointCursor;
+    })
+  | (RequestBase & RestoreInitialBuildCheckpointInput & {
+      operation: "restore_initial_build_checkpoint";
+    })
+  | (RequestBase & {
+      operation: "plan_initial_build_checkpoint_reconciliation";
       generation: string;
       vault_id: string;
       current_sources: ReconciliationSourceMetadata[];
@@ -365,13 +412,45 @@ export interface ExportGenerationResult {
   source_policy_hash: string;
 }
 
+export interface InitialBuildCheckpointExportResult extends BuildResult {
+  record_kind: typeof INITIAL_BUILD_CHECKPOINT_RECORD_KIND;
+  checkpoint_record_version: typeof INITIAL_BUILD_CHECKPOINT_RECORD_VERSION;
+  checkpoint_image_version: typeof INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION;
+  publication: "initial_staging";
+  searchable: false;
+  cursor: InitialBuildCheckpointCursor;
+  bytes: Uint8Array;
+  blob_byte_length: number;
+  blob_sha256: string;
+  protocol_version: typeof WORKER_PROTOCOL_VERSION;
+  cache_schema_version: typeof CACHE_SCHEMA_VERSION;
+  chunking_version: number;
+  sqlite_version: "3.53.0";
+  sqlite_wasm_sha256: string;
+  rust_wasm_sha256: string;
+  plugin_id: string;
+  plugin_version: string;
+  cache_identity: string;
+  source_policy_hash: string;
+}
+
+export interface RestoreInitialBuildCheckpointResult extends BuildResult {
+  record_kind: typeof INITIAL_BUILD_CHECKPOINT_RECORD_KIND;
+  publication: "initial_staging";
+  searchable: false;
+  cursor: InitialBuildCheckpointCursor;
+}
+
 export type WorkerResult =
   | InitializeResult
   | BuildResult
   | StatusResult
   | SearchResult
   | ExportGenerationResult
+  | InitialBuildCheckpointExportResult
+  | RestoreInitialBuildCheckpointResult
   | ReconciliationPlanResult
+  | InitialBuildCheckpointReconciliationPlanResult
   | DisposeResult;
 
 export type WorkerResponse =
@@ -429,9 +508,19 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
         && isSha256Hex(value.cache_identity)
         ? value as unknown as WorkerRequest
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
+    case "export_initial_build_checkpoint":
+      return hasExactKeys(value, [...base, "generation", "cache_identity", "cursor"])
+        && isGeneration(value.generation)
+        && isSha256Hex(value.cache_identity)
+        && isInitialBuildCheckpointCursor(value.cursor)
+        ? value as unknown as WorkerRequest
+        : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "restore_generation":
       return parseRestoreGenerationRequest(value, base);
+    case "restore_initial_build_checkpoint":
+      return parseRestoreInitialBuildCheckpointRequest(value, base);
     case "plan_reconciliation":
+    case "plan_initial_build_checkpoint_reconciliation":
       return hasExactKeys(value, [...base, "generation", "vault_id", "current_sources"])
         && isGeneration(value.generation)
         && isBoundedString(value.vault_id, 1_024)
@@ -535,6 +624,78 @@ function parseRestoreGenerationRequest(
   return value as unknown as WorkerRequest;
 }
 
+function parseRestoreInitialBuildCheckpointRequest(
+  value: Record<string, unknown>,
+  base: readonly string[],
+): WorkerRequest | WorkerError {
+  const keys = [
+    ...base,
+    "record_kind",
+    "checkpoint_record_version",
+    "checkpoint_image_version",
+    "generation",
+    "cursor",
+    "bytes",
+    "blob_byte_length",
+    "blob_sha256",
+    "digest_verified",
+    "protocol_version",
+    "cache_schema_version",
+    "chunking_version",
+    "sqlite_version",
+    "sqlite_wasm_sha256",
+    "rust_wasm_sha256",
+    "plugin_id",
+    "plugin_version",
+    "cache_identity",
+    "source_policy_hash",
+    "expected_cache_identity",
+    "expected_source_policy_hash",
+  ];
+  if (!hasExactKeys(value, keys)
+    || !isBoundedString(value.record_kind, 64)
+    || !isNonNegativeSafeInteger(value.checkpoint_record_version)
+    || !isNonNegativeSafeInteger(value.checkpoint_image_version)
+    || !isGeneration(value.generation)
+    || !isInitialBuildCheckpointCursor(value.cursor)
+    || !(value.bytes instanceof Uint8Array)
+    || !isNonNegativeSafeInteger(value.blob_byte_length)
+    || !isSha256Hex(value.blob_sha256)
+    || value.digest_verified !== false
+    || !isNonNegativeSafeInteger(value.protocol_version)
+    || !isNonNegativeSafeInteger(value.cache_schema_version)
+    || !isNonNegativeSafeInteger(value.chunking_version)
+    || !isBoundedString(value.sqlite_version, 64)
+    || !isSha256Hex(value.sqlite_wasm_sha256)
+    || !isSha256Hex(value.rust_wasm_sha256)
+    || !isBoundedString(value.plugin_id, MAX_PLUGIN_ID_CHARACTERS)
+    || !isBoundedString(value.plugin_version, MAX_PLUGIN_VERSION_CHARACTERS)
+    || !isSha256Hex(value.cache_identity)
+    || !isSha256Hex(value.source_policy_hash)
+    || !isSha256Hex(value.expected_cache_identity)
+    || !isSha256Hex(value.expected_source_policy_hash)) {
+    return fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
+  }
+  if (value.bytes.byteLength > MAX_EXPORT_BLOB_BYTES
+    || value.blob_byte_length > MAX_EXPORT_BLOB_BYTES) {
+    return fixedWorkerError(
+      "checkpoint_blob_too_large",
+      "protocol",
+      "Initial-build checkpoint exceeds the restore limit.",
+      false,
+    );
+  }
+  if (value.bytes.byteLength === 0 || value.blob_byte_length !== value.bytes.byteLength) {
+    return fixedWorkerError(
+      "checkpoint_image_invalid",
+      "protocol",
+      "Initial-build checkpoint has an invalid length.",
+      false,
+    );
+  }
+  return value as unknown as WorkerRequest;
+}
+
 export function isWorkerResponse(value: unknown): value is WorkerResponse {
   if (!isRecord(value)
     || value.version !== WORKER_PROTOCOL_VERSION
@@ -595,6 +756,30 @@ export function isSourceBatch(value: unknown, allowEmpty = false): value is Sour
     }
   }
   return true;
+}
+
+function isInitialBuildCheckpointCursor(
+  value: unknown,
+): value is InitialBuildCheckpointCursor {
+  if (!isRecord(value)
+    || !hasExactKeys(value, [
+      "snapshot_source_count",
+      "acknowledged_add_batches",
+      "acknowledged_prefix_sources",
+      "last_acknowledged_path",
+    ])
+    || !isNonNegativeSafeInteger(value.snapshot_source_count)
+    || value.snapshot_source_count > MAX_RECONCILIATION_SOURCES
+    || !isNonNegativeSafeInteger(value.acknowledged_add_batches)
+    || value.acknowledged_add_batches > value.snapshot_source_count
+    || !isNonNegativeSafeInteger(value.acknowledged_prefix_sources)
+    || value.acknowledged_prefix_sources > value.snapshot_source_count) {
+    return false;
+  }
+  return value.acknowledged_prefix_sources === 0
+    ? value.last_acknowledged_path === null
+    : value.acknowledged_add_batches > 0
+      && isNormalizedVaultRelativePath(value.last_acknowledged_path);
 }
 
 function isReconciliationSources(value: unknown): value is ReconciliationSourceMetadata[] {
@@ -679,10 +864,16 @@ function isResultForOperation(operation: WorkerOperation, value: unknown): boole
     case "abort_build":
     case "restore_generation":
       return isBuildResult(value);
+    case "restore_initial_build_checkpoint":
+      return isRestoreInitialBuildCheckpointResult(value);
     case "export_generation":
       return isExportGenerationResult(value);
+    case "export_initial_build_checkpoint":
+      return isInitialBuildCheckpointExportResult(value);
     case "plan_reconciliation":
       return isReconciliationPlanResult(value);
+    case "plan_initial_build_checkpoint_reconciliation":
+      return isInitialBuildCheckpointReconciliationPlanResult(value);
     case "status":
       return isStatusResult(value);
     case "search":
@@ -710,19 +901,25 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
     && value.fts5Enabled === 1;
 }
 
+const BUILD_RESULT_KEYS = [
+  "generation",
+  "documents",
+  "chunks",
+  "database_bytes",
+  "database_byte_limit",
+  "quarantined_sources",
+  "quarantine_fields",
+  "source_format_counts",
+] as const;
+
 export function isBuildResult(value: unknown): value is BuildResult {
   return isRecord(value)
-    && hasExactKeys(value, [
-      "generation",
-      "documents",
-      "chunks",
-      "database_bytes",
-      "database_byte_limit",
-      "quarantined_sources",
-      "quarantine_fields",
-      "source_format_counts",
-    ])
-    && isGeneration(value.generation)
+    && hasExactKeys(value, BUILD_RESULT_KEYS)
+    && hasValidBuildResultFields(value);
+}
+
+function hasValidBuildResultFields(value: Record<string, unknown>): boolean {
+  return isGeneration(value.generation)
     && isNonNegativeSafeInteger(value.documents)
     && isNonNegativeSafeInteger(value.chunks)
     && isNonNegativeSafeInteger(value.database_bytes)
@@ -777,6 +974,86 @@ function isExportGenerationResult(value: unknown): value is ExportGenerationResu
     && isBoundedString(value.plugin_version, MAX_PLUGIN_VERSION_CHARACTERS)
     && isSha256Hex(value.cache_identity)
     && isSha256Hex(value.source_policy_hash);
+}
+
+function isInitialBuildCheckpointExportResult(
+  value: unknown,
+): value is InitialBuildCheckpointExportResult {
+  return isRecord(value)
+    && hasExactKeys(value, [
+      ...BUILD_RESULT_KEYS,
+      "record_kind",
+      "checkpoint_record_version",
+      "checkpoint_image_version",
+      "publication",
+      "searchable",
+      "cursor",
+      "bytes",
+      "blob_byte_length",
+      "blob_sha256",
+      "protocol_version",
+      "cache_schema_version",
+      "chunking_version",
+      "sqlite_version",
+      "sqlite_wasm_sha256",
+      "rust_wasm_sha256",
+      "plugin_id",
+      "plugin_version",
+      "cache_identity",
+      "source_policy_hash",
+    ])
+    && hasValidBuildResultFields(value)
+    && value.record_kind === INITIAL_BUILD_CHECKPOINT_RECORD_KIND
+    && value.checkpoint_record_version === INITIAL_BUILD_CHECKPOINT_RECORD_VERSION
+    && value.checkpoint_image_version === INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION
+    && value.publication === "initial_staging"
+    && value.searchable === false
+    && isInitialBuildCheckpointCursor(value.cursor)
+    && value.bytes instanceof Uint8Array
+    && value.bytes.byteLength > 0
+    && value.bytes.byteLength <= MAX_EXPORT_BLOB_BYTES
+    && value.blob_byte_length === value.bytes.byteLength
+    && isSha256Hex(value.blob_sha256)
+    && value.protocol_version === WORKER_PROTOCOL_VERSION
+    && value.cache_schema_version === CACHE_SCHEMA_VERSION
+    && isNonNegativeSafeInteger(value.chunking_version)
+    && value.sqlite_version === "3.53.0"
+    && isSha256Hex(value.sqlite_wasm_sha256)
+    && isSha256Hex(value.rust_wasm_sha256)
+    && isBoundedString(value.plugin_id, MAX_PLUGIN_ID_CHARACTERS)
+    && isBoundedString(value.plugin_version, MAX_PLUGIN_VERSION_CHARACTERS)
+    && isSha256Hex(value.cache_identity)
+    && isSha256Hex(value.source_policy_hash);
+}
+
+function isRestoreInitialBuildCheckpointResult(
+  value: unknown,
+): value is RestoreInitialBuildCheckpointResult {
+  return isRecord(value)
+    && hasExactKeys(value, [
+      ...BUILD_RESULT_KEYS,
+      "record_kind",
+      "publication",
+      "searchable",
+      "cursor",
+    ])
+    && hasValidBuildResultFields(value)
+    && value.record_kind === INITIAL_BUILD_CHECKPOINT_RECORD_KIND
+    && value.publication === "initial_staging"
+    && value.searchable === false
+    && isInitialBuildCheckpointCursor(value.cursor);
+}
+
+function isInitialBuildCheckpointReconciliationPlanResult(
+  value: unknown,
+): value is InitialBuildCheckpointReconciliationPlanResult {
+  if (!isRecord(value)
+    || value.publication !== "initial_staging"
+    || value.searchable !== false) {
+    return false;
+  }
+  const { publication: _publication, searchable: _searchable, ...plan } = value;
+  return isReconciliationPlanResult(plan);
 }
 
 function isReconciliationPlanResult(value: unknown): value is ReconciliationPlanResult {
@@ -966,6 +1243,12 @@ export function isWorkerError(value: unknown): value is WorkerError {
     "cache_digest_mismatch",
     "cache_image_invalid",
     "cache_blob_too_large",
+    "checkpoint_kind_mismatch",
+    "checkpoint_identity_mismatch",
+    "checkpoint_version_mismatch",
+    "checkpoint_digest_mismatch",
+    "checkpoint_image_invalid",
+    "checkpoint_blob_too_large",
     "worker_crashed",
     "timeout",
     "disposed",
@@ -984,6 +1267,9 @@ function isWorkerOperation(value: unknown): value is WorkerOperation {
     || value === "export_generation"
     || value === "restore_generation"
     || value === "plan_reconciliation"
+    || value === "export_initial_build_checkpoint"
+    || value === "restore_initial_build_checkpoint"
+    || value === "plan_initial_build_checkpoint_reconciliation"
     || value === "search"
     || value === "status"
     || value === "dispose";

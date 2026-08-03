@@ -9,10 +9,15 @@ import {
   type StableSourceRead,
   type VaultSourceEvent,
 } from "../active-vault-source";
-import type {
-  CacheLoad,
-  CacheStoreAvailability,
-  CacheStorePort,
+import {
+  INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+  type CacheLoad,
+  type CacheStoreAvailability,
+  type CacheStoreBundlePort,
+  type CacheStorePort,
+  type InitialBuildCheckpointCursor,
+  type InitialBuildCheckpointLoad,
+  type InitialBuildCheckpointToken,
 } from "../cache/cache-store";
 import {
   EXTRACTION_COVERAGES,
@@ -22,6 +27,9 @@ import {
 import type {
   BuildResult,
   ExportGenerationResult,
+  InitialBuildCheckpointExportResult,
+  InitialBuildCheckpointReconciliationPlanResult,
+  RestoreInitialBuildCheckpointResult,
   ReconciliationPlanResult,
   ReconciliationSourceMetadata,
   SourceFormatCounts,
@@ -61,6 +69,24 @@ export interface CacheIndexWorkerPort extends IndexWorkerPort {
   exportGeneration(generation: string, cacheIdentity: string): Promise<ExportGenerationResult>;
 }
 
+export interface CheckpointIndexWorkerPort extends CacheIndexWorkerPort {
+  exportInitialBuildCheckpoint(
+    generation: string,
+    cacheIdentity: string,
+    cursor: InitialBuildCheckpointCursor,
+  ): Promise<InitialBuildCheckpointExportResult>;
+  restoreInitialBuildCheckpoint(
+    hit: Extract<InitialBuildCheckpointLoad, { kind: "hit" }>,
+    expectedCacheIdentity: string,
+    expectedSourcePolicyHash: string,
+  ): Promise<RestoreInitialBuildCheckpointResult>;
+  planInitialBuildCheckpointReconciliation(
+    generation: string,
+    vaultId: string,
+    currentSources: ReconciliationSourceMetadata[],
+  ): Promise<InitialBuildCheckpointReconciliationPlanResult>;
+}
+
 export type IndexControllerStage =
   | "starting"
   | "snapshot"
@@ -87,7 +113,12 @@ export type IndexControllerIssue =
   | "cache_incompatible"
   | "cache_restore_unavailable"
   | "cache_discard_failed"
-  | "cache_save_failed";
+  | "cache_save_failed"
+  | "checkpoint_corrupt"
+  | "checkpoint_incompatible"
+  | "checkpoint_unavailable"
+  | "checkpoint_discard_failed"
+  | "checkpoint_save_failed";
 
 export interface InitialColdPreviewLease {
   generation: string;
@@ -205,6 +236,18 @@ type ReconciliationProbe =
   | { kind: "read"; inspection: SourceInspection; read: StableSourceRead }
   | { kind: "unreadable" };
 
+interface InitialBuildProgress {
+  generation: string;
+  snapshot: Snapshot;
+  represented: boolean[];
+  acknowledgedAddBatches: number;
+  acknowledgedPrefixSources: number;
+  lastAcknowledgedPath: string | null;
+  counts: IndexCounts;
+}
+
+const INITIAL_BUILD_CHECKPOINT_BATCH_CADENCE = 25;
+
 export class InPluginIndexController {
   private readonly source: ActiveVaultSource;
   private readonly worker: IndexWorkerPort;
@@ -229,10 +272,13 @@ export class InPluginIndexController {
   private unsubscribe: (() => void) | null = null;
   private running: Promise<void> | null = null;
   private exportRunning: Promise<void> | null = null;
+  private checkpointRunning: Promise<void> | null = null;
+  private shutdownPreparation: Promise<void> | null = null;
   private disposal: Promise<void> = Promise.resolve();
   private exportTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private disposed = false;
+  private stoppingForCheckpoint = false;
   private blocked = false;
   private workerInitialized = false;
   private startupDecided = false;
@@ -267,6 +313,8 @@ export class InPluginIndexController {
   private initialColdPreviewGeneration: string | null = null;
   private initialColdPreviewRevision = 0;
   private initialColdPreviewProcessed = 0;
+  private initialBuildProgress: InitialBuildProgress | null = null;
+  private initialBuildCheckpointToken: InitialBuildCheckpointToken | null = null;
   private cacheStore: CacheStorePort | null = null;
   private cacheIssue: IndexControllerIssue | null = null;
   private lastPersistedGeneration: string | null = null;
@@ -332,9 +380,45 @@ export class InPluginIndexController {
     await this.disposal;
   }
 
+  prepareForShutdown(deadlineMs: number): Promise<void> {
+    if (this.shutdownPreparation) return this.shutdownPreparation;
+    if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1) {
+      return Promise.reject(new Error("shutdown checkpoint deadline must be a positive integer"));
+    }
+    if (this.disposed) return Promise.resolve();
+
+    this.stoppingForCheckpoint = true;
+    this.blocked = true;
+    this.mutationEpoch += 1;
+    this.cancelExportTimer();
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.pendingUpserts.clear();
+    this.pendingRemovals.clear();
+    this.pendingRenames.clear();
+    this.rebuildRequested = false;
+    this.rescanRequested = false;
+    this.clearInitialColdPreview();
+
+    const deadlineAt = Date.now() + deadlineMs;
+    const attempt = async (): Promise<void> => {
+      try {
+        await this.running;
+      } catch {
+        // The run-loop records ordinary failures itself. Shutdown only needs the
+        // last state whose Worker acknowledgement is certain.
+      }
+      if (this.disposed || Date.now() >= deadlineAt) return;
+      await this.persistInitialBuildCheckpoint("shutdown");
+    };
+    this.shutdownPreparation = raceWithDeadline(attempt(), deadlineMs);
+    return this.shutdownPreparation;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.stoppingForCheckpoint = false;
     this.blocked = true;
     this.mutationEpoch += 1;
     this.cancelExportTimer();
@@ -346,22 +430,22 @@ export class InPluginIndexController {
     this.rebuildRequested = false;
     this.replacementBuildInProgress = false;
     this.rescanRequested = false;
+    this.initialBuildProgress = null;
     this.clearInitialColdPreview();
     this.emit("disposed");
     const store = this.cacheStore;
     this.cacheStore = null;
     this.disposal = (async () => {
       try {
-        await this.exportRunning;
-      } catch {
-        // A durability operation cannot delay or overturn disposal.
+        await Promise.allSettled([this.exportRunning, this.checkpointRunning]);
+      } finally {
+        await store?.dispose();
       }
-      await store?.dispose();
     })();
   }
 
   private handleEvent(event: VaultSourceEvent): void {
-    if (this.disposed) return;
+    if (this.disposed || this.stoppingForCheckpoint) return;
     const sequence = ++this.eventSequence;
     this.mutationEpoch += 1;
     if (this.cacheIssue === "cache_save_failed") this.cacheIssue = null;
@@ -471,7 +555,9 @@ export class InPluginIndexController {
     if (this.disposed || this.blocked || this.running) return;
     const task = Promise.resolve()
       .then(() => this.runLoop())
-      .catch((error: unknown) => this.handleFailure(error))
+      .catch((error: unknown) => {
+        if (!(error instanceof ShutdownRequestedError)) this.handleFailure(error);
+      })
       .finally(() => {
         if (this.running === task) this.running = null;
         if (this.hasWork() && !this.blocked && !this.disposed) this.scheduleWork();
@@ -561,62 +647,66 @@ export class InPluginIndexController {
     }
     this.requireActive();
 
+    let checkpointEligible = loaded.kind === "miss";
     if (loaded.kind === "miss") {
       await this.classifyCacheMissReason(loaded.reason);
-      this.emit("starting");
-      return;
-    }
-    if (loaded.record.identity.source_policy_hash !== this.sourcePolicyHash) {
+    } else if (loaded.record.identity.source_policy_hash !== this.sourcePolicyHash) {
       await this.discardCache("incompatible", "cache_incompatible");
-      this.emit("starting");
-      return;
-    }
-    if (!isCacheIndexWorker(this.worker)) {
+      checkpointEligible = true;
+    } else if (!isCacheIndexWorker(this.worker)) {
       this.cacheIssue = "cache_restore_unavailable";
       this.emit("starting");
       return;
-    }
-
-    let counts: IndexCounts;
-    try {
-      counts = await this.worker.restoreGeneration(
-        loaded,
-        availability.store.vaultCacheIdentity,
-        this.sourcePolicyHash,
-      );
-    } catch (error) {
-      this.requireActive();
-      const code = errorCode(error);
-      if (code === "cache_digest_mismatch"
-        || code === "cache_image_invalid"
-        || code === "cache_blob_too_large") {
-        await this.discardCache("corrupt", "cache_corrupt");
-      } else if (code === "cache_version_mismatch" || code === "cache_identity_mismatch") {
-        await this.discardCache("incompatible", "cache_incompatible");
-      } else if (code === "internal_error" || code === "invalid_state") {
-        this.cacheIssue = "cache_restore_unavailable";
-      } else {
-        throw error;
+    } else {
+      let counts: IndexCounts | null = null;
+      try {
+        counts = await this.worker.restoreGeneration(
+          loaded,
+          availability.store.vaultCacheIdentity,
+          this.sourcePolicyHash,
+        );
+      } catch (error) {
+        this.requireActive();
+        const code = errorCode(error);
+        if (code === "cache_digest_mismatch"
+          || code === "cache_image_invalid"
+          || code === "cache_blob_too_large") {
+          await this.discardCache("corrupt", "cache_corrupt");
+          checkpointEligible = true;
+        } else if (code === "cache_version_mismatch"
+          || code === "cache_identity_mismatch") {
+          await this.discardCache("incompatible", "cache_incompatible");
+          checkpointEligible = true;
+        } else if (code === "internal_error" || code === "invalid_state") {
+          this.cacheIssue = "cache_restore_unavailable";
+          this.emit("starting");
+          return;
+        } else {
+          throw error;
+        }
       }
-      this.emit("starting");
-      return;
+      if (counts !== null) {
+        this.requireActive();
+        this.setActiveCounts(counts);
+        this.lastPersistedGeneration = counts.generation;
+        this.startupReconciling = true;
+        this.cacheIssue = "index_reconciling";
+        this.replaySubphase = "planning";
+        this.completed = 0;
+        this.total = null;
+        this.currentPath = null;
+        this.emit("replay");
+        if (!this.cacheSearchableObserved) {
+          this.cacheSearchableObserved = true;
+          this.observeStartup({ kind: "cache_searchable", cacheBytes: loaded.record.byteLength });
+        }
+        await this.reconcileRestoredGeneration();
+        return;
+      }
     }
 
-    this.requireActive();
-    this.setActiveCounts(counts);
-    this.lastPersistedGeneration = counts.generation;
-    this.startupReconciling = true;
-    this.cacheIssue = "index_reconciling";
-    this.replaySubphase = "planning";
-    this.completed = 0;
-    this.total = null;
-    this.currentPath = null;
-    this.emit("replay");
-    if (!this.cacheSearchableObserved) {
-      this.cacheSearchableObserved = true;
-      this.observeStartup({ kind: "cache_searchable", cacheBytes: loaded.record.byteLength });
-    }
-    await this.reconcileRestoredGeneration();
+    if (checkpointEligible && await this.tryResumeInitialBuildCheckpoint()) return;
+    this.emit("starting");
   }
 
   private async classifyCacheMissReason(
@@ -649,6 +739,334 @@ export class InPluginIndexController {
     } catch {
       this.requireActive();
       this.cacheIssue = "cache_discard_failed";
+    }
+  }
+
+  private async tryResumeInitialBuildCheckpoint(): Promise<boolean> {
+    const store = isCheckpointStore(this.cacheStore) ? this.cacheStore : null;
+    const worker = isCheckpointIndexWorker(this.worker) ? this.worker : null;
+    if (!store || !worker || this.activeGeneration !== null) return false;
+
+    let loaded: InitialBuildCheckpointLoad;
+    try {
+      loaded = await store.loadInitialBuildCheckpoint();
+    } catch {
+      this.requireActive();
+      this.cacheIssue = "checkpoint_unavailable";
+      return false;
+    }
+    this.requireActive();
+    if (loaded.kind === "miss") {
+      if (loaded.reason === "absent") return false;
+      if (loaded.reason === "identity_mismatch") {
+        this.cacheIssue = "checkpoint_incompatible";
+        return false;
+      }
+      // The store observed and conditionally cleaned malformed or incomplete
+      // pointer state under its writer lock. A second unqualified discard here
+      // could delete a newer checkpoint committed after that observation.
+      this.cacheIssue = loaded.reason === "pointer_incompatible"
+        ? "checkpoint_incompatible"
+        : "checkpoint_corrupt";
+      return false;
+    }
+    this.initialBuildCheckpointToken = {
+      generationId: loaded.record.generationId,
+      sha256: loaded.record.sha256,
+    };
+    if (loaded.record.identity.source_policy_hash !== this.sourcePolicyHash) {
+      await this.discardInitialBuildCheckpoint("incompatible", "checkpoint_incompatible");
+      return false;
+    }
+
+    let restored: RestoreInitialBuildCheckpointResult;
+    try {
+      restored = await worker.restoreInitialBuildCheckpoint(
+        loaded,
+        store.vaultCacheIdentity,
+        this.sourcePolicyHash,
+      );
+    } catch (error) {
+      this.requireActive();
+      const code = errorCode(error);
+      if (code === "checkpoint_digest_mismatch"
+        || code === "checkpoint_image_invalid"
+        || code === "checkpoint_blob_too_large") {
+        await this.discardInitialBuildCheckpoint("corrupt", "checkpoint_corrupt");
+      } else if (code === "checkpoint_version_mismatch"
+        || code === "checkpoint_identity_mismatch"
+        || code === "checkpoint_kind_mismatch") {
+        await this.discardInitialBuildCheckpoint("incompatible", "checkpoint_incompatible");
+      } else if (code === "internal_error" || code === "invalid_state") {
+        this.cacheIssue = "checkpoint_unavailable";
+      } else {
+        throw error;
+      }
+      return false;
+    }
+
+    this.requireActive();
+    if (restored.searchable || restored.publication !== "initial_staging"
+      || restored.generation !== loaded.record.generationId
+      || !sameCheckpointCursor(restored.cursor, loaded.record.cursor)) {
+      try {
+        await worker.abortBuild(loaded.record.generationId);
+      } finally {
+        await this.discardInitialBuildCheckpoint("corrupt", "checkpoint_corrupt");
+      }
+      return false;
+    }
+
+    try {
+      await this.resumeInitialBuildFromCheckpoint(
+        worker,
+        loaded.record.generationId,
+        loaded.record.cursor,
+        restored,
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof ShutdownRequestedError) throw error;
+      let failure = error;
+      try {
+        await worker.abortBuild(loaded.record.generationId);
+      } catch (abortError) {
+        failure = new AggregateError(
+          [error, abortError],
+          "checkpoint resume failed and staging abort did not complete",
+        );
+      }
+      this.initialBuildProgress = null;
+      if (error instanceof CheckpointResumeFallbackError) {
+        this.cacheIssue = "checkpoint_unavailable";
+        return false;
+      }
+      throw failure;
+    }
+  }
+
+  private async discardInitialBuildCheckpoint(
+    reason: "corrupt" | "incompatible" | "completed",
+    successIssue: IndexControllerIssue | null,
+  ): Promise<void> {
+    const store = isCheckpointStore(this.cacheStore) ? this.cacheStore : null;
+    const expected = this.initialBuildCheckpointToken;
+    if (!store || !expected) return;
+    try {
+      await store.discardInitialBuildCheckpoint(reason, expected);
+      if (sameCheckpointToken(this.initialBuildCheckpointToken, expected)) {
+        this.initialBuildCheckpointToken = null;
+      }
+      if (!this.disposed && successIssue !== null) this.cacheIssue = successIssue;
+    } catch {
+      if (!this.disposed) this.cacheIssue = "checkpoint_discard_failed";
+    }
+  }
+
+  private async resumeInitialBuildFromCheckpoint(
+    worker: CheckpointIndexWorkerPort,
+    generation: string,
+    cursor: InitialBuildCheckpointCursor,
+    restored: IndexCounts,
+  ): Promise<void> {
+    this.clearSourceOmissions();
+    this.clearInitialColdPreview();
+    this.initialColdPreviewGeneration = null;
+    this.replaySubphase = "planning";
+    this.completed = 0;
+    this.total = null;
+    this.currentPath = null;
+    this.cacheIssue = "index_reconciling";
+    this.emit("replay");
+
+    const reconciled = await this.reconcileCheckpointPrefix(worker, generation, cursor, restored);
+    this.requireActive();
+    const snapshot = reconciled.snapshot;
+    const prefixLength = snapshot.entries.findIndex((entry) => (
+      cursor.last_acknowledged_path !== null
+        && comparePaths(entry.path, cursor.last_acknowledged_path) > 0
+    ));
+    const representedPrefix = prefixLength < 0 ? snapshot.entries.length : prefixLength;
+    const progress: InitialBuildProgress = {
+      generation,
+      snapshot,
+      represented: snapshot.entries.map((_entry, index) => index < representedPrefix),
+      // A saved batch count describes the old snapshot. Rebase it to the fresh
+      // represented prefix so later suffix acknowledgements can never construct
+      // a cursor with more batches than sources in the current snapshot.
+      acknowledgedAddBatches: Math.min(
+        cursor.acknowledged_add_batches,
+        representedPrefix,
+      ),
+      acknowledgedPrefixSources: representedPrefix,
+      lastAcknowledgedPath: representedPrefix > 0
+        ? snapshot.entries[representedPrefix - 1]!.path
+        : null,
+      counts: reconciled.counts,
+    };
+    this.initialBuildProgress = progress;
+    this.completed = representedPrefix;
+    this.total = snapshot.entries.length;
+    this.currentPath = progress.lastAcknowledgedPath;
+    this.replaySubphase = null;
+    this.emit("snapshot");
+
+    const suffix = snapshot.entries
+      .map((entry, ordinal) => ({ entry, ordinal }))
+      .filter(({ ordinal }) => ordinal >= representedPrefix);
+    let counts = await this.addSnapshotSources(
+      generation,
+      snapshot,
+      reconciled.counts,
+      false,
+      progress,
+      suffix,
+    );
+    this.requireActive();
+
+    this.emit("replay");
+    while (this.hasPendingChanges()) {
+      counts = await this.applyPendingChanges(generation, null, counts);
+      this.syncWorkerQuarantines(counts);
+      progress.counts = counts;
+      this.requireActive();
+    }
+
+    counts = await worker.commitBuild(generation);
+    this.requireActive();
+    this.setActiveCounts(counts);
+    this.initialBuildProgress = null;
+    this.completed = this.total ?? 0;
+    this.cacheIssue = null;
+    this.emit(this.hasPendingChanges() ? "replay" : "ready");
+    await this.discardInitialBuildCheckpoint("completed", null);
+    if (this.cacheIssue === "checkpoint_discard_failed") this.emit("ready");
+  }
+
+  private async reconcileCheckpointPrefix(
+    worker: CheckpointIndexWorkerPort,
+    generation: string,
+    cursor: InitialBuildCheckpointCursor,
+    initialCounts: IndexCounts,
+  ): Promise<{ snapshot: Snapshot; counts: IndexCounts }> {
+    let counts = initialCounts;
+    for (;;) {
+      this.requireActive();
+      const snapshot = this.captureSnapshot();
+      const expectedEpoch = this.mutationEpoch;
+      const prefix = cursor.last_acknowledged_path === null
+        ? []
+        : snapshot.entries.filter((entry) => comparePaths(entry.path, cursor.last_acknowledged_path!) <= 0);
+      const prefixPaths = new Set(prefix.map((entry) => entry.path));
+      this.replaySubphase = "planning";
+      this.completed = 0;
+      this.total = null;
+      this.currentPath = null;
+      this.emit("replay");
+      // Plan against the complete fresh snapshot so represented staging rows in
+      // the untouched suffix are matched, never misclassified as deletions merely
+      // because the conservative cursor stops before them. Only the proven prefix
+      // classifications are applied here; the suffix is replayed ordinarily.
+      const plan = await worker.planInitialBuildCheckpointReconciliation(
+        generation,
+        ACTIVE_VAULT_ID,
+        snapshot.entries.map(({ inspection }) => inspectionMetadata(inspection)),
+      );
+      this.requireActive();
+      if (this.mutationEpoch !== expectedEpoch) continue;
+      if (plan.generation !== generation || plan.publication !== "initial_staging" || plan.searchable) {
+        throw new Error("checkpoint reconciliation plan changed publication state");
+      }
+      assertCompleteReconciliationPlan(plan, snapshot.entries.map((entry) => entry.path));
+
+      const refresh = new Set(plan.refresh.filter((path) => prefixPaths.has(path)));
+      const audit = new Map(plan.audit
+        .filter((entry) => prefixPaths.has(entry.path))
+        .map((entry) => [entry.path, entry.content_hash]));
+      const probedUpserts = new Map<string, SourceUpsert>();
+      const removals = new Set<string>();
+      let attemptedReads = 0;
+      let unreadableReads = 0;
+      this.replaySubphase = "verifying";
+      this.completed = 0;
+      this.total = new Set([...refresh, ...audit.keys(), ...plan.remove]).size;
+      if (this.total > 0) this.emit("replay");
+
+      for (const entry of prefix) {
+        if (!refresh.has(entry.path) && !audit.has(entry.path)) continue;
+        this.currentPath = entry.path;
+        if (entry.inspection.kind === "candidate") attemptedReads += 1;
+        const probe = await this.probeSnapshotRefresh(entry);
+        this.requireActive();
+        if (this.mutationEpoch !== expectedEpoch) break;
+        if (probe.kind === "unreadable") {
+          unreadableReads += 1;
+        } else {
+          const expectedHash = audit.get(entry.path);
+          const unchanged = expectedHash !== undefined
+            && probe.read.kind === "source"
+            && await sha256Hex(probe.read.source.bytes) === expectedHash;
+          if (!unchanged) {
+            const upsert = sourceUpsert(probe.read);
+            if (upsert) probedUpserts.set(entry.path, upsert);
+            else throw new CheckpointResumeFallbackError();
+          }
+        }
+        this.completed += 1;
+        if (this.total !== null && this.completed < this.total) this.emit("replay");
+        await this.yieldControl();
+      }
+      if (this.mutationEpoch !== expectedEpoch) continue;
+
+      for (const path of [...plan.remove].sort(comparePaths)) {
+        this.currentPath = path;
+        // Planner removals remain hypotheses even outside the saved prefix. A
+        // crossing rename or post-cut creation can make the path present again;
+        // only an independent current inspection authorizes deleting its staged
+        // row. Present paths are conservatively upserted instead.
+        attemptedReads += 1;
+        const probe = await this.probePotentialRemoval(path);
+        this.requireActive();
+        if (this.mutationEpoch !== expectedEpoch) break;
+        if (probe.kind === "unreadable") {
+          unreadableReads += 1;
+        } else if (probe.inspection.kind === "missing") {
+          removals.add(path);
+        } else {
+          const upsert = sourceUpsert(probe.read);
+          if (upsert) probedUpserts.set(path, upsert);
+          else throw new CheckpointResumeFallbackError();
+        }
+        this.completed += 1;
+        if (this.total !== null && this.completed < this.total) this.emit("replay");
+        await this.yieldControl();
+      }
+      if (this.mutationEpoch !== expectedEpoch) continue;
+      if (isSystemicUnreadability(unreadableReads, attemptedReads)) {
+        throw new VaultUnavailableError(new Error("active vault became unreadable"));
+      }
+      if (unreadableReads > 0) throw new CheckpointResumeFallbackError();
+
+      this.replaySubphase = "applying";
+      this.completed = 0;
+      this.total = probedUpserts.size + removals.size;
+      const paths = [...new Set([...probedUpserts.keys(), ...removals])].sort(comparePaths);
+      for (const path of paths) {
+        if (this.mutationEpoch !== expectedEpoch) break;
+        this.currentPath = path;
+        counts = await worker.applySourceChanges(
+          generation,
+          null,
+          probedUpserts.has(path) ? [probedUpserts.get(path)!] : [],
+          removals.has(path) ? [{ vault_id: ACTIVE_VAULT_ID, path }] : [],
+        );
+        this.requireActive();
+        this.syncWorkerQuarantines(counts);
+        this.completed += 1;
+        if (this.total !== null && this.completed < this.total) this.emit("replay");
+      }
+      if (this.mutationEpoch !== expectedEpoch) continue;
+      return { snapshot, counts };
     }
   }
 
@@ -967,15 +1385,33 @@ export class InPluginIndexController {
       this.syncWorkerQuarantines(counts);
 
       const snapshot = this.captureSnapshot();
+      const progress: InitialBuildProgress | null = rebuilding ? null : {
+        generation,
+        snapshot,
+        represented: snapshot.entries.map(() => false),
+        acknowledgedAddBatches: 0,
+        acknowledgedPrefixSources: 0,
+        lastAcknowledgedPath: null,
+        counts,
+      };
+      this.initialBuildProgress = progress;
       this.completed = 0;
       this.currentPath = null;
       this.total = snapshot.entries.length;
       this.emit(rebuilding ? "rebuild" : "snapshot");
-      counts = await this.addSnapshotSources(generation, snapshot, counts, rebuilding);
+      counts = await this.addSnapshotSources(
+        generation,
+        snapshot,
+        counts,
+        rebuilding,
+        progress,
+        snapshot.entries.map((entry, ordinal) => ({ entry, ordinal })),
+      );
 
       if (this.rescanRequested) {
         this.clearInitialColdPreview();
         await this.worker.abortBuild(generation);
+        this.initialBuildProgress = null;
         began = false;
         if (activeOmissions) this.restoreSourceOmissions(activeOmissions);
         this.replacementBuildInProgress = false;
@@ -987,9 +1423,11 @@ export class InPluginIndexController {
       while (this.hasPendingChanges()) {
         counts = await this.applyPendingChanges(generation, null, counts);
         this.syncWorkerQuarantines(counts);
+        if (this.initialBuildProgress) this.initialBuildProgress.counts = counts;
         if (this.rescanRequested) {
           this.clearInitialColdPreview();
           await this.worker.abortBuild(generation);
+          this.initialBuildProgress = null;
           began = false;
           if (activeOmissions) this.restoreSourceOmissions(activeOmissions);
           this.replacementBuildInProgress = false;
@@ -1021,11 +1459,17 @@ export class InPluginIndexController {
       counts = await this.worker.commitBuild(generation);
       this.requireActive();
       this.setActiveCounts(counts);
+      this.initialBuildProgress = null;
       this.completed = this.total ?? 0;
       this.replacementBuildInProgress = false;
       this.emit(this.hasPendingChanges() ? "replay" : "ready");
+      if (!rebuilding) {
+        await this.discardInitialBuildCheckpoint("completed", null);
+        if (this.cacheIssue === "checkpoint_discard_failed") this.emit("ready");
+      }
     } catch (error) {
       this.clearInitialColdPreview();
+      if (error instanceof ShutdownRequestedError) throw error;
       const unreadableEvidence = rebuilding ? [...this.unreadableSources] : [];
       let failure = error;
       if (began) {
@@ -1041,6 +1485,7 @@ export class InPluginIndexController {
       if (activeOmissions) {
         this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
       }
+      this.initialBuildProgress = null;
       this.replacementBuildInProgress = false;
       throw failure;
     }
@@ -1095,11 +1540,13 @@ export class InPluginIndexController {
     snapshot: Snapshot,
     initialCounts: IndexCounts,
     rebuilding: boolean,
+    progress: InitialBuildProgress | null,
+    entries: Array<{ entry: SnapshotEntry; ordinal: number }>,
   ): Promise<IndexCounts> {
     let counts = initialCounts;
     let batch: SourceUpsert[] = [];
+    let batchOrdinals: number[] = [];
     let batchBytes = 0;
-    let batchProcessedThrough = 0;
     let attemptedCandidateReads = 0;
     let unreadableCandidateReads = 0;
 
@@ -1109,25 +1556,41 @@ export class InPluginIndexController {
       this.clearInitialColdPreview();
       if (previewWasAvailable) this.emit(rebuilding ? "rebuild" : "snapshot");
       counts = await this.worker.addSourceBatch(generation, batch);
-      this.requireActive();
       this.syncWorkerQuarantines(counts);
+      if (progress) {
+        for (const ordinal of batchOrdinals) progress.represented[ordinal] = true;
+        progress.acknowledgedAddBatches += 1;
+        progress.counts = counts;
+        this.advanceAcknowledgedPrefix(progress);
+      }
       batch = [];
+      batchOrdinals = [];
       batchBytes = 0;
+      if (this.stoppingForCheckpoint) throw new ShutdownRequestedError();
+      this.requireActive();
+      if (progress
+        && progress.acknowledgedAddBatches % INITIAL_BUILD_CHECKPOINT_BATCH_CADENCE === 0) {
+        await this.persistInitialBuildCheckpoint("cadence");
+      }
       if (!rebuilding) {
         this.initialColdPreviewRevision += 1;
-        this.initialColdPreviewProcessed = batchProcessedThrough;
+        this.initialColdPreviewProcessed = progress?.acknowledgedPrefixSources ?? this.completed;
         this.offerInitialColdPreview(generation, counts);
       }
       this.emit(rebuilding ? "rebuild" : "snapshot");
     };
 
     let cursor = 0;
-    while (cursor < snapshot.entries.length) {
+    while (cursor < entries.length) {
       let reservedBytes = 0;
-      const window: Array<{ entry: SnapshotEntry; read: Promise<StableSourceRead> }> = [];
-      while (cursor < snapshot.entries.length && window.length < this.limits.maxConcurrentReads) {
-        const entry = snapshot.entries[cursor]!;
-        const inspection = entry.inspection;
+      const window: Array<{
+        entry: SnapshotEntry;
+        ordinal: number;
+        read: Promise<StableSourceRead>;
+      }> = [];
+      while (cursor < entries.length && window.length < this.limits.maxConcurrentReads) {
+        const indexed = entries[cursor]!;
+        const inspection = indexed.entry.inspection;
         if (inspection.kind === "candidate") {
           if (inspection.size > this.limits.maxBatchBytes) {
             throw new Error("source exceeds the configured batch byte limit");
@@ -1139,9 +1602,9 @@ export class InPluginIndexController {
           }
           reservedBytes += inspection.size;
           attemptedCandidateReads += 1;
-          window.push({ entry, read: this.readSnapshot(inspection) });
+          window.push({ ...indexed, read: this.readSnapshot(inspection) });
         } else {
-          window.push({ entry, read: Promise.resolve(inspection) });
+          window.push({ ...indexed, read: Promise.resolve(inspection) });
         }
         cursor += 1;
       }
@@ -1151,7 +1614,7 @@ export class InPluginIndexController {
       let firstUnreadableError: UnreadableVaultSourceError | null = null;
       for (let index = 0; index < window.length; index += 1) {
         const result = settled[index]!;
-        const { entry } = window[index]!;
+        const { entry, ordinal } = window[index]!;
         this.completed += 1;
         this.currentPath = entry.path;
         if (result.status === "rejected") {
@@ -1159,7 +1622,6 @@ export class InPluginIndexController {
           firstUnreadableError ??= result.reason;
           unreadableCandidateReads += 1;
           this.unreadableSources.add(entry.path);
-          batchProcessedThrough = this.completed;
           this.emit(rebuilding ? "rebuild" : "snapshot");
           continue;
         }
@@ -1177,6 +1639,7 @@ export class InPluginIndexController {
               await flush();
             }
             batch.push(upsert);
+            batchOrdinals.push(ordinal);
             batchBytes += sourceBytes;
           } else if (read.kind === "stale") {
             this.queueUpsert(entry.path);
@@ -1184,7 +1647,6 @@ export class InPluginIndexController {
             this.queueRemoval(entry.path);
           }
         }
-        batchProcessedThrough = this.completed;
         this.emit(rebuilding ? "rebuild" : "snapshot");
         if (batch.length >= this.limits.maxBatchSources) await flush();
       }
@@ -1192,8 +1654,6 @@ export class InPluginIndexController {
         && unreadableCandidateReads >= MIN_SYSTEMIC_UNREADABLE_SOURCES
         && unreadableCandidateReads
           > attemptedCandidateReads * SYSTEMIC_UNREADABLE_READ_RATIO) {
-        // The aggregate ratio, rather than any one rejected source, proves the
-        // vault is unavailable and must prevent a mostly empty commit.
         throw new VaultUnavailableError(firstUnreadableError);
       }
       await this.yieldControl();
@@ -1202,6 +1662,102 @@ export class InPluginIndexController {
 
     await flush();
     return counts;
+  }
+
+  private advanceAcknowledgedPrefix(progress: InitialBuildProgress): void {
+    while (progress.acknowledgedPrefixSources < progress.represented.length
+      && progress.represented[progress.acknowledgedPrefixSources]) {
+      progress.acknowledgedPrefixSources += 1;
+    }
+    progress.lastAcknowledgedPath = progress.acknowledgedPrefixSources > 0
+      ? progress.snapshot.entries[progress.acknowledgedPrefixSources - 1]!.path
+      : null;
+  }
+
+  private async persistInitialBuildCheckpoint(
+    _reason: "cadence" | "shutdown",
+  ): Promise<void> {
+    if (this.checkpointRunning) {
+      await this.checkpointRunning;
+      return;
+    }
+    const store = isCheckpointStore(this.cacheStore) ? this.cacheStore : null;
+    const worker = isCheckpointIndexWorker(this.worker) ? this.worker : null;
+    const progress = this.initialBuildProgress;
+    if (!store
+      || !worker
+      || !progress
+      || progress.acknowledgedPrefixSources === 0
+      || this.activeGeneration !== null
+      || this.replacementBuildInProgress
+      || this.disposed) return;
+
+    const cursor: InitialBuildCheckpointCursor = {
+      snapshot_source_count: progress.snapshot.entries.length,
+      acknowledged_add_batches: progress.acknowledgedAddBatches,
+      acknowledged_prefix_sources: progress.acknowledgedPrefixSources,
+      last_acknowledged_path: progress.lastAcknowledgedPath,
+    };
+    const task = (async () => {
+      try {
+        const exported = await worker.exportInitialBuildCheckpoint(
+          progress.generation,
+          store.vaultCacheIdentity,
+          cursor,
+        );
+        if (this.disposed
+          || this.activeGeneration !== null
+          || this.initialBuildProgress !== progress
+          || exported.generation !== progress.generation
+          || exported.publication !== "initial_staging"
+          || exported.searchable
+          || !sameCheckpointCursor(exported.cursor, cursor)) return;
+        const persisted = await store.putInitialBuildCheckpoint({
+          recordKind: exported.record_kind,
+          recordVersion: exported.checkpoint_record_version,
+          imageVersion: exported.checkpoint_image_version,
+          orderingVersion: INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+          generationId: exported.generation,
+          byteLength: exported.blob_byte_length,
+          sha256: exported.blob_sha256,
+          bytes: exported.bytes,
+          cursor,
+          identity: {
+            protocol_version: exported.protocol_version,
+            cache_schema_version: exported.cache_schema_version,
+            chunking_version: exported.chunking_version,
+            sqlite_version: exported.sqlite_version,
+            sqlite_wasm_sha256: exported.sqlite_wasm_sha256,
+            rust_wasm_sha256: exported.rust_wasm_sha256,
+            plugin_id: exported.plugin_id,
+            plugin_version: exported.plugin_version,
+            cache_identity: exported.cache_identity,
+            source_policy_hash: exported.source_policy_hash,
+          },
+        });
+        if (persisted.generationId !== exported.generation
+          || persisted.sha256 !== exported.blob_sha256) {
+          throw new Error("checkpoint store returned a different record token");
+        }
+        if (!this.disposed && this.initialBuildProgress === progress) {
+          this.initialBuildCheckpointToken = {
+            generationId: persisted.generationId,
+            sha256: persisted.sha256,
+          };
+          if (this.cacheIssue === "checkpoint_save_failed") this.cacheIssue = null;
+          if (!this.stoppingForCheckpoint) this.emit(this.stage);
+        }
+      } catch {
+        if (!this.disposed && this.initialBuildProgress === progress) {
+          this.cacheIssue = "checkpoint_save_failed";
+          if (!this.stoppingForCheckpoint) this.emit(this.stage);
+        }
+      }
+    })().finally(() => {
+      if (this.checkpointRunning === task) this.checkpointRunning = null;
+    });
+    this.checkpointRunning = task;
+    await task;
   }
 
   private async flushActiveChanges(): Promise<void> {
@@ -1736,6 +2292,21 @@ export class InPluginIndexController {
 
   private requireActive(): void {
     if (this.disposed) throw new Error("in-plugin index controller is disposed");
+    if (this.stoppingForCheckpoint) throw new ShutdownRequestedError();
+  }
+}
+
+class ShutdownRequestedError extends Error {
+  constructor() {
+    super("in-plugin index controller is stopping for checkpoint");
+    this.name = "ShutdownRequestedError";
+  }
+}
+
+class CheckpointResumeFallbackError extends Error {
+  constructor() {
+    super("checkpoint prefix could not be proven current");
+    this.name = "CheckpointResumeFallbackError";
   }
 }
 
@@ -1760,6 +2331,53 @@ function isCacheIndexWorker(worker: IndexWorkerPort): worker is CacheIndexWorker
   return typeof candidate.restoreGeneration === "function"
     && typeof candidate.planReconciliation === "function"
     && typeof candidate.exportGeneration === "function";
+}
+
+function isCheckpointIndexWorker(worker: IndexWorkerPort): worker is CheckpointIndexWorkerPort {
+  if (!isCacheIndexWorker(worker)) return false;
+  const candidate = worker as Partial<CheckpointIndexWorkerPort>;
+  return typeof candidate.exportInitialBuildCheckpoint === "function"
+    && typeof candidate.restoreInitialBuildCheckpoint === "function"
+    && typeof candidate.planInitialBuildCheckpointReconciliation === "function";
+}
+
+function isCheckpointStore(store: CacheStorePort | null): store is CacheStoreBundlePort {
+  if (!store) return false;
+  const candidate = store as Partial<CacheStoreBundlePort>;
+  return typeof candidate.loadInitialBuildCheckpoint === "function"
+    && typeof candidate.putInitialBuildCheckpoint === "function"
+    && typeof candidate.discardInitialBuildCheckpoint === "function";
+}
+
+function sameCheckpointToken(
+  left: InitialBuildCheckpointToken | null,
+  right: InitialBuildCheckpointToken,
+): boolean {
+  return left?.generationId === right.generationId && left.sha256 === right.sha256;
+}
+
+function sameCheckpointCursor(
+  left: InitialBuildCheckpointCursor,
+  right: InitialBuildCheckpointCursor,
+): boolean {
+  return left.snapshot_source_count === right.snapshot_source_count
+    && left.acknowledged_add_batches === right.acknowledged_add_batches
+    && left.acknowledged_prefix_sources === right.acknowledged_prefix_sources
+    && left.last_acknowledged_path === right.last_acknowledged_path;
+}
+
+async function raceWithDeadline(task: Promise<void>, deadlineMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      task,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, deadlineMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 }
 
 function inspectionMetadata(

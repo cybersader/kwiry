@@ -1,14 +1,21 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import type { CacheLoad } from "../cache/cache-store";
+import type {
+  CacheLoad,
+  InitialBuildCheckpointLoad,
+} from "../cache/cache-store";
 import type {
   BuildResult,
   DisposeResult,
   ExportGenerationResult,
+  InitialBuildCheckpointExportResult,
+  InitialBuildCheckpointReconciliationPlanResult,
+  InitialBuildCheckpointCursor,
   InitializeResult,
   ReconciliationPlanResult,
   ReconciliationSourceMetadata,
+  RestoreInitialBuildCheckpointResult,
   SearchResult,
   SourceUpsert,
   SourceRemoval,
@@ -100,6 +107,19 @@ export class InPluginWorkerSession {
    * forwarded rather than erased so the Worker can require and discharge the
    * digest-verification obligation itself.
    */
+  exportInitialBuildCheckpoint(
+    generation: string,
+    cacheIdentity: string,
+    cursor: InitialBuildCheckpointCursor,
+  ): Promise<InitialBuildCheckpointExportResult> {
+    return this.client.request({
+      operation: "export_initial_build_checkpoint",
+      generation,
+      cache_identity: cacheIdentity,
+      cursor,
+    }) as Promise<InitialBuildCheckpointExportResult>;
+  }
+
   restoreGeneration(
     hit: Extract<CacheLoad, { kind: "hit" }>,
     expectedCacheIdentity: string,
@@ -119,6 +139,29 @@ export class InPluginWorkerSession {
     }) as Promise<BuildResult>;
   }
 
+  restoreInitialBuildCheckpoint(
+    hit: Extract<InitialBuildCheckpointLoad, { kind: "hit" }>,
+    expectedCacheIdentity: string,
+    expectedSourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH,
+  ): Promise<RestoreInitialBuildCheckpointResult> {
+    const { record } = hit;
+    return this.client.request({
+      operation: "restore_initial_build_checkpoint",
+      record_kind: record.recordKind,
+      checkpoint_record_version: record.recordVersion,
+      checkpoint_image_version: record.imageVersion,
+      generation: record.generationId,
+      cursor: record.cursor,
+      bytes: hit.bytes,
+      blob_byte_length: record.byteLength,
+      blob_sha256: record.sha256,
+      digest_verified: hit.digestVerified,
+      ...record.identity,
+      expected_cache_identity: expectedCacheIdentity,
+      expected_source_policy_hash: expectedSourcePolicyHash,
+    }) as Promise<RestoreInitialBuildCheckpointResult>;
+  }
+
   planReconciliation(
     generation: string,
     vaultId: string,
@@ -130,6 +173,19 @@ export class InPluginWorkerSession {
       vault_id: vaultId,
       current_sources: currentSources,
     }) as Promise<ReconciliationPlanResult>;
+  }
+
+  planInitialBuildCheckpointReconciliation(
+    generation: string,
+    vaultId: string,
+    currentSources: ReconciliationSourceMetadata[],
+  ): Promise<InitialBuildCheckpointReconciliationPlanResult> {
+    return this.client.request({
+      operation: "plan_initial_build_checkpoint_reconciliation",
+      generation,
+      vault_id: vaultId,
+      current_sources: currentSources,
+    }) as Promise<InitialBuildCheckpointReconciliationPlanResult>;
   }
 
   search(query: string, limit: number): Promise<SearchResult> {

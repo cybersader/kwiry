@@ -26,6 +26,9 @@ export const PRODUCTION_RPC_PROTOCOL: WorkerRpcProtocol = Object.freeze({
       case "restore_generation":
       case "plan_reconciliation":
       case "export_generation":
+      case "export_initial_build_checkpoint":
+      case "restore_initial_build_checkpoint":
+      case "plan_initial_build_checkpoint_reconciliation":
         return stringField(command, "generation");
       case "apply_source_changes":
         return stringField(command, "next_generation")
@@ -35,7 +38,8 @@ export const PRODUCTION_RPC_PROTOCOL: WorkerRpcProtocol = Object.freeze({
     }
   },
   transferList(command: RpcCommand) {
-    if (command.operation !== "restore_generation") return [];
+    if (command.operation !== "restore_generation"
+      && command.operation !== "restore_initial_build_checkpoint") return [];
     const bytes = command.bytes;
     return bytes instanceof Uint8Array
       ? [bytes.buffer as ArrayBuffer]
@@ -54,6 +58,9 @@ function isWorkerOperation(value: string): value is WorkerOperation {
     case "export_generation":
     case "restore_generation":
     case "plan_reconciliation":
+    case "export_initial_build_checkpoint":
+    case "restore_initial_build_checkpoint":
+    case "plan_initial_build_checkpoint_reconciliation":
     case "search":
     case "status":
     case "dispose":

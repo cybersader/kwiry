@@ -8,6 +8,9 @@ import { D5C_OWNER_RPC_PROTOCOL } from "../src/worker/d5c-owner-protocol";
 import { D5C_RPC_EXTENSION } from "../src/worker/d5c-session";
 import {
   CACHE_SCHEMA_VERSION,
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   WORKER_PROTOCOL_VERSION,
   emptySourceFormatCounts,
   type WorkerRequest,
@@ -146,6 +149,41 @@ function restoreCommand(generation = "g1") {
     source_policy_hash: identity,
     expected_cache_identity: identity,
     expected_source_policy_hash: identity,
+  };
+}
+
+const CHECKPOINT_CURSOR = {
+  snapshot_source_count: 1,
+  acknowledged_add_batches: 1,
+  acknowledged_prefix_sources: 1,
+  last_acknowledged_path: "alpha.md",
+} as const;
+
+function checkpointRestoreCommand(generation = "g1") {
+  return {
+    ...restoreCommand(generation),
+    operation: "restore_initial_build_checkpoint" as const,
+    record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+    checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+    checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+    cursor: CHECKPOINT_CURSOR,
+  };
+}
+
+function checkpointRestoreResult(generation = "g1") {
+  return {
+    generation,
+    documents: 1,
+    chunks: 1,
+    database_bytes: 1,
+    database_byte_limit: 2,
+    quarantined_sources: 0,
+    quarantine_fields: [],
+    source_format_counts: sourceFormatCounts(1),
+    record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+    publication: "initial_staging" as const,
+    searchable: false as const,
+    cursor: CHECKPOINT_CURSOR,
   };
 }
 
@@ -398,6 +436,102 @@ describe("WorkerRpcClient", () => {
       },
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
+  it("transfers only checkpoint restore bytes and correlates staging generations", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
+    const command = checkpointRestoreCommand();
+    const pending = client.request(command);
+    expect(worker.transfers[0]).toEqual([command.bytes.buffer]);
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "restore_initial_build_checkpoint",
+      ok: true,
+      result: checkpointRestoreResult(),
+    });
+    await expect(pending).resolves.toMatchObject({
+      generation: "g1",
+      publication: "initial_staging",
+      searchable: false,
+    });
+  });
+
+  it("poisons the client on an uncorrelated checkpoint generation", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
+    const pending = client.request(checkpointRestoreCommand("g1"));
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "restore_initial_build_checkpoint",
+      ok: true,
+      result: checkpointRestoreResult("g2"),
+    });
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
+  it("correlates checkpoint export and staging reconciliation operations", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
+    const identity = "d".repeat(64);
+    const exportPending = client.request({
+      operation: "export_initial_build_checkpoint",
+      generation: "g1",
+      cache_identity: identity,
+      cursor: CHECKPOINT_CURSOR,
+    });
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_initial_build_checkpoint",
+      ok: true,
+      result: {
+        ...checkpointRestoreResult(),
+        checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+        checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+        bytes: new Uint8Array([1, 2, 3]),
+        blob_byte_length: 3,
+        blob_sha256: "a".repeat(64),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        cache_schema_version: CACHE_SCHEMA_VERSION,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        sqlite_wasm_sha256: "b".repeat(64),
+        rust_wasm_sha256: "c".repeat(64),
+        plugin_id: "kwiry-search",
+        plugin_version: "0.1.0",
+        cache_identity: identity,
+        source_policy_hash: "e".repeat(64),
+      },
+    });
+    await expect(exportPending).resolves.toMatchObject({ generation: "g1" });
+
+    const planPending = client.request({
+      operation: "plan_initial_build_checkpoint_reconciliation",
+      generation: "g1",
+      vault_id: "active-vault",
+      current_sources: [],
+    });
+    worker.emitMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 2,
+      operation: "plan_initial_build_checkpoint_reconciliation",
+      ok: true,
+      result: {
+        generation: "g1",
+        publication: "initial_staging",
+        searchable: false,
+        unchanged: [],
+        audit: [],
+        refresh: [],
+        remove: [],
+        stored_source_count: 0,
+        matched_source_count: 0,
+      },
+    });
+    await expect(planPending).resolves.toMatchObject({ generation: "g1" });
   });
 
   it("refuses private operations when no extension is installed", async () => {

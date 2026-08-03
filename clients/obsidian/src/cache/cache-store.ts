@@ -10,9 +10,24 @@
 // This module must stay free of "fs" and of any import from "obsidian" so the
 // contract, its bounds, and its validators are testable without either.
 
-import { MAX_EXPORT_BLOB_BYTES } from "../worker/protocol";
+import {
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION as WORKER_CHECKPOINT_IMAGE_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND as WORKER_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION as WORKER_CHECKPOINT_RECORD_VERSION,
+  MAX_EXPORT_BLOB_BYTES,
+  MAX_RECONCILIATION_SOURCES,
+  type InitialBuildCheckpointCursor,
+} from "../worker/protocol";
+import { isNormalizedVaultFilePath } from "../vault-path";
+
+export type { InitialBuildCheckpointCursor } from "../worker/protocol";
 
 export const CACHE_POINTER_VERSION = 1 as const;
+export const INITIAL_BUILD_CHECKPOINT_POINTER_VERSION = 1 as const;
+export const INITIAL_BUILD_CHECKPOINT_RECORD_VERSION = WORKER_CHECKPOINT_RECORD_VERSION;
+export const INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION = WORKER_CHECKPOINT_IMAGE_VERSION;
+export const INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION = 1 as const;
+export const INITIAL_BUILD_CHECKPOINT_RECORD_KIND = WORKER_CHECKPOINT_RECORD_KIND;
 
 /**
  * The store's ceiling IS the protocol's ceiling, by construction rather than by
@@ -23,6 +38,7 @@ export const MAX_CACHE_BLOB_BYTES = MAX_EXPORT_BLOB_BYTES;
 export const MAX_POINTER_BYTES = 8 * 1024;
 export const MAX_RETAINED_GENERATIONS = 2 as const;
 export const CACHE_IMAGE_EXTENSION = ".kwc";
+export const INITIAL_BUILD_CHECKPOINT_IMAGE_EXTENSION = ".kwp";
 
 /**
  * Worker-issued generation identifiers only. TypeScript validates and never
@@ -75,6 +91,65 @@ export interface CacheWrite extends CacheRecord {
   /** Transferred from the Worker. The store keeps no reference after `put`. */
   readonly bytes: Uint8Array;
 }
+
+/**
+ * Conservative progress through one deterministic initial-build snapshot.
+ *
+ * The cursor is evidence about acknowledged Worker state, never authority to
+ * publish or skip reconciliation. Its exact shape and bounds are persisted so
+ * malformed or future ordering semantics cannot be guessed at restore time.
+ */
+export const INITIAL_BUILD_CHECKPOINT_CURSOR_KEYS: readonly (
+  keyof InitialBuildCheckpointCursor
+)[] = [
+  "snapshot_source_count",
+  "acknowledged_add_batches",
+  "acknowledged_prefix_sources",
+  "last_acknowledged_path",
+];
+
+export interface InitialBuildCheckpointRecord {
+  readonly recordKind: typeof INITIAL_BUILD_CHECKPOINT_RECORD_KIND;
+  readonly recordVersion: typeof INITIAL_BUILD_CHECKPOINT_RECORD_VERSION;
+  readonly imageVersion: typeof INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION;
+  readonly orderingVersion: typeof INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION;
+  readonly generationId: string;
+  readonly byteLength: number;
+  /** Worker-computed. The main-thread store never computes or trusts it. */
+  readonly sha256: string;
+  readonly identity: CacheIdentityEnvelope;
+  readonly cursor: InitialBuildCheckpointCursor;
+}
+
+export interface InitialBuildCheckpointWrite extends InitialBuildCheckpointRecord {
+  /** Transferred from the Worker. The store keeps no reference after the write. */
+  readonly bytes: Uint8Array;
+}
+
+/** Identifies the exact checkpoint pointer a delayed destructive action observed. */
+export interface InitialBuildCheckpointToken {
+  readonly generationId: string;
+  readonly sha256: string;
+}
+
+export type InitialBuildCheckpointMissReason =
+  | "absent"
+  | "pointer_unreadable"
+  | "pointer_corrupt"
+  | "pointer_incompatible"
+  | "identity_mismatch"
+  | "image_absent"
+  | "image_unreadable"
+  | "image_length_mismatch";
+
+export type InitialBuildCheckpointLoad =
+  | {
+      readonly kind: "hit";
+      readonly record: InitialBuildCheckpointRecord;
+      readonly bytes: Uint8Array;
+      readonly digestVerified: false;
+    }
+  | { readonly kind: "miss"; readonly reason: InitialBuildCheckpointMissReason };
 
 export type CacheMissReason =
   | "absent"
@@ -139,11 +214,10 @@ export interface CacheStorePort {
   /** The opaque vault identity this store is scoped to. Never a path. */
   readonly vaultCacheIdentity: string;
   /**
-   * Reads the pointed-to generation WITHOUT verifying its digest. The image is
-   * length-checked against the pointer and the Worker-recorded `sha256` is
-   * returned alongside the bytes; verifying it is the caller's obligation and
-   * belongs off the main thread. A hit therefore carries `digestVerified:
-   * false`, which no consumer can ignore by accident.
+   * Reads the pointed-to COMPLETE generation WITHOUT verifying its digest. The
+   * image is length-checked against `current.json` and the Worker-recorded
+   * `sha256` is returned alongside the bytes; verifying it is the caller's
+   * obligation and belongs off the main thread.
    */
   load(): Promise<CacheLoad>;
   put(write: CacheWrite): Promise<CacheRecord>;
@@ -151,9 +225,29 @@ export interface CacheStorePort {
   dispose(): Promise<void>;
 }
 
-export type CacheStoreAvailability =
-  | { readonly kind: "available"; readonly store: CacheStorePort }
+/** A disjoint API and record kind for resumable initial-build staging only. */
+export interface InitialBuildCheckpointStorePort {
+  readonly vaultCacheIdentity: string;
+  loadInitialBuildCheckpoint(): Promise<InitialBuildCheckpointLoad>;
+  putInitialBuildCheckpoint(
+    write: InitialBuildCheckpointWrite,
+  ): Promise<InitialBuildCheckpointRecord>;
+  discardInitialBuildCheckpoint(
+    reason: "corrupt" | "incompatible" | "completed" | "requested",
+    expected: InitialBuildCheckpointToken,
+  ): Promise<void>;
+}
+
+/** The one machine-local store owns both namespaces under one writer lock. */
+export interface CacheStoreBundlePort extends CacheStorePort, InitialBuildCheckpointStorePort {}
+
+export type CacheStoreAvailability<
+  Store extends CacheStorePort = CacheStorePort,
+> =
+  | { readonly kind: "available"; readonly store: Store }
   | { readonly kind: "unavailable"; readonly reason: CacheStoreUnavailableReason };
+
+export type CacheStoreBundleAvailability = CacheStoreAvailability<CacheStoreBundlePort>;
 
 export function isGenerationId(value: unknown): value is string {
   return typeof value === "string" && GENERATION_ID_PATTERN.test(value);
@@ -191,6 +285,48 @@ export function imageFileName(generationId: string): string {
 
 export function imageRelativePath(generationId: string): string {
   return `generations/${imageFileName(generationId)}`;
+}
+
+export function initialBuildCheckpointImageFileName(
+  generationId: string,
+  sha256: string,
+): string {
+  return `${generationId}-${sha256}${INITIAL_BUILD_CHECKPOINT_IMAGE_EXTENSION}`;
+}
+
+/** Relative to the dedicated `initial-build` namespace, never the vault root. */
+export function initialBuildCheckpointImageRelativePath(
+  generationId: string,
+  sha256: string,
+): string {
+  return `images/${initialBuildCheckpointImageFileName(generationId, sha256)}`;
+}
+
+export function isInitialBuildCheckpointCursor(
+  value: unknown,
+): value is InitialBuildCheckpointCursor {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== INITIAL_BUILD_CHECKPOINT_CURSOR_KEYS.length
+    || !keys.every((key) => (
+      INITIAL_BUILD_CHECKPOINT_CURSOR_KEYS as readonly string[]
+    ).includes(key))) {
+    return false;
+  }
+  if (!isNonNegativeSafeInteger(value.snapshot_source_count)
+    || value.snapshot_source_count > MAX_RECONCILIATION_SOURCES
+    || !isNonNegativeSafeInteger(value.acknowledged_add_batches)
+    || value.acknowledged_add_batches > value.snapshot_source_count
+    || !isNonNegativeSafeInteger(value.acknowledged_prefix_sources)
+    || value.acknowledged_prefix_sources > value.snapshot_source_count) {
+    return false;
+  }
+  if (value.acknowledged_prefix_sources === 0) {
+    return value.last_acknowledged_path === null;
+  }
+  return value.acknowledged_add_batches > 0
+    && typeof value.last_acknowledged_path === "string"
+    && isNormalizedVaultFilePath(value.last_acknowledged_path);
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

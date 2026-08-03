@@ -11,7 +11,18 @@ import {
   type StableSourceRead,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
-import type { CacheLoad, CacheStorePort, CacheWrite } from "../src/cache/cache-store";
+import {
+  INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+  type CacheLoad,
+  type CacheStoreBundlePort,
+  type CacheStorePort,
+  type CacheWrite,
+  type InitialBuildCheckpointLoad,
+  type InitialBuildCheckpointToken,
+  type InitialBuildCheckpointWrite,
+} from "../src/cache/cache-store";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
 import { classifySourcePath, type SourceFormat } from "../src/source-formats";
 import {
@@ -24,10 +35,16 @@ import {
 } from "../src/backends/in-plugin-index-controller";
 import {
   CACHE_SCHEMA_VERSION,
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
   WORKER_PROTOCOL_VERSION,
   emptySourceFormatCounts,
+  parseWorkerRequest,
   type ExportGenerationResult,
+  type InitialBuildCheckpointCursor,
+  type InitialBuildCheckpointExportResult,
+  type InitialBuildCheckpointReconciliationPlanResult,
   type ReconciliationPlanResult,
+  type RestoreInitialBuildCheckpointResult,
   type ReconciliationSourceMetadata,
   type SourceInput,
   type SourcePreparationDefectField,
@@ -135,6 +152,7 @@ class FakeWorker implements IndexWorkerPort {
   readonly calls: string[] = [];
   readonly applyCalls: ApplyCall[] = [];
   readonly applyUpsertFormats: SourceFormat[][] = [];
+  readonly appliedUpsertBytes = new Map<string, Uint8Array>();
   activeGeneration: string | null = null;
   stagingGeneration: string | null = null;
   activePaths = new Set<string>();
@@ -173,6 +191,9 @@ class FakeWorker implements IndexWorkerPort {
       removals: removals.map((removal) => removal.path),
     });
     this.applyUpsertFormats.push(upserts.map((source) => source.descriptor.format));
+    for (const source of upserts) {
+      if ("bytes" in source) this.appliedUpsertBytes.set(source.descriptor.path, source.bytes.slice());
+    }
     const paths = nextGeneration === null ? this.stagingPaths : this.activePaths;
     for (const removal of removals) paths.delete(removal.path);
     for (const source of upserts) paths.add(source.descriptor.path);
@@ -201,7 +222,7 @@ class FakeWorker implements IndexWorkerPort {
     return this.counts(active, this.activePaths);
   }
 
-  private counts(generation: string, paths: Set<string>): IndexCounts {
+  protected counts(generation: string, paths: Set<string>): IndexCounts {
     const sourceFormatCounts = emptySourceFormatCounts();
     for (const path of paths) {
       const format = classifySourcePath(path);
@@ -359,6 +380,119 @@ class FakeCacheStore implements CacheStorePort {
   }
 }
 
+class FakeCheckpointStore extends FakeCacheStore implements CacheStoreBundlePort {
+  readonly checkpointPuts: InitialBuildCheckpointWrite[] = [];
+  readonly checkpointDiscards: string[] = [];
+  readonly checkpointDiscardTokens: InitialBuildCheckpointToken[] = [];
+  checkpointLoadCalls = 0;
+
+  constructor(
+    loaded: CacheLoad,
+    readonly checkpointLoaded: InitialBuildCheckpointLoad,
+    onLoad: (() => void) | null = null,
+    private readonly onCheckpointLoad: (() => void) | null = null,
+  ) {
+    super(loaded, onLoad);
+  }
+
+  async loadInitialBuildCheckpoint(): Promise<InitialBuildCheckpointLoad> {
+    this.checkpointLoadCalls += 1;
+    this.onCheckpointLoad?.();
+    return this.checkpointLoaded;
+  }
+
+  async putInitialBuildCheckpoint(write: InitialBuildCheckpointWrite) {
+    this.checkpointPuts.push(write);
+    const { bytes: _bytes, ...record } = write;
+    return record;
+  }
+
+  async discardInitialBuildCheckpoint(
+    reason: "corrupt" | "incompatible" | "completed" | "requested",
+    expected: InitialBuildCheckpointToken,
+  ): Promise<void> {
+    this.checkpointDiscards.push(reason);
+    this.checkpointDiscardTokens.push(expected);
+  }
+}
+
+class FakeCheckpointWorker extends FakeCacheWorker {
+  readonly checkpointExportCursors: InitialBuildCheckpointCursor[] = [];
+  checkpointRestoreCalls = 0;
+  checkpointPlanCalls = 0;
+  onCheckpointPlan: (() => void) | null = null;
+
+  async exportInitialBuildCheckpoint(
+    generation: string,
+    _cacheIdentity: string,
+    cursor: InitialBuildCheckpointCursor,
+  ): Promise<InitialBuildCheckpointExportResult> {
+    const parsed = parseWorkerRequest({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "export_initial_build_checkpoint",
+      generation,
+      cache_identity: CACHE_IDENTITY,
+      cursor,
+    });
+    if ("code" in parsed) {
+      throw new Error("checkpoint export cursor was rejected by the Worker protocol");
+    }
+    this.checkpointExportCursors.push({ ...cursor });
+    return {
+      ...this.counts(generation, this.stagingPaths),
+      record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+      checkpoint_record_version: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+      checkpoint_image_version: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+      publication: "initial_staging",
+      searchable: false,
+      cursor: { ...cursor },
+      bytes: new Uint8Array([5, 6, 7, 8]),
+      blob_byte_length: 4,
+      blob_sha256: "f".repeat(64),
+      protocol_version: WORKER_PROTOCOL_VERSION,
+      cache_schema_version: CACHE_SCHEMA_VERSION,
+      chunking_version: 1,
+      sqlite_version: "3.53.0",
+      sqlite_wasm_sha256: "b".repeat(64),
+      rust_wasm_sha256: "c".repeat(64),
+      plugin_id: "kwiry-search",
+      plugin_version: "0.1.0",
+      cache_identity: CACHE_IDENTITY,
+      source_policy_hash: this.sourcePolicyHash,
+    };
+  }
+
+  async restoreInitialBuildCheckpoint(
+    hit: Extract<InitialBuildCheckpointLoad, { kind: "hit" }>,
+  ): Promise<RestoreInitialBuildCheckpointResult> {
+    this.checkpointRestoreCalls += 1;
+    this.stagingGeneration = hit.record.generationId;
+    this.stagingPaths = new Set(this.restoredLedger.keys());
+    return {
+      ...this.counts(hit.record.generationId, this.stagingPaths),
+      record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+      publication: "initial_staging",
+      searchable: false,
+      cursor: { ...hit.record.cursor },
+    };
+  }
+
+  async planInitialBuildCheckpointReconciliation(
+    generation: string,
+    vaultId: string,
+    currentSources: ReconciliationSourceMetadata[],
+  ): Promise<InitialBuildCheckpointReconciliationPlanResult> {
+    this.checkpointPlanCalls += 1;
+    this.onCheckpointPlan?.();
+    return {
+      ...await super.planReconciliation(generation, vaultId, currentSources),
+      publication: "initial_staging",
+      searchable: false,
+    };
+  }
+}
+
 function cacheHit(
   generationId = "cached-generation",
   sourcePolicyHash = SOURCE_POLICY_HASH,
@@ -383,6 +517,45 @@ function cacheHit(
       },
     },
     bytes: new Uint8Array([1, 2, 3, 4]),
+    digestVerified: false,
+  };
+}
+
+function checkpointHit(
+  generationId = "checkpoint-generation",
+  cursor: InitialBuildCheckpointCursor = {
+    snapshot_source_count: 1,
+    acknowledged_add_batches: 1,
+    acknowledged_prefix_sources: 1,
+    last_acknowledged_path: "a.md",
+  },
+  sourcePolicyHash = SOURCE_POLICY_HASH,
+): Extract<InitialBuildCheckpointLoad, { kind: "hit" }> {
+  return {
+    kind: "hit",
+    record: {
+      recordKind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+      recordVersion: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+      imageVersion: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+      orderingVersion: INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+      generationId,
+      byteLength: 4,
+      sha256: "f".repeat(64),
+      identity: {
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        cache_schema_version: CACHE_SCHEMA_VERSION,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        sqlite_wasm_sha256: "b".repeat(64),
+        rust_wasm_sha256: "c".repeat(64),
+        plugin_id: "kwiry-search",
+        plugin_version: "0.1.0",
+        cache_identity: CACHE_IDENTITY,
+        source_policy_hash: sourcePolicyHash,
+      },
+      cursor,
+    },
+    bytes: new Uint8Array([5, 6, 7, 8]),
     digestVerified: false,
   };
 }
@@ -1298,6 +1471,377 @@ describe("InPluginIndexController", () => {
       issue: "vault_read_failed",
     });
     expect(JSON.stringify({ diagnostic, status: statuses.at(-1) })).not.toContain("Secret-");
+  });
+
+  it("checkpoints every 25 acknowledged initial-build batches with a conservative path cursor", async () => {
+    const source = new FakeSource();
+    for (let index = 0; index < 26; index += 1) {
+      source.set(`${String(index).padStart(2, "0")}.md`, `source-${index}`, 1);
+    }
+    const worker = new FakeCheckpointWorker();
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      { kind: "miss", reason: "absent" },
+    );
+    const { controller } = harness(source, worker, {
+      maxBatchSources: 1,
+      maxConcurrentReads: 1,
+    }, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(worker.checkpointExportCursors).toEqual([{
+      snapshot_source_count: 26,
+      acknowledged_add_batches: 25,
+      acknowledged_prefix_sources: 25,
+      last_acknowledged_path: "24.md",
+    }]);
+    expect(store.checkpointPuts).toHaveLength(1);
+    expect(store.checkpointDiscards).toContain("completed");
+  });
+
+  it("trusts store-side conditional cleanup and performs an explicit fresh initial build", async () => {
+    const source = new FakeSource();
+    source.set("fresh.md", "fresh", 1);
+    const worker = new FakeCheckpointWorker();
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      { kind: "miss", reason: "pointer_incompatible" },
+    );
+    const { controller, statuses } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(store.checkpointDiscards).toEqual([]);
+    expect(worker.checkpointRestoreCalls).toBe(0);
+    expect(worker.calls).toContain("begin:generation-1");
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-1",
+    });
+  });
+
+  it("never considers a partial checkpoint when a complete generation is restorable", async () => {
+    const source = new FakeSource();
+    const worker = new FakeCheckpointWorker();
+    const store = new FakeCheckpointStore(cacheHit(), checkpointHit());
+    const { controller } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(worker.restoreCalls).toBe(1);
+    expect(worker.checkpointRestoreCalls).toBe(0);
+    expect(store.checkpointLoadCalls).toBe(0);
+    expect(worker.activeGeneration).toBe("cached-generation");
+  });
+
+  it("reconciles only the checkpoint prefix without classifying an untouched suffix as removal", async () => {
+    const source = new FakeSource();
+    source.set("aa.md", "inserted", 2);
+    source.set("b.md", "changed", 2);
+    source.set("c.md", "untouched suffix", 1);
+    source.set("y.md", "renamed prefix", 2);
+    const worker = new FakeCheckpointWorker();
+    for (const [path, text] of [
+      ["a.md", "old a"],
+      ["b.md", "old b"],
+      ["c.md", "untouched suffix"],
+      ["x.md", "deleted"],
+      ["z.md", "old z"],
+    ] as const) {
+      worker.restoredLedger.set(path, {
+        path,
+        byte_length: text.length,
+        mtime_nanos: "1000000",
+        indexable: true,
+        content_hash: await sha256Text(text),
+      });
+    }
+    let releaseCommit!: () => void;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    const originalCommit = worker.commitBuild.bind(worker);
+    worker.commitBuild = vi.fn(async (generation) => {
+      await commitGate;
+      return originalCommit(generation);
+    });
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      checkpointHit("checkpoint-generation", {
+        snapshot_source_count: 4,
+        acknowledged_add_batches: 25,
+        acknowledged_prefix_sources: 2,
+        last_acknowledged_path: "b.md",
+      }),
+      null,
+      () => {
+        source.set("during.md", "during restore", 3);
+        source.emit({ kind: "upsert", path: "during.md" });
+      },
+    );
+    const { controller, statuses } = harness(source, worker, {
+      maxBatchSources: 1,
+      maxConcurrentReads: 1,
+    }, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await vi.waitFor(() => expect(worker.commitBuild).toHaveBeenCalledTimes(1));
+
+    expect(worker.activeGeneration).toBeNull();
+    expect(statuses.at(-1)).toMatchObject({ searchable: false, generation: null });
+    expect(worker.planCalls[0]?.map((entry) => entry.path)).toEqual([
+      "aa.md",
+      "b.md",
+      "c.md",
+      "during.md",
+      "y.md",
+    ]);
+    expect(worker.applyCalls.some((call) => call.removals.includes("c.md"))).toBe(false);
+    expect(worker.applyCalls.flatMap((call) => call.upserts)).toContain("aa.md");
+    expect(worker.appliedUpsertBytes.get("b.md")).toEqual(
+      new TextEncoder().encode("changed"),
+    );
+    expect(worker.stagingPaths).toEqual(new Set(["aa.md", "b.md", "c.md", "during.md", "y.md"]));
+
+    releaseCommit();
+    await controller.whenIdle();
+
+    expect(worker.activePaths).toEqual(new Set(["aa.md", "b.md", "c.md", "during.md", "y.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "checkpoint-generation",
+      dirty: false,
+    });
+    expect(store.checkpointDiscards).toEqual(["completed"]);
+  });
+
+  it("reconciles renames crossing the saved cursor without losing or duplicating either side", async () => {
+    const source = new FakeSource();
+    source.set("aa.md", "moved from suffix", 2);
+    source.set("b.md", "stable prefix", 1);
+    source.set("y.md", "moved from prefix", 2);
+    const worker = new FakeCheckpointWorker();
+    for (const [path, text] of [
+      ["a.md", "moved from prefix"],
+      ["b.md", "stable prefix"],
+      ["z.md", "moved from suffix"],
+    ] as const) {
+      worker.restoredLedger.set(path, {
+        path,
+        byte_length: text.length,
+        mtime_nanos: "1000000",
+        indexable: true,
+        content_hash: await sha256Text(text),
+      });
+    }
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      checkpointHit("checkpoint-generation", {
+        snapshot_source_count: 3,
+        acknowledged_add_batches: 2,
+        acknowledged_prefix_sources: 2,
+        last_acknowledged_path: "b.md",
+      }),
+    );
+    const { controller } = harness(source, worker, {
+      maxBatchSources: 1,
+      maxConcurrentReads: 1,
+    }, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(worker.activePaths).toEqual(new Set(["aa.md", "b.md", "y.md"]));
+    expect(worker.applyCalls.flatMap((call) => call.removals).sort()).toEqual(["a.md", "z.md"]);
+    expect(worker.applyCalls.flatMap((call) => call.upserts)).toContain("aa.md");
+    expect(worker.calls).toContain("add:y.md");
+  });
+
+  it("treats conservative cursor lag as replayable work rather than skipped work", async () => {
+    const source = new FakeSource();
+    const worker = new FakeCheckpointWorker();
+    for (const path of ["a.md", "b.md", "c.md"]) {
+      source.set(path, path, 1);
+      worker.restoredLedger.set(path, {
+        path,
+        byte_length: path.length,
+        mtime_nanos: "1000000",
+        indexable: true,
+        content_hash: await sha256Text(path),
+      });
+    }
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      checkpointHit("checkpoint-generation", {
+        snapshot_source_count: 3,
+        acknowledged_add_batches: 3,
+        acknowledged_prefix_sources: 1,
+        last_acknowledged_path: "a.md",
+      }),
+    );
+    const { controller } = harness(source, worker, {
+      maxBatchSources: 1,
+      maxConcurrentReads: 1,
+    }, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(worker.calls).toContain("add:b.md");
+    expect(worker.calls).toContain("add:c.md");
+    expect(worker.applyCalls.flatMap((call) => call.removals)).toEqual([]);
+    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "c.md"]));
+  });
+
+  it("rebases checkpoint batch cadence after a resumed snapshot shrinks", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a.md", 1);
+    source.set("b.md", "b.md", 1);
+    const worker = new FakeCheckpointWorker();
+    for (const path of ["a.md", "b.md", "c.md"]) {
+      worker.restoredLedger.set(path, {
+        path,
+        byte_length: path.length,
+        mtime_nanos: "1000000",
+        indexable: true,
+        content_hash: await sha256Text(path),
+      });
+    }
+    let reportSuffixAcknowledged!: () => void;
+    const suffixAcknowledged = new Promise<void>((resolve) => {
+      reportSuffixAcknowledged = resolve;
+    });
+    let releaseSuffix!: () => void;
+    const suffixGate = new Promise<void>((resolve) => {
+      releaseSuffix = resolve;
+    });
+    const originalAdd = worker.addSourceBatch.bind(worker);
+    worker.addSourceBatch = vi.fn(async (generation: string, sources: SourceUpsert[]) => {
+      const counts = await originalAdd(generation, sources);
+      if (sources.some((entry) => entry.descriptor.path === "b.md")) {
+        reportSuffixAcknowledged();
+        await suffixGate;
+      }
+      return counts;
+    });
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      checkpointHit("checkpoint-generation", {
+        snapshot_source_count: 3,
+        acknowledged_add_batches: 3,
+        acknowledged_prefix_sources: 1,
+        last_acknowledged_path: "a.md",
+      }),
+    );
+    const { controller } = harness(source, worker, {
+      maxBatchSources: 1,
+      maxConcurrentReads: 1,
+    }, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await suffixAcknowledged;
+    const shutdown = controller.prepareForShutdown(1_000);
+    releaseSuffix();
+    await shutdown;
+
+    expect(worker.checkpointExportCursors).toEqual([{
+      snapshot_source_count: 2,
+      acknowledged_add_batches: 2,
+      acknowledged_prefix_sources: 2,
+      last_acknowledged_path: "b.md",
+    }]);
+    expect(store.checkpointPuts).toHaveLength(1);
+  });
+
+  it("restarts checkpoint reconciliation when a post-cut event arrives and replays it", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a.md", 1);
+    source.set("b.md", "b.md", 1);
+    const worker = new FakeCheckpointWorker();
+    worker.restoredLedger.set("a.md", {
+      path: "a.md",
+      byte_length: 4,
+      mtime_nanos: "1000000",
+      indexable: true,
+      content_hash: await sha256Text("a.md"),
+    });
+    worker.onCheckpointPlan = () => {
+      worker.onCheckpointPlan = null;
+      source.set("post.md", "post-cut", 2);
+      source.emit({ kind: "upsert", path: "post.md" });
+    };
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      checkpointHit("checkpoint-generation", {
+        snapshot_source_count: 2,
+        acknowledged_add_batches: 1,
+        acknowledged_prefix_sources: 1,
+        last_acknowledged_path: "a.md",
+      }),
+    );
+    const { controller } = harness(source, worker, {
+      maxBatchSources: 1,
+      maxConcurrentReads: 1,
+    }, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(worker.checkpointPlanCalls).toBe(2);
+    expect(worker.planCalls[1]?.map((entry) => entry.path)).toEqual(["a.md", "b.md", "post.md"]);
+    expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "post.md"]));
+  });
+
+  it("never checkpoints a replacement build even after 25 acknowledged batches", async () => {
+    const source = new FakeSource();
+    source.set("initial.md", "initial", 1);
+    const worker = new FakeCheckpointWorker();
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      { kind: "miss", reason: "absent" },
+    );
+    const { controller } = harness(source, worker, {
+      maxBatchSources: 1,
+      maxConcurrentReads: 1,
+    }, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+    controller.start();
+    await controller.whenIdle();
+    worker.checkpointExportCursors.length = 0;
+    store.checkpointPuts.length = 0;
+
+    for (let index = 0; index < 26; index += 1) {
+      source.set(`replacement-${String(index).padStart(2, "0")}.md`, `r-${index}`, 2);
+    }
+    controller.requestRebuild();
+    await controller.whenIdle();
+
+    expect(worker.checkpointExportCursors).toEqual([]);
+    expect(store.checkpointPuts).toEqual([]);
+    expect(worker.activeGeneration).toBe("generation-2");
   });
 
   it("refuses an old source policy cache and exports the fresh generation under the new hash", async () => {

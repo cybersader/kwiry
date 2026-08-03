@@ -203,6 +203,13 @@ async function buildTypoPrototypeGeneration(worker) {
   await request(worker, { id: 4, operation: "commit_build", generation: "typo-g1" });
 }
 
+const CHECKPOINT_CURSOR = {
+  snapshot_source_count: 1,
+  acknowledged_add_batches: 1,
+  acknowledged_prefix_sources: 1,
+  last_acknowledged_path: "alpha.md",
+};
+
 function restoreFromExport(envelope, { id = 2, generation = envelope.generation, ...overrides } = {}) {
   return {
     id,
@@ -226,6 +233,63 @@ function restoreFromExport(envelope, { id = 2, generation = envelope.generation,
     expected_source_policy_hash: envelope.source_policy_hash,
     ...overrides,
   };
+}
+
+function restoreFromCheckpoint(
+  envelope,
+  { id = 2, generation = envelope.generation, ...overrides } = {},
+) {
+  return {
+    id,
+    operation: "restore_initial_build_checkpoint",
+    record_kind: envelope.record_kind,
+    checkpoint_record_version: envelope.checkpoint_record_version,
+    checkpoint_image_version: envelope.checkpoint_image_version,
+    generation,
+    cursor: envelope.cursor,
+    bytes: envelope.bytes.slice(),
+    blob_byte_length: envelope.blob_byte_length,
+    blob_sha256: envelope.blob_sha256,
+    digest_verified: false,
+    protocol_version: envelope.protocol_version,
+    cache_schema_version: envelope.cache_schema_version,
+    chunking_version: envelope.chunking_version,
+    sqlite_version: envelope.sqlite_version,
+    sqlite_wasm_sha256: envelope.sqlite_wasm_sha256,
+    rust_wasm_sha256: envelope.rust_wasm_sha256,
+    plugin_id: envelope.plugin_id,
+    plugin_version: envelope.plugin_version,
+    cache_identity: envelope.cache_identity,
+    source_policy_hash: envelope.source_policy_hash,
+    expected_cache_identity: envelope.cache_identity,
+    expected_source_policy_hash: envelope.source_policy_hash,
+    ...overrides,
+  };
+}
+
+async function checkpointFixture(options = {}) {
+  const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+  try {
+    await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+    await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+    await request(worker, {
+      id: 3,
+      operation: "add_source_batch",
+      generation: "g1",
+      sources: [source(options.path ?? "alpha.md", options.text ?? "stableterm")],
+    });
+    const response = await request(worker, {
+      id: 4,
+      operation: "export_initial_build_checkpoint",
+      generation: "g1",
+      cache_identity: CACHE_IDENTITY,
+      cursor: CHECKPOINT_CURSOR,
+    });
+    expect(response).toMatchObject({ ok: true });
+    return response.result;
+  } finally {
+    await worker.terminate();
+  }
 }
 
 async function exportedFixture(options = {}) {
@@ -925,6 +989,316 @@ describe("exported cache generation", () => {
         },
       });
       await request(worker, { id: 7, operation: "dispose" });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+});
+
+describe("initial-build staging checkpoints", () => {
+  it("restores only as staging, reconciles and mutates there, and publishes only through commit", async () => {
+    const envelope = await checkpointFixture();
+    expect(envelope).toMatchObject({
+      record_kind: "initial_build_checkpoint",
+      publication: "initial_staging",
+      searchable: false,
+      generation: "g1",
+      cursor: CHECKPOINT_CURSOR,
+    });
+    expect(createHash("sha256").update(envelope.bytes).digest("hex")).toBe(envelope.blob_sha256);
+
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await expect(request(worker, restoreFromCheckpoint(envelope))).resolves.toMatchObject({
+        ok: true,
+        result: {
+          record_kind: "initial_build_checkpoint",
+          publication: "initial_staging",
+          searchable: false,
+          generation: "g1",
+          documents: 1,
+          chunks: 1,
+        },
+      });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          active_generation: null,
+          staging_generation: "g1",
+          searchable: false,
+          documents: 0,
+          chunks: 0,
+        },
+      });
+      await expect(request(worker, {
+        id: 4,
+        operation: "search",
+        query: "stableterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: false, error: { code: "index_building" } });
+      await expect(request(worker, {
+        id: 5,
+        operation: "plan_initial_build_checkpoint_reconciliation",
+        generation: "g1",
+        vault_id: "active-vault",
+        current_sources: [{
+          path: "alpha.md",
+          byte_length: 10,
+          mtime_nanos: "1000001",
+          indexable: true,
+        }],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          publication: "initial_staging",
+          searchable: false,
+          audit: [{ path: "alpha.md" }],
+        },
+      });
+      await expect(request(worker, {
+        id: 6,
+        operation: "apply_source_changes",
+        generation: "g1",
+        next_generation: null,
+        upserts: [source("beta.md", "continuedterm")],
+        removals: [],
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g1", documents: 2 } });
+      await expect(request(worker, {
+        id: 7,
+        operation: "search",
+        query: "continuedterm",
+        limit: 20,
+      })).resolves.toMatchObject({ ok: false, error: { code: "index_building" } });
+      await expect(request(worker, {
+        id: 8,
+        operation: "commit_build",
+        generation: "g1",
+      })).resolves.toMatchObject({ ok: true, result: { generation: "g1", documents: 2 } });
+      await expect(request(worker, {
+        id: 9,
+        operation: "search",
+        query: "continuedterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "g1", hits: [{ path: "beta.md" }] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("refuses checkpoint restore over an active generation without disturbing search", async () => {
+    const envelope = await checkpointFixture();
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "live",
+        path: "live.md",
+        text: "liveterm",
+      });
+      await expect(request(worker, restoreFromCheckpoint(envelope, {
+        id: 5,
+        generation: "checkpoint",
+      }))).resolves.toMatchObject({ ok: false, error: { code: "invalid_state" } });
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "liveterm",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { generation: "live", hits: [{ path: "live.md" }] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it.each([
+    ["wrong kind", { record_kind: "complete_generation" }, "checkpoint_kind_mismatch"],
+    ["wrong recorded vault identity", { cache_identity: "e".repeat(64) }, "checkpoint_identity_mismatch"],
+    ["wrong expected vault identity", { expected_cache_identity: "f".repeat(64) }, "checkpoint_identity_mismatch"],
+    ["wrong recorded source policy", { source_policy_hash: "0".repeat(64) }, "checkpoint_identity_mismatch"],
+    ["wrong expected source policy", { expected_source_policy_hash: "1".repeat(64) }, "checkpoint_identity_mismatch"],
+    ["wrong plugin id", { plugin_id: "other-plugin" }, "checkpoint_identity_mismatch"],
+    ["wrong record version", { checkpoint_record_version: 999 }, "checkpoint_version_mismatch"],
+    ["wrong image version", { checkpoint_image_version: 999 }, "checkpoint_version_mismatch"],
+    ["wrong protocol", { protocol_version: WORKER_PROTOCOL_VERSION - 1 }, "checkpoint_version_mismatch"],
+    ["wrong cache schema", { cache_schema_version: CACHE_SCHEMA_VERSION + 1 }, "checkpoint_version_mismatch"],
+    ["wrong chunking version", { chunking_version: 999 }, "checkpoint_version_mismatch"],
+    ["wrong SQLite version", { sqlite_version: "0.0.0" }, "checkpoint_version_mismatch"],
+    ["wrong SQLite WASM hash", { sqlite_wasm_sha256: "2".repeat(64) }, "checkpoint_version_mismatch"],
+    ["wrong Rust WASM hash", { rust_wasm_sha256: "3".repeat(64) }, "checkpoint_version_mismatch"],
+    ["wrong plugin version", { plugin_version: "999.0.0" }, "checkpoint_version_mismatch"],
+    ["wrong digest", { blob_sha256: "f".repeat(64) }, "checkpoint_digest_mismatch"],
+  ])("refuses %s without retaining staged or active state", async (_name, overrides, code) => {
+    const envelope = await checkpointFixture();
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await expect(request(worker, restoreFromCheckpoint(envelope, overrides))).resolves.toMatchObject({
+        ok: false,
+        error: { code, retryable: false },
+      });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null, searchable: false },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("rejects digest-valid checkpoint wrapper corruption without retaining staging", async () => {
+    const envelope = await checkpointFixture();
+    const bytes = envelope.bytes.slice();
+    bytes[0] ^= 0xff;
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await expect(request(worker, restoreFromCheckpoint(envelope, {
+        bytes,
+        blob_sha256: createHash("sha256").update(bytes).digest("hex"),
+      }))).resolves.toMatchObject({
+        ok: false,
+        error: { code: "checkpoint_image_invalid" },
+      });
+      await expect(request(worker, { id: 3, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: null, searchable: false },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("structurally refuses complete images and checkpoint wrappers through the opposite restore APIs", async () => {
+    const complete = await exportedFixture();
+    const checkpoint = await checkpointFixture();
+    const checkpointWorker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    const completeWorker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(checkpointWorker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await expect(request(checkpointWorker, restoreFromCheckpoint({
+        ...checkpoint,
+        bytes: complete.bytes,
+        blob_byte_length: complete.blob_byte_length,
+        blob_sha256: complete.blob_sha256,
+      }))).resolves.toMatchObject({
+        ok: false,
+        error: { code: "checkpoint_image_invalid" },
+      });
+
+      await request(completeWorker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await expect(request(completeWorker, restoreFromExport({
+        ...complete,
+        bytes: checkpoint.bytes,
+        blob_byte_length: checkpoint.blob_byte_length,
+        blob_sha256: checkpoint.blob_sha256,
+      }))).resolves.toMatchObject({
+        ok: false,
+        error: { code: "cache_image_invalid" },
+      });
+    } finally {
+      await checkpointWorker.terminate();
+      await completeWorker.terminate();
+    }
+  }, 120_000);
+
+  it("keeps staging usable when checkpoint response transfer fails", async () => {
+    const worker = new Worker(
+      nodeWorkerSource(guardWorkerSource, { failTransfer: true }),
+      { eval: true },
+    );
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("alpha.md", "stableterm")],
+      });
+      await expect(request(worker, {
+        id: 4,
+        operation: "export_initial_build_checkpoint",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+        cursor: CHECKPOINT_CURSOR,
+      })).resolves.toMatchObject({ ok: false, error: { code: "internal_error" } });
+      await expect(request(worker, {
+        id: 5,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("beta.md", "continuedterm")],
+      })).resolves.toMatchObject({ ok: true, result: { documents: 2 } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it.each([
+    ["integrity", "target.index.assertIntegrity = () => { throw new Error('injected'); };"],
+    ["image export", "target.index.exportImage = () => { throw new Error('injected'); };"],
+  ])("leaves initial staging usable after a failed %s", async (_name, sabotage) => {
+    const needle = "const target = staging;";
+    const injected = guardWorkerSource.replace(needle, `${needle}\n  ${sabotage}`);
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("alpha.md", "stableterm")],
+      });
+      await expect(request(worker, {
+        id: 4,
+        operation: "export_initial_build_checkpoint",
+        generation: "g1",
+        cache_identity: CACHE_IDENTITY,
+        cursor: CHECKPOINT_CURSOR,
+      })).resolves.toMatchObject({ ok: false });
+      await expect(request(worker, { id: 5, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: { active_generation: null, staging_generation: "g1", searchable: false },
+      });
+      await expect(request(worker, {
+        id: 6,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [source("beta.md", "continuedterm")],
+      })).resolves.toMatchObject({ ok: true, result: { documents: 2 } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it.each([
+    ["without a build", async (worker) => {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      return { id: 2, generation: "g1" };
+    }],
+    ["for replacement staging", async (worker) => {
+      await buildActiveGeneration(worker);
+      await request(worker, { id: 5, operation: "begin_build", generation: "g2" });
+      return { id: 6, generation: "g2" };
+    }],
+  ])("refuses checkpoint export %s", async (_name, arrange) => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      const { id, generation } = await arrange(worker);
+      await expect(request(worker, {
+        id,
+        operation: "export_initial_build_checkpoint",
+        generation,
+        cache_identity: CACHE_IDENTITY,
+        cursor: CHECKPOINT_CURSOR,
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_state" } });
     } finally {
       await worker.terminate();
     }

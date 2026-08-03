@@ -48,6 +48,8 @@ const CAPABILITIES = {
   sourceScope: "active_vault" as const,
   manualRebuild: true,
 };
+const CLEAN_UNLOAD_CHECKPOINT_DEADLINE_MS = 1_500;
+const CLEAN_UNLOAD_STORE_DISPOSAL_GRACE_MS = 250;
 
 export class InPluginLexicalBackend implements SearchBackend {
   readonly identity: BackendIdentity;
@@ -200,15 +202,27 @@ export class InPluginLexicalBackend implements SearchBackend {
     this.disposed = true;
     this.epoch += 1;
     const controller = this.controller;
-    controller?.dispose();
     this.controller = null;
     const session = this.session;
     this.session = null;
     this.recovering = false;
     this.publish(disposedStatus(this.identity));
     this.statusListeners.clear();
+
+    try {
+      await controller?.prepareForShutdown(CLEAN_UNLOAD_CHECKPOINT_DEADLINE_MS);
+    } catch {
+      // A final checkpoint is a bounded durability opportunity, never a reason to
+      // retain the Worker or block plugin unload.
+    }
     session?.forceDispose();
-    await controller?.whenDisposed();
+    controller?.dispose();
+    if (controller) {
+      await raceWithDeadline(
+        controller.whenDisposed(),
+        CLEAN_UNLOAD_STORE_DISPOSAL_GRACE_MS,
+      );
+    }
   }
 
   private startController(recovering: boolean): void {
@@ -494,6 +508,38 @@ function controllerIssue(
         safeMessage: "Search ready; cache save failed",
         recoverable: true,
       };
+    case "checkpoint_corrupt":
+      return {
+        code: issue,
+        safeMessage: "Initial-build checkpoint was corrupt; building fresh…",
+        recoverable: true,
+      };
+    case "checkpoint_incompatible":
+      return {
+        code: issue,
+        safeMessage: "Initial-build checkpoint is incompatible; building fresh…",
+        recoverable: true,
+      };
+    case "checkpoint_unavailable":
+      return {
+        code: issue,
+        safeMessage: "Initial-build checkpoint could not be resumed; building fresh…",
+        recoverable: true,
+      };
+    case "checkpoint_discard_failed":
+      return {
+        code: issue,
+        safeMessage: status.searchable
+          ? "Search ready; stale initial-build checkpoint cleanup failed."
+          : "Initial-build checkpoint was rejected but could not be discarded; building fresh…",
+        recoverable: true,
+      };
+    case "checkpoint_save_failed":
+      return {
+        code: issue,
+        safeMessage: "Initial build continues, but checkpoint save failed.",
+        recoverable: true,
+      };
   }
 }
 
@@ -625,6 +671,20 @@ function disposedBackendError(): KwiryBackendError {
     false,
     "The in-plugin backend is disposed.",
   );
+}
+
+async function raceWithDeadline(task: Promise<void>, deadlineMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      task,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, deadlineMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 }
 
 function yieldToBrowser(): Promise<void> {

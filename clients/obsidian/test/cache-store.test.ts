@@ -19,12 +19,19 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+  INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+  INITIAL_BUILD_CHECKPOINT_POINTER_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   CacheStoreError,
   MAX_CACHE_BLOB_BYTES,
   type CacheIdentityEnvelope,
   type CacheLoad,
-  type CacheStorePort,
+  type CacheStoreBundlePort,
   type CacheWrite,
+  type InitialBuildCheckpointLoad,
+  type InitialBuildCheckpointWrite,
 } from "../src/cache/cache-store";
 import { MAX_EXPORT_BLOB_BYTES, WORKER_PROTOCOL_VERSION } from "../src/worker/protocol";
 import {
@@ -171,6 +178,30 @@ function write(generationId: string, bytes: Uint8Array): CacheWrite {
   };
 }
 
+function checkpointWrite(
+  generationId: string,
+  bytes: Uint8Array,
+  cursor: InitialBuildCheckpointWrite["cursor"] = {
+    snapshot_source_count: 3,
+    acknowledged_add_batches: 2,
+    acknowledged_prefix_sources: 2,
+    last_acknowledged_path: "folder/b.md",
+  },
+): InitialBuildCheckpointWrite {
+  return {
+    recordKind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+    recordVersion: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+    imageVersion: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+    orderingVersion: INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+    generationId,
+    byteLength: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    identity: envelope(),
+    cursor,
+    bytes,
+  };
+}
+
 function image(seed: number, size = 64): Uint8Array {
   return new Uint8Array(size).fill(seed);
 }
@@ -180,7 +211,7 @@ async function openStore(overrides: {
   maxBlobBytes?: number;
   now?: () => number;
   rootOverride?: string;
-} = {}): Promise<CacheStorePort> {
+} = {}): Promise<CacheStoreBundlePort> {
   const availability = await openLocalCacheStore({
     canonicalVaultPath: vaultPath,
     vaultConfigDirName: ".obsidian",
@@ -203,6 +234,26 @@ function generationsDirectory(): string {
   return path.join(vaultDirectory(), "generations");
 }
 
+function initialBuildDirectory(): string {
+  return path.join(vaultDirectory(), "initial-build");
+}
+
+function initialBuildImagesDirectory(): string {
+  return path.join(initialBuildDirectory(), "images");
+}
+
+function initialBuildPointerPath(): string {
+  return path.join(initialBuildDirectory(), "checkpoint.json");
+}
+
+function listInitialBuildImages(): string[] {
+  try {
+    return readdirSync(initialBuildImagesDirectory()).sort();
+  } catch {
+    return [];
+  }
+}
+
 function listGenerations(): string[] {
   return readdirSync(generationsDirectory()).sort();
 }
@@ -221,6 +272,15 @@ function readPointer(): Record<string, unknown> {
 
 function writePointer(value: unknown): void {
   writeFileSync(path.join(vaultDirectory(), "current.json"), JSON.stringify(value));
+}
+
+function readInitialBuildPointer(): Record<string, unknown> {
+  return JSON.parse(readFileSync(initialBuildPointerPath(), "utf8"));
+}
+
+function writeInitialBuildPointer(value: unknown): void {
+  mkdirSync(initialBuildDirectory(), { recursive: true });
+  writeFileSync(initialBuildPointerPath(), JSON.stringify(value));
 }
 
 function walkFiles(root: string): string[] {
@@ -1036,4 +1096,420 @@ describe("LocalCacheStore", () => {
       }
     },
   );
+});
+
+describe("LocalCacheStore initial-build checkpoints", () => {
+  it("round-trips a typed checkpoint in a disjoint pointer and image namespace", async () => {
+    const store = await openStore();
+    const completeBytes = image(0x31, 128);
+    const checkpointBytes = image(0x32, 192);
+    await store.put(write("complete-g1", completeBytes));
+    const record = await store.putInitialBuildCheckpoint(
+      checkpointWrite("staging-g1", checkpointBytes),
+    );
+
+    expect(record).toMatchObject({
+      recordKind: "initial_build_checkpoint",
+      recordVersion: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+      imageVersion: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+      orderingVersion: INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+      generationId: "staging-g1",
+    });
+    const pointer = readInitialBuildPointer();
+    expect(pointer).toMatchObject({
+      pointerVersion: INITIAL_BUILD_CHECKPOINT_POINTER_VERSION,
+      recordKind: "initial_build_checkpoint",
+      generationId: "staging-g1",
+      cursor: checkpointWrite("unused", image(1)).cursor,
+    });
+    expect(pointer.file).toMatch(/^images\/staging-g1-[0-9a-f]{64}\.kwp$/u);
+    expect(existsSync(path.join(vaultDirectory(), "current.json"))).toBe(true);
+    expect(listGenerations()).toEqual(["complete-g1.kwc"]);
+    expect(listInitialBuildImages()).toEqual([path.basename(String(pointer.file))]);
+
+    const loaded = await store.loadInitialBuildCheckpoint();
+    expect(loaded.kind).toBe("hit");
+    if (loaded.kind !== "hit") return;
+    expect(loaded.record).toEqual(record);
+    expect(Array.from(loaded.bytes)).toEqual(Array.from(checkpointBytes));
+    expect(loaded.digestVerified).toBe(false);
+    await expect(store.load()).resolves.toMatchObject({
+      kind: "hit",
+      record: { generationId: "complete-g1" },
+    });
+    await store.dispose();
+  });
+
+  it("durably renames a checkpoint image before committing its pointer", async () => {
+    const io = new RecordingFileSystem();
+    const store = await openStore({ fs: io });
+    io.calls.length = 0;
+    await store.putInitialBuildCheckpoint(checkpointWrite("staging-g1", image(0x33)));
+
+    const pointer = readInitialBuildPointer();
+    const imagePath = path.join(initialBuildDirectory(), String(pointer.file));
+    const relevant = io.log.filter((entry) =>
+      entry.includes(".kwp") || entry.includes("checkpoint.json"));
+    const imageTemp = relevant.find((entry) =>
+      entry.startsWith("open(wx)") && entry.includes(".kwp"))!.slice("open(wx):".length);
+    const pointerTemp = relevant.find((entry) =>
+      entry.startsWith("open(wx)") && entry.includes("checkpoint.json"))!
+      .slice("open(wx):".length);
+    const expected = [
+      `open(wx):${imageTemp}`,
+      `write:${imageTemp}`,
+      `sync:${imageTemp}`,
+      `rename:${imagePath}`,
+      `open(wx):${pointerTemp}`,
+      `write:${pointerTemp}`,
+      `sync:${pointerTemp}`,
+      `rename:${initialBuildPointerPath()}`,
+    ];
+    let cursor = 0;
+    for (const entry of io.log) {
+      if (entry === expected[cursor]) cursor += 1;
+    }
+    expect(cursor).toBe(expected.length);
+    expect(io.log.indexOf(`rename:${imagePath}`))
+      .toBeLessThan(io.log.indexOf(`rename:${initialBuildPointerPath()}`));
+    await store.dispose();
+  });
+
+  it("never returns substituted checkpoint bytes through the complete-generation loader", async () => {
+    const store = await openStore();
+    const completeBytes = image(0x34, 128);
+    await store.put(write("complete-g1", completeBytes));
+    await store.putInitialBuildCheckpoint(checkpointWrite("staging-g1", image(0x35, 128)));
+    const checkpointPointer = readInitialBuildPointer();
+    writeFileSync(
+      path.join(initialBuildDirectory(), String(checkpointPointer.file)),
+      completeBytes,
+    );
+
+    const complete = await store.load();
+    expect(complete).toMatchObject({ kind: "hit", record: { generationId: "complete-g1" } });
+    const checkpoint = await store.loadInitialBuildCheckpoint();
+    expect(checkpoint).toMatchObject({
+      kind: "hit",
+      record: { recordKind: "initial_build_checkpoint", generationId: "staging-g1" },
+      digestVerified: false,
+    });
+    if (checkpoint.kind === "hit") {
+      expect(createHash("sha256").update(checkpoint.bytes).digest("hex"))
+        .not.toBe(checkpoint.record.sha256);
+    }
+    await store.dispose();
+  });
+
+  it("keeps checkpoint and complete hit types structurally distinct", () => {
+    type HitOf<T> = Extract<T, { readonly kind: "hit" }>;
+    type IsExactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+    const distinct: IsExactly<HitOf<InitialBuildCheckpointLoad>, HitOf<CacheLoad>> = false;
+    expect(distinct).toBe(false);
+  });
+
+  it("refuses records routed through the wrong API before touching disk", async () => {
+    const io = new RecordingFileSystem();
+    const store = await openStore({ fs: io });
+    io.calls.length = 0;
+    const checkpoint = checkpointWrite("staging-g1", image(0x41));
+    await expect(store.put(checkpoint as unknown as CacheWrite)).rejects.toMatchObject({
+      code: "invalid_blob",
+    });
+    await expect(store.putInitialBuildCheckpoint(
+      write("complete-g1", image(0x42)) as unknown as InitialBuildCheckpointWrite,
+    )).rejects.toMatchObject({ code: "invalid_blob" });
+    expect(io.calls).toEqual([]);
+    await store.dispose();
+  });
+
+  it("refuses complete and checkpoint pointer substitution without crossing namespaces", async () => {
+    const store = await openStore();
+    await store.put(write("complete-g1", image(0x51, 96)));
+    await store.putInitialBuildCheckpoint(checkpointWrite("staging-g1", image(0x52, 96)));
+    const completePointer = readPointer();
+    const checkpointPointer = readInitialBuildPointer();
+
+    writeInitialBuildPointer(completePointer);
+    await expect(store.loadInitialBuildCheckpoint()).resolves.toEqual({
+      kind: "miss",
+      reason: "pointer_incompatible",
+    });
+    expect(listInitialBuildImages()).toEqual([]);
+    await expect(store.load()).resolves.toMatchObject({
+      kind: "hit",
+      record: { generationId: "complete-g1" },
+    });
+
+    await store.putInitialBuildCheckpoint(checkpointWrite("staging-g1", image(0x53, 96)));
+    writePointer(checkpointPointer);
+    await expect(store.load()).resolves.toEqual({ kind: "miss", reason: "pointer_corrupt" });
+    await expect(store.loadInitialBuildCheckpoint()).resolves.toMatchObject({
+      kind: "hit",
+      record: { generationId: "staging-g1" },
+    });
+    expect(listGenerations()).toEqual(["complete-g1.kwc"]);
+    await store.dispose();
+  });
+
+  it.each([
+    ["an extra pointer key", () => writeInitialBuildPointer({ ...readInitialBuildPointer(), extra: 1 })],
+    [
+      "a traversal image path",
+      () => writeInitialBuildPointer({
+        ...readInitialBuildPointer(),
+        file: "../../generations/complete-g1.kwc",
+      }),
+    ],
+    [
+      "a wrong record kind",
+      () => writeInitialBuildPointer({
+        ...readInitialBuildPointer(),
+        recordKind: "complete_generation",
+      }),
+    ],
+    [
+      "an old pointer version",
+      () => writeInitialBuildPointer({
+        ...readInitialBuildPointer(),
+        pointerVersion: INITIAL_BUILD_CHECKPOINT_POINTER_VERSION + 1,
+      }),
+    ],
+    [
+      "an invalid cursor path",
+      () => writeInitialBuildPointer({
+        ...readInitialBuildPointer(),
+        cursor: {
+          ...(readInitialBuildPointer().cursor as object),
+          last_acknowledged_path: "../outside.md",
+        },
+      }),
+    ],
+    [
+      "an incoherent empty cursor",
+      () => writeInitialBuildPointer({
+        ...readInitialBuildPointer(),
+        cursor: {
+          snapshot_source_count: 1,
+          acknowledged_add_batches: 0,
+          acknowledged_prefix_sources: 0,
+          last_acknowledged_path: "note.md",
+        },
+      }),
+    ],
+    [
+      "an oversized pointer",
+      () => writeFileSync(initialBuildPointerPath(), "x".repeat(9 * 1024)),
+    ],
+  ])("refuses %s and removes checkpoint-owned artifacts only", async (_name, corrupt) => {
+    const store = await openStore();
+    await store.put(write("complete-g1", image(0x61)));
+    await store.putInitialBuildCheckpoint(checkpointWrite("staging-g1", image(0x62)));
+    corrupt();
+
+    const loaded = await store.loadInitialBuildCheckpoint();
+    expect(loaded.kind).toBe("miss");
+    expect(["pointer_corrupt", "pointer_incompatible"]).toContain(
+      loaded.kind === "miss" ? loaded.reason : "hit",
+    );
+    expect(listInitialBuildImages()).toEqual([]);
+    await expect(store.load()).resolves.toMatchObject({
+      kind: "hit",
+      record: { generationId: "complete-g1" },
+    });
+    await store.dispose();
+  });
+
+  it("preserves a foreign-vault checkpoint pointer and image", async () => {
+    const store = await openStore();
+    await store.putInitialBuildCheckpoint(checkpointWrite("staging-g1", image(0x71)));
+    const pointer = readInitialBuildPointer();
+    writeInitialBuildPointer({
+      ...pointer,
+      vaultIdentity: "f".repeat(64),
+      identity: { ...(pointer.identity as object), cache_identity: "f".repeat(64) },
+    });
+    const beforeImages = listInitialBuildImages();
+
+    await expect(store.loadInitialBuildCheckpoint()).resolves.toEqual({
+      kind: "miss",
+      reason: "identity_mismatch",
+    });
+    expect(readInitialBuildPointer().vaultIdentity).toBe("f".repeat(64));
+    expect(listInitialBuildImages()).toEqual(beforeImages);
+    await store.dispose();
+  });
+
+  it.each(["initial-build", "images"] as const)(
+    "refuses a symlink at the checkpoint %s directory without touching its target",
+    async (component) => {
+      mkdirSync(vaultPath, { recursive: true });
+      const store = await openStore();
+      mkdirSync(vaultDirectory(), { recursive: true });
+      if (component === "initial-build") {
+        symlinkSync(
+          vaultPath,
+          initialBuildDirectory(),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      } else {
+        mkdirSync(initialBuildDirectory(), { recursive: true });
+        symlinkSync(
+          vaultPath,
+          initialBuildImagesDirectory(),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
+
+      await expect(store.putInitialBuildCheckpoint(
+        checkpointWrite("staging-g1", image(0x72)),
+      )).rejects.toMatchObject({ code: "unsafe_path" });
+      expect(readdirSync(vaultPath)).toEqual([]);
+      await store.dispose();
+    },
+  );
+
+  it("refuses a symlink checkpoint image and never follows it", async () => {
+    const store = await openStore();
+    await store.putInitialBuildCheckpoint(checkpointWrite("staging-g1", image(0x73, 128)));
+    const pointer = readInitialBuildPointer();
+    const checkpointImage = path.join(initialBuildDirectory(), String(pointer.file));
+    const target = path.join(workspace, "outside-checkpoint-target");
+    writeFileSync(target, Buffer.alloc(128, 0x74));
+    rmSync(checkpointImage);
+    symlinkSync(target, checkpointImage, "file");
+
+    await expect(store.loadInitialBuildCheckpoint()).resolves.toEqual({
+      kind: "miss",
+      reason: "image_unreadable",
+    });
+    expect(readFileSync(target)).toEqual(Buffer.alloc(128, 0x74));
+    await store.dispose();
+  });
+
+  it("commits image before pointer and preserves the previous same-generation checkpoint on a torn write", async () => {
+    const first = image(0x81, 256);
+    const second = image(0x82, 256);
+    const setup = await openStore();
+    await setup.putInitialBuildCheckpoint(checkpointWrite("staging-g1", first));
+    await setup.dispose();
+
+    const io = new RecordingFileSystem();
+    io.failure = (call) => call.op === "rename" && call.path === initialBuildPointerPath();
+    const crashing = await openStore({ fs: io });
+    await expect(crashing.putInitialBuildCheckpoint(
+      checkpointWrite("staging-g1", second),
+    )).rejects.toMatchObject({ code: "write_failed" });
+
+    const imageRename = io.log.findIndex((entry) =>
+      entry.startsWith("rename:") && entry.endsWith(".kwp"));
+    const pointerRename = io.log.findIndex((entry) => entry === `rename:${initialBuildPointerPath()}`);
+    expect(imageRename).toBeGreaterThanOrEqual(0);
+    expect(pointerRename).toBeGreaterThan(imageRename);
+
+    const recovered = await openStore();
+    const loaded = await recovered.loadInitialBuildCheckpoint();
+    expect(loaded.kind).toBe("hit");
+    if (loaded.kind !== "hit") return;
+    expect(Array.from(loaded.bytes)).toEqual(Array.from(first));
+    await recovered.putInitialBuildCheckpoint(checkpointWrite("staging-g1", second));
+    expect(listInitialBuildImages()).toHaveLength(1);
+    await recovered.dispose();
+    await crashing.dispose();
+  });
+
+  it("uses the shared writer lock and takes over a stale lock", async () => {
+    const store = await openStore();
+    await store.put(write("complete-g1", image(0x91)));
+    writeFileSync(path.join(vaultDirectory(), "writer.lock"), "{}");
+
+    await expect(store.putInitialBuildCheckpoint(
+      checkpointWrite("staging-g1", image(0x92)),
+    )).rejects.toMatchObject({ code: "locked" });
+    const takingOver = await openStore({ now: () => Date.now() + 60 * 60 * 1000 });
+    await expect(takingOver.putInitialBuildCheckpoint(
+      checkpointWrite("staging-g1", image(0x93)),
+    )).resolves.toMatchObject({ generationId: "staging-g1" });
+    await store.dispose();
+    await takingOver.dispose();
+  });
+
+  it("rejects oversized checkpoint blobs and malformed bounded cursors before I/O", async () => {
+    const io = new RecordingFileSystem();
+    const store = await openStore({ fs: io, maxBlobBytes: 1_024 });
+    io.calls.length = 0;
+    await expect(store.putInitialBuildCheckpoint(
+      checkpointWrite("staging-g1", image(0xa1, 2_048)),
+    )).rejects.toMatchObject({ code: "invalid_blob" });
+    await expect(store.putInitialBuildCheckpoint(checkpointWrite("staging-g1", image(0xa2), {
+      snapshot_source_count: 1,
+      acknowledged_add_batches: 2,
+      acknowledged_prefix_sources: 1,
+      last_acknowledged_path: "note.md",
+    }))).rejects.toMatchObject({ code: "invalid_blob" });
+    expect(io.calls).toEqual([]);
+    await store.dispose();
+  });
+
+  it("keeps complete and checkpoint discard operations isolated", async () => {
+    const store = await openStore();
+    await store.put(write("complete-g1", image(0xb1)));
+    const firstCheckpoint = await store.putInitialBuildCheckpoint(
+      checkpointWrite("staging-g1", image(0xb2)),
+    );
+
+    await store.discardInitialBuildCheckpoint("completed", firstCheckpoint);
+    await expect(store.loadInitialBuildCheckpoint()).resolves.toEqual({
+      kind: "miss",
+      reason: "absent",
+    });
+    await expect(store.load()).resolves.toMatchObject({
+      kind: "hit",
+      record: { generationId: "complete-g1" },
+    });
+
+    await store.putInitialBuildCheckpoint(checkpointWrite("staging-g2", image(0xb3)));
+    await store.discard("requested");
+    await expect(store.load()).resolves.toEqual({ kind: "miss", reason: "absent" });
+    await expect(store.loadInitialBuildCheckpoint()).resolves.toMatchObject({
+      kind: "hit",
+      record: { generationId: "staging-g2" },
+    });
+    await store.dispose();
+  });
+
+  it("does not discard a newer checkpoint committed by another store", async () => {
+    const staleStore = await openStore();
+    const newerStore = await openStore();
+    const stale = await staleStore.putInitialBuildCheckpoint(
+      checkpointWrite("staging-old", image(0xb4)),
+    );
+    const newer = await newerStore.putInitialBuildCheckpoint(
+      checkpointWrite("staging-old", image(0xb5)),
+    );
+
+    await staleStore.discardInitialBuildCheckpoint("completed", stale);
+
+    await expect(newerStore.loadInitialBuildCheckpoint()).resolves.toMatchObject({
+      kind: "hit",
+      record: { generationId: "staging-old", sha256: newer.sha256 },
+    });
+    await staleStore.dispose();
+    await newerStore.dispose();
+  });
+
+  it("refuses every checkpoint operation after disposal", async () => {
+    const store = await openStore();
+    const checkpoint = await store.putInitialBuildCheckpoint(
+      checkpointWrite("staging-g1", image(0xc1)),
+    );
+    await store.dispose();
+
+    await expect(store.loadInitialBuildCheckpoint()).rejects.toMatchObject({ code: "disposed" });
+    await expect(store.putInitialBuildCheckpoint(
+      checkpointWrite("staging-g2", image(0xc2)),
+    )).rejects.toMatchObject({ code: "disposed" });
+    await expect(store.discardInitialBuildCheckpoint("requested", checkpoint))
+      .rejects.toMatchObject({ code: "disposed" });
+  });
 });

@@ -14,23 +14,36 @@ import * as path from "path";
 
 import {
   CACHE_POINTER_VERSION,
+  INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+  INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+  INITIAL_BUILD_CHECKPOINT_POINTER_VERSION,
+  INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+  INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   CacheStoreError,
   MAX_CACHE_BLOB_BYTES,
   MAX_POINTER_BYTES,
   MAX_RETAINED_GENERATIONS,
   imageFileName,
   imageRelativePath,
+  initialBuildCheckpointImageFileName,
+  initialBuildCheckpointImageRelativePath,
   isCacheIdentityEnvelope,
   isGenerationId,
+  isInitialBuildCheckpointCursor,
   isNonNegativeSafeInteger,
   isRecord,
   isSha256Hex,
   type CacheIdentityEnvelope,
   type CacheLoad,
   type CacheRecord,
-  type CacheStoreAvailability,
-  type CacheStorePort,
+  type CacheStoreBundleAvailability,
+  type CacheStoreBundlePort,
   type CacheWrite,
+  type InitialBuildCheckpointCursor,
+  type InitialBuildCheckpointLoad,
+  type InitialBuildCheckpointRecord,
+  type InitialBuildCheckpointToken,
+  type InitialBuildCheckpointWrite,
 } from "./cache-store";
 import {
   foldPathForComparison,
@@ -126,6 +139,63 @@ const POINTER_KEYS: readonly string[] = [
   "writtenAtMs",
 ];
 
+interface InitialBuildCheckpointPointer {
+  readonly pointerVersion: typeof INITIAL_BUILD_CHECKPOINT_POINTER_VERSION;
+  readonly recordKind: typeof INITIAL_BUILD_CHECKPOINT_RECORD_KIND;
+  readonly recordVersion: typeof INITIAL_BUILD_CHECKPOINT_RECORD_VERSION;
+  readonly imageVersion: typeof INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION;
+  readonly orderingVersion: typeof INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION;
+  readonly vaultIdentity: string;
+  readonly generationId: string;
+  readonly file: string;
+  readonly byteLength: number;
+  readonly sha256: string;
+  readonly identity: CacheIdentityEnvelope;
+  readonly cursor: InitialBuildCheckpointCursor;
+  readonly writtenAtMs: number;
+}
+
+const INITIAL_BUILD_CHECKPOINT_POINTER_KEYS: readonly string[] = [
+  "pointerVersion",
+  "recordKind",
+  "recordVersion",
+  "imageVersion",
+  "orderingVersion",
+  "vaultIdentity",
+  "generationId",
+  "file",
+  "byteLength",
+  "sha256",
+  "identity",
+  "cursor",
+  "writtenAtMs",
+];
+
+const INITIAL_BUILD_CHECKPOINT_WRITE_KEYS: readonly string[] = [
+  "recordKind",
+  "recordVersion",
+  "imageVersion",
+  "orderingVersion",
+  "generationId",
+  "byteLength",
+  "sha256",
+  "identity",
+  "cursor",
+  "bytes",
+];
+
+type CheckpointPointerParse =
+  | { readonly kind: "valid"; readonly pointer: InitialBuildCheckpointPointer }
+  | { readonly kind: "corrupt" }
+  | { readonly kind: "incompatible" };
+
+function sameInitialBuildCheckpoint(
+  pointer: InitialBuildCheckpointPointer,
+  expected: InitialBuildCheckpointToken,
+): boolean {
+  return pointer.generationId === expected.generationId && pointer.sha256 === expected.sha256;
+}
+
 export function nodeCacheFileSystem(): CacheFileSystem {
   return {
     mkdir: async (target, options) => {
@@ -178,7 +248,7 @@ export function nodeCacheFileSystem(): CacheFileSystem {
 
 export async function openLocalCacheStore(
   options: LocalCacheStoreOptions,
-): Promise<CacheStoreAvailability> {
+): Promise<CacheStoreBundleAvailability> {
   const platform = options.rootInputs?.platform ?? process.platform;
   const io = options.fs ?? nodeCacheFileSystem();
   const canonicalVaultPath = options.canonicalVaultPath.trim();
@@ -289,7 +359,7 @@ export async function openVaultCacheStore(options: {
   readonly locationIo?: VaultLocationIo;
   readonly rootInputs?: CacheRootInputs;
   readonly fs?: CacheFileSystem;
-}): Promise<CacheStoreAvailability> {
+}): Promise<CacheStoreBundleAvailability> {
   const location = resolveCanonicalVaultPath(options.adapter, options.locationIo);
   if (location.kind !== "path") return { kind: "unavailable", reason: location.reason };
   return openLocalCacheStore({
@@ -310,11 +380,15 @@ interface LocalCacheStoreDependencies {
   readonly randomSuffix: () => string;
 }
 
-class LocalCacheStore implements CacheStorePort {
+class LocalCacheStore implements CacheStoreBundlePort {
   private readonly vaultDirectory: string;
   private readonly generationsDirectory: string;
   private readonly quarantineDirectory: string;
   private readonly pointerPath: string;
+  private readonly initialBuildDirectory: string;
+  private readonly initialBuildImagesDirectory: string;
+  private readonly initialBuildQuarantineDirectory: string;
+  private readonly initialBuildPointerPath: string;
   private readonly lockPath: string;
   private queue: Promise<unknown> = Promise.resolve();
   private disposed = false;
@@ -330,6 +404,10 @@ class LocalCacheStore implements CacheStorePort {
     this.generationsDirectory = path.join(this.vaultDirectory, "generations");
     this.quarantineDirectory = path.join(this.vaultDirectory, "quarantine");
     this.pointerPath = path.join(this.vaultDirectory, "current.json");
+    this.initialBuildDirectory = path.join(this.vaultDirectory, "initial-build");
+    this.initialBuildImagesDirectory = path.join(this.initialBuildDirectory, "images");
+    this.initialBuildQuarantineDirectory = path.join(this.initialBuildDirectory, "quarantine");
+    this.initialBuildPointerPath = path.join(this.initialBuildDirectory, "checkpoint.json");
     this.lockPath = path.join(this.vaultDirectory, "writer.lock");
   }
 
@@ -350,10 +428,42 @@ class LocalCacheStore implements CacheStorePort {
     return this.serialize(() => this.putLocked(write));
   }
 
+  loadInitialBuildCheckpoint(): Promise<InitialBuildCheckpointLoad> {
+    return this.serialize(() => this.loadInitialBuildCheckpointLocked());
+  }
+
+  async putInitialBuildCheckpoint(
+    write: InitialBuildCheckpointWrite,
+  ): Promise<InitialBuildCheckpointRecord> {
+    this.requireUsable();
+    this.validateInitialBuildCheckpointWrite(write);
+    return this.serialize(() => this.putInitialBuildCheckpointLocked(write));
+  }
+
+  discardInitialBuildCheckpoint(
+    _reason: "corrupt" | "incompatible" | "completed" | "requested",
+    expected: InitialBuildCheckpointToken,
+  ): Promise<void> {
+    return this.serialize(async () => {
+      this.requireUsable();
+      await this.withWriterLock(async () => {
+        // The observation that authorized this cleanup happened without the
+        // cross-window lock. Re-read under it and leave a later checkpoint alone.
+        const pointer = await this.readInitialBuildCheckpointPointerQuietly();
+        if (!pointer || !sameInitialBuildCheckpoint(pointer, expected)) return;
+        // Pointer first, and only the checkpoint namespace. Complete-generation
+        // state remains independently loadable throughout this operation.
+        await this.removeDefinitively(this.initialBuildPointerPath);
+        await this.removeTreeDefinitively(this.initialBuildImagesDirectory);
+        await this.removeTreeDefinitively(this.initialBuildQuarantineDirectory);
+      });
+    });
+  }
+
   /**
-   * The reason is caller-side context only: every reason removes everything
-   * this store owns, so branching on it would invent a distinction the desktop
-   * store does not actually make.
+   * The reason is caller-side context only: every reason removes the complete-
+   * generation namespace this method owns. Checkpoints have a separate discard
+   * path, so complete cleanup cannot consume or promote staging state.
    */
   discard(_reason: "corrupt" | "incompatible" | "requested"): Promise<void> {
     return this.serialize(async () => {
@@ -480,6 +590,11 @@ class LocalCacheStore implements CacheStorePort {
   }
 
   private validateWrite(write: CacheWrite): void {
+    // A checkpoint record routed through the complete-generation API must be a
+    // refusal, not a permissive structural-TypeScript conversion.
+    if (isRecord(write) && "recordKind" in write) {
+      throw new CacheStoreError("invalid_blob", "Checkpoint records are not complete generations.");
+    }
     if (!isGenerationId(write.generationId)) {
       throw new CacheStoreError("invalid_generation_id", "Generation identifier is invalid.");
     }
@@ -493,6 +608,35 @@ class LocalCacheStore implements CacheStorePort {
     if (!isCacheIdentityEnvelope(write.identity)
       || write.identity.cache_identity !== this.deps.vaultCacheIdentity) {
       throw new CacheStoreError("invalid_identity", "Cache identity envelope is invalid.");
+    }
+  }
+
+  private validateInitialBuildCheckpointWrite(write: InitialBuildCheckpointWrite): void {
+    if (!isRecord(write)
+      || Object.keys(write).length !== INITIAL_BUILD_CHECKPOINT_WRITE_KEYS.length
+      || !Object.keys(write).every((key) => INITIAL_BUILD_CHECKPOINT_WRITE_KEYS.includes(key))
+      || write.recordKind !== INITIAL_BUILD_CHECKPOINT_RECORD_KIND
+      || write.recordVersion !== INITIAL_BUILD_CHECKPOINT_RECORD_VERSION
+      || write.imageVersion !== INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION
+      || write.orderingVersion !== INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION) {
+      throw new CacheStoreError("invalid_blob", "Initial-build checkpoint record is invalid.");
+    }
+    if (!isGenerationId(write.generationId)) {
+      throw new CacheStoreError("invalid_generation_id", "Generation identifier is invalid.");
+    }
+    if (!(write.bytes instanceof Uint8Array)
+      || write.bytes.byteLength === 0
+      || write.bytes.byteLength > this.deps.maxBlobBytes
+      || write.byteLength !== write.bytes.byteLength
+      || !isSha256Hex(write.sha256)) {
+      throw new CacheStoreError("invalid_blob", "Initial-build checkpoint image is invalid.");
+    }
+    if (!isCacheIdentityEnvelope(write.identity)
+      || write.identity.cache_identity !== this.deps.vaultCacheIdentity) {
+      throw new CacheStoreError("invalid_identity", "Checkpoint identity envelope is invalid.");
+    }
+    if (!isInitialBuildCheckpointCursor(write.cursor)) {
+      throw new CacheStoreError("invalid_blob", "Initial-build checkpoint cursor is invalid.");
     }
   }
 
@@ -581,6 +725,108 @@ class LocalCacheStore implements CacheStorePort {
     };
   }
 
+  private async loadInitialBuildCheckpointLocked(): Promise<InitialBuildCheckpointLoad> {
+    this.requireUsable();
+    await this.assertOwnedParent(this.initialBuildPointerPath);
+    let stats: CacheFileStats;
+    try {
+      stats = await this.deps.io.lstat(this.initialBuildPointerPath);
+    } catch (error) {
+      if (isNotFoundError(error)) return { kind: "miss", reason: "absent" };
+      throw error;
+    }
+    if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_POINTER_BYTES) {
+      await this.discardInvalidInitialBuildCheckpointQuietly();
+      return { kind: "miss", reason: "pointer_corrupt" };
+    }
+
+    let raw: string;
+    try {
+      raw = await this.readBoundedFile(this.initialBuildPointerPath, MAX_POINTER_BYTES);
+    } catch {
+      return { kind: "miss", reason: "pointer_unreadable" };
+    }
+    if (this.initialBuildCheckpointPointerNamesForeignVault(raw)) {
+      return { kind: "miss", reason: "identity_mismatch" };
+    }
+    const parsed = this.parseInitialBuildCheckpointPointer(raw);
+    if (parsed.kind !== "valid") {
+      await this.discardInvalidInitialBuildCheckpointQuietly(raw);
+      return {
+        kind: "miss",
+        reason: parsed.kind === "incompatible" ? "pointer_incompatible" : "pointer_corrupt",
+      };
+    }
+    const pointer = parsed.pointer;
+    if (pointer.vaultIdentity !== this.deps.vaultCacheIdentity
+      || pointer.identity.cache_identity !== this.deps.vaultCacheIdentity) {
+      // Foreign ownership is never deletion authority.
+      return { kind: "miss", reason: "identity_mismatch" };
+    }
+
+    const imagePath = path.join(
+      this.initialBuildImagesDirectory,
+      initialBuildCheckpointImageFileName(pointer.generationId, pointer.sha256),
+    );
+    await this.assertOwnedParent(imagePath);
+    let imageStats: CacheFileStats;
+    try {
+      imageStats = await this.deps.io.lstat(imagePath);
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        await this.discardInitialBuildCheckpointIfCurrentQuietly({
+          generationId: pointer.generationId,
+          sha256: pointer.sha256,
+        });
+        return { kind: "miss", reason: "image_absent" };
+      }
+      throw error;
+    }
+    if (imageStats.isSymbolicLink() || !imageStats.isFile()) {
+      await this.quarantineInitialBuildCheckpoint(imagePath, pointer.generationId, pointer.sha256);
+      return { kind: "miss", reason: "image_unreadable" };
+    }
+    if (imageStats.size !== pointer.byteLength) {
+      await this.quarantineInitialBuildCheckpoint(imagePath, pointer.generationId, pointer.sha256);
+      return { kind: "miss", reason: "image_length_mismatch" };
+    }
+
+    const buffer = new Uint8Array(pointer.byteLength);
+    let read: number;
+    try {
+      const handle = await this.deps.io.open(imagePath, "r");
+      try {
+        read = await handle.readInto(buffer);
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      await this.quarantineInitialBuildCheckpoint(imagePath, pointer.generationId, pointer.sha256);
+      return { kind: "miss", reason: "image_unreadable" };
+    }
+    if (read !== pointer.byteLength) {
+      await this.quarantineInitialBuildCheckpoint(imagePath, pointer.generationId, pointer.sha256);
+      return { kind: "miss", reason: "image_unreadable" };
+    }
+
+    return {
+      kind: "hit",
+      record: {
+        recordKind: pointer.recordKind,
+        recordVersion: pointer.recordVersion,
+        imageVersion: pointer.imageVersion,
+        orderingVersion: pointer.orderingVersion,
+        generationId: pointer.generationId,
+        byteLength: pointer.byteLength,
+        sha256: pointer.sha256,
+        identity: pointer.identity,
+        cursor: pointer.cursor,
+      },
+      bytes: buffer,
+      digestVerified: false,
+    };
+  }
+
   private async putLocked(write: CacheWrite): Promise<CacheRecord> {
     this.requireUsable();
     return this.withWriterLock(async () => {
@@ -643,6 +889,77 @@ class LocalCacheStore implements CacheStorePort {
         byteLength: write.byteLength,
         sha256: write.sha256,
         identity: write.identity,
+      };
+    });
+  }
+
+  private async putInitialBuildCheckpointLocked(
+    write: InitialBuildCheckpointWrite,
+  ): Promise<InitialBuildCheckpointRecord> {
+    this.requireUsable();
+    return this.withWriterLock(async () => {
+      await this.ensureOwnedDirectory(this.initialBuildImagesDirectory);
+      await this.applyDirectoryMode(this.initialBuildDirectory);
+      await this.applyDirectoryMode(this.initialBuildImagesDirectory);
+      await this.removeTreeQuietly(this.initialBuildQuarantineDirectory);
+
+      const suffix = this.deps.randomSuffix();
+      const imagePath = path.join(
+        this.initialBuildImagesDirectory,
+        initialBuildCheckpointImageFileName(write.generationId, write.sha256),
+      );
+      const imageTemp = `${imagePath}${TEMP_MARKER}${suffix}`;
+      const pointerTemp = `${this.initialBuildPointerPath}${TEMP_MARKER}${suffix}`;
+
+      try {
+        await this.writeFileDurably(imageTemp, write.bytes);
+        await this.assertOwnedParent(imageTemp);
+        await this.assertOwnedParent(imagePath);
+        await this.deps.io.rename(imageTemp, imagePath);
+        await this.syncDirectory(this.initialBuildImagesDirectory);
+
+        const pointer: InitialBuildCheckpointPointer = {
+          pointerVersion: INITIAL_BUILD_CHECKPOINT_POINTER_VERSION,
+          recordKind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+          recordVersion: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+          imageVersion: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+          orderingVersion: INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+          vaultIdentity: this.deps.vaultCacheIdentity,
+          generationId: write.generationId,
+          file: initialBuildCheckpointImageRelativePath(write.generationId, write.sha256),
+          byteLength: write.byteLength,
+          sha256: write.sha256,
+          identity: write.identity,
+          cursor: write.cursor,
+          writtenAtMs: this.deps.now(),
+        };
+        const encoded = new TextEncoder().encode(JSON.stringify(pointer));
+        if (encoded.byteLength > MAX_POINTER_BYTES) {
+          throw new CacheStoreError("invalid_blob", "Checkpoint pointer exceeded its bound.");
+        }
+        await this.writeFileDurably(pointerTemp, encoded);
+        await this.assertOwnedParent(pointerTemp);
+        await this.assertOwnedParent(this.initialBuildPointerPath);
+        await this.deps.io.rename(pointerTemp, this.initialBuildPointerPath);
+        await this.syncDirectory(this.initialBuildDirectory, true);
+      } catch (error) {
+        await this.removeQuietly(imageTemp);
+        await this.removeQuietly(pointerTemp);
+        if (error instanceof CacheStoreError) throw error;
+        throw new CacheStoreError("write_failed", "Checkpoint image could not be written.");
+      }
+
+      await this.pruneInitialBuildCheckpointsQuietly(write.generationId);
+      return {
+        recordKind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
+        recordVersion: INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+        imageVersion: INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+        orderingVersion: INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION,
+        generationId: write.generationId,
+        byteLength: write.byteLength,
+        sha256: write.sha256,
+        identity: write.identity,
+        cursor: write.cursor,
       };
     });
   }
@@ -811,6 +1128,83 @@ class LocalCacheStore implements CacheStorePort {
     return parsed as unknown as CachePointer;
   }
 
+  private initialBuildCheckpointPointerNamesForeignVault(raw: string): boolean {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!isRecord(parsed)) return false;
+      if (isSha256Hex(parsed.vaultIdentity)
+        && parsed.vaultIdentity !== this.deps.vaultCacheIdentity) {
+        return true;
+      }
+      return isCacheIdentityEnvelope(parsed.identity)
+        && parsed.identity.cache_identity !== this.deps.vaultCacheIdentity;
+    } catch {
+      return false;
+    }
+  }
+
+  private parseInitialBuildCheckpointPointer(raw: string): CheckpointPointerParse {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { kind: "corrupt" };
+    }
+    if (!isRecord(parsed)) return { kind: "corrupt" };
+    const keys = Object.keys(parsed);
+    // A complete-generation pointer copied into this namespace is not generic
+    // corruption: it is a known cross-kind artifact and must be refused as such.
+    if (keys.length === POINTER_KEYS.length && keys.every((key) => POINTER_KEYS.includes(key))) {
+      return { kind: "incompatible" };
+    }
+    if (parsed.recordKind !== INITIAL_BUILD_CHECKPOINT_RECORD_KIND
+      || parsed.pointerVersion !== INITIAL_BUILD_CHECKPOINT_POINTER_VERSION
+      || parsed.recordVersion !== INITIAL_BUILD_CHECKPOINT_RECORD_VERSION
+      || parsed.imageVersion !== INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION
+      || parsed.orderingVersion !== INITIAL_BUILD_CHECKPOINT_ORDERING_VERSION) {
+      return { kind: "incompatible" };
+    }
+    if (keys.length !== INITIAL_BUILD_CHECKPOINT_POINTER_KEYS.length
+      || !keys.every((key) => INITIAL_BUILD_CHECKPOINT_POINTER_KEYS.includes(key))) {
+      return { kind: "corrupt" };
+    }
+    if (!isSha256Hex(parsed.vaultIdentity)
+      || !isGenerationId(parsed.generationId)
+      || !isNonNegativeSafeInteger(parsed.byteLength)
+      || parsed.byteLength < 1
+      || parsed.byteLength > this.deps.maxBlobBytes
+      || !isSha256Hex(parsed.sha256)
+      || !isCacheIdentityEnvelope(parsed.identity)
+      || !isInitialBuildCheckpointCursor(parsed.cursor)
+      || !isNonNegativeSafeInteger(parsed.writtenAtMs)) {
+      return { kind: "corrupt" };
+    }
+    if (parsed.file !== initialBuildCheckpointImageRelativePath(
+      parsed.generationId,
+      parsed.sha256,
+    )) {
+      return { kind: "corrupt" };
+    }
+    return {
+      kind: "valid",
+      pointer: parsed as unknown as InitialBuildCheckpointPointer,
+    };
+  }
+
+  private async readInitialBuildCheckpointPointerQuietly(
+  ): Promise<InitialBuildCheckpointPointer | null> {
+    try {
+      const stats = await this.deps.io.lstat(this.initialBuildPointerPath);
+      if (stats.isSymbolicLink() || !stats.isFile() || stats.size > MAX_POINTER_BYTES) return null;
+      const parsed = this.parseInitialBuildCheckpointPointer(
+        await this.readBoundedFile(this.initialBuildPointerPath, MAX_POINTER_BYTES),
+      );
+      return parsed.kind === "valid" ? parsed.pointer : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Corruption is moved, never read again, and the pointer goes with it so the
    * next load is a clean miss. Quarantine holds at most one entry and is
@@ -847,6 +1241,92 @@ class LocalCacheStore implements CacheStorePort {
         await this.removeQuietly(imagePath);
       }
     });
+  }
+
+  private async discardInitialBuildCheckpointIfCurrentQuietly(
+    expected: InitialBuildCheckpointToken,
+  ): Promise<void> {
+    await this.tryWithWriterLock(async () => {
+      const pointer = await this.readInitialBuildCheckpointPointerQuietly();
+      if (!pointer || !sameInitialBuildCheckpoint(pointer, expected)) return;
+      await this.removeQuietly(this.initialBuildPointerPath);
+      await this.removeTreeQuietly(this.initialBuildImagesDirectory);
+      await this.removeTreeQuietly(this.initialBuildQuarantineDirectory);
+    });
+  }
+
+  private async quarantineInitialBuildCheckpoint(
+    imagePath: string,
+    generationId: string,
+    sha256: string,
+  ): Promise<void> {
+    await this.tryWithWriterLock(async () => {
+      const pointer = await this.readInitialBuildCheckpointPointerQuietly();
+      if (pointer !== null
+        && (pointer.generationId !== generationId || pointer.sha256 !== sha256)) return;
+      await this.removeQuietly(this.initialBuildPointerPath);
+      try {
+        await this.removeTreeQuietly(this.initialBuildQuarantineDirectory);
+        await this.ensureOwnedDirectory(this.initialBuildQuarantineDirectory);
+        const quarantinedPath = path.join(
+          this.initialBuildQuarantineDirectory,
+          `${generationId}-${this.deps.now()}.kwp`,
+        );
+        await this.assertOwnedParent(imagePath);
+        await this.assertOwnedParent(quarantinedPath);
+        await this.deps.io.rename(imagePath, quarantinedPath);
+      } catch {
+        await this.removeQuietly(imagePath);
+      }
+    });
+  }
+
+  private async discardInvalidInitialBuildCheckpointQuietly(
+    observedRaw?: string,
+  ): Promise<void> {
+    await this.tryWithWriterLock(async () => {
+      // A writer may have committed after the unlocked read. Re-evaluate under
+      // the shared lock and delete only if the pointer is still the invalid one.
+      try {
+        const stats = await this.deps.io.lstat(this.initialBuildPointerPath);
+        if (!stats.isSymbolicLink() && stats.isFile() && stats.size <= MAX_POINTER_BYTES) {
+          const currentRaw = await this.readBoundedFile(
+            this.initialBuildPointerPath,
+            MAX_POINTER_BYTES,
+          );
+          if (observedRaw !== undefined && currentRaw !== observedRaw) return;
+          if (this.parseInitialBuildCheckpointPointer(currentRaw).kind === "valid") return;
+        }
+      } catch (error) {
+        if (isNotFoundError(error)) return;
+      }
+      await this.removeQuietly(this.initialBuildPointerPath);
+      await this.removeTreeQuietly(this.initialBuildImagesDirectory);
+      await this.removeTreeQuietly(this.initialBuildQuarantineDirectory);
+    });
+  }
+
+  private async pruneInitialBuildCheckpointsQuietly(
+    currentGenerationId: string,
+  ): Promise<void> {
+    try {
+      const pointer = await this.readInitialBuildCheckpointPointerQuietly();
+      if (pointer === null || pointer.generationId !== currentGenerationId) return;
+      const retained = initialBuildCheckpointImageFileName(
+        pointer.generationId,
+        pointer.sha256,
+      );
+      for (const entry of await this.deps.io.readdir(this.initialBuildImagesDirectory)) {
+        if (entry === retained) continue;
+        await this.removeQuietly(path.join(this.initialBuildImagesDirectory, entry));
+      }
+      for (const entry of await this.deps.io.readdir(this.initialBuildDirectory)) {
+        if (!entry.includes(TEMP_MARKER)) continue;
+        await this.removeQuietly(path.join(this.initialBuildDirectory, entry));
+      }
+    } catch {
+      // The pointer is already committed. Retention cannot revoke that success.
+    }
   }
 
   private async pruneQuietly(currentGenerationId: string): Promise<void> {
