@@ -1,9 +1,10 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "source_key": "3c47a35af57764e0226b2e2383dbbb3fcbba10ece8c83e27860aab44892beaeb",
   "vault_id": "golden-vault",
   "path": "Golden/Property Key and Scalar Edges.md",
   "format": "markdown",
+  "coverage": "indexed-complete",
   "content_hash": "6cc3598e7a5bc661577f11e001fc31dec0a4271cfc8fcc4a7ff1464498aa1dbc",
   "byte_length": 384,
   "mtime": 1785253671659,

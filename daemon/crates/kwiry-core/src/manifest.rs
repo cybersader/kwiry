@@ -8,13 +8,14 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::error::{Error, Result};
 use crate::model::{
-    CHUNKING_VERSION, FileIngestOutcome, FileOutcomeKind, ResourceKey, VaultRegistration,
+    CHUNKING_VERSION, FileIngestOutcome, FileOutcomeKind, ResourceKey, SourceFormatCounts,
+    VaultRegistration,
 };
 pub use crate::source::source_key;
 use crate::state::{read_json, write_json_atomic};
 
-pub const MANIFEST_VERSION: u32 = 2;
-pub const INDEX_FORMAT_VERSION: u32 = 9;
+pub const MANIFEST_VERSION: u32 = 3;
+pub const INDEX_FORMAT_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
@@ -61,6 +62,21 @@ impl Manifest {
                 self.manifest_version, self.index_format_version, self.chunking_version
             )));
         }
+        if self.files.values().any(|file| {
+            file.coverage.is_indexed() != (file.outcome == ManifestFileOutcome::Indexed)
+        }) {
+            return Err(Error::State(
+                "manifest coverage does not match persisted file outcomes; run `kwiry index` to rebuild the disposable index"
+                    .to_owned(),
+            ));
+        }
+        let counts = self.source_format_counts();
+        if counts.indexed_documents() != self.document_count() {
+            return Err(Error::State(
+                "manifest per-format coverage counts do not match its document total; run `kwiry index` to rebuild the disposable index"
+                    .to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -98,6 +114,14 @@ impl Manifest {
         self.files.values().map(|file| file.chunk_count).sum()
     }
 
+    pub fn source_format_counts(&self) -> SourceFormatCounts {
+        let mut counts = SourceFormatCounts::default();
+        for file in self.files.values() {
+            counts.record(file.format, file.coverage);
+        }
+        counts
+    }
+
     pub fn mark_synced(&mut self) -> Result<()> {
         self.state_revision = self.state_revision.saturating_add(1);
         self.last_sync = Some(
@@ -113,6 +137,8 @@ impl Manifest {
 pub struct ManifestFile {
     pub vault_id: String,
     pub path: String,
+    pub format: crate::format::SourceFormat,
+    pub coverage: crate::extract::ExtractionCoverage,
     pub content_hash: String,
     pub registration_fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +171,8 @@ impl ManifestFile {
             Self {
                 vault_id: outcome.vault_id.clone(),
                 path: outcome.path.clone(),
+                format: outcome.format,
+                coverage: outcome.coverage,
                 content_hash,
                 registration_fingerprint: registration_fingerprint.to_owned(),
                 resource: resource.cloned(),
@@ -206,9 +234,40 @@ mod tests {
         };
 
         let error = manifest.validate().unwrap_err();
-        assert!(error.to_string().contains("found manifest=2, index=5"));
-        assert!(error.to_string().contains("expected manifest=2, index=9"));
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("found manifest={MANIFEST_VERSION}, index=5"))
+        );
+        assert!(error.to_string().contains(&format!(
+            "expected manifest={MANIFEST_VERSION}, index={INDEX_FORMAT_VERSION}"
+        )));
         assert!(error.to_string().contains("kwiry index"));
+    }
+
+    #[test]
+    fn manifest_rejects_coverage_that_disagrees_with_document_outcome() {
+        let mut manifest = Manifest::default();
+        manifest.files.insert(
+            "broken".to_owned(),
+            ManifestFile {
+                vault_id: "vault".to_owned(),
+                path: "broken.base".to_owned(),
+                format: crate::format::SourceFormat::Base,
+                coverage: crate::extract::ExtractionCoverage::Quarantined,
+                content_hash: "hash".to_owned(),
+                registration_fingerprint: "fingerprint".to_owned(),
+                resource: None,
+                byte_length: 4,
+                mtime_nanos: 1,
+                chunk_count: 0,
+                outcome: ManifestFileOutcome::Indexed,
+                warning: Some("invalid Base YAML".to_owned()),
+            },
+        );
+
+        let error = manifest.validate().unwrap_err();
+        assert!(error.to_string().contains("coverage"));
     }
 
     #[test]
@@ -216,6 +275,8 @@ mod tests {
         let previous = ManifestFile {
             vault_id: "vault".to_owned(),
             path: "note.md".to_owned(),
+            format: crate::format::SourceFormat::Markdown,
+            coverage: crate::extract::ExtractionCoverage::IndexedComplete,
             content_hash: "hash".to_owned(),
             registration_fingerprint: "fingerprint".to_owned(),
             resource: Some(ResourceKey::new("tenant", "vault", "room")),
@@ -227,6 +288,52 @@ mod tests {
         };
 
         assert_eq!(ManifestFile::retained(&previous), previous);
+    }
+
+    #[test]
+    fn manifest_persists_and_aggregates_per_format_coverage() {
+        let mut manifest = Manifest::default();
+        manifest.files.insert(
+            "markdown".to_owned(),
+            ManifestFile {
+                vault_id: "vault".to_owned(),
+                path: "note.md".to_owned(),
+                format: crate::format::SourceFormat::Markdown,
+                coverage: crate::extract::ExtractionCoverage::IndexedPartial,
+                content_hash: "markdown-hash".to_owned(),
+                registration_fingerprint: "fingerprint".to_owned(),
+                resource: None,
+                byte_length: 4,
+                mtime_nanos: 1,
+                chunk_count: 1,
+                outcome: ManifestFileOutcome::Indexed,
+                warning: Some("partial metadata".to_owned()),
+            },
+        );
+        manifest.files.insert(
+            "base".to_owned(),
+            ManifestFile {
+                vault_id: "vault".to_owned(),
+                path: "broken.base".to_owned(),
+                format: crate::format::SourceFormat::Base,
+                coverage: crate::extract::ExtractionCoverage::Quarantined,
+                content_hash: "base-hash".to_owned(),
+                registration_fingerprint: "fingerprint".to_owned(),
+                resource: None,
+                byte_length: 4,
+                mtime_nanos: 1,
+                chunk_count: 0,
+                outcome: ManifestFileOutcome::Skipped,
+                warning: Some("invalid Base YAML".to_owned()),
+            },
+        );
+
+        let counts = manifest.source_format_counts();
+        assert_eq!(manifest.document_count(), 1);
+        assert_eq!(counts.indexed_documents(), manifest.document_count());
+        assert_eq!(counts.total_sources(), 2);
+        assert_eq!(counts.markdown.indexed_partial, 1);
+        assert_eq!(counts.base.quarantined, 1);
     }
 
     #[test]

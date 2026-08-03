@@ -20,6 +20,8 @@ import {
 } from "./rpc-client";
 import { PRODUCTION_RPC_PROTOCOL } from "./production-rpc-protocol";
 
+const DEFAULT_SOURCE_POLICY_HASH = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b";
+
 export class InPluginWorkerSession {
   protected readonly client: WorkerRpcClient;
   private cleaned = false;
@@ -37,10 +39,11 @@ export class InPluginWorkerSession {
     );
   }
 
-  initialize(vaultId: string): Promise<InitializeResult> {
+  initialize(vaultId: string, sourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH): Promise<InitializeResult> {
     return this.client.request({
       operation: "initialize",
       vault_id: vaultId,
+      source_policy_hash: sourcePolicyHash,
     }) as Promise<InitializeResult>;
   }
 
@@ -100,6 +103,7 @@ export class InPluginWorkerSession {
   restoreGeneration(
     hit: Extract<CacheLoad, { kind: "hit" }>,
     expectedCacheIdentity: string,
+    expectedSourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH,
   ): Promise<BuildResult> {
     const { record } = hit;
     return this.client.request({
@@ -111,6 +115,7 @@ export class InPluginWorkerSession {
       digest_verified: hit.digestVerified,
       ...record.identity,
       expected_cache_identity: expectedCacheIdentity,
+      expected_source_policy_hash: expectedSourcePolicyHash,
     }) as Promise<BuildResult>;
   }
 

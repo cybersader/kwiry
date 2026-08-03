@@ -54,6 +54,7 @@ import {
   type WorkerOperation,
   type WorkerRequest,
   type WorkerResponse,
+  emptySourceFormatCounts,
   fixedWorkerError,
   isSourcePreparationDefectField,
   parseWorkerRequest,
@@ -111,6 +112,7 @@ let guards: GuardCounters | null = null;
 // under, so the adapter identity — not an observed chunk — is the source.
 let declaredChunkingVersion: number | null = null;
 let initializedVaultId: string | null = null;
+let initializedSourcePolicyHash: string | null = null;
 const handleInternalPrototypeMessage = createInternalPrototypeHandler({
   scope,
   getActive: () => active,
@@ -149,7 +151,10 @@ const handleInternalD5cPreviewMessage = __KWIRY_D5C_OWNER_WORKER__
     })
   : async () => false;
 
-async function initialize(vaultId: string): Promise<InitializeResult> {
+async function initialize(
+  vaultId: string,
+  sourcePolicyHash = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b",
+): Promise<InitializeResult> {
   if (state !== "cold") {
     throw fixedWorkerError("invalid_state", "lifecycle", "Worker is already initialized.", false);
   }
@@ -161,6 +166,7 @@ async function initialize(vaultId: string): Promise<InitializeResult> {
     const rustIdentity = initializeRustAdapter();
     declaredChunkingVersion = rustIdentity.chunking_version;
     initializedVaultId = vaultId;
+    initializedSourcePolicyHash = sourcePolicyHash;
 
     const initializeSqlite = sqlite3InitModule as unknown as SQLiteInitializer;
     const originalWarn = console.warn;
@@ -233,6 +239,7 @@ async function initialize(vaultId: string): Promise<InitializeResult> {
     sqlite = null;
     declaredChunkingVersion = null;
     initializedVaultId = null;
+    initializedSourcePolicyHash = null;
     if (isWorkerError(error)) throw error;
     if (error instanceof RustAdapterError) {
       throw fixedWorkerError(
@@ -260,7 +267,12 @@ function beginBuild(generation: string): BuildResult {
   }
   staging = {
     id: generation,
-    index: openFts5Generation(sqlite, undefined, requireInitializedVaultId()),
+    index: openFts5Generation(
+      sqlite,
+      undefined,
+      requireInitializedVaultId(),
+      requireInitializedSourcePolicyHash(),
+    ),
     quarantinedSources: new Map(),
   };
   stagingIsInitialCold = active === null;
@@ -531,6 +543,7 @@ async function exportGeneration(
     plugin_id: PLUGIN_ID,
     plugin_version: PLUGIN_VERSION,
     cache_identity: cacheIdentity,
+    source_policy_hash: requireInitializedSourcePolicyHash(),
   };
 }
 
@@ -551,6 +564,8 @@ async function restoreGeneration(
   // before the candidate bytes are hashed, parsed, copied into blocks, or shown
   // to SQLite.
   if (request.cache_identity !== request.expected_cache_identity
+    || request.source_policy_hash !== request.expected_source_policy_hash
+    || request.source_policy_hash !== requireInitializedSourcePolicyHash()
     || request.plugin_id !== PLUGIN_ID) {
     throw fixedWorkerError(
       "cache_identity_mismatch",
@@ -620,6 +635,7 @@ async function restoreGeneration(
       declaredChunkingVersion,
       undefined,
       requireInitializedVaultId(),
+      requireInitializedSourcePolicyHash(),
     );
     staging = {
       id: request.generation,
@@ -779,6 +795,7 @@ function status(): StatusResult {
       active_database_bytes: 0,
       staging_database_bytes: 0,
       database_byte_limit: DEFAULT_DATABASE_BYTE_LIMIT,
+      source_format_counts: emptySourceFormatCounts(),
       dirty: true,
       rebuilding: false,
     };
@@ -796,6 +813,7 @@ function status(): StatusResult {
     database_byte_limit: active?.index.databaseByteLimit
       ?? staging?.index.databaseByteLimit
       ?? DEFAULT_DATABASE_BYTE_LIMIT,
+    source_format_counts: active?.index.sourceFormatCounts ?? emptySourceFormatCounts(),
     dirty: !active || staging !== null || failed,
     rebuilding: staging !== null,
   };
@@ -824,6 +842,14 @@ function requireInitializedVaultId(): string {
     throw fixedWorkerError("invalid_state", "lifecycle", "Worker vault is unavailable.", false);
   }
   return initializedVaultId;
+}
+
+function requireInitializedSourcePolicyHash(): string {
+  requireInitialized();
+  if (initializedSourcePolicyHash === null) {
+    throw fixedWorkerError("invalid_state", "lifecycle", "Worker source policy is unavailable.", false);
+  }
+  return initializedSourcePolicyHash;
 }
 
 function requireInitialized(): void {
@@ -869,6 +895,7 @@ function generationResult(generation: Generation): BuildResult {
     database_byte_limit: generation.index.databaseByteLimit,
     quarantined_sources: generation.quarantinedSources.size,
     quarantine_fields: [...new Set(generation.quarantinedSources.values())].sort(),
+    source_format_counts: generation.index.sourceFormatCounts,
   };
 }
 
@@ -927,12 +954,13 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
   const filename = descriptor.path.split("/").at(-1) ?? descriptor.path;
   const separator = filename.lastIndexOf(".");
   return {
-    schema_version: 4,
+    schema_version: 5,
     source_key: await sourceKey(descriptor.vault_id, descriptor.path),
     vault_id: descriptor.vault_id,
     ...(descriptor.room === undefined ? {} : { room: descriptor.room }),
     path: descriptor.path,
     format: descriptor.format,
+    coverage: "quarantined",
     content_hash: null,
     byte_length: descriptor.byte_length,
     mtime: descriptor.mtime,
@@ -1037,7 +1065,7 @@ async function dispatchProduction(request: WorkerRequest): Promise<unknown> {
   lastRequestId = request.id;
   switch (request.operation) {
     case "initialize":
-      return initialize(request.vault_id);
+      return initialize(request.vault_id, request.source_policy_hash);
     case "begin_build":
       return beginBuild(request.generation);
     case "add_source_batch":

@@ -1,0 +1,20 @@
+title: Project dashboard
+tags: [projects, active]
+enabled: true
+threshold: 12.5
+max_items: 18446744073709551615
+filters:
+  and:
+    - file.inFolder("Projects")
+    - status == "active"
+optional: null
+views:
+  - type: table
+    name: Active
+    order: [file.name, status]
+  - type: cards
+    name: Gallery
+    cover: note.cover
+  - type: list
+    name: Active
+    groupBy: status

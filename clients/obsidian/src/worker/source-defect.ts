@@ -5,7 +5,7 @@
 // free of the WASM import so it is directly testable. The adapter cannot be
 // imported in a unit test because it pulls in the Rust binary.
 
-const SOURCE_SCHEMA_VERSION = 4;
+const SOURCE_SCHEMA_VERSION = 5;
 
 // This mirrors Rust's call-stack safety boundary. It is deliberately the only
 // property-bag bound: source byte limits already protect allocation, while a
@@ -28,6 +28,7 @@ export function sourcePreparationDefect(value: unknown): string | null {
     "vault_id",
     "path",
     "format",
+    "coverage",
     "content_hash",
     "byte_length",
     "mtime",
@@ -48,7 +49,8 @@ export function sourcePreparationDefect(value: unknown): string | null {
     ["vault_id", () => isBoundedString(value.vault_id, 1_024)],
     ["room", () => value.room === undefined || isBoundedString(value.room, 1_024)],
     ["path", () => isBoundedString(value.path, 4_096)],
-    ["format", () => value.format === "markdown" || value.format === "text"],
+    ["format", () => isSourceFormat(value.format)],
+    ["coverage", () => isExtractionCoverage(value.coverage)],
     ["content_hash", () => value.content_hash === null
       || isBoundedString(value.content_hash, 128)],
     ["byte_length", () => isNonNegativeSafeInteger(value.byte_length)],
@@ -86,6 +88,11 @@ export function sourcePreparationDefect(value: unknown): string | null {
     ["skipped_has_chunks", () => value.kind !== "skipped"
       || (Array.isArray(value.chunks) && value.chunks.length === 0)],
     ["indexed_missing_hash", () => value.kind !== "indexed" || value.content_hash !== null],
+    ["coverage", () => value.kind === "indexed"
+      ? value.coverage === "indexed-complete" || value.coverage === "indexed-partial"
+      : value.coverage === "skipped-no-extractable-text"
+        || value.coverage === "unreadable"
+        || value.coverage === "quarantined"],
   ];
   for (const [name, check] of trailingChecks) {
     try {
@@ -261,9 +268,11 @@ function preparedChunkDefect(
   owner: Record<string, unknown>,
 ): string | null {
   if (!isRecord(value)
-    || !hasExactKeys(value, [
-      "chunk", "heading_text", "normalized_heading", "technical_identifiers",
-    ])
+    || !hasRequiredAndOptionalKeys(
+      value,
+      ["chunk", "heading_text", "normalized_heading", "technical_identifiers"],
+      ["source_locator"],
+    )
     || !isRecord(value.chunk)) {
     return "chunks_contents";
   }
@@ -297,6 +306,10 @@ function preparedChunkDefect(
     || !isStringArray(value.technical_identifiers)) {
     return "chunks_contents";
   }
+  if (value.source_locator !== undefined
+    && (!isSourceLocator(value.source_locator) || owner.format !== "base")) {
+    return "chunks_source_locator";
+  }
   if (chunk.vault_id !== owner.vault_id
     || chunk.room !== (owner.room ?? null)
     || chunk.path !== owner.path
@@ -309,6 +322,30 @@ function preparedChunkDefect(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSourceFormat(value: unknown): boolean {
+  return value === "markdown"
+    || value === "text"
+    || value === "base"
+    || value === "canvas"
+    || value === "docx"
+    || value === "pdf";
+}
+
+function isExtractionCoverage(value: unknown): boolean {
+  return value === "indexed-complete"
+    || value === "indexed-partial"
+    || value === "skipped-no-extractable-text"
+    || value === "unreadable"
+    || value === "quarantined";
+}
+
+function isSourceLocator(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ["kind", "view"])
+    && value.kind === "base_view"
+    && isBoundedString(value.view, 4_096);
 }
 
 function isBoundedString(value: unknown, maximum: number, allowEmpty = false): value is string {

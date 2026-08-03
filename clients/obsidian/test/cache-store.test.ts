@@ -156,6 +156,7 @@ function envelope(overrides: Partial<CacheIdentityEnvelope> = {}): CacheIdentity
     plugin_id: "kwiry-search",
     plugin_version: "0.1.0",
     cache_identity: vaultIdentity,
+    source_policy_hash: "d".repeat(64),
     ...overrides,
   };
 }
@@ -863,6 +864,7 @@ describe("LocalCacheStore", () => {
 
   it.each([
     ["a short digest", envelope({ rust_wasm_sha256: "c".repeat(63) })],
+    ["a malformed source policy hash", envelope({ source_policy_hash: "policy" })],
     ["a non-integer version", { ...envelope(), protocol_version: 1.5 }],
     ["a foreign vault identity", envelope({ cache_identity: "9".repeat(64) })],
     ["an unknown key", { ...envelope(), unexpected: true }],

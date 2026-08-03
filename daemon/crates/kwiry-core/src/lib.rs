@@ -16,6 +16,12 @@ mod connection;
 #[cfg(feature = "native")]
 mod error;
 #[cfg(feature = "portable")]
+mod extract;
+#[cfg(feature = "portable")]
+mod format;
+#[cfg(feature = "portable")]
+mod formats;
+#[cfg(feature = "portable")]
 mod frontmatter;
 #[cfg(feature = "native")]
 mod generation;
@@ -79,6 +85,15 @@ pub use connection::{
 };
 #[cfg(feature = "native")]
 pub use error::{Error, Result};
+#[cfg(feature = "portable")]
+pub use extract::{
+    ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionCoverage, ExtractionError,
+    ExtractionNotice, SourceLocator,
+};
+#[cfg(feature = "portable")]
+pub use format::{FormatSpec, SourceFormat, format_specs};
+#[cfg(feature = "portable")]
+pub use formats::extract_source;
 #[cfg(feature = "native")]
 pub use generation::{DataRoot, DataRootLock, GenerationPaths};
 #[cfg(feature = "native")]
@@ -98,8 +113,9 @@ pub use model::{
 };
 #[cfg(feature = "portable")]
 pub use model::{
-    CHUNKING_VERSION, Chunk, Frontmatter, IndexFreshnessBasis, MAX_FILE_BYTES, PreparedChunk,
-    PropertyBag, PropertyValue, RetrievalMetadata, SearchHit,
+    CHUNKING_VERSION, Chunk, ExtractionCoverageCounts, Frontmatter, IndexFreshnessBasis,
+    MAX_FILE_BYTES, PreparedChunk, PropertyBag, PropertyValue, RetrievalMetadata, SearchHit,
+    SourceFormatCounts,
 };
 #[cfg(feature = "portable")]
 pub use query::{
@@ -158,9 +174,9 @@ pub use semantic::{
 };
 #[cfg(feature = "portable")]
 pub use source::{
-    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourceExactMetadata, SourceFormat,
-    SourcePreparation, SourcePreparationError, SourcePreparationKind, prepare_oversized_source,
-    prepare_source_buffer, source_key,
+    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourceExactMetadata, SourcePreparation,
+    SourcePreparationError, SourcePreparationKind, prepare_oversized_source, prepare_source_buffer,
+    source_key,
 };
 #[cfg(feature = "portable")]
 pub use status::{

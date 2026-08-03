@@ -4,21 +4,23 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::frontmatter::parse_frontmatter;
+use crate::extract::{
+    ExtractionCoverage, MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE, MAX_EXTRACTED_SECTIONS_PER_SOURCE,
+};
+use crate::format::SourceFormat;
+use crate::formats::extract_source;
 use crate::lexical::{normalize_raw, technical_identifiers};
-use crate::links::extract_wikilinks;
 use crate::model::{
     CHUNK_OVERLAP_CHARS, CHUNKING_VERSION, Chunk, Frontmatter, MAX_CHUNK_CHARS, MAX_FILE_BYTES,
     PreparedChunk, PropertyBag, RetrievalMetadata,
 };
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 4;
-pub const MAX_PREPARED_CHUNKS_PER_SOURCE: usize = 100_000;
-pub const MAX_PREPARED_HEADING_BYTES_PER_SOURCE: usize = MAX_FILE_BYTES as usize;
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 5;
+pub const MAX_PREPARED_CHUNKS_PER_SOURCE: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
+pub const MAX_PREPARED_HEADING_BYTES_PER_SOURCE: usize = MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -27,13 +29,6 @@ pub struct SourceExactMetadata {
     pub stem: Option<String>,
     pub aliases: Vec<String>,
     pub title: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceFormat {
-    Markdown,
-    Text,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +61,7 @@ pub struct SourcePreparation {
     pub room: Option<String>,
     pub path: String,
     pub format: SourceFormat,
+    pub coverage: ExtractionCoverage,
     pub content_hash: Option<String>,
     pub byte_length: u64,
     pub mtime: u64,
@@ -93,6 +89,7 @@ struct SourcePreparationWire {
     room: Option<String>,
     path: String,
     format: SourceFormat,
+    coverage: ExtractionCoverage,
     content_hash: Option<String>,
     byte_length: u64,
     mtime: u64,
@@ -116,6 +113,8 @@ impl<'de> Deserialize<'de> for SourcePreparation {
         let mut wire = SourcePreparationWire::deserialize(deserializer)?;
         let source_frontmatter = Arc::new(Frontmatter::from_properties(&wire.frontmatter));
         for chunk in &mut wire.chunks {
+            chunk.source_format = Some(wire.format);
+            chunk.extraction_coverage = Some(wire.coverage);
             chunk.source_properties = wire.frontmatter.clone();
             chunk.source_frontmatter = Arc::clone(&source_frontmatter);
         }
@@ -126,6 +125,7 @@ impl<'de> Deserialize<'de> for SourcePreparation {
             room: wire.room,
             path: wire.path,
             format: wire.format,
+            coverage: wire.coverage,
             content_hash: wire.content_hash,
             byte_length: wire.byte_length,
             mtime: wire.mtime,
@@ -145,18 +145,6 @@ impl<'de> Deserialize<'de> for SourcePreparation {
 pub struct SourcePreparationError {
     pub code: String,
     pub message: String,
-}
-
-#[derive(Debug)]
-struct Section<'a> {
-    heading_path: Vec<String>,
-    content: &'a str,
-}
-
-#[derive(Debug)]
-struct HeadingMarker {
-    start: usize,
-    path: Vec<String>,
 }
 
 /// Records an oversized source from trusted host metadata without reading or
@@ -180,6 +168,7 @@ pub fn prepare_oversized_source(
         room: descriptor.room.clone(),
         path: descriptor.path.clone(),
         format: descriptor.format,
+        coverage: ExtractionCoverage::Unreadable,
         content_hash: None,
         byte_length: descriptor.byte_length,
         mtime: descriptor.mtime,
@@ -211,59 +200,39 @@ pub fn prepare_source_buffer(
     if actual_byte_length > MAX_FILE_BYTES {
         return prepare_oversized_source(descriptor);
     }
+
     let source_key = source_key(&descriptor.vault_id, &descriptor.path);
     let empty_retrieval = retrieval_metadata(&descriptor.path, Vec::new());
-
     let content_hash = hex_digest(bytes);
-    let source = match String::from_utf8(bytes.to_vec()) {
-        Ok(source) => source,
-        Err(error) => {
-            return Ok(skipped_preparation(
-                descriptor,
-                source_key,
-                empty_retrieval,
-                Some(content_hash),
-                format!("skipped non-UTF-8 file: {error}"),
-            ));
-        }
-    };
-    if source.contains('\0') {
+    let extracted =
+        extract_source(descriptor.format, bytes).map_err(|error| SourcePreparationError {
+            code: error.code,
+            message: error.message,
+        })?;
+    let warning = extracted.warning();
+    if !extracted.coverage.is_indexed() {
         return Ok(skipped_preparation(
             descriptor,
             source_key,
             empty_retrieval,
             Some(content_hash),
-            "skipped binary file containing NUL bytes".to_owned(),
+            extracted.coverage,
+            warning.expect("skipped extraction outcomes carry a notice"),
         ));
     }
 
-    let (properties, frontmatter, aliases, body, warning) = match descriptor.format {
-        SourceFormat::Markdown => parse_frontmatter(&source),
-        SourceFormat::Text => (
-            PropertyBag::default(),
-            Frontmatter::default(),
-            Vec::new(),
-            source.as_str(),
-            None,
-        ),
-    };
-    let retrieval = retrieval_metadata(&descriptor.path, aliases);
-    let normalized_exact = source_exact_metadata(&retrieval, &frontmatter);
-    let source_frontmatter = Arc::new(frontmatter);
-    let links_out = extract_wikilinks(body);
-    let sections = match descriptor.format {
-        SourceFormat::Markdown => markdown_sections(body)?,
-        SourceFormat::Text => vec![Section {
-            heading_path: Vec::new(),
-            content: body,
-        }],
-    };
+    let retrieval = retrieval_metadata(&descriptor.path, extracted.aliases);
+    let normalized_exact = source_exact_metadata(&retrieval, &extracted.frontmatter);
+    let source_frontmatter = Arc::new(extracted.frontmatter);
+    let properties = extracted.properties;
+    let links_out = extracted.links_out;
+    let coverage = extracted.coverage;
 
     let mut chunks = Vec::new();
     let mut chunk_ix = 0_u64;
     let mut prepared_heading_bytes = 0_usize;
-    for section in sections {
-        for part in split_oversized(section.content) {
+    for section in extracted.sections {
+        for part in split_oversized(&section.content) {
             if part.trim().is_empty() {
                 continue;
             }
@@ -302,6 +271,9 @@ pub fn prepare_source_buffer(
                 normalized_heading,
                 heading_text,
                 technical_identifiers: technical_identifiers(&chunk.content),
+                source_locator: section.locator.clone(),
+                source_format: Some(descriptor.format),
+                extraction_coverage: Some(coverage),
                 source_properties: properties.clone(),
                 source_frontmatter: Arc::clone(&source_frontmatter),
                 chunk,
@@ -310,8 +282,9 @@ pub fn prepare_source_buffer(
         }
     }
 
-    // A frontmatter-only note still needs a deterministic searchable result. Its empty portable
-    // chunk carries no source-level projection; native indexing shares both source-owned views.
+    // A source with authored properties but no text still needs a deterministic searchable result.
+    // Its empty portable chunk carries no source-level projection; native indexing shares both
+    // source-owned views.
     if chunks.is_empty() && !properties.is_empty() {
         let chunk = Chunk {
             chunk_id: chunk_id(&descriptor.vault_id, &descriptor.path, &[], 0),
@@ -330,6 +303,9 @@ pub fn prepare_source_buffer(
             heading_text: String::new(),
             normalized_heading: None,
             technical_identifiers: Vec::new(),
+            source_locator: None,
+            source_format: Some(descriptor.format),
+            extraction_coverage: Some(coverage),
             source_properties: properties.clone(),
             source_frontmatter: Arc::clone(&source_frontmatter),
             chunk,
@@ -343,6 +319,7 @@ pub fn prepare_source_buffer(
         room: descriptor.room.clone(),
         path: descriptor.path.clone(),
         format: descriptor.format,
+        coverage,
         content_hash: Some(content_hash),
         byte_length: descriptor.byte_length,
         mtime: descriptor.mtime,
@@ -389,6 +366,18 @@ fn validate_descriptor(descriptor: &SourceDescriptor) -> Result<(), SourcePrepar
             "path must be a normalized vault-relative forward-slash file path",
         ));
     }
+    let Some(path_format) = SourceFormat::from_path(&descriptor.path) else {
+        return Err(validation_error(
+            "path extension is not registered as a supported source format",
+        ));
+    };
+    if path_format != descriptor.format {
+        return Err(validation_error(&format!(
+            "descriptor format {} does not match path extension format {}",
+            descriptor.format.as_str(),
+            path_format.as_str()
+        )));
+    }
     Ok(())
 }
 
@@ -404,6 +393,7 @@ fn skipped_preparation(
     source_key: String,
     retrieval: RetrievalMetadata,
     content_hash: Option<String>,
+    coverage: ExtractionCoverage,
     warning: String,
 ) -> SourcePreparation {
     SourcePreparation {
@@ -413,6 +403,7 @@ fn skipped_preparation(
         room: descriptor.room.clone(),
         path: descriptor.path.clone(),
         format: descriptor.format,
+        coverage,
         content_hash,
         byte_length: descriptor.byte_length,
         mtime: descriptor.mtime,
@@ -459,69 +450,6 @@ fn source_exact_metadata(
     }
 }
 
-fn markdown_sections(source: &str) -> Result<Vec<Section<'_>>, SourcePreparationError> {
-    let mut markers = Vec::new();
-    let mut heading_stack: Vec<(usize, String)> = Vec::new();
-    let mut active_heading: Option<(usize, usize, String)> = None;
-    let mut prepared_path_bytes = 0_usize;
-
-    for (event, range) in Parser::new_ext(source, Options::all()).into_offset_iter() {
-        match event {
-            Event::Start(Tag::Heading { level, .. }) => {
-                active_heading = Some((heading_level(level), range.start, String::new()));
-            }
-            Event::Text(text) | Event::Code(text) => {
-                if let Some((_, _, heading)) = active_heading.as_mut() {
-                    heading.push_str(&text);
-                }
-            }
-            Event::SoftBreak | Event::HardBreak => {
-                if let Some((_, _, heading)) = active_heading.as_mut() {
-                    heading.push(' ');
-                }
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                if let Some((level, start, heading)) = active_heading.take() {
-                    while heading_stack
-                        .last()
-                        .is_some_and(|(parent_level, _)| *parent_level >= level)
-                    {
-                        heading_stack.pop();
-                    }
-                    heading_stack.push((level, heading.trim().to_owned()));
-                    if markers.len() == MAX_PREPARED_CHUNKS_PER_SOURCE {
-                        return Err(chunk_inventory_error());
-                    }
-                    let path_bytes = heading_stack
-                        .iter()
-                        .map(|(_, heading)| heading.len())
-                        .sum::<usize>();
-                    prepared_path_bytes = prepared_path_bytes
-                        .checked_add(path_bytes)
-                        .filter(|total| *total <= MAX_PREPARED_HEADING_BYTES_PER_SOURCE)
-                        .ok_or_else(heading_inventory_error)?;
-                    markers.push(HeadingMarker {
-                        start,
-                        path: heading_stack
-                            .iter()
-                            .map(|(_, heading)| heading.clone())
-                            .collect(),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if markers
-        .first()
-        .is_some_and(|marker| marker.start > 0 && markers.len() == MAX_PREPARED_CHUNKS_PER_SOURCE)
-    {
-        return Err(chunk_inventory_error());
-    }
-    Ok(sections_from_markers(source, markers))
-}
-
 fn chunk_inventory_error() -> SourcePreparationError {
     SourcePreparationError {
         code: "index_limit_exceeded".to_owned(),
@@ -538,48 +466,6 @@ fn heading_inventory_error() -> SourcePreparationError {
 
 fn heading_path_bytes(path: &[String]) -> usize {
     path.iter().map(String::len).sum::<usize>()
-}
-
-fn heading_level(level: pulldown_cmark::HeadingLevel) -> usize {
-    match level {
-        pulldown_cmark::HeadingLevel::H1 => 1,
-        pulldown_cmark::HeadingLevel::H2 => 2,
-        pulldown_cmark::HeadingLevel::H3 => 3,
-        pulldown_cmark::HeadingLevel::H4 => 4,
-        pulldown_cmark::HeadingLevel::H5 => 5,
-        pulldown_cmark::HeadingLevel::H6 => 6,
-    }
-}
-
-fn sections_from_markers(source: &str, markers: Vec<HeadingMarker>) -> Vec<Section<'_>> {
-    if markers.is_empty() {
-        return vec![Section {
-            heading_path: Vec::new(),
-            content: source,
-        }];
-    }
-
-    let mut sections = Vec::new();
-    if markers[0].start > 0 {
-        sections.push(Section {
-            heading_path: Vec::new(),
-            content: &source[..markers[0].start],
-        });
-    }
-
-    let ends = markers
-        .iter()
-        .skip(1)
-        .map(|marker| marker.start)
-        .chain(std::iter::once(source.len()))
-        .collect::<Vec<_>>();
-    for (marker, end) in markers.into_iter().zip(ends) {
-        sections.push(Section {
-            heading_path: marker.path,
-            content: &source[marker.start..end],
-        });
-    }
-    sections
 }
 
 fn split_oversized(source: &str) -> Vec<&str> {
@@ -925,6 +811,112 @@ mod tests {
     }
 
     #[test]
+    fn base_uses_the_shared_chunk_and_property_pipeline() {
+        let source = br#"title: Project dashboard
+tags: [projects, active]
+filters: file.inFolder("Projects")
+views:
+  - type: table
+    name: Active
+    order: [file.name, status]
+  - type: cards
+    name: Gallery
+"#;
+        let prepared = prepare_source_buffer(
+            &descriptor("dashboard.base", SourceFormat::Base, source),
+            source,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.kind, SourcePreparationKind::Indexed);
+        assert_eq!(prepared.coverage, ExtractionCoverage::IndexedComplete);
+        assert_eq!(prepared.chunks.len(), 3);
+        assert!(prepared.chunks[0].content.contains("filters:"));
+        assert_eq!(prepared.chunks[1].heading_path, ["Active"]);
+        assert_eq!(
+            prepared.chunks[1].source_locator,
+            Some(crate::extract::SourceLocator::BaseView {
+                view: "Active".to_owned()
+            })
+        );
+        assert_eq!(prepared.chunks[2].heading_path, ["Gallery"]);
+        assert_eq!(
+            prepared.chunks[2].source_locator,
+            Some(crate::extract::SourceLocator::BaseView {
+                view: "Gallery".to_owned()
+            })
+        );
+        assert_eq!(
+            prepared.normalized_exact.title.as_deref(),
+            Some("project dashboard")
+        );
+        assert!(matches!(
+            prepared.frontmatter.get("base"),
+            Some(PropertyValue::Map(_))
+        ));
+        assert_eq!(
+            prepared.frontmatter.get("title"),
+            Some(&PropertyValue::String("Project dashboard".to_owned()))
+        );
+    }
+
+    #[test]
+    fn unsupported_wave_one_formats_skip_without_text_decoding() {
+        for (path, format) in [
+            ("board.canvas", SourceFormat::Canvas),
+            ("report.docx", SourceFormat::Docx),
+            ("paper.pdf", SourceFormat::Pdf),
+        ] {
+            let bytes = [0xff, 0x00, 0xfe];
+            let prepared =
+                prepare_source_buffer(&descriptor(path, format, &bytes), &bytes).unwrap();
+            assert_eq!(prepared.kind, SourcePreparationKind::Skipped);
+            assert_eq!(
+                prepared.coverage,
+                ExtractionCoverage::SkippedNoExtractableText
+            );
+            assert!(prepared.chunks.is_empty());
+            assert!(prepared.warning.unwrap().contains("not yet supported"));
+        }
+    }
+
+    #[test]
+    fn descriptor_format_must_agree_with_the_registered_extension() {
+        let source = b"body";
+        let error = prepare_source_buffer(
+            &descriptor("note.txt", SourceFormat::Markdown, source),
+            source,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_source");
+        assert!(error.message.contains("does not match"));
+
+        let error =
+            prepare_source_buffer(&descriptor("note.png", SourceFormat::Text, source), source)
+                .unwrap_err();
+        assert_eq!(error.code, "invalid_source");
+        assert!(error.message.contains("not registered"));
+    }
+
+    #[test]
+    fn markdown_metadata_warning_reports_partial_coverage() {
+        let source = b"---\ntitle: [invalid\n---\nBody\n";
+        let prepared = prepare_source_buffer(
+            &descriptor("note.md", SourceFormat::Markdown, source),
+            source,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.kind, SourcePreparationKind::Indexed);
+        assert_eq!(prepared.coverage, ExtractionCoverage::IndexedPartial);
+        assert_eq!(
+            prepared.warning.as_deref(),
+            Some("invalid YAML frontmatter")
+        );
+        assert_eq!(prepared.chunks[0].content, "Body");
+    }
+
+    #[test]
     fn projects_complete_rust_normalized_exact_metadata_with_utf8_byte_bounds() {
         let rockets = "🚀".repeat(260);
         let source = format!(
@@ -1233,6 +1225,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prepared.kind, SourcePreparationKind::Skipped);
+        assert_eq!(prepared.coverage, ExtractionCoverage::Unreadable);
         assert!(prepared.content_hash.is_some());
         assert!(prepared.warning.unwrap().contains("NUL"));
     }

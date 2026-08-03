@@ -3,6 +3,11 @@
 
 import type { SearchMode } from "./api";
 import type { BackendProfile } from "./backend";
+import {
+  DEFAULT_ENABLED_SOURCE_FORMATS,
+  SOURCE_FORMATS,
+  type EnabledSourceFormats,
+} from "./source-formats";
 
 export type DiagnosticsLogLevel = "off" | "error" | "info";
 
@@ -19,6 +24,7 @@ export interface KwiryPluginSettings {
   /** Daemon vault ID that identifies the current Obsidian vault for local actions. */
   daemonCurrentVaultId: string;
   showRibbonIcon: boolean;
+  enabledSourceFormats: EnabledSourceFormats;
   diagnosticsLogLevel: DiagnosticsLogLevel;
 }
 
@@ -31,12 +37,16 @@ export const DEFAULT_SETTINGS: KwiryPluginSettings = {
   vaultId: "",
   daemonCurrentVaultId: "",
   showRibbonIcon: true,
+  enabledSourceFormats: { ...DEFAULT_ENABLED_SOURCE_FORMATS },
   diagnosticsLogLevel: "info",
 };
 
 /** Merges stored data over defaults, discarding unknown keys. */
 export function loadSettings(stored: unknown): KwiryPluginSettings {
-  const settings = { ...DEFAULT_SETTINGS };
+  const settings: KwiryPluginSettings = {
+    ...DEFAULT_SETTINGS,
+    enabledSourceFormats: { ...DEFAULT_ENABLED_SOURCE_FORMATS },
+  };
   if (typeof stored !== "object" || stored === null) {
     return settings;
   }
@@ -61,6 +71,14 @@ export function loadSettings(stored: unknown): KwiryPluginSettings {
     settings.daemonCurrentVaultId = source.daemonCurrentVaultId;
   }
   if (typeof source.showRibbonIcon === "boolean") settings.showRibbonIcon = source.showRibbonIcon;
+  if (typeof source.enabledSourceFormats === "object" && source.enabledSourceFormats !== null) {
+    const storedFormats = source.enabledSourceFormats as Record<string, unknown>;
+    for (const format of SOURCE_FORMATS) {
+      if (typeof storedFormats[format] === "boolean") {
+        settings.enabledSourceFormats[format] = storedFormats[format];
+      }
+    }
+  }
   if (
     source.diagnosticsLogLevel === "off"
     || source.diagnosticsLogLevel === "error"

@@ -11,6 +11,10 @@ import {
   ObsidianActiveVaultSource,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
+import {
+  DEFAULT_ENABLED_SOURCE_FORMATS,
+  type EnabledSourceFormats,
+} from "../src/source-formats";
 
 class FakeVault {
   readonly calls: string[] = [];
@@ -43,7 +47,7 @@ class FakeVault {
     this.handlers.set(stored.name, handlers.filter((handler) => handler !== stored.callback));
   }
 
-  getMarkdownFiles(): TFile[] {
+  getFiles(): TFile[] {
     this.calls.push("list");
     return [...this.files.values()];
   }
@@ -72,19 +76,30 @@ function folder(path: string): TAbstractFile {
   return { path, name: path.split("/").at(-1) ?? path } as unknown as TAbstractFile;
 }
 
-function source(fake: FakeVault): ObsidianActiveVaultSource {
-  return new ObsidianActiveVaultSource(fake as unknown as Vault);
+function source(
+  fake: FakeVault,
+  enabled: Readonly<EnabledSourceFormats> = DEFAULT_ENABLED_SOURCE_FORMATS,
+): ObsidianActiveVaultSource {
+  return new ObsidianActiveVaultSource(fake as unknown as Vault, enabled);
 }
 
 describe("ObsidianActiveVaultSource", () => {
   it("registers every event before enumeration, sorts paths, and detaches exactly once", () => {
     const fake = new FakeVault();
     fake.files.set("z.md", file("z.md"));
-    fake.files.set("folder/a.md", file("folder/a.md"));
+    fake.files.set("folder/a.base", file("folder/a.base"));
+    fake.files.set("notes.txt", file("notes.txt"));
+    fake.files.set("board.canvas", file("board.canvas"));
+    fake.files.set("ignored.png", file("ignored.png"));
     const active = source(fake);
 
     const stop = active.subscribe(() => undefined);
-    expect(active.listMarkdownPaths()).toEqual(["folder/a.md", "z.md"]);
+    expect(active.listSourcePaths()).toEqual([
+      "board.canvas",
+      "folder/a.base",
+      "notes.txt",
+      "z.md",
+    ]);
     expect(fake.calls.slice(0, 5)).toEqual([
       "on:create",
       "on:modify",
@@ -98,6 +113,27 @@ describe("ObsidianActiveVaultSource", () => {
     expect(fake.calls.filter((call) => call === "offref")).toHaveLength(4);
   });
 
+  it("honors per-format admission toggles for inventory, inspection, and events", () => {
+    const fake = new FakeVault();
+    fake.files.set("note.md", file("note.md"));
+    fake.files.set("query.base", file("query.base"));
+    fake.files.set("notes.txt", file("notes.txt"));
+    const enabled: EnabledSourceFormats = {
+      ...DEFAULT_ENABLED_SOURCE_FORMATS,
+      text: false,
+      base: false,
+    };
+    const events: VaultSourceEvent[] = [];
+    const active = source(fake, enabled);
+    active.subscribe((event) => events.push(event));
+
+    expect(active.listSourcePaths()).toEqual(["note.md"]);
+    expect(active.inspectSource("notes.txt")).toEqual({ kind: "missing", path: "notes.txt" });
+    fake.emit("modify", file("notes.txt"));
+    fake.emit("modify", file("note.md"));
+    expect(events).toEqual([{ kind: "upsert", path: "note.md" }]);
+  });
+
   it("maps file events to immutable path intents and rescans folder delete or rename", () => {
     const fake = new FakeVault();
     const events: VaultSourceEvent[] = [];
@@ -105,10 +141,10 @@ describe("ObsidianActiveVaultSource", () => {
 
     fake.emit("create", file("new.md"));
     fake.emit("modify", file("new.md"));
-    fake.emit("rename", file("renamed.md"), "new.md");
-    fake.emit("rename", file("renamed.txt"), "renamed.md");
-    fake.emit("rename", file("added.md"), "added.txt");
-    fake.emit("delete", file("added.md"));
+    fake.emit("rename", file("renamed.base"), "new.md");
+    fake.emit("rename", file("renamed.png"), "renamed.base");
+    fake.emit("rename", file("added.txt"), "added.png");
+    fake.emit("delete", file("added.txt"));
     fake.emit("create", folder("ignored-folder"));
     fake.emit("delete", folder("deleted-folder"));
     fake.emit("rename", folder("renamed-folder"), "old-folder");
@@ -116,10 +152,10 @@ describe("ObsidianActiveVaultSource", () => {
     expect(events).toEqual([
       { kind: "upsert", path: "new.md" },
       { kind: "upsert", path: "new.md" },
-      { kind: "rename", oldPath: "new.md", path: "renamed.md" },
-      { kind: "remove", path: "renamed.md" },
-      { kind: "upsert", path: "added.md" },
-      { kind: "remove", path: "added.md" },
+      { kind: "rename", oldPath: "new.md", path: "renamed.base" },
+      { kind: "remove", path: "renamed.base" },
+      { kind: "upsert", path: "added.txt" },
+      { kind: "remove", path: "added.txt" },
       { kind: "rescan" },
       { kind: "rescan" },
     ]);
@@ -131,16 +167,17 @@ describe("ObsidianActiveVaultSource", () => {
     fake.files.set("unicode.md", file("unicode.md", bytes.byteLength, 1_234));
     fake.contents.set("unicode.md", bytes);
     const active = source(fake);
-    const inspection = active.inspectMarkdown("unicode.md");
+    const inspection = active.inspectSource("unicode.md");
     expect(inspection).toEqual({
       kind: "candidate",
       path: "unicode.md",
+      format: "markdown",
       size: bytes.byteLength,
       mtime: 1_234,
     });
     if (inspection.kind !== "candidate") throw new Error("expected candidate");
 
-    await expect(active.readMarkdown(inspection)).resolves.toMatchObject({
+    await expect(active.readSource(inspection)).resolves.toMatchObject({
       kind: "source",
       source: {
         descriptor: {
@@ -156,13 +193,42 @@ describe("ObsidianActiveVaultSource", () => {
     });
   });
 
+  it("classifies Base and plain text sources into their descriptors", async () => {
+    const fake = new FakeVault();
+    const baseBytes = new TextEncoder().encode("views:\n  - name: Active\n");
+    const textBytes = new TextEncoder().encode("plain text\n");
+    fake.files.set("query.base", file("query.base", baseBytes.byteLength, 2_000));
+    fake.contents.set("query.base", baseBytes);
+    fake.files.set("notes.txt", file("notes.txt", textBytes.byteLength, 3_000));
+    fake.contents.set("notes.txt", textBytes);
+    const active = source(fake);
+
+    const baseInspection = active.inspectSource("query.base");
+    const textInspection = active.inspectSource("notes.txt");
+    expect(baseInspection).toMatchObject({ kind: "candidate", format: "base" });
+    expect(textInspection).toMatchObject({ kind: "candidate", format: "text" });
+    if (baseInspection.kind !== "candidate" || textInspection.kind !== "candidate") {
+      throw new Error("expected candidate sources");
+    }
+
+    await expect(active.readSource(baseInspection)).resolves.toMatchObject({
+      kind: "source",
+      source: { descriptor: { path: "query.base", format: "base" }, bytes: baseBytes },
+    });
+    await expect(active.readSource(textInspection)).resolves.toMatchObject({
+      kind: "source",
+      source: { descriptor: { path: "notes.txt", format: "text" }, bytes: textBytes },
+    });
+  });
+
   it("preflights oversized notes without reading them", () => {
     const fake = new FakeVault();
     fake.files.set("large.md", file("large.md", MAX_INDEXABLE_SOURCE_BYTES + 1, 1));
 
-    expect(source(fake).inspectMarkdown("large.md")).toEqual({
+    expect(source(fake).inspectSource("large.md")).toEqual({
       kind: "oversized",
       path: "large.md",
+      format: "markdown",
       size: MAX_INDEXABLE_SOURCE_BYTES + 1,
       mtime: 1,
     });
@@ -177,10 +243,10 @@ describe("ObsidianActiveVaultSource", () => {
       fake.files.set("changing.md", file("changing.md", 4, 11));
     };
     const active = source(fake);
-    const inspection = active.inspectMarkdown("changing.md");
+    const inspection = active.inspectSource("changing.md");
     if (inspection.kind !== "candidate") throw new Error("expected candidate");
 
-    await expect(active.readMarkdown(inspection)).resolves.toEqual({
+    await expect(active.readSource(inspection)).resolves.toEqual({
       kind: "stale",
       path: "changing.md",
     });
@@ -228,7 +294,7 @@ describe("ObsidianActiveVaultSource", () => {
     fake.contents.set("big.md", new Uint8Array(size));
     const active = source(fake);
 
-    expect(active.inspectMarkdown("big.md")).toMatchObject({ kind: "candidate" });
+    expect(active.inspectSource("big.md")).toMatchObject({ kind: "candidate" });
     await expect(active.readExcerptText("big.md")).resolves.toEqual({
       kind: "oversized",
       path: "big.md",

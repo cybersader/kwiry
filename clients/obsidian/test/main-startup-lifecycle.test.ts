@@ -10,6 +10,9 @@ interface LifecycleHarness {
   layoutReady: (() => void) | null;
   startupObserver: ((observation: unknown) => void) | null;
   backendInitializations: number;
+  backendDisposals: number;
+  cachePolicyHashes: string[];
+  sourcePolicies: Array<Record<string, boolean>>;
   clipboardWrites: string[];
 }
 
@@ -17,6 +20,9 @@ const harness: LifecycleHarness = {
   layoutReady: null,
   startupObserver: null,
   backendInitializations: 0,
+  backendDisposals: 0,
+  cachePolicyHashes: [],
+  sourcePolicies: [],
   clipboardWrites: [],
 };
 
@@ -24,7 +30,9 @@ const MAIN_PATH = new URL("../src/main.ts", import.meta.url).pathname;
 const require = createRequire(import.meta.url);
 
 async function loadProductionPlugin(): Promise<new () => {
+  settings: { enabledSourceFormats: Record<string, boolean> };
   onload(): Promise<void>;
+  onSourcePolicyChanged(): Promise<void>;
   copyDiagnostics(): Promise<void>;
 }> {
   const bundle = await build({
@@ -46,7 +54,9 @@ async function loadProductionPlugin(): Promise<new () => {
   const plugin = module.exports.default;
   if (typeof plugin !== "function") throw new Error("main.ts test bundle has no default plugin");
   return plugin as new () => {
+    settings: { enabledSourceFormats: Record<string, boolean> };
     onload(): Promise<void>;
+    onSourcePolicyChanged(): Promise<void>;
     copyDiagnostics(): Promise<void>;
   };
 }
@@ -118,8 +128,13 @@ function stubSource(path: string): string {
       return `export default "worker source";`;
     case "active-vault-source":
       return `
+        const harness = globalThis.__kwiryStartupLifecycleHarness;
         export const ACTIVE_VAULT_ID = "active-vault";
-        export class ObsidianActiveVaultSource {}
+        export class ObsidianActiveVaultSource {
+          constructor(_vault, enabledFormats) {
+            harness.sourcePolicies.push({ ...enabledFormats });
+          }
+        }
       `;
     case "daemon-backend":
       return `export class DaemonBackend {}`;
@@ -153,11 +168,17 @@ function stubSource(path: string): string {
           }
           async status() { return this.statusValue; }
           subscribeStatus() { return () => undefined; }
-          async dispose() {}
+          async dispose() { harness.backendDisposals += 1; }
         }
       `;
     case "cache-options":
-      return `export function createInPluginCacheOptions() { return undefined; }`;
+      return `
+        const harness = globalThis.__kwiryStartupLifecycleHarness;
+        export function createInPluginCacheOptions(_vault, sourcePolicyHash) {
+          harness.cachePolicyHashes.push(sourcePolicyHash);
+          return undefined;
+        }
+      `;
     case "credentials":
       return `export async function readDaemonToken() { throw new Error("unexpected token read"); }`;
     case "private-tools":
@@ -185,6 +206,9 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.layoutReady = null;
     harness.startupObserver = null;
     harness.backendInitializations = 0;
+    harness.backendDisposals = 0;
+    harness.cachePolicyHashes.length = 0;
+    harness.sourcePolicies.length = 0;
     harness.clipboardWrites.length = 0;
     vi.stubGlobal("__kwiryStartupLifecycleHarness", harness);
     vi.stubGlobal("window", { setInterval: () => 1 });
@@ -239,5 +263,29 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(startupRecords[0]).toMatch(/fullyCurrentMs=\d+/u);
     expect(startupRecords[0]).toContain("cacheHit=true");
     expect(startupRecords[0]).toContain("cacheBytes=4096");
+  });
+
+  it("reactivates with an awaited new policy hash and a fresh source policy snapshot", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+
+    await plugin.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.backendInitializations).toBe(1));
+
+    const initialHash = harness.cachePolicyHashes[0];
+    expect(initialHash).toMatch(/^[0-9a-f]{64}$/u);
+    expect(harness.sourcePolicies[0]?.pdf).toBe(true);
+
+    plugin.settings.enabledSourceFormats.pdf = false;
+    await plugin.onSourcePolicyChanged();
+
+    expect(harness.backendInitializations).toBe(2);
+    expect(harness.backendDisposals).toBe(1);
+    expect(harness.cachePolicyHashes).toHaveLength(2);
+    expect(harness.cachePolicyHashes[1]).toMatch(/^[0-9a-f]{64}$/u);
+    expect(harness.cachePolicyHashes[1]).not.toBe(initialHash);
+    expect(harness.sourcePolicies[1]?.pdf).toBe(false);
+    expect(harness.sourcePolicies[0]?.pdf).toBe(true);
   });
 });

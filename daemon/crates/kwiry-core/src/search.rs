@@ -2040,6 +2040,12 @@ fn hit_from_document(
         vault_id: text(document, fields.vault_id)?.to_owned(),
         path: text(document, fields.path)?.to_owned(),
         heading_path: decode_json(text(document, fields.heading_path)?, "heading_path")?,
+        format: decode_json(text(document, fields.source_format)?, "source_format")?,
+        coverage: decode_json(
+            text(document, fields.extraction_coverage)?,
+            "extraction_coverage",
+        )?,
+        locator: decode_json(text(document, fields.source_locator)?, "source_locator")?,
         score,
         excerpt,
         frontmatter: decode_json(text(document, fields.frontmatter)?, "frontmatter")?,

@@ -1,9 +1,10 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "source_key": "1cf7799f26377840ecf0bd295af8c3d8b793b0d90b7208966341cb622da6e6ca",
   "vault_id": "golden-vault",
   "path": "Golden/Large Property Array.md",
   "format": "markdown",
+  "coverage": "indexed-complete",
   "content_hash": "d335bb4ceda775b297a760fa3badcf740239730107ee7ea97bd2c89e72c7661f",
   "byte_length": 6135,
   "mtime": 1785253671659,

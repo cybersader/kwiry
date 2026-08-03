@@ -10,6 +10,9 @@ use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
 };
 
+use crate::extract::{ExtractionCoverage, SourceLocator};
+use crate::format::SourceFormat;
+
 pub const CHUNKING_VERSION: u64 = 2;
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_CHUNK_CHARS: usize = 4_000;
@@ -527,8 +530,15 @@ pub struct PreparedChunk {
     pub heading_text: String,
     pub normalized_heading: Option<String>,
     pub technical_identifiers: Vec<String>,
-    // Native indexing needs the source-level projections while reconciliation still transports
-    // chunks independently. Both are non-serialized shared views owned once by the preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_locator: Option<SourceLocator>,
+    // Native indexing needs source-level projections and non-ranking extraction metadata while
+    // reconciliation still transports chunks independently. These shared views stay outside the
+    // portable chunk ABI; the serialized SourcePreparation owns format and coverage at top level.
+    #[serde(skip, default)]
+    pub(crate) source_format: Option<crate::format::SourceFormat>,
+    #[serde(skip, default)]
+    pub(crate) extraction_coverage: Option<crate::extract::ExtractionCoverage>,
     #[serde(skip, default)]
     pub(crate) source_properties: PropertyBag,
     #[serde(skip, default = "default_shared_frontmatter")]
@@ -576,9 +586,89 @@ pub struct SearchHit {
     pub vault_id: String,
     pub path: String,
     pub heading_path: Vec<String>,
+    pub format: SourceFormat,
+    pub coverage: ExtractionCoverage,
+    pub locator: Option<SourceLocator>,
     pub score: f32,
     pub excerpt: String,
     pub frontmatter: Frontmatter,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub struct ExtractionCoverageCounts {
+    pub indexed_complete: usize,
+    pub indexed_partial: usize,
+    pub skipped_no_extractable_text: usize,
+    pub unreadable: usize,
+    pub quarantined: usize,
+}
+
+impl ExtractionCoverageCounts {
+    fn record(&mut self, coverage: ExtractionCoverage) {
+        match coverage {
+            ExtractionCoverage::IndexedComplete => self.indexed_complete += 1,
+            ExtractionCoverage::IndexedPartial => self.indexed_partial += 1,
+            ExtractionCoverage::SkippedNoExtractableText => {
+                self.skipped_no_extractable_text += 1;
+            }
+            ExtractionCoverage::Unreadable => self.unreadable += 1,
+            ExtractionCoverage::Quarantined => self.quarantined += 1,
+        }
+    }
+
+    pub const fn indexed_documents(&self) -> usize {
+        self.indexed_complete + self.indexed_partial
+    }
+
+    pub const fn total_sources(&self) -> usize {
+        self.indexed_documents()
+            + self.skipped_no_extractable_text
+            + self.unreadable
+            + self.quarantined
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceFormatCounts {
+    pub markdown: ExtractionCoverageCounts,
+    pub text: ExtractionCoverageCounts,
+    pub base: ExtractionCoverageCounts,
+    pub canvas: ExtractionCoverageCounts,
+    pub docx: ExtractionCoverageCounts,
+    pub pdf: ExtractionCoverageCounts,
+}
+
+impl SourceFormatCounts {
+    pub fn record(&mut self, format: SourceFormat, coverage: ExtractionCoverage) {
+        let counts = match format {
+            SourceFormat::Markdown => &mut self.markdown,
+            SourceFormat::Text => &mut self.text,
+            SourceFormat::Base => &mut self.base,
+            SourceFormat::Canvas => &mut self.canvas,
+            SourceFormat::Docx => &mut self.docx,
+            SourceFormat::Pdf => &mut self.pdf,
+        };
+        counts.record(coverage);
+    }
+
+    pub const fn indexed_documents(&self) -> usize {
+        self.markdown.indexed_documents()
+            + self.text.indexed_documents()
+            + self.base.indexed_documents()
+            + self.canvas.indexed_documents()
+            + self.docx.indexed_documents()
+            + self.pdf.indexed_documents()
+    }
+
+    pub const fn total_sources(&self) -> usize {
+        self.markdown.total_sources()
+            + self.text.total_sources()
+            + self.base.total_sources()
+            + self.canvas.total_sources()
+            + self.docx.total_sources()
+            + self.pdf.total_sources()
+    }
 }
 
 #[cfg(feature = "native")]
@@ -587,6 +677,21 @@ pub struct IndexStats {
     pub documents: usize,
     pub chunks: usize,
     pub warnings: Vec<IngestWarning>,
+    pub source_format_counts: SourceFormatCounts,
+}
+
+#[cfg(feature = "native")]
+impl IndexStats {
+    pub(crate) fn record_outcome(&mut self, outcome: &FileIngestOutcome) {
+        if outcome.content_hash.is_none() {
+            return;
+        }
+        self.source_format_counts
+            .record(outcome.format, outcome.coverage);
+        if outcome.kind == FileOutcomeKind::Indexed {
+            self.documents += 1;
+        }
+    }
 }
 
 #[cfg(feature = "native")]
@@ -613,6 +718,8 @@ pub(crate) enum FileOutcomeKind {
 pub(crate) struct FileIngestOutcome {
     pub vault_id: String,
     pub path: String,
+    pub format: SourceFormat,
+    pub coverage: ExtractionCoverage,
     pub content_hash: Option<String>,
     pub byte_length: u64,
     pub mtime: u64,
@@ -626,6 +733,69 @@ pub(crate) struct FileIngestOutcome {
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_format_counts_are_closed_complete_and_match_indexed_documents() {
+        let mut counts = SourceFormatCounts::default();
+        counts.record(SourceFormat::Markdown, ExtractionCoverage::IndexedComplete);
+        counts.record(SourceFormat::Markdown, ExtractionCoverage::IndexedPartial);
+        counts.record(
+            SourceFormat::Text,
+            ExtractionCoverage::SkippedNoExtractableText,
+        );
+        counts.record(SourceFormat::Base, ExtractionCoverage::Quarantined);
+        counts.record(SourceFormat::Canvas, ExtractionCoverage::Unreadable);
+
+        assert_eq!(counts.indexed_documents(), 2);
+        assert_eq!(counts.total_sources(), 5);
+        assert_eq!(
+            serde_json::to_value(counts).unwrap(),
+            serde_json::json!({
+                "markdown": {
+                    "indexed-complete": 1,
+                    "indexed-partial": 1,
+                    "skipped-no-extractable-text": 0,
+                    "unreadable": 0,
+                    "quarantined": 0
+                },
+                "text": {
+                    "indexed-complete": 0,
+                    "indexed-partial": 0,
+                    "skipped-no-extractable-text": 1,
+                    "unreadable": 0,
+                    "quarantined": 0
+                },
+                "base": {
+                    "indexed-complete": 0,
+                    "indexed-partial": 0,
+                    "skipped-no-extractable-text": 0,
+                    "unreadable": 0,
+                    "quarantined": 1
+                },
+                "canvas": {
+                    "indexed-complete": 0,
+                    "indexed-partial": 0,
+                    "skipped-no-extractable-text": 0,
+                    "unreadable": 1,
+                    "quarantined": 0
+                },
+                "docx": {
+                    "indexed-complete": 0,
+                    "indexed-partial": 0,
+                    "skipped-no-extractable-text": 0,
+                    "unreadable": 0,
+                    "quarantined": 0
+                },
+                "pdf": {
+                    "indexed-complete": 0,
+                    "indexed-partial": 0,
+                    "skipped-no-extractable-text": 0,
+                    "unreadable": 0,
+                    "quarantined": 0
+                }
+            })
+        );
+    }
 
     #[test]
     fn startup_configuration_changes_require_restart_but_vault_changes_do_not() {

@@ -16,7 +16,7 @@ import {
   type LinkInsertionKind,
   type LinkInsertionTarget,
 } from "./link-insertion";
-import { validateOpenResult } from "./open-result";
+import { validateOpenResult, type OpenTarget } from "./open-result";
 import { progressLine } from "./progress-line";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
 import {
@@ -224,7 +224,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     if (!validated) return;
     const leaf = this.app.workspace.getLeaf(placement === "current" ? false : placement);
     void leaf.openFile(validated.file, {
-      eState: validated.heading ? { subpath: `#${validated.heading}` } : undefined,
+      eState: validated.target.subpath === undefined
+        ? undefined
+        : { subpath: validated.target.subpath },
     }).catch((error: unknown) => {
       this.plugin.recordCaughtFailure("ui", "open", error, {
         profile: this.backend.identity.profile,
@@ -235,6 +237,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private insertResultLink(result: ModalResult, kind: LinkInsertionKind): void {
     const validated = this.validatedResult(result);
     if (!validated) return;
+    if (result.hit.format !== "markdown") {
+      new Notice("Kwiry: link insertion is available only for Markdown results.");
+      return;
+    }
     const target = this.linkInsertionTarget;
     if (!target) {
       new Notice("Kwiry: open this search from a Markdown editor to insert a link.");
@@ -244,13 +250,13 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       this.app.fileManager,
       validated.file,
       target,
-      validated.heading,
+      deepestMatchedHeading(result.hit.heading_path),
       kind,
     );
     if (!outcome.ok) new Notice(`Kwiry: ${outcome.safeMessage}`);
   }
 
-  private validatedResult(result: ModalResult): { file: TFile; heading: string | undefined } | null {
+  private validatedResult(result: ModalResult): { file: TFile; target: OpenTarget } | null {
     const activeBackend = this.plugin.getActiveBackendIdentity();
     if (!activeBackend) {
       new Notice("Kwiry: the search backend is no longer active.");
@@ -270,7 +276,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       new Notice("Kwiry: this result is not present in the current vault.");
       return null;
     }
-    return { file, heading: deepestMatchedHeading(result.hit.heading_path) };
+    const target: OpenTarget = decision.subpath === undefined
+      ? { path: decision.path }
+      : { path: decision.path, subpath: decision.subpath };
+    return { file, target };
   }
 
   onClose(): void {

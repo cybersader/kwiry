@@ -30,6 +30,9 @@ const HIT = {
   chunk_id: "c1",
   vault_id: "notes",
   path: "a/b.md",
+  format: "markdown",
+  coverage: "indexed-complete",
+  locator: null,
   heading_path: ["A", "B"],
   score: 1.5,
   excerpt: "text",
@@ -107,6 +110,36 @@ describe("KwiryClient.search", () => {
 
   it("rejects malformed successful response shapes", async () => {
     const { transport } = mockTransport(200, { hits: [{ ...HIT, path: 42 }], next_cursor: null });
+    const error = await client(transport)
+      .search({ q: "a", mode: "lexical" })
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(KwiryApiError);
+    expect(error.code).toBe("invalid_response");
+  });
+
+  it("parses the closed source format and Base view locator", async () => {
+    const baseHit = {
+      ...HIT,
+      path: "projects.base",
+      format: "base",
+      locator: { kind: "base_view", view: "Active" },
+    };
+    const { transport } = mockTransport(200, { hits: [baseHit], next_cursor: null });
+    await expect(client(transport).search({ q: "a", mode: "lexical" })).resolves.toMatchObject({
+      hits: [{ format: "base", locator: { kind: "base_view", view: "Active" } }],
+    });
+  });
+
+  it.each([
+    { format: "epub" },
+    { locator: { kind: "base_view", view: "Active" } },
+    { locator: { kind: "page", page: 3 } },
+    { locator: { kind: "base_view", view: "" } },
+  ])("rejects an invalid format or locator projection: %j", async (overrides) => {
+    const { transport } = mockTransport(200, {
+      hits: [{ ...HIT, ...overrides }],
+      next_cursor: null,
+    });
     const error = await client(transport)
       .search({ q: "a", mode: "lexical" })
       .catch((caught) => caught);

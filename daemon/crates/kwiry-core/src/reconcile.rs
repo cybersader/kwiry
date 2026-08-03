@@ -322,6 +322,8 @@ mod tests {
         ManifestFile {
             vault_id: "vault".to_owned(),
             path: "note.md".to_owned(),
+            format: crate::format::SourceFormat::Markdown,
+            coverage: crate::extract::ExtractionCoverage::IndexedComplete,
             content_hash: hash.to_owned(),
             registration_fingerprint: fingerprint.to_owned(),
             resource: None,

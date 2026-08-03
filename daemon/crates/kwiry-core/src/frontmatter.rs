@@ -42,21 +42,7 @@ pub(crate) fn parse_frontmatter(
         );
     }
 
-    let options = serde_saphyr::options! {
-        // The accepted input is already byte-bounded. Disabling the dependency's pre-parse budget
-        // removes its hidden alias/anchor ratio and cardinality limits; replay work remains bounded
-        // explicitly below, and recursive construction remains bounded by PropertyValue's visitor.
-        budget: None,
-        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
-        merge_keys: serde_saphyr::MergeKeyPolicy::Merge,
-        alias_limits: serde_saphyr::alias_limits! {
-            max_total_replayed_events: MAX_ALIAS_REPLAYED_EVENTS,
-            max_replay_stack_depth: MAX_PROPERTY_NESTING_DEPTH,
-            max_alias_expansions_per_anchor: usize::MAX,
-        },
-        with_snippet: false,
-    };
-    match serde_saphyr::from_str_with_options::<PropertyValue>(yaml, options) {
+    match parse_yaml_value(yaml) {
         Ok(PropertyValue::Map(properties)) => {
             let properties = PropertyBag::from_properties(properties);
             let frontmatter = Frontmatter::from_properties(&properties);
@@ -79,6 +65,27 @@ pub(crate) fn parse_frontmatter(
             Some("invalid YAML frontmatter".to_owned()),
         ),
     }
+}
+
+pub(crate) fn parse_yaml_value(source: &str) -> Result<PropertyValue, ()> {
+    if source.len() > MAX_FRONTMATTER_BYTES {
+        return Err(());
+    }
+    let options = serde_saphyr::options! {
+        // The accepted input is already byte-bounded. Disabling the dependency's pre-parse budget
+        // removes its hidden alias/anchor ratio and cardinality limits; replay work remains bounded
+        // explicitly below, and recursive construction remains bounded by PropertyValue's visitor.
+        budget: None,
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+        merge_keys: serde_saphyr::MergeKeyPolicy::Merge,
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: MAX_ALIAS_REPLAYED_EVENTS,
+            max_replay_stack_depth: MAX_PROPERTY_NESTING_DEPTH,
+            max_alias_expansions_per_anchor: usize::MAX,
+        },
+        with_snippet: false,
+    };
+    serde_saphyr::from_str_with_options::<PropertyValue>(source, options).map_err(|_| ())
 }
 
 fn split_frontmatter(source: &str) -> Option<(&str, &str)> {

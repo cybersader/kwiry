@@ -16,6 +16,7 @@ import {
 
 const require = createRequire(import.meta.url);
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
+const SOURCE_POLICY_HASH = "fedcba9876543210".repeat(4);
 let workerSource;
 let guardWorkerSource;
 let prototypeWorkerSource;
@@ -105,7 +106,13 @@ function request(worker, message, timeoutMs = 30_000) {
     };
     worker.on("message", onMessage);
     worker.on("error", onError);
-    worker.postMessage({ version: WORKER_PROTOCOL_VERSION, ...message });
+    worker.postMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      ...message,
+      ...(message.operation === "initialize" && message.source_policy_hash === undefined
+        ? { source_policy_hash: SOURCE_POLICY_HASH }
+        : {}),
+    });
   });
 }
 
@@ -116,12 +123,16 @@ function injectGuardProbe(source, needle, statement) {
 }
 
 function source(path, text) {
+  return sourceWithFormat(path, "markdown", text);
+}
+
+function sourceWithFormat(path, format, text) {
   const bytes = Buffer.from(text, "utf8");
   return {
     descriptor: {
       vault_id: "active-vault",
       path,
-      format: "markdown",
+      format,
       byte_length: bytes.byteLength,
       mtime: 1,
       mtime_nanos: "1000001",
@@ -207,7 +218,9 @@ function restoreFromExport(envelope, { id = 2, generation = envelope.generation,
     plugin_id: envelope.plugin_id,
     plugin_version: envelope.plugin_version,
     cache_identity: envelope.cache_identity,
+    source_policy_hash: envelope.source_policy_hash,
     expected_cache_identity: envelope.cache_identity,
+    expected_source_policy_hash: envelope.source_policy_hash,
     ...overrides,
   };
 }
@@ -1600,7 +1613,7 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: {
           rustAbiVersion: 2,
-          sourceSchemaVersion: 4,
+          sourceSchemaVersion: 5,
           querySchemaVersion: 4,
           matchPlanSchemaVersion: 3,
           sqliteVersion: "3.53.0",
@@ -1643,10 +1656,16 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: {
           generation: "generation-1",
-          // The index is contentless: the Worker returns identity and ranking
-          // and never index-derived excerpt text. The host hydrates excerpts
-          // from the vault file.
-          hits: [{ chunk_id: expect.any(String), path: "alpha.md", excerpt: "" }],
+          // Stored content is hydrated only after final hit selection and never
+          // enters MATCH, BM25, or ordering.
+          hits: [{
+            chunk_id: expect.any(String),
+            path: "alpha.md",
+            format: "markdown",
+            coverage: "indexed-complete",
+            locator: null,
+            excerpt: expect.stringContaining("portable quasar cache storage"),
+          }],
         },
       });
 
@@ -1690,6 +1709,76 @@ describe("exact generated production Worker", () => {
       await expect(request(worker, { id: 14, operation: "dispose" })).resolves.toMatchObject({
         ok: true,
         result: { closed: true },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("projects the Rust Base fixture through the real Worker with honest coverage and excerpts", async () => {
+    const fixtureRoot = new URL(
+      "../../../daemon/crates/kwiry-core/tests/fixtures/base/",
+      import.meta.url,
+    );
+    const wellFormed = readFileSync(new URL("well-formed.base", fixtureRoot), "utf8");
+    const empty = readFileSync(new URL("empty.base", fixtureRoot), "utf8");
+    const malformed = readFileSync(new URL("malformed.base", fixtureRoot), "utf8");
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "base-parity" });
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "base-parity",
+        sources: [
+          sourceWithFormat("project-dashboard.base", "base", wellFormed),
+          sourceWithFormat("empty.base", "base", empty),
+          sourceWithFormat("malformed.base", "base", malformed),
+        ],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { documents: 1, chunks: 4 },
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "base-parity" });
+
+      const gallery = await request(worker, {
+        id: 5, operation: "search", query: "Gallery", limit: 20,
+      });
+      expect(gallery).toMatchObject({
+        ok: true,
+        result: {
+          generation: "base-parity",
+          hits: [{
+            path: "project-dashboard.base",
+            format: "base",
+            coverage: "indexed-complete",
+            locator: { kind: "base_view", view: "Gallery" },
+          }],
+        },
+      });
+      expect(gallery.result.hits[0].excerpt.length).toBeGreaterThan(0);
+      expect(gallery.result.hits[0].excerpt.length).toBeLessThanOrEqual(240);
+
+      await expect(request(worker, {
+        id: 6, operation: "search", query: "file.inFolder", limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { hits: [{ path: "project-dashboard.base", locator: null }] },
+      });
+      await expect(request(worker, { id: 7, operation: "status" })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          documents: 1,
+          chunks: 4,
+          source_format_counts: {
+            base: {
+              "indexed-complete": 1,
+              "skipped-no-extractable-text": 1,
+              quarantined: 1,
+            },
+          },
+        },
       });
     } finally {
       await worker.terminate();
@@ -2156,7 +2245,12 @@ describe("exact generated production Worker", () => {
       })).resolves.toMatchObject({ ok: false, error: { code: "source_rejected" } });
       await expect(request(worker, { id: 6, operation: "status" })).resolves.toMatchObject({
         ok: true,
-        result: { active_generation: "g1", documents: 1, chunks: 1 },
+        result: {
+          active_generation: "g1",
+          documents: 1,
+          chunks: 1,
+          source_format_counts: { markdown: { "indexed-complete": 1 } },
+        },
       });
       await expect(request(worker, {
         id: 7,

@@ -1,10 +1,11 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "source_key": "67a13bc654d9b97bde0260a68e6001f94224e85eeea2926bc9f7bb096ef2d6b3",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Shared Key Integer.md",
   "format": "markdown",
+  "coverage": "indexed-complete",
   "content_hash": "ea35c84d4a494a0b8162d4ab68fe89a7d8bcc874de20508ba54698f02fe6cd76",
   "byte_length": 60,
   "mtime": 1785253671659,

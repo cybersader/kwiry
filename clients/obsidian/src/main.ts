@@ -34,6 +34,7 @@ import type {
 import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
 import { LatestRequestEpoch } from "./latest-request-epoch";
 import { KwirySearchModal } from "./search-modal";
+import { formatPolicyFingerprint } from "./source-formats";
 import { formatStatus } from "./status-format";
 import {
   DEFAULT_SETTINGS,
@@ -63,6 +64,7 @@ export default class KwiryPlugin extends Plugin {
   private readonly diagnostics = new PluginDiagnostics(DEFAULT_SETTINGS.diagnosticsLogLevel);
   private startupTimeline: StartupTimeline | null = null;
   private privateTools: PrivateTools = createPrivateTools(this, undefined);
+  private sourcePolicyHash: string | null = null;
 
   async onload(): Promise<void> {
     const pluginEpoch = ++this.pluginEpoch;
@@ -71,6 +73,9 @@ export default class KwiryPlugin extends Plugin {
       try {
         const storedData = await this.loadData();
         this.settings = loadSettings(storedData);
+        this.sourcePolicyHash = await formatPolicyFingerprint({
+          ...this.settings.enabledSourceFormats,
+        });
         this.privateTools = createPrivateTools(this, storedData);
         this.diagnostics.setLevel(this.settings.diagnosticsLogLevel);
         this.startupTimeline?.setProfile(this.settings.backendProfile);
@@ -89,12 +94,18 @@ export default class KwiryPlugin extends Plugin {
             transport: obsidianTransport,
           }),
           in_plugin: (instanceId) => {
-            const cache = createInPluginCacheOptions(this.app.vault);
+            const cache = createInPluginCacheOptions(
+              this.app.vault,
+              this.requireSourcePolicyHash(),
+            );
             const activationEpoch = this.activationEpoch;
             return new InPluginLexicalBackend({
               instanceId,
               activeVaultId: ACTIVE_VAULT_ID,
-              source: new ObsidianActiveVaultSource(this.app.vault),
+              source: new ObsidianActiveVaultSource(
+                this.app.vault,
+                { ...this.settings.enabledSourceFormats },
+              ),
               workerSource,
               ...(cache === undefined ? {} : { cache }),
               onDiagnosticFailure: (
@@ -142,7 +153,7 @@ export default class KwiryPlugin extends Plugin {
           window.setInterval(() => void this.refreshStatus(), STATUS_POLL_MS),
         );
         // Wait for Obsidian to finish populating its file list before indexing.
-        // getMarkdownFiles() returns only what the vault has cached so far, and on
+        // getFiles() returns only what the vault has cached so far, and on
         // a network-backed vault that enumeration is still in flight during
         // onload: indexing here snapshots a nearly empty vault, reports ready, and
         // finds nothing. onLayoutReady fires once the initial scan is complete.
@@ -184,6 +195,11 @@ export default class KwiryPlugin extends Plugin {
       this.recordCaughtFailure("settings", "save", error);
       throw error;
     }
+  }
+
+  async onSourcePolicyChanged(): Promise<void> {
+    if (this.settings.backendProfile !== "in_plugin") return;
+    await this.activateBackendProfile();
   }
 
   renderPrivateSettings(containerEl: HTMLElement): void {
@@ -246,7 +262,8 @@ export default class KwiryPlugin extends Plugin {
   async activateBackendProfile(): Promise<void> {
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = ++this.activationEpoch;
-    this.startupTimeline?.beginActivation(this.settings.backendProfile, activationEpoch);
+    const profile = this.settings.backendProfile;
+    this.startupTimeline?.beginActivation(profile, activationEpoch);
     this.statusRefresh.invalidate();
     this.statusUnsubscribe?.();
     this.statusUnsubscribe = null;
@@ -254,7 +271,14 @@ export default class KwiryPlugin extends Plugin {
     this.statusBar?.setText("kwiry: starting…");
 
     try {
-      const backend = await this.backendManager.activate(this.settings.backendProfile);
+      if (profile === "in_plugin") {
+        const sourcePolicyHash = await formatPolicyFingerprint({
+          ...this.settings.enabledSourceFormats,
+        });
+        if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
+        this.sourcePolicyHash = sourcePolicyHash;
+      }
+      const backend = await this.backendManager.activate(profile);
       if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
       this.bindBackend(backend, pluginEpoch, activationEpoch);
       await this.refreshStatus(pluginEpoch, activationEpoch);
@@ -263,7 +287,7 @@ export default class KwiryPlugin extends Plugin {
         "ui",
         "activate",
         error,
-        { profile: this.settings.backendProfile, pluginEpoch, activationEpoch },
+        { profile, pluginEpoch, activationEpoch },
         this.isCurrent(pluginEpoch, activationEpoch) ? "failed" : "superseded",
       );
       if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
@@ -509,6 +533,11 @@ export default class KwiryPlugin extends Plugin {
       return;
     }
     this.startupTimeline?.finish(observation.outcome, observation.reason);
+  }
+
+  private requireSourcePolicyHash(): string {
+    if (this.sourcePolicyHash === null) throw new Error("source policy identity is unavailable");
+    return this.sourcePolicyHash;
   }
 
   private isCurrent(pluginEpoch: number, activationEpoch: number): boolean {

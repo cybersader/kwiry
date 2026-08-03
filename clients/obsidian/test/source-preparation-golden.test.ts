@@ -23,6 +23,7 @@ const expectedFixtureNames = [
   "12-shared-key-string.json",
   "13-shared-key-boolean.json",
   "14-property-key-and-scalar-edges.json",
+  "15-base-project-dashboard.json",
 ] as const;
 
 const fixtureDirectory = fileURLToPath(
@@ -31,19 +32,45 @@ const fixtureDirectory = fileURLToPath(
 const fixtureNames = readdirSync(fixtureDirectory)
   .filter((name) => name.endsWith(".json"))
   .sort();
-const fixtures = fixtureNames.map((name) => ({
-  name,
-  preparation: JSON.parse(readFileSync(`${fixtureDirectory}/${name}`, "utf8")) as unknown,
-}));
+const fixtures = fixtureNames.map((name) => {
+  const bytes = readFileSync(`${fixtureDirectory}/${name}`, "utf8");
+  return {
+    name,
+    bytes,
+    preparation: JSON.parse(bytes) as unknown,
+  };
+});
 
 describe("Rust SourcePreparation golden fixtures", () => {
   it("contains the complete adversarial producer matrix", () => {
     expect(fixtureNames).toEqual(expectedFixtureNames);
   });
 
-  it.each(fixtures)("accepts real Rust output from $name", ({ preparation }) => {
+  it.each(fixtures)("accepts byte-canonical real Rust output from $name", ({ bytes, preparation }) => {
     // Producer-owned output prevents the validator and its fixtures from
-    // sharing the same unexamined assumptions about valid source shapes.
+    // sharing the same unexamined assumptions about valid source shapes. Re-encoding must be
+    // byte-exact, so whitespace or ordering drift in the Rust ABI is visible to Vitest.
     expect(sourcePreparationDefect(preparation)).toBeNull();
+    expect(`${JSON.stringify(preparation, null, 2)}\n`).toBe(bytes);
+  });
+
+  it("preserves Base format, view order, and authored locator in the Rust golden", () => {
+    const base = fixtures.find(({ name }) => name === "15-base-project-dashboard.json")
+      ?.preparation as {
+        format?: unknown;
+        coverage?: unknown;
+        chunks?: Array<{ chunk?: { heading_path?: unknown }; source_locator?: unknown }>;
+      } | undefined;
+
+    expect(base).toMatchObject({
+      format: "base",
+      coverage: "indexed-complete",
+      chunks: [
+        { chunk: { heading_path: [] } },
+        { chunk: { heading_path: ["Active"] }, source_locator: { kind: "base_view", view: "Active" } },
+        { chunk: { heading_path: ["Gallery"] }, source_locator: { kind: "base_view", view: "Gallery" } },
+        { chunk: { heading_path: ["Active (2)"] }, source_locator: { kind: "base_view", view: "Active" } },
+      ],
+    });
   });
 });

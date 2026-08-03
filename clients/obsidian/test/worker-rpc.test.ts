@@ -9,10 +9,17 @@ import { D5C_RPC_EXTENSION } from "../src/worker/d5c-session";
 import {
   CACHE_SCHEMA_VERSION,
   WORKER_PROTOCOL_VERSION,
+  emptySourceFormatCounts,
   type WorkerRequest,
 } from "../src/worker/protocol";
 import { PRODUCTION_RPC_PROTOCOL } from "../src/worker/production-rpc-protocol";
 import { WorkerRpcClient, type WorkerLike } from "../src/worker/rpc-client";
+
+function sourceFormatCounts(indexed = 0) {
+  const counts = emptySourceFormatCounts();
+  counts.markdown["indexed-complete"] = indexed;
+  return counts;
+}
 
 class MockWorker implements WorkerLike {
   readonly posted: WorkerRequest[] = [];
@@ -62,6 +69,7 @@ function statusResponse(id: number): unknown {
       active_database_bytes: 0,
       staging_database_bytes: 0,
       database_byte_limit: 1,
+      source_format_counts: emptySourceFormatCounts(),
       dirty: true,
       rebuilding: false,
     },
@@ -113,6 +121,7 @@ function exportResult(generation: string, cacheIdentity: string): unknown {
     plugin_id: "kwiry-search",
     plugin_version: "0.1.0",
     cache_identity: cacheIdentity,
+    source_policy_hash: "e".repeat(64),
   };
 }
 
@@ -134,7 +143,9 @@ function restoreCommand(generation = "g1") {
     plugin_id: "kwiry-search",
     plugin_version: "0.1.0",
     cache_identity: identity,
+    source_policy_hash: identity,
     expected_cache_identity: identity,
+    expected_source_policy_hash: identity,
   };
 }
 
@@ -185,6 +196,7 @@ describe("WorkerRpcClient", () => {
         database_byte_limit: 1,
         quarantined_sources: 0,
         quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(),
       },
     });
     await expect(pending).resolves.toMatchObject({ generation: "g2" });
@@ -245,6 +257,7 @@ describe("WorkerRpcClient", () => {
         database_byte_limit: 1,
         quarantined_sources: 0,
         quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(),
       },
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
@@ -325,6 +338,7 @@ describe("WorkerRpcClient", () => {
         database_byte_limit: 2,
         quarantined_sources: 0,
         quarantine_fields: [],
+        source_format_counts: sourceFormatCounts(1),
       },
     });
     await expect(pending).resolves.toMatchObject({ generation: "g1" });
@@ -357,6 +371,7 @@ describe("WorkerRpcClient", () => {
         database_byte_limit: 2,
         quarantined_sources: 0,
         quarantine_fields: [],
+        source_format_counts: sourceFormatCounts(1),
       },
     });
     await expect(pending).resolves.toMatchObject({ generation: "g1" });
@@ -379,6 +394,7 @@ describe("WorkerRpcClient", () => {
         database_byte_limit: 2,
         quarantined_sources: 0,
         quarantine_fields: [],
+        source_format_counts: sourceFormatCounts(1),
       },
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });

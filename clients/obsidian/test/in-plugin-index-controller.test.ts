@@ -13,6 +13,7 @@ import {
 } from "../src/active-vault-source";
 import type { CacheLoad, CacheStorePort, CacheWrite } from "../src/cache/cache-store";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
+import { classifySourcePath, type SourceFormat } from "../src/source-formats";
 import {
   InPluginIndexController,
   type IndexControllerCacheOptions,
@@ -24,6 +25,7 @@ import {
 import {
   CACHE_SCHEMA_VERSION,
   WORKER_PROTOCOL_VERSION,
+  emptySourceFormatCounts,
   type ExportGenerationResult,
   type ReconciliationPlanResult,
   type ReconciliationSourceMetadata,
@@ -54,7 +56,7 @@ class FakeSource implements ActiveVaultSource {
     };
   }
 
-  listMarkdownPaths(): readonly string[] {
+  listSourcePaths(): readonly string[] {
     this.log.push("list");
     return [...this.records.keys()].reverse();
   }
@@ -64,21 +66,29 @@ class FakeSource implements ActiveVaultSource {
     return { kind: "missing", path };
   }
 
-  inspectMarkdown(path: string): SourceInspection {
+  inspectSource(path: string): SourceInspection {
     const record = this.records.get(path);
-    if (!record) return { kind: "missing", path };
+    const format = classifySourcePath(path);
+    if (!record || format === null) return { kind: "missing", path };
     if (this.oversizedPaths.has(path)) {
-      return { kind: "oversized", path, size: record.bytes.byteLength, mtime: record.mtime };
+      return {
+        kind: "oversized",
+        path,
+        format,
+        size: record.bytes.byteLength,
+        mtime: record.mtime,
+      };
     }
     return {
       kind: "candidate",
       path,
+      format,
       size: record.bytes.byteLength,
       mtime: record.mtime,
     };
   }
 
-  async readMarkdown(
+  async readSource(
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
   ): Promise<StableSourceRead> {
     this.log.push(`read:${inspection.path}`);
@@ -95,7 +105,7 @@ class FakeSource implements ActiveVaultSource {
     if (record.mtime !== inspection.mtime || record.bytes.byteLength !== inspection.size) {
       return { kind: "stale", path: inspection.path };
     }
-    return { kind: "source", source: sourceInput(inspection.path, record.bytes, record.mtime) };
+    return { kind: "source", source: sourceInput(inspection.path, record.bytes, record.mtime, inspection.format) };
   }
 
   emit(event: VaultSourceEvent): void {
@@ -124,6 +134,7 @@ interface ApplyCall {
 class FakeWorker implements IndexWorkerPort {
   readonly calls: string[] = [];
   readonly applyCalls: ApplyCall[] = [];
+  readonly applyUpsertFormats: SourceFormat[][] = [];
   activeGeneration: string | null = null;
   stagingGeneration: string | null = null;
   activePaths = new Set<string>();
@@ -131,7 +142,7 @@ class FakeWorker implements IndexWorkerPort {
   quarantinedSources = 0;
   quarantineFields: SourcePreparationDefectField[] = [];
 
-  async initialize(): Promise<void> {
+  async initialize(_vaultId: string, _sourcePolicyHash: string): Promise<void> {
     this.calls.push("initialize");
   }
 
@@ -161,6 +172,7 @@ class FakeWorker implements IndexWorkerPort {
       upserts: upserts.map((source) => source.descriptor.path),
       removals: removals.map((removal) => removal.path),
     });
+    this.applyUpsertFormats.push(upserts.map((source) => source.descriptor.format));
     const paths = nextGeneration === null ? this.stagingPaths : this.activePaths;
     for (const removal of removals) paths.delete(removal.path);
     for (const source of upserts) paths.add(source.descriptor.path);
@@ -190,6 +202,11 @@ class FakeWorker implements IndexWorkerPort {
   }
 
   private counts(generation: string, paths: Set<string>): IndexCounts {
+    const sourceFormatCounts = emptySourceFormatCounts();
+    for (const path of paths) {
+      const format = classifySourcePath(path);
+      if (format !== null) sourceFormatCounts[format]["indexed-complete"] += 1;
+    }
     return {
       generation,
       documents: paths.size,
@@ -198,11 +215,13 @@ class FakeWorker implements IndexWorkerPort {
       database_byte_limit: 1_000_000,
       quarantined_sources: this.quarantinedSources,
       quarantine_fields: [...this.quarantineFields],
+      source_format_counts: sourceFormatCounts,
     };
   }
 }
 
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
+const SOURCE_POLICY_HASH = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b";
 
 async function sha256Text(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -220,6 +239,12 @@ class FakeCacheWorker extends FakeWorker {
   readonly exportCalls: string[] = [];
   restoreCalls = 0;
   exportGate: Promise<void> | null = null;
+  sourcePolicyHash = SOURCE_POLICY_HASH;
+
+  override async initialize(vaultId: string, sourcePolicyHash: string): Promise<void> {
+    await super.initialize(vaultId, sourcePolicyHash);
+    this.sourcePolicyHash = sourcePolicyHash;
+  }
 
   async restoreGeneration(hit: Extract<CacheLoad, { kind: "hit" }>): Promise<IndexCounts> {
     this.restoreCalls += 1;
@@ -274,10 +299,15 @@ class FakeCacheWorker extends FakeWorker {
   async exportGeneration(generation: string): Promise<ExportGenerationResult> {
     this.exportCalls.push(generation);
     if (this.exportGate) await this.exportGate;
-    return exportResult(generation);
+    return exportResult(generation, this.sourcePolicyHash);
   }
 
   private countsFor(generation: string, paths: Set<string>): IndexCounts {
+    const sourceFormatCounts = emptySourceFormatCounts();
+    for (const path of paths) {
+      const format = classifySourcePath(path);
+      if (format !== null) sourceFormatCounts[format]["indexed-complete"] += 1;
+    }
     return {
       generation,
       documents: paths.size,
@@ -286,6 +316,7 @@ class FakeCacheWorker extends FakeWorker {
       database_byte_limit: 1_000_000,
       quarantined_sources: 0,
       quarantine_fields: [],
+      source_format_counts: sourceFormatCounts,
     };
   }
 }
@@ -327,7 +358,10 @@ class FakeCacheStore implements CacheStorePort {
   }
 }
 
-function cacheHit(generationId = "cached-generation"): Extract<CacheLoad, { kind: "hit" }> {
+function cacheHit(
+  generationId = "cached-generation",
+  sourcePolicyHash = SOURCE_POLICY_HASH,
+): Extract<CacheLoad, { kind: "hit" }> {
   return {
     kind: "hit",
     record: {
@@ -344,6 +378,7 @@ function cacheHit(generationId = "cached-generation"): Extract<CacheLoad, { kind
         plugin_id: "kwiry-search",
         plugin_version: "0.1.0",
         cache_identity: CACHE_IDENTITY,
+        source_policy_hash: sourcePolicyHash,
       },
     },
     bytes: new Uint8Array([1, 2, 3, 4]),
@@ -351,7 +386,10 @@ function cacheHit(generationId = "cached-generation"): Extract<CacheLoad, { kind
   };
 }
 
-function exportResult(generation: string): ExportGenerationResult {
+function exportResult(
+  generation: string,
+  sourcePolicyHash = SOURCE_POLICY_HASH,
+): ExportGenerationResult {
   return {
     generation,
     documents: 1,
@@ -368,15 +406,30 @@ function exportResult(generation: string): ExportGenerationResult {
     plugin_id: "kwiry-search",
     plugin_version: "0.1.0",
     cache_identity: CACHE_IDENTITY,
+    source_policy_hash: sourcePolicyHash,
   };
 }
 
-function sourceInput(path: string, bytes: Uint8Array, mtime: number): SourceInput {
+function sourceFormatCountsForPaths(paths: readonly string[]) {
+  const counts = emptySourceFormatCounts();
+  for (const path of paths) {
+    const format = classifySourcePath(path);
+    if (format !== null) counts[format]["indexed-complete"] += 1;
+  }
+  return counts;
+}
+
+function sourceInput(
+  path: string,
+  bytes: Uint8Array,
+  mtime: number,
+  format: SourceFormat = "markdown",
+): SourceInput {
   return {
     descriptor: {
       vault_id: ACTIVE_VAULT_ID,
       path,
-      format: "markdown",
+      format,
       byte_length: bytes.byteLength,
       mtime: Math.floor(mtime / 1_000),
       mtime_nanos: (BigInt(mtime) * 1_000_000n).toString(),
@@ -508,16 +561,16 @@ describe("InPluginIndexController", () => {
     const source = new FakeSource();
     source.set("a.md", "aaaa");
     source.set("b.md", "bbbb");
-    const originalInspect = source.inspectMarkdown.bind(source);
-    source.inspectMarkdown = vi.fn((path) => {
+    const originalInspect = source.inspectSource.bind(source);
+    source.inspectSource = vi.fn((path) => {
       const inspection = originalInspect(path);
       return inspection.kind === "candidate" ? { ...inspection, size: 2 } : inspection;
     });
-    source.readMarkdown = vi.fn(async (inspection) => {
+    source.readSource = vi.fn(async (inspection) => {
       const record = source.records.get(inspection.path)!;
       return {
         kind: "source" as const,
-        source: sourceInput(inspection.path, record.bytes, record.mtime),
+        source: sourceInput(inspection.path, record.bytes, record.mtime, inspection.format),
       };
     });
     const { controller, statuses } = harness(
@@ -603,8 +656,8 @@ describe("InPluginIndexController", () => {
     source.set("a.md", "a");
     source.set("b.md", "b");
     source.set("vanished.md", "gone");
-    const originalInspect = source.inspectMarkdown.bind(source);
-    source.inspectMarkdown = vi.fn((path) => {
+    const originalInspect = source.inspectSource.bind(source);
+    source.inspectSource = vi.fn((path) => {
       if (path === "vanished.md") source.records.delete(path);
       return originalInspect(path);
     });
@@ -614,7 +667,7 @@ describe("InPluginIndexController", () => {
     await controller.whenIdle();
 
     expect(failures).toEqual([]);
-    expect(source.inspectMarkdown).toHaveBeenCalledWith("vanished.md");
+    expect(source.inspectSource).toHaveBeenCalledWith("vanished.md");
     expect(worker.calls).toEqual([
       "initialize",
       "begin:generation-1",
@@ -640,8 +693,8 @@ describe("InPluginIndexController", () => {
     source.set("a.md", "a");
     source.set("b.md", "b");
     source.set("unreadable.md", "locked");
-    const originalInspect = source.inspectMarkdown.bind(source);
-    source.inspectMarkdown = vi.fn((path) => {
+    const originalInspect = source.inspectSource.bind(source);
+    source.inspectSource = vi.fn((path) => {
       if (path === "unreadable.md") throw new Error("simulated inspection failure");
       return originalInspect(path);
     });
@@ -674,8 +727,8 @@ describe("InPluginIndexController", () => {
     source.set("a.md", "a");
     source.set("b.md", "b");
     source.set("healthy.md", "healthy");
-    const originalInspect = source.inspectMarkdown.bind(source);
-    source.inspectMarkdown = vi.fn((path) => {
+    const originalInspect = source.inspectSource.bind(source);
+    source.inspectSource = vi.fn((path) => {
       if (path === "a.md" || path === "b.md") {
         throw new Error("simulated inspection failure");
       }
@@ -708,7 +761,7 @@ describe("InPluginIndexController", () => {
   it("classifies authoritative path enumeration failure as vault-wide", async () => {
     const source = new FakeSource();
     source.set("note.md", "value");
-    source.listMarkdownPaths = vi.fn(() => {
+    source.listSourcePaths = vi.fn(() => {
       throw new Error("simulated enumeration failure");
     });
     const { controller, worker, statuses, failures } = harness(source);
@@ -1106,8 +1159,8 @@ describe("InPluginIndexController", () => {
       expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "unreadable.md"]));
 
       if (failureKind === "inspection") {
-        const originalInspect = source.inspectMarkdown.bind(source);
-        source.inspectMarkdown = vi.fn((path) => {
+        const originalInspect = source.inspectSource.bind(source);
+        source.inspectSource = vi.fn((path) => {
           if (path === "unreadable.md") throw new Error("private SMB inspection detail");
           return originalInspect(path);
         });
@@ -1132,6 +1185,7 @@ describe("InPluginIndexController", () => {
         generation: "generation-1",
         documents: 3,
         chunks: 3,
+        sourceFormatCounts: sourceFormatCountsForPaths(["a.md", "b.md", "unreadable.md"]),
         quarantinedSources: 0,
         unreadableSources: 1,
         quarantineValidatorFields: [],
@@ -1172,6 +1226,7 @@ describe("InPluginIndexController", () => {
       generation: "generation-2",
       documents: 1,
       chunks: 1,
+      sourceFormatCounts: sourceFormatCountsForPaths(["kept.md"]),
       quarantinedSources: 0,
       unreadableSources: 0,
       quarantineValidatorFields: [],
@@ -1228,6 +1283,11 @@ describe("InPluginIndexController", () => {
       generation: "generation-1",
       documents: 3,
       chunks: 3,
+      sourceFormatCounts: sourceFormatCountsForPaths([
+        "Clients/Secret-A.md",
+        "Clients/Secret-B.md",
+        "healthy.md",
+      ]),
       quarantinedSources: 0,
       unreadableSources: 2,
       quarantineValidatorFields: [],
@@ -1237,6 +1297,37 @@ describe("InPluginIndexController", () => {
       issue: "vault_read_failed",
     });
     expect(JSON.stringify({ diagnostic, status: statuses.at(-1) })).not.toContain("Secret-");
+  });
+
+  it("refuses an old source policy cache and exports the fresh generation under the new hash", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("note.md", "fresh", 1);
+      const worker = new FakeCacheWorker();
+      const store = new FakeCacheStore(cacheHit("old-generation", "e".repeat(64)));
+      const { controller } = harness(source, worker, {}, {
+        sourcePolicyHash: SOURCE_POLICY_HASH,
+        openStore: async () => ({ kind: "available", store }),
+      });
+
+      controller.start();
+      await controller.whenIdle();
+
+      expect(store.discards).toEqual(["incompatible"]);
+      expect(worker.restoreCalls).toBe(0);
+      expect(worker.activeGeneration).toBe("generation-1");
+      expect(worker.sourcePolicyHash).toBe(SOURCE_POLICY_HASH);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect(store.puts).toHaveLength(1));
+      expect(store.puts[0]).toMatchObject({
+        generationId: "generation-1",
+        identity: { source_policy_hash: SOURCE_POLICY_HASH },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("binds before awaits, audits metadata matches, and mutates only changed sources", async () => {
@@ -1809,8 +1900,8 @@ describe("InPluginIndexController", () => {
     const started: string[] = [];
     let activeReads = 0;
     let peakReads = 0;
-    const originalRead = source.readMarkdown.bind(source);
-    source.readMarkdown = vi.fn(async (inspection) => {
+    const originalRead = source.readSource.bind(source);
+    source.readSource = vi.fn(async (inspection) => {
       started.push(inspection.path);
       activeReads += 1;
       peakReads = Math.max(peakReads, activeReads);
@@ -1837,8 +1928,8 @@ describe("InPluginIndexController", () => {
     for (const path of ["a.md", "b.md", "c.md"]) source.set(path, "123456");
     const releases = new Map<string, () => void>();
     const started: string[] = [];
-    const originalRead = source.readMarkdown.bind(source);
-    source.readMarkdown = vi.fn(async (inspection) => {
+    const originalRead = source.readSource.bind(source);
+    source.readSource = vi.fn(async (inspection) => {
       started.push(inspection.path);
       await new Promise<void>((resolve) => releases.set(inspection.path, resolve));
       return originalRead(inspection);
@@ -1892,6 +1983,26 @@ describe("InPluginIndexController", () => {
       removals: ["b.md"],
     });
     expect([...worker.activePaths].sort()).toEqual(["a.md", "c.md"]);
+  });
+
+  it("applies an extension-changing rename as one atomic remove and typed upsert", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "# Note");
+    const { controller, worker } = harness(source);
+    controller.start();
+    await controller.whenIdle();
+
+    source.rename("note.md", "note.base");
+    await controller.whenIdle();
+
+    expect(worker.applyCalls.at(-1)).toEqual({
+      generation: "generation-1",
+      nextGeneration: "generation-2",
+      upserts: ["note.base"],
+      removals: ["note.md"],
+    });
+    expect(worker.applyUpsertFormats.at(-1)).toEqual(["base"]);
+    expect([...worker.activePaths]).toEqual(["note.base"]);
   });
 
   it("continues replay when another event arrives during a staging mutation", async () => {
@@ -1980,9 +2091,9 @@ describe("InPluginIndexController", () => {
     controller.start();
     await controller.whenIdle();
 
-    const originalInspect = source.inspectMarkdown.bind(source);
+    const originalInspect = source.inspectSource.bind(source);
     let postEventInspections = 0;
-    source.inspectMarkdown = vi.fn((path) => {
+    source.inspectSource = vi.fn((path) => {
       postEventInspections += 1;
       if (postEventInspections === 1) throw new Error("simulated inspection failure");
       return originalInspect(path);
@@ -2073,6 +2184,7 @@ describe("InPluginIndexController", () => {
       generation: "generation-1",
       documents: 3,
       chunks: 3,
+      sourceFormatCounts: sourceFormatCountsForPaths(["a.md", "b.md", "unreadable.md"]),
       quarantinedSources: 0,
       unreadableSources: 1,
       quarantineValidatorFields: [],
@@ -2133,9 +2245,9 @@ describe("InPluginIndexController", () => {
   it("retries a transient stale read and publishes the stable source", async () => {
     const source = new FakeSource();
     source.set("note.md", "stable");
-    const originalRead = source.readMarkdown.bind(source);
+    const originalRead = source.readSource.bind(source);
     let attempts = 0;
-    source.readMarkdown = vi.fn(async (inspection) => {
+    source.readSource = vi.fn(async (inspection) => {
       attempts += 1;
       if (attempts === 1) return { kind: "stale" as const, path: inspection.path };
       return originalRead(inspection);
@@ -2522,15 +2634,15 @@ describe("InPluginIndexController", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const originalRead = source.readMarkdown.bind(source);
-    source.readMarkdown = vi.fn(async (inspection) => {
+    const originalRead = source.readSource.bind(source);
+    source.readSource = vi.fn(async (inspection) => {
       await gate;
       return originalRead(inspection);
     });
     const { controller, worker, statuses } = harness(source);
 
     controller.start();
-    await vi.waitFor(() => expect(source.readMarkdown).toHaveBeenCalled());
+    await vi.waitFor(() => expect(source.readSource).toHaveBeenCalled());
     controller.dispose();
     release();
     await controller.whenIdle();

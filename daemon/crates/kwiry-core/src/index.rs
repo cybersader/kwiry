@@ -22,8 +22,8 @@ use crate::generation::DataRoot;
 use crate::lexical::{fold_lexical, normalize_raw};
 use crate::manifest::{Manifest, registration_fingerprint, source_key};
 use crate::model::{
-    Config, FileOutcomeKind, HostProfile, IndexStats, PreparedChunk, PropertyBag, PropertyValue,
-    ResourceKey, RetrievalMetadata, VaultRegistration,
+    Config, HostProfile, IndexStats, PreparedChunk, PropertyBag, PropertyValue, ResourceKey,
+    RetrievalMetadata, VaultRegistration,
 };
 use crate::partition::{GenerationLayout, partition_index_dir};
 
@@ -102,6 +102,9 @@ pub(crate) struct Fields {
     pub vault_id: Field,
     pub room: Field,
     pub path: Field,
+    pub source_format: Field,
+    pub source_locator: Field,
+    pub extraction_coverage: Field,
     pub filename: Field,
     pub stem: Field,
     pub aliases: Field,
@@ -154,6 +157,9 @@ impl Fields {
             vault_id: field(schema, "vault_id")?,
             room: field(schema, "room")?,
             path: field(schema, "path")?,
+            source_format: field(schema, "source_format")?,
+            source_locator: field(schema, "source_locator")?,
+            extraction_coverage: field(schema, "extraction_coverage")?,
             filename: field(schema, "filename")?,
             stem: field(schema, "stem")?,
             aliases: field(schema, "aliases")?,
@@ -256,9 +262,7 @@ fn build_desktop_candidate(
             if let Some(warning) = outcome.warning.clone() {
                 stats.warnings.push(warning);
             }
-            if outcome.kind == FileOutcomeKind::Indexed {
-                stats.documents += 1;
-            }
+            stats.record_outcome(&outcome);
             for chunk in &outcome.chunks {
                 writer
                     .add_document(chunk_document(&fields, chunk, &outcome.retrieval)?)
@@ -295,6 +299,15 @@ fn build_desktop_candidate(
             stats.documents,
             manifest.document_count()
         )));
+    }
+    let manifest_counts = manifest.source_format_counts();
+    if manifest_counts != stats.source_format_counts
+        || stats.source_format_counts.indexed_documents() != stats.documents
+    {
+        return Err(Error::State(
+            "candidate per-format coverage counts do not match indexed documents or manifest"
+                .to_owned(),
+        ));
     }
     Ok(stats)
 }
@@ -363,6 +376,15 @@ fn build_openclast_candidate(
             manifest.document_count()
         )));
     }
+    let manifest_counts = manifest.source_format_counts();
+    if manifest_counts != stats.source_format_counts
+        || stats.source_format_counts.indexed_documents() != stats.documents
+    {
+        return Err(Error::State(
+            "candidate per-format coverage counts do not match indexed documents or manifest"
+                .to_owned(),
+        ));
+    }
     Ok(stats)
 }
 
@@ -398,9 +420,7 @@ fn build_partition(
         if let Some(warning) = outcome.warning.clone() {
             stats.warnings.push(warning);
         }
-        if outcome.kind == FileOutcomeKind::Indexed {
-            stats.documents += 1;
-        }
+        stats.record_outcome(&outcome);
         for chunk in &outcome.chunks {
             if chunk.vault_id != resource.vault_id
                 || chunk.room.as_deref() != Some(resource.room_id.as_str())
@@ -459,6 +479,11 @@ pub(crate) fn build_schema() -> Schema {
     builder.add_text_field("vault_id", STRING | STORED);
     builder.add_text_field("room", STRING | STORED);
     builder.add_text_field("path", STRING | STORED);
+    // Extraction metadata is returned after ranking but is never indexed, queried, boosted, or
+    // included in BM25 statistics.
+    builder.add_text_field("source_format", STORED);
+    builder.add_text_field("source_locator", STORED);
+    builder.add_text_field("extraction_coverage", STORED);
     builder.add_text_field("filename", TEXT);
     builder.add_text_field("stem", TEXT);
     builder.add_text_field("aliases", TEXT);
@@ -523,6 +548,32 @@ pub(crate) fn chunk_document(
     document.add_text(fields.vault_id, &chunk.vault_id);
     document.add_text(fields.room, chunk.room.as_deref().unwrap_or_default());
     document.add_text(fields.path, &chunk.path);
+    let source_format = prepared.source_format.ok_or_else(|| {
+        Error::Index(format!(
+            "prepared chunk {} is missing its source format",
+            chunk.chunk_id
+        ))
+    })?;
+    let extraction_coverage = prepared.extraction_coverage.ok_or_else(|| {
+        Error::Index(format!(
+            "prepared chunk {} is missing its extraction coverage",
+            chunk.chunk_id
+        ))
+    })?;
+    document.add_text(
+        fields.source_format,
+        serde_json::to_string(&source_format).map_err(|error| Error::Index(error.to_string()))?,
+    );
+    document.add_text(
+        fields.source_locator,
+        serde_json::to_string(&prepared.source_locator)
+            .map_err(|error| Error::Index(error.to_string()))?,
+    );
+    document.add_text(
+        fields.extraction_coverage,
+        serde_json::to_string(&extraction_coverage)
+            .map_err(|error| Error::Index(error.to_string()))?,
+    );
     document.add_text(fields.filename, &retrieval.filename);
     document.add_text(fields.stem, &retrieval.stem);
     add_raw(&mut document, fields.filename_raw, &retrieval.filename);
@@ -1014,8 +1065,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::api::SearchFilters;
+    use crate::extract::{ExtractionCoverage, SourceLocator};
+    use crate::format::SourceFormat;
     use crate::model::VaultRegistration;
-    use crate::source::{SourceDescriptor, SourceFormat, prepare_source_buffer};
+    use crate::search::search_reader;
+    use crate::source::{SourceDescriptor, prepare_source_buffer};
     use crate::{LexicalSearchRequest, search_index};
 
     #[test]
@@ -1347,6 +1402,194 @@ mod tests {
             assert_eq!(stored, "{}");
             assert!(!stored.contains(&payload));
         }
+    }
+
+    #[test]
+    fn base_fixture_projects_through_tantivy_with_stored_locator_and_excerpt() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let index_path = temporary.path().join("index");
+        fs::create_dir(&vault_path).unwrap();
+        fs::write(
+            vault_path.join("project-dashboard.base"),
+            include_bytes!("../tests/fixtures/base/well-formed.base"),
+        )
+        .unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+
+        let stats = build_index(&config, &index_path).unwrap();
+        assert_eq!(stats.documents, 1);
+        assert_eq!(stats.chunks, 4);
+
+        let gallery = search_index(
+            &index_path,
+            &LexicalSearchRequest {
+                query: "Gallery".into(),
+                limit: 20,
+                vault_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(gallery.len(), 1);
+        assert_eq!(gallery[0].format, SourceFormat::Base);
+        assert_eq!(gallery[0].coverage, ExtractionCoverage::IndexedComplete);
+        assert_eq!(
+            gallery[0].locator,
+            Some(SourceLocator::BaseView {
+                view: "Gallery".to_owned()
+            })
+        );
+        assert!(gallery[0].excerpt.chars().count() <= 241);
+        assert!(gallery[0].excerpt.contains("Gallery") || gallery[0].excerpt.contains("cover"));
+
+        let configuration = search_index(
+            &index_path,
+            &LexicalSearchRequest {
+                query: "file.inFolder".into(),
+                limit: 20,
+                vault_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(configuration.len(), 1);
+        assert_eq!(configuration[0].format, SourceFormat::Base);
+        assert_eq!(configuration[0].locator, None);
+    }
+
+    #[test]
+    fn native_index_stats_account_for_every_persisted_format_coverage() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_path = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        fs::write(vault_path.join("complete.md"), "# Complete\nbody").unwrap();
+        fs::write(vault_path.join("unreadable.md"), [0xff]).unwrap();
+        fs::write(
+            vault_path.join("partial.base"),
+            "filters: status == \"active\"\nviews:\n  - type: table\n  - not-a-view\n",
+        )
+        .unwrap();
+        fs::write(vault_path.join("empty.base"), "{}").unwrap();
+        fs::write(vault_path.join("broken.base"), "not: [valid").unwrap();
+        fs::write(vault_path.join("unsupported.canvas"), "{}").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+
+        let stats = build_index(&config, &data_path).unwrap();
+
+        assert_eq!(stats.documents, 2);
+        assert_eq!(stats.source_format_counts.indexed_documents(), 2);
+        assert_eq!(stats.source_format_counts.total_sources(), 6);
+        assert_eq!(stats.source_format_counts.markdown.indexed_complete, 1);
+        assert_eq!(stats.source_format_counts.base.indexed_partial, 1);
+        assert_eq!(stats.source_format_counts.base.quarantined, 1);
+        assert_eq!(
+            stats.source_format_counts.base.skipped_no_extractable_text,
+            1
+        );
+        assert_eq!(stats.source_format_counts.markdown.unreadable, 1);
+        assert_eq!(
+            stats
+                .source_format_counts
+                .canvas
+                .skipped_no_extractable_text,
+            1
+        );
+    }
+
+    #[test]
+    fn stored_source_format_is_ranking_neutral_under_mutation() {
+        fn preparation(path: &str, format: SourceFormat) -> crate::source::SourcePreparation {
+            let body = b"neutral evidence";
+            prepare_source_buffer(
+                &SourceDescriptor {
+                    vault_id: "fixture".to_owned(),
+                    room: None,
+                    path: path.to_owned(),
+                    format,
+                    byte_length: body.len() as u64,
+                    mtime: 1,
+                    mtime_nanos: 1,
+                },
+                body,
+            )
+            .unwrap()
+        }
+
+        fn ranked(
+            first_format: SourceFormat,
+            second_format: SourceFormat,
+        ) -> Vec<crate::model::SearchHit> {
+            let mut first = preparation("alpha.md", SourceFormat::Markdown);
+            let mut second = preparation("beta.txt", SourceFormat::Text);
+            first.chunks[0].source_format = Some(first_format);
+            second.chunks[0].source_format = Some(second_format);
+
+            let schema = build_schema();
+            let fields = Fields::from_schema(&schema).unwrap();
+            let index = Index::create_in_ram(schema);
+            register_lexical_analyzer(&index);
+            let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
+            for source in [&first, &second] {
+                writer
+                    .add_document(
+                        chunk_document(&fields, &source.chunks[0], &source.retrieval).unwrap(),
+                    )
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+            let reader = index.reader().unwrap();
+            search_reader(
+                &index,
+                &fields,
+                &reader,
+                "content:neutral",
+                20,
+                &SearchFilters::default(),
+            )
+            .unwrap()
+        }
+
+        let baseline = ranked(SourceFormat::Markdown, SourceFormat::Text);
+        assert_eq!(baseline.len(), 2);
+        assert_eq!(baseline[0].score, baseline[1].score);
+
+        let mutated = ranked(SourceFormat::Text, SourceFormat::Markdown);
+        assert_eq!(
+            baseline
+                .iter()
+                .map(|hit| (&hit.chunk_id, hit.score))
+                .collect::<Vec<_>>(),
+            mutated
+                .iter()
+                .map(|hit| (&hit.chunk_id, hit.score))
+                .collect::<Vec<_>>()
+        );
+        let baseline_formats = baseline
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.format))
+            .collect::<BTreeMap<_, _>>();
+        let mutated_formats = mutated
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.format))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(baseline_formats["alpha.md"], SourceFormat::Markdown);
+        assert_eq!(baseline_formats["beta.txt"], SourceFormat::Text);
+        assert_eq!(mutated_formats["alpha.md"], SourceFormat::Text);
+        assert_eq!(mutated_formats["beta.txt"], SourceFormat::Markdown);
     }
 
     #[test]

@@ -7,6 +7,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { buildPlugin } from "../esbuild.config.mjs";
 import { WORKER_PROTOCOL_VERSION, isWorkerResponse } from "../src/worker/protocol";
 
+const SOURCE_POLICY_HASH = "0".repeat(64);
+
 let injectedWorkerSource;
 
 beforeAll(async () => {
@@ -79,7 +81,12 @@ function source(path, text) {
 
 async function initializedWorker() {
   const worker = new Worker(nodeWorkerSource(injectedWorkerSource), { eval: true });
-  await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+  await request(worker, {
+    id: 1,
+    operation: "initialize",
+    vault_id: "active-vault",
+    source_policy_hash: SOURCE_POLICY_HASH,
+  });
   return worker;
 }
 

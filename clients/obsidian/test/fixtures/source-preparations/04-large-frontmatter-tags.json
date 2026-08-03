@@ -1,9 +1,10 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "source_key": "09b54235e46ecbc8597be3aab37398b1df8ba096b4aa7765c59741293859ef01",
   "vault_id": "golden-vault",
   "path": "Golden/Large Frontmatter Tags.md",
   "format": "markdown",
+  "coverage": "indexed-complete",
   "content_hash": "6a0481d13319b39b38697a32391c04e2efca372d4b6707d188dac5ce78d5859e",
   "byte_length": 33564,
   "mtime": 1785253671659,

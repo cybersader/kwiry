@@ -9,13 +9,21 @@ import {
   MAX_RECONCILIATION_SOURCES,
   MAX_SOURCE_BYTES,
   MAX_SOURCE_CHANGES,
+  SOURCE_FORMATS,
   WORKER_PROTOCOL_VERSION,
+  emptySourceFormatCounts,
   type SourceInput,
   isWorkerResponse,
   parseWorkerRequest,
 } from "../src/worker/protocol";
 
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
+
+function sourceFormatCounts(indexed = 0) {
+  const counts = emptySourceFormatCounts();
+  counts.markdown["indexed-complete"] = indexed;
+  return counts;
+}
 
 function exportEnvelope(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -34,6 +42,7 @@ function exportEnvelope(overrides: Record<string, unknown> = {}): Record<string,
     plugin_id: "kwiry-search",
     plugin_version: "0.1.0",
     cache_identity: CACHE_IDENTITY,
+    source_policy_hash: CACHE_IDENTITY,
     ...overrides,
   };
 }
@@ -57,7 +66,9 @@ function restoreRequest(overrides: Record<string, unknown> = {}): Record<string,
     plugin_id: "kwiry-search",
     plugin_version: "0.1.0",
     cache_identity: CACHE_IDENTITY,
+    source_policy_hash: CACHE_IDENTITY,
     expected_cache_identity: CACHE_IDENTITY,
+    expected_source_policy_hash: CACHE_IDENTITY,
     ...overrides,
   };
 }
@@ -78,6 +89,12 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
+  it("publishes protocol 7, cache schema 9, and the closed six-format set", () => {
+    expect(WORKER_PROTOCOL_VERSION).toBe(7);
+    expect(CACHE_SCHEMA_VERSION).toBe(9);
+    expect(SOURCE_FORMATS).toEqual(["markdown", "text", "base", "canvas", "docx", "pdf"]);
+  });
+
   it("accepts exact bounded source batches", () => {
     const request = parseWorkerRequest({
       version: WORKER_PROTOCOL_VERSION,
@@ -87,6 +104,29 @@ describe("Worker protocol", () => {
       sources: [source()],
     });
     expect(request).toMatchObject({ operation: "add_source_batch" });
+  });
+
+  it("accepts all six source formats and rejects open-ended format strings", () => {
+    for (const format of SOURCE_FORMATS) {
+      const candidate = source(`note.${format === "markdown" ? "md" : format}`);
+      candidate.descriptor.format = format;
+      expect(parseWorkerRequest({
+        version: WORKER_PROTOCOL_VERSION,
+        id: 1,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [candidate],
+      })).toMatchObject({ operation: "add_source_batch" });
+    }
+    const invalid = source();
+    (invalid.descriptor as { format: string }).format = "html";
+    expect(parseWorkerRequest({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "add_source_batch",
+      generation: "g1",
+      sources: [invalid],
+    })).toMatchObject({ code: "invalid_request" });
   });
 
   it("accepts exact staging and active source changes", () => {
@@ -392,7 +432,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "restore_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 2, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [] },
+      result: { generation: "g1", documents: 1, chunks: 2, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [], source_format_counts: sourceFormatCounts(1) },
     })).toBe(true);
     for (const code of [
       "cache_identity_mismatch",
@@ -451,7 +491,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "export_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 1, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [] },
+      result: { generation: "g1", documents: 1, chunks: 1, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [], source_format_counts: sourceFormatCounts(1) },
     })).toBe(false);
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
@@ -514,7 +554,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "apply_source_changes",
       ok: true,
-      result: { generation: "g2", documents: 1, chunks: 1, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [] },
+      result: { generation: "g2", documents: 1, chunks: 1, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [], source_format_counts: sourceFormatCounts(1) },
     })).toBe(true);
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
@@ -555,6 +595,7 @@ describe("Worker protocol", () => {
       active_database_bytes: 131_072,
       staging_database_bytes: 0,
       database_byte_limit: 1024 * 1024,
+      source_format_counts: sourceFormatCounts(1),
       dirty: false,
       rebuilding: false,
     };
@@ -573,6 +614,15 @@ describe("Worker protocol", () => {
       ok: true,
       result: missingBytes,
     })).toBe(false);
+    const invalidCounts = emptySourceFormatCounts();
+    invalidCounts.pdf.unreadable = -1;
+    expect(isWorkerResponse({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "status",
+      ok: true,
+      result: { ...status, source_format_counts: invalidCounts },
+    })).toBe(false);
   });
 
   it("carries only compact display frontmatter in ordinary search responses", () => {
@@ -587,9 +637,12 @@ describe("Worker protocol", () => {
           chunk_id: "chunk-1",
           vault_id: "active-vault",
           path: "note.md",
+          format: "markdown",
+          coverage: "indexed-complete",
+          locator: null,
           heading_path: [],
           score: 1,
-          excerpt: "",
+          excerpt: "stored content",
           frontmatter,
         }],
       },
@@ -600,17 +653,17 @@ describe("Worker protocol", () => {
     expect(isWorkerResponse(response({ title: "x".repeat(1_025) }))).toBe(false);
   });
 
-  // The hit shape is frozen. Slimming the index changed how the excerpt text
-  // is produced, not the transported fields, so the exact key set must still
-  // be enforced in both directions.
-  it("holds the search hit shape exactly, including the excerpt field", () => {
+  it("holds the multi-format search hit shape and bounded stored excerpt exactly", () => {
     const hit = {
       chunk_id: "chunk-1",
       vault_id: "active-vault",
       path: "note.md",
+      format: "markdown",
+      coverage: "indexed-complete",
+      locator: null,
       heading_path: ["Heading"],
       score: 1.5,
-      excerpt: "",
+      excerpt: "portable quasar cache",
       frontmatter: { title: "Note" },
     };
     const response = (result: unknown) => ({
@@ -630,16 +683,22 @@ describe("Worker protocol", () => {
       generation: "g1",
       hits: [{ ...hit, match_terms: ["quasar"] }],
     }))).toBe(false);
-    // Contentless index: the Worker has no text to snippet, so the empty
-    // string is enforced rather than merely bounded. A Worker that regressed
-    // to emitting snippet text would be rejected here.
     expect(isWorkerResponse(response({
       generation: "g1",
-      hits: [{ ...hit, excerpt: "portable <b>quasar</b> cache" }],
+      hits: [{
+        ...hit,
+        path: "projects.base",
+        format: "base",
+        locator: { kind: "base_view", view: "Active" },
+      }],
+    }))).toBe(true);
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...hit, locator: { kind: "base_view", view: "Active" } }],
     }))).toBe(false);
     expect(isWorkerResponse(response({
       generation: "g1",
-      hits: [{ ...hit, excerpt: "x".repeat(262_145) }],
+      hits: [{ ...hit, excerpt: "x".repeat(16_385) }],
     }))).toBe(false);
     expect(isWorkerResponse(response({
       generation: "g1",

@@ -7,6 +7,50 @@ import type { Transport } from "../src/api";
 import { DaemonBackend } from "../src/backends/daemon-backend";
 
 const TOKEN = "A".repeat(43);
+const SOURCE_FORMAT_COUNTS = {
+  markdown: {
+    "indexed-complete": 2,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  text: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  base: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  canvas: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  docx: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  pdf: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+};
 const STATUS = {
   state: "ready",
   version: "0.1.0",
@@ -14,6 +58,7 @@ const STATUS = {
   chunking_version: 1,
   documents: 2,
   chunks: 4,
+  source_format_counts: SOURCE_FORMAT_COUNTS,
   last_sync: null,
   dirty: false,
   rebuilding: false,
@@ -24,6 +69,9 @@ const HIT = {
   chunk_id: "chunk-1",
   vault_id: "notes",
   path: "folder/note.md",
+  format: "markdown",
+  coverage: "indexed-complete",
+  locator: null,
   heading_path: ["Heading"],
   score: 1,
   excerpt: "before <b>match</b> after",
@@ -77,6 +125,9 @@ describe("DaemonBackend", () => {
     expect(execution.effectiveMode).toBe("hybrid");
     expect(execution.response.hits[0]).toMatchObject({
       path: "folder/note.md",
+      format: "markdown",
+      coverage: "indexed-complete",
+      locator: null,
       excerpt: [
         { text: "before ", highlighted: false },
         { text: "match", highlighted: true },
@@ -88,6 +139,25 @@ describe("DaemonBackend", () => {
         vaultId: "notes",
       },
     });
+  });
+
+  it("rejects search hits with invalid coverage or format-incompatible locators", async () => {
+    const invalidHits = [
+      { ...HIT, coverage: "complete" },
+      { ...HIT, locator: { kind: "base_view", view: "Table" } },
+    ];
+
+    for (const invalidHit of invalidHits) {
+      const daemon = backend(jsonTransport((url) =>
+        url.endsWith("/v0/status")
+          ? { status: 200, body: STATUS }
+          : { status: 200, body: { hits: [invalidHit], next_cursor: null } },
+      ));
+      await daemon.status();
+      await expect(daemon.search({ q: "match", mode: "lexical" })).rejects.toMatchObject({
+        code: "invalid_response",
+      });
+    }
   });
 
   it("reads the token provider for each authenticated status and search request", async () => {

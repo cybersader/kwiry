@@ -14,11 +14,17 @@ import type {
   CacheStoreAvailability,
   CacheStorePort,
 } from "../cache/cache-store";
+import {
+  EXTRACTION_COVERAGES,
+  SOURCE_FORMATS,
+  emptySourceFormatCounts,
+} from "../worker/protocol";
 import type {
   BuildResult,
   ExportGenerationResult,
   ReconciliationPlanResult,
   ReconciliationSourceMetadata,
+  SourceFormatCounts,
   SourcePreparationDefectField,
   SourceRemoval,
   SourceUpsert,
@@ -28,7 +34,7 @@ export type IndexCounts = BuildResult;
 export type { SourceRemoval } from "../worker/protocol";
 
 export interface IndexWorkerPort {
-  initialize(vaultId: string): Promise<unknown>;
+  initialize(vaultId: string, sourcePolicyHash: string): Promise<unknown>;
   beginBuild(generation: string): Promise<IndexCounts>;
   addSourceBatch(generation: string, sources: SourceUpsert[]): Promise<IndexCounts>;
   applySourceChanges(
@@ -45,6 +51,7 @@ export interface CacheIndexWorkerPort extends IndexWorkerPort {
   restoreGeneration(
     hit: Extract<CacheLoad, { kind: "hit" }>,
     expectedCacheIdentity: string,
+    expectedSourcePolicyHash: string,
   ): Promise<IndexCounts>;
   planReconciliation(
     generation: string,
@@ -100,6 +107,7 @@ export interface IndexControllerStatus {
   initialColdPreview?: InitialColdPreviewLease;
   documents: number;
   chunks: number;
+  sourceFormatCounts: SourceFormatCounts;
   quarantinedSources: number;
   unreadableSources: number;
   quarantineValidatorFields: readonly SourcePreparationDefectField[];
@@ -126,6 +134,7 @@ export interface IndexControllerLimits {
 }
 
 export interface IndexControllerCacheOptions {
+  sourcePolicyHash?: string;
   openStore: () => Promise<CacheStoreAvailability>;
   idleExportMs?: number;
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
@@ -162,6 +171,7 @@ const DEFAULT_LIMITS: IndexControllerLimits = {
   maxStableReadAttempts: 3,
 };
 const DEFAULT_IDLE_EXPORT_MS = 2_000;
+const DEFAULT_SOURCE_POLICY_HASH = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b";
 const MAX_GENERATION_ALLOCATION_ATTEMPTS = 32;
 // A network share that disappears midway can yield a plausible-looking partial
 // index. Requiring more than half of attempted reads to fail avoids publishing
@@ -185,6 +195,7 @@ interface Snapshot {
 }
 
 interface SourceOmissions {
+  sourceFormatCounts: SourceFormatCounts;
   quarantinedSources: number;
   unreadableSources: string[];
   quarantineValidatorFields: SourcePreparationDefectField[];
@@ -204,6 +215,7 @@ export class InPluginIndexController {
   private readonly yieldControl: () => Promise<void>;
   private readonly limits: IndexControllerLimits;
   private readonly cache: IndexControllerCacheOptions | null;
+  private readonly sourcePolicyHash: string;
   private readonly initialColdPreviewEnabled: boolean;
   private readonly idleExportMs: number;
   private readonly setTimer: NonNullable<IndexControllerCacheOptions["setTimer"]>;
@@ -238,9 +250,11 @@ export class InPluginIndexController {
   private chunks = 0;
   private databaseBytes = 0;
   private databaseByteLimit = 1;
+  private sourceFormatCounts = emptySourceFormatCounts();
   private quarantinedSources = 0;
   private readonly unreadableSources = new Set<string>();
   private readonly quarantineValidatorFields = new Set<SourcePreparationDefectField>();
+  private activeSourceFormatCounts = emptySourceFormatCounts();
   private activeQuarantinedSources = 0;
   private activeUnreadableSources = 0;
   private readonly activeQuarantineValidatorFields = new Set<SourcePreparationDefectField>();
@@ -267,6 +281,7 @@ export class InPluginIndexController {
     this.yieldControl = options.yieldControl ?? (() => Promise.resolve());
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.cache = options.cache ?? null;
+    this.sourcePolicyHash = options.cache?.sourcePolicyHash ?? DEFAULT_SOURCE_POLICY_HASH;
     this.initialColdPreviewEnabled = options.initialColdPreview?.enabled === true;
     this.idleExportMs = options.cache?.idleExportMs ?? DEFAULT_IDLE_EXPORT_MS;
     this.setTimer = options.cache?.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
@@ -466,7 +481,7 @@ export class InPluginIndexController {
 
   private async runLoop(): Promise<void> {
     if (!this.workerInitialized) {
-      await this.worker.initialize(ACTIVE_VAULT_ID);
+      await this.worker.initialize(ACTIVE_VAULT_ID, this.sourcePolicyHash);
       this.requireActive();
       this.workerInitialized = true;
     }
@@ -551,6 +566,11 @@ export class InPluginIndexController {
       this.emit("starting");
       return;
     }
+    if (loaded.record.identity.source_policy_hash !== this.sourcePolicyHash) {
+      await this.discardCache("incompatible", "cache_incompatible");
+      this.emit("starting");
+      return;
+    }
     if (!isCacheIndexWorker(this.worker)) {
       this.cacheIssue = "cache_restore_unavailable";
       this.emit("starting");
@@ -562,6 +582,7 @@ export class InPluginIndexController {
       counts = await this.worker.restoreGeneration(
         loaded,
         availability.store.vaultCacheIdentity,
+        this.sourcePolicyHash,
       );
     } catch (error) {
       this.requireActive();
@@ -792,7 +813,7 @@ export class InPluginIndexController {
         inspection = buffered.inspection;
       } else {
         try {
-          inspection = this.inspectMarkdown(path);
+          inspection = this.inspectSource(path);
         } catch (error) {
           if (!(error instanceof UnreadableVaultSourceError)) throw error;
           this.unreadableSources.add(path);
@@ -848,7 +869,7 @@ export class InPluginIndexController {
   private async probePotentialRemoval(path: string): Promise<ReconciliationProbe> {
     let inspection: SourceInspection;
     try {
-      inspection = this.inspectMarkdown(path);
+      inspection = this.inspectSource(path);
     } catch (error) {
       if (!(error instanceof UnreadableVaultSourceError)) throw error;
       this.unreadableSources.add(path);
@@ -1026,14 +1047,14 @@ export class InPluginIndexController {
   }
 
   private captureSnapshot(): Snapshot {
-    const paths = this.listMarkdownPaths();
+    const paths = this.listSourcePaths();
     const entries: SnapshotEntry[] = [];
     let unreadableInspections = 0;
     let firstUnreadableError: UnreadableVaultSourceError | null = null;
     for (const path of paths) {
       let inspection: SourceInspection;
       try {
-        inspection = this.inspectMarkdown(path);
+        inspection = this.inspectSource(path);
       } catch (error) {
         if (!(error instanceof UnreadableVaultSourceError)) throw error;
         unreadableInspections += 1;
@@ -1195,6 +1216,7 @@ export class InPluginIndexController {
       database_byte_limit: this.databaseByteLimit,
       quarantined_sources: this.quarantinedSources,
       quarantine_fields: [...this.quarantineValidatorFields],
+      source_format_counts: cloneSourceFormatCounts(this.sourceFormatCounts),
     });
     this.requireActive();
     const applied = counts.generation !== generation;
@@ -1310,7 +1332,7 @@ export class InPluginIndexController {
       if (isUpsert) {
         let estimated = 0;
         try {
-          const inspection = this.inspectMarkdown(path);
+          const inspection = this.inspectSource(path);
           estimated = inspection.kind === "candidate" ? inspection.size : 0;
         } catch (error) {
           if (!(error instanceof UnreadableVaultSourceError)) throw error;
@@ -1327,9 +1349,9 @@ export class InPluginIndexController {
     return { paths, upserts, removals };
   }
 
-  private inspectMarkdown(path: string): SourceInspection {
+  private inspectSource(path: string): SourceInspection {
     try {
-      return this.source.inspectMarkdown(path);
+      return this.source.inspectSource(path);
     } catch (error) {
       // Inspection names exactly one source, so failure proves nothing about the
       // rest of the vault and belongs on the per-source omission path.
@@ -1337,9 +1359,9 @@ export class InPluginIndexController {
     }
   }
 
-  private listMarkdownPaths(): string[] {
+  private listSourcePaths(): string[] {
     try {
-      return [...this.source.listMarkdownPaths()].sort(comparePaths);
+      return [...this.source.listSourcePaths()].sort(comparePaths);
     } catch (error) {
       // Without the authoritative inventory there is no trustworthy source set
       // or denominator from which a partial generation could be published.
@@ -1352,7 +1374,7 @@ export class InPluginIndexController {
     let lastError: unknown = new Error("active-vault source could not be read");
     for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
       try {
-        const read = await this.source.readMarkdown(inspection);
+        const read = await this.source.readSource(inspection);
         this.requireActive();
         return read;
       } catch (error) {
@@ -1368,9 +1390,9 @@ export class InPluginIndexController {
     let readError: unknown = null;
     for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
       try {
-        const inspection = this.inspectMarkdown(path);
+        const inspection = this.inspectSource(path);
         if (inspection.kind !== "candidate") return inspection;
-        const read = await this.source.readMarkdown(inspection);
+        const read = await this.source.readSource(inspection);
         this.requireActive();
         if (read.kind !== "stale") return read;
       } catch (error) {
@@ -1403,6 +1425,7 @@ export class InPluginIndexController {
 
   private captureSourceOmissions(): SourceOmissions {
     return {
+      sourceFormatCounts: cloneSourceFormatCounts(this.sourceFormatCounts),
       quarantinedSources: this.quarantinedSources,
       unreadableSources: [...this.unreadableSources],
       quarantineValidatorFields: [...this.quarantineValidatorFields],
@@ -1413,6 +1436,7 @@ export class InPluginIndexController {
     omissions: SourceOmissions,
     unreadableEvidence: readonly string[] = [],
   ): void {
+    this.sourceFormatCounts = cloneSourceFormatCounts(omissions.sourceFormatCounts);
     this.quarantinedSources = omissions.quarantinedSources;
     this.quarantineValidatorFields.clear();
     for (const field of omissions.quarantineValidatorFields) {
@@ -1425,12 +1449,14 @@ export class InPluginIndexController {
   }
 
   private clearSourceOmissions(): void {
+    this.sourceFormatCounts = emptySourceFormatCounts();
     this.quarantinedSources = 0;
     this.quarantineValidatorFields.clear();
     this.unreadableSources.clear();
   }
 
   private syncWorkerQuarantines(counts: IndexCounts): void {
+    this.sourceFormatCounts = cloneSourceFormatCounts(counts.source_format_counts);
     this.quarantinedSources = counts.quarantined_sources;
     this.quarantineValidatorFields.clear();
     for (const field of counts.quarantine_fields) this.quarantineValidatorFields.add(field);
@@ -1468,6 +1494,7 @@ export class InPluginIndexController {
   }
 
   private syncActiveOmissionsFromCurrent(): void {
+    this.activeSourceFormatCounts = cloneSourceFormatCounts(this.sourceFormatCounts);
     this.activeQuarantinedSources = this.quarantinedSources;
     this.activeUnreadableSources = this.unreadableSources.size;
     this.activeQuarantineValidatorFields.clear();
@@ -1531,6 +1558,9 @@ export class InPluginIndexController {
       : undefined;
     const hasActive = this.activeGeneration !== null;
     const servingPriorDuringReplacement = hasActive && this.replacementBuildInProgress;
+    const visibleSourceFormatCounts = servingPriorDuringReplacement
+      ? this.activeSourceFormatCounts
+      : this.sourceFormatCounts;
     const visibleQuarantinedSources = servingPriorDuringReplacement
       ? this.activeQuarantinedSources
       : this.quarantinedSources;
@@ -1558,6 +1588,7 @@ export class InPluginIndexController {
         : { initialColdPreview: this.initialColdPreview }),
       documents: this.documents,
       chunks: this.chunks,
+      sourceFormatCounts: cloneSourceFormatCounts(visibleSourceFormatCounts),
       quarantinedSources: visibleQuarantinedSources,
       unreadableSources: visibleUnreadableSources,
       quarantineValidatorFields: [...visibleQuarantineFields].sort(),
@@ -1676,6 +1707,7 @@ export class InPluginIndexController {
           plugin_id: exported.plugin_id,
           plugin_version: exported.plugin_version,
           cache_identity: exported.cache_identity,
+          source_policy_hash: exported.source_policy_hash,
         },
       });
       this.lastPersistedGeneration = generation;
@@ -1749,7 +1781,7 @@ function oversizedInput(
     descriptor: {
       vault_id: ACTIVE_VAULT_ID,
       path: inspection.path,
-      format: "markdown",
+      format: inspection.format,
       byte_length: inspection.size,
       mtime: Math.floor(inspection.mtime / 1_000),
       mtime_nanos: canonicalMtimeNanos(inspection.mtime),
@@ -1839,6 +1871,16 @@ function assertCompleteReconciliationPlan(
     || plan.matched_source_count + plan.remove.length !== plan.stored_source_count) {
     throw new Error("reconciliation plan did not prove complete ledger coverage");
   }
+}
+
+function cloneSourceFormatCounts(counts: SourceFormatCounts): SourceFormatCounts {
+  const clone = emptySourceFormatCounts();
+  for (const format of SOURCE_FORMATS) {
+    for (const coverage of EXTRACTION_COVERAGES) {
+      clone[format][coverage] = counts[format][coverage];
+    }
+  }
+  return clone;
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {

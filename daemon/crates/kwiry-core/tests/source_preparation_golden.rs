@@ -17,7 +17,8 @@ const ALIAS_COUNT: usize = 512;
 const OPEN_PROPERTY_COUNT: usize = 1_000;
 const PROPERTY_ARRAY_COUNT: usize = 1_200;
 const PROPERTY_MAP_DEPTH: usize = 32;
-const FIXTURE_COUNT: usize = 14;
+const BASE_SOURCE: &str = include_str!("fixtures/base/well-formed.base");
+const FIXTURE_COUNT: usize = 15;
 
 struct Fixture {
     file_name: &'static str,
@@ -138,16 +139,33 @@ fn fixtures() -> Vec<Fixture> {
             property_key_and_scalar_edges_source(),
             None,
         ),
+        prepare_format(
+            "15-base-project-dashboard.json",
+            "Golden/Project Dashboard.base",
+            BASE_SOURCE.to_owned(),
+            Some("fixture-room"),
+            SourceFormat::Base,
+        ),
     ]
 }
 
 fn prepare(file_name: &'static str, path: &str, source: String, room: Option<&str>) -> Fixture {
+    prepare_format(file_name, path, source, room, SourceFormat::Markdown)
+}
+
+fn prepare_format(
+    file_name: &'static str,
+    path: &str,
+    source: String,
+    room: Option<&str>,
+    format: SourceFormat,
+) -> Fixture {
     let bytes = source.as_bytes();
     let descriptor = SourceDescriptor {
         vault_id: "golden-vault".to_owned(),
         room: room.map(str::to_owned),
         path: path.to_owned(),
-        format: SourceFormat::Markdown,
+        format,
         byte_length: bytes.len() as u64,
         mtime: 1_785_253_671_659,
         mtime_nanos: 1_785_253_671_659_123_456,
@@ -453,6 +471,19 @@ fn assert_adversarial_shape(fixture: &Fixture) {
             assert_eq!(
                 frontmatter.get("empty_map"),
                 Some(&PropertyValue::Map(Default::default()))
+            );
+        }
+        "15-base-project-dashboard.json" => {
+            assert_eq!(fixture.preparation.format, SourceFormat::Base);
+            assert_eq!(fixture.preparation.chunks.len(), 4);
+            assert_eq!(fixture.preparation.chunks[1].heading_path, ["Active"]);
+            assert_eq!(fixture.preparation.chunks[2].heading_path, ["Gallery"]);
+            assert_eq!(fixture.preparation.chunks[3].heading_path, ["Active (2)"]);
+            assert_eq!(
+                fixture.preparation.chunks[3].source_locator,
+                Some(kwiry_core::SourceLocator::BaseView {
+                    view: "Active".to_owned()
+                })
             );
         }
         _ => unreachable!("every fixture has an adversarial shape assertion"),

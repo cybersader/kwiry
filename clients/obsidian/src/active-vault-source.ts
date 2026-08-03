@@ -3,17 +3,20 @@
 
 import type { EventRef, TAbstractFile, TFile, Vault } from "obsidian";
 
+import {
+  DEFAULT_ENABLED_SOURCE_FORMATS,
+  classifySourcePath,
+  isSourceFormatEnabled,
+  type EnabledSourceFormats,
+  type SourceFormat,
+} from "./source-formats";
 import type { SourceInput } from "./worker/protocol";
-import { isNormalizedMarkdownPath } from "./vault-path";
 
 export const ACTIVE_VAULT_ID = "active-vault";
 export const MAX_INDEXABLE_SOURCE_BYTES = 10 * 1024 * 1024;
 /**
- * Excerpt hydration runs on the Obsidian main thread, once per distinct hit
- * note, so its input bound is far tighter than the indexing bound: a note may
- * be indexed up to `MAX_INDEXABLE_SOURCE_BYTES` and still be too large to fold
- * interactively. Past this bound the excerpt is reported `oversized` and
- * rendered empty — the hit itself is unaffected.
+ * Temporary compatibility bound for the Markdown-only excerpt path. Worker-side
+ * stored excerpt hydration removes this vault reread in the multi-format wave.
  */
 export const MAX_EXCERPT_SOURCE_BYTES = 1024 * 1024;
 
@@ -23,14 +26,13 @@ export const MAX_EXCERPT_SOURCE_BYTES = 1024 * 1024;
 /// A vault on an SMB or DFS share can report a timestamp this arithmetic
 /// cannot represent. A pre-epoch mtime yields a leading minus and fails the
 /// digits-only check; NaN or Infinity makes BigInt throw outright. Either way
-/// the Rust boundary refuses the whole batch as `source_rejected`, so one note
-/// with an odd timestamp stops the entire vault from indexing -- which is what
-/// a production network vault did.
+/// the Rust boundary refuses the whole batch as `source_rejected`, so one source
+/// with an odd timestamp stops the entire vault from indexing.
 ///
 /// Clamping is the right response rather than rejecting: an mtime is an
 /// acceleration hint used to detect change, never authority over content. A
-/// clamped value simply looks old, so the source is read and hashed rather
-/// than skipped, which is the safe direction to be wrong in.
+/// clamped value simply looks old, so the source is read and hashed rather than
+/// skipped, which is the safe direction to be wrong in.
 export function canonicalMtimeNanos(mtimeMs: number): string {
   if (!Number.isFinite(mtimeMs)) return "0";
   const truncated = Math.trunc(mtimeMs);
@@ -50,21 +52,20 @@ export type VaultSourceEvent =
   | { kind: "rescan" };
 
 export type SourceInspection =
-  | { kind: "candidate"; path: string; size: number; mtime: number }
+  | { kind: "candidate"; path: string; format: SourceFormat; size: number; mtime: number }
   | { kind: "missing"; path: string }
-  | { kind: "oversized"; path: string; size: number; mtime: number };
+  | { kind: "oversized"; path: string; format: SourceFormat; size: number; mtime: number };
 
 export type StableSourceRead =
   | { kind: "source"; source: SourceInput }
   | { kind: "missing"; path: string }
-  | { kind: "oversized"; path: string; size: number; mtime: number }
+  | { kind: "oversized"; path: string; format: SourceFormat; size: number; mtime: number }
   | { kind: "stale"; path: string };
 
 /**
- * Result of a presentation-only text read used for excerpt hydration. It is
- * deliberately distinct from `StableSourceRead`: nothing indexed is derived
- * from it, and every non-`text` outcome must degrade to an empty excerpt
- * rather than to guessed content.
+ * Transitional presentation-only Markdown read. It remains distinct from
+ * `StableSourceRead` and disappears once the Worker-owned stored excerpt path
+ * is connected by the index projection slice.
  */
 export type ExcerptRead =
   | { kind: "text"; path: string; text: string }
@@ -74,16 +75,19 @@ export type ExcerptRead =
 
 export interface ActiveVaultSource {
   subscribe(listener: (event: VaultSourceEvent) => void): () => void;
-  listMarkdownPaths(): readonly string[];
-  inspectMarkdown(path: string): SourceInspection;
-  readMarkdown(inspection: Extract<SourceInspection, { kind: "candidate" }>): Promise<StableSourceRead>;
+  listSourcePaths(): readonly string[];
+  inspectSource(path: string): SourceInspection;
+  readSource(inspection: Extract<SourceInspection, { kind: "candidate" }>): Promise<StableSourceRead>;
   readExcerptText(path: string): Promise<ExcerptRead>;
 }
 
 export class ObsidianActiveVaultSource implements ActiveVaultSource {
   private refs: EventRef[] = [];
 
-  constructor(private readonly vault: Vault) {}
+  constructor(
+    private readonly vault: Vault,
+    private readonly enabledFormats: Readonly<EnabledSourceFormats> = DEFAULT_ENABLED_SOURCE_FORMATS,
+  ) {}
 
   subscribe(listener: (event: VaultSourceEvent) => void): () => void {
     if (this.refs.length > 0) throw new Error("active-vault source is already subscribed");
@@ -105,38 +109,44 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
     };
   }
 
-  listMarkdownPaths(): readonly string[] {
-    return this.vault.getMarkdownFiles()
+  listSourcePaths(): readonly string[] {
+    return this.vault.getFiles()
       .map((file) => file.path)
-      .filter(isNormalizedMarkdownPath)
+      .filter((path) => this.enabledFormat(path) !== null)
       .sort(comparePaths);
   }
 
-  inspectMarkdown(path: string): SourceInspection {
-    if (!isNormalizedMarkdownPath(path)) return { kind: "missing", path };
+  inspectSource(path: string): SourceInspection {
+    const format = this.enabledFormat(path);
+    if (format === null) return { kind: "missing", path };
     const file = this.vault.getFileByPath(path);
-    if (!file || !isMarkdownFile(file)) return { kind: "missing", path };
+    if (!file || !isSourceFile(file, format)) return { kind: "missing", path };
     if (file.stat.size > MAX_INDEXABLE_SOURCE_BYTES) {
-      return { kind: "oversized", path, size: file.stat.size, mtime: file.stat.mtime };
+      return { kind: "oversized", path, format, size: file.stat.size, mtime: file.stat.mtime };
     }
     return {
       kind: "candidate",
       path,
+      format,
       size: file.stat.size,
       mtime: file.stat.mtime,
     };
   }
 
-  async readMarkdown(
+  async readSource(
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
   ): Promise<StableSourceRead> {
     const before = this.vault.getFileByPath(inspection.path);
-    if (!before || !isMarkdownFile(before)) return { kind: "missing", path: inspection.path };
+    if (!before || !isSourceFile(before, inspection.format)) {
+      return { kind: "missing", path: inspection.path };
+    }
     if (!matchesInspection(before, inspection)) return { kind: "stale", path: inspection.path };
 
     const buffer = await this.vault.readBinary(before);
     const after = this.vault.getFileByPath(inspection.path);
-    if (!after || !isMarkdownFile(after)) return { kind: "missing", path: inspection.path };
+    if (!after || !isSourceFile(after, inspection.format)) {
+      return { kind: "missing", path: inspection.path };
+    }
     if (!matchesInspection(after, inspection)) return { kind: "stale", path: inspection.path };
 
     const bytes = new Uint8Array(buffer);
@@ -144,6 +154,7 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
       return {
         kind: "oversized",
         path: inspection.path,
+        format: inspection.format,
         size: bytes.byteLength,
         mtime: inspection.mtime,
       };
@@ -156,7 +167,7 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
         descriptor: {
           vault_id: ACTIVE_VAULT_ID,
           path: inspection.path,
-          format: "markdown",
+          format: inspection.format,
           byte_length: bytes.byteLength,
           mtime: Math.floor(inspection.mtime / 1_000),
           mtime_nanos: canonicalMtimeNanos(inspection.mtime),
@@ -166,24 +177,20 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
     };
   }
 
-  /**
-   * Reads current file text for excerpt display only. `cachedRead` is the
-   * documented API for "content you only want to display", but it carries no
-   * staleness guarantee of its own, so the same before/after stat sandwich
-   * `readMarkdown` uses is repeated here.
-   */
   async readExcerptText(path: string): Promise<ExcerptRead> {
-    const inspection = this.inspectMarkdown(path);
-    if (inspection.kind !== "candidate") return { kind: inspection.kind, path };
+    const inspection = this.inspectSource(path);
+    if (inspection.kind !== "candidate" || inspection.format !== "markdown") {
+      return { kind: inspection.kind === "candidate" ? "missing" : inspection.kind, path };
+    }
     if (inspection.size > MAX_EXCERPT_SOURCE_BYTES) return { kind: "oversized", path };
 
     const before = this.vault.getFileByPath(path);
-    if (!before || !isMarkdownFile(before)) return { kind: "missing", path };
+    if (!before || !isSourceFile(before, "markdown")) return { kind: "missing", path };
     if (!matchesInspection(before, inspection)) return { kind: "stale", path };
 
     const text = await this.vault.cachedRead(before);
     const after = this.vault.getFileByPath(path);
-    if (!after || !isMarkdownFile(after)) return { kind: "missing", path };
+    if (!after || !isSourceFile(after, "markdown")) return { kind: "missing", path };
     if (!matchesInspection(after, inspection)) return { kind: "stale", path };
 
     return { kind: "text", path, text };
@@ -193,7 +200,7 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
     file: TAbstractFile,
     listener: (event: VaultSourceEvent) => void,
   ): void {
-    if (isFile(file) && isNormalizedMarkdownPath(file.path)) {
+    if (isFile(file) && this.enabledFormat(file.path) !== null) {
       listener({ kind: "upsert", path: file.path });
     }
   }
@@ -202,7 +209,7 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
     file: TAbstractFile,
     listener: (event: VaultSourceEvent) => void,
   ): void {
-    if (isFile(file) && isNormalizedMarkdownPath(file.path)) {
+    if (isFile(file) && this.enabledFormat(file.path) !== null) {
       listener({ kind: "upsert", path: file.path });
     }
   }
@@ -215,7 +222,7 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
       listener({ kind: "rescan" });
       return;
     }
-    if (isNormalizedMarkdownPath(file.path)) listener({ kind: "remove", path: file.path });
+    if (this.enabledFormat(file.path) !== null) listener({ kind: "remove", path: file.path });
   }
 
   private handleRename(
@@ -228,15 +235,20 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
       return;
     }
 
-    const oldMarkdown = isNormalizedMarkdownPath(oldPath);
-    const newMarkdown = isNormalizedMarkdownPath(file.path);
-    if (oldMarkdown && newMarkdown) {
+    const oldFormat = this.enabledFormat(oldPath);
+    const newFormat = this.enabledFormat(file.path);
+    if (oldFormat !== null && newFormat !== null) {
       listener({ kind: "rename", oldPath, path: file.path });
-    } else if (oldMarkdown) {
+    } else if (oldFormat !== null) {
       listener({ kind: "remove", path: oldPath });
-    } else if (newMarkdown) {
+    } else if (newFormat !== null) {
       listener({ kind: "upsert", path: file.path });
     }
+  }
+
+  private enabledFormat(path: string): SourceFormat | null {
+    const format = classifySourcePath(path);
+    return format !== null && isSourceFormatEnabled(format, this.enabledFormats) ? format : null;
   }
 }
 
@@ -253,8 +265,8 @@ function isFile(file: TAbstractFile): file is TFile {
   return "extension" in file && "stat" in file;
 }
 
-function isMarkdownFile(file: TFile): boolean {
-  return file.extension.toLowerCase() === "md" && isNormalizedMarkdownPath(file.path);
+function isSourceFile(file: TFile, expectedFormat: SourceFormat): boolean {
+  return classifySourcePath(file.path) === expectedFormat;
 }
 
 function comparePaths(left: string, right: string): number {

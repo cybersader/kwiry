@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 6 as const;
+export const WORKER_PROTOCOL_VERSION = 7 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -23,6 +23,7 @@ export const SOURCE_PREPARATION_DEFECT_FIELDS = [
   "room",
   "path",
   "format",
+  "coverage",
   "content_hash",
   "byte_length",
   "mtime",
@@ -32,6 +33,7 @@ export const SOURCE_PREPARATION_DEFECT_FIELDS = [
   "chunks_shape",
   "chunks_contents",
   "chunks_source_correlation",
+  "chunks_source_locator",
   "frontmatter_not_a_record",
   "frontmatter_property_value",
   "frontmatter_property_nesting",
@@ -49,7 +51,7 @@ export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIEL
  * `PRAGMA user_version`). Any schema edit must bump it: an image whose value
  * differs from the running build's is not restorable.
  */
-export const CACHE_SCHEMA_VERSION = 8;
+export const CACHE_SCHEMA_VERSION = 9;
 
 /**
  * Independent ceiling on a transported generation image. The SQLite adapter's
@@ -62,6 +64,38 @@ export const MAX_PLUGIN_ID_CHARACTERS = 128;
 export const MAX_PLUGIN_VERSION_CHARACTERS = 64;
 
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
+
+export const SOURCE_FORMATS = [
+  "markdown",
+  "text",
+  "base",
+  "canvas",
+  "docx",
+  "pdf",
+] as const;
+export type SourceFormat = typeof SOURCE_FORMATS[number];
+
+export const EXTRACTION_COVERAGES = [
+  "indexed-complete",
+  "indexed-partial",
+  "skipped-no-extractable-text",
+  "unreadable",
+  "quarantined",
+] as const;
+export type ExtractionCoverage = typeof EXTRACTION_COVERAGES[number];
+
+export type SourceLocator = { kind: "base_view"; view: string };
+export type SourceFormatCounts = Record<
+  SourceFormat,
+  Record<ExtractionCoverage, number>
+>;
+
+export function emptySourceFormatCounts(): SourceFormatCounts {
+  return Object.fromEntries(SOURCE_FORMATS.map((format) => [
+    format,
+    Object.fromEntries(EXTRACTION_COVERAGES.map((coverage) => [coverage, 0])),
+  ])) as SourceFormatCounts;
+}
 
 export type WorkerOperation =
   | "initialize"
@@ -111,7 +145,7 @@ export interface SourceDescriptorInput {
   vault_id: string;
   room?: string;
   path: string;
-  format: "markdown" | "text";
+  format: SourceFormat;
   byte_length: number;
   mtime: number;
   mtime_nanos: string;
@@ -172,8 +206,11 @@ export interface RestoreGenerationInput {
   plugin_id: string;
   plugin_version: string;
   cache_identity: string;
+  source_policy_hash: string;
   /** Independently derived for the currently open vault, never copied from the record. */
   expected_cache_identity: string;
+  /** Independently computed from the currently enabled source formats and source schema. */
+  expected_source_policy_hash: string;
 }
 
 interface RequestBase {
@@ -182,7 +219,7 @@ interface RequestBase {
 }
 
 export type WorkerRequest =
-  | (RequestBase & { operation: "initialize"; vault_id: string })
+  | (RequestBase & { operation: "initialize"; vault_id: string; source_policy_hash: string })
   | (RequestBase & { operation: "begin_build"; generation: string })
   | (RequestBase & {
       operation: "add_source_batch";
@@ -224,7 +261,7 @@ export type WorkerRequest =
 
 export interface InitializeResult {
   rustAbiVersion: 2;
-  sourceSchemaVersion: 4;
+  sourceSchemaVersion: 5;
   querySchemaVersion: 4;
   matchPlanSchemaVersion: 3;
   sqliteVersion: "3.53.0";
@@ -239,6 +276,7 @@ export interface BuildResult {
   database_byte_limit: number;
   quarantined_sources: number;
   quarantine_fields: SourcePreparationDefectField[];
+  source_format_counts: SourceFormatCounts;
 }
 
 export interface StatusResult {
@@ -251,6 +289,7 @@ export interface StatusResult {
   active_database_bytes: number;
   staging_database_bytes: number;
   database_byte_limit: number;
+  source_format_counts: SourceFormatCounts;
   dirty: boolean;
   rebuilding: boolean;
 }
@@ -281,6 +320,9 @@ export interface WorkerSearchHit {
   chunk_id: string;
   vault_id: string;
   path: string;
+  format: SourceFormat;
+  coverage: ExtractionCoverage;
+  locator: SourceLocator | null;
   heading_path: string[];
   score: number;
   excerpt: string;
@@ -320,6 +362,7 @@ export interface ExportGenerationResult {
   plugin_id: string;
   plugin_version: string;
   cache_identity: string;
+  source_policy_hash: string;
 }
 
 export type WorkerResult =
@@ -363,9 +406,10 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
   const base = ["version", "id", "operation"];
   switch (value.operation) {
     case "initialize":
-      return hasExactKeys(value, [...base, "vault_id"])
+      return hasExactKeys(value, [...base, "vault_id", "source_policy_hash"])
         && isBoundedString(value.vault_id, 1_024)
         && value.vault_id.trim().length > 0
+        && isSha256Hex(value.source_policy_hash)
         ? value as unknown as WorkerRequest
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "status":
@@ -447,7 +491,9 @@ function parseRestoreGenerationRequest(
     "plugin_id",
     "plugin_version",
     "cache_identity",
+    "source_policy_hash",
     "expected_cache_identity",
+    "expected_source_policy_hash",
   ];
   if (!hasExactKeys(value, keys)
     || !isGeneration(value.generation)
@@ -464,7 +510,9 @@ function parseRestoreGenerationRequest(
     || !isBoundedString(value.plugin_id, MAX_PLUGIN_ID_CHARACTERS)
     || !isBoundedString(value.plugin_version, MAX_PLUGIN_VERSION_CHARACTERS)
     || !isSha256Hex(value.cache_identity)
-    || !isSha256Hex(value.expected_cache_identity)) {
+    || !isSha256Hex(value.source_policy_hash)
+    || !isSha256Hex(value.expected_cache_identity)
+    || !isSha256Hex(value.expected_source_policy_hash)) {
     return fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
   }
   if (value.bytes.byteLength > MAX_EXPORT_BLOB_BYTES
@@ -612,7 +660,7 @@ function isSourceDescriptor(value: unknown, allowOversized = false): value is So
     && isBoundedString(value.vault_id, 1_024)
     && (value.room === undefined || isBoundedString(value.room, 1_024))
     && isBoundedString(value.path, 4_096)
-    && (value.format === "markdown" || value.format === "text")
+    && isSourceFormat(value.format)
     && isNonNegativeSafeInteger(value.byte_length)
     && (allowOversized || Number(value.byte_length) <= MAX_SOURCE_BYTES)
     && isNonNegativeSafeInteger(value.mtime)
@@ -655,7 +703,7 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
       "fts5Enabled",
     ])
     && value.rustAbiVersion === 2
-    && value.sourceSchemaVersion === 4
+    && value.sourceSchemaVersion === 5
     && value.querySchemaVersion === 4
     && value.matchPlanSchemaVersion === 3
     && value.sqliteVersion === "3.53.0"
@@ -672,6 +720,7 @@ export function isBuildResult(value: unknown): value is BuildResult {
       "database_byte_limit",
       "quarantined_sources",
       "quarantine_fields",
+      "source_format_counts",
     ])
     && isGeneration(value.generation)
     && isNonNegativeSafeInteger(value.documents)
@@ -683,7 +732,9 @@ export function isBuildResult(value: unknown): value is BuildResult {
     && Array.isArray(value.quarantine_fields)
     && value.quarantine_fields.length <= SOURCE_PREPARATION_DEFECT_FIELDS.length
     && value.quarantine_fields.every(isSourcePreparationDefectField)
-    && new Set(value.quarantine_fields).size === value.quarantine_fields.length;
+    && new Set(value.quarantine_fields).size === value.quarantine_fields.length
+    && isSourceFormatCounts(value.source_format_counts)
+    && indexedSourceCount(value.source_format_counts) === value.documents;
 }
 
 function isExportGenerationResult(value: unknown): value is ExportGenerationResult {
@@ -704,6 +755,7 @@ function isExportGenerationResult(value: unknown): value is ExportGenerationResu
       "plugin_id",
       "plugin_version",
       "cache_identity",
+      "source_policy_hash",
     ])
     && isGeneration(value.generation)
     && isNonNegativeSafeInteger(value.documents)
@@ -723,7 +775,8 @@ function isExportGenerationResult(value: unknown): value is ExportGenerationResu
     && isSha256Hex(value.rust_wasm_sha256)
     && isBoundedString(value.plugin_id, MAX_PLUGIN_ID_CHARACTERS)
     && isBoundedString(value.plugin_version, MAX_PLUGIN_VERSION_CHARACTERS)
-    && isSha256Hex(value.cache_identity);
+    && isSha256Hex(value.cache_identity)
+    && isSha256Hex(value.source_policy_hash);
 }
 
 function isReconciliationPlanResult(value: unknown): value is ReconciliationPlanResult {
@@ -782,6 +835,7 @@ export function isStatusResult(value: unknown): value is StatusResult {
       "active_database_bytes",
       "staging_database_bytes",
       "database_byte_limit",
+      "source_format_counts",
       "dirty",
       "rebuilding",
     ])
@@ -799,6 +853,8 @@ export function isStatusResult(value: unknown): value is StatusResult {
     && isPositiveSafeInteger(value.database_byte_limit)
     && value.active_database_bytes <= value.database_byte_limit
     && value.staging_database_bytes <= value.database_byte_limit
+    && isSourceFormatCounts(value.source_format_counts)
+    && indexedSourceCount(value.source_format_counts) === value.documents
     && typeof value.dirty === "boolean"
     && typeof value.rebuilding === "boolean";
 }
@@ -818,6 +874,9 @@ function isSearchHit(value: unknown): value is WorkerSearchHit {
       "chunk_id",
       "vault_id",
       "path",
+      "format",
+      "coverage",
+      "locator",
       "heading_path",
       "score",
       "excerpt",
@@ -826,16 +885,18 @@ function isSearchHit(value: unknown): value is WorkerSearchHit {
     && isBoundedString(value.chunk_id, 1_024)
     && isBoundedString(value.vault_id, 1_024)
     && isBoundedString(value.path, 4_096)
+    && isSourceFormat(value.format)
+    && (value.coverage === "indexed-complete" || value.coverage === "indexed-partial")
+    && (value.locator === null || isSourceLocator(value.locator))
+    && (value.locator === null || value.format === "base")
     && Array.isArray(value.heading_path)
     && value.heading_path.length <= 64
     && value.heading_path.every((heading) => isBoundedString(heading, 1_024))
     && typeof value.score === "number"
     && Number.isFinite(value.score)
-    // The index is contentless, so the Worker has no text to snippet and the
-    // host hydrates the excerpt from the vault file. The frozen hit shape keeps
-    // the field; a Worker that filled it again would be regressing the ruling,
-    // so the empty string is enforced rather than merely length-bounded.
-    && value.excerpt === ""
+    // Excerpts are hydrated only after final hit selection from the stored
+    // canonical chunk content. They never participate in MATCH, BM25, or ordering.
+    && isBoundedString(value.excerpt, 16_384, true)
     && isFrontmatter(value.frontmatter);
 }
 
@@ -843,6 +904,38 @@ function isFrontmatter(value: unknown): value is WorkerFrontmatter {
   return isRecord(value)
     && Object.keys(value).every((key) => key === "title")
     && (value.title === undefined || isBoundedString(value.title, 1_024, true));
+}
+
+export function isSourceFormat(value: unknown): value is SourceFormat {
+  return typeof value === "string" && (SOURCE_FORMATS as readonly string[]).includes(value);
+}
+
+export function isExtractionCoverage(value: unknown): value is ExtractionCoverage {
+  return typeof value === "string"
+    && (EXTRACTION_COVERAGES as readonly string[]).includes(value);
+}
+
+export function isSourceLocator(value: unknown): value is SourceLocator {
+  return isRecord(value)
+    && hasExactKeys(value, ["kind", "view"])
+    && value.kind === "base_view"
+    && isBoundedString(value.view, 4_096);
+}
+
+export function isSourceFormatCounts(value: unknown): value is SourceFormatCounts {
+  if (!isRecord(value) || !hasExactKeys(value, SOURCE_FORMATS)) return false;
+  return SOURCE_FORMATS.every((format) => {
+    const counts = value[format];
+    return isRecord(counts)
+      && hasExactKeys(counts, EXTRACTION_COVERAGES)
+      && EXTRACTION_COVERAGES.every((coverage) => isNonNegativeSafeInteger(counts[coverage]));
+  });
+}
+
+function indexedSourceCount(counts: SourceFormatCounts): number {
+  return SOURCE_FORMATS.reduce((total, format) => total
+    + counts[format]["indexed-complete"]
+    + counts[format]["indexed-partial"], 0);
 }
 
 export function isWorkerError(value: unknown): value is WorkerError {

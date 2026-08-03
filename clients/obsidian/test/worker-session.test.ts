@@ -6,12 +6,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CACHE_SCHEMA_VERSION,
   WORKER_PROTOCOL_VERSION,
+  emptySourceFormatCounts,
   type WorkerRequest,
   type WorkerResult,
 } from "../src/worker/protocol";
 import type { IndexWorkerPort } from "../src/backends/in-plugin-index-controller";
 import type { WorkerLike } from "../src/worker/rpc-client";
 import { InPluginWorkerSession } from "../src/worker/session";
+
+const SOURCE_POLICY_HASH = "d".repeat(64);
 
 class MockWorker implements WorkerLike {
   terminate = vi.fn();
@@ -52,7 +55,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
     case "initialize":
       return {
         rustAbiVersion: 2,
-        sourceSchemaVersion: 4,
+        sourceSchemaVersion: 5,
         querySchemaVersion: 4,
         matchPlanSchemaVersion: 3,
         sqliteVersion: "3.53.0",
@@ -71,6 +74,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
         database_byte_limit: 1,
         quarantined_sources: 0,
         quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(),
       };
     case "apply_source_changes":
       return {
@@ -81,6 +85,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
         database_byte_limit: 1,
         quarantined_sources: 0,
         quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(),
       };
     case "plan_reconciliation":
       return {
@@ -109,6 +114,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
         plugin_id: "kwiry-search",
         plugin_version: "0.1.0",
         cache_identity: message.cache_identity,
+        source_policy_hash: SOURCE_POLICY_HASH,
       };
     case "search":
       return { generation: "g1", hits: [] };
@@ -123,6 +129,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
         active_database_bytes: 0,
         staging_database_bytes: 0,
         database_byte_limit: 1,
+        source_format_counts: emptySourceFormatCounts(),
         dirty: false,
         rebuilding: false,
       };
@@ -215,11 +222,12 @@ describe("InPluginWorkerSession", () => {
           plugin_id: "kwiry-search",
           plugin_version: "0.1.0",
           cache_identity: identity,
+          source_policy_hash: SOURCE_POLICY_HASH,
         },
       },
       bytes,
       digestVerified: false,
-    }, identity)).resolves.toMatchObject({ generation: "g1" });
+    }, identity, SOURCE_POLICY_HASH)).resolves.toMatchObject({ generation: "g1" });
 
     expect(worker.posted[0]).toEqual({
       version: WORKER_PROTOCOL_VERSION,
@@ -239,7 +247,9 @@ describe("InPluginWorkerSession", () => {
       plugin_id: "kwiry-search",
       plugin_version: "0.1.0",
       cache_identity: identity,
+      source_policy_hash: SOURCE_POLICY_HASH,
       expected_cache_identity: identity,
+      expected_source_policy_hash: SOURCE_POLICY_HASH,
     });
   });
 

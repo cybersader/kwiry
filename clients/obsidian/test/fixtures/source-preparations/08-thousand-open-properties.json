@@ -1,9 +1,10 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "source_key": "3144f7b04de4201d925f067d8ec31119447cd51f61de46e21521922f114f5ab7",
   "vault_id": "golden-vault",
   "path": "Golden/Thousand Open Properties.md",
   "format": "markdown",
+  "coverage": "indexed-complete",
   "content_hash": "f4ca5a95136699f3cac1391b238de8e7ef42fa440bc9c887a1897b9ebb45ee7e",
   "byte_length": 23840,
   "mtime": 1785253671659,

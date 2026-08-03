@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::{CHUNKING_VERSION, IndexFreshnessBasis};
+use crate::model::{CHUNKING_VERSION, IndexFreshnessBasis, SourceFormatCounts};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -106,6 +106,7 @@ pub struct DaemonStatus {
     pub chunking_version: u64,
     pub documents: usize,
     pub chunks: usize,
+    pub source_format_counts: SourceFormatCounts,
     pub last_sync: Option<String>,
     pub dirty: bool,
     pub rebuilding: bool,
@@ -122,6 +123,7 @@ impl DaemonStatus {
             chunking_version: CHUNKING_VERSION,
             documents: 0,
             chunks: 0,
+            source_format_counts: SourceFormatCounts::default(),
             last_sync: None,
             dirty: true,
             rebuilding: false,
@@ -154,5 +156,9 @@ mod tests {
         assert_eq!(encoded["state"], "starting");
         assert!(encoded["model"].is_null());
         assert_eq!(encoded["chunking_version"], CHUNKING_VERSION);
+        assert_eq!(
+            encoded["source_format_counts"]["markdown"]["indexed-complete"],
+            0
+        );
     }
 }

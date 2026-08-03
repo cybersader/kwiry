@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import type { BackendStatus } from "../src/backend";
 import { formatStatus } from "../src/status-format";
+import { emptySourceFormatCounts } from "../src/worker/protocol";
 
 const base: BackendStatus = {
   identity: {
@@ -105,7 +106,21 @@ describe("formatStatus", () => {
         safeMessage: "3 notes may be missing from search (2 quarantined, 1 unreadable).",
         recoverable: true,
       },
-    })).toBe("Kwiry: Ready · 3 notes incomplete");
+    })).toBe("Kwiry: Ready · 3 sources incomplete");
+  });
+
+  it("reports partial extraction separately from omitted sources", () => {
+    const counts = emptySourceFormatCounts();
+    counts.pdf["indexed-partial"] = 2;
+    counts.base["indexed-partial"] = 1;
+
+    expect(formatStatus({
+      ...base,
+      phase: "degraded",
+      sourceFormatCounts: counts,
+      quarantinedSources: 1,
+      unreadableSources: 1,
+    })).toBe("Kwiry: Ready · 3 sources partial · 2 sources incomplete");
   });
 
   it("never exposes old profile, question-mark, or verbose issue copy", () => {

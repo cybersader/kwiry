@@ -3,8 +3,24 @@
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_SETTINGS, loadSettings } from "../src/settings";
+import {
+  DEFAULT_ENABLED_SOURCE_FORMATS,
+  classifySourcePath,
+  formatPolicyFingerprint,
+} from "../src/source-formats";
 
 describe("loadSettings", () => {
+  it("classifies the closed extension set case-insensitively and rejects unsafe paths", () => {
+    expect(classifySourcePath("Notes/Example.MDX")).toBe("markdown");
+    expect(classifySourcePath("notes.txt")).toBe("text");
+    expect(classifySourcePath("query.base")).toBe("base");
+    expect(classifySourcePath("board.canvas")).toBe("canvas");
+    expect(classifySourcePath("report.docx")).toBe("docx");
+    expect(classifySourcePath("paper.PDF")).toBe("pdf");
+    expect(classifySourcePath("../escape.md")).toBeNull();
+    expect(classifySourcePath("image.png")).toBeNull();
+  });
+
   it("returns daemon defaults for missing or invalid data", () => {
     expect(loadSettings(undefined)).toEqual(DEFAULT_SETTINGS);
     expect(loadSettings(null)).toEqual(DEFAULT_SETTINGS);
@@ -59,6 +75,48 @@ describe("loadSettings", () => {
     expect(loadSettings({ diagnosticsLogLevel: "off" }).diagnosticsLogLevel).toBe("off");
     expect(loadSettings({ diagnosticsLogLevel: "error" }).diagnosticsLogLevel).toBe("error");
     expect(loadSettings({ diagnosticsLogLevel: "verbose" }).diagnosticsLogLevel).toBe("info");
+  });
+
+  it("enables every closed source format by default and loads valid toggles only", () => {
+    expect(DEFAULT_SETTINGS.enabledSourceFormats).toEqual(DEFAULT_ENABLED_SOURCE_FORMATS);
+    const loaded = loadSettings({
+      enabledSourceFormats: {
+        markdown: false,
+        text: false,
+        base: true,
+        canvas: "yes",
+        pdf: false,
+        unknown: false,
+      },
+    });
+    expect(loaded.enabledSourceFormats).toEqual({
+      markdown: false,
+      text: false,
+      base: true,
+      canvas: true,
+      docx: true,
+      pdf: false,
+    });
+    expect(loaded.enabledSourceFormats).not.toBe(DEFAULT_SETTINGS.enabledSourceFormats);
+  });
+
+  it("fingerprints format policy deterministically and changes on a toggle", async () => {
+    const first = await formatPolicyFingerprint({ ...DEFAULT_ENABLED_SOURCE_FORMATS });
+    const reordered = await formatPolicyFingerprint({
+      pdf: true,
+      docx: true,
+      canvas: true,
+      base: true,
+      text: true,
+      markdown: true,
+    });
+    const withoutText = await formatPolicyFingerprint({
+      ...DEFAULT_ENABLED_SOURCE_FORMATS,
+      text: false,
+    });
+    expect(first).toMatch(/^[0-9a-f]{64}$/u);
+    expect(reordered).toBe(first);
+    expect(withoutText).not.toBe(first);
   });
 
   it("keeps normal settings unaware of private-build namespaces", () => {

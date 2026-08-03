@@ -3,7 +3,10 @@
 
 import type { SearchMode, SearchRequest, SearchResponse } from "./api";
 import type { ExcerptSegment } from "./excerpt";
-import type { SourcePreparationDefectField } from "./worker/protocol";
+import type {
+  SourceFormatCounts,
+  SourcePreparationDefectField,
+} from "./worker/protocol";
 
 export type BackendProfile = "daemon" | "in_plugin";
 export type BackendPhase =
@@ -44,6 +47,7 @@ export interface BackendStatus {
   capabilities: BackendCapabilities;
   documents: number;
   chunks: number;
+  sourceFormatCounts?: SourceFormatCounts;
   quarantinedSources?: number;
   unreadableSources?: number;
   quarantineValidatorFields?: readonly SourcePreparationDefectField[];

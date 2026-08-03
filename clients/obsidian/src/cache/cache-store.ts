@@ -47,6 +47,7 @@ export interface CacheIdentityEnvelope {
   readonly plugin_id: string;
   readonly plugin_version: string;
   readonly cache_identity: string;
+  readonly source_policy_hash: string;
 }
 
 export const CACHE_IDENTITY_KEYS: readonly (keyof CacheIdentityEnvelope)[] = [
@@ -59,6 +60,7 @@ export const CACHE_IDENTITY_KEYS: readonly (keyof CacheIdentityEnvelope)[] = [
   "plugin_id",
   "plugin_version",
   "cache_identity",
+  "source_policy_hash",
 ];
 
 export interface CacheRecord {
@@ -178,7 +180,8 @@ export function isCacheIdentityEnvelope(value: unknown): value is CacheIdentityE
     && isSha256Hex(value.rust_wasm_sha256)
     && isBoundedString(value.plugin_id, 128)
     && isBoundedString(value.plugin_version, 64)
-    && isSha256Hex(value.cache_identity);
+    && isSha256Hex(value.cache_identity)
+    && isSha256Hex(value.source_policy_hash);
 }
 
 /** The image filename a pointer is allowed to name, derived rather than parsed. */

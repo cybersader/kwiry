@@ -15,6 +15,7 @@ import { InPluginLexicalBackend } from "../src/backends/in-plugin-lexical-backen
 import {
   CACHE_SCHEMA_VERSION,
   WORKER_PROTOCOL_VERSION,
+  emptySourceFormatCounts,
   type ExportGenerationResult,
 } from "../src/worker/protocol";
 import { WorkerRpcError } from "../src/worker/rpc-client";
@@ -39,15 +40,15 @@ class FakeSource implements ActiveVaultSource {
     };
   }
 
-  listMarkdownPaths(): readonly string[] {
+  listSourcePaths(): readonly string[] {
     return [];
   }
 
-  inspectMarkdown(path: string): SourceInspection {
+  inspectSource(path: string): SourceInspection {
     return { kind: "missing", path };
   }
 
-  async readMarkdown(
+  async readSource(
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
   ): Promise<StableSourceRead> {
     return { kind: "missing", path: inspection.path };
@@ -67,6 +68,7 @@ class FakeSource implements ActiveVaultSource {
 }
 
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
+const SOURCE_POLICY_HASH = "e".repeat(64);
 
 function cacheHit(generationId = "cached-generation"): Extract<CacheLoad, { kind: "hit" }> {
   return {
@@ -85,6 +87,7 @@ function cacheHit(generationId = "cached-generation"): Extract<CacheLoad, { kind
         plugin_id: "kwiry-search",
         plugin_version: "0.1.0",
         cache_identity: CACHE_IDENTITY,
+        source_policy_hash: SOURCE_POLICY_HASH,
       },
     },
     bytes: new Uint8Array([1, 2, 3, 4]),
@@ -109,6 +112,7 @@ function exportResult(generation: string): ExportGenerationResult {
     plugin_id: "kwiry-search",
     plugin_version: "0.1.0",
     cache_identity: CACHE_IDENTITY,
+    source_policy_hash: SOURCE_POLICY_HASH,
   };
 }
 
@@ -156,6 +160,7 @@ function fakeSession(options: {
       database_byte_limit: 1_000_000,
       quarantined_sources: 0,
       quarantine_fields: [],
+      source_format_counts: emptySourceFormatCounts(),
     })),
     addSourceBatch: vi.fn(async (generation: string) => ({
       generation,
@@ -165,6 +170,7 @@ function fakeSession(options: {
       database_byte_limit: 1_000_000,
       quarantined_sources: 0,
       quarantine_fields: [],
+      source_format_counts: emptySourceFormatCounts(),
     })),
     applySourceChanges: vi.fn(async (
       generation: string,
@@ -177,6 +183,7 @@ function fakeSession(options: {
       database_byte_limit: 1_000_000,
       quarantined_sources: 0,
       quarantine_fields: [],
+      source_format_counts: emptySourceFormatCounts(),
     })),
     commitBuild: vi.fn(options.commit ?? (async (generation: string) => ({
       generation,
@@ -186,6 +193,7 @@ function fakeSession(options: {
       database_byte_limit: 1_000_000,
       quarantined_sources: 0,
       quarantine_fields: [],
+      source_format_counts: emptySourceFormatCounts(),
     }))),
     abortBuild: vi.fn(async (generation: string) => ({
       generation,
@@ -195,6 +203,7 @@ function fakeSession(options: {
       database_byte_limit: 1_000_000,
       quarantined_sources: 0,
       quarantine_fields: [],
+      source_format_counts: emptySourceFormatCounts(),
     })),
     restoreGeneration: vi.fn(options.restore ?? (async (hit: Extract<CacheLoad, { kind: "hit" }>) => ({
       generation: hit.record.generationId,
@@ -204,6 +213,7 @@ function fakeSession(options: {
       database_byte_limit: 1_000_000,
       quarantined_sources: 0,
       quarantine_fields: [],
+      source_format_counts: emptySourceFormatCounts(),
     }))),
     planReconciliation: vi.fn(options.plan ?? (async () => ({
       generation: "cached-generation",
@@ -251,7 +261,7 @@ function backend(
     },
     nextGeneration: () => `generation-${++generation}`,
     yieldControl: () => Promise.resolve(),
-    ...(cache ? { cache } : {}),
+    ...(cache ? { cache: { ...cache, sourcePolicyHash: SOURCE_POLICY_HASH } } : {}),
     ...(onStartupObservation ? { onStartupObservation } : {}),
   });
 }
@@ -300,6 +310,7 @@ describe("InPluginLexicalBackend", () => {
         database_byte_limit: 1_000_000,
         quarantined_sources: 1,
         quarantine_fields: ["chunks_contents"],
+        source_format_counts: emptySourceFormatCounts(),
       }),
     });
     const startupObservations: unknown[] = [];
@@ -655,10 +666,25 @@ describe("InPluginLexicalBackend", () => {
     });
   });
 
-  it("hydrates excerpts from the vault file and attaches in-plugin result origin", async () => {
+  it("hydrates excerpts from stored chunk content and attaches in-plugin result origin", async () => {
     const source = new FakeSource();
-    source.excerptTexts.set("note.md", "# Heading\nbefore match after");
-    const inPlugin = backend(source, [fakeSession()]);
+    const inPlugin = backend(source, [fakeSession({
+      search: async () => ({
+        generation: "generation-1",
+        hits: [{
+          chunk_id: "chunk-1",
+          vault_id: "active-vault",
+          path: "note.md",
+          format: "markdown",
+          coverage: "indexed-complete",
+          locator: null,
+          heading_path: ["Heading"],
+          score: 1,
+          excerpt: "before match after",
+          frontmatter: {},
+        }],
+      }),
+    })]);
     await inPlugin.initialize();
     await vi.waitFor(async () => {
       await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
@@ -684,12 +710,11 @@ describe("InPluginLexicalBackend", () => {
         }],
       },
     });
-    expect(source.excerptReads).toEqual(["note.md"]);
+    expect(source.excerptReads).toEqual([]);
   });
 
-  it("reads each hit path once even when several chunks of a note match", async () => {
+  it("hydrates each matching chunk without rereading the vault path", async () => {
     const source = new FakeSource();
-    source.excerptTexts.set("note.md", "alpha match beta");
     const session = fakeSession({
       search: async () => ({
         generation: "generation-1",
@@ -697,9 +722,12 @@ describe("InPluginLexicalBackend", () => {
           chunk_id: `chunk-${index}`,
           vault_id: "active-vault",
           path: "note.md",
+          format: "markdown" as const,
+          coverage: "indexed-complete" as const,
+          locator: null,
           heading_path: [],
           score: index,
-          excerpt: "",
+          excerpt: `alpha ${index} match beta`,
           frontmatter: {},
         })),
       }),
@@ -711,24 +739,21 @@ describe("InPluginLexicalBackend", () => {
     });
 
     const execution = await inPlugin.search({ q: "match", mode: "lexical" });
-    expect(source.excerptReads).toEqual(["note.md"]);
+    expect(source.excerptReads).toEqual([]);
     expect(execution.response.hits).toHaveLength(3);
     for (const hit of execution.response.hits) {
       expect(hit.excerpt.filter((segment) => segment.highlighted)).toEqual([
         { text: "match", highlighted: true },
       ]);
     }
-    // Reading once is not enough: the file must also be located and folded
-    // once. Hits sharing a path and heading path share the hydrated result.
     const [first, second, third] = execution.response.hits;
-    expect(second!.excerpt).toBe(first!.excerpt);
-    expect(third!.excerpt).toBe(first!.excerpt);
+    expect(first!.excerpt).not.toBe(second!.excerpt);
+    expect(second!.excerpt).not.toBe(third!.excerpt);
   });
 
-  // Files are authoritative. If the file behind a hit cannot be read, the hit
-  // stays — with an empty excerpt — rather than the search failing or the
-  // excerpt being invented.
-  it("degrades a single unreadable or missing file to an empty excerpt", async () => {
+  // Stored chunks are authoritative for presentation after final hit selection;
+  // current vault readability cannot erase a valid indexed excerpt.
+  it("uses stored excerpts even when current vault files are unreadable or missing", async () => {
     const source = new FakeSource();
     source.excerptTexts.set("readable.md", "readable match here");
     source.excerptFailures.add("broken.md");
@@ -740,27 +765,36 @@ describe("InPluginLexicalBackend", () => {
             chunk_id: "chunk-broken",
             vault_id: "active-vault",
             path: "broken.md",
+            format: "markdown",
+            coverage: "indexed-complete",
+            locator: null,
             heading_path: [],
             score: 3,
-            excerpt: "",
+            excerpt: "broken stored match",
             frontmatter: {},
           },
           {
             chunk_id: "chunk-gone",
             vault_id: "active-vault",
             path: "deleted.md",
+            format: "markdown",
+            coverage: "indexed-complete",
+            locator: null,
             heading_path: [],
             score: 2,
-            excerpt: "",
+            excerpt: "deleted stored match",
             frontmatter: {},
           },
           {
             chunk_id: "chunk-ok",
             vault_id: "active-vault",
             path: "readable.md",
+            format: "markdown",
+            coverage: "indexed-complete",
+            locator: null,
             heading_path: [],
             score: 1,
-            excerpt: "",
+            excerpt: "readable match here",
             frontmatter: {},
           },
         ],
@@ -775,13 +809,12 @@ describe("InPluginLexicalBackend", () => {
     const execution = await inPlugin.search({ q: "match", mode: "lexical" });
     const hits = execution.response.hits;
     expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-broken", "chunk-gone", "chunk-ok"]);
-    expect(hits[0]!.excerpt).toEqual([]);
-    expect(hits[1]!.excerpt).toEqual([]);
-    expect(hits[2]!.excerpt).toEqual([
-      { text: "readable ", highlighted: false },
-      { text: "match", highlighted: true },
-      { text: " here", highlighted: false },
-    ]);
+    expect(source.excerptReads).toEqual([]);
+    for (const hit of hits) {
+      expect(hit.excerpt.filter((segment) => segment.highlighted)).toEqual([
+        { text: "match", highlighted: true },
+      ]);
+    }
   });
 
   it("rejects a search whose hydration finishes after disposal", async () => {
@@ -790,11 +823,26 @@ describe("InPluginLexicalBackend", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const inPlugin = backend(source, [fakeSession()]);
-    source.readExcerptText = async (path: string) => {
-      await gate;
-      return { kind: "missing", path };
-    };
+    const inPlugin = backend(source, [fakeSession({
+      search: async () => {
+        await gate;
+        return {
+          generation: "generation-1",
+          hits: [{
+            chunk_id: "chunk-1",
+            vault_id: "active-vault",
+            path: "note.md",
+            format: "markdown",
+            coverage: "indexed-complete",
+            locator: null,
+            heading_path: [],
+            score: 1,
+            excerpt: "stored match",
+            frontmatter: {},
+          }],
+        };
+      },
+    })]);
     await inPlugin.initialize();
     await vi.waitFor(async () => {
       await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });

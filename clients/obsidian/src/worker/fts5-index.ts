@@ -7,10 +7,18 @@ import {
   CACHE_SCHEMA_VERSION,
   MAX_EXPORT_BLOB_BYTES,
   MAX_RECONCILIATION_SOURCES,
+  emptySourceFormatCounts,
+  isExtractionCoverage,
+  isSourceFormat,
+  isSourceLocator,
 } from "./protocol";
 import type {
+  ExtractionCoverage,
   ReconciliationPlanResult,
   ReconciliationSourceMetadata,
+  SourceFormat,
+  SourceFormatCounts,
+  SourceLocator,
   SourceRemoval,
   WorkerFrontmatter,
   WorkerSearchHit,
@@ -249,13 +257,21 @@ PRAGMA user_version = ${requireSchemaVersionLiteral(CACHE_SCHEMA_VERSION)};
 
 CREATE TABLE generation_identity (
   singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-  vault_id TEXT NOT NULL
+  vault_id TEXT NOT NULL,
+  source_policy_hash TEXT NOT NULL
+    CHECK(length(source_policy_hash) = 64 AND source_policy_hash NOT GLOB '*[^0-9a-f]*')
 );
 
 CREATE TABLE sources (
   source_key TEXT PRIMARY KEY,
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
+  source_format TEXT NOT NULL
+    CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf')),
+  extraction_coverage TEXT NOT NULL
+    CHECK(extraction_coverage IN (
+      'indexed-complete','indexed-partial','skipped-no-extractable-text','unreadable','quarantined'
+    )),
   outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),
   content_hash TEXT,
   byte_length INTEGER NOT NULL CHECK(byte_length >= 0),
@@ -273,6 +289,12 @@ CREATE TABLE sources (
   property_count INTEGER NOT NULL CHECK(property_count >= 0),
   property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),
   CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),
+  CHECK(
+    (outcome = 'indexed' AND extraction_coverage IN ('indexed-complete','indexed-partial'))
+    OR (outcome = 'skipped' AND extraction_coverage IN (
+      'skipped-no-extractable-text','unreadable','quarantined'
+    ))
+  ),
   CHECK(outcome = 'indexed' OR (
     chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0
   )),
@@ -288,6 +310,7 @@ CREATE TABLE chunks (
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
   heading_path_json TEXT NOT NULL,
+  locator_json TEXT CHECK(locator_json IS NULL OR json_valid(locator_json)),
   frontmatter_json TEXT NOT NULL CHECK(json_valid(frontmatter_json)),
   heading_text TEXT NOT NULL,
   exact_heading TEXT,
@@ -466,13 +489,13 @@ const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "table", name: "chunk_exact_identifier_fts_data", table: "chunk_exact_identifier_fts_data", sql: "CREATE TABLE 'chunk_exact_identifier_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
   { type: "table", name: "chunk_exact_identifier_fts_docsize", table: "chunk_exact_identifier_fts_docsize", sql: "CREATE TABLE 'chunk_exact_identifier_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)" },
   { type: "table", name: "chunk_exact_identifier_fts_idx", table: "chunk_exact_identifier_fts_idx", sql: "CREATE TABLE 'chunk_exact_identifier_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
-  { type: "table", name: "chunks", table: "chunks", sql: "CREATE TABLE chunks (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,chunk_id TEXT NOT NULL UNIQUE,vault_id TEXT NOT NULL,path TEXT NOT NULL,heading_path_json TEXT NOT NULL,frontmatter_json TEXT NOT NULL CHECK(json_valid(frontmatter_json)),heading_text TEXT NOT NULL,exact_heading TEXT,content TEXT NOT NULL,identifiers_json TEXT NOT NULL CHECK(json_valid(identifiers_json)))" },
+  { type: "table", name: "chunks", table: "chunks", sql: "CREATE TABLE chunks (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,chunk_id TEXT NOT NULL UNIQUE,vault_id TEXT NOT NULL,path TEXT NOT NULL,heading_path_json TEXT NOT NULL,locator_json TEXT CHECK(locator_json IS NULL OR json_valid(locator_json)),frontmatter_json TEXT NOT NULL CHECK(json_valid(frontmatter_json)),heading_text TEXT NOT NULL,exact_heading TEXT,content TEXT NOT NULL,identifiers_json TEXT NOT NULL CHECK(json_valid(identifiers_json)))" },
   { type: "table", name: "chunks_fts", table: "chunks_fts", sql: "CREATE VIRTUAL TABLE chunks_fts USING fts5(filename,stem,aliases,title,heading_text,path_text,tags,content,content='chunk_search',content_rowid='rowid',tokenize='unicode61 remove_diacritics 2')" },
   { type: "table", name: "chunks_fts_config", table: "chunks_fts_config", sql: "CREATE TABLE 'chunks_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID" },
   { type: "table", name: "chunks_fts_data", table: "chunks_fts_data", sql: "CREATE TABLE 'chunks_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
   { type: "table", name: "chunks_fts_docsize", table: "chunks_fts_docsize", sql: "CREATE TABLE 'chunks_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)" },
   { type: "table", name: "chunks_fts_idx", table: "chunks_fts_idx", sql: "CREATE TABLE 'chunks_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
-  { type: "table", name: "generation_identity", table: "generation_identity", sql: "CREATE TABLE generation_identity (singleton INTEGER PRIMARY KEY CHECK(singleton = 1),vault_id TEXT NOT NULL)" },
+  { type: "table", name: "generation_identity", table: "generation_identity", sql: "CREATE TABLE generation_identity (singleton INTEGER PRIMARY KEY CHECK(singleton = 1),vault_id TEXT NOT NULL,source_policy_hash TEXT NOT NULL CHECK(length(source_policy_hash) = 64 AND source_policy_hash NOT GLOB '*[^0-9a-f]*'))" },
   { type: "table", name: "source_exact_aliases", table: "source_exact_aliases", sql: "CREATE TABLE source_exact_aliases (value TEXT NOT NULL,source_key TEXT NOT NULL,PRIMARY KEY(value, source_key)) WITHOUT ROWID" },
   { type: "table", name: "source_properties", table: "source_properties", sql: "CREATE TABLE source_properties (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,property_name TEXT NOT NULL,value_json TEXT NOT NULL CHECK(json_valid(value_json)),root_type TEXT NOT NULL CHECK(root_type IN ('null','boolean','i64','u64','real','string','date','array','object')),exact_value TEXT,numeric_value REAL,date_value TEXT,CHECK(root_type IN ('array','object') OR exact_value IS NOT NULL),CHECK(root_type NOT IN ('array','object') OR (exact_value IS NULL AND numeric_value IS NULL AND date_value IS NULL)),CHECK(root_type IN ('i64','u64','real') OR numeric_value IS NULL),CHECK(root_type = 'date' OR date_value IS NULL),UNIQUE(source_key, property_name))" },
   { type: "table", name: "source_property_scalars", table: "source_property_scalars", sql: "CREATE TABLE source_property_scalars (rowid INTEGER PRIMARY KEY CHECK(rowid > 0),source_key TEXT NOT NULL,property_name TEXT NOT NULL,json_pointer TEXT NOT NULL,scalar_type TEXT NOT NULL CHECK(scalar_type IN ('null','boolean','i64','u64','real','string','date')),exact_value TEXT NOT NULL,numeric_value REAL,date_value TEXT,CHECK(scalar_type IN ('i64','u64','real') OR numeric_value IS NULL),CHECK(scalar_type = 'date' OR date_value IS NULL),UNIQUE(source_key, property_name, json_pointer))" },
@@ -481,12 +504,12 @@ const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "table", name: "source_property_text_fts_data", table: "source_property_text_fts_data", sql: "CREATE TABLE 'source_property_text_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
   { type: "table", name: "source_property_text_fts_docsize", table: "source_property_text_fts_docsize", sql: "CREATE TABLE 'source_property_text_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)" },
   { type: "table", name: "source_property_text_fts_idx", table: "source_property_text_fts_idx", sql: "CREATE TABLE 'source_property_text_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
-  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),exact_filename TEXT,exact_stem TEXT,exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),exact_title TEXT,aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
+  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,source_format TEXT NOT NULL CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf')),extraction_coverage TEXT NOT NULL CHECK(extraction_coverage IN ('indexed-complete','indexed-partial','skipped-no-extractable-text','unreadable','quarantined')),outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),exact_filename TEXT,exact_stem TEXT,exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),exact_title TEXT,aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK((outcome = 'indexed' AND extraction_coverage IN ('indexed-complete','indexed-partial')) OR (outcome = 'skipped' AND extraction_coverage IN ('skipped-no-extractable-text','unreadable','quarantined'))),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
   { type: "view", name: "chunk_search", table: "chunk_search", sql: "CREATE VIEW chunk_search AS SELECT c.rowid AS rowid,json_extract(s.retrieval_json,'$.filename') AS filename,json_extract(s.retrieval_json,'$.stem') AS stem,s.aliases_text AS aliases,s.title_text AS title,c.heading_text AS heading_text,s.path AS path_text,s.tags_text AS tags,c.content AS content FROM chunks c JOIN sources s ON s.source_key = c.source_key" },
 ];
 
 const SOURCE_COLUMNS_SQL = `
-source_key, vault_id, path, outcome, content_hash, byte_length,
+source_key, vault_id, path, source_format, extraction_coverage, outcome, content_hash, byte_length,
 mtime_nanos, retrieval_json, exact_filename, exact_stem, exact_aliases_json, exact_title,
 aliases_text, title_text, tags_text, chunk_count, property_count, property_scalar_count
 `;
@@ -512,7 +535,7 @@ LIMIT ?
 `;
 
 const INSERT_SOURCE_SQL = `
-INSERT INTO sources(${SOURCE_COLUMNS_SQL}) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO sources(${SOURCE_COLUMNS_SQL}) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 const INSERT_PROPERTY_SQL = `
@@ -537,9 +560,9 @@ INSERT INTO source_property_text_fts(
 
 const INSERT_CHUNK_SQL = `
 INSERT INTO chunks(
-  rowid, source_key, chunk_id, vault_id, path, heading_path_json, frontmatter_json,
+  rowid, source_key, chunk_id, vault_id, path, heading_path_json, locator_json, frontmatter_json,
   heading_text, exact_heading, content, identifiers_json
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 const INSERT_CHUNK_FTS_SQL = `
@@ -611,7 +634,8 @@ SELECT MAX(
 // against the real chunk rows rather than assumed.
 const RECONCILE_SQL = `
 SELECT
-  (SELECT count(*) FROM generation_identity WHERE singleton = 1 AND vault_id = ?) AS identity,
+  (SELECT count(*) FROM generation_identity
+     WHERE singleton = 1 AND vault_id = ? AND source_policy_hash = ?) AS identity,
   (SELECT count(*) FROM chunks) AS chunks,
   (SELECT count(*) FROM chunks WHERE rowid <= 0) AS nonpositive_chunks,
   (SELECT count(*) FROM chunks_fts_docsize) AS fts,
@@ -676,8 +700,10 @@ interface ExistingGenerationState {
   documents: number;
   chunks: number;
   sources: number;
+  sourceFormatCounts: SourceFormatCounts;
   chunkingVersion: number;
   vaultId: string;
+  sourcePolicyHash: string;
   exportImage: () => Uint8Array;
   close: () => void;
 }
@@ -686,6 +712,7 @@ export class Fts5GenerationIndex {
   private documentCount = 0;
   private chunkCount = 0;
   private sourceCount = 0;
+  private formatCounts = emptySourceFormatCounts();
   private observedChunkingVersion: number | null = null;
   private closed = false;
   private readonly limits: ResolvedFts5IndexLimits;
@@ -700,6 +727,7 @@ export class Fts5GenerationIndex {
     limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
     existing?: ExistingGenerationState,
     private readonly vaultId = "active",
+    private readonly sourcePolicyHash = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b",
   ) {
     this.limits = resolveIndexLimits(limits);
     this.effectiveDatabaseByteLimit = configureDatabasePageLimit(db, this.limits);
@@ -707,9 +735,10 @@ export class Fts5GenerationIndex {
       if (db.filename !== ":memory:") throw new Error("FTS5 generation is not in memory");
       try {
         db.exec(SCHEMA_SQL);
-        db.exec("INSERT INTO generation_identity(singleton, vault_id) VALUES(1, ?)", {
-          bind: [vaultId],
-        });
+        db.exec(
+          "INSERT INTO generation_identity(singleton, vault_id, source_policy_hash) VALUES(1, ?, ?)",
+          { bind: [vaultId, sourcePolicyHash] },
+        );
         installVocabularyTable(db);
       } catch (error) {
         throw translateSqliteCapacityError(error);
@@ -723,6 +752,9 @@ export class Fts5GenerationIndex {
 
     installVocabularyTable(db);
     if (existing.vaultId !== vaultId) throw new CacheImageInvalidError("cache vault identity differs");
+    if (existing.sourcePolicyHash !== sourcePolicyHash) {
+      throw new CacheImageInvalidError("cache source policy differs");
+    }
     requireProjectedCounts(
       existing.documents,
       existing.chunks,
@@ -733,6 +765,7 @@ export class Fts5GenerationIndex {
     this.documentCount = existing.documents;
     this.chunkCount = existing.chunks;
     this.sourceCount = existing.sources;
+    this.formatCounts = cloneSourceFormatCounts(existing.sourceFormatCounts);
     this.observedChunkingVersion = existing.chunks === 0 ? null : existing.chunkingVersion;
     this.exportStrategy = () => existing.exportImage();
     this.closeStrategy = existing.close;
@@ -768,6 +801,11 @@ export class Fts5GenerationIndex {
   /** Every prepared source recorded in the freshness table, skips included. */
   get sources(): number {
     return this.sourceCount;
+  }
+
+  get sourceFormatCounts(): SourceFormatCounts {
+    this.requireOpen();
+    return cloneSourceFormatCounts(this.formatCounts);
   }
 
   /**
@@ -844,6 +882,7 @@ export class Fts5GenerationIndex {
     const nextDocuments = this.documentCount - removedDocuments + indexed.length;
     const nextChunks = this.chunkCount - removedChunks + addedChunks;
     const nextSources = this.sourceCount - touched.size + projected.length;
+    const nextFormatCounts = updatedSourceFormatCounts(this.formatCounts, stored, projected);
     const nextChunkingVersion = requireSingleChunkingVersion(
       this.observedChunkingVersion,
       projected,
@@ -941,6 +980,8 @@ export class Fts5GenerationIndex {
                 change.preparation.source_key,
                 change.preparation.vault_id,
                 change.preparation.path,
+                change.preparation.format,
+                change.preparation.coverage,
                 change.preparation.kind,
                 change.preparation.content_hash,
                 change.preparation.byte_length,
@@ -987,6 +1028,7 @@ export class Fts5GenerationIndex {
     this.documentCount = nextDocuments;
     this.chunkCount = nextChunks;
     this.sourceCount = nextSources;
+    this.formatCounts = nextFormatCounts;
     this.observedChunkingVersion = nextChunkingVersion;
   }
 
@@ -1193,7 +1235,7 @@ export class Fts5GenerationIndex {
       throw new Error("invalid FTS5 search limit");
     }
     if (plan.disposition === "empty_no_evidence") return [];
-    const hits: WorkerSearchHit[] = [];
+    const hits: SearchCandidate[] = [];
     const seen = new Set<string>();
     let candidates = 0;
     for (const stage of plan.stages) {
@@ -1236,7 +1278,49 @@ export class Fts5GenerationIndex {
       trace.candidateCount += candidates;
       trace.resultCount = hits.length;
     }
-    return hits;
+    return this.hydrateStoredExcerpts(hits);
+  }
+
+  private hydrateStoredExcerpts(hits: readonly SearchCandidate[]): WorkerSearchHit[] {
+    if (hits.length === 0) return [];
+    const placeholders = hits.map(() => "?").join(", ");
+    const rows = this.db.selectObjects(`
+      SELECT c.chunk_id, c.content, c.locator_json, s.source_format, s.extraction_coverage
+      FROM chunks c JOIN sources s ON s.source_key = c.source_key
+      WHERE c.chunk_id IN (${placeholders})
+    `, hits.map((hit) => hit.chunk_id));
+    if (rows.length !== hits.length) throw new Error("stored search content is incomplete");
+
+    const byChunkId = new Map<string, {
+      excerpt: string;
+      format: SourceFormat;
+      coverage: ExtractionCoverage;
+      locator: SourceLocator | null;
+    }>();
+    for (const row of rows) {
+      const locator = parseSourceLocatorJson(row.locator_json);
+      if (!isBoundedString(row.chunk_id, 128)
+        || typeof row.content !== "string"
+        || row.content.length > 16_384
+        || !isSourceFormat(row.source_format)
+        || !isExtractionCoverage(row.extraction_coverage)
+        || locator === undefined
+        || (locator !== null && row.source_format !== "base")
+        || byChunkId.has(row.chunk_id)) {
+        throw new Error("SQLite returned invalid stored search content");
+      }
+      byChunkId.set(row.chunk_id, {
+        excerpt: row.content,
+        format: row.source_format,
+        coverage: row.extraction_coverage,
+        locator,
+      });
+    }
+    return hits.map((hit) => {
+      const stored = byChunkId.get(hit.chunk_id);
+      if (stored === undefined) throw new Error("stored search content is incomplete");
+      return { ...hit, ...stored };
+    });
   }
 
   assertIntegrity(validateExactProjection = true): void {
@@ -1302,6 +1386,7 @@ export class Fts5GenerationIndex {
     this.documentCount = 0;
     this.chunkCount = 0;
     this.sourceCount = 0;
+    this.formatCounts = emptySourceFormatCounts();
     this.observedChunkingVersion = null;
   }
 
@@ -1349,7 +1434,7 @@ export class Fts5GenerationIndex {
     expectedSources: number,
     validateExactProjection = true,
   ): void {
-    const rows = this.db.selectObjects(RECONCILE_SQL, [this.vaultId]);
+    const rows = this.db.selectObjects(RECONCILE_SQL, [this.vaultId, this.sourcePolicyHash]);
     if (rows.length !== 1) {
       throw new IndexIntegrityError("FTS5 reconciliation query returned no row");
     }
@@ -1454,12 +1539,14 @@ export function openFts5Generation(
   sqlite: SQLiteApi,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   vaultId = "active",
+  sourcePolicyHash = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b",
 ): Fts5GenerationIndex {
   return new Fts5GenerationIndex(
     new sqlite.oo1.DB(":memory:", "c"),
     limits,
     undefined,
     vaultId,
+    sourcePolicyHash,
   );
 }
 
@@ -1474,6 +1561,7 @@ export function openRestoredFts5Generation(
   chunkingVersion: number,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   expectedVaultId = "active",
+  expectedSourcePolicyHash = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b",
 ): Fts5GenerationIndex {
   let handle: BlockVfsHandle | null = null;
   try {
@@ -1512,7 +1600,12 @@ export function openRestoredFts5Generation(
       throw new CacheImageInvalidError("cache image failed FTS5 integrity validation");
     }
     validatePositiveRestoredRowids(db);
-    const inventory = readRestoredInventory(db, limits, expectedVaultId);
+    const inventory = readRestoredInventory(
+      db,
+      limits,
+      expectedVaultId,
+      expectedSourcePolicyHash,
+    );
     validateChunkFtsBijection(db);
     validateExactIdentifierFtsBijection(db);
     validatePropertyFtsBijection(db);
@@ -1536,9 +1629,10 @@ export function openRestoredFts5Generation(
       ...inventory,
       chunkingVersion,
       vaultId: expectedVaultId,
+      sourcePolicyHash: expectedSourcePolicyHash,
       exportImage: () => ownedHandle.exportImage(),
       close: () => ownedHandle.close(),
-    }, expectedVaultId);
+    }, expectedVaultId, expectedSourcePolicyHash);
     try {
       index.assertIntegrity();
     } catch {
@@ -1591,18 +1685,21 @@ function readRestoredInventory(
   db: SQLiteDatabase,
   limits: Fts5IndexLimits,
   expectedVaultId: string,
+  expectedSourcePolicyHash: string,
 ): {
   documents: number;
   chunks: number;
   sources: number;
+  sourceFormatCounts: SourceFormatCounts;
 } {
   const resolvedLimits = resolveIndexLimits(limits);
   const identityRows = db.selectObjects(
-    "SELECT singleton, vault_id FROM generation_identity LIMIT 2",
+    "SELECT singleton, vault_id, source_policy_hash FROM generation_identity LIMIT 2",
   );
   if (identityRows.length !== 1
     || identityRows[0]?.singleton !== 1
-    || identityRows[0]?.vault_id !== expectedVaultId) {
+    || identityRows[0]?.vault_id !== expectedVaultId
+    || identityRows[0]?.source_policy_hash !== expectedSourcePolicyHash) {
     throw new CacheImageInvalidError("cache vault identity is invalid");
   }
   const sourceRows = db.selectObjects(
@@ -1612,6 +1709,7 @@ function readRestoredInventory(
   if (sourceRows.length > resolvedLimits.maxSources) throw new IndexCapacityError();
 
   let documents = 0;
+  const sourceFormatCounts = emptySourceFormatCounts();
   const sourcesByKey = new Map<string, StoredSource>();
   for (const row of sourceRows) {
     let source: StoredSource | null;
@@ -1626,6 +1724,7 @@ function readRestoredInventory(
       throw new CacheImageInvalidError("cache source inventory is invalid");
     }
     sourcesByKey.set(source.source_key, source);
+    sourceFormatCounts[source.source_format][source.extraction_coverage] += 1;
     if (source.outcome === "indexed") documents += 1;
   }
 
@@ -1652,8 +1751,8 @@ function readRestoredInventory(
   // Do not count and trust chunk rows. Read at most one beyond the configured
   // ceiling, then validate every canonical chunk-local field before publication.
   const chunkRows = db.selectObjects(`
-    SELECT rowid, source_key, chunk_id, vault_id, path, heading_path_json, frontmatter_json,
-      heading_text, exact_heading, content, identifiers_json
+    SELECT rowid, source_key, chunk_id, vault_id, path, heading_path_json, locator_json,
+      frontmatter_json, heading_text, exact_heading, content, identifiers_json
     FROM chunks
     ORDER BY rowid
     LIMIT ?
@@ -1665,6 +1764,7 @@ function readRestoredInventory(
     documents,
     chunks: chunkRows.length,
     sources: sourceRows.length,
+    sourceFormatCounts,
   };
 }
 
@@ -1674,6 +1774,7 @@ function validateRestoredChunk(
   legacyBySource: ReadonlyMap<string, LegacyProjection>,
 ): void {
   const identifiers = parseIdentifiersJson(row.identifiers_json);
+  const locator = parseSourceLocatorJson(row.locator_json);
   if (!isPositiveSafeInteger(row.rowid)
     || !isBoundedString(row.source_key, 128)
     || !isBoundedString(row.chunk_id, 128)
@@ -1681,6 +1782,7 @@ function validateRestoredChunk(
     || row.vault_id.trim().length === 0
     || !isNormalizedVaultRelativePath(row.path)
     || parseHeadingPathJson(row.heading_path_json) === null
+    || locator === undefined
     || parseDisplayFrontmatterJson(row.frontmatter_json) === null
     || typeof row.heading_text !== "string"
     || !(row.exact_heading === null || isBoundedNormalizedExact(row.exact_heading))
@@ -1694,6 +1796,7 @@ function validateRestoredChunk(
     || source.outcome !== "indexed"
     || row.vault_id !== source.vault_id
     || row.path !== source.path
+    || (locator !== null && source.source_format !== "base")
     || row.frontmatter_json !== displayFrontmatterJsonFromTitle(legacy.title)) {
     throw new CacheImageInvalidError("cache chunk identity does not match its source");
   }
@@ -2116,6 +2219,8 @@ function onePastLimit(limit: number): number {
   return limit === Number.MAX_SAFE_INTEGER ? limit : limit + 1;
 }
 
+type SearchCandidate = Omit<WorkerSearchHit, "format" | "coverage" | "locator" | "excerpt">;
+
 interface ProjectedChunk {
   /** Chunk identity, display metadata, and canonical chunk-local lexical inputs. */
   metadataBind: readonly unknown[];
@@ -2137,6 +2242,8 @@ interface StoredSource {
   source_key: string;
   vault_id: string;
   path: string;
+  source_format: SourceFormat;
+  extraction_coverage: ExtractionCoverage;
   outcome: "indexed" | "skipped";
   content_hash: string | null;
   byte_length: number;
@@ -2253,6 +2360,7 @@ function projectChunk(
       chunk.vault_id,
       chunk.path,
       JSON.stringify(chunk.heading_path),
+      prepared.source_locator === undefined ? null : JSON.stringify(prepared.source_locator),
       displayFrontmatterJson(sourceFrontmatter),
       prepared.heading_text,
       prepared.normalized_heading,
@@ -2599,7 +2707,10 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
     || row.vault_id.trim().length < 1
     || row.vault_id.length > 1_024
     || !isNormalizedVaultRelativePath(row.path)
+    || !isSourceFormat(row.source_format)
+    || !isExtractionCoverage(row.extraction_coverage)
     || (row.outcome !== "indexed" && row.outcome !== "skipped")
+    || !coverageMatchesOutcome(row.extraction_coverage, row.outcome)
     || !(row.content_hash === null
       || (typeof row.content_hash === "string"
         && row.content_hash.length > 0
@@ -2630,6 +2741,8 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
     source_key: row.source_key,
     vault_id: row.vault_id,
     path: row.path,
+    source_format: row.source_format,
+    extraction_coverage: row.extraction_coverage,
     outcome: row.outcome,
     content_hash: row.content_hash,
     byte_length: row.byte_length,
@@ -2646,6 +2759,45 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
     property_count: row.property_count,
     property_scalar_count: row.property_scalar_count,
   };
+}
+
+function coverageMatchesOutcome(
+  coverage: ExtractionCoverage,
+  outcome: StoredSource["outcome"],
+): boolean {
+  return outcome === "indexed"
+    ? coverage === "indexed-complete" || coverage === "indexed-partial"
+    : coverage === "skipped-no-extractable-text"
+      || coverage === "unreadable"
+      || coverage === "quarantined";
+}
+
+function cloneSourceFormatCounts(counts: SourceFormatCounts): SourceFormatCounts {
+  return Object.fromEntries(Object.entries(counts).map(([format, coverageCounts]) => [
+    format,
+    { ...coverageCounts },
+  ])) as SourceFormatCounts;
+}
+
+function updatedSourceFormatCounts(
+  current: SourceFormatCounts,
+  removed: readonly StoredSource[],
+  added: readonly ProjectedPreparation[],
+): SourceFormatCounts {
+  const next = cloneSourceFormatCounts(current);
+  for (const source of removed) {
+    const count = next[source.source_format][source.extraction_coverage];
+    if (count < 1) throw new Error("source format accounting is invalid");
+    next[source.source_format][source.extraction_coverage] = count - 1;
+  }
+  for (const source of added) {
+    const counts = next[source.preparation.format];
+    const coverage = source.preparation.coverage;
+    const count = counts[coverage];
+    if (!Number.isSafeInteger(count + 1)) throw new Error("source format accounting is invalid");
+    counts[coverage] = count + 1;
+  }
+  return next;
 }
 
 function requireProjectedCounts(
@@ -2886,6 +3038,18 @@ function parseHeadingPathJson(value: unknown): string[] | null {
     : null;
 }
 
+function parseSourceLocatorJson(value: unknown): SourceLocator | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  return isSourceLocator(parsed) ? parsed : undefined;
+}
+
 function parseDisplayFrontmatterJson(value: unknown): WorkerFrontmatter | null {
   if (typeof value !== "string") return null;
   let parsed: unknown;
@@ -2916,7 +3080,7 @@ function parsePropertyValueJson(value: string): PreparedPropertyValue | undefine
     : undefined;
 }
 
-function parseSearchRow(row: Record<string, unknown>): WorkerSearchHit {
+function parseSearchRow(row: Record<string, unknown>): SearchCandidate {
   const headingPath = parseHeadingPathJson(row.heading_path_json);
   const frontmatter = parseDisplayFrontmatterJson(row.frontmatter_json);
   if (!isBoundedString(row.chunk_id, 128)
@@ -2935,10 +3099,6 @@ function parseSearchRow(row: Record<string, unknown>): WorkerSearchHit {
     path: row.path,
     heading_path: headingPath,
     score: row.score,
-    // The contentless index stores no text, so the Worker cannot produce
-    // excerpt text. The frozen hit shape keeps the field; the host fills it
-    // by hydrating a bounded window from the authoritative vault file.
-    excerpt: "",
     frontmatter,
   };
 }

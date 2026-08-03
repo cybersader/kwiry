@@ -137,11 +137,12 @@ function sourceAt(
   frontmatter: PropertyBag = { title, tags: ["test"] },
 ): SourcePreparation {
   return {
-    schema_version: 4,
+    schema_version: 5,
     source_key: sourceKey,
     vault_id: "active",
     path,
     format: "markdown",
+    coverage: "indexed-complete",
     content_hash: `hash-${sourceKey}`,
     byte_length: content.length,
     mtime: 1,
@@ -219,9 +220,38 @@ describe("Fts5GenerationIndex", () => {
       heading_path: ["Heading"],
       frontmatter: { title: "Quasar Guide" },
     });
-    // The index is contentless: it can rank and locate, but it stores no text
-    // and must not pretend to have produced excerpt text.
-    expect(hits[0]!.excerpt).toBe("");
+    // Canonical content is hydrated only after final hit selection; it is not
+    // selected by the ranking SQL and cannot affect MATCH, BM25, or ordering.
+    expect(hits[0]!.excerpt).toBe("portable quasar text");
+    expect(hits[0]).toMatchObject({
+      format: "markdown",
+      coverage: "indexed-complete",
+      locator: null,
+    });
+  });
+
+  it("hydrates Base format, coverage, locator, excerpt, and status counts after ranking", () => {
+    const base = sourceAt(
+      "projects",
+      "projects.base",
+      "chunk-projects-active",
+      "active projects",
+      "Projects",
+    );
+    base.format = "base";
+    base.chunks[0]!.source_locator = { kind: "base_view", view: "Active" };
+    index.replaceSource(base);
+
+    const hits = index.search(anyPlan("active"), 20);
+    expect(hits).toEqual([expect.objectContaining({
+      chunk_id: "chunk-projects-active",
+      format: "base",
+      coverage: "indexed-complete",
+      locator: { kind: "base_view", view: "Active" },
+      excerpt: "active projects",
+    })]);
+    expect(index.sourceFormatCounts.base["indexed-complete"]).toBe(1);
+    expect(index.sourceFormatCounts.markdown["indexed-complete"]).toBe(0);
   });
 
   it("intersects exact identifiers with ordinary FTS terms and identifier-only stages", () => {
@@ -649,6 +679,31 @@ describe("Fts5GenerationIndex", () => {
     expect(hits[0]?.chunk_id).toBe("000-primary");
     expect(summary.candidate_count).toBe(256);
     expect(summary.stages[0]?.candidate_count).toBe(256);
+  });
+
+  it("keeps equal evidence rank-neutral when only stored SourceFormat is mutated", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      scoped.applySourceChanges([
+        sourceAt("neutral-alpha", "neutral-alpha.md", "chunk-neutral-alpha", "formatneutral"),
+        sourceAt("neutral-beta", "neutral-beta.md", "chunk-neutral-beta", "formatneutral"),
+      ], []);
+      const baseline = scoped.search(anyPlan("formatneutral"), 20);
+      expect(baseline).toHaveLength(2);
+      expect(baseline[0]!.score).toBe(baseline[1]!.score);
+
+      db.exec("UPDATE sources SET source_format = 'base' WHERE source_key = 'neutral-beta'");
+      const mutated = scoped.search(anyPlan("formatneutral"), 20);
+
+      expect(mutated.map(({ format, ...hit }) => hit))
+        .toEqual(baseline.map(({ format, ...hit }) => hit));
+      expect(mutated.find((hit) => hit.path === "neutral-alpha.md")?.format).toBe("markdown");
+      expect(mutated.find((hit) => hit.path === "neutral-beta.md")?.format).toBe("base");
+      expect(mutated[0]!.score).toBe(mutated[1]!.score);
+    } finally {
+      scoped.close();
+    }
   });
 
   it("orders equal-score ties by chunk ID then path independently of insertion order", () => {
@@ -1367,6 +1422,7 @@ describe("Fts5GenerationIndex", () => {
 
     const skipped = structuredClone(empty);
     skipped.kind = "skipped";
+    skipped.coverage = "skipped-no-extractable-text";
     skipped.content_hash = null;
     index.replaceSource(skipped);
     expect(index.documents).toBe(0);
@@ -1386,6 +1442,7 @@ describe("Fts5GenerationIndex", () => {
       const skipped = source("binary", "unused", "");
       skipped.chunks = [];
       skipped.kind = "skipped";
+    skipped.coverage = "skipped-no-extractable-text";
       skipped.content_hash = "hash-binary";
       skipped.normalized_exact.title = null;
       skipped.byte_length = 4;
@@ -1397,6 +1454,8 @@ describe("Fts5GenerationIndex", () => {
         source_key: "binary",
         vault_id: "active",
         path: "binary.md",
+        source_format: "markdown",
+        extraction_coverage: "skipped-no-extractable-text",
         outcome: "skipped",
         content_hash: "hash-binary",
         byte_length: 4,
@@ -1434,6 +1493,7 @@ describe("Fts5GenerationIndex", () => {
       const oversized = source("huge", "unused", "");
       oversized.chunks = [];
       oversized.kind = "skipped";
+      oversized.coverage = "unreadable";
       oversized.content_hash = null;
       oversized.byte_length = 10 * 1024 * 1024 + 1;
 
@@ -1470,6 +1530,8 @@ describe("Fts5GenerationIndex", () => {
         source_key: "alpha",
         vault_id: "active",
         path: "alpha.md",
+        source_format: "markdown",
+        extraction_coverage: "indexed-complete",
         outcome: "indexed",
         content_hash: "hash-alpha",
         byte_length: 10,
@@ -1501,6 +1563,7 @@ describe("Fts5GenerationIndex", () => {
     const skipped = source("skipped", "unused", "");
     skipped.chunks = [];
     skipped.kind = "skipped";
+    skipped.coverage = "skipped-no-extractable-text";
 
     index.applySourceChanges([
       source("alpha", "chunk-a", "alphaterm"),
@@ -1510,6 +1573,8 @@ describe("Fts5GenerationIndex", () => {
     expect(index.documents).toBe(1);
     expect(index.chunks).toBe(1);
     expect(index.sources).toBe(2);
+    expect(index.sourceFormatCounts.markdown["indexed-complete"]).toBe(1);
+    expect(index.sourceFormatCounts.markdown["skipped-no-extractable-text"]).toBe(1);
   });
 
   it("refuses a batch that would exceed the source ceiling without changing rows", () => {
@@ -1537,8 +1602,8 @@ describe("Fts5GenerationIndex", () => {
     ],
     [
       "a skipped source owning chunks",
-      "UPDATE sources SET outcome = 'skipped', chunk_count = 0, property_count = 0, "
-        + "property_scalar_count = 0, content_hash = NULL "
+      "UPDATE sources SET outcome = 'skipped', extraction_coverage = 'unreadable', "
+        + "chunk_count = 0, property_count = 0, property_scalar_count = 0, content_hash = NULL "
         + "WHERE source_key = 'alpha'",
     ],
     [
@@ -1547,9 +1612,9 @@ describe("Fts5GenerationIndex", () => {
     ],
     [
       "an invented source row",
-      "INSERT INTO sources VALUES('ghost','active','ghost.md','skipped',NULL,0,'1',"
-        + "'{\"filename\":\"ghost.md\",\"stem\":\"ghost\",\"aliases\":[]}',"
-        + "'ghost.md','ghost','[]',NULL,'','','',0,0,0)",
+      "INSERT INTO sources VALUES('ghost','active','ghost.md','markdown','unreadable',"
+        + "'skipped',NULL,0,'1','{\"filename\":\"ghost.md\",\"stem\":\"ghost\","
+        + "\"aliases\":[]}','ghost.md','ghost','[]',NULL,'','','',0,0,0)",
     ],
   ])("fails the integrity gate on %s", (_name, corruption) => {
     const db = new sqlite.oo1.DB(":memory:", "c");
@@ -1880,6 +1945,8 @@ describe("Fts5GenerationIndex", () => {
       expect(restored.documents).toBe(2);
       expect(restored.chunks).toBe(2);
       expect(restored.sources).toBe(2);
+      expect(restored.sourceFormatCounts.markdown["indexed-complete"]).toBe(2);
+      expect(restored.sourceFormatCounts.base["indexed-complete"]).toBe(0);
       expect(restored.search(anyPlan("oldterm"), 20)).toHaveLength(1);
       expect(() => restored.assertIntegrity()).not.toThrow();
       const reexported = restored.exportImage(sqlite);
@@ -1994,10 +2061,10 @@ describe("Fts5GenerationIndex", () => {
       .toThrow(CacheVersionMismatchError);
   });
 
-  it("rejects the schema-v7 cache inside the disposable migration boundary", () => {
+  it("rejects the schema-v8 cache inside the disposable migration boundary", () => {
     index.replaceSource(source("alpha", "chunk-a", "quasar"));
     const oldImage = mutateExportedImage(index.exportImage(sqlite), (db) => {
-      db.exec("PRAGMA user_version = 7");
+      db.exec("PRAGMA user_version = 8");
     });
     expect(() => openRestoredFts5Generation(sqlite, oldImage, 1))
       .toThrow(CacheVersionMismatchError);

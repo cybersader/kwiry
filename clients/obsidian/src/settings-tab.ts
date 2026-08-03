@@ -5,6 +5,7 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 
 import type KwiryPlugin from "./main";
 import type { SearchMode } from "./api";
+import { SOURCE_FORMATS, type SourceFormat } from "./source-formats";
 
 export class KwirySettingTab extends PluginSettingTab {
   constructor(
@@ -39,8 +40,9 @@ export class KwirySettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setName("In-plugin · Lexical")
         .setDesc(
-          "Indexes Markdown files from the active vault in memory. This profile is lexical-only and never reads the daemon token.",
+          "Indexes enabled sources from the active vault. Markdown, plain text, and Base are extractable; Canvas, PDF, and DOCX are admitted but reported as not yet supported. This profile is lexical-only and never reads the daemon token.",
         );
+      this.renderSourceFormatSettings(containerEl);
       new Setting(containerEl)
         .setName("Rebuild in-plugin lexical index")
         .setDesc("Build a complete replacement generation while the current index remains searchable.")
@@ -78,6 +80,31 @@ export class KwirySettingTab extends PluginSettingTab {
 
     this.renderDiagnosticsSettings(containerEl);
     this.plugin.renderPrivateSettings(containerEl);
+  }
+
+  private renderSourceFormatSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Indexed source formats")
+      .setDesc(
+        "Changing any format rebuilds the index from scratch. Search is unavailable until the rebuild completes.",
+      )
+      .setHeading();
+
+    for (const format of SOURCE_FORMATS) {
+      new Setting(containerEl)
+        .setName(sourceFormatLabel(format))
+        .setDesc(sourceFormatDescription(format))
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.enabledSourceFormats[format])
+            .onChange(async (value) => {
+              if (this.plugin.settings.enabledSourceFormats[format] === value) return;
+              this.plugin.settings.enabledSourceFormats[format] = value;
+              await this.plugin.saveSettings();
+              await this.plugin.onSourcePolicyChanged();
+            }),
+        );
+    }
   }
 
   private renderDiagnosticsSettings(containerEl: HTMLElement): void {
@@ -189,5 +216,31 @@ export class KwirySettingTab extends PluginSettingTab {
   private async reconfigureDaemon(): Promise<void> {
     await this.plugin.saveSettings();
     await this.plugin.activateBackendProfile();
+  }
+}
+
+function sourceFormatLabel(format: SourceFormat): string {
+  switch (format) {
+    case "markdown": return "Markdown";
+    case "text": return "Plain text";
+    case "base": return "Base";
+    case "canvas": return "Canvas";
+    case "docx": return "DOCX";
+    case "pdf": return "PDF";
+  }
+}
+
+function sourceFormatDescription(format: SourceFormat): string {
+  switch (format) {
+    case "markdown":
+      return "Extract and index Markdown notes.";
+    case "text":
+      return "Extract and index plain-text files.";
+    case "base":
+      return "Extract authored YAML configuration and named views; materialized query rows are never indexed.";
+    case "canvas":
+    case "docx":
+    case "pdf":
+      return "Admit this format, but report it as not yet supported with no extracted text in this wave.";
   }
 }

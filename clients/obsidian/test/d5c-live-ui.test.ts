@@ -18,7 +18,11 @@ import {
   resultFocusKey,
 } from "../src/internal/d5c-playground/live-view";
 import { D5cOwnerService } from "../src/internal/d5c-playground/live-service";
-import type { SourceRemoval, SourceUpsert } from "../src/worker/protocol";
+import {
+  emptySourceFormatCounts,
+  type SourceRemoval,
+  type SourceUpsert,
+} from "../src/worker/protocol";
 import type { D5cWorkerSession } from "../src/worker/d5c-session";
 
 const PRIVATE_PATH = "private-folder/private-title.md";
@@ -37,15 +41,15 @@ class OneNoteSource implements ActiveVaultSource {
     };
   }
 
-  listMarkdownPaths(): readonly string[] {
+  listSourcePaths(): readonly string[] {
     return [PRIVATE_PATH];
   }
 
-  inspectMarkdown(path: string): SourceInspection {
-    return { kind: "candidate", path, size: 10, mtime: 1 };
+  inspectSource(path: string): SourceInspection {
+    return { kind: "candidate", path, format: "markdown", size: 10, mtime: 1 };
   }
 
-  async readMarkdown(): Promise<StableSourceRead> {
+  async readSource(): Promise<StableSourceRead> {
     const bytes = new TextEncoder().encode(`# Private\n${PRIVATE_EXCERPT}`);
     return {
       kind: "source",
@@ -127,6 +131,8 @@ class FakeLiveSession {
 }
 
 function counts(generation: string, documents: number): IndexCounts {
+  const sourceFormatCounts = emptySourceFormatCounts();
+  sourceFormatCounts.markdown["indexed-complete"] = documents;
   return {
     generation,
     documents,
@@ -135,6 +141,7 @@ function counts(generation: string, documents: number): IndexCounts {
     database_byte_limit: 1_000,
     quarantined_sources: 0,
     quarantine_fields: [],
+    source_format_counts: sourceFormatCounts,
   };
 }
 
@@ -179,6 +186,7 @@ describe("live Text vs Balanced owner UI", () => {
       generation: null,
       documents: 0,
       chunks: 0,
+      sourceFormatCounts: emptySourceFormatCounts(),
       quarantinedSources: 0,
       unreadableSources: 0,
       quarantineValidatorFields: [],

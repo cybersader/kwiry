@@ -11,10 +11,16 @@ import {
   prepare_source,
 } from "virtual:kwiry-rust-wasm-bindings";
 
-import type { PropertyBag, SourceDescriptorInput } from "./protocol";
+import type {
+  ExtractionCoverage,
+  PropertyBag,
+  SourceDescriptorInput,
+  SourceFormat,
+  SourceLocator,
+} from "./protocol";
 
 const ABI_VERSION = 2;
-const SOURCE_SCHEMA_VERSION = 4;
+const SOURCE_SCHEMA_VERSION = 5;
 const QUERY_SCHEMA_VERSION = 4;
 const MATCH_PLAN_SCHEMA_VERSION = 3;
 
@@ -22,7 +28,7 @@ export interface RustIdentity {
   abi_version: 2;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
-  source_preparation_schema_version: 4;
+  source_preparation_schema_version: 5;
   lexical_query_plan_schema_version: 4;
   fts5_match_plan_schema_version: 3;
   /**
@@ -66,15 +72,17 @@ export interface PreparedChunk {
   heading_text: string;
   normalized_heading: string | null;
   technical_identifiers: string[];
+  source_locator?: SourceLocator;
 }
 
 export interface SourcePreparation {
-  schema_version: 4;
+  schema_version: 5;
   source_key: string;
   vault_id: string;
   room?: string;
   path: string;
-  format: "markdown" | "text";
+  format: SourceFormat;
+  coverage: ExtractionCoverage;
   content_hash: string | null;
   byte_length: number;
   mtime: number;

@@ -1,12 +1,13 @@
 use std::fs;
 
+use crate::format::SourceFormat;
 use crate::model::{
     DiscoveredFile, FileIngestOutcome, FileOutcomeKind, IngestReport, IngestWarning, PreparedChunk,
-    RetrievalMetadata, VaultRegistration,
+    VaultRegistration,
 };
 use crate::source::{
-    SourceDescriptor, SourceFormat, SourcePreparation, SourcePreparationKind,
-    prepare_source_buffer, retrieval_metadata,
+    SourceDescriptor, SourcePreparation, SourcePreparationKind, prepare_source_buffer,
+    retrieval_metadata,
 };
 use crate::walk::{EnumerationResult, discover_vault};
 
@@ -44,15 +45,17 @@ pub(crate) fn ingest_vault_files(
 }
 
 pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> FileIngestOutcome {
+    let format = SourceFormat::from_extension(&file.extension)
+        .expect("vault discovery only admits registered source formats");
     let bytes = match fs::read(&file.absolute_path) {
         Ok(bytes) => bytes,
         Err(error) => {
             return file_outcome(
                 vault,
                 file,
+                crate::extract::ExtractionCoverage::Unreadable,
                 None,
                 Vec::new(),
-                retrieval_metadata(&file.relative_path, Vec::new()),
                 FileOutcomeKind::TransientError,
                 Some(error.to_string()),
             );
@@ -62,11 +65,7 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
         vault_id: vault.id.clone(),
         room: vault.room.clone(),
         path: file.relative_path.clone(),
-        format: if file.extension == "txt" {
-            SourceFormat::Text
-        } else {
-            SourceFormat::Markdown
-        },
+        format,
         byte_length: file.byte_length,
         mtime: file.mtime,
         mtime_nanos: file.mtime_nanos,
@@ -76,9 +75,9 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
         Err(error) => file_outcome(
             vault,
             file,
+            crate::extract::ExtractionCoverage::Unreadable,
             None,
             Vec::new(),
-            retrieval_metadata(&file.relative_path, Vec::new()),
             FileOutcomeKind::Skipped,
             Some(error.to_string()),
         ),
@@ -92,6 +91,8 @@ fn file_outcome_from_preparation(
     FileIngestOutcome {
         vault_id: preparation.vault_id,
         path: preparation.path,
+        format: preparation.format,
+        coverage: preparation.coverage,
         content_hash: preparation.content_hash,
         byte_length: preparation.byte_length,
         mtime: preparation.mtime,
@@ -112,21 +113,24 @@ fn file_outcome_from_preparation(
 fn file_outcome(
     vault: &VaultRegistration,
     file: &DiscoveredFile,
+    coverage: crate::extract::ExtractionCoverage,
     content_hash: Option<String>,
     chunks: Vec<PreparedChunk>,
-    retrieval: RetrievalMetadata,
     kind: FileOutcomeKind,
     warning: Option<String>,
 ) -> FileIngestOutcome {
     FileIngestOutcome {
         vault_id: vault.id.clone(),
         path: file.relative_path.clone(),
+        format: SourceFormat::from_extension(&file.extension)
+            .expect("vault discovery only admits registered source formats"),
+        coverage,
         content_hash,
         byte_length: file.byte_length,
         mtime: file.mtime,
         mtime_nanos: file.mtime_nanos,
         chunks,
-        retrieval,
+        retrieval: retrieval_metadata(&file.relative_path, Vec::new()),
         kind,
         warning: warning.map(|message| IngestWarning {
             path: file.absolute_path.clone(),
@@ -208,6 +212,8 @@ mod tests {
 
             assert_eq!(native.vault_id, portable.vault_id);
             assert_eq!(native.path, portable.path);
+            assert_eq!(native.format, portable.format);
+            assert_eq!(native.coverage, portable.coverage);
             assert_eq!(native.content_hash, portable.content_hash);
             assert_eq!(native.byte_length, portable.byte_length);
             assert_eq!(native.mtime, portable.mtime);

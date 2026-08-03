@@ -2,10 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import type { BackendIdentity, BackendSearchHit } from "./backend";
-import { isNormalizedMarkdownPath } from "./vault-path";
+import { pathMatchesFormat } from "./vault-path";
+
+export interface OpenTarget {
+  path: string;
+  subpath?: string;
+}
 
 export type OpenResultDecision =
-  | { ok: true; path: string }
+  | ({ ok: true } & OpenTarget)
   | {
       ok: false;
       code:
@@ -15,6 +20,19 @@ export type OpenResultDecision =
         | "invalid_path";
       safeMessage: string;
     };
+
+export function openTargetForHit(
+  hit: Pick<BackendSearchHit, "path" | "format" | "locator" | "heading_path">,
+): OpenTarget {
+  if (hit.format === "markdown") {
+    const heading = hit.heading_path.at(-1);
+    return heading ? { path: hit.path, subpath: `#${heading}` } : { path: hit.path };
+  }
+  if (hit.format === "base" && hit.locator?.kind === "base_view") {
+    return { path: hit.path, subpath: `#${hit.locator.view}` };
+  }
+  return { path: hit.path };
+}
 
 export function validateOpenResult(
   hit: BackendSearchHit,
@@ -31,11 +49,11 @@ export function validateOpenResult(
       safeMessage: "This result belongs to an inactive search backend.",
     };
   }
-  if (!isNormalizedMarkdownPath(hit.path)) {
+  if (!pathMatchesFormat(hit.path, hit.format)) {
     return {
       ok: false,
       code: "invalid_path",
-      safeMessage: "This result does not contain a safe vault-relative Markdown path.",
+      safeMessage: "This result does not contain a safe vault-relative path for its source format.",
     };
   }
 
@@ -67,7 +85,11 @@ export function validateOpenResult(
     };
   }
 
-  return { ok: true, path: hit.path };
+  return { ok: true, ...openTargetForHit(hit) };
 }
 
-export { isNormalizedMarkdownPath } from "./vault-path";
+export {
+  isNormalizedMarkdownPath,
+  isNormalizedVaultFilePath,
+  pathMatchesFormat,
+} from "./vault-path";

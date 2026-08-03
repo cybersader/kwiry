@@ -7,11 +7,12 @@ import { sourcePreparationDefect } from "../src/worker/source-defect";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
 
 const VALID = {
-  schema_version: 4,
+  schema_version: 5,
   source_key: "a".repeat(64),
   vault_id: "active-vault",
   path: "Notes/Example.md",
   format: "markdown",
+  coverage: "skipped-no-extractable-text",
   content_hash: "b".repeat(64),
   byte_length: 10,
   mtime: 1785253671659,
@@ -39,7 +40,7 @@ describe("sourcePreparationDefect", () => {
     // refused it" without ever saying which check refused.
     expect(sourcePreparationDefect({ ...VALID, mtime_nanos: "-1000000" })).toBe("mtime_nanos");
     expect(sourcePreparationDefect({ ...VALID, mtime: -1 })).toBe("mtime");
-    expect(sourcePreparationDefect({ ...VALID, format: "pdf" })).toBe("format");
+    expect(sourcePreparationDefect({ ...VALID, format: "html" })).toBe("format");
     expect(sourcePreparationDefect({ ...VALID, path: "" })).toBe("path");
     expect(sourcePreparationDefect({ ...VALID, byte_length: 1.5 })).toBe("byte_length");
     expect(sourcePreparationDefect({ ...VALID, kind: "indexed", content_hash: null }))
@@ -74,6 +75,7 @@ describe("chunk/source correlation", () => {
     ...VALID,
     room: "reference",
     kind: "indexed",
+    coverage: "indexed-complete",
     frontmatter: {},
     chunks: [{
       chunk: {
@@ -113,6 +115,19 @@ describe("chunk/source correlation", () => {
     (preparation.chunks[0]!.chunk as Record<string, unknown>).room = null;
     expect(sourcePreparationDefect(preparation)).toBeNull();
   });
+
+  it("accepts Base view locators and rejects locators on other formats", () => {
+    const preparation = indexed();
+    preparation.format = "base";
+    (preparation.chunks[0] as Record<string, unknown>).source_locator = {
+      kind: "base_view",
+      view: "Active",
+    };
+    expect(sourcePreparationDefect(preparation)).toBeNull();
+
+    preparation.format = "markdown";
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+  });
 });
 
 describe("open property bag validation", () => {
@@ -149,6 +164,7 @@ describe("open property bag validation", () => {
     path: "Properties/Open.md",
     content_hash: VALID.content_hash,
     kind: "indexed",
+    coverage: "indexed-complete",
     frontmatter: prepareBag(frontmatter),
     chunks: [{
       chunk: {
@@ -272,7 +288,12 @@ describe("caps reflect the Rust contract, not an invented policy", () => {
       normalized_heading: null,
       technical_identifiers: [],
     };
-    expect(sourcePreparationDefect({ ...VALID, kind: "indexed", chunks: [chunk] })).toBeNull();
+    expect(sourcePreparationDefect({
+      ...VALID,
+      kind: "indexed",
+      coverage: "indexed-complete",
+      chunks: [chunk],
+    })).toBeNull();
   });
 
   it("still rejects a structurally corrupt chunk", () => {
@@ -313,8 +334,12 @@ describe("no count ceiling is enforced anywhere", () => {
       { heading_path: huge(5_000) },
       { frontmatter: { tags: huge(10_000) } },
     ]) {
-      expect(sourcePreparationDefect({ ...VALID, kind: "indexed", chunks: [chunkWith(over)] }))
-        .toBeNull();
+      expect(sourcePreparationDefect({
+        ...VALID,
+        kind: "indexed",
+        coverage: "indexed-complete",
+        chunks: [chunkWith(over)],
+      })).toBeNull();
     }
   });
 
