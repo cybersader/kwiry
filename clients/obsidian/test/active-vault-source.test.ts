@@ -79,8 +79,9 @@ function folder(path: string): TAbstractFile {
 function source(
   fake: FakeVault,
   enabled: Readonly<EnabledSourceFormats> = DEFAULT_ENABLED_SOURCE_FORMATS,
+  readTimeoutMs?: number,
 ): ObsidianActiveVaultSource {
-  return new ObsidianActiveVaultSource(fake as unknown as Vault, enabled);
+  return new ObsidianActiveVaultSource(fake as unknown as Vault, enabled, readTimeoutMs);
 }
 
 describe("ObsidianActiveVaultSource", () => {
@@ -132,6 +133,47 @@ describe("ObsidianActiveVaultSource", () => {
     fake.emit("modify", file("notes.txt"));
     fake.emit("modify", file("note.md"));
     expect(events).toEqual([{ kind: "upsert", path: "note.md" }]);
+  });
+
+  it("never inventories, inspects, emits, or reads unsupported DOCX and PDF files", async () => {
+    const fake = new FakeVault();
+    fake.files.set("report.docx", file("report.docx", 4, 1));
+    fake.files.set("paper.PDF", file("paper.PDF", 3, 2));
+    fake.contents.set("report.docx", new Uint8Array([1, 2, 3, 4]));
+    fake.contents.set("paper.PDF", new Uint8Array([5, 6, 7]));
+    const events: VaultSourceEvent[] = [];
+    const legacyEnabled: EnabledSourceFormats = {
+      ...DEFAULT_ENABLED_SOURCE_FORMATS,
+      docx: true,
+      pdf: true,
+    };
+    const active = source(fake, legacyEnabled);
+    active.subscribe((event) => events.push(event));
+
+    expect(active.listSourcePaths()).toEqual([]);
+    expect(active.inspectSource("report.docx")).toEqual({ kind: "missing", path: "report.docx" });
+    expect(active.inspectSource("paper.PDF")).toEqual({ kind: "missing", path: "paper.PDF" });
+    await expect(active.readSource({
+      kind: "candidate",
+      path: "report.docx",
+      format: "docx",
+      size: 4,
+      mtime: 1,
+    })).resolves.toEqual({ kind: "missing", path: "report.docx" });
+    await expect(active.readSource({
+      kind: "candidate",
+      path: "paper.PDF",
+      format: "pdf",
+      size: 3,
+      mtime: 2,
+    })).resolves.toEqual({ kind: "missing", path: "paper.PDF" });
+    fake.emit("create", file("new.docx"));
+    fake.emit("modify", file("report.docx"));
+    fake.emit("rename", file("renamed.pdf"), "paper.PDF");
+    fake.emit("delete", file("renamed.pdf"));
+
+    expect(events).toEqual([]);
+    expect(fake.readBinary).not.toHaveBeenCalled();
   });
 
   it("maps file events to immutable path intents and rescans folder delete or rename", () => {
@@ -191,6 +233,94 @@ describe("ObsidianActiveVaultSource", () => {
         bytes,
       },
     });
+    expect(fake.readBinary).toHaveBeenCalledTimes(1);
+  });
+
+  it("times out a never-resolving read without overlapping it and ignores late success", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = new FakeVault();
+      const bytes = new Uint8Array([1, 2, 3]);
+      fake.files.set("slow.md", file("slow.md", bytes.byteLength, 10));
+      fake.contents.set("slow.md", bytes);
+      let release: ((buffer: ArrayBuffer) => void) | undefined;
+      fake.readBinary.mockImplementationOnce(() => new Promise<ArrayBuffer>((resolve) => {
+        release = resolve;
+      }));
+      const active = source(fake, DEFAULT_ENABLED_SOURCE_FORMATS, 25);
+      const inspection = active.inspectSource("slow.md");
+      if (inspection.kind !== "candidate") throw new Error("expected candidate");
+
+      const first = active.readSource(inspection);
+      await vi.advanceTimersByTimeAsync(25);
+      const timedOut = await first;
+      expect(timedOut).toMatchObject({ kind: "timeout" });
+      if (timedOut.kind !== "timeout") throw new Error("expected timeout");
+      const repeated = await active.readSource(inspection);
+      expect(repeated).toMatchObject({ kind: "timeout" });
+      if (repeated.kind !== "timeout") throw new Error("expected repeated timeout");
+      expect(repeated.underlyingSettled).toBe(timedOut.underlyingSettled);
+      expect(fake.readBinary).toHaveBeenCalledTimes(1);
+
+      let underlyingDidSettle = false;
+      void timedOut.underlyingSettled.then(() => {
+        underlyingDidSettle = true;
+      });
+      await Promise.resolve();
+      expect(underlyingDidSettle).toBe(false);
+      release?.(new Uint8Array(bytes).buffer);
+      await timedOut.underlyingSettled;
+      await expect(first).resolves.toBe(timedOut);
+      await expect(active.readSource(inspection)).resolves.toMatchObject({ kind: "source" });
+      expect(fake.readBinary).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases a timed-out read under its original path after a concurrent rename", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = new FakeVault();
+      const bytes = new Uint8Array([1, 2, 3]);
+      const sourceFile = file("slow.md", bytes.byteLength, 10);
+      fake.files.set("slow.md", sourceFile);
+      fake.contents.set("slow.md", bytes);
+      let release: ((buffer: ArrayBuffer) => void) | undefined;
+      fake.readBinary.mockImplementationOnce(() => new Promise<ArrayBuffer>((resolve) => {
+        release = resolve;
+      }));
+      const active = source(fake, DEFAULT_ENABLED_SOURCE_FORMATS, 25);
+      const inspection = active.inspectSource("slow.md");
+      if (inspection.kind !== "candidate") throw new Error("expected candidate");
+
+      const first = active.readSource(inspection);
+      await vi.advanceTimersByTimeAsync(25);
+      const timedOut = await first;
+      expect(timedOut).toMatchObject({ kind: "timeout" });
+      if (timedOut.kind !== "timeout") throw new Error("expected timeout");
+
+      sourceFile.path = "renamed.md";
+      release?.(new Uint8Array(bytes).buffer);
+      await timedOut.underlyingSettled;
+      sourceFile.path = "slow.md";
+
+      await expect(active.readSource(inspection)).resolves.toMatchObject({ kind: "source" });
+      expect(fake.readBinary).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves ordinary read failures as failures rather than timeouts", async () => {
+    const fake = new FakeVault();
+    fake.files.set("failed.md", file("failed.md", 3, 10));
+    fake.readBinary.mockRejectedValueOnce(new Error("read failed"));
+    const active = source(fake, DEFAULT_ENABLED_SOURCE_FORMATS, 25);
+    const inspection = active.inspectSource("failed.md");
+    if (inspection.kind !== "candidate") throw new Error("expected candidate");
+
+    await expect(active.readSource(inspection)).rejects.toThrow("read failed");
   });
 
   it("classifies Base and plain text sources into their descriptors", async () => {
@@ -231,6 +361,21 @@ describe("ObsidianActiveVaultSource", () => {
       format: "markdown",
       size: MAX_INDEXABLE_SOURCE_BYTES + 1,
       mtime: 1,
+    });
+    expect(fake.readBinary).not.toHaveBeenCalled();
+  });
+
+  it("reports a candidate that disappears before reading as missing without reading bytes", async () => {
+    const fake = new FakeVault();
+    fake.files.set("gone.md", file("gone.md", 3, 10));
+    const active = source(fake);
+    const inspection = active.inspectSource("gone.md");
+    if (inspection.kind !== "candidate") throw new Error("expected candidate");
+    fake.files.delete("gone.md");
+
+    await expect(active.readSource(inspection)).resolves.toEqual({
+      kind: "missing",
+      path: "gone.md",
     });
     expect(fake.readBinary).not.toHaveBeenCalled();
   });

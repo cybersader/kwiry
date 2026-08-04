@@ -8,6 +8,7 @@ import {
   type ActiveVaultSource,
   type ExcerptRead,
   type SourceInspection,
+  type SourceReadOutcome,
   type StableSourceRead,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
@@ -107,7 +108,7 @@ class FakeSource implements ActiveVaultSource {
 
   async readSource(
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
-  ): Promise<StableSourceRead> {
+  ): Promise<SourceReadOutcome> {
     this.log.push(`read:${inspection.path}`);
     this.readAttempts.set(inspection.path, (this.readAttempts.get(inspection.path) ?? 0) + 1);
     this.onRead?.(inspection.path);
@@ -242,8 +243,8 @@ class FakeWorker implements IndexWorkerPort {
 }
 
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
-const OLD_SOURCE_POLICY_HASH = "9ac3d481372532c3c6259eedd2c1fdb51a3de4dd6807bf1ef8f95d4fc47fe20b";
-const SOURCE_POLICY_HASH = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97";
+const OLD_SOURCE_POLICY_HASH = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97";
+const SOURCE_POLICY_HASH = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860";
 
 async function sha256Text(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -385,6 +386,7 @@ class FakeCheckpointStore extends FakeCacheStore implements CacheStoreBundlePort
   readonly checkpointDiscards: string[] = [];
   readonly checkpointDiscardTokens: InitialBuildCheckpointToken[] = [];
   checkpointLoadCalls = 0;
+  checkpointPutGate: Promise<void> | null = null;
 
   constructor(
     loaded: CacheLoad,
@@ -403,6 +405,7 @@ class FakeCheckpointStore extends FakeCacheStore implements CacheStoreBundlePort
 
   async putInitialBuildCheckpoint(write: InitialBuildCheckpointWrite) {
     this.checkpointPuts.push(write);
+    if (this.checkpointPutGate) await this.checkpointPutGate;
     const { bytes: _bytes, ...record } = write;
     return record;
   }
@@ -421,6 +424,7 @@ class FakeCheckpointWorker extends FakeCacheWorker {
   checkpointRestoreCalls = 0;
   checkpointPlanCalls = 0;
   onCheckpointPlan: (() => void) | null = null;
+  checkpointExportGate: Promise<void> | null = null;
 
   async exportInitialBuildCheckpoint(
     generation: string,
@@ -439,6 +443,7 @@ class FakeCheckpointWorker extends FakeCacheWorker {
       throw new Error("checkpoint export cursor was rejected by the Worker protocol");
     }
     this.checkpointExportCursors.push({ ...cursor });
+    if (this.checkpointExportGate) await this.checkpointExportGate;
     return {
       ...this.counts(generation, this.stagingPaths),
       record_kind: INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
@@ -593,6 +598,24 @@ function sourceFormatCountsForPaths(paths: readonly string[]) {
   return counts;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushAsyncWork(turns = 12): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) await Promise.resolve();
+}
+
 function sourceInput(
   path: string,
   bytes: Uint8Array,
@@ -618,6 +641,7 @@ function harness(
   limits: ConstructorParameters<typeof InPluginIndexController>[0]["limits"] = {},
   cache?: IndexControllerCacheOptions,
   initialColdPreview = false,
+  sourceReadTimeoutMs?: number,
 ): {
     controller: InPluginIndexController;
     worker: FakeWorker;
@@ -635,6 +659,7 @@ function harness(
     onFailure: (error) => failures.push(error),
     yieldControl: () => Promise.resolve(),
     limits,
+    ...(sourceReadTimeoutMs === undefined ? {} : { sourceReadTimeoutMs }),
     ...(cache ? { cache } : {}),
     ...(initialColdPreview ? { initialColdPreview: { enabled: true as const } } : {}),
   });
@@ -812,8 +837,11 @@ describe("InPluginIndexController", () => {
     controller.start();
     await controller.whenIdle();
 
-    const mutationStatusIndex = statuses.findIndex((status) =>
-      status.progress?.path === "b.md" && status.initialColdPreview === undefined);
+    const firstPreviewIndex = statuses.findIndex((status) => status.initialColdPreview !== undefined);
+    const mutationStatusIndex = statuses.findIndex((status, index) =>
+      index > firstPreviewIndex
+      && status.stage === "snapshot"
+      && status.initialColdPreview === undefined);
     expect(mutationStatusIndex).toBeGreaterThanOrEqual(0);
     expect(statuses.slice(mutationStatusIndex).every((status) =>
       status.initialColdPreview === undefined)).toBe(true);
@@ -1615,6 +1643,12 @@ describe("InPluginIndexController", () => {
       new TextEncoder().encode("changed"),
     );
     expect(worker.stagingPaths).toEqual(new Set(["aa.md", "b.md", "c.md", "during.md", "y.md"]));
+    const statusBeforeRebuildRequest = statuses.at(-1);
+    const statusCountBeforeRebuildRequest = statuses.length;
+    expect(controller.requestRebuild()).toBe("already_building");
+    expect(statuses).toHaveLength(statusCountBeforeRebuildRequest);
+    expect(statuses.at(-1)).toEqual(statusBeforeRebuildRequest);
+    expect(worker.calls.some((call) => call.startsWith("begin:"))).toBe(false);
 
     releaseCommit();
     await controller.whenIdle();
@@ -1852,7 +1886,6 @@ describe("InPluginIndexController", () => {
       const worker = new FakeCacheWorker();
       const store = new FakeCacheStore(cacheHit("old-generation", OLD_SOURCE_POLICY_HASH));
       const { controller } = harness(source, worker, {}, {
-        sourcePolicyHash: SOURCE_POLICY_HASH,
         openStore: async () => ({ kind: "available", store }),
       });
 
@@ -2019,7 +2052,7 @@ describe("InPluginIndexController", () => {
     await vi.waitFor(() => expect(worker.planReconciliation).toHaveBeenCalledTimes(1));
     expect(statuses.at(-1)).toMatchObject({
       stage: "replay",
-      progress: { subphase: "planning", completed: 0, total: null },
+      progress: { subphase: "planning", completed: 0, total: 1 },
     });
 
     releasePlan();
@@ -2431,6 +2464,530 @@ describe("InPluginIndexController", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       await vi.waitFor(() => expect(store.puts).toHaveLength(1));
       expect(store.puts[0]!.generationId).toBe("generation-2");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out a cold read window, starts no later window, and ignores late results", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      for (const path of ["a.md", "b.md", "c.md", "d.md", "later.md"]) source.set(path, path);
+      const reads = new Map<string, ReturnType<typeof deferred<StableSourceRead>>>();
+      const started: string[] = [];
+      source.readSource = vi.fn((inspection) => {
+        started.push(inspection.path);
+        const pending = deferred<StableSourceRead>();
+        reads.set(inspection.path, pending);
+        return pending.promise;
+      });
+      const { controller, worker, statuses, failures } = harness(
+        source,
+        new FakeWorker(),
+        { maxConcurrentReads: 4 },
+        undefined,
+        false,
+        1_000,
+      );
+
+      controller.start();
+      await flushAsyncWork();
+      expect(started).toEqual(["a.md", "b.md", "c.md", "d.md"]);
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "snapshot",
+        progress: { activity: "read", completed: 0, total: 5, inFlight: 4 },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await controller.whenIdle();
+
+      expect(started).not.toContain("later.md");
+      expect(worker.calls).toEqual([
+        "initialize",
+        "begin:generation-1",
+        "abort:generation-1",
+      ]);
+      expect(failures).toHaveLength(1);
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "failed",
+        searchable: false,
+        generation: null,
+        issue: "vault_read_failed",
+        progress: {
+          activity: "read",
+          completed: 0,
+          total: 5,
+          inFlight: 0,
+          stallCategory: "source_read_timeout",
+        },
+      });
+
+      for (const [path, pending] of reads) {
+        const record = source.records.get(path)!;
+        pending.resolve({
+          kind: "source",
+          source: sourceInput(path, record.bytes, record.mtime),
+        });
+      }
+      await flushAsyncWork();
+
+      expect(worker.calls).toEqual([
+        "initialize",
+        "begin:generation-1",
+        "abort:generation-1",
+      ]);
+      expect(statuses.at(-1)).toMatchObject({ stage: "failed", searchable: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("checkpoints only the acknowledged cold prefix before a timed-out window aborts", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("a.md", "a");
+      source.set("b.md", "b");
+      const blockedRead = deferred<StableSourceRead>();
+      const originalRead = source.readSource.bind(source);
+      source.readSource = vi.fn((inspection) => (
+        inspection.path === "b.md" ? blockedRead.promise : originalRead(inspection)
+      ));
+      const worker = new FakeCheckpointWorker();
+      const store = new FakeCheckpointStore(
+        { kind: "miss", reason: "absent" },
+        { kind: "miss", reason: "absent" },
+      );
+      const { controller } = harness(
+        source,
+        worker,
+        { maxBatchSources: 1, maxConcurrentReads: 1 },
+        { openStore: async () => ({ kind: "available", store }) },
+        false,
+        1_000,
+      );
+
+      controller.start();
+      await flushAsyncWork(24);
+      expect(worker.calls).toContain("add:a.md");
+      expect(source.readSource).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await controller.whenIdle();
+
+      expect(worker.checkpointExportCursors).toEqual([{
+        snapshot_source_count: 2,
+        acknowledged_add_batches: 1,
+        acknowledged_prefix_sources: 1,
+        last_acknowledged_path: "a.md",
+      }]);
+      expect(store.checkpointPuts).toHaveLength(1);
+      expect(worker.calls).toContain("abort:generation-1");
+      expect(worker.calls.some((call) => call.startsWith("commit:"))).toBe(false);
+
+      const record = source.records.get("b.md")!;
+      blockedRead.resolve({
+        kind: "source",
+        source: sourceInput("b.md", record.bytes, record.mtime),
+      });
+      await flushAsyncWork();
+      expect(worker.calls).not.toContain("add:b.md");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds failure checkpoint export liveness before aborting cold staging", async () => {
+    vi.useFakeTimers();
+    const exportGate = deferred<void>();
+    try {
+      const source = new FakeSource();
+      source.set("a.md", "a");
+      source.set("b.md", "b");
+      const blockedRead = deferred<StableSourceRead>();
+      const originalRead = source.readSource.bind(source);
+      source.readSource = vi.fn((inspection) => (
+        inspection.path === "b.md" ? blockedRead.promise : originalRead(inspection)
+      ));
+      const worker = new FakeCheckpointWorker();
+      worker.checkpointExportGate = exportGate.promise;
+      const store = new FakeCheckpointStore(
+        { kind: "miss", reason: "absent" },
+        { kind: "miss", reason: "absent" },
+      );
+      const { controller, statuses, failures } = harness(
+        source,
+        worker,
+        { maxBatchSources: 1, maxConcurrentReads: 1 },
+        { openStore: async () => ({ kind: "available", store }) },
+        false,
+        1_000,
+      );
+
+      controller.start();
+      await flushAsyncWork(24);
+      expect(worker.calls).toContain("add:a.md");
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushAsyncWork(24);
+      expect(worker.checkpointExportCursors).toHaveLength(1);
+
+      let idle = false;
+      void controller.whenIdle().then(() => {
+        idle = true;
+      });
+      await vi.advanceTimersByTimeAsync(1_499);
+      await flushAsyncWork();
+      expect(idle).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await flushAsyncWork(24);
+
+      expect(idle).toBe(true);
+      expect(worker.calls).toContain("abort:generation-1");
+      expect(store.checkpointPuts).toHaveLength(0);
+      expect(failures).toHaveLength(1);
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "failed",
+        searchable: false,
+        issue: "vault_read_failed",
+        progress: { stallCategory: "source_read_timeout" },
+      });
+
+      const record = source.records.get("b.md")!;
+      blockedRead.resolve({
+        kind: "source",
+        source: sourceInput("b.md", record.bytes, record.mtime),
+      });
+      await flushAsyncWork();
+      expect(controller.requestRebuild()).toBe("scheduled");
+      await controller.whenIdle();
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "ready",
+        searchable: true,
+        generation: "generation-2",
+      });
+
+      const statusCount = statuses.length;
+      exportGate.resolve();
+      await flushAsyncWork(24);
+      expect(store.checkpointPuts).toHaveLength(0);
+      expect(statuses).toHaveLength(statusCount);
+      expect((controller as unknown as {
+        initialBuildCheckpointToken: InitialBuildCheckpointToken | null;
+      }).initialBuildCheckpointToken).toBeNull();
+
+      controller.dispose();
+      await controller.whenDisposed();
+      expect(store.disposed).toBe(1);
+    } finally {
+      exportGate.resolve();
+      await flushAsyncWork(24);
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds failure checkpoint store liveness and ignores its late token", async () => {
+    vi.useFakeTimers();
+    const putGate = deferred<void>();
+    try {
+      const source = new FakeSource();
+      source.set("a.md", "a");
+      source.set("b.md", "b");
+      const blockedRead = deferred<StableSourceRead>();
+      const originalRead = source.readSource.bind(source);
+      source.readSource = vi.fn((inspection) => (
+        inspection.path === "b.md" ? blockedRead.promise : originalRead(inspection)
+      ));
+      const worker = new FakeCheckpointWorker();
+      const store = new FakeCheckpointStore(
+        { kind: "miss", reason: "absent" },
+        { kind: "miss", reason: "absent" },
+      );
+      store.checkpointPutGate = putGate.promise;
+      const { controller, statuses, failures } = harness(
+        source,
+        worker,
+        { maxBatchSources: 1, maxConcurrentReads: 1 },
+        { openStore: async () => ({ kind: "available", store }) },
+        false,
+        1_000,
+      );
+
+      controller.start();
+      await flushAsyncWork(24);
+      expect(worker.calls).toContain("add:a.md");
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushAsyncWork(24);
+      expect(store.checkpointPuts).toHaveLength(1);
+
+      let idle = false;
+      void controller.whenIdle().then(() => {
+        idle = true;
+      });
+      await vi.advanceTimersByTimeAsync(1_499);
+      await flushAsyncWork();
+      expect(idle).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await flushAsyncWork(24);
+
+      expect(idle).toBe(true);
+      expect(worker.calls).toContain("abort:generation-1");
+      expect(failures).toHaveLength(1);
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "failed",
+        searchable: false,
+        issue: "vault_read_failed",
+        progress: { stallCategory: "source_read_timeout" },
+      });
+
+      const statusCount = statuses.length;
+      controller.dispose();
+      let disposed = false;
+      void controller.whenDisposed().then(() => {
+        disposed = true;
+      });
+      await flushAsyncWork();
+      expect(disposed).toBe(true);
+      expect(store.disposed).toBe(1);
+
+      putGate.resolve();
+      await flushAsyncWork(24);
+      expect(statuses).toHaveLength(statusCount + 1);
+      expect(statuses.at(-1)).toMatchObject({ stage: "disposed", generation: null });
+      expect((controller as unknown as {
+        initialBuildCheckpointToken: InitialBuildCheckpointToken | null;
+      }).initialBuildCheckpointToken).toBeNull();
+    } finally {
+      putGate.resolve();
+      await flushAsyncWork(24);
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a healthy initial build singular when manual rebuild is requested mid-batch", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("b.md", "b");
+    const addGate = deferred<void>();
+    const addEntered = deferred<void>();
+    class GatedInitialWorker extends FakeWorker {
+      private gated = false;
+
+      override async addSourceBatch(
+        generation: string,
+        sources: SourceUpsert[],
+      ): Promise<IndexCounts> {
+        if (!this.gated) {
+          this.gated = true;
+          addEntered.resolve();
+          await addGate.promise;
+        }
+        return super.addSourceBatch(generation, sources);
+      }
+    }
+    const worker = new GatedInitialWorker();
+    const { controller, statuses } = harness(source, worker, {
+      maxBatchSources: 1,
+      maxConcurrentReads: 1,
+    });
+
+    controller.start();
+    await addEntered.promise;
+    const beforeRequest = statuses.at(-1)!;
+    const statusCount = statuses.length;
+    expect(beforeRequest).toMatchObject({
+      stage: "snapshot",
+      mutationEpoch: 0,
+      progress: { activity: "prepare", completed: 0, total: 2, inFlight: 1 },
+    });
+
+    expect(controller.requestRebuild()).toBe("already_building");
+    expect(controller.requestRebuild()).toBe("already_building");
+    expect(statuses).toHaveLength(statusCount);
+    expect(statuses.at(-1)).toEqual(beforeRequest);
+
+    addGate.resolve();
+    await controller.whenIdle();
+
+    expect(worker.calls.filter((call) => call.startsWith("begin:"))).toEqual([
+      "begin:generation-1",
+    ]);
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+      "commit:generation-1",
+    ]);
+    const completed = statuses
+      .flatMap((status) => status.progress ? [status.progress.completed] : []);
+    expect(completed).toEqual([...completed].sort((left, right) => left - right));
+  });
+
+  it("restarts a blocked cold build after a typed read timeout", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "value");
+    const originalRead = source.readSource.bind(source);
+    let timedOut = false;
+    source.readSource = vi.fn(async (inspection) => {
+      if (!timedOut) {
+        timedOut = true;
+        return { kind: "timeout" as const, underlyingSettled: Promise.resolve() };
+      }
+      return originalRead(inspection);
+    });
+    const { controller, worker, statuses } = harness(source);
+
+    controller.start();
+    await controller.whenIdle();
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "failed",
+      issue: "vault_read_failed",
+      progress: { stallCategory: "source_read_timeout" },
+    });
+
+    expect(controller.requestRebuild()).toBe("scheduled");
+    await controller.whenIdle();
+
+    expect(worker.calls.filter((call) => call.startsWith("begin:"))).toEqual([
+      "begin:generation-1",
+      "begin:generation-2",
+    ]);
+    expect(worker.calls).toContain("abort:generation-1");
+    expect(worker.calls).toContain("commit:generation-2");
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-2",
+      documents: 1,
+    });
+  });
+
+  it("aborts a timed-out replacement and keeps the complete active generation immutable", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("a.md", "a");
+      source.set("b.md", "b");
+      const { controller, worker, statuses, failures } = harness(
+        source,
+        new FakeWorker(),
+        { maxConcurrentReads: 2 },
+        undefined,
+        false,
+        1_000,
+      );
+      controller.start();
+      await controller.whenIdle();
+      const activePaths = new Set(worker.activePaths);
+      const addCallsBeforeReplacement = worker.calls.filter((call) => call.startsWith("add:")).length;
+      const lateReads = new Map<string, ReturnType<typeof deferred<StableSourceRead>>>();
+      source.readSource = vi.fn((inspection) => {
+        const pending = deferred<StableSourceRead>();
+        lateReads.set(inspection.path, pending);
+        return pending.promise;
+      });
+
+      expect(controller.requestRebuild()).toBe("scheduled");
+      await flushAsyncWork();
+      expect(source.readSource).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await controller.whenIdle();
+
+      expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+        "commit:generation-1",
+      ]);
+      expect(worker.calls).toContain("abort:generation-2");
+      expect(worker.activeGeneration).toBe("generation-1");
+      expect(worker.activePaths).toEqual(activePaths);
+      expect(failures).toHaveLength(1);
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "degraded",
+        searchable: true,
+        generation: "generation-1",
+        documents: 2,
+        issue: "vault_read_failed",
+        progress: {
+          activity: "read",
+          completed: 0,
+          total: 2,
+          inFlight: 0,
+          stallCategory: "source_read_timeout",
+        },
+      });
+
+      for (const [path, pending] of lateReads) {
+        const record = source.records.get(path)!;
+        pending.resolve({
+          kind: "source",
+          source: sourceInput(path, record.bytes, record.mtime),
+        });
+      }
+      await flushAsyncWork();
+      expect(worker.activeGeneration).toBe("generation-1");
+      expect(worker.activePaths).toEqual(activePaths);
+      expect(worker.calls.filter((call) => call.startsWith("add:"))).toHaveLength(
+        addCallsBeforeReplacement,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("caps abandoned source reads across repeated blocked cold restarts", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      for (const path of ["a.md", "b.md", "c.md", "d.md"]) source.set(path, path);
+      const blocked = new Map<string, ReturnType<typeof deferred<StableSourceRead>>>();
+      source.readSource = vi.fn((inspection) => {
+        const pending = deferred<StableSourceRead>();
+        blocked.set(inspection.path, pending);
+        return pending.promise;
+      });
+      const { controller, worker, statuses } = harness(
+        source,
+        new FakeWorker(),
+        { maxConcurrentReads: 4 },
+        undefined,
+        false,
+        1_000,
+      );
+
+      controller.start();
+      await flushAsyncWork();
+      expect(source.readSource).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await controller.whenIdle();
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        expect(controller.requestRebuild()).toBe("scheduled");
+        await controller.whenIdle();
+        expect(source.readSource).toHaveBeenCalledTimes(4);
+        expect(statuses.at(-1)).toMatchObject({
+          stage: "failed",
+          progress: { stallCategory: "source_read_capacity" },
+        });
+      }
+
+      const released = blocked.get("a.md")!;
+      const record = source.records.get("a.md")!;
+      released.resolve({
+        kind: "source",
+        source: sourceInput("a.md", record.bytes, record.mtime),
+      });
+      await flushAsyncWork();
+
+      expect(controller.requestRebuild()).toBe("scheduled");
+      await flushAsyncWork();
+      expect(source.readSource).toHaveBeenCalledTimes(5);
+      expect(source.readSource).toHaveBeenLastCalledWith(
+        expect.objectContaining({ path: "a.md" }),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      await controller.whenIdle();
+      expect(source.readSource).toHaveBeenCalledTimes(5);
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "failed",
+        progress: { stallCategory: "source_read_timeout" },
+      });
+      expect(worker.calls.filter((call) => call.startsWith("begin:"))).toHaveLength(4);
     } finally {
       vi.useRealTimers();
     }
@@ -3036,23 +3593,29 @@ describe("InPluginIndexController", () => {
     expect([...worker.activePaths].sort()).toEqual(["b.md", "c.md"]);
   });
 
-  it("coalesces repeated manual rebuild requests and resets progress immediately", async () => {
+  it("coalesces repeated ready-state manual rebuild requests into one replacement", async () => {
     const source = new FakeSource();
     source.set("a.md", "a");
     const { controller, worker, statuses } = harness(source);
     controller.start();
     await controller.whenIdle();
 
-    controller.requestRebuild();
-    controller.requestRebuild();
-    controller.requestRebuild();
+    expect(controller.requestRebuild()).toBe("scheduled");
+    expect(controller.requestRebuild()).toBe("scheduled");
+    expect(controller.requestRebuild()).toBe("scheduled");
     expect(statuses.at(-1)).toMatchObject({
       stage: "rebuild",
-      progress: { completed: 0, total: null },
+      progress: {
+        activity: "inventory",
+        completed: 0,
+        total: null,
+        inFlight: 0,
+      },
     });
     await controller.whenIdle();
 
     expect(worker.calls.filter((call) => call.startsWith("begin:"))).toHaveLength(2);
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toHaveLength(2);
   });
 
   it("turns pending-path overflow into one authoritative rebuild", async () => {

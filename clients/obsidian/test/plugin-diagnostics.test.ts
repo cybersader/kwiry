@@ -66,6 +66,7 @@ describe("PluginDiagnostics", () => {
         activationEpoch: 2,
         pluginLoadCompleteMs: 5,
         layoutReadyMs: 15,
+        firstProgressMs: 20,
         firstCacheSearchableMs: 40,
         fullyCurrentMs: null,
         cacheHit: true,

@@ -9,21 +9,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 interface LifecycleHarness {
   layoutReady: (() => void) | null;
   startupObserver: ((observation: unknown) => void) | null;
+  statusListener: ((status: unknown) => void) | null;
   backendInitializations: number;
   backendDisposals: number;
   cachePolicyHashes: string[];
   sourcePolicies: Array<Record<string, boolean>>;
   clipboardWrites: string[];
+  notices: string[];
+  rebuildResult: "scheduled" | "already_building";
 }
 
 const harness: LifecycleHarness = {
   layoutReady: null,
   startupObserver: null,
+  statusListener: null,
   backendInitializations: 0,
   backendDisposals: 0,
   cachePolicyHashes: [],
   sourcePolicies: [],
   clipboardWrites: [],
+  notices: [],
+  rebuildResult: "scheduled",
 };
 
 const MAIN_PATH = new URL("../src/main.ts", import.meta.url).pathname;
@@ -33,6 +39,7 @@ async function loadProductionPlugin(): Promise<new () => {
   settings: { enabledSourceFormats: Record<string, boolean> };
   onload(): Promise<void>;
   onSourcePolicyChanged(): Promise<void>;
+  rebuildInPluginIndex(): Promise<void>;
   copyDiagnostics(): Promise<void>;
 }> {
   const bundle = await build({
@@ -57,6 +64,7 @@ async function loadProductionPlugin(): Promise<new () => {
     settings: { enabledSourceFormats: Record<string, boolean> };
     onload(): Promise<void>;
     onSourcePolicyChanged(): Promise<void>;
+    rebuildInPluginIndex(): Promise<void>;
     copyDiagnostics(): Promise<void>;
   };
 }
@@ -119,7 +127,9 @@ function stubSource(path: string): string {
           addStatusBarItem() { return { setText() {} }; }
           registerInterval() {}
         }
-        export class Notice {}
+        export class Notice {
+          constructor(message) { harness.notices.push(message); }
+        }
         export const Platform = { isAndroidApp: false, isIosApp: false };
         export const apiVersion = "1.8.10";
         export async function requestUrl() { throw new Error("unexpected request"); }
@@ -163,11 +173,33 @@ function stubSource(path: string): string {
           }
           async initialize() {
             harness.backendInitializations += 1;
+            harness.statusListener?.({
+              ...this.statusValue,
+              phase: "building",
+              searchable: false,
+              dirty: true,
+              progress: {
+                stage: "snapshot",
+                activity: "inventory",
+                completed: 0,
+                total: 0,
+                inFlight: 0,
+              },
+            });
+            harness.startupObserver?.({ kind: "first_progress" });
             harness.startupObserver?.({ kind: "cache_searchable", cacheBytes: 4096 });
             harness.startupObserver?.({ kind: "fully_current" });
+            harness.statusListener?.(this.statusValue);
           }
           async status() { return this.statusValue; }
-          subscribeStatus() { return () => undefined; }
+          subscribeStatus(listener) {
+            harness.statusListener = listener;
+            listener(this.statusValue);
+            return () => {
+              if (harness.statusListener === listener) harness.statusListener = null;
+            };
+          }
+          async rebuild() { return harness.rebuildResult; }
           async dispose() { harness.backendDisposals += 1; }
         }
       `;
@@ -205,11 +237,14 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
   beforeEach(() => {
     harness.layoutReady = null;
     harness.startupObserver = null;
+    harness.statusListener = null;
     harness.backendInitializations = 0;
     harness.backendDisposals = 0;
     harness.cachePolicyHashes.length = 0;
     harness.sourcePolicies.length = 0;
     harness.clipboardWrites.length = 0;
+    harness.notices.length = 0;
+    harness.rebuildResult = "scheduled";
     vi.stubGlobal("__kwiryStartupLifecycleHarness", harness);
     vi.stubGlobal("window", { setInterval: () => 1 });
     vi.stubGlobal("navigator", {
@@ -259,10 +294,102 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(startupRecords[0]).toContain("reason=fully_current");
     expect(startupRecords[0]).toMatch(/pluginLoadCompleteMs=\d+/u);
     expect(startupRecords[0]).toMatch(/layoutReadyMs=\d+/u);
+    expect(startupRecords[0]).toMatch(/firstProgressMs=\d+/u);
     expect(startupRecords[0]).toMatch(/firstCacheSearchableMs=\d+/u);
     expect(startupRecords[0]).toMatch(/fullyCurrentMs=\d+/u);
     expect(startupRecords[0]).toContain("cacheHit=true");
     expect(startupRecords[0]).toContain("cacheBytes=4096");
+  });
+
+  it("reports scheduled and already-building manual rebuild outcomes distinctly", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+
+    await plugin.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.backendInitializations).toBe(1));
+
+    harness.rebuildResult = "scheduled";
+    await plugin.rebuildInPluginIndex();
+    expect(harness.notices.at(-1)).toBe("Kwiry: in-plugin lexical rebuild started.");
+
+    harness.rebuildResult = "already_building";
+    await plugin.rebuildInPluginIndex();
+    expect(harness.notices.at(-1)).toBe(
+      "Kwiry: the in-plugin lexical index is already building.",
+    );
+
+    await plugin.copyDiagnostics();
+    const report = harness.clipboardWrites.at(-1) ?? "";
+    expect(report).toContain("outcome=scheduled");
+    expect(report).toContain("outcome=already_building");
+  });
+
+  it("deduplicates aggregate progress milestones without retaining private text", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+
+    await plugin.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.backendInitializations).toBe(1));
+    const listener = harness.statusListener;
+    expect(listener).toEqual(expect.any(Function));
+    const privateText = "Clients/Private/Quarterly Plan.md";
+    for (let completed = 0; completed <= 1_000; completed += 1) {
+      listener?.({
+        identity: {
+          profile: "in_plugin",
+          instanceId: "in_plugin-1",
+          label: "In-plugin",
+          boundVaultId: "active-vault",
+        },
+        capabilities: {
+          supportedModes: ["lexical"],
+          sourceScope: "active_vault",
+          manualRebuild: true,
+        },
+        phase: "building",
+        liveness: "alive",
+        searchable: false,
+        generation: null,
+        dirty: true,
+        rebuilding: false,
+        documents: 0,
+        chunks: 0,
+        progress: {
+          stage: "snapshot",
+          activity: "read",
+          completed,
+          total: 1_000,
+          inFlight: completed % 2 === 0 ? 4 : 0,
+        },
+        issue: {
+          code: "cache_absent",
+          safeMessage: privateText,
+          recoverable: true,
+        },
+      });
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await plugin.copyDiagnostics();
+    const report = harness.clipboardWrites.at(-1) ?? "";
+    const jsonText = report.split("Structured records (JSON):\n")[1];
+    expect(jsonText).toBeDefined();
+    const structured = JSON.parse(jsonText!);
+    const progressRecords = structured.records.filter((record: {
+      code: string;
+      details: { operation?: string; activity?: string };
+    }) => record.code === "index.lifecycle"
+      && record.details.operation === "status"
+      && record.details.activity === "read");
+
+    expect(progressRecords.length).toBeGreaterThanOrEqual(20);
+    expect(progressRecords.length).toBeLessThanOrEqual(21);
+    expect(report).not.toContain(privateText);
+    expect(progressRecords.every((record: { details: Record<string, unknown> }) =>
+      !("path" in record.details))).toBe(true);
   });
 
   it("reactivates with an awaited new policy hash and a fresh source policy snapshot", async () => {
@@ -275,9 +402,10 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
 
     const initialHash = harness.cachePolicyHashes[0];
     expect(initialHash).toMatch(/^[0-9a-f]{64}$/u);
-    expect(harness.sourcePolicies[0]?.pdf).toBe(true);
+    expect(harness.sourcePolicies[0]?.pdf).toBe(false);
+    expect(harness.sourcePolicies[0]?.text).toBe(true);
 
-    plugin.settings.enabledSourceFormats.pdf = false;
+    plugin.settings.enabledSourceFormats.text = false;
     await plugin.onSourcePolicyChanged();
 
     expect(harness.backendInitializations).toBe(2);
@@ -285,7 +413,8 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(harness.cachePolicyHashes).toHaveLength(2);
     expect(harness.cachePolicyHashes[1]).toMatch(/^[0-9a-f]{64}$/u);
     expect(harness.cachePolicyHashes[1]).not.toBe(initialHash);
+    expect(harness.sourcePolicies[1]?.text).toBe(false);
+    expect(harness.sourcePolicies[0]?.text).toBe(true);
     expect(harness.sourcePolicies[1]?.pdf).toBe(false);
-    expect(harness.sourcePolicies[0]?.pdf).toBe(true);
   });
 });

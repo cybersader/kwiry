@@ -195,9 +195,9 @@ describe("live Text vs Balanced owner UI", () => {
     };
     const status = formatOwnerStatus({
       ...identity,
-      progress: { completed: 42, total: 900 },
+      progress: { activity: "read", completed: 42, total: 900, inFlight: 0 },
     });
-    expect(status).toBe("Kwiry: Indexing 42/900 (4%)");
+    expect(status).toBe("Kwiry: Reading 42/900 (4%)");
     expect(status).not.toContain("?");
     expect(status).not.toContain("In-plugin");
   });

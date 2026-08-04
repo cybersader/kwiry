@@ -6,7 +6,7 @@
 //
 // A first build on a network vault can run for minutes. Without a visibly
 // advancing line, a working index is indistinguishable from a stalled one, so
-// this reports both the count and the file currently being read.
+// this reports privacy-safe stage, count, and in-flight aggregates.
 
 import type { BackendStatus } from "./backend";
 import { formatIndexProgress } from "./index-progress-format";
@@ -18,7 +18,7 @@ export function progressLine(status: BackendStatus): string | null {
   const omissions = omissionLine(status);
   if (!progress) return omissions;
   const suffix = omissions === null ? "" : ` · ${omissions}`;
-  return `${formatIndexProgress(progress, { includePath: true })}${suffix}`;
+  return `${formatIndexProgress(progress)}${suffix}`;
 }
 
 function omissionLine(status: BackendStatus): string | null {

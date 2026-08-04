@@ -47,6 +47,20 @@ pub(crate) fn ingest_vault_files(
 pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> FileIngestOutcome {
     let format = SourceFormat::from_extension(&file.extension)
         .expect("vault discovery only admits registered source formats");
+    if !format.is_extractable() {
+        return file_outcome(
+            vault,
+            file,
+            crate::extract::ExtractionCoverage::SkippedNoExtractableText,
+            None,
+            Vec::new(),
+            FileOutcomeKind::Skipped,
+            Some(format!(
+                "{} extraction is not yet supported; skipped without reading source bytes",
+                format.as_str()
+            )),
+        );
+    }
     let bytes = match fs::read(&file.absolute_path) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -162,6 +176,41 @@ mod tests {
         assert!(report.chunks.is_empty());
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].message.contains("NUL"));
+    }
+
+    #[test]
+    fn native_ingest_refuses_unextractable_formats_before_reading_bytes() {
+        let temporary = tempdir().unwrap();
+        let vault = VaultRegistration {
+            id: "fixture".into(),
+            path: temporary.path().to_path_buf(),
+            room: None,
+        };
+        let file = DiscoveredFile {
+            absolute_path: temporary.path().join("missing.docx"),
+            relative_path: "missing.docx".into(),
+            extension: "docx".into(),
+            byte_length: 123,
+            mtime: 42,
+            mtime_nanos: 42_000_000_000,
+        };
+
+        let outcome = ingest_file(&vault, &file);
+
+        assert_eq!(outcome.kind, FileOutcomeKind::Skipped);
+        assert_eq!(
+            outcome.coverage,
+            crate::extract::ExtractionCoverage::SkippedNoExtractableText
+        );
+        assert!(outcome.content_hash.is_none());
+        assert!(outcome.chunks.is_empty());
+        assert!(
+            outcome
+                .warning
+                .unwrap()
+                .message
+                .contains("without reading source bytes")
+        );
     }
 
     #[test]

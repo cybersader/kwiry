@@ -27,7 +27,7 @@ import {
 } from "./rpc-client";
 import { PRODUCTION_RPC_PROTOCOL } from "./production-rpc-protocol";
 
-const DEFAULT_SOURCE_POLICY_HASH = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97";
+const DEFAULT_SOURCE_POLICY_HASH = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860";
 
 export class InPluginWorkerSession {
   protected readonly client: WorkerRpcClient;

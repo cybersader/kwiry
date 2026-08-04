@@ -727,7 +727,7 @@ export class Fts5GenerationIndex {
     limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
     existing?: ExistingGenerationState,
     private readonly vaultId = "active",
-    private readonly sourcePolicyHash = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97",
+    private readonly sourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
   ) {
     this.limits = resolveIndexLimits(limits);
     this.effectiveDatabaseByteLimit = configureDatabasePageLimit(db, this.limits);
@@ -1541,7 +1541,7 @@ export function openFts5Generation(
   sqlite: SQLiteApi,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   vaultId = "active",
-  sourcePolicyHash = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97",
+  sourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
 ): Fts5GenerationIndex {
   return new Fts5GenerationIndex(
     new sqlite.oo1.DB(":memory:", "c"),
@@ -1563,7 +1563,7 @@ export function openRestoredFts5Generation(
   chunkingVersion: number,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   expectedVaultId = "active",
-  expectedSourcePolicyHash = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97",
+  expectedSourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
 ): Fts5GenerationIndex {
   let handle: BlockVfsHandle | null = null;
   try {

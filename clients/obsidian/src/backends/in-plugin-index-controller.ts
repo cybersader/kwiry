@@ -6,6 +6,7 @@ import {
   canonicalMtimeNanos,
   type ActiveVaultSource,
   type SourceInspection,
+  type SourceReadOutcome,
   type StableSourceRead,
   type VaultSourceEvent,
 } from "../active-vault-source";
@@ -98,6 +99,12 @@ export type IndexControllerStage =
   | "disposed";
 
 export type IndexControllerReplaySubphase = "planning" | "verifying" | "applying";
+export type IndexControllerActivity = "inventory" | "read" | "prepare" | "apply";
+export type IndexControllerStallCategory =
+  | "source_read_timeout"
+  | "source_read_capacity"
+  | "worker_timeout";
+export type IndexControllerRebuildResult = "scheduled" | "already_building";
 
 export type IndexControllerIssue =
   | "vault_read_failed"
@@ -146,12 +153,12 @@ export interface IndexControllerStatus {
   rebuilding: boolean;
   mutationEpoch?: number;
   progress?: {
+    activity: IndexControllerActivity;
     completed: number;
     total: number | null;
+    inFlight: number;
     subphase?: IndexControllerReplaySubphase;
-    /// Most recently processed source path. Reported so a long first build on
-    /// a network vault visibly advances instead of looking stalled.
-    path?: string;
+    stallCategory?: IndexControllerStallCategory;
   };
   issue?: IndexControllerIssue;
 }
@@ -190,6 +197,7 @@ export interface InPluginIndexControllerOptions {
   onStartupObservation?: (observation: IndexControllerStartupObservation) => void;
   yieldControl?: () => Promise<void>;
   limits?: Partial<IndexControllerLimits>;
+  sourceReadTimeoutMs?: number;
   cache?: IndexControllerCacheOptions;
   initialColdPreview?: { enabled: true };
 }
@@ -202,7 +210,9 @@ const DEFAULT_LIMITS: IndexControllerLimits = {
   maxStableReadAttempts: 3,
 };
 const DEFAULT_IDLE_EXPORT_MS = 2_000;
-const DEFAULT_SOURCE_POLICY_HASH = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97";
+const DEFAULT_SOURCE_READ_TIMEOUT_MS = 30_000;
+const FAILURE_CHECKPOINT_DEADLINE_MS = 1_500;
+const DEFAULT_SOURCE_POLICY_HASH = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860";
 const MAX_GENERATION_ALLOCATION_ATTEMPTS = 32;
 // A network share that disappears midway can yield a plausible-looking partial
 // index. Requiring more than half of attempted reads to fail avoids publishing
@@ -246,6 +256,16 @@ interface InitialBuildProgress {
   counts: IndexCounts;
 }
 
+interface SourceReadWindowLease {
+  generation: string;
+  epoch: number;
+  active: boolean;
+  failure: Error | null;
+  deadline: Promise<never>;
+  rejectDeadline: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 const INITIAL_BUILD_CHECKPOINT_BATCH_CADENCE = 25;
 
 export class InPluginIndexController {
@@ -261,6 +281,7 @@ export class InPluginIndexController {
   private readonly sourcePolicyHash: string;
   private readonly initialColdPreviewEnabled: boolean;
   private readonly idleExportMs: number;
+  private readonly sourceReadTimeoutMs: number;
   private readonly setTimer: NonNullable<IndexControllerCacheOptions["setTimer"]>;
   private readonly clearTimer: NonNullable<IndexControllerCacheOptions["clearTimer"]>;
   private readonly pendingUpserts = new Set<string>();
@@ -291,6 +312,10 @@ export class InPluginIndexController {
   private rescanSequence = 0;
   private eventSequence = 0;
   private mutationEpoch = 0;
+  private readEpoch = 0;
+  private currentReadWindow: SourceReadWindowLease | null = null;
+  private readonly outstandingSourceReads = new Set<Promise<SourceReadOutcome>>();
+  private candidateGeneration: string | null = null;
   private activeGeneration: string | null = null;
   private documents = 0;
   private chunks = 0;
@@ -305,8 +330,11 @@ export class InPluginIndexController {
   private activeUnreadableSources = 0;
   private readonly activeQuarantineValidatorFields = new Set<SourcePreparationDefectField>();
   private stage: IndexControllerStage = "starting";
+  private activity: IndexControllerActivity = "inventory";
   private completed = 0;
   private total: number | null = null;
+  private inFlight = 0;
+  private stallCategory: IndexControllerStallCategory | null = null;
   private currentPath: string | null = null;
   private replaySubphase: IndexControllerReplaySubphase | null = null;
   private initialColdPreview: InitialColdPreviewLease | null = null;
@@ -332,11 +360,15 @@ export class InPluginIndexController {
     this.sourcePolicyHash = options.cache?.sourcePolicyHash ?? DEFAULT_SOURCE_POLICY_HASH;
     this.initialColdPreviewEnabled = options.initialColdPreview?.enabled === true;
     this.idleExportMs = options.cache?.idleExportMs ?? DEFAULT_IDLE_EXPORT_MS;
+    this.sourceReadTimeoutMs = options.sourceReadTimeoutMs ?? DEFAULT_SOURCE_READ_TIMEOUT_MS;
     this.setTimer = options.cache?.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.clearTimer = options.cache?.clearTimer ?? ((timer) => clearTimeout(timer));
     validateLimits(this.limits);
     if (!Number.isSafeInteger(this.idleExportMs) || this.idleExportMs < 1) {
       throw new Error("idle export delay must be a positive integer");
+    }
+    if (!Number.isSafeInteger(this.sourceReadTimeoutMs) || this.sourceReadTimeoutMs < 1) {
+      throw new Error("source read timeout must be a positive integer");
     }
   }
 
@@ -350,11 +382,24 @@ export class InPluginIndexController {
     this.scheduleWork();
   }
 
-  requestRebuild(): void {
-    if (this.disposed) return;
+  requestRebuild(): IndexControllerRebuildResult {
+    if (this.disposed || this.stoppingForCheckpoint) return "already_building";
+    if (this.activeGeneration === null && !this.blocked) {
+      // A healthy cold build or checkpoint resume already owns the only staging
+      // generation. Do not erase its acknowledged progress/checkpoint state or
+      // queue the redundant second generation observed during field indexing.
+      return "already_building";
+    }
+    if (this.activeGeneration !== null
+      && (this.rebuildRequested || this.replacementBuildInProgress)) {
+      return "scheduled";
+    }
+
     this.blocked = false;
     this.rebuildRequested = true;
     this.mutationEpoch += 1;
+    this.stallCategory = null;
+    this.inFlight = 0;
     if (this.cacheIssue === "cache_save_failed") this.cacheIssue = null;
     this.cancelExportTimer();
     // Omissions are NOT cleared here. Requesting a rebuild does not replace the
@@ -363,6 +408,7 @@ export class InPluginIndexController {
     // Clearing on request drops the warning while the partial index is still
     // the one answering queries, which is the silent-partial-index failure this
     // whole change exists to prevent.
+    this.activity = "inventory";
     this.completed = 0;
     this.currentPath = null;
     this.total = null;
@@ -370,6 +416,7 @@ export class InPluginIndexController {
     this.clearInitialColdPreview();
     this.emit(this.activeGeneration === null ? "starting" : "rebuild");
     this.scheduleWork();
+    return "scheduled";
   }
 
   async whenIdle(): Promise<void> {
@@ -390,6 +437,7 @@ export class InPluginIndexController {
     this.stoppingForCheckpoint = true;
     this.blocked = true;
     this.mutationEpoch += 1;
+    this.invalidateCurrentReadWindow(new ShutdownRequestedError());
     this.cancelExportTimer();
     this.unsubscribe?.();
     this.unsubscribe = null;
@@ -421,6 +469,7 @@ export class InPluginIndexController {
     this.stoppingForCheckpoint = false;
     this.blocked = true;
     this.mutationEpoch += 1;
+    this.invalidateCurrentReadWindow(new Error("in-plugin index controller is disposed"));
     this.cancelExportTimer();
     this.unsubscribe?.();
     this.unsubscribe = null;
@@ -430,6 +479,7 @@ export class InPluginIndexController {
     this.rebuildRequested = false;
     this.replacementBuildInProgress = false;
     this.rescanRequested = false;
+    this.candidateGeneration = null;
     this.initialBuildProgress = null;
     this.clearInitialColdPreview();
     this.emit("disposed");
@@ -827,6 +877,8 @@ export class InPluginIndexController {
       return true;
     } catch (error) {
       if (error instanceof ShutdownRequestedError) throw error;
+      this.invalidateReadWindowForGeneration(loaded.record.generationId, error);
+      await this.persistInitialBuildCheckpoint("failure");
       let failure = error;
       try {
         await worker.abortBuild(loaded.record.generationId);
@@ -836,6 +888,7 @@ export class InPluginIndexController {
           "checkpoint resume failed and staging abort did not complete",
         );
       }
+      this.candidateGeneration = null;
       this.initialBuildProgress = null;
       if (error instanceof CheckpointResumeFallbackError) {
         this.cacheIssue = "checkpoint_unavailable";
@@ -869,6 +922,7 @@ export class InPluginIndexController {
     cursor: InitialBuildCheckpointCursor,
     restored: IndexCounts,
   ): Promise<void> {
+    this.candidateGeneration = generation;
     this.clearSourceOmissions();
     this.clearInitialColdPreview();
     this.initialColdPreviewGeneration = null;
@@ -935,8 +989,12 @@ export class InPluginIndexController {
     counts = await worker.commitBuild(generation);
     this.requireActive();
     this.setActiveCounts(counts);
+    this.candidateGeneration = null;
     this.initialBuildProgress = null;
+    this.activity = "apply";
     this.completed = this.total ?? 0;
+    this.inFlight = 0;
+    this.stallCategory = null;
     this.cacheIssue = null;
     this.emit(this.hasPendingChanges() ? "replay" : "ready");
     await this.discardInitialBuildCheckpoint("completed", null);
@@ -960,7 +1018,7 @@ export class InPluginIndexController {
       const prefixPaths = new Set(prefix.map((entry) => entry.path));
       this.replaySubphase = "planning";
       this.completed = 0;
-      this.total = null;
+      this.total = snapshot.entries.length;
       this.currentPath = null;
       this.emit("replay");
       // Plan against the complete fresh snapshot so represented staging rows in
@@ -1080,7 +1138,7 @@ export class InPluginIndexController {
     this.replaySubphase = "planning";
     this.completed = 0;
     this.currentPath = null;
-    this.total = null;
+    this.total = snapshot.entries.length;
     this.emit("replay");
     const current = snapshot.entries.map(({ inspection }) => inspectionMetadata(inspection));
     const plan = await worker.planReconciliation(generation, ACTIVE_VAULT_ID, current);
@@ -1368,7 +1426,14 @@ export class InPluginIndexController {
 
   private async buildGeneration(rebuilding: boolean): Promise<void> {
     this.replaySubphase = null;
+    this.activity = "inventory";
+    this.completed = 0;
+    this.total = null;
+    this.inFlight = 0;
+    this.stallCategory = null;
+    this.currentPath = null;
     const generation = this.allocateFreshGeneration();
+    this.candidateGeneration = generation;
     const activeOmissions = rebuilding ? this.captureSourceOmissions() : null;
     let began = false;
     this.replacementBuildInProgress = rebuilding;
@@ -1385,6 +1450,10 @@ export class InPluginIndexController {
       this.syncWorkerQuarantines(counts);
 
       const snapshot = this.captureSnapshot();
+      // Publish the authoritative inventory denominator before source reads begin.
+      // This is the first meaningful cold-build progress signal, including for an
+      // empty vault; acknowledged completion still advances only after Worker RPCs.
+      this.activity = "inventory";
       const progress: InitialBuildProgress | null = rebuilding ? null : {
         generation,
         snapshot,
@@ -1412,6 +1481,7 @@ export class InPluginIndexController {
         this.clearInitialColdPreview();
         await this.worker.abortBuild(generation);
         this.initialBuildProgress = null;
+        this.candidateGeneration = null;
         began = false;
         if (activeOmissions) this.restoreSourceOmissions(activeOmissions);
         this.replacementBuildInProgress = false;
@@ -1428,6 +1498,7 @@ export class InPluginIndexController {
           this.clearInitialColdPreview();
           await this.worker.abortBuild(generation);
           this.initialBuildProgress = null;
+          this.candidateGeneration = null;
           began = false;
           if (activeOmissions) this.restoreSourceOmissions(activeOmissions);
           this.replacementBuildInProgress = false;
@@ -1450,6 +1521,7 @@ export class InPluginIndexController {
           this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
         }
         this.blocked = !this.rebuildRequested && !this.rescanRequested;
+        this.candidateGeneration = null;
         this.replacementBuildInProgress = false;
         this.emit("degraded", "sources_unreadable");
         return;
@@ -1459,8 +1531,12 @@ export class InPluginIndexController {
       counts = await this.worker.commitBuild(generation);
       this.requireActive();
       this.setActiveCounts(counts);
+      this.candidateGeneration = null;
       this.initialBuildProgress = null;
+      this.activity = "apply";
       this.completed = this.total ?? 0;
+      this.inFlight = 0;
+      this.stallCategory = null;
       this.replacementBuildInProgress = false;
       this.emit(this.hasPendingChanges() ? "replay" : "ready");
       if (!rebuilding) {
@@ -1469,10 +1545,12 @@ export class InPluginIndexController {
       }
     } catch (error) {
       this.clearInitialColdPreview();
+      this.invalidateReadWindowForGeneration(generation, error);
       if (error instanceof ShutdownRequestedError) throw error;
       const unreadableEvidence = rebuilding ? [...this.unreadableSources] : [];
       let failure = error;
       if (began) {
+        if (!rebuilding) await this.persistInitialBuildCheckpoint("failure");
         try {
           await this.worker.abortBuild(generation);
         } catch (abortError) {
@@ -1485,6 +1563,7 @@ export class InPluginIndexController {
       if (activeOmissions) {
         this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
       }
+      this.candidateGeneration = null;
       this.initialBuildProgress = null;
       this.replacementBuildInProgress = false;
       throw failure;
@@ -1552,13 +1631,17 @@ export class InPluginIndexController {
 
     const flush = async (): Promise<void> => {
       if (batch.length === 0) return;
+      const acknowledgedOrdinals = batchOrdinals;
       const previewWasAvailable = this.initialColdPreview !== null;
       this.clearInitialColdPreview();
-      if (previewWasAvailable) this.emit(rebuilding ? "rebuild" : "snapshot");
+      this.activity = "prepare";
+      this.inFlight = batch.length;
+      this.emit(rebuilding ? "rebuild" : "snapshot");
       counts = await this.worker.addSourceBatch(generation, batch);
       this.syncWorkerQuarantines(counts);
+      this.completed += acknowledgedOrdinals.length;
       if (progress) {
-        for (const ordinal of batchOrdinals) progress.represented[ordinal] = true;
+        for (const ordinal of acknowledgedOrdinals) progress.represented[ordinal] = true;
         progress.acknowledgedAddBatches += 1;
         progress.counts = counts;
         this.advanceAcknowledgedPrefix(progress);
@@ -1566,8 +1649,9 @@ export class InPluginIndexController {
       batch = [];
       batchOrdinals = [];
       batchBytes = 0;
+      this.inFlight = 0;
+      this.activity = "apply";
       if (this.stoppingForCheckpoint) throw new ShutdownRequestedError();
-      this.requireActive();
       if (progress
         && progress.acknowledgedAddBatches % INITIAL_BUILD_CHECKPOINT_BATCH_CADENCE === 0) {
         await this.persistInitialBuildCheckpoint("cadence");
@@ -1583,15 +1667,20 @@ export class InPluginIndexController {
     let cursor = 0;
     while (cursor < entries.length) {
       let reservedBytes = 0;
-      const window: Array<{
-        entry: SnapshotEntry;
-        ordinal: number;
-        read: Promise<StableSourceRead>;
-      }> = [];
+      let reservedReads = 0;
+      const availableReadSlots = this.limits.maxConcurrentReads
+        - this.outstandingSourceReads.size;
+      // Keep one candidate in the window when capacity is exhausted so
+      // beginSourceReadWindow reports the bounded capacity stall instead of
+      // spinning an empty cursor. Otherwise use every currently available slot,
+      // but never exceed the established read-concurrency ceiling.
+      const candidateReadLimit = Math.max(1, availableReadSlots);
+      const window: Array<{ entry: SnapshotEntry; ordinal: number }> = [];
       while (cursor < entries.length && window.length < this.limits.maxConcurrentReads) {
         const indexed = entries[cursor]!;
         const inspection = indexed.entry.inspection;
         if (inspection.kind === "candidate") {
+          if (reservedReads >= candidateReadLimit) break;
           if (inspection.size > this.limits.maxBatchBytes) {
             throw new Error("source exceeds the configured batch byte limit");
           }
@@ -1601,21 +1690,38 @@ export class InPluginIndexController {
             continue;
           }
           reservedBytes += inspection.size;
+          reservedReads += 1;
           attemptedCandidateReads += 1;
-          window.push({ ...indexed, read: this.readSnapshot(inspection) });
-        } else {
-          window.push({ ...indexed, read: Promise.resolve(inspection) });
         }
+        window.push(indexed);
         cursor += 1;
       }
 
-      const settled = await Promise.allSettled(window.map((entry) => entry.read));
+      const candidateReads = window.filter(({ entry }) => entry.inspection.kind === "candidate").length;
+      const lease = candidateReads > 0
+        ? this.beginSourceReadWindow(generation, candidateReads)
+        : null;
+      this.activity = candidateReads > 0 ? "read" : "prepare";
+      this.inFlight = candidateReads;
+      this.emit(rebuilding ? "rebuild" : "snapshot");
+      let settled: PromiseSettledResult<StableSourceRead>[];
+      try {
+        settled = await Promise.allSettled(window.map(({ entry }) => (
+          entry.inspection.kind === "candidate"
+            ? this.readSnapshot(entry.inspection, lease!)
+            : Promise.resolve(entry.inspection)
+        )));
+        if (lease) this.assertReadWindowCurrent(lease);
+      } finally {
+        if (lease) this.finishSourceReadWindow(lease);
+      }
       this.requireActive();
+      this.inFlight = 0;
+      this.activity = "prepare";
       let firstUnreadableError: UnreadableVaultSourceError | null = null;
       for (let index = 0; index < window.length; index += 1) {
         const result = settled[index]!;
         const { entry, ordinal } = window[index]!;
-        this.completed += 1;
         this.currentPath = entry.path;
         if (result.status === "rejected") {
           if (!(result.reason instanceof UnreadableVaultSourceError)) throw result.reason;
@@ -1675,10 +1781,17 @@ export class InPluginIndexController {
   }
 
   private async persistInitialBuildCheckpoint(
-    _reason: "cadence" | "shutdown",
+    reason: "cadence" | "shutdown" | "failure",
   ): Promise<void> {
     if (this.checkpointRunning) {
-      await this.checkpointRunning;
+      const running = this.checkpointRunning;
+      if (reason === "failure") {
+        await raceWithDeadline(running, FAILURE_CHECKPOINT_DEADLINE_MS, () => {
+          if (this.checkpointRunning === running) this.checkpointRunning = null;
+        });
+      } else {
+        await running;
+      }
       return;
     }
     const store = isCheckpointStore(this.cacheStore) ? this.cacheStore : null;
@@ -1698,14 +1811,16 @@ export class InPluginIndexController {
       acknowledged_prefix_sources: progress.acknowledgedPrefixSources,
       last_acknowledged_path: progress.lastAcknowledgedPath,
     };
-    const task = (async () => {
+    let attemptActive = true;
+    const persistence = (async () => {
       try {
         const exported = await worker.exportInitialBuildCheckpoint(
           progress.generation,
           store.vaultCacheIdentity,
           cursor,
         );
-        if (this.disposed
+        if (!attemptActive
+          || this.disposed
           || this.activeGeneration !== null
           || this.initialBuildProgress !== progress
           || exported.generation !== progress.generation
@@ -1735,6 +1850,7 @@ export class InPluginIndexController {
             source_policy_hash: exported.source_policy_hash,
           },
         });
+        if (!attemptActive) return;
         if (persisted.generationId !== exported.generation
           || persisted.sha256 !== exported.blob_sha256) {
           throw new Error("checkpoint store returned a different record token");
@@ -1748,12 +1864,21 @@ export class InPluginIndexController {
           if (!this.stoppingForCheckpoint) this.emit(this.stage);
         }
       } catch {
-        if (!this.disposed && this.initialBuildProgress === progress) {
+        if (attemptActive && !this.disposed && this.initialBuildProgress === progress) {
           this.cacheIssue = "checkpoint_save_failed";
           if (!this.stoppingForCheckpoint) this.emit(this.stage);
         }
       }
-    })().finally(() => {
+    })();
+    // A failure checkpoint is a bounded, best-effort durability opportunity.
+    // Once abandoned, its uncancellable export/store continuation is detached and
+    // may no longer publish a token, diagnostic, or disposal dependency.
+    const task = (reason === "failure"
+      ? raceWithDeadline(persistence, FAILURE_CHECKPOINT_DEADLINE_MS, () => {
+        attemptActive = false;
+      })
+      : persistence
+    ).finally(() => {
       if (this.checkpointRunning === task) this.checkpointRunning = null;
     });
     this.checkpointRunning = task;
@@ -1810,7 +1935,7 @@ export class InPluginIndexController {
       for (const path of changes.upserts) {
         let read: StableSourceRead;
         try {
-          read = await this.readStable(path);
+          read = await this.readStable(path, generation);
         } catch (error) {
           if (!(error instanceof UnreadableVaultSourceError)) throw error;
           this.unreadableSources.add(path);
@@ -1925,43 +2050,187 @@ export class InPluginIndexController {
     }
   }
 
-  private async readSnapshot(inspection: SourceInspection): Promise<StableSourceRead> {
+  private async readSnapshot(
+    inspection: SourceInspection,
+    sharedLease?: SourceReadWindowLease,
+  ): Promise<StableSourceRead> {
     if (inspection.kind !== "candidate") return inspection;
-    let lastError: unknown = new Error("active-vault source could not be read");
-    for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
-      try {
-        const read = await this.source.readSource(inspection);
-        this.requireActive();
-        return read;
-      } catch (error) {
-        if (this.disposed) throw error;
-        lastError = error;
-        this.requireActive();
+    const lease = sharedLease ?? this.beginSourceReadWindow(
+      this.candidateGeneration ?? this.activeGeneration ?? "initial-staging",
+      1,
+    );
+    try {
+      let lastError: unknown = new Error("active-vault source could not be read");
+      for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
+        this.assertReadWindowCurrent(lease);
+        try {
+          const read = await this.readSourceWithinWindow(inspection, lease);
+          this.assertReadWindowCurrent(lease);
+          return read;
+        } catch (error) {
+          if (error instanceof SourceReadWindowError || error instanceof ShutdownRequestedError) {
+            throw error;
+          }
+          if (this.disposed) throw error;
+          lastError = error;
+          this.assertReadWindowCurrent(lease);
+        }
       }
+      throw new UnreadableVaultSourceError(lastError);
+    } finally {
+      if (!sharedLease) this.finishSourceReadWindow(lease);
     }
-    throw new UnreadableVaultSourceError(lastError);
   }
 
-  private async readStable(path: string): Promise<StableSourceRead> {
-    let readError: unknown = null;
-    for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
-      try {
-        const inspection = this.inspectSource(path);
-        if (inspection.kind !== "candidate") return inspection;
-        const read = await this.source.readSource(inspection);
-        this.requireActive();
-        if (read.kind !== "stale") return read;
-      } catch (error) {
-        if (this.disposed) throw error;
-        readError = error;
-        this.requireActive();
+  private async readStable(path: string, generation: string): Promise<StableSourceRead> {
+    const lease = this.beginSourceReadWindow(generation, 1);
+    try {
+      let readError: unknown = null;
+      for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
+        this.assertReadWindowCurrent(lease);
+        try {
+          const inspection = this.inspectSource(path);
+          if (inspection.kind !== "candidate") return inspection;
+          const read = await this.readSourceWithinWindow(inspection, lease);
+          this.assertReadWindowCurrent(lease);
+          if (read.kind !== "stale") return read;
+        } catch (error) {
+          if (error instanceof SourceReadWindowError || error instanceof ShutdownRequestedError) {
+            throw error;
+          }
+          if (this.disposed) throw error;
+          readError = error;
+          this.assertReadWindowCurrent(lease);
+        }
       }
+      // Every attempt concerned this one path. Continuous churn or share-level
+      // metadata lag therefore omits that source; it does not prove a dead vault.
+      throw new UnreadableVaultSourceError(
+        readError ?? new Error("vault source did not become stable"),
+      );
+    } finally {
+      this.finishSourceReadWindow(lease);
     }
-    // Every attempt concerned this one path. Continuous churn or share-level
-    // metadata lag therefore omits that source; it does not prove a dead vault.
-    throw new UnreadableVaultSourceError(
-      readError ?? new Error("vault source did not become stable"),
+  }
+
+  private beginSourceReadWindow(
+    generation: string,
+    requestedReads: number,
+  ): SourceReadWindowLease {
+    this.requireActive();
+    if (this.currentReadWindow !== null) {
+      throw new Error("source read windows must not overlap");
+    }
+    if (this.outstandingSourceReads.size + requestedReads > this.limits.maxConcurrentReads) {
+      const error = new SourceReadWindowError("source_read_capacity");
+      this.stallCategory = error.stallCategory;
+      this.inFlight = 0;
+      throw error;
+    }
+
+    let rejectDeadline!: (error: Error) => void;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      rejectDeadline = reject;
+    });
+    void deadline.catch(() => undefined);
+    const lease = {
+      generation,
+      epoch: ++this.readEpoch,
+      active: true,
+      failure: null,
+      deadline,
+      rejectDeadline,
+      timer: undefined as unknown as ReturnType<typeof setTimeout>,
+    } satisfies SourceReadWindowLease;
+    lease.timer = setTimeout(() => {
+      if (!lease.active || this.currentReadWindow !== lease) return;
+      const error = new SourceReadWindowError("source_read_timeout");
+      this.stallCategory = error.stallCategory;
+      this.inFlight = 0;
+      this.invalidateReadWindow(lease, error);
+    }, this.sourceReadTimeoutMs);
+    this.currentReadWindow = lease;
+    return lease;
+  }
+
+  private readSourceWithinWindow(
+    inspection: Extract<SourceInspection, { kind: "candidate" }>,
+    lease: SourceReadWindowLease,
+  ): Promise<StableSourceRead> {
+    this.assertReadWindowCurrent(lease);
+    if (this.outstandingSourceReads.size >= this.limits.maxConcurrentReads) {
+      const error = new SourceReadWindowError("source_read_capacity");
+      this.stallCategory = error.stallCategory;
+      this.invalidateReadWindow(lease, error);
+      return Promise.reject(error);
+    }
+
+    let underlying: Promise<SourceReadOutcome>;
+    try {
+      underlying = Promise.resolve(this.source.readSource(inspection));
+    } catch (error) {
+      underlying = Promise.reject(error);
+    }
+    this.outstandingSourceReads.add(underlying);
+    void underlying.then(
+      (outcome) => {
+        if (outcome.kind !== "timeout") {
+          this.outstandingSourceReads.delete(underlying);
+          return;
+        }
+        void outcome.underlyingSettled.then(
+          () => this.outstandingSourceReads.delete(underlying),
+          () => this.outstandingSourceReads.delete(underlying),
+        );
+      },
+      () => this.outstandingSourceReads.delete(underlying),
     );
+    return Promise.race([underlying, lease.deadline]).then((read) => {
+      this.assertReadWindowCurrent(lease);
+      if (read.kind === "timeout") {
+        const error = new SourceReadWindowError("source_read_timeout");
+        this.stallCategory = error.stallCategory;
+        this.invalidateReadWindow(lease, error);
+        throw error;
+      }
+      return read;
+    });
+  }
+
+  private assertReadWindowCurrent(lease: SourceReadWindowLease): void {
+    if (!lease.active || this.currentReadWindow !== lease) {
+      throw lease.failure ?? new SourceReadWindowError("source_read_timeout");
+    }
+    this.requireActive();
+  }
+
+  private finishSourceReadWindow(lease: SourceReadWindowLease): void {
+    if (!lease.active || this.currentReadWindow !== lease) return;
+    clearTimeout(lease.timer);
+    lease.active = false;
+    this.currentReadWindow = null;
+    this.inFlight = 0;
+  }
+
+  private invalidateReadWindow(lease: SourceReadWindowLease, error: unknown): void {
+    if (!lease.active) return;
+    clearTimeout(lease.timer);
+    lease.active = false;
+    lease.failure = error instanceof Error ? error : new Error("source read window invalidated");
+    if (this.currentReadWindow === lease) this.currentReadWindow = null;
+    lease.rejectDeadline(lease.failure);
+  }
+
+  private invalidateCurrentReadWindow(error: unknown): void {
+    if (this.currentReadWindow) this.invalidateReadWindow(this.currentReadWindow, error);
+    this.inFlight = 0;
+  }
+
+  private invalidateReadWindowForGeneration(generation: string, error: unknown): void {
+    if (this.currentReadWindow?.generation === generation) {
+      this.invalidateReadWindow(this.currentReadWindow, error);
+    }
+    this.inFlight = 0;
   }
 
   private wasTouchedAfter(path: string, cut: number): boolean {
@@ -2079,6 +2348,15 @@ export class InPluginIndexController {
     if (this.disposed) return;
     this.blocked = true;
     this.cancelExportTimer();
+    this.inFlight = 0;
+    const sourceReadWindowError = findSourceReadWindowError(error);
+    if (sourceReadWindowError) {
+      this.activity = "read";
+      this.stallCategory = sourceReadWindowError.stallCategory;
+    } else if (containsWorkerTimeout(error)) {
+      this.activity = "apply";
+      this.stallCategory = "worker_timeout";
+    }
     const hasActive = this.activeGeneration !== null;
     const issue = containsIndexLimitError(error)
       ? "index_limit_exceeded"
@@ -2102,14 +2380,21 @@ export class InPluginIndexController {
       || stage === "rebuild"
       || stage === "degraded"
       || stage === "failed";
-    const progress = stage === "snapshot" || stage === "replay" || stage === "rebuild"
+    const progress = stage === "snapshot"
+      || stage === "replay"
+      || stage === "rebuild"
+      || this.stallCategory !== null
       ? {
+        activity: stage === "replay" && this.replaySubphase !== null
+          ? replayActivity(this.replaySubphase)
+          : this.activity,
         completed: this.completed,
         total: this.total,
+        inFlight: this.inFlight,
         ...(stage === "replay" && this.replaySubphase !== null
           ? { subphase: this.replaySubphase }
           : {}),
-        ...(this.currentPath === null ? {} : { path: this.currentPath }),
+        ...(this.stallCategory === null ? {} : { stallCategory: this.stallCategory }),
       }
       : undefined;
     const hasActive = this.activeGeneration !== null;
@@ -2319,6 +2604,15 @@ class VaultUnavailableError extends Error {
   }
 }
 
+class SourceReadWindowError extends VaultUnavailableError {
+  constructor(readonly stallCategory: Extract<
+    IndexControllerStallCategory,
+    "source_read_timeout" | "source_read_capacity"
+  >) {
+    super(new Error(stallCategory));
+  }
+}
+
 class UnreadableVaultSourceError extends Error {
   constructor(cause: unknown) {
     super("one active vault source could not be read", { cause });
@@ -2366,13 +2660,20 @@ function sameCheckpointCursor(
     && left.last_acknowledged_path === right.last_acknowledged_path;
 }
 
-async function raceWithDeadline(task: Promise<void>, deadlineMs: number): Promise<void> {
+async function raceWithDeadline(
+  task: Promise<void>,
+  deadlineMs: number,
+  onDeadline?: () => void,
+): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
     await Promise.race([
       task,
       new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, deadlineMs);
+        timer = setTimeout(() => {
+          onDeadline?.();
+          resolve();
+        }, deadlineMs);
       }),
     ]);
   } finally {
@@ -2445,9 +2746,35 @@ function containsVaultUnavailableError(error: unknown): boolean {
       && error.errors.some((nested) => containsVaultUnavailableError(nested)));
 }
 
+function findSourceReadWindowError(error: unknown): SourceReadWindowError | null {
+  if (error instanceof SourceReadWindowError) return error;
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const found = findSourceReadWindowError(nested);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function containsWorkerTimeout(error: unknown): boolean {
+  if (error instanceof AggregateError) {
+    return error.errors.some((nested) => containsWorkerTimeout(nested));
+  }
+  return errorCode(error) === "timeout";
+}
+
 function isSystemicUnreadability(unreadable: number, attempted: number): boolean {
   return unreadable >= MIN_SYSTEMIC_UNREADABLE_SOURCES
     && unreadable > attempted * SYSTEMIC_UNREADABLE_READ_RATIO;
+}
+
+function replayActivity(subphase: IndexControllerReplaySubphase): IndexControllerActivity {
+  switch (subphase) {
+    case "planning": return "inventory";
+    case "verifying": return "read";
+    case "applying": return "apply";
+  }
 }
 
 function validateLimits(limits: IndexControllerLimits): void {

@@ -8,6 +8,7 @@ import type { SearchMode } from "./api";
 import {
   IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
   SOURCE_FORMATS,
+  isSourceFormatExtractable,
   sourceFormatDescription,
   type SourceFormat,
 } from "./source-formats";
@@ -94,19 +95,20 @@ export class KwirySettingTab extends PluginSettingTab {
       .setHeading();
 
     for (const format of SOURCE_FORMATS) {
-      new Setting(containerEl)
+      const setting = new Setting(containerEl)
         .setName(sourceFormatLabel(format))
-        .setDesc(sourceFormatDescription(format))
-        .addToggle((toggle) =>
-          toggle
-            .setValue(this.plugin.settings.enabledSourceFormats[format])
-            .onChange(async (value) => {
-              if (this.plugin.settings.enabledSourceFormats[format] === value) return;
-              this.plugin.settings.enabledSourceFormats[format] = value;
-              await this.plugin.saveSettings();
-              await this.plugin.onSourcePolicyChanged();
-            }),
-        );
+        .setDesc(sourceFormatDescription(format));
+      if (!isSourceFormatExtractable(format)) continue;
+      setting.addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enabledSourceFormats[format])
+          .onChange(async (value) => {
+            if (this.plugin.settings.enabledSourceFormats[format] === value) return;
+            this.plugin.settings.enabledSourceFormats[format] = value;
+            await this.plugin.saveSettings();
+            await this.plugin.onSourcePolicyChanged();
+          }),
+      );
     }
   }
 

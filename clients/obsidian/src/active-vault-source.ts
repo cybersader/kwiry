@@ -20,6 +20,8 @@ export const MAX_INDEXABLE_SOURCE_BYTES = 10 * 1024 * 1024;
  */
 export const MAX_EXCERPT_SOURCE_BYTES = 1024 * 1024;
 
+const DEFAULT_ACTIVE_VAULT_READ_TIMEOUT_MS = 30_000;
+
 /// Converts a millisecond mtime to the canonical nanosecond string the ABI
 /// requires: digits only, at most 39 of them.
 ///
@@ -62,6 +64,17 @@ export type StableSourceRead =
   | { kind: "oversized"; path: string; format: SourceFormat; size: number; mtime: number }
   | { kind: "stale"; path: string };
 
+/** A timeout carries no source identity so it is safe to aggregate in diagnostics. */
+export type SourceReadOutcome = StableSourceRead | {
+  kind: "timeout";
+  /** Settles only when the uncancellable underlying vault read actually settles. */
+  underlyingSettled: Promise<void>;
+};
+
+type BinaryReadOutcome =
+  | { kind: "bytes"; buffer: ArrayBuffer }
+  | Extract<SourceReadOutcome, { kind: "timeout" }>;
+
 /**
  * Transitional presentation-only Markdown read. It remains distinct from
  * `StableSourceRead` and disappears once the Worker-owned stored excerpt path
@@ -77,16 +90,18 @@ export interface ActiveVaultSource {
   subscribe(listener: (event: VaultSourceEvent) => void): () => void;
   listSourcePaths(): readonly string[];
   inspectSource(path: string): SourceInspection;
-  readSource(inspection: Extract<SourceInspection, { kind: "candidate" }>): Promise<StableSourceRead>;
+  readSource(inspection: Extract<SourceInspection, { kind: "candidate" }>): Promise<SourceReadOutcome>;
   readExcerptText(path: string): Promise<ExcerptRead>;
 }
 
 export class ObsidianActiveVaultSource implements ActiveVaultSource {
   private refs: EventRef[] = [];
+  private readonly pendingBinaryReads = new Map<string, Promise<BinaryReadOutcome>>();
 
   constructor(
     private readonly vault: Vault,
     private readonly enabledFormats: Readonly<EnabledSourceFormats> = DEFAULT_ENABLED_SOURCE_FORMATS,
+    private readonly readTimeoutMs = DEFAULT_ACTIVE_VAULT_READ_TIMEOUT_MS,
   ) {}
 
   subscribe(listener: (event: VaultSourceEvent) => void): () => void {
@@ -135,21 +150,26 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
 
   async readSource(
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
-  ): Promise<StableSourceRead> {
+  ): Promise<SourceReadOutcome> {
+    if (!isSourceFormatEnabled(inspection.format, this.enabledFormats)) {
+      return { kind: "missing", path: inspection.path };
+    }
     const before = this.vault.getFileByPath(inspection.path);
     if (!before || !isSourceFile(before, inspection.format)) {
       return { kind: "missing", path: inspection.path };
     }
     if (!matchesInspection(before, inspection)) return { kind: "stale", path: inspection.path };
 
-    const buffer = await this.vault.readBinary(before);
+    const read = await this.readBinaryBounded(before);
+    if (read.kind === "timeout") return read;
+
     const after = this.vault.getFileByPath(inspection.path);
     if (!after || !isSourceFile(after, inspection.format)) {
       return { kind: "missing", path: inspection.path };
     }
     if (!matchesInspection(after, inspection)) return { kind: "stale", path: inspection.path };
 
-    const bytes = new Uint8Array(buffer);
+    const bytes = new Uint8Array(read.buffer);
     if (bytes.byteLength > MAX_INDEXABLE_SOURCE_BYTES) {
       return {
         kind: "oversized",
@@ -175,6 +195,39 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
         bytes,
       },
     };
+  }
+
+  private readBinaryBounded(file: TFile): Promise<BinaryReadOutcome> {
+    const path = file.path;
+    const pending = this.pendingBinaryReads.get(path);
+    if (pending) return pending;
+
+    const underlying = Promise.resolve().then(() => this.vault.readBinary(file));
+    const underlyingSettled = underlying.then(
+      () => undefined,
+      () => undefined,
+    );
+    let timeoutHandle: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<BinaryReadOutcome>((resolve) => {
+      timeoutHandle = setTimeout(
+        () => resolve({ kind: "timeout", underlyingSettled }),
+        Math.max(1, this.readTimeoutMs),
+      );
+    });
+    const outcome = Promise.race<BinaryReadOutcome>([
+      underlying.then((buffer) => ({ kind: "bytes", buffer })),
+      timeout,
+    ]);
+    this.pendingBinaryReads.set(path, outcome);
+
+    const release = (): void => {
+      clearTimeout(timeoutHandle);
+      if (this.pendingBinaryReads.get(path) === outcome) {
+        this.pendingBinaryReads.delete(path);
+      }
+    };
+    void underlying.then(release, release);
+    return outcome;
   }
 
   async readExcerptText(path: string): Promise<ExcerptRead> {

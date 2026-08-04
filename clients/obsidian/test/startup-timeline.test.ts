@@ -20,7 +20,7 @@ describe("StartupTimeline", () => {
       profile: "daemon",
       pluginEpoch: 3,
       wallNow: () => 1_700_000_000_000,
-      monotonicNow: clock(100, 110.2, 120.4, 150.1, 200.3, 201.1),
+      monotonicNow: clock(100, 110.2, 120.4, 130.6, 150.1, 200.3, 201.1),
       record: (record) => records.push(record),
     });
 
@@ -29,6 +29,8 @@ describe("StartupTimeline", () => {
     timeline.markPluginLoadComplete();
     timeline.markPluginLoadComplete();
     timeline.markLayoutReady();
+    timeline.markFirstProgress();
+    timeline.markFirstProgress();
     timeline.markCacheSearchable(4_096);
     timeline.markCacheSearchable(8_192);
     timeline.markFullyCurrent();
@@ -45,6 +47,7 @@ describe("StartupTimeline", () => {
         activationEpoch: 7,
         pluginLoadCompleteMs: 10,
         layoutReadyMs: 20,
+        firstProgressMs: 31,
         firstCacheSearchableMs: 50,
         fullyCurrentMs: 100,
         cacheHit: true,
@@ -83,6 +86,7 @@ describe("StartupTimeline", () => {
         activationEpoch: 2,
         pluginLoadCompleteMs: null,
         layoutReadyMs: null,
+        firstProgressMs: null,
         firstCacheSearchableMs: null,
         fullyCurrentMs: null,
         cacheHit: false,
@@ -101,6 +105,7 @@ describe("StartupTimeline", () => {
     });
 
     timeline.markPluginLoadComplete();
+    timeline.markFirstProgress();
     timeline.markLayoutReady();
     timeline.markCacheSearchable(1);
     timeline.finish("degraded", "vault_unavailable");
@@ -110,9 +115,32 @@ describe("StartupTimeline", () => {
       details: {
         pluginLoadCompleteMs: 30,
         layoutReadyMs: 30,
-        firstCacheSearchableMs: 30,
+        firstProgressMs: 30,
+        firstCacheSearchableMs: 40,
       },
     });
+  });
+
+  it("records empty-vault inventory completion as first progress exactly once", () => {
+    const record = vi.fn();
+    const timeline = new StartupTimeline({
+      profile: "in_plugin",
+      pluginEpoch: 1,
+      wallNow: () => 100,
+      monotonicNow: clock(10, 15, 25, 30),
+      record,
+    });
+
+    timeline.markFirstProgress();
+    timeline.markFirstProgress();
+    timeline.markFullyCurrent();
+
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({
+      details: expect.objectContaining({
+        firstProgressMs: 5,
+        fullyCurrentMs: 15,
+      }),
+    }));
   });
 
   it("swallows recorder failures", () => {

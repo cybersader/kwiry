@@ -48,6 +48,13 @@ export type DiagnosticTextValue =
   | "index"
   | "query"
   | "lifecycle"
+  | "inventory"
+  | "read"
+  | "prepare"
+  | "apply"
+  | "source_read_timeout"
+  | "source_read_capacity"
+  | "worker_timeout"
   | "snapshot"
   | "replay"
   | "rebuild"
@@ -81,6 +88,7 @@ export type DiagnosticTextValue =
   | "hit"
   | "miss"
   | "scheduled"
+  | "already_building"
   | "skipped"
   | "aborted"
   | "restored"
@@ -196,6 +204,8 @@ export interface DiagnosticDetails {
   profile?: "daemon" | "in_plugin";
   phase?: DiagnosticTextValue;
   stage?: DiagnosticTextValue;
+  activity?: "inventory" | "read" | "prepare" | "apply";
+  stallCategory?: "source_read_timeout" | "source_read_capacity" | "worker_timeout";
   liveness?: "unknown" | "alive" | "unreachable" | "terminated";
   mode?: "lexical" | "semantic" | "hybrid";
   outcome?: DiagnosticTextValue;
@@ -221,6 +231,7 @@ export interface DiagnosticDetails {
   chunks?: number;
   completed?: number;
   total?: number | null;
+  inFlight?: number;
   warningCount?: number;
   pending?: number;
   sourcesEnumerated?: number;
@@ -236,6 +247,7 @@ export interface DiagnosticDetails {
   cacheBytes?: number;
   pluginLoadCompleteMs?: number | null;
   layoutReadyMs?: number | null;
+  firstProgressMs?: number | null;
   firstCacheSearchableMs?: number | null;
   fullyCurrentMs?: number | null;
   retryable?: boolean;
@@ -315,11 +327,14 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "daemon", "in_plugin", "connecting", "starting", "building", "ready", "degraded",
   "unavailable", "disposed", "unknown", "alive", "unreachable", "terminated", "lexical",
   "semantic", "hybrid", "configuration", "transport", "protocol", "index", "query",
-  "lifecycle", "snapshot", "replay", "rebuild", "create", "modify", "delete", "rename",
+  "lifecycle", "inventory", "read", "prepare", "apply", "source_read_timeout",
+  "source_read_capacity", "worker_timeout", "snapshot", "replay", "rebuild", "create",
+  "modify", "delete", "rename",
   "activate", "dispose", "initialize", "status", "search", "open", "load", "restore",
   "export", "discard", "build", "reconcile", "update", "poll", "save", "copy", "clear",
   "requested", "started", "succeeded", "failed", "cancelled", "superseded", "hit", "miss",
-  "scheduled", "skipped", "aborted", "restored", "discarded", "exported", "plugin",
+  "scheduled", "already_building", "skipped", "aborted", "restored", "discarded", "exported",
+  "plugin",
   "backend_manager", "daemon_backend", "in_plugin_backend", "index_controller", "cache_store",
   "vault_source", "search_session", "worker", "rpc", "vfs", "settings", "ui",
   "vault_read_failed", "index_build_failed", "index_update_failed", "index_limit_exceeded",
@@ -345,33 +360,39 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "plugin_load_failed", "activation_failed", "plugin_unloaded",
 ];
 const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
-  "profile", "phase", "stage", "liveness", "mode", "outcome", "code", "reason", "errorName", "operation",
+  "profile", "phase", "stage", "activity", "stallCategory", "liveness", "mode", "outcome",
+  "code", "reason", "errorName", "operation",
   "subsystem", "generationId", "pathHash", "pluginEpoch", "activationEpoch", "mutationEpoch",
-  "count", "limit", "documents", "chunks", "completed", "total", "warningCount", "pending",
+  "count", "limit", "documents", "chunks", "completed", "total", "inFlight", "warningCount",
+  "pending",
   "sourcesEnumerated", "sourcesRead", "sourcesSkipped", "sourcesOversized", "sourcesFailed",
   "bytesRead", "batchCount", "upserts", "removals", "resultCount", "cacheBytes",
-  "pluginLoadCompleteMs", "layoutReadyMs", "firstCacheSearchableMs", "fullyCurrentMs", "retryable",
+  "pluginLoadCompleteMs", "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs",
+  "fullyCurrentMs", "retryable",
   "recoverable", "searchable", "dirty", "rebuilding", "cacheHit", "recovery",
 ];
 const NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "pluginEpoch", "activationEpoch", "mutationEpoch", "count", "limit", "documents", "chunks",
-  "completed", "warningCount", "pending", "sourcesEnumerated", "sourcesRead", "sourcesSkipped",
+  "completed", "inFlight", "warningCount", "pending", "sourcesEnumerated", "sourcesRead",
+  "sourcesSkipped",
   "sourcesOversized", "sourcesFailed", "bytesRead", "batchCount", "upserts", "removals",
   "resultCount", "cacheBytes",
 ]);
 const NULLABLE_NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
-  "pluginLoadCompleteMs", "layoutReadyMs", "firstCacheSearchableMs", "fullyCurrentMs",
+  "pluginLoadCompleteMs", "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs",
+  "fullyCurrentMs",
 ]);
 const BOOLEAN_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "retryable", "recoverable", "searchable", "dirty", "rebuilding", "cacheHit", "recovery",
 ]);
 const STARTUP_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "profile", "outcome", "reason", "pluginEpoch", "activationEpoch", "pluginLoadCompleteMs",
-  "layoutReadyMs", "firstCacheSearchableMs", "fullyCurrentMs", "cacheHit", "cacheBytes",
+  "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs", "fullyCurrentMs", "cacheHit",
+  "cacheBytes",
 ]);
 const REQUIRED_STARTUP_DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
   "profile", "outcome", "reason", "pluginEpoch", "activationEpoch", "pluginLoadCompleteMs",
-  "layoutReadyMs", "firstCacheSearchableMs", "fullyCurrentMs", "cacheHit",
+  "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs", "fullyCurrentMs", "cacheHit",
 ];
 const STARTUP_OUTCOMES = new Set<DiagnosticTextValue>([
   "succeeded", "degraded", "failed", "cancelled",
@@ -386,6 +407,12 @@ const COUNTERS = new Set<DiagnosticCounter>([
   "upserts", "removals", "resultCount", "cacheBytes",
 ]);
 const TEXT_VALUE_SET = new Set<DiagnosticTextValue>(TEXT_VALUES);
+const INDEX_ACTIVITY_SET = new Set<NonNullable<DiagnosticDetails["activity"]>>([
+  "inventory", "read", "prepare", "apply",
+]);
+const INDEX_STALL_CATEGORY_SET = new Set<NonNullable<DiagnosticDetails["stallCategory"]>>([
+  "source_read_timeout", "source_read_capacity", "worker_timeout",
+]);
 const EVENT_CODE_SET = new Set<DiagnosticEventCode>(EVENT_CODES);
 const LEVEL_SET = new Set<DiagnosticLevel>(LEVELS);
 const PLATFORM_SET = new Set<DiagnosticPlatform>([
@@ -718,6 +745,16 @@ function isValidDetailValue(key: keyof DiagnosticDetails, value: unknown): boole
   if (key === "generationId") {
     return typeof value === "string"
       && (IN_PLUGIN_GENERATION_PATTERN.test(value) || DAEMON_GENERATION_PATTERN.test(value));
+  }
+  if (key === "activity") {
+    return typeof value === "string"
+      && INDEX_ACTIVITY_SET.has(value as NonNullable<DiagnosticDetails["activity"]>);
+  }
+  if (key === "stallCategory") {
+    return typeof value === "string"
+      && INDEX_STALL_CATEGORY_SET.has(
+        value as NonNullable<DiagnosticDetails["stallCategory"]>,
+      );
   }
   if (key === "total" || NULLABLE_NUMERIC_DETAIL_KEYS.has(key)) {
     return value === null || isNonNegativeInteger(value);

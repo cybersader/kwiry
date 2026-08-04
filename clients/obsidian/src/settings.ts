@@ -6,6 +6,7 @@ import type { BackendProfile } from "./backend";
 import {
   DEFAULT_ENABLED_SOURCE_FORMATS,
   SOURCE_FORMATS,
+  normalizeEnabledSourceFormats,
   type EnabledSourceFormats,
 } from "./source-formats";
 
@@ -79,6 +80,7 @@ export function loadSettings(stored: unknown): KwiryPluginSettings {
       }
     }
   }
+  settings.enabledSourceFormats = normalizeEnabledSourceFormats(settings.enabledSourceFormats);
   if (
     source.diagnosticsLogLevel === "off"
     || source.diagnosticsLogLevel === "error"

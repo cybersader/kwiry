@@ -7,7 +7,7 @@ import {
   type ActiveVaultSource,
   type ExcerptRead,
   type SourceInspection,
-  type StableSourceRead,
+  type SourceReadOutcome,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
 import {
@@ -72,7 +72,7 @@ class FakeSource implements ActiveVaultSource {
 
   async readSource(
     inspection: Extract<SourceInspection, { kind: "candidate" }>,
-  ): Promise<StableSourceRead> {
+  ): Promise<SourceReadOutcome> {
     const record = this.records.get(inspection.path);
     if (!record) return { kind: "missing", path: inspection.path };
     return {
@@ -408,6 +408,87 @@ describe("InPluginLexicalBackend", () => {
     });
   });
 
+  it("records first progress only when the empty-vault inventory total is known", async () => {
+    let release!: () => void;
+    const initializing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const source = new FakeSource();
+    const observations: unknown[] = [];
+    const inPlugin = backend(
+      source,
+      [fakeSession({ initialize: () => initializing })],
+      undefined,
+      (observation) => observations.push(observation),
+    );
+
+    await inPlugin.initialize();
+    expect(observations).toEqual([]);
+    release();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "ready",
+        searchable: true,
+      });
+    });
+    expect(observations).toEqual([
+      { kind: "first_progress" },
+      { kind: "fully_current" },
+    ]);
+  });
+
+  it("reports a manual request during a healthy initial build as already building", async () => {
+    let release!: () => void;
+    const initializing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const source = new FakeSource();
+    const session = fakeSession({ initialize: () => initializing });
+    const inPlugin = backend(source, [session]);
+
+    await inPlugin.initialize();
+    await expect(inPlugin.rebuild()).resolves.toBe("already_building");
+    expect(session.beginBuild).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(session.commitBuild).toHaveBeenCalledTimes(1));
+    expect(session.beginBuild).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes a path-free timeout stall while pre-ready search stays index_building", async () => {
+    const source = new FakeSource();
+    source.set("private-looking-name.md", "body");
+    source.readSource = vi.fn(async () => ({
+      kind: "timeout" as const,
+      underlyingSettled: Promise.resolve(),
+    }));
+    const inPlugin = backend(source, [fakeSession()]);
+
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "unavailable",
+        searchable: false,
+        generation: null,
+        issue: { code: "vault_read_failed", recoverable: true },
+        progress: {
+          stage: "failed",
+          activity: "read",
+          completed: 0,
+          total: 1,
+          inFlight: 0,
+          stallCategory: "source_read_timeout",
+        },
+      });
+    });
+    const status = await inPlugin.status();
+    expect(JSON.stringify(status)).not.toContain("private-looking-name.md");
+    await expect(inPlugin.search({ q: "query", mode: "lexical" })).rejects.toMatchObject({
+      code: "index_building",
+      safeMessage: "In-plugin lexical index is still building.",
+    });
+  });
+
   it("publishes quarantined counts and validator fields as a degraded searchable status", async () => {
     const source = new FakeSource();
     const session = fakeSession({
@@ -447,11 +528,14 @@ describe("InPluginLexicalBackend", () => {
         },
       });
     });
-    expect(startupObservations).toEqual([{
-      kind: "terminal",
-      outcome: "degraded",
-      reason: "sources_omitted",
-    }]);
+    expect(startupObservations).toEqual([
+      { kind: "first_progress" },
+      {
+        kind: "terminal",
+        outcome: "degraded",
+        reason: "sources_omitted",
+      },
+    ]);
   });
 
   it("publishes a restored generation as searchable but stale until reconciliation completes", async () => {
@@ -483,7 +567,10 @@ describe("InPluginLexicalBackend", () => {
 
     await inPlugin.initialize();
     await vi.waitFor(() => expect(session.planReconciliation).toHaveBeenCalledTimes(1));
-    expect(startupObservations).toEqual([{ kind: "cache_searchable", cacheBytes: 4 }]);
+    expect(startupObservations).toEqual([
+      { kind: "cache_searchable", cacheBytes: 4 },
+      { kind: "first_progress" },
+    ]);
     await expect(inPlugin.status()).resolves.toMatchObject({
       phase: "building",
       searchable: true,
@@ -493,7 +580,7 @@ describe("InPluginLexicalBackend", () => {
         stage: "replay",
         subphase: "planning",
         completed: 0,
-        total: null,
+        total: 0,
       },
       issue: {
         code: "index_reconciling",
@@ -515,8 +602,114 @@ describe("InPluginLexicalBackend", () => {
     });
     expect(startupObservations).toEqual([
       { kind: "cache_searchable", cacheBytes: 4 },
+      { kind: "first_progress" },
       { kind: "fully_current" },
     ]);
+  });
+
+  it.each([
+    [null, "cache_absent"],
+    ["cache_digest_mismatch", "cache_corrupt"],
+    ["cache_version_mismatch", "cache_incompatible"],
+  ] as const)(
+    "keeps %s support detail in status while pre-ready search returns public index_building",
+    async (restoreCode, expectedIssue) => {
+      let releaseAdd!: () => void;
+      const addGate = new Promise<void>((resolve) => {
+        releaseAdd = resolve;
+      });
+      const source = new FakeSource();
+      source.set("private-looking-name.md", "body");
+      const session = fakeSession({
+        add: async (generation) => {
+          await addGate;
+          return {
+            generation,
+            documents: 1,
+            chunks: 1,
+            database_bytes: 1,
+            database_byte_limit: 1_000_000,
+            quarantined_sources: 0,
+            quarantine_fields: [],
+            source_format_counts: emptySourceFormatCounts(),
+          };
+        },
+        ...(restoreCode === null
+          ? {}
+          : {
+              restore: async () => Promise.reject(Object.assign(new Error(restoreCode), {
+                code: restoreCode,
+              })),
+            }),
+      });
+      const store = new FakeCacheStore(restoreCode === null
+        ? { kind: "miss", reason: "absent" }
+        : cacheHit());
+      const inPlugin = backend(source, [session], {
+        openStore: async () => ({ kind: "available", store }),
+      });
+
+      await inPlugin.initialize();
+      await vi.waitFor(async () => {
+        await expect(inPlugin.status()).resolves.toMatchObject({
+          searchable: false,
+          issue: { code: expectedIssue },
+        });
+      });
+      await expect(inPlugin.search({ q: "query", mode: "lexical" })).rejects.toMatchObject({
+        code: "index_building",
+        profile: "in_plugin",
+        stage: "index",
+        retryable: true,
+        safeMessage: "In-plugin lexical index is still building.",
+      });
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        issue: { code: expectedIssue },
+      });
+
+      releaseAdd();
+      await vi.waitFor(async () => {
+        await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
+      });
+    },
+  );
+
+  it("keeps a clean initial publication ready while cache persistence finishes", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      const session = fakeSession();
+      const store = new FakeCacheStore({ kind: "miss", reason: "absent" });
+      const inPlugin = backend(source, [session], {
+        openStore: async () => ({ kind: "available", store }),
+        idleExportMs: 10,
+      });
+
+      await inPlugin.initialize();
+      await vi.waitFor(() => expect(session.commitBuild).toHaveBeenCalledTimes(1));
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "ready",
+        searchable: true,
+        dirty: false,
+        issue: {
+          code: "cache_absent",
+          safeMessage: "Index is current; cached durability is pending.",
+        },
+      });
+      await expect(inPlugin.search({ q: "query", mode: "lexical" })).resolves.toMatchObject({
+        generation: "generation-1",
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.waitFor(() => expect(store.puts).toHaveLength(1));
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "ready",
+        searchable: true,
+        dirty: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps cache unavailability observable after an explicit clean build", async () => {
@@ -585,7 +778,7 @@ describe("InPluginLexicalBackend", () => {
       await inPlugin.initialize();
       await vi.waitFor(async () => {
         await expect(inPlugin.status()).resolves.toMatchObject({
-          phase: "degraded",
+          phase: "ready",
           searchable: true,
           generation: "generation-1",
           dirty: false,
@@ -619,7 +812,7 @@ describe("InPluginLexicalBackend", () => {
       await inPlugin.initialize();
       await vi.waitFor(async () => {
         await expect(inPlugin.status()).resolves.toMatchObject({
-          phase: "degraded",
+          phase: "ready",
           searchable: true,
           generation: "generation-1",
           dirty: false,
@@ -704,7 +897,7 @@ describe("InPluginLexicalBackend", () => {
 
     await inPlugin.initialize();
     await vi.waitFor(() => expect(session.commitBuild).toHaveBeenCalledTimes(1));
-    await inPlugin.rebuild();
+    await expect(inPlugin.rebuild()).resolves.toBe("scheduled");
     await vi.waitFor(() => expect(session.commitBuild).toHaveBeenCalledTimes(2));
 
     expect(phases[0]).toBe("starting");
@@ -736,7 +929,7 @@ describe("InPluginLexicalBackend", () => {
       });
     });
 
-    await inPlugin.rebuild();
+    await expect(inPlugin.rebuild()).resolves.toBe("scheduled");
     await vi.waitFor(async () => {
       await expect(inPlugin.status()).resolves.toMatchObject({
         phase: "building",

@@ -12,13 +12,26 @@ export const SOURCE_FORMATS = [
 
 export type SourceFormat = typeof SOURCE_FORMATS[number];
 
+export const EXTRACTABLE_SOURCE_FORMATS = [
+  "markdown",
+  "text",
+  "base",
+  "canvas",
+] as const satisfies readonly SourceFormat[];
+
+export type ExtractableSourceFormat = typeof EXTRACTABLE_SOURCE_FORMATS[number];
+
+const EXTRACTABLE_SOURCE_FORMAT_SET: ReadonlySet<SourceFormat> = new Set(
+  EXTRACTABLE_SOURCE_FORMATS,
+);
+
 // Mirrors kwiry_core::source::SOURCE_PREPARATION_SCHEMA_VERSION. This belongs in
 // the policy fingerprint so a preparation-schema change always invalidates a
 // cache even when the enabled extension set is unchanged.
 export const SOURCE_PREPARATION_SCHEMA_VERSION = 6 as const;
 
 export const IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION =
-  "Indexes enabled sources from the active vault. Markdown, plain text, Base, and Canvas are extractable; PDF and DOCX are admitted but reported as not yet supported. This profile is lexical-only and never reads the daemon token.";
+  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, and Canvas are available; PDF and DOCX remain unavailable until extractors ship and their bytes are not read. This profile is lexical-only and never reads the daemon token.";
 
 export interface EnabledSourceFormats {
   markdown: boolean;
@@ -34,8 +47,8 @@ export const DEFAULT_ENABLED_SOURCE_FORMATS: Readonly<EnabledSourceFormats> = Ob
   text: true,
   base: true,
   canvas: true,
-  docx: true,
-  pdf: true,
+  docx: false,
+  pdf: false,
 });
 
 const FORMAT_BY_EXTENSION: Readonly<Record<string, SourceFormat>> = Object.freeze({
@@ -58,11 +71,30 @@ export function classifySourcePath(path: string): SourceFormat | null {
   return FORMAT_BY_EXTENSION[name.slice(separator + 1).toLowerCase()] ?? null;
 }
 
+export function isSourceFormatExtractable(
+  format: SourceFormat,
+): format is ExtractableSourceFormat {
+  return EXTRACTABLE_SOURCE_FORMAT_SET.has(format);
+}
+
 export function isSourceFormatEnabled(
   format: SourceFormat,
   enabled: Readonly<EnabledSourceFormats>,
 ): boolean {
-  return enabled[format];
+  return isSourceFormatExtractable(format) && enabled[format];
+}
+
+export function normalizeEnabledSourceFormats(
+  enabled: Readonly<EnabledSourceFormats>,
+): EnabledSourceFormats {
+  return {
+    markdown: isSourceFormatEnabled("markdown", enabled),
+    text: isSourceFormatEnabled("text", enabled),
+    base: isSourceFormatEnabled("base", enabled),
+    canvas: isSourceFormatEnabled("canvas", enabled),
+    docx: isSourceFormatEnabled("docx", enabled),
+    pdf: isSourceFormatEnabled("pdf", enabled),
+  };
 }
 
 export function sourceFormatDescription(format: SourceFormat): string {
@@ -77,7 +109,7 @@ export function sourceFormatDescription(format: SourceFormat): string {
       return "Extract authored text cards, group and edge labels, URLs, and file-reference paths without reading referenced files.";
     case "docx":
     case "pdf":
-      return "Admit this format, but report it as not yet supported with no extracted text in this wave.";
+      return "Unavailable until an extractor ships. Files of this format are not inventoried or read.";
   }
 }
 
@@ -97,7 +129,9 @@ export function isEnabledSourcePath(
 export async function formatPolicyFingerprint(
   enabled: Readonly<EnabledSourceFormats>,
 ): Promise<string> {
-  const enabledSet = SOURCE_FORMATS.filter((format) => enabled[format]).sort().join(",");
+  const enabledSet = SOURCE_FORMATS.filter(
+    (format) => isSourceFormatEnabled(format, enabled),
+  ).sort().join(",");
   const material = [
     "kwiry-source-format-policy-v1",
     `source-preparation-schema=${SOURCE_PREPARATION_SCHEMA_VERSION}`,

@@ -86,6 +86,14 @@ impl SourceFormat {
             .expect("every source format has a registry entry")
     }
 
+    pub fn is_extractable(self) -> bool {
+        self.spec().extraction_supported
+    }
+
+    pub fn from_extractable_path(path: impl AsRef<Path>) -> Option<Self> {
+        Self::from_path(path).filter(|format| format.is_extractable())
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Markdown => "markdown",
@@ -141,6 +149,15 @@ mod tests {
         assert!(SourceFormat::Canvas.spec().extraction_supported);
         assert!(!SourceFormat::Docx.spec().extraction_supported);
         assert!(!SourceFormat::Pdf.spec().extraction_supported);
+        assert!(SourceFormat::Canvas.is_extractable());
+        assert!(!SourceFormat::Docx.is_extractable());
+        assert!(!SourceFormat::Pdf.is_extractable());
+        assert_eq!(
+            SourceFormat::from_extractable_path("board.canvas"),
+            Some(SourceFormat::Canvas)
+        );
+        assert_eq!(SourceFormat::from_extractable_path("report.docx"), None);
+        assert_eq!(SourceFormat::from_extractable_path("paper.PDF"), None);
 
         for spec in format_specs() {
             assert_eq!(spec.format.spec(), spec);

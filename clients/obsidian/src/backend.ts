@@ -18,6 +18,12 @@ export type BackendPhase =
   | "unavailable"
   | "disposed";
 export type BackendLiveness = "unknown" | "alive" | "unreachable" | "terminated";
+export type BackendIndexActivity = "inventory" | "read" | "prepare" | "apply";
+export type BackendIndexStallCategory =
+  | "source_read_timeout"
+  | "source_read_capacity"
+  | "worker_timeout";
+export type BackendRebuildResult = "scheduled" | "already_building";
 
 export interface BackendIdentity {
   profile: BackendProfile;
@@ -54,12 +60,13 @@ export interface BackendStatus {
   dirty: boolean;
   rebuilding: boolean;
   progress?: {
-    stage: "snapshot" | "replay" | "rebuild";
+    stage: "snapshot" | "replay" | "rebuild" | "degraded" | "failed";
+    activity: BackendIndexActivity;
     subphase?: "planning" | "verifying" | "applying";
     completed: number;
     total: number | null;
-    /// Most recently processed source path, when the backend reports one.
-    path?: string;
+    inFlight: number;
+    stallCategory?: BackendIndexStallCategory;
   };
   issue?: BackendIssue;
 }
@@ -93,7 +100,7 @@ export interface SearchBackend {
   initialize(): Promise<void>;
   status(): Promise<BackendStatus>;
   subscribeStatus?(listener: (status: BackendStatus) => void): () => void;
-  rebuild?(): Promise<void>;
+  rebuild?(): Promise<BackendRebuildResult>;
   search(request: SearchRequest): Promise<SearchExecution>;
   dispose(): Promise<void>;
 }

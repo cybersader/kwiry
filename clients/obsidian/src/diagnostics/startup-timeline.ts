@@ -21,6 +21,7 @@ export interface StartupAggregateDetails {
   readonly activationEpoch: number;
   readonly pluginLoadCompleteMs: number | null;
   readonly layoutReadyMs: number | null;
+  readonly firstProgressMs: number | null;
   readonly firstCacheSearchableMs: number | null;
   readonly fullyCurrentMs: number | null;
   readonly cacheHit: boolean;
@@ -57,6 +58,7 @@ export class StartupTimeline {
   private activationEpoch: number;
   private pluginLoadCompleteMs: number | null = null;
   private layoutReadyMs: number | null = null;
+  private firstProgressMs: number | null = null;
   private firstCacheSearchableMs: number | null = null;
   private fullyCurrentMs: number | null = null;
   private cacheBytes: number | undefined;
@@ -97,6 +99,12 @@ export class StartupTimeline {
     }
   }
 
+  markFirstProgress(): void {
+    if (this.firstProgressMs === null && !this.finished) {
+      this.firstProgressMs = this.elapsedMs();
+    }
+  }
+
   markCacheSearchable(cacheBytes: number): void {
     if (this.finished || this.firstCacheSearchableMs !== null) return;
     this.firstCacheSearchableMs = this.elapsedMs();
@@ -122,6 +130,7 @@ export class StartupTimeline {
       activationEpoch: this.activationEpoch,
       pluginLoadCompleteMs: this.pluginLoadCompleteMs,
       layoutReadyMs: this.layoutReadyMs,
+      firstProgressMs: this.firstProgressMs,
       firstCacheSearchableMs: this.firstCacheSearchableMs,
       fullyCurrentMs: this.fullyCurrentMs,
       cacheHit: this.cacheHit,

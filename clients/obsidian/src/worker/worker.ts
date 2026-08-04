@@ -165,7 +165,7 @@ const handleInternalD5cPreviewMessage = __KWIRY_D5C_OWNER_WORKER__
 
 async function initialize(
   vaultId: string,
-  sourcePolicyHash = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97",
+  sourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
 ): Promise<InitializeResult> {
   if (state !== "cold") {
     throw fixedWorkerError("invalid_state", "lifecycle", "Worker is already initialized.", false);

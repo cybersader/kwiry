@@ -5,6 +5,7 @@ import type { ActiveVaultSource } from "../active-vault-source";
 import type { SearchRequest } from "../api";
 import {
   type BackendIdentity,
+  type BackendRebuildResult,
   type BackendStatus,
   type SearchBackend,
   type SearchExecution,
@@ -27,6 +28,9 @@ import {
   type IndexControllerStatus,
 } from "./in-plugin-index-controller";
 
+export type InPluginBackendStartupObservation = IndexControllerStartupObservation
+  | { kind: "first_progress" };
+
 export interface InPluginLexicalBackendOptions {
   instanceId: string;
   activeVaultId: string;
@@ -40,7 +44,7 @@ export interface InPluginLexicalBackendOptions {
   /// controller's catch-all `index_build_failed` reaches a field report with
   /// no indication of which subsystem broke.
   onDiagnosticFailure?: (classification: FailureClassification) => void;
-  onStartupObservation?: (observation: IndexControllerStartupObservation) => void;
+  onStartupObservation?: (observation: InPluginBackendStartupObservation) => void;
 }
 
 const CAPABILITIES = {
@@ -60,7 +64,7 @@ export class InPluginLexicalBackend implements SearchBackend {
   private readonly yieldControl: () => Promise<void>;
   private readonly cache: IndexControllerCacheOptions | null;
   private readonly onDiagnosticFailure: (classification: FailureClassification) => void;
-  private readonly onStartupObservation: (observation: IndexControllerStartupObservation) => void;
+  private readonly onStartupObservation: (observation: InPluginBackendStartupObservation) => void;
   private readonly statusListeners = new Set<(status: BackendStatus) => void>();
   private session: InPluginWorkerSession | null = null;
   private controller: InPluginIndexController | null = null;
@@ -69,6 +73,7 @@ export class InPluginLexicalBackend implements SearchBackend {
   private disposed = false;
   private recovering = false;
   private automaticRecoveries = 0;
+  private firstProgressObserved = false;
 
   constructor(options: InPluginLexicalBackendOptions) {
     this.identity = {
@@ -115,14 +120,14 @@ export class InPluginLexicalBackend implements SearchBackend {
     };
   }
 
-  async rebuild(): Promise<void> {
+  async rebuild(): Promise<BackendRebuildResult> {
     this.requireActive();
     this.automaticRecoveries = 0;
     if (!this.controller) {
       this.startController(false);
-      return;
+      return "scheduled";
     }
-    this.controller.requestRebuild();
+    return this.controller.requestRebuild();
   }
 
   async search(request: SearchRequest): Promise<SearchExecution> {
@@ -140,11 +145,11 @@ export class InPluginLexicalBackend implements SearchBackend {
     const status = this.cachedStatus;
     if (!status.searchable) {
       throw new KwiryBackendError(
-        status.issue?.code ?? "index_building",
+        "index_building",
         "in_plugin",
         "index",
-        status.issue?.recoverable ?? true,
-        status.issue?.safeMessage ?? "In-plugin lexical index is still building.",
+        true,
+        "In-plugin lexical index is still building.",
       );
     }
 
@@ -243,6 +248,14 @@ export class InPluginLexicalBackend implements SearchBackend {
         onStatus: (status) => {
           if (this.disposed || epoch !== this.epoch || controller !== this.controller) return;
           latestStatus = status;
+          if (!this.firstProgressObserved && isMeaningfulControllerProgress(status.progress)) {
+            this.firstProgressObserved = true;
+            try {
+              this.onStartupObservation({ kind: "first_progress" });
+            } catch {
+              // Startup instrumentation cannot interrupt backend publication.
+            }
+          }
           if (status.stage === "ready" && !status.dirty) {
             this.recovering = false;
             this.automaticRecoveries = 0;
@@ -339,6 +352,15 @@ export class InPluginLexicalBackend implements SearchBackend {
   }
 }
 
+function isMeaningfulControllerProgress(
+  progress: IndexControllerStatus["progress"],
+): boolean {
+  if (!progress) return false;
+  if (progress.activity === "inventory") return progress.total !== null;
+  if (progress.activity === "read") return progress.inFlight > 0;
+  return true;
+}
+
 function mapControllerStatus(
   identity: BackendIdentity,
   status: IndexControllerStatus,
@@ -360,7 +382,8 @@ function mapControllerStatus(
             safeMessage: "In-plugin lexical index is still building.",
             recoverable: true,
           };
-  const phase = status.stage === "ready" && !status.dirty && !issue
+  const phase = status.stage === "ready" && !status.dirty
+    && (!issue || isCurrentCachePersistencePending(issue.code))
     ? "ready"
     : status.stage === "ready" && !status.dirty && issue
       ? "degraded"
@@ -375,15 +398,21 @@ function mapControllerStatus(
     status.stage === "snapshot"
     || status.stage === "replay"
     || status.stage === "rebuild"
+    || status.stage === "degraded"
+    || status.stage === "failed"
   )
     ? {
         stage: status.stage,
+        activity: status.progress.activity,
         completed: status.progress.completed,
         total: status.progress.total,
+        inFlight: status.progress.inFlight,
         ...(status.progress.subphase === undefined
           ? {}
           : { subphase: status.progress.subphase }),
-        ...(status.progress.path === undefined ? {} : { path: status.progress.path }),
+        ...(status.progress.stallCategory === undefined
+          ? {}
+          : { stallCategory: status.progress.stallCategory }),
       }
     : undefined;
   return {
@@ -541,6 +570,13 @@ function controllerIssue(
         recoverable: true,
       };
   }
+}
+
+function isCurrentCachePersistencePending(code: string): boolean {
+  return code === "cache_absent"
+    || code === "cache_corrupt"
+    || code === "cache_incompatible"
+    || code === "cache_restore_unavailable";
 }
 
 function omissionMessage(quarantined: number, unreadable: number): string {

@@ -41,30 +41,38 @@ describe("formatStatus", () => {
     })).toBe("Kwiry: Index unavailable");
   });
 
-  it("reports count and percentage with distinct indexing verbs", () => {
+  it("reports count and percentage with distinct aggregate activities", () => {
     const cases = [
-      ["snapshot", "Kwiry: Indexing 42/900 (4%)"],
-      ["rebuild", "Kwiry: Rebuilding 42/900 (4%)"],
+      ["inventory", "Kwiry: Inventory 42/900 (4%)"],
+      ["read", "Kwiry: Reading 42/900 (4%) · 4 in flight"],
+      ["prepare", "Kwiry: Preparing 42/900 (4%) · 4 in flight"],
+      ["apply", "Kwiry: Applying 42/900 (4%) · 4 in flight"],
     ] as const;
 
-    for (const [stage, expected] of cases) {
+    for (const [activity, expected] of cases) {
       expect(formatStatus({
         ...base,
         phase: "building",
         searchable: false,
         dirty: true,
-        progress: { stage, completed: 42, total: 900 },
+        progress: {
+          stage: "snapshot",
+          activity,
+          completed: 42,
+          total: 900,
+          inFlight: activity === "inventory" ? 0 : 4,
+        },
       })).toBe(expected);
     }
   });
 
   it("reports reconciliation planning, verification, and application honestly", () => {
     const cases: Array<[NonNullable<BackendStatus["progress"]>, string]> = [
-      [{ stage: "replay", subphase: "planning", completed: 0, total: null },
+      [{ stage: "replay", activity: "apply", subphase: "planning", completed: 0, total: null, inFlight: 0 },
         "Kwiry: Planning reconciliation…"],
-      [{ stage: "replay", subphase: "verifying", completed: 42, total: 900 },
+      [{ stage: "replay", activity: "apply", subphase: "verifying", completed: 42, total: 900, inFlight: 0 },
         "Kwiry: Verifying 42/900 (4%)"],
-      [{ stage: "replay", subphase: "applying", completed: 2, total: 5 },
+      [{ stage: "replay", activity: "apply", subphase: "applying", completed: 2, total: 5, inFlight: 0 },
         "Kwiry: Applying changes 2/5 (40%)"],
     ];
 
@@ -86,8 +94,8 @@ describe("formatStatus", () => {
       searchable: false,
       generation: null,
       dirty: true,
-      progress: { stage: "snapshot", completed: 0, total: null },
-    })).toBe("Kwiry: Starting index…");
+      progress: { stage: "snapshot", activity: "inventory", completed: 0, total: null, inFlight: 0 },
+    })).toBe("Kwiry: Inventorying sources…");
   });
 
   it("keeps dirty searchable state distinct when no counter is available", () => {
@@ -132,7 +140,7 @@ describe("formatStatus", () => {
         searchable: false,
         generation: null,
         dirty: true,
-        progress: { stage: "snapshot", completed: 0, total: null },
+        progress: { stage: "snapshot", activity: "inventory", completed: 0, total: null, inFlight: 0 },
         issue: {
           code: "cache_absent",
           safeMessage: "No cached index; building a fresh index…",

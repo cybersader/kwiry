@@ -153,7 +153,7 @@ fn keep_entry(entry: &DirEntry) -> bool {
 }
 
 fn normalized_extension(path: &Path) -> Option<String> {
-    SourceFormat::from_path(path)?;
+    SourceFormat::from_extractable_path(path)?;
     Some(path.extension()?.to_str()?.to_ascii_lowercase())
 }
 
@@ -189,17 +189,7 @@ mod tests {
             .iter()
             .map(|file| file.relative_path.as_str())
             .collect();
-        assert_eq!(
-            paths,
-            [
-                "a.TXT",
-                "board.canvas",
-                "dashboard.base",
-                "paper.PDF",
-                "report.docx",
-                "z.md"
-            ]
-        );
+        assert_eq!(paths, ["a.TXT", "board.canvas", "dashboard.base", "z.md"]);
         assert!(result.warnings.is_empty());
         assert_eq!(result.completeness, EnumerationCompleteness::Complete);
     }

@@ -156,6 +156,7 @@ describe("DiagnosticLog", () => {
       activationEpoch: 4,
       pluginLoadCompleteMs: 10,
       layoutReadyMs: 20,
+      firstProgressMs: 30,
       firstCacheSearchableMs: 100,
       fullyCurrentMs: 320,
       cacheHit: true,
@@ -168,6 +169,7 @@ describe("DiagnosticLog", () => {
       code: "startup.lifecycle",
       details: {
         outcome: "succeeded",
+        firstProgressMs: 30,
         firstCacheSearchableMs: 100,
         fullyCurrentMs: 320,
         cacheHit: true,
@@ -186,11 +188,45 @@ describe("DiagnosticLog", () => {
       activationEpoch: 1,
       pluginLoadCompleteMs: null,
       layoutReadyMs: null,
+      firstProgressMs: null,
       firstCacheSearchableMs: null,
       fullyCurrentMs: null,
       cacheHit: false,
       pathHash: diagnosticHash(`sha256:${"b".repeat(64)}`),
     })).toThrow("Invalid startup diagnostic details");
+  });
+
+  it("records only closed aggregate progress and stall details", async () => {
+    const log = new DiagnosticLog(4, clock(0), clock(0, 1));
+    await capture(log, "warn", "index.lifecycle", {
+      phase: "building",
+      stage: "snapshot",
+      activity: "read",
+      completed: 32,
+      total: 100,
+      inFlight: 4,
+      stallCategory: "source_read_timeout",
+    });
+
+    const serialized = JSON.stringify(log.snapshot());
+    expect(log.snapshot().entries[0]?.details).toMatchObject({
+      activity: "read",
+      completed: 32,
+      total: 100,
+      inFlight: 4,
+      stallCategory: "source_read_timeout",
+    });
+    expect(serialized).not.toContain("Clients/Private/Target.md");
+    await expect(log.capture("warn", "index.lifecycle", {
+      // @ts-expect-error Source paths are not diagnostic progress fields.
+      path: "Clients/Private/Target.md",
+    }, () => undefined)).rejects.toThrow("Invalid diagnostic details");
+    await expect(log.capture("warn", "index.lifecycle", {
+      activity: "daemon",
+    } as never, () => undefined)).rejects.toThrow("Invalid diagnostic details");
+    await expect(log.capture("warn", "index.lifecycle", {
+      stallCategory: "timeout",
+    } as never, () => undefined)).rejects.toThrow("Invalid diagnostic details");
   });
 
   it("renders both a pasteable summary and the structured JSON records", async () => {

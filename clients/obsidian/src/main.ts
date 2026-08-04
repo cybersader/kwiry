@@ -18,8 +18,10 @@ import {
   KwiryBackendError,
 } from "./backend";
 import { DaemonBackend } from "./backends/daemon-backend";
-import { InPluginLexicalBackend } from "./backends/in-plugin-lexical-backend";
-import type { IndexControllerStartupObservation } from "./backends/in-plugin-index-controller";
+import {
+  InPluginLexicalBackend,
+  type InPluginBackendStartupObservation,
+} from "./backends/in-plugin-lexical-backend";
 import { createInPluginCacheOptions } from "./cache/build-cache-options";
 import { readDaemonToken } from "./credentials";
 import { PluginDiagnostics } from "./diagnostics/plugin-diagnostics";
@@ -361,11 +363,13 @@ export default class KwiryPlugin extends Plugin {
           new Notice("Kwiry: manual rebuild is available only for In-plugin · Lexical.");
           return;
         }
-        await backend.rebuild();
-        event.set({ outcome: "scheduled" });
+        const result = await backend.rebuild();
+        event.set({ outcome: result });
         if (this.isCurrent(pluginEpoch, activationEpoch)
           && this.activeBackendIdentity?.instanceId === backend.identity.instanceId) {
-          new Notice("Kwiry: in-plugin lexical rebuild started.");
+          new Notice(result === "already_building"
+            ? "Kwiry: the in-plugin lexical index is already building."
+            : "Kwiry: in-plugin lexical rebuild started.");
         }
       } catch (error) {
         event.setLevel("error");
@@ -434,6 +438,10 @@ export default class KwiryPlugin extends Plugin {
     const quarantinedSources = status.quarantinedSources ?? 0;
     const unreadableSources = status.unreadableSources ?? 0;
     const quarantineFields = status.quarantineValidatorFields ?? [];
+    const progress = status.progress;
+    if (isMeaningfulBackendProgress(progress) && this.isCurrent(pluginEpoch, activationEpoch)) {
+      this.startupTimeline?.markFirstProgress();
+    }
     if (status.identity.profile === "daemon" && this.isCurrent(pluginEpoch, activationEpoch)) {
       if (status.phase === "ready" && status.searchable && !status.dirty
         && quarantinedSources === 0 && unreadableSources === 0) {
@@ -459,6 +467,10 @@ export default class KwiryPlugin extends Plugin {
       unreadableSources,
       quarantineFields.join(","),
       issueCode,
+      progress?.stage ?? "none",
+      progress?.activity ?? "none",
+      progress?.stallCategory ?? "none",
+      diagnosticProgressMilestone(progress),
     ].join(":");
     if (signature === this.lastDiagnosticStatus) return;
     this.lastDiagnosticStatus = signature;
@@ -479,6 +491,18 @@ export default class KwiryPlugin extends Plugin {
       chunks: status.chunks,
       sourcesSkipped: quarantinedSources,
       sourcesFailed: unreadableSources,
+      ...(progress === undefined
+        ? {}
+        : {
+            stage: progress.stage,
+            activity: progress.activity,
+            completed: progress.completed,
+            total: progress.total,
+            inFlight: progress.inFlight,
+            ...(progress.stallCategory === undefined
+              ? {}
+              : { stallCategory: progress.stallCategory }),
+          }),
       ...(status.issue ? { recoverable: status.issue.recoverable } : {}),
     }, () => undefined);
     for (const field of quarantineFields) {
@@ -519,11 +543,15 @@ export default class KwiryPlugin extends Plugin {
   }
 
   private observeInPluginStartup(
-    observation: IndexControllerStartupObservation,
+    observation: InPluginBackendStartupObservation,
     pluginEpoch: number,
     activationEpoch: number,
   ): void {
     if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
+    if (observation.kind === "first_progress") {
+      this.startupTimeline?.markFirstProgress();
+      return;
+    }
     if (observation.kind === "cache_searchable") {
       this.startupTimeline?.markCacheSearchable(observation.cacheBytes);
       return;
@@ -543,6 +571,21 @@ export default class KwiryPlugin extends Plugin {
   private isCurrent(pluginEpoch: number, activationEpoch: number): boolean {
     return pluginEpoch === this.pluginEpoch && activationEpoch === this.activationEpoch;
   }
+}
+
+function isMeaningfulBackendProgress(progress: BackendStatus["progress"]): boolean {
+  if (!progress) return false;
+  if (progress.activity === "inventory") return progress.total !== null;
+  if (progress.activity === "read") return progress.inFlight > 0;
+  return true;
+}
+
+function diagnosticProgressMilestone(progress: BackendStatus["progress"]): string {
+  if (progress === undefined) return "none";
+  if (progress.total === null) return "unknown";
+  if (progress.total === 0) return "empty";
+  if (progress.total <= 20) return `${progress.completed}`;
+  return `${Math.min(20, Math.floor((progress.completed * 20) / progress.total))}`;
 }
 
 function optionalString(value: string): string | null {
