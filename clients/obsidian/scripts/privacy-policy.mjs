@@ -14,8 +14,8 @@ const SOURCE_TARGETS = Object.freeze([
   Object.freeze({ path: "src", kind: "directory" }),
   Object.freeze({ path: "test", kind: "directory" }),
   Object.freeze({ path: "esbuild.config.mjs", kind: "file" }),
-  Object.freeze({ path: "main.js", kind: "file" }),
 ]);
+const GENERATED_SOURCE_TARGET = "main.js";
 
 const CONTENT_RULES = Object.freeze([
   Object.freeze({
@@ -161,7 +161,9 @@ export async function assertWorkerAuthorityGraph(sourceRoot, metafile) {
   return { sourceRoot, files: files.map((path) => portableRelative(sourceRoot, path)) };
 }
 
-export async function scanSourcePrivacy(sourceRoot = defaultSourceRoot) {
+export async function scanSourcePrivacy(sourceRoot = defaultSourceRoot, {
+  requireMainArtifact = true,
+} = {}) {
   sourceRoot = resolve(sourceRoot);
   const files = [];
   for (const target of SOURCE_TARGETS) {
@@ -171,13 +173,32 @@ export async function scanSourcePrivacy(sourceRoot = defaultSourceRoot) {
     else files.push(targetPath);
   }
 
+  const mainPath = resolve(sourceRoot, GENERATED_SOURCE_TARGET);
+  let mainAvailable = false;
+  try {
+    const metadata = await lstat(mainPath);
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`privacy scan target must not be a symbolic link: ${mainPath}`);
+    }
+    if (!metadata.isFile()) {
+      throw new Error(`privacy scan target must be a file: ${mainPath}`);
+    }
+    mainAvailable = true;
+    files.push(mainPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    if (requireMainArtifact) {
+      throw new Error(`privacy scan target is missing: ${mainPath}`);
+    }
+  }
+
   const findings = await scanFiles(sourceRoot, files, { allowSyntheticFixtures: true });
   const workerRoot = resolve(sourceRoot, "src/worker");
   await requirePath(workerRoot, "directory");
   findings.push(...await scanFiles(sourceRoot, await listFiles(workerRoot), {
     rules: [WORKER_AUTHORITY_RULE],
   }));
-  findings.push(...await scanEmbeddedWorkerPrivacy(sourceRoot, resolve(sourceRoot, "main.js")));
+  if (mainAvailable) findings.push(...await scanEmbeddedWorkerPrivacy(sourceRoot, mainPath));
   return sortFindings(findings);
 }
 
@@ -197,10 +218,16 @@ export async function scanPackagePrivacy(packageRoot) {
   return sortFindings(findings);
 }
 
-export async function assertSourcePrivacy(sourceRoot = defaultSourceRoot) {
-  const findings = await scanSourcePrivacy(sourceRoot);
+export async function assertSourcePrivacy(sourceRoot = defaultSourceRoot, options) {
+  const findings = await scanSourcePrivacy(sourceRoot, options);
   if (findings.length !== 0) throw new Error(formatPrivacyFindings("source", findings));
-  return { sourceRoot: resolve(sourceRoot), files: SOURCE_TARGETS.map(({ path }) => path) };
+  return {
+    sourceRoot: resolve(sourceRoot),
+    files: [
+      ...SOURCE_TARGETS.map(({ path }) => path),
+      ...(options?.requireMainArtifact === false ? [] : [GENERATED_SOURCE_TARGET]),
+    ],
+  };
 }
 
 export async function assertPackagePrivacy(packageRoot) {

@@ -100,10 +100,23 @@ afterEach(async () => {
 });
 
 describe("privacy policy", () => {
-  it("accepts the repository only through exact synthetic-fixture values", async () => {
-    await expect(assertSourcePrivacy(repositoryRoot)).resolves.toMatchObject({
+  it("accepts a clean checkout through exact synthetic-fixture values before build", async () => {
+    await expect(assertSourcePrivacy(repositoryRoot, {
+      requireMainArtifact: false,
+    })).resolves.toMatchObject({
       sourceRoot: repositoryRoot,
     });
+  });
+
+  it("requires the generated main artifact by default", async () => {
+    const sourceRoot = await createSourceFixture();
+    await rm(resolve(sourceRoot, "main.js"));
+
+    await expect(assertSourcePrivacy(sourceRoot))
+      .rejects.toThrow("privacy scan target is missing");
+    await expect(assertSourcePrivacy(sourceRoot, {
+      requireMainArtifact: false,
+    })).resolves.toMatchObject({ sourceRoot });
   });
 
   it("makes a forbidden first-party source match fail the command", async () => {
