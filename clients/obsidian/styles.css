@@ -91,19 +91,83 @@
   color: inherit;
 }
 
-/* Indexing progress under the search input. Deliberately quiet: it is
-   ambient reassurance during a long build, not a result. */
-.kwiry-progress-line {
-  display: none;
-  padding: 2px 12px 6px;
+/* Stable two-line rail: query state is live; aggregate indexing is ambient. */
+.kwiry-status-rail {
+  display: grid;
+  grid-template-rows: minmax(1.35em, auto) minmax(1.35em, auto);
+  min-height: calc(2.7em + 8px);
+  gap: 2px;
+  box-sizing: border-box;
+  padding: 4px var(--size-4-3);
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: color-mix(in srgb, var(--background-secondary) 48%, transparent);
   font-size: var(--font-ui-smaller);
-  color: var(--text-faint);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.kwiry-progress-line.is-active {
-  display: block;
+.kwiry-query-status,
+.kwiry-index-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.35;
+}
+
+.kwiry-query-status {
+  position: relative;
+  padding-inline-start: 16px;
+  color: var(--text-muted);
+  font-weight: var(--font-medium);
+}
+
+.kwiry-query-status::before {
+  position: absolute;
+  inset-inline-start: 1px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid transparent;
+  border-radius: 50%;
+  content: "";
+  opacity: 0;
+  transform: translateY(-50%);
+}
+
+.kwiry-query-status.is-searching.is-animation-ready::before {
+  border-color: var(--text-faint);
+  border-top-color: var(--interactive-accent);
+  opacity: 1;
+  animation: kwiry-status-spin 720ms linear infinite;
+}
+
+.kwiry-query-status.is-error {
+  color: var(--text-error);
+}
+
+.kwiry-index-status {
+  padding-inline-start: 16px;
+  color: var(--text-faint);
+  visibility: hidden;
+}
+
+.kwiry-index-status.has-status {
+  visibility: visible;
+}
+
+.kwiry-index-status.is-attention {
+  color: var(--text-muted);
+}
+
+@keyframes kwiry-status-spin {
+  to {
+    transform: translateY(-50%) rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kwiry-query-status.is-searching.is-animation-ready::before {
+    animation: none;
+  }
 }

@@ -27,6 +27,11 @@ export type FailureSubsystem =
 
 export type FailureReason =
   | "worker_failed"
+  | "explicit_query_unsupported"
+  | "invalid_query"
+  | "invalid_query_plan"
+  | "query_execution_failed"
+  | "index_building"
   | "index_limit_exceeded"
   | "vault_read_failed"
   | "unsafe_path"
@@ -93,10 +98,11 @@ const KNOWN_ERROR_NAMES = new Set<FailureErrorName>([
 export type WorkerFailureCode =
   | "protocol_mismatch" | "invalid_request" | "invalid_state" | "artifact_mismatch"
   | "rust_init_failed" | "sqlite_init_failed" | "fts5_unavailable" | "source_rejected"
-  | "query_rejected" | "index_building" | "index_limit_exceeded" | "integrity_failed"
-  | "cache_identity_mismatch" | "cache_version_mismatch" | "cache_digest_mismatch"
-  | "cache_image_invalid" | "cache_blob_too_large" | "worker_crashed" | "timeout"
-  | "disposed" | "internal_error";
+  | "explicit_query_unsupported" | "invalid_query" | "invalid_query_plan"
+  | "query_execution_failed" | "index_building" | "index_limit_exceeded"
+  | "integrity_failed" | "cache_identity_mismatch" | "cache_version_mismatch"
+  | "cache_digest_mismatch" | "cache_image_invalid" | "cache_blob_too_large"
+  | "worker_crashed" | "timeout" | "disposed" | "internal_error";
 
 /// The Worker's own stage vocabulary. `source_rejected` alone does not say
 /// whether portable Rust or the SQLite index refused the batch; the stage is
@@ -111,7 +117,8 @@ const WORKER_ERROR_STAGES = new Set<WorkerFailureStage>([
 const WORKER_ERROR_CODES = new Set<WorkerFailureCode>([
   "protocol_mismatch", "invalid_request", "invalid_state", "artifact_mismatch",
   "rust_init_failed", "sqlite_init_failed", "fts5_unavailable", "source_rejected",
-  "query_rejected", "index_building", "index_limit_exceeded", "integrity_failed",
+  "explicit_query_unsupported", "invalid_query", "invalid_query_plan",
+  "query_execution_failed", "index_building", "index_limit_exceeded", "integrity_failed",
   "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch",
   "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
   "disposed", "internal_error",
@@ -123,6 +130,23 @@ function workerSubsystem(code: WorkerFailureCode): FailureSubsystem {
   if (code.startsWith("cache_")) return "cache_store";
   if (code === "worker_crashed" || code === "timeout") return "rpc";
   return "worker";
+}
+
+function workerReason(code: WorkerFailureCode, fallback: FailureReason): FailureReason {
+  switch (code) {
+    case "explicit_query_unsupported":
+    case "invalid_query":
+    case "invalid_query_plan":
+    case "query_execution_failed":
+    case "index_building":
+    case "index_limit_exceeded":
+      return code;
+    case "worker_crashed":
+    case "timeout":
+      return "worker_failed";
+    default:
+      return fallback;
+  }
 }
 
 export interface FailureClassification {
@@ -257,7 +281,7 @@ export function classifyFailure(error: unknown): FailureClassification {
 
   return {
     subsystem: workerCode === null ? subsystem : workerSubsystem(workerCode),
-    reason,
+    reason: workerCode === null ? reason : workerReason(workerCode, reason),
     errorName,
     ...(workerCode === null ? {} : { workerCode }),
     ...(workerStage === null ? {} : { workerStage }),

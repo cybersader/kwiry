@@ -173,6 +173,11 @@ export class InPluginLexicalBackend implements SearchBackend {
         requestedMode: "lexical",
         effectiveMode: "lexical",
         generation: result.generation,
+        candidateWindow: {
+          state: result.candidate_window.state,
+          candidateCount: result.candidate_window.candidate_count,
+          candidateLimit: result.candidate_window.candidate_limit,
+        },
         response: {
           hits: result.hits.map((hit) => ({
             ...hit,
@@ -663,28 +668,54 @@ function isUncertainWorkerFailure(error: unknown): boolean {
 function workerBackendError(error: unknown): KwiryBackendError {
   if (error instanceof KwiryBackendError) return error;
   if (error instanceof WorkerRpcError) {
-    const code = error.code === "query_rejected"
-      ? "invalid_query"
-      : error.code === "index_building"
-        ? "index_building"
-        : "worker_failed";
-    return new KwiryBackendError(
-      code,
-      "in_plugin",
-      error.stage === "query" ? "query" : "lifecycle",
-      error.retryable,
-      error.code === "query_rejected"
-        ? "The query is unavailable in the in-plugin backend."
-        : error.code === "index_building"
-          ? "In-plugin lexical index is still building."
-          : "In-plugin search Worker failed.",
-    );
+    switch (error.code) {
+      case "explicit_query_unsupported":
+        return new KwiryBackendError(
+          error.code,
+          "in_plugin",
+          "query",
+          false,
+          "This explicit query is unavailable in the in-plugin backend.",
+        );
+      case "invalid_query":
+        return new KwiryBackendError(
+          error.code,
+          "in_plugin",
+          "query",
+          false,
+          "The query is invalid or exceeds the supported limits.",
+        );
+      case "invalid_query_plan":
+        return new KwiryBackendError(
+          error.code,
+          "in_plugin",
+          "protocol",
+          false,
+          "The in-plugin backend produced an invalid query plan.",
+        );
+      case "query_execution_failed":
+        return new KwiryBackendError(
+          error.code,
+          "in_plugin",
+          "query",
+          error.retryable,
+          "In-plugin lexical search could not complete.",
+        );
+      case "index_building":
+        return new KwiryBackendError(
+          error.code,
+          "in_plugin",
+          "index",
+          error.retryable,
+          "In-plugin lexical index is still building.",
+        );
+    }
   }
   return new KwiryBackendError(
     "worker_failed",
     "in_plugin",
     "lifecycle",
-    true,
+    error instanceof WorkerRpcError ? error.retryable : true,
     "In-plugin search Worker failed.",
   );
 }

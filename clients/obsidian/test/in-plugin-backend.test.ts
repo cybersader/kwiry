@@ -334,18 +334,31 @@ function fakeSession(options: {
       : checkpointExportResult(generation, cursor)),
     restoreInitialBuildCheckpoint: vi.fn(),
     planInitialBuildCheckpointReconciliation: vi.fn(),
-    search: vi.fn(options.search ?? (async () => ({
-      generation: "generation-1",
-      hits: [{
-        chunk_id: "chunk-1",
-        vault_id: "active-vault",
-        path: "note.md",
-        heading_path: ["Heading"],
-        score: 1,
-        excerpt: "",
-        frontmatter: {},
-      }],
-    }))),
+    search: vi.fn(async () => {
+      const result = await (options.search ?? (async () => ({
+        generation: "generation-1",
+        hits: [{
+          chunk_id: "chunk-1",
+          vault_id: "active-vault",
+          path: "note.md",
+          heading_path: ["Heading"],
+          score: 1,
+          excerpt: "",
+          frontmatter: {},
+        }],
+      })))();
+      if (typeof result !== "object" || result === null || "candidate_window" in result) {
+        return result;
+      }
+      return {
+        ...result,
+        candidate_window: {
+          state: "unknown",
+          candidate_count: 0,
+          candidate_limit: 512,
+        },
+      };
+    }),
     dispose: vi.fn(async () => ({ closed: true as const })),
     forceDispose: vi.fn(),
   } as unknown as InPluginWorkerSession;
@@ -985,6 +998,11 @@ describe("InPluginLexicalBackend", () => {
           excerpt: "before match after",
           frontmatter: {},
         }],
+        candidate_window: {
+          state: "more_available",
+          candidate_count: 11,
+          candidate_limit: 512,
+        },
       }),
     })]);
     await inPlugin.initialize();
@@ -997,6 +1015,11 @@ describe("InPluginLexicalBackend", () => {
       requestedMode: "lexical",
       effectiveMode: "lexical",
       generation: "generation-1",
+      candidateWindow: {
+        state: "more_available",
+        candidateCount: 11,
+        candidateLimit: 512,
+      },
       response: {
         hits: [{
           excerpt: [
@@ -1351,6 +1374,75 @@ describe("InPluginLexicalBackend", () => {
         },
       });
     });
+  });
+
+  it.each([
+    [
+      "explicit_query_unsupported",
+      "query",
+      false,
+      "This explicit query is unavailable in the in-plugin backend.",
+    ],
+    [
+      "invalid_query",
+      "query",
+      false,
+      "The query is invalid or exceeds the supported limits.",
+    ],
+    [
+      "invalid_query_plan",
+      "protocol",
+      false,
+      "The in-plugin backend produced an invalid query plan.",
+    ],
+    [
+      "query_execution_failed",
+      "query",
+      true,
+      "In-plugin lexical search could not complete.",
+    ],
+  ] as const)(
+    "preserves the structured %s Worker query failure",
+    async (code, stage, retryable, safeMessage) => {
+      const source = new FakeSource();
+      const session = fakeSession({
+        search: async () => {
+          throw new WorkerRpcError({
+            code,
+            stage: code === "invalid_query_plan" ? "rust" : "query",
+            message: "private query, SQL, or Rust detail",
+            retryable,
+          });
+        },
+      });
+      const inPlugin = backend(source, [session]);
+      await inPlugin.initialize();
+      await vi.waitFor(async () => {
+        await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
+      });
+
+      const rejected = await inPlugin.search({ q: "private query", mode: "lexical" })
+        .catch((error: unknown) => error);
+      expect(rejected).toMatchObject({ code, stage, retryable, safeMessage });
+      expect(JSON.stringify(rejected)).not.toMatch(/private query|SQL|Rust detail/u);
+    },
+  );
+
+  it("rejects an unavailable mode without entering the Worker query lane", async () => {
+    const source = new FakeSource();
+    const session = fakeSession();
+    const inPlugin = backend(source, [session]);
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
+    });
+
+    await expect(inPlugin.search({ q: "query", mode: "semantic" })).rejects.toMatchObject({
+      code: "mode_unavailable",
+      stage: "query",
+      retryable: false,
+    });
+    expect(session.search).not.toHaveBeenCalled();
   });
 
   it("terminates an uncertain Worker before starting one fresh recovery build", async () => {

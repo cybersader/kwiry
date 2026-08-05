@@ -177,7 +177,15 @@ function resultFor(message: WorkerRequest): WorkerResult {
         source_policy_hash: SOURCE_POLICY_HASH,
       };
     case "search":
-      return { generation: "g1", hits: [] };
+      return {
+        generation: "g1",
+        hits: [],
+        candidate_window: {
+          state: "unknown",
+          candidate_count: 0,
+          candidate_limit: 512,
+        },
+      };
     case "status":
       return {
         phase: "ready",

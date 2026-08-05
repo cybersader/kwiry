@@ -17,6 +17,11 @@ import { fileURLToPath } from "node:url";
 import builtins from "builtin-modules";
 import esbuild from "esbuild";
 
+import {
+  assertWorkerAuthorityGraph,
+  embedWorkerPrivacyBoundary,
+} from "./scripts/privacy-policy.mjs";
+
 const root = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const cliMode = process.argv[2];
@@ -399,6 +404,7 @@ function ownerWorkerCapabilityPlugin(enabled) {
 }
 
 function workerSourcePlugin(workerSource) {
+  const embeddedWorkerSource = embedWorkerPrivacyBoundary(workerSource);
   return {
     name: "kwiry-worker-source",
     setup(build) {
@@ -407,7 +413,7 @@ function workerSourcePlugin(workerSource) {
         namespace: "kwiry-worker-source",
       }));
       build.onLoad({ filter: /.*/, namespace: "kwiry-worker-source" }, () => ({
-        contents: `export default ${JSON.stringify(workerSource)};`,
+        contents: `export default ${JSON.stringify(embeddedWorkerSource)};`,
         loader: "js",
       }));
     },
@@ -445,10 +451,11 @@ function privateToolsPlugin(enabled, workerSource) {
           throw new Error("private playground Worker source is unavailable");
         }
         const corpus = JSON.parse(readFileSync(d5cFixtureCorpus, "utf8"));
+        const embeddedWorkerSource = embedWorkerPrivacyBoundary(workerSource);
         return {
           contents: [
             `import { createD5cPlaygroundTools } from ${JSON.stringify(resolve(root, "src/internal/d5c-playground/index.ts"))};`,
-            `const workerSource=${JSON.stringify(workerSource)};`,
+            `const workerSource=${JSON.stringify(embeddedWorkerSource)};`,
             `const fixtureCorpus=${JSON.stringify(corpus)};`,
             "export function createPrivateTools(plugin,stored){",
             "return createD5cPlaygroundTools(plugin,stored,{workerSource,fixtureCorpus});",
@@ -534,6 +541,7 @@ export async function buildPlugin({
       throw new Error(`Worker build emitted ${workerBuild.outputFiles.length} files`);
     }
     assertWorkerGraph(workerBuild.metafile);
+    await assertWorkerAuthorityGraph(root, workerBuild.metafile);
     if (internalD5cOwnerHost) assertD5cOwnerWorkerGraph(workerBuild.metafile);
     workerSource = workerBuild.outputFiles[0].text;
     if (/\bimport\s*\(|\bimportScripts\s*\(/u.test(workerSource)) {
@@ -574,6 +582,7 @@ export async function buildPlugin({
         throw new Error(`D5C playground Worker build emitted ${playgroundBuild.outputFiles.length} files`);
       }
       assertD5cPlaygroundGraph(playgroundBuild.metafile);
+      await assertWorkerAuthorityGraph(root, playgroundBuild.metafile);
       playgroundSource = playgroundBuild.outputFiles[0].text;
       if (/\bimport\s*\(|\bimportScripts\s*\(/u.test(playgroundSource)) {
         throw new Error("D5C playground Worker bundle contains a runtime import");

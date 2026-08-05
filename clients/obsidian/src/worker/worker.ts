@@ -1071,12 +1071,17 @@ function search(query: string, limit: number): SearchResult {
     const prepared = prepareQueryWithRust(query);
     const evidence = active.index.observeQuery(prepared.probes, trace);
     const finalized = finalizeQueryWithRust(query, evidence);
-    const hits = active.index.search(finalized.execution_plan, limit, trace);
+    const collected = active.index.searchWithCandidateWindow(
+      finalized.execution_plan,
+      limit,
+      trace,
+    );
     active.index.finishInternalLexicalTrace(trace);
     traceFinished = true;
     return {
       generation: active.id,
-      hits,
+      hits: collected.hits,
+      candidate_window: collected.candidate_window,
     };
   } catch (error) {
     if (!traceFinished) {
@@ -1086,20 +1091,43 @@ function search(query: string, limit: number): SearchResult {
         // A trace is diagnostic state only and must never replace the query failure.
       }
     }
-    if (error instanceof RustAdapterError) {
-      throw fixedWorkerError(
-        "query_rejected",
+    if (error instanceof RustAdapterError) throw rustQueryError(error);
+    throw fixedWorkerError(
+      "query_execution_failed",
+      "query",
+      "In-plugin lexical search could not complete.",
+      true,
+    );
+  }
+}
+
+function rustQueryError(error: RustAdapterError): WorkerError {
+  switch (error.code) {
+    case "explicit_query_unsupported":
+      return fixedWorkerError(
+        "explicit_query_unsupported",
         "query",
-        "The query is unavailable in the in-plugin backend.",
+        "This explicit query is unavailable in the in-plugin backend.",
         false,
       );
-    }
-    throw fixedWorkerError(
-      "query_rejected",
-      "query",
-      "In-plugin lexical search failed.",
-      false,
-    );
+    case "invalid_query":
+      return fixedWorkerError(
+        "invalid_query",
+        "query",
+        "The query is invalid or exceeds the supported limits.",
+        false,
+      );
+    case "invalid_query_plan":
+    case "invalid_request":
+    case "abi_mismatch":
+    case "invalid_response":
+    default:
+      return fixedWorkerError(
+        "invalid_query_plan",
+        "rust",
+        "Portable Rust returned invalid query data.",
+        false,
+      );
   }
 }
 

@@ -58,10 +58,13 @@ jobs:
             printf 'Publication tag does not match package versions.\n' >&2
             exit 1
           fi
-      - name: Prepare release assets and checksums
+      - name: Prepare exact release assets and checksums
         run: |
+          set -euo pipefail
           npm run --silent evidence > gate5.evidence.json
-          sha256sum LICENSE THIRD_PARTY_NOTICES.md gate5.evidence.json main.js manifest.json styles.css > SHA256SUMS
+          npm run validate:evidence -- gate5.evidence.json
+          npm run validate:privacy
+          npm run package:release -- .tmp/release-assets gate5.evidence.json
       - name: Create explicitly authorized release
         run: |
           set -euo pipefail
@@ -78,7 +81,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "kwiry-search $RELEASE_TAG" \
             --notes-file /tmp/release-notes.md \
-            main.js manifest.json styles.css LICENSE THIRD_PARTY_NOTICES.md SHA256SUMS gate5.evidence.json
+            .tmp/release-assets/*
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}

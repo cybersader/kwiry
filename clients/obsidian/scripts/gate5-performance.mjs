@@ -28,7 +28,7 @@ const scriptRoot = dirname(fileURLToPath(import.meta.url));
 /** Occurs in the beacon line of every generated note, so it fills a result page. */
 const HYDRATION_QUERY = "synthetic";
 const HYDRATION_SAMPLES = 20;
-const WORKER_PROTOCOL_VERSION = 8;
+const WORKER_PROTOCOL_VERSION = 10;
 const PERFORMANCE_VAULT_ID = "gate5-performance-vault";
 const CACHE_IDENTITY = "c".repeat(64);
 const EXPORT_BLOB_LIMIT = 384 * 1024 * 1024;
@@ -241,10 +241,20 @@ async function main() {
       added_rss_mib: round(addedRssMiB),
     };
     const evidence = {
-      schema_version: 1,
+      schema_version: 2,
       kind: "kwiry_gate5_generated_performance",
       verdict: "EVIDENCE_CAPTURE_COMPLETE_OWNER_DECISION_REQUIRED",
       host: "node_worker_threads",
+      provenance: {
+        runtime: {
+          node_version: process.version,
+          platform: process.platform,
+          architecture: process.arch,
+        },
+        measurement_runs: 1,
+        baseline_runs: 0,
+        regression_assessed: false,
+      },
       artifact: {
         worker: identity(workerSource),
         rust_wasm: build.identities.rust,

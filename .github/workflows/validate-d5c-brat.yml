@@ -118,30 +118,7 @@ jobs:
           test "$(find "$package/plugin" -maxdepth 1 -type f | wc -l)" -eq 3
           test "$(find "$package/support" -maxdepth 1 -type f | wc -l)" -eq 7
           ! find "$package/plugin" -type f \( -name '*.wasm' -o -name '*.map' -o -name '*.db' -o -name '*worker*.js' \) | grep -q .
-          PACKAGE_ROOT="$package" python3 - <<'PY'
-          import os
-          import pathlib
-          import re
-
-          root = pathlib.Path(os.environ["PACKAGE_ROOT"])
-          patterns = {
-              "private_home": re.compile(r"/home/(?!web_user(?:[/\"']|$))[A-Za-z0-9._-]+"),
-              "private_unix": re.compile(r"/Users/|/mnt/[a-z]/"),
-              "private_windows": re.compile(r"[A-Z]:\\\\Users\\\\"),
-              "literal_bearer": re.compile(r"Bearer\\s+[A-Za-z0-9._~-]{24,}"),
-              "secret_prefix": re.compile(r"(?:sk|ghp|github_pat)_[A-Za-z0-9_-]{16,}"),
-              "ai_attribution": re.compile(
-                  r"Co-Authored-By:.*(?:Claude|Anthropic|GPT|OpenAI)", re.IGNORECASE
-              ),
-          }
-          for path in root.rglob("*"):
-              if not path.is_file():
-                  continue
-              text = path.read_bytes().decode("utf-8", errors="ignore")
-              for label, pattern in patterns.items():
-                  if pattern.search(text):
-                      raise SystemExit(f"{label} found in candidate file {path.name}")
-          PY
+          npm run validate:privacy -- package "$package"
       - name: Upload immutable candidate for separate publication authorization
         if: matrix.node == 22
         uses: actions/upload-artifact@v4

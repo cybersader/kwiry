@@ -626,6 +626,10 @@ function diagnosticErrorCode(code: unknown): DiagnosticTextValue {
     case "disposed":
     case "daemon_unreachable":
     case "mode_unavailable":
+    case "explicit_query_unsupported":
+    case "invalid_query":
+    case "invalid_query_plan":
+    case "query_execution_failed":
     case "worker_failed":
     case "worker_recovering":
     case "vault_read_failed":

@@ -87,11 +87,29 @@ export interface BackendSearchResponse {
   next_cursor: string | null;
 }
 
+export type CandidateWindowState =
+  | "exhausted"
+  | "more_available"
+  | "candidate_limit_reached"
+  | "unknown";
+
+/**
+ * Facts about the bounded candidate collection that produced this execution.
+ * `candidateCount` is inspected work, never a corpus/result total. Null counts
+ * mean the backend's frozen response does not expose candidate-window evidence.
+ */
+export interface CandidateWindowFacts {
+  state: CandidateWindowState;
+  candidateCount: number | null;
+  candidateLimit: number | null;
+}
+
 export interface SearchExecution {
   backend: BackendIdentity;
   requestedMode: SearchMode;
   effectiveMode: SearchMode;
   generation: string | null;
+  candidateWindow: CandidateWindowFacts;
   response: BackendSearchResponse;
 }
 

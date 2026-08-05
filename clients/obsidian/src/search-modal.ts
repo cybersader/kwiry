@@ -8,7 +8,7 @@ import { Notice, Platform, SuggestModal, TFile } from "obsidian";
 import type { SearchMode } from "./api";
 import type { BackendSearchHit, BackendStatus, SearchBackend } from "./backend";
 import type KwiryPlugin from "./main";
-import { emptyStateMessage } from "./empty-state";
+import { shouldNoticeSearchError } from "./empty-state";
 import {
   captureLinkInsertionTarget,
   deepestMatchedHeading,
@@ -17,8 +17,13 @@ import {
   type LinkInsertionTarget,
 } from "./link-insertion";
 import { validateOpenResult, type OpenTarget } from "./open-result";
-import { progressLine } from "./progress-line";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
+import {
+  presentBackgroundIndex,
+  presentQueryStatus,
+  type QueryStatusFacts,
+  type QueryStatusPresentation,
+} from "./search-status-presenter";
 import {
   SEARCH_SHORTCUT_BINDINGS,
   searchShortcutAction,
@@ -33,14 +38,23 @@ interface ModalResult {
 
 type OpenPlacement = "current" | "tab" | "split";
 
+export const SEARCH_STATUS_ANIMATION_DELAY_MS = 180;
+
 export class KwirySearchModal extends SuggestModal<ModalResult> {
   private readonly session: SearchSessionController;
   private mode: SearchMode;
   private readonly modeButtons = new Map<SearchMode, HTMLButtonElement>();
   private lastErrorCode: string | null = null;
-  private progressEl: HTMLElement | null = null;
+  private queryStatusEl: HTMLElement | null = null;
+  private indexStatusEl: HTMLElement | null = null;
   private progressTimer: number | null = null;
+  private queryAnimationTimer: number | null = null;
   private progressFailureRecorded = false;
+  private progressEpoch = 0;
+  private requestEpoch = 0;
+  private activeRequestEpoch = 0;
+  private lastQueryStatusText = "";
+  private lastIndexStatusText = "";
   private readonly shortcutPlatform: SearchShortcutPlatform;
   private readonly linkInsertionTarget: LinkInsertionTarget | null;
 
@@ -62,9 +76,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       this.mode,
     );
     this.setPlaceholder("Search your notes with kwiry…");
+    this.emptyStateText = "";
     this.createProfileLabel(status);
     this.createModeControl();
-    this.createProgressLine(status);
+    this.createStatusRail(status);
     this.setInstructions(
       SEARCH_SHORTCUT_BINDINGS.map(({ command, purpose }) => ({ command, purpose })),
     );
@@ -86,6 +101,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   async getSuggestions(query: string): Promise<ModalResult[]> {
+    const epoch = ++this.requestEpoch;
+    this.beginQueryStatus(epoch, query.trim().length > 0
+      ? { phase: "searching" }
+      : { phase: "prompt" });
     const filters = this.backend.identity.profile === "daemon"
       && this.plugin.settings.vaultId.trim().length > 0
       ? { vault_id: this.plugin.settings.vaultId.trim() }
@@ -102,48 +121,55 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
         filters,
       });
       switch (outcome.kind) {
-        case "results":
+        case "results": {
+          const resultCount = outcome.execution.response.hits.length;
+          if (!this.completeQueryStatus(epoch, {
+            phase: "settled",
+            resultCount,
+            candidateWindow: outcome.execution.candidateWindow,
+          })) {
+            event.set({ outcome: "superseded" });
+            return [];
+          }
           this.lastErrorCode = null;
-          event.set({
-            outcome: "succeeded",
-            resultCount: outcome.execution.response.hits.length,
-          });
-          // A completed search that matched nothing must say so. Without
-          // this, no-matches and no-query-typed render identically blank.
-          this.setEmptyState(
-            outcome.execution.response.hits.length === 0
-              ? emptyStateMessage("no-matches", query)
-              : emptyStateMessage("prompt"),
-          );
+          event.set({ outcome: "succeeded", resultCount });
           return outcome.execution.response.hits.map((hit) => ({ hit }));
+        }
         case "error":
+          if (!this.completeQueryStatus(epoch, {
+            phase: "error",
+            code: outcome.error.code,
+            safeMessage: outcome.error.safeMessage,
+          })) {
+            event.set({ outcome: "superseded" });
+            return [];
+          }
           event.setLevel("error");
           event.set({
             outcome: "failed",
             ...this.plugin.diagnosticErrorDetails(outcome.error),
           });
-          if (outcome.error.code !== this.lastErrorCode) {
-            this.lastErrorCode = outcome.error.code;
+          if (shouldNoticeSearchError(outcome.error.code)
+            && outcome.error.code !== this.lastErrorCode) {
             new Notice(`Kwiry: ${outcome.error.safeMessage}`);
           }
-          this.setEmptyState(emptyStateMessage("error"));
+          this.lastErrorCode = outcome.error.code;
           return [];
         case "empty":
+          if (!this.completeQueryStatus(epoch, { phase: "prompt" })) {
+            event.set({ outcome: "superseded" });
+            return [];
+          }
           this.lastErrorCode = null;
           event.set({ outcome: "skipped" });
-          this.setEmptyState(emptyStateMessage("prompt"));
           return [];
         case "stale":
           event.set({ outcome: "superseded" });
           // A superseded request must not overwrite the newer request's
-          // message; leave whatever the in-flight search will set.
+          // status or clear its delayed activity indicator.
           return [];
       }
     });
-  }
-
-  private setEmptyState(text: string): void {
-    this.emptyStateText = text;
   }
 
   renderSuggestion(result: ModalResult, el: HTMLElement): void {
@@ -283,33 +309,50 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   onClose(): void {
+    this.activeRequestEpoch = ++this.requestEpoch;
+    this.progressEpoch += 1;
+    this.clearQueryAnimationTimer();
     if (this.progressTimer !== null) {
-      window.clearInterval(this.progressTimer);
+      window.clearTimeout(this.progressTimer);
       this.progressTimer = null;
     }
     this.session.dispose();
     super.onClose();
   }
 
-  /// A single line under the input reporting what indexing is doing right now.
-  /// It polls rather than subscribing because the modal can outlive any one
-  /// status push, and it hides itself whenever nothing is in flight so a ready
-  /// index shows no chrome at all.
-  private createProgressLine(status: BackendStatus): void {
-    const line = this.contentEl.createDiv({ cls: "kwiry-progress-line" });
-    this.progressEl = line;
-    this.resultContainerEl.before(line);
+  /// Query status is a polite atomic live region. Aggregate index progress is
+  /// deliberately a separate, non-live line so the 400 ms poll remains quiet.
+  private createStatusRail(status: BackendStatus): void {
+    const rail = this.contentEl.createDiv({ cls: "kwiry-status-rail" });
+    this.queryStatusEl = rail.createDiv({ cls: "kwiry-query-status" });
+    this.queryStatusEl.setAttribute("role", "status");
+    this.queryStatusEl.setAttribute("aria-live", "polite");
+    this.queryStatusEl.setAttribute("aria-atomic", "true");
+    this.indexStatusEl = rail.createDiv({ cls: "kwiry-index-status" });
+    this.resultContainerEl.before(rail);
+    this.applyQueryStatus(presentQueryStatus({ phase: "prompt" }));
     this.renderProgress(status);
-    this.progressTimer = window.setInterval(() => {
-      void this.refreshProgress();
+    this.scheduleProgressRefresh();
+  }
+
+  private scheduleProgressRefresh(): void {
+    if (this.progressTimer !== null) return;
+    const epoch = this.progressEpoch;
+    this.progressTimer = window.setTimeout(() => {
+      this.progressTimer = null;
+      if (epoch !== this.progressEpoch) return;
+      void this.refreshProgress(epoch);
     }, 400);
   }
 
-  private async refreshProgress(): Promise<void> {
+  private async refreshProgress(epoch: number): Promise<void> {
     try {
-      this.renderProgress(await this.backend.status());
+      const status = await this.backend.status();
+      if (epoch !== this.progressEpoch) return;
+      this.renderProgress(status);
       this.progressFailureRecorded = false;
     } catch (error) {
+      if (epoch !== this.progressEpoch) return;
       if (!this.progressFailureRecorded) {
         this.progressFailureRecorded = true;
         this.plugin.recordCaughtFailure("ui", "poll", error, {
@@ -318,15 +361,62 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       }
       // A failed status poll is not worth surfacing here: the search path
       // already reports backend errors through the notice.
+    } finally {
+      if (epoch === this.progressEpoch) this.scheduleProgressRefresh();
     }
   }
 
-  private renderProgress(status: BackendStatus): void {
-    const line = this.progressEl;
+  private beginQueryStatus(epoch: number, facts: QueryStatusFacts): void {
+    this.activeRequestEpoch = epoch;
+    this.clearQueryAnimationTimer();
+    const presentation = presentQueryStatus(facts);
+    this.applyQueryStatus(presentation);
+    if (presentation.state !== "searching") return;
+    this.queryAnimationTimer = window.setTimeout(() => {
+      this.queryAnimationTimer = null;
+      if (this.activeRequestEpoch !== epoch) return;
+      this.queryStatusEl?.classList.add("is-animation-ready");
+    }, SEARCH_STATUS_ANIMATION_DELAY_MS);
+  }
+
+  private completeQueryStatus(epoch: number, facts: QueryStatusFacts): boolean {
+    if (epoch !== this.activeRequestEpoch) return false;
+    this.clearQueryAnimationTimer();
+    this.applyQueryStatus(presentQueryStatus(facts));
+    return true;
+  }
+
+  private applyQueryStatus(presentation: QueryStatusPresentation): void {
+    const line = this.queryStatusEl;
     if (!line) return;
-    const text = progressLine(status);
-    line.setText(text ?? "");
-    line.toggleClass("is-active", text !== null);
+    if (presentation.text !== this.lastQueryStatusText) {
+      this.lastQueryStatusText = presentation.text;
+      line.setText(presentation.text);
+    }
+    line.setAttribute("data-state", presentation.state);
+    line.classList.toggle("is-searching", presentation.state === "searching");
+    line.classList.toggle("is-error", presentation.state === "error");
+    if (presentation.state !== "searching") line.classList.remove("is-animation-ready");
+    this.resultContainerEl.setAttribute("aria-busy", String(presentation.busy));
+  }
+
+  private clearQueryAnimationTimer(): void {
+    if (this.queryAnimationTimer === null) return;
+    window.clearTimeout(this.queryAnimationTimer);
+    this.queryAnimationTimer = null;
+  }
+
+  private renderProgress(status: BackendStatus): void {
+    const line = this.indexStatusEl;
+    if (!line) return;
+    const presentation = presentBackgroundIndex(status);
+    if (presentation.text !== this.lastIndexStatusText) {
+      this.lastIndexStatusText = presentation.text;
+      line.setText(presentation.text);
+    }
+    line.setAttribute("data-state", presentation.state);
+    line.classList.toggle("has-status", presentation.state !== "quiet");
+    line.classList.toggle("is-attention", presentation.state === "attention");
   }
 
   private createProfileLabel(status: BackendStatus): void {

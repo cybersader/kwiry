@@ -60,6 +60,11 @@ class DeferredBackend implements SearchBackend {
       requestedMode: mode,
       effectiveMode: mode,
       generation: "generation-1",
+      candidateWindow: {
+        state: "unknown",
+        candidateCount: null,
+        candidateLimit: null,
+      },
       response: { hits: [], next_cursor: null },
     };
   }
@@ -143,6 +148,66 @@ describe("SearchSessionController", () => {
     ));
 
     await expect(pending).resolves.toEqual({ kind: "stale" });
+  });
+
+  it("keeps an older rejection stale after a newer request begins", async () => {
+    const backend = new DeferredBackend();
+    const session = new SearchSessionController(backend, ["lexical"], "lexical");
+    const older = session.search("older", { limit: 20 });
+    const newer = session.search("newer", { limit: 20 });
+
+    backend.searches[0]!.reject(new KwiryBackendError(
+      "query_execution_failed",
+      "daemon",
+      "query",
+      true,
+      "The older request failed.",
+    ));
+    backend.searches[1]!.resolve(backend.execution());
+
+    await expect(older).resolves.toEqual({ kind: "stale" });
+    await expect(newer).resolves.toMatchObject({ kind: "results" });
+  });
+
+  it.each([
+    "explicit_query_unsupported",
+    "invalid_query",
+    "invalid_query_plan",
+    "query_execution_failed",
+    "mode_unavailable",
+    "index_building",
+    "worker_recovering",
+  ])("preserves the structured %s backend error", async (code) => {
+    const backend = new DeferredBackend();
+    const session = new SearchSessionController(backend, ["lexical"], "lexical");
+    const pending = session.search("query", { limit: 20 });
+    const error = new KwiryBackendError(
+      code,
+      "daemon",
+      code === "index_building" ? "index" : code === "invalid_query_plan" ? "protocol" : "query",
+      code === "index_building" || code === "query_execution_failed" || code === "worker_recovering",
+      "Fixed safe message.",
+    );
+    backend.searches[0]!.reject(error);
+
+    await expect(pending).resolves.toEqual({ kind: "error", error });
+  });
+
+  it("maps an untyped search rejection to a distinct fixed execution failure", async () => {
+    const backend = new DeferredBackend();
+    const session = new SearchSessionController(backend, ["lexical"], "lexical");
+    const pending = session.search("query", { limit: 20 });
+    backend.searches[0]!.reject(new Error("private query, SQL, path, or Rust detail"));
+
+    await expect(pending).resolves.toMatchObject({
+      kind: "error",
+      error: {
+        code: "internal_error",
+        stage: "protocol",
+        safeMessage: "The selected backend could not complete the search.",
+      },
+    });
+    expect(JSON.stringify(await pending)).not.toContain("private query");
   });
 
   it("refuses programmatic requests for unsupported modes", () => {

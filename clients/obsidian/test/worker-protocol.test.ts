@@ -9,6 +9,7 @@ import {
   INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
   INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   MAX_EXPORT_BLOB_BYTES,
+  MAX_QUERY_CHARACTERS,
   MAX_RECONCILIATION_SOURCES,
   MAX_SOURCE_BYTES,
   MAX_SOURCE_CHANGES,
@@ -144,8 +145,8 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
-  it("publishes protocol 8, cache schema 9, and the closed six-format set", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(8);
+  it("publishes protocol 10, cache schema 9, and the closed six-format set", () => {
+    expect(WORKER_PROTOCOL_VERSION).toBe(10);
     expect(CACHE_SCHEMA_VERSION).toBe(9);
     expect(SOURCE_FORMATS).toEqual(["markdown", "text", "base", "canvas", "docx", "pdf"]);
   });
@@ -182,6 +183,24 @@ describe("Worker protocol", () => {
       generation: "g1",
       sources: [invalid],
     })).toMatchObject({ code: "invalid_request" });
+  });
+
+  it("separates user query bounds from malformed Worker requests", () => {
+    const request = (query: unknown, limit: unknown = 20) => parseWorkerRequest({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "search",
+      query,
+      limit,
+    });
+    expect(request("   ")).toMatchObject({ code: "invalid_query", stage: "query" });
+    expect(request("x".repeat(MAX_QUERY_CHARACTERS + 1)))
+      .toMatchObject({ code: "invalid_query", stage: "query" });
+    expect(request("query", 0)).toMatchObject({ code: "invalid_request", stage: "protocol" });
+    expect(request({ private: "query" })).toMatchObject({
+      code: "invalid_request",
+      stage: "protocol",
+    });
   });
 
   it("accepts exact staging and active source changes", () => {
@@ -715,6 +734,32 @@ describe("Worker protocol", () => {
     })).toBe(false);
   });
 
+  it("accepts only the protocol-10 structured query error vocabulary", () => {
+    const response = (code: string) => ({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "search",
+      ok: false,
+      error: {
+        code,
+        stage: "query",
+        message: "Safe query failure.",
+        retryable: false,
+      },
+    });
+    for (const code of [
+      "explicit_query_unsupported",
+      "invalid_query",
+      "invalid_query_plan",
+      "query_execution_failed",
+      "index_building",
+    ]) {
+      expect(isWorkerResponse(response(code)), code).toBe(true);
+    }
+    expect(isWorkerResponse(response("query_rejected"))).toBe(false);
+    expect(isWorkerResponse(response("private_adapter_code"))).toBe(false);
+  });
+
   it("validates operation-correlated exact responses", () => {
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
@@ -812,6 +857,11 @@ describe("Worker protocol", () => {
           excerpt: "stored content",
           frontmatter,
         }],
+        candidate_window: {
+          state: "exhausted",
+          candidate_count: 1,
+          candidate_limit: 512,
+        },
       },
     });
     expect(isWorkerResponse(response({ title: "Display title" }))).toBe(true);
@@ -833,16 +883,29 @@ describe("Worker protocol", () => {
       excerpt: "portable quasar cache",
       frontmatter: { title: "Note" },
     };
-    const response = (result: unknown) => ({
+    const candidateWindow = {
+      state: "exhausted",
+      candidate_count: 1,
+      candidate_limit: 512,
+    };
+    const response = (result: Record<string, unknown>) => ({
       version: WORKER_PROTOCOL_VERSION,
       id: 1,
       operation: "search" as const,
       ok: true as const,
-      result,
+      result: { ...result, candidate_window: candidateWindow },
     });
 
     expect(isWorkerResponse(response({ generation: "g1", hits: [hit] }))).toBe(true);
     expect(isWorkerResponse(response({ generation: "g1", hits: [] }))).toBe(true);
+    expect(isWorkerResponse({
+      ...response({ generation: "g1", hits: [hit] }),
+      result: {
+        generation: "g1",
+        hits: [hit],
+        candidate_window: { ...candidateWindow, candidate_count: 0 },
+      },
+    })).toBe(false);
 
     const { excerpt: _excerpt, ...withoutExcerpt } = hit;
     expect(isWorkerResponse(response({ generation: "g1", hits: [withoutExcerpt] }))).toBe(false);
@@ -871,5 +934,60 @@ describe("Worker protocol", () => {
       generation: "g1",
       hits: [{ ...hit, excerpt: null }],
     }))).toBe(false);
+  });
+
+  it("requires closed truthful candidate-window facts on every search result", () => {
+    const response = (candidateWindow: unknown) => ({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "search" as const,
+      ok: true as const,
+      result: {
+        generation: "g1",
+        hits: [],
+        candidate_window: candidateWindow,
+      },
+    });
+    for (const [state, candidateCount] of [
+      ["exhausted", 0],
+      ["more_available", 1],
+      ["candidate_limit_reached", 512],
+      ["unknown", 0],
+    ] as const) {
+      expect(isWorkerResponse(response({
+        state,
+        candidate_count: candidateCount,
+        candidate_limit: 512,
+      })), state).toBe(true);
+    }
+    expect(isWorkerResponse(response({
+      state: "candidate_limit_reached",
+      candidate_count: 0,
+      candidate_limit: 512,
+    }))).toBe(false);
+    expect(isWorkerResponse(response({
+      state: "more_available",
+      candidate_count: 0,
+      candidate_limit: 512,
+    }))).toBe(false);
+    expect(isWorkerResponse(response({
+      state: "complete",
+      candidate_count: 0,
+      candidate_limit: 512,
+    }))).toBe(false);
+    expect(isWorkerResponse(response({
+      state: "unknown",
+      candidate_count: 513,
+      candidate_limit: 512,
+    }))).toBe(false);
+    expect(isWorkerResponse(response({
+      state: "unknown",
+      candidate_count: 0,
+      candidate_limit: 100,
+    }))).toBe(false);
+    expect(isWorkerResponse({
+      ...response(undefined),
+      result: { generation: "g1", hits: [] },
+    })).toBe(false);
   });
 });

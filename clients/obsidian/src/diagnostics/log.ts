@@ -173,7 +173,10 @@ export type DiagnosticTextValue =
   | "invalid_request"
   | "invalid_state"
   | "source_rejected"
-  | "query_rejected"
+  | "explicit_query_unsupported"
+  | "invalid_query"
+  | "invalid_query_plan"
+  | "query_execution_failed"
   | "integrity_failed"
   | "cache_identity_mismatch"
   | "cache_version_mismatch"
@@ -355,7 +358,7 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "CacheImageInvalidError", "CacheVersionMismatchError", "VaultSourceReadError",
   "WorkerRpcError", "RustAdapterError", "TypeError", "RangeError",
   "ReferenceError", "SyntaxError", "Error", "other", "rust", "sqlite", "artifact",
-  "fts5_unavailable", "rust_init_failed", "sqlite_init_failed", "artifact_mismatch", "protocol_mismatch", "invalid_request", "invalid_state", "source_rejected", "query_rejected", "integrity_failed", "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch", "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
+  "fts5_unavailable", "rust_init_failed", "sqlite_init_failed", "artifact_mismatch", "protocol_mismatch", "invalid_request", "invalid_state", "source_rejected", "explicit_query_unsupported", "invalid_query", "invalid_query_plan", "query_execution_failed", "integrity_failed", "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch", "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
   "fully_current", "sources_omitted", "vault_unavailable", "index_capacity", "backend_unavailable",
   "plugin_load_failed", "activation_failed", "plugin_unloaded",
 ];

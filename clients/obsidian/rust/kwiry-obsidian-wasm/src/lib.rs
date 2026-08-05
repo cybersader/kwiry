@@ -928,7 +928,7 @@ fn validate_prefix_observations(
     if plan.assistance == QueryAssistanceEligibility::ExplicitSyntaxBypass {
         if !observations.is_empty() {
             return Err(adapter_error(
-                "invalid_request",
+                "invalid_query_plan",
                 "Explicit query prefix observations must be empty.",
             ));
         }
@@ -938,7 +938,7 @@ fn validate_prefix_observations(
         || report.term_support.len() != plan.support_probes.len()
     {
         return Err(adapter_error(
-            "invalid_request",
+            "invalid_query_plan",
             "Prefix observations must exactly match requested term probes.",
         ));
     }
@@ -963,7 +963,7 @@ fn validate_prefix_observations(
             || (exact_identifier && !observation.terms.is_empty())
         {
             return Err(adapter_error(
-                "invalid_request",
+                "invalid_query_plan",
                 "Prefix observation does not match its requested probe.",
             ));
         }
@@ -981,7 +981,7 @@ fn validate_prefix_observations(
                 || previous.is_some_and(|value| value >= term.as_str())
             {
                 return Err(adapter_error(
-                    "invalid_request",
+                    "invalid_query_plan",
                     "Prefix expansion observation is invalid.",
                 ));
             }
@@ -2037,7 +2037,7 @@ mod tests {
             &[vec![oversized.as_str()]],
         )));
         assert_eq!(rejected["status"], "error");
-        assert_eq!(rejected["error"]["code"], "invalid_request");
+        assert_eq!(rejected["error"]["code"], "invalid_query_plan");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 8 as const;
+export const WORKER_PROTOCOL_VERSION = 10 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -126,7 +126,10 @@ export type WorkerErrorCode =
   | "sqlite_init_failed"
   | "fts5_unavailable"
   | "source_rejected"
-  | "query_rejected"
+  | "explicit_query_unsupported"
+  | "invalid_query"
+  | "invalid_query_plan"
+  | "query_execution_failed"
   | "index_building"
   | "index_limit_exceeded"
   | "integrity_failed"
@@ -376,9 +379,28 @@ export interface WorkerSearchHit {
   frontmatter: WorkerFrontmatter;
 }
 
+export const CANDIDATE_WINDOW_STATES = [
+  "exhausted",
+  "more_available",
+  "candidate_limit_reached",
+  "unknown",
+] as const;
+export type CandidateWindowState = typeof CANDIDATE_WINDOW_STATES[number];
+
+/**
+ * Closed evidence from the bounded in-plugin collector. `candidate_count` is the
+ * number of candidate rows actually inspected, never a corpus/result total.
+ */
+export interface WorkerCandidateWindow {
+  state: CandidateWindowState;
+  candidate_count: number;
+  candidate_limit: 512;
+}
+
 export interface SearchResult {
   generation: string;
   hits: WorkerSearchHit[];
+  candidate_window: WorkerCandidateWindow;
 }
 
 export interface DisposeResult {
@@ -548,15 +570,21 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
         ? value as unknown as WorkerRequest
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "search":
-      return hasExactKeys(value, [...base, "query", "limit"])
-        && typeof value.query === "string"
-        && value.query.trim().length > 0
-        && value.query.length <= MAX_QUERY_CHARACTERS
-        && Number.isSafeInteger(value.limit)
-        && Number(value.limit) >= 1
-        && Number(value.limit) <= MAX_SEARCH_HITS
+      if (!hasExactKeys(value, [...base, "query", "limit"])
+        || typeof value.query !== "string"
+        || !Number.isSafeInteger(value.limit)
+        || Number(value.limit) < 1
+        || Number(value.limit) > MAX_SEARCH_HITS) {
+        return fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
+      }
+      return value.query.trim().length > 0 && value.query.length <= MAX_QUERY_CHARACTERS
         ? value as unknown as WorkerRequest
-        : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
+        : fixedWorkerError(
+            "invalid_query",
+            "query",
+            "The query is invalid or exceeds the supported limits.",
+            false,
+          );
   }
 }
 
@@ -1138,11 +1166,26 @@ export function isStatusResult(value: unknown): value is StatusResult {
 
 export function isSearchResult(value: unknown): value is SearchResult {
   return isRecord(value)
-    && hasExactKeys(value, ["generation", "hits"])
+    && hasExactKeys(value, ["generation", "hits", "candidate_window"])
     && isGeneration(value.generation)
     && Array.isArray(value.hits)
     && value.hits.length <= MAX_SEARCH_HITS
-    && value.hits.every(isSearchHit);
+    && value.hits.every(isSearchHit)
+    && isWorkerCandidateWindow(value.candidate_window)
+    && value.candidate_window.candidate_count >= value.hits.length
+    && (value.candidate_window.state !== "candidate_limit_reached"
+      || value.candidate_window.candidate_count === value.candidate_window.candidate_limit)
+    && (value.candidate_window.state !== "more_available"
+      || value.candidate_window.candidate_count > value.hits.length);
+}
+
+function isWorkerCandidateWindow(value: unknown): value is WorkerCandidateWindow {
+  return isRecord(value)
+    && hasExactKeys(value, ["state", "candidate_count", "candidate_limit"])
+    && CANDIDATE_WINDOW_STATES.includes(value.state as CandidateWindowState)
+    && isNonNegativeSafeInteger(value.candidate_count)
+    && value.candidate_limit === 512
+    && value.candidate_count <= value.candidate_limit;
 }
 
 function isSearchHit(value: unknown): value is WorkerSearchHit {
@@ -1234,7 +1277,10 @@ export function isWorkerError(value: unknown): value is WorkerError {
     "sqlite_init_failed",
     "fts5_unavailable",
     "source_rejected",
-    "query_rejected",
+    "explicit_query_unsupported",
+    "invalid_query",
+    "invalid_query_plan",
+    "query_execution_failed",
     "index_building",
     "index_limit_exceeded",
     "integrity_failed",

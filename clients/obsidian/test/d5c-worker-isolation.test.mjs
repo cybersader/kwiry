@@ -32,7 +32,7 @@ function normalizedInputs(metafile) {
 
 describe("D5C playground Worker isolation", () => {
   it("keeps the primary Worker and production Rust identity byte-identical", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(8);
+    expect(WORKER_PROTOCOL_VERSION).toBe(10);
     expect(CACHE_SCHEMA_VERSION).toBe(9);
     expect(internalBuild.workerSource).toBe(normalBuild.workerSource);
     expect(internalBuild.identities.rust).toEqual(normalBuild.identities.rust);
@@ -125,13 +125,13 @@ describe("D5C playground Worker isolation", () => {
     expect(source).not.toMatch(/\bnew\s+Worker\s*\(/u);
   });
 
-  it("leaves the release package allowlist unchanged", () => {
+  it("keeps the production release package isolated from D5C assets", () => {
     const workflow = readFileSync(
       new URL("../../../.github/workflows/release-plugin.yml", import.meta.url),
       "utf8",
     );
     expect(workflow).toContain(
-      'cp main.js manifest.json styles.css LICENSE THIRD_PARTY_NOTICES.md "$package/"',
+      "npm run package:release -- .tmp/release-candidate gate5.evidence.json",
     );
     expect(workflow).not.toContain("internal-d5c-playground-worker.js");
   });

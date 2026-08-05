@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+
 export const GATE5_TARGETS = [
   ["async_start", 100, "ms"],
   ["first_progress", 500, "ms"],
@@ -67,6 +70,7 @@ const GENERATED_PERFORMANCE_KEYS = [
   "kind",
   "verdict",
   "host",
+  "provenance",
   "artifact",
   "corpus",
   "index",
@@ -76,6 +80,13 @@ const GENERATED_PERFORMANCE_KEYS = [
   "targets",
   "privacy",
 ];
+const PERFORMANCE_PROVENANCE_KEYS = [
+  "runtime",
+  "measurement_runs",
+  "baseline_runs",
+  "regression_assessed",
+];
+const PERFORMANCE_RUNTIME_KEYS = ["node_version", "platform", "architecture"];
 const PERFORMANCE_ARTIFACT_KEYS = ["worker", "rust_wasm", "sqlite_wasm"];
 const PERFORMANCE_CORPUS_KEYS = [
   "kind",
@@ -124,6 +135,16 @@ const TOKEN = /(?:bearer\s+[A-Za-z0-9._~+/-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|api
 const SQL = /\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA|MATCH|BEGIN|COMMIT|ROLLBACK)\b/iu;
 const STACK = /(?:\b(?:Aggregate)?Error:|\bat\s+[^\n]+:\d+:\d+|Caused by:)/u;
 const OWNER_VERDICT = /(?:^|_)(?:GO|NO_GO|APPROVED|ACCEPTED|DELIVERED|READY_FOR_RELEASE)(?:_|$)/u;
+
+export function validateGate5Evidence(value) {
+  if (value?.kind === "kwiry_gate5_automated_evidence") {
+    return validateGate5AutomatedEvidence(value);
+  }
+  if (value?.kind === "kwiry_gate5_generated_performance") {
+    return validateGate5GeneratedPerformanceEvidence(value);
+  }
+  throw new Error("unknown Gate 5 evidence kind");
+}
 
 export function validateGate5AutomatedEvidence(value) {
   requireRecord(value, "evidence");
@@ -178,7 +199,7 @@ export function validateGate5AutomatedEvidence(value) {
 export function validateGate5GeneratedPerformanceEvidence(value) {
   requireRecord(value, "evidence");
   exactKeys(value, GENERATED_PERFORMANCE_KEYS, "evidence");
-  requireEqual(value.schema_version, 1, "schema_version");
+  requireEqual(value.schema_version, 2, "schema_version");
   requireEqual(value.kind, "kwiry_gate5_generated_performance", "kind");
   requireEqual(
     value.verdict,
@@ -186,6 +207,26 @@ export function validateGate5GeneratedPerformanceEvidence(value) {
     "verdict",
   );
   requireEqual(value.host, "node_worker_threads", "host");
+
+  requireRecord(value.provenance, "provenance");
+  exactKeys(value.provenance, PERFORMANCE_PROVENANCE_KEYS, "provenance");
+  requireRecord(value.provenance.runtime, "provenance.runtime");
+  exactKeys(value.provenance.runtime, PERFORMANCE_RUNTIME_KEYS, "provenance.runtime");
+  requirePattern(
+    value.provenance.runtime.node_version,
+    /^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/u,
+    "provenance.runtime.node_version",
+  );
+  for (const key of ["platform", "architecture"]) {
+    requirePattern(
+      value.provenance.runtime[key],
+      /^[a-z0-9][a-z0-9._-]{0,31}$/u,
+      `provenance.runtime.${key}`,
+    );
+  }
+  requireEqual(value.provenance.measurement_runs, 1, "provenance.measurement_runs");
+  requireEqual(value.provenance.baseline_runs, 0, "provenance.baseline_runs");
+  requireEqual(value.provenance.regression_assessed, false, "provenance.regression_assessed");
 
   requireRecord(value.artifact, "artifact");
   exactKeys(value.artifact, PERFORMANCE_ARTIFACT_KEYS, "artifact");
@@ -259,6 +300,7 @@ export function validateGate5GeneratedPerformanceEvidence(value) {
   requireRecord(value.samples, "samples");
   exactKeys(value.samples, PERFORMANCE_SAMPLE_KEYS, "samples");
   positiveInteger(value.samples.warm_search, "samples.warm_search");
+  positiveInteger(value.samples.hydration, "samples.hydration");
   positiveInteger(value.samples.update_visibility, "samples.update_visibility");
 
   validateGeneratedPerformanceTargets(value.targets, value.measurements);
@@ -404,6 +446,12 @@ function requireBoolean(value, label) {
   if (typeof value !== "boolean") throw new Error(`${label} must be boolean`);
 }
 
+function requirePattern(value, pattern, label) {
+  if (typeof value !== "string" || !pattern.test(value)) {
+    throw new Error(`${label} is invalid`);
+  }
+}
+
 function positiveInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be positive`);
 }
@@ -426,4 +474,13 @@ function sha256(value, label) {
   if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
     throw new Error(`${label} must be SHA-256`);
   }
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const evidencePath = process.argv[2];
+  if (!evidencePath || process.argv.length !== 3) {
+    throw new Error("usage: gate5-evidence-schema.mjs <evidence.json>");
+  }
+  const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
+  validateGate5Evidence(evidence);
 }

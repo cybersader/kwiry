@@ -2043,6 +2043,11 @@ describe("exact generated production Worker", () => {
             locator: null,
             excerpt: expect.stringContaining("portable quasar cache storage"),
           }],
+          candidate_window: {
+            state: "exhausted",
+            candidate_count: 1,
+            candidate_limit: 512,
+          },
         },
       });
 
@@ -2395,7 +2400,7 @@ describe("exact generated production Worker", () => {
       await request(worker, { id: 4, operation: "commit_build", generation: "validator" });
       await expect(request(worker, {
         id: 5, operation: "search", query: "validatorprobe", limit: 20,
-      })).resolves.toMatchObject({ ok: false, error: { code: "query_rejected" } });
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
     } finally {
       await worker.terminate();
     }
@@ -2421,7 +2426,116 @@ describe("exact generated production Worker", () => {
       await request(worker, { id: 4, operation: "commit_build", generation: "anchor-validator" });
       await expect(request(worker, {
         id: 5, operation: "search", query: "RFC 9110 missingcontext", limit: 20,
-      })).resolves.toMatchObject({ ok: false, error: { code: "query_rejected" } });
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("distinguishes protocol and Rust query budgets without leaking the query", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    const overCharacterBudget = "a".repeat(4_097);
+    const overUtf8Budget = "é".repeat(3_000);
+    try {
+      const protocolRejected = await request(worker, {
+        id: 1,
+        operation: "search",
+        query: overCharacterBudget,
+        limit: 20,
+      });
+      expect(protocolRejected).toMatchObject({
+        ok: false,
+        error: { code: "invalid_query", stage: "query", retryable: false },
+      });
+      expect(JSON.stringify(protocolRejected)).not.toContain(overCharacterBudget);
+
+      await buildActiveGeneration(worker, {
+        generation: "query-budget",
+        path: "budget.md",
+        text: "budget",
+      });
+      const rustRejected = await request(worker, {
+        id: 6,
+        operation: "search",
+        query: overUtf8Budget,
+        limit: 20,
+      });
+      expect(rustRejected).toMatchObject({
+        ok: false,
+        error: { code: "invalid_query", stage: "query", retryable: false },
+      });
+      expect(JSON.stringify(rustRejected)).not.toContain(overUtf8Budget);
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("fails a query execution fault closed without relabeling it as user rejection", async () => {
+    const needle = "const collected = active.index.searchWithCandidateWindow(";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `if (query === "executionprobe") throw new Error("SELECT private FROM secret_path");\n    ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "execution-failure",
+        path: "execution.md",
+        text: "executionprobe",
+      });
+      const rejected = await request(worker, {
+        id: 5,
+        operation: "search",
+        query: "executionprobe",
+        limit: 20,
+      });
+      expect(rejected).toMatchObject({
+        ok: false,
+        error: {
+          code: "query_execution_failed",
+          stage: "query",
+          message: "In-plugin lexical search could not complete.",
+          retryable: true,
+        },
+      });
+      expect(JSON.stringify(rejected)).not.toMatch(/SELECT|secret_path|executionprobe/u);
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("maps an unallowlisted Rust adapter query code to invalid_query_plan", async () => {
+    const needle = "function adapterErrorCode(operation, code) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  if (operation === "prepare_query" && code === "invalid_query") return null;`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    const overUtf8Budget = "é".repeat(3_000);
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "adapter-code",
+        path: "adapter.md",
+        text: "adapter",
+      });
+      const rejected = await request(worker, {
+        id: 5,
+        operation: "search",
+        query: overUtf8Budget,
+        limit: 20,
+      });
+      expect(rejected).toMatchObject({
+        ok: false,
+        error: {
+          code: "invalid_query_plan",
+          stage: "rust",
+          message: "Portable Rust returned invalid query data.",
+          retryable: false,
+        },
+      });
+      expect(JSON.stringify(rejected)).not.toContain(overUtf8Budget);
     } finally {
       await worker.terminate();
     }
@@ -2608,7 +2722,15 @@ describe("exact generated production Worker", () => {
         query: "title:notes OR '); DROP TABLE chunks; --",
         limit: 20,
       });
-      expect(rejected).toMatchObject({ ok: false, error: { code: "query_rejected" } });
+      expect(rejected).toMatchObject({
+        ok: false,
+        error: {
+          code: "explicit_query_unsupported",
+          stage: "query",
+          message: "This explicit query is unavailable in the in-plugin backend.",
+          retryable: false,
+        },
+      });
       expect(JSON.stringify(rejected)).not.toContain("DROP TABLE");
       await request(worker, { id: 10, operation: "dispose" });
     } finally {

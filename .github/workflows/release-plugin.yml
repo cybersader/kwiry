@@ -68,14 +68,10 @@ jobs:
       - name: Prepare exact candidate package
         run: |
           set -euo pipefail
-          package=.tmp/release-candidate
-          rm -rf "$package"
-          mkdir -p "$package"
-          npm run --silent evidence > "$package/gate5.evidence.json"
-          cp main.js manifest.json styles.css LICENSE THIRD_PARTY_NOTICES.md "$package/"
-          (cd "$package" && sha256sum LICENSE THIRD_PARTY_NOTICES.md gate5.evidence.json main.js manifest.json styles.css > SHA256SUMS)
-          head -20 main.js | grep -q "GNU General Public License"
-          test "$(find "$package" -maxdepth 1 -type f | wc -l)" -eq 7
+          npm run --silent evidence > gate5.evidence.json
+          npm run validate:evidence -- gate5.evidence.json
+          npm run validate:privacy
+          npm run package:release -- .tmp/release-candidate gate5.evidence.json
       - name: Upload candidate for separate publication authorization
         uses: actions/upload-artifact@v4
         with:

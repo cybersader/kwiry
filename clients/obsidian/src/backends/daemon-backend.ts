@@ -135,6 +135,13 @@ export class DaemonBackend implements SearchBackend {
         requestedMode: request.mode,
         effectiveMode: request.mode,
         generation: status.generation,
+        candidateWindow: {
+          // The frozen daemon body exposes only positive continuation evidence.
+          // A null cursor says nothing about exhaustion or candidate totals.
+          state: response.next_cursor === null ? "unknown" : "more_available",
+          candidateCount: null,
+          candidateLimit: null,
+        },
         response: {
           hits: response.hits.map((hit) => ({
             ...hit,

@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
   GATE5_TARGETS,
   assertPrivacySafeEvidence,
   validateGate5AutomatedEvidence,
+  validateGate5Evidence,
   validateGate5GeneratedPerformanceEvidence,
 } from "../scripts/gate5-evidence-schema.mjs";
 
@@ -81,10 +83,16 @@ function validPerformanceEvidence() {
     ["added_steady_state_memory", "added_rss_mib"],
   ]);
   return {
-    schema_version: 1,
+    schema_version: 2,
     kind: "kwiry_gate5_generated_performance",
     verdict: "EVIDENCE_CAPTURE_COMPLETE_OWNER_DECISION_REQUIRED",
     host: "node_worker_threads",
+    provenance: {
+      runtime: { node_version: "v22.21.1", platform: "linux", architecture: "x64" },
+      measurement_runs: 1,
+      baseline_runs: 0,
+      regression_assessed: false,
+    },
     artifact: {
       worker: { bytes: 1, sha256: HASH },
       rust_wasm: { bytes: 1, sha256: HASH },
@@ -155,6 +163,19 @@ describe("Gate 5 evidence schema", () => {
       verdict: "AUTOMATED_CHECKS_PASSED_OWNER_REVIEW_REQUIRED",
       checks: { failed: 0 },
     });
+    expect(validateGate5Evidence(validEvidence())).toMatchObject({
+      kind: "kwiry_gate5_automated_evidence",
+    });
+  });
+
+  it("keeps CI target validation schema-owned instead of duplicating a target count", () => {
+    const workflow = readFileSync(
+      new URL("../../../.github/workflows/ci.yml", import.meta.url),
+      "utf8",
+    );
+    expect(workflow).toContain("npm run validate:evidence -- gate5.evidence.json");
+    expect(workflow).not.toMatch(/targets\.length/u);
+    expect(workflow).not.toMatch(/evidence\.targets[^\n]*\b[0-9]+\b/u);
   });
 
   it("rejects unknown fields and incomplete target sets", () => {
@@ -215,6 +236,37 @@ describe("Gate 5 evidence schema", () => {
         expect.objectContaining({ id: "added_steady_state_memory", status: "missed" }),
       ]),
     });
+  });
+
+  it("requires every generated performance sample class to be non-empty", () => {
+    for (const sample of ["warm_search", "hydration", "update_visibility"]) {
+      const evidence = validPerformanceEvidence();
+      evidence.samples[sample] = 0;
+      expect(() => validateGate5GeneratedPerformanceEvidence(evidence), sample)
+        .toThrow(`samples.${sample}`);
+    }
+  });
+
+  it("requires runtime provenance and keeps single-run evidence non-comparative", () => {
+    const evidence = validPerformanceEvidence();
+    expect(validateGate5GeneratedPerformanceEvidence(evidence)).toMatchObject({
+      provenance: {
+        runtime: { node_version: "v22.21.1", platform: "linux", architecture: "x64" },
+        measurement_runs: 1,
+        baseline_runs: 0,
+        regression_assessed: false,
+      },
+    });
+
+    const missingRuntime = validPerformanceEvidence();
+    delete missingRuntime.provenance.runtime.architecture;
+    expect(() => validateGate5GeneratedPerformanceEvidence(missingRuntime))
+      .toThrow("provenance.runtime has unexpected or missing keys");
+
+    const inventedRegression = validPerformanceEvidence();
+    inventedRegression.provenance.regression_assessed = true;
+    expect(() => validateGate5GeneratedPerformanceEvidence(inventedRegression))
+      .toThrow("provenance.regression_assessed");
   });
 
   it("rejects invented installed-host measurements and inconsistent performance targets", () => {

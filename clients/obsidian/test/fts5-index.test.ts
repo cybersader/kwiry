@@ -704,6 +704,80 @@ describe("Fts5GenerationIndex", () => {
     expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-needle-exact"]);
   });
 
+  it("proves an exact result limit exhausted only when the searched stage itself exhausted", () => {
+    for (let value = 0; value < 20; value += 1) {
+      const suffix = String(value).padStart(2, "0");
+      index.replaceSource(sourceAt(
+        `window-exact-${suffix}`,
+        `window-exact-${suffix}.md`,
+        `chunk-window-exact-${suffix}`,
+        "windowexact",
+      ));
+    }
+
+    const result = index.searchWithCandidateWindow(anyPlan("windowexact"), 20);
+    expect(result.hits).toHaveLength(20);
+    expect(result.candidate_window).toEqual({
+      state: "exhausted",
+      candidate_count: 20,
+      candidate_limit: 512,
+    });
+  });
+
+  it("reports more_available from an observed unreturned candidate, not hits length", () => {
+    for (let value = 0; value < 21; value += 1) {
+      const suffix = String(value).padStart(2, "0");
+      index.replaceSource(sourceAt(
+        `window-more-${suffix}`,
+        `window-more-${suffix}.md`,
+        `chunk-window-more-${suffix}`,
+        "windowmore",
+      ));
+    }
+
+    const result = index.searchWithCandidateWindow(anyPlan("windowmore"), 20);
+    expect(result.hits).toHaveLength(20);
+    expect(result.candidate_window).toEqual({
+      state: "more_available",
+      candidate_count: 21,
+      candidate_limit: 512,
+    });
+  });
+
+  it("closes at the unchanged 256-per-stage and 512-total candidate ceilings", () => {
+    for (let value = 0; value < 256; value += 1) {
+      const suffix = String(value).padStart(3, "0");
+      index.replaceSource(sourceAt(
+        `window-cap-${suffix}`,
+        `window-cap-${suffix}.md`,
+        `chunk-window-cap-${suffix}`,
+        "windowcap",
+      ));
+    }
+    const stage = {
+      plan_id: "lexical_all_terms_v3" as const,
+      match_value: "\"windowcap\"",
+      max_candidates: 256,
+    };
+
+    const result = index.searchWithCandidateWindow({
+      schema_version: 3,
+      profile_id: "lexical-v1",
+      disposition: "ready",
+      max_total_candidates: 512,
+      stages: [
+        { ...stage, ordinal: 0 },
+        { ...stage, ordinal: 1 },
+      ],
+    }, 512);
+    expect(result.hits).toHaveLength(256);
+    expect(result.candidate_window).toEqual({
+      state: "candidate_limit_reached",
+      candidate_count: 512,
+      candidate_limit: 512,
+    });
+  });
+
   it("keeps exact filename and title candidates in the same metadata score tier at cutoff", () => {
     index.replaceSource(sourceAt(
       "primary-filename",

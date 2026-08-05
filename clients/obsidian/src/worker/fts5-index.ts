@@ -20,6 +20,7 @@ import type {
   SourceFormatCounts,
   SourceLocator,
   SourceRemoval,
+  WorkerCandidateWindow,
   WorkerFrontmatter,
   WorkerSearchHit,
 } from "./protocol";
@@ -98,6 +99,11 @@ export interface Fts5IndexLimits {
   maxDatabaseBytes: number;
   maxSources?: number;
   maxExportBytes?: number;
+}
+
+export interface Fts5SearchResult {
+  hits: WorkerSearchHit[];
+  candidate_window: WorkerCandidateWindow;
 }
 
 interface ResolvedFts5IndexLimits {
@@ -1230,23 +1236,50 @@ export class Fts5GenerationIndex {
     limit: number,
     trace?: InternalLexicalTraceHandle,
   ): WorkerSearchHit[] {
+    return this.searchWithCandidateWindow(plan, limit, trace).hits;
+  }
+
+  searchWithCandidateWindow(
+    plan: ExecutionPlan,
+    limit: number,
+    trace?: InternalLexicalTraceHandle,
+  ): Fts5SearchResult {
     this.requireOpen();
     requireActiveTrace(trace);
     requireExecutionPlanIdentity(plan);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 512) {
       throw new Error("invalid FTS5 search limit");
     }
-    if (plan.disposition === "empty_no_evidence") return [];
+    if (plan.disposition === "empty_no_evidence") {
+      return {
+        hits: [],
+        candidate_window: {
+          state: "exhausted",
+          candidate_count: 0,
+          candidate_limit: plan.max_total_candidates,
+        },
+      };
+    }
+
     const hits: SearchCandidate[] = [];
     const seen = new Set<string>();
     let candidates = 0;
-    for (const stage of plan.stages) {
-      if (hits.length === limit || candidates === plan.max_total_candidates) break;
+    let candidateLimitReached = false;
+    let state: WorkerCandidateWindow["state"] | null = null;
+
+    for (const [stageIndex, stage] of plan.stages.entries()) {
+      if (candidates === plan.max_total_candidates) {
+        state = "candidate_limit_reached";
+        break;
+      }
       const stageLimit = Math.min(
         stage.max_candidates,
         plan.max_total_candidates - candidates,
       );
-      if (stageLimit < 1) break;
+      if (stageLimit < 1) {
+        state = "candidate_limit_reached";
+        break;
+      }
       const mandatory = stage.plan_id !== "lexical_partial_coverage_v3"
         && stage.plan_id !== "lexical_prefix_v3";
       const started = trace === undefined ? 0 : checkedClock(trace.clock);
@@ -1258,11 +1291,13 @@ export class Fts5GenerationIndex {
       if (!mandatory && trace !== undefined) trace.optionalDurationMs += duration;
       const previousHits = hits.length;
       candidates += rows.length;
+      candidateLimitReached ||= rows.length === stageLimit;
+      let moreAvailable = false;
       for (const hit of rows) {
         if (seen.has(hit.chunk_id)) continue;
         seen.add(hit.chunk_id);
-        hits.push(hit);
-        if (hits.length === limit) break;
+        if (hits.length < limit) hits.push(hit);
+        else moreAvailable = true;
       }
       if (trace !== undefined) {
         pushTraceStage(trace, {
@@ -1275,12 +1310,34 @@ export class Fts5GenerationIndex {
           candidate_count: rows.length,
         });
       }
+      if (moreAvailable) {
+        state = "more_available";
+        break;
+      }
+      if (hits.length === limit) {
+        const searchedEveryStage = stageIndex === plan.stages.length - 1;
+        state = candidateLimitReached
+          ? "candidate_limit_reached"
+          : searchedEveryStage
+            ? "exhausted"
+            : "unknown";
+        break;
+      }
     }
+
+    state ??= candidateLimitReached ? "candidate_limit_reached" : "exhausted";
     if (trace !== undefined) {
       trace.candidateCount += candidates;
       trace.resultCount = hits.length;
     }
-    return this.hydrateStoredExcerpts(hits);
+    return {
+      hits: this.hydrateStoredExcerpts(hits),
+      candidate_window: {
+        state,
+        candidate_count: candidates,
+        candidate_limit: plan.max_total_candidates,
+      },
+    };
   }
 
   private hydrateStoredExcerpts(hits: readonly SearchCandidate[]): WorkerSearchHit[] {

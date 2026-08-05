@@ -98,6 +98,23 @@ describe("classifyFailure worker protocol errors", () => {
     });
   });
 
+  it.each([
+    "explicit_query_unsupported",
+    "invalid_query",
+    "invalid_query_plan",
+    "query_execution_failed",
+    "index_building",
+  ] as const)("classifies %s without reading its message", (code) => {
+    const result = classifyFailure({
+      code,
+      stage: "query",
+      message: "Clients/Acme query and SQL detail",
+      retryable: false,
+    });
+    expect(result).toMatchObject({ workerCode: code, reason: code, subsystem: "worker" });
+    expect(JSON.stringify(result)).not.toContain("Acme");
+  });
+
   it("routes a SQLite init failure to the vfs subsystem", () => {
     expect(classifyFailure({ code: "sqlite_init_failed" }).subsystem).toBe("vfs");
     expect(classifyFailure({ code: "fts5_unavailable" }).subsystem).toBe("vfs");

@@ -239,9 +239,28 @@ export interface FinalizedQuery {
   execution_plan: ExecutionPlan;
 }
 
+export type RustAdapterErrorCode =
+  | "abi_mismatch"
+  | "artifact_mismatch"
+  | "explicit_query_unsupported"
+  | "index_limit_exceeded"
+  | "invalid_query"
+  | "invalid_query_plan"
+  | "invalid_request"
+  | "invalid_response"
+  | "invalid_source"
+  | "rust_init_failed"
+  | "source_too_large";
+
+type ProductionAdapterOperation =
+  | "prepare_source"
+  | "prepare_oversized_source"
+  | "prepare_query"
+  | "finalize_query";
+
 export class RustAdapterError extends Error {
   constructor(
-    public readonly code: string,
+    public readonly code: RustAdapterErrorCode,
     message: string,
   ) {
     super(message);
@@ -364,7 +383,7 @@ interface SuccessResponse {
   result: unknown;
 }
 
-function parseResponse(source: string, operation: string): SuccessResponse {
+function parseResponse(source: string, operation: ProductionAdapterOperation): SuccessResponse {
   const value = parseJson(source);
   if (!isRecord(value)
     || value.abi_version !== ABI_VERSION
@@ -381,12 +400,59 @@ function parseResponse(source: string, operation: string): SuccessResponse {
       || value.error.message.length > 1_024) {
       throw new RustAdapterError("invalid_response", "Portable Rust returned an invalid error.");
     }
-    throw new RustAdapterError(value.error.code, value.error.message);
+    const code = adapterErrorCode(operation, value.error.code);
+    if (code === null) {
+      throw new RustAdapterError("invalid_response", "Portable Rust returned an unknown error.");
+    }
+    throw new RustAdapterError(code, safeAdapterErrorMessage(code));
   }
   if (!hasExactKeys(value, ["status", "abi_version", "operation", "result"])) {
     throw new RustAdapterError("invalid_response", "Portable Rust returned an invalid response.");
   }
   return { result: value.result };
+}
+
+function adapterErrorCode(
+  operation: ProductionAdapterOperation,
+  code: string,
+): RustAdapterErrorCode | null {
+  if (code === "invalid_request" || code === "abi_mismatch") return code;
+  if (operation === "prepare_source" || operation === "prepare_oversized_source") {
+    return code === "invalid_source"
+      || code === "index_limit_exceeded"
+      || code === "source_too_large"
+      ? code
+      : null;
+  }
+  return code === "invalid_query"
+    || code === "invalid_query_plan"
+    || (operation === "finalize_query" && code === "explicit_query_unsupported")
+    ? code
+    : null;
+}
+
+function safeAdapterErrorMessage(code: RustAdapterErrorCode): string {
+  switch (code) {
+    case "explicit_query_unsupported":
+      return "This explicit query is unavailable in the in-plugin backend.";
+    case "invalid_query":
+      return "The query is invalid or exceeds the supported limits.";
+    case "invalid_query_plan":
+    case "invalid_request":
+    case "abi_mismatch":
+      return "Portable Rust returned invalid query data.";
+    case "index_limit_exceeded":
+      return "Portable Rust reached the index capacity limit.";
+    case "invalid_source":
+    case "source_too_large":
+      return "Portable Rust rejected source data.";
+    case "artifact_mismatch":
+      return "Portable Rust artifact identity mismatch.";
+    case "rust_init_failed":
+      return "Portable Rust initialization failed.";
+    case "invalid_response":
+      return "Portable Rust returned an invalid response.";
+  }
 }
 
 function parseJson(source: string): unknown {

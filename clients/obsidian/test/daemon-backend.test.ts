@@ -123,6 +123,11 @@ describe("DaemonBackend", () => {
     const execution = await daemon.search({ q: "match", mode: "hybrid" });
     expect(execution.requestedMode).toBe("hybrid");
     expect(execution.effectiveMode).toBe("hybrid");
+    expect(execution.candidateWindow).toEqual({
+      state: "unknown",
+      candidateCount: null,
+      candidateLimit: null,
+    });
     expect(execution.response.hits[0]).toMatchObject({
       path: "folder/note.md",
       format: "markdown",
@@ -138,6 +143,44 @@ describe("DaemonBackend", () => {
         backendInstanceId: "daemon-7",
         vaultId: "notes",
       },
+    });
+  });
+
+  it("does not infer exhaustion or a total from an exact-limit response with next_cursor null", async () => {
+    const exactLimitHits = Array.from({ length: 100 }, (_, index) => ({
+      ...HIT,
+      chunk_id: `chunk-${index}`,
+      path: `note-${index}.md`,
+    }));
+    const daemon = backend(jsonTransport((url) =>
+      url.endsWith("/v0/status")
+        ? { status: 200, body: STATUS }
+        : { status: 200, body: { hits: exactLimitHits, next_cursor: null } },
+    ));
+    await daemon.status();
+
+    const execution = await daemon.search({ q: "match", mode: "lexical", limit: 100 });
+    expect(execution.response.hits).toHaveLength(100);
+    expect(execution.candidateWindow).toEqual({
+      state: "unknown",
+      candidateCount: null,
+      candidateLimit: null,
+    });
+  });
+
+  it("reports more_available only when the daemon supplies a continuation cursor", async () => {
+    const daemon = backend(jsonTransport((url) =>
+      url.endsWith("/v0/status")
+        ? { status: 200, body: STATUS }
+        : { status: 200, body: { hits: [HIT], next_cursor: "opaque-next-page" } },
+    ));
+    await daemon.status();
+
+    const execution = await daemon.search({ q: "match", mode: "lexical", limit: 100 });
+    expect(execution.candidateWindow).toEqual({
+      state: "more_available",
+      candidateCount: null,
+      candidateLimit: null,
     });
   });
 
