@@ -48,6 +48,8 @@ class FakeElement {
   parent: FakeElement | null = null;
   textContent = "";
   textSetCount = 0;
+  value = "";
+  readonly dispatchedEvents: Event[] = [];
 
   constructor(className?: string) {
     if (className) this.classList.add(...className.split(/\s+/u));
@@ -113,7 +115,10 @@ class FakeElement {
 
   addEventListener(): void {}
   focus(): void {}
-  dispatchEvent(): boolean { return true; }
+  dispatchEvent(event: Event): boolean {
+    this.dispatchedEvents.push(event);
+    return true;
+  }
 }
 
 class FakeSuggestModal<T> {
@@ -145,6 +150,7 @@ class FakeTFile {}
 
 interface SearchModalLike {
   readonly contentEl: FakeElement;
+  readonly inputEl: FakeElement;
   getSuggestions(query: string): Promise<unknown[]>;
   onClose(): void;
 }
@@ -406,8 +412,11 @@ function findByClass(root: FakeElement, className: string): FakeElement | null {
   return null;
 }
 
-function createModal(backend: DeferredBackend): SearchModalLike {
-  return new searchModalModule.KwirySearchModal(plugin(), backend, status());
+function createModal(
+  backend: DeferredBackend,
+  initialStatus: BackendStatus = status(),
+): SearchModalLike {
+  return new searchModalModule.KwirySearchModal(plugin(), backend, initialStatus);
 }
 
 beforeEach(() => {
@@ -506,6 +515,75 @@ describe("KwirySearchModal status rail", () => {
     modal.onClose();
   });
 
+  it("reruns the retained query once when a cold index becomes searchable", async () => {
+    const backend = new DeferredBackend();
+    const building = status({
+      phase: "building",
+      searchable: false,
+      generation: null,
+      dirty: true,
+      rebuilding: true,
+    });
+    backend.statusValue = building;
+    const modal = createModal(backend, building);
+    modal.inputEl.value = "retained query";
+
+    const blocked = modal.getSuggestions(modal.inputEl.value);
+    backend.searches[0]!.reject(new searchModalModule.KwiryBackendError(
+      "index_building",
+      "in_plugin",
+      "index",
+      true,
+      "In-plugin lexical index is still building.",
+    ));
+    await expect(blocked).resolves.toEqual([]);
+    expect(modal.inputEl.dispatchedEvents).toEqual([]);
+
+    backend.statusValue = status();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(modal.inputEl.dispatchedEvents.map((event) => event.type)).toEqual(["input"]);
+
+    await vi.advanceTimersByTimeAsync(400);
+    expect(modal.inputEl.dispatchedEvents).toHaveLength(1);
+
+    backend.statusValue = building;
+    await vi.advanceTimersByTimeAsync(400);
+    backend.statusValue = status();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(modal.inputEl.dispatchedEvents).toHaveLength(1);
+    modal.onClose();
+  });
+
+  it("does not rerun a cleared query when the cold index becomes searchable", async () => {
+    const backend = new DeferredBackend();
+    const building = status({
+      phase: "building",
+      searchable: false,
+      generation: null,
+      dirty: true,
+      rebuilding: true,
+    });
+    backend.statusValue = building;
+    const modal = createModal(backend, building);
+    modal.inputEl.value = "temporary query";
+
+    const blocked = modal.getSuggestions(modal.inputEl.value);
+    backend.searches[0]!.reject(new searchModalModule.KwiryBackendError(
+      "index_building",
+      "in_plugin",
+      "index",
+      true,
+      "In-plugin lexical index is still building.",
+    ));
+    await expect(blocked).resolves.toEqual([]);
+    modal.inputEl.value = "";
+
+    backend.statusValue = status();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(modal.inputEl.dispatchedEvents).toEqual([]);
+    modal.onClose();
+  });
+
   it("updates background indexing without mutating the query live region", async () => {
     const backend = new DeferredBackend();
     const modal = createModal(backend);
@@ -526,7 +604,7 @@ describe("KwirySearchModal status rail", () => {
     });
     await vi.advanceTimersByTimeAsync(400);
 
-    expect(index.textContent).toBe("Index · Reading 4/10 (40%) · 1 in flight");
+    expect(index.textContent).toBe("Index · Reading 4/10 (40%) ·  1 in flight");
     expect(index.attributes.has("aria-live")).toBe(false);
     expect(query.textSetCount).toBe(queryMutations);
     expect(query.textContent).toBe("Type to search your notes.");
@@ -559,7 +637,7 @@ describe("KwirySearchModal status rail", () => {
       },
     }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(index.textContent).toBe("Index · Reading 6/10 (60%) · 1 in flight");
+    expect(index.textContent).toBe("Index · Reading 6/10 (60%) ·  1 in flight");
 
     await vi.advanceTimersByTimeAsync(400);
     expect(backend.statusCalls).toBe(2);
@@ -578,7 +656,7 @@ describe("KwirySearchModal status rail", () => {
       },
     }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(index.textContent).toBe("Index · Reading 6/10 (60%) · 1 in flight");
+    expect(index.textContent).toBe("Index · Reading 6/10 (60%) ·  1 in flight");
     expect(vi.getTimerCount()).toBe(0);
   });
 

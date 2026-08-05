@@ -55,6 +55,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private activeRequestEpoch = 0;
   private lastQueryStatusText = "";
   private lastIndexStatusText = "";
+  private lastSearchable: boolean;
   private readonly shortcutPlatform: SearchShortcutPlatform;
   private readonly linkInsertionTarget: LinkInsertionTarget | null;
 
@@ -75,6 +76,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       status.capabilities.supportedModes,
       this.mode,
     );
+    this.lastSearchable = status.searchable;
     this.setPlaceholder("Search your notes with kwiry…");
     this.emptyStateText = "";
     this.createProfileLabel(status);
@@ -407,6 +409,8 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   private renderProgress(status: BackendStatus): void {
+    const becameSearchable = !this.lastSearchable && status.searchable;
+    this.lastSearchable = status.searchable;
     const line = this.indexStatusEl;
     if (!line) return;
     const presentation = presentBackgroundIndex(status);
@@ -417,6 +421,19 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     line.setAttribute("data-state", presentation.state);
     line.classList.toggle("has-status", presentation.state !== "quiet");
     line.classList.toggle("is-attention", presentation.state === "attention");
+    if (becameSearchable) this.rerunRetainedQuery(status);
+  }
+
+  private rerunRetainedQuery(status: BackendStatus): void {
+    if (status.identity.instanceId !== this.backend.identity.instanceId
+      || this.lastErrorCode !== "index_building"
+      || this.inputEl.value.trim().length === 0) {
+      return;
+    }
+    // The transition can be observed by more than one status consumer, but the
+    // retained query must be submitted only once for this completed build.
+    this.lastErrorCode = null;
+    this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
   private createProfileLabel(status: BackendStatus): void {

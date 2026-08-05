@@ -203,8 +203,35 @@ describe("presentBackgroundIndex", () => {
       },
     }))).toEqual({
       state: "indexing",
-      text: "Index · Reading 8/10 (80%) · 2 in flight",
+      text: "Index · Reading 8/10 (80%) ·  2 in flight",
     });
+  });
+
+  it("reserves two tabular positions for the in-flight count", () => {
+    const oneDigit = presentBackgroundIndex(status({
+      phase: "building",
+      progress: {
+        stage: "snapshot",
+        activity: "read",
+        completed: 8,
+        total: 10,
+        inFlight: 9,
+      },
+    })).text;
+    const twoDigits = presentBackgroundIndex(status({
+      phase: "building",
+      progress: {
+        stage: "snapshot",
+        activity: "read",
+        completed: 8,
+        total: 10,
+        inFlight: 10,
+      },
+    })).text;
+
+    expect(oneDigit).toContain("·  9 in flight");
+    expect(twoDigits).toContain("· 10 in flight");
+    expect(oneDigit.length).toBe(twoDigits.length);
   });
 
   it("keeps aggregate omissions visible without exposing paths", () => {

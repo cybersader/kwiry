@@ -93,8 +93,16 @@ export function presentBackgroundIndex(status: BackendStatus): BackgroundIndexPr
   if (text === null) return { state: "quiet", text: "" };
   return {
     state: status.progress === undefined ? "attention" : "indexing",
-    text: `Index · ${text}`,
+    text: `Index · ${stabilizeInFlightWidth(text)}`,
   };
+}
+
+/**
+ * A figure space occupies one tabular digit without displaying a glyph, so the
+ * trailing "in flight" label does not jump when the count crosses 9 → 10.
+ */
+function stabilizeInFlightWidth(text: string): string {
+  return text.replace(/ · ([0-9]) in flight/u, " ·  $1 in flight");
 }
 
 function candidateWindowText(state: CandidateWindowFacts["state"]): string {
