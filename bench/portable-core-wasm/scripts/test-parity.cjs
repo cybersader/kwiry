@@ -82,7 +82,7 @@ const get = (name) => {
   return value;
 };
 
-assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 6);
+assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 7);
 assert.equal(get("markdown-frontmatter-links-identifiers").preparation.retrieval.aliases.length, 2);
 assert.ok(
   get("markdown-frontmatter-links-identifiers").preparation.chunks.some((chunk) =>

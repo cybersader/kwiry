@@ -313,7 +313,7 @@ fn push_notice(
     }
 }
 
-#[cfg(all(feature = "internal-docx-extractor", test))]
+#[cfg(test)]
 mod tests {
     use crate::extract::ExtractionCoverage;
 
@@ -859,16 +859,32 @@ mod tests {
     }
 
     #[test]
-    fn feature_does_not_admit_docx_extraction() {
-        let package = minimal_package(Method::Store, false, None);
+    fn docx_is_admitted_and_extracts_through_the_shared_source_model() {
+        let package =
+            package_with_main_body(r#"<w:p><w:r><w:t>Admitted body</w:t></w:r></w:p>"#, None);
         let extracted = extract(&package.bytes);
+        assert_eq!(extracted.coverage, ExtractionCoverage::IndexedComplete);
         assert_eq!(
-            extracted.coverage,
-            ExtractionCoverage::SkippedNoExtractableText
+            extracted
+                .sections
+                .iter()
+                .map(|section| section.content.as_str())
+                .collect::<Vec<_>>(),
+            ["Admitted body"]
         );
-        assert!(extracted.sections.is_empty());
-        assert_eq!(extracted.notices[0].code, "format_not_yet_supported");
-        assert!(!crate::format::SourceFormat::Docx.is_extractable());
+        assert!(extracted.notices.is_empty());
+        assert!(crate::format::SourceFormat::Docx.is_extractable());
+
+        // An empty package still carries no text, but it must be reported as a
+        // real extraction outcome rather than an unsupported format.
+        let empty = extract(&minimal_package(Method::Store, false, None).bytes);
+        assert_eq!(empty.coverage, ExtractionCoverage::SkippedNoExtractableText);
+        assert!(
+            empty
+                .notices
+                .iter()
+                .all(|notice| notice.code != "format_not_yet_supported")
+        );
     }
 
     #[test]
