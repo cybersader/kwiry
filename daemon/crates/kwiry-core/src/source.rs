@@ -204,11 +204,24 @@ pub fn prepare_source_buffer(
     let source_key = source_key(&descriptor.vault_id, &descriptor.path);
     let empty_retrieval = retrieval_metadata(&descriptor.path, Vec::new());
     let content_hash = hex_digest(bytes);
-    let extracted =
-        extract_source(descriptor.format, bytes).map_err(|error| SourcePreparationError {
-            code: error.code,
-            message: error.message,
-        })?;
+    // An extractor that hits its own budget describes one source, never the
+    // batch. Propagating the error here rejects every source sent alongside it,
+    // so a single oversized drawing or note stops an entire vault from
+    // indexing. The coverage vocabulary already has a per-source outcome for
+    // this, so quarantine the source and let its neighbours through.
+    let extracted = match extract_source(descriptor.format, bytes) {
+        Ok(extracted) => extracted,
+        Err(error) => {
+            return Ok(skipped_preparation(
+                descriptor,
+                source_key,
+                empty_retrieval,
+                Some(content_hash),
+                ExtractionCoverage::Quarantined,
+                error.message,
+            ));
+        }
+    };
     let warning = extracted.warning();
     if !extracted.coverage.is_indexed() {
         return Ok(skipped_preparation(
@@ -751,21 +764,39 @@ mod tests {
     }
 
     #[test]
-    fn preparation_refuses_one_chunk_past_the_generation_ceiling() {
+    fn preparation_quarantines_one_chunk_past_the_generation_ceiling() {
         let source = (0..=MAX_PREPARED_CHUNKS_PER_SOURCE)
             .map(|index| format!("# h{index}\nx\n"))
             .collect::<String>();
-        let error = prepare_source_buffer(
+        let prepared = prepare_source_buffer(
             &descriptor("many.md", SourceFormat::Markdown, source.as_bytes()),
             source.as_bytes(),
         )
-        .unwrap_err();
+        .expect("an over-budget source is a per-source outcome, never a batch failure");
 
-        assert_eq!(error.code, "index_limit_exceeded");
+        assert_eq!(prepared.coverage, ExtractionCoverage::Quarantined);
+        assert_eq!(prepared.kind, SourcePreparationKind::Skipped);
+        assert!(prepared.chunks.is_empty());
+        assert!(
+            prepared
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("chunk inventory limit"))
+        );
+
+        // The neighbour a real batch would carry alongside it still prepares:
+        // one oversized note must not stop a vault from indexing.
+        let neighbour = b"# ok\nbody\n";
+        let prepared = prepare_source_buffer(
+            &descriptor("ok.md", SourceFormat::Markdown, neighbour),
+            neighbour,
+        )
+        .expect("a healthy neighbour still prepares");
+        assert!(prepared.coverage.is_indexed());
     }
 
     #[test]
-    fn preparation_refuses_large_parent_heading_path_amplification_early() {
+    fn preparation_quarantines_large_parent_heading_path_amplification_early() {
         let parent = "p".repeat(1024 * 1024);
         let mut source = format!("# {parent}\nparent body\n");
         for index in 0..12 {
@@ -773,14 +804,20 @@ mod tests {
         }
         assert!((source.len() as u64) < MAX_FILE_BYTES);
 
-        let error = prepare_source_buffer(
+        let prepared = prepare_source_buffer(
             &descriptor("large-parent.md", SourceFormat::Markdown, source.as_bytes()),
             source.as_bytes(),
         )
-        .unwrap_err();
+        .expect("an over-budget source is a per-source outcome, never a batch failure");
 
-        assert_eq!(error.code, "index_limit_exceeded");
-        assert!(error.message.contains("heading-path memory limit"));
+        assert_eq!(prepared.coverage, ExtractionCoverage::Quarantined);
+        assert!(prepared.chunks.is_empty());
+        assert!(
+            prepared
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("heading-path memory limit"))
+        );
     }
 
     #[test]

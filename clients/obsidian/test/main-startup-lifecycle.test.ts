@@ -36,7 +36,10 @@ const MAIN_PATH = new URL("../src/main.ts", import.meta.url).pathname;
 const require = createRequire(import.meta.url);
 
 async function loadProductionPlugin(): Promise<new () => {
-  settings: { enabledSourceFormats: Record<string, boolean> };
+  settings: {
+    enabledSourceFormats: Record<string, boolean>;
+    diagnosticsReportDetail: "compact" | "full";
+  };
   onload(): Promise<void>;
   onSourcePolicyChanged(): Promise<void>;
   rebuildInPluginIndex(): Promise<void>;
@@ -61,7 +64,10 @@ async function loadProductionPlugin(): Promise<new () => {
   const plugin = module.exports.default;
   if (typeof plugin !== "function") throw new Error("main.ts test bundle has no default plugin");
   return plugin as new () => {
-    settings: { enabledSourceFormats: Record<string, boolean> };
+    settings: {
+    enabledSourceFormats: Record<string, boolean>;
+    diagnosticsReportDetail: "compact" | "full";
+  };
     onload(): Promise<void>;
     onSourcePolicyChanged(): Promise<void>;
     rebuildInPluginIndex(): Promise<void>;
@@ -373,10 +379,20 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     await Promise.resolve();
     await Promise.resolve();
 
+    // The structured records are what this assertion inspects, so ask for the
+    // full report explicitly; the shipped default is compact so a field report
+    // stays small enough to send.
+    plugin.settings.diagnosticsReportDetail = "full";
     await plugin.copyDiagnostics();
     const report = harness.clipboardWrites.at(-1) ?? "";
     const jsonText = report.split("Structured records (JSON):\n")[1];
     expect(jsonText).toBeDefined();
+
+    plugin.settings.diagnosticsReportDetail = "compact";
+    await plugin.copyDiagnostics();
+    const compact = harness.clipboardWrites.at(-1) ?? "";
+    expect(compact).toContain("structured_records: omitted");
+    expect(compact.length).toBeLessThan(report.length);
     const structured = JSON.parse(jsonText!);
     const progressRecords = structured.records.filter((record: {
       code: string;

@@ -570,15 +570,86 @@ export class DiagnosticLog {
   }
 }
 
+/// Export shaping. A field report is only useful if it can actually be sent:
+/// a full report is dominated by its structured records, which makes it
+/// impractical to copy from a phone. Narrowing by level or category, or
+/// dropping the records block, keeps the same evidence at a fraction of the
+/// size. Filtering never changes what was captured, only what is exported.
+export interface DiagnosticReportOptions {
+  readonly minimumLevel?: DiagnosticLevel;
+  readonly categories?: readonly DiagnosticEventCode[];
+  readonly includeStructuredRecords?: boolean;
+}
+
+export const DIAGNOSTIC_CATEGORY_GROUPS = {
+  all: null,
+  indexing: ["index.lifecycle", "cache.lifecycle", "worker.lifecycle", "vault.event"],
+  search: ["search.lifecycle"],
+  startup: [
+    "plugin.load",
+    "plugin.unload",
+    "startup.lifecycle",
+    "backend.activate",
+    "backend.dispose",
+  ],
+  failures: ["failure.caught", "promise.rejected"],
+} as const satisfies Record<string, readonly DiagnosticEventCode[] | null>;
+
+export type DiagnosticCategoryGroup = keyof typeof DIAGNOSTIC_CATEGORY_GROUPS;
+
+export function diagnosticCategoryGroup(
+  group: DiagnosticCategoryGroup,
+): readonly DiagnosticEventCode[] | undefined {
+  return DIAGNOSTIC_CATEGORY_GROUPS[group] ?? undefined;
+}
+
 export function formatDiagnosticLog(
   log: DiagnosticLog,
   context: DiagnosticExportContext,
-  minimumLevel: DiagnosticLevel = "debug",
+  minimumLevelOrOptions: DiagnosticLevel | DiagnosticReportOptions = "debug",
+): string {
+  const options: DiagnosticReportOptions = typeof minimumLevelOrOptions === "string"
+    ? { minimumLevel: minimumLevelOrOptions }
+    : minimumLevelOrOptions;
+  const minimumLevel = options.minimumLevel ?? "debug";
+  const categories = options.categories;
+  if (categories !== undefined) {
+    if (categories.length === 0) throw new TypeError("Invalid diagnostic category filter");
+    for (const category of categories) {
+      if (!EVENT_CODE_SET.has(category)) {
+        throw new TypeError("Invalid diagnostic category filter");
+      }
+    }
+  }
+  const includeStructuredRecords = options.includeStructuredRecords ?? true;
+  return formatFilteredLog(
+    log,
+    context,
+    minimumLevel,
+    categories,
+    includeStructuredRecords,
+  );
+}
+
+function formatFilteredLog(
+  log: DiagnosticLog,
+  context: DiagnosticExportContext,
+  minimumLevel: DiagnosticLevel,
+  categories: readonly DiagnosticEventCode[] | undefined,
+  includeStructuredRecords: boolean,
 ): string {
   if (!PLATFORM_SET.has(context.platform) || !PROFILE_SET.has(context.backendProfile)) {
     throw new TypeError("Invalid diagnostic header");
   }
-  const snapshot = log.snapshot(minimumLevel);
+  const fullSnapshot = log.snapshot(minimumLevel);
+  const selected = categories === undefined
+    ? fullSnapshot.entries
+    : fullSnapshot.entries.filter((entry) => categories.includes(entry.code));
+  const snapshot = {
+    capacity: fullSnapshot.capacity,
+    dropped: fullSnapshot.dropped,
+    entries: selected,
+  };
   const safeContext = {
     pluginVersion: headerToken(context.pluginVersion),
     obsidianVersion: headerToken(context.obsidianVersion),
@@ -595,6 +666,10 @@ export function formatDiagnosticLog(
     `stored_entries: ${snapshot.entries.length}`,
     `dropped_entries: ${snapshot.dropped}`,
     `minimum_level: ${minimumLevel}`,
+    `categories: ${categories === undefined ? "all" : categories.join(",")}`,
+    ...(fullSnapshot.entries.length === snapshot.entries.length
+      ? []
+      : [`filtered_out_entries: ${fullSnapshot.entries.length - snapshot.entries.length}`]),
     "",
     "Summary:",
   ];
@@ -607,6 +682,10 @@ export function formatDiagnosticLog(
     lines.push(detail.length === 0 ? prefix : `${prefix} ${detail}`);
   }
   if (snapshot.entries.length === 0) lines.push("(no retained events at this level)");
+  if (!includeStructuredRecords) {
+    lines.push("", "structured_records: omitted");
+    return `${lines.join("\n")}\n`;
+  }
   lines.push("", "Structured records (JSON):");
   lines.push(JSON.stringify({
     schemaVersion: 1,

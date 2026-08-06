@@ -8,6 +8,9 @@ import type { SearchMode } from "./api";
 import {
   SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
   SOURCE_ROW_LIMIT_SETTING_NAME,
+  type DiagnosticsReportDetail,
+  type DiagnosticsReportLevel,
+  type DiagnosticsReportScope,
 } from "./settings";
 import {
   IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
@@ -136,6 +139,63 @@ export class KwirySettingTab extends PluginSettingTab {
             const level = value === "off" || value === "error" ? value : "info";
             this.plugin.settings.diagnosticsLogLevel = level;
             this.plugin.setDiagnosticsLogLevel(level);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Report level")
+      .setDesc(
+        "Which events a copied report contains. It can narrow the log level but never include events the log level above did not record.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            debug: "Everything recorded",
+            info: "Info and above",
+            warn: "Warnings and errors",
+            error: "Errors only",
+          })
+          .setValue(this.plugin.settings.diagnosticsReportLevel)
+          .onChange(async (value) => {
+            this.plugin.settings.diagnosticsReportLevel = value as DiagnosticsReportLevel;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Report scope")
+      .setDesc("Restrict a copied report to one area so it stays small enough to send.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            all: "Everything",
+            indexing: "Indexing, cache, and Worker",
+            search: "Search",
+            startup: "Startup and backend",
+            failures: "Failures only",
+          })
+          .setValue(this.plugin.settings.diagnosticsReportScope)
+          .onChange(async (value) => {
+            this.plugin.settings.diagnosticsReportScope = value as DiagnosticsReportScope;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Report detail")
+      .setDesc(
+        "The full report appends every event again as JSON, which dominates its size. Compact keeps the readable summary only.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            compact: "Compact summary",
+            full: "Full, with JSON records",
+          })
+          .setValue(this.plugin.settings.diagnosticsReportDetail)
+          .onChange(async (value) => {
+            this.plugin.settings.diagnosticsReportDetail = value as DiagnosticsReportDetail;
             await this.plugin.saveSettings();
           }),
       );

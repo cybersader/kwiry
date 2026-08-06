@@ -26,6 +26,7 @@ import { createInPluginCacheOptions } from "./cache/build-cache-options";
 import { readDaemonToken } from "./credentials";
 import { PluginDiagnostics } from "./diagnostics/plugin-diagnostics";
 import { StartupTimeline } from "./diagnostics/startup-timeline";
+import { diagnosticCategoryGroup } from "./diagnostics/log";
 import type {
   DiagnosticDetails,
   DiagnosticEventBuilder,
@@ -214,13 +215,19 @@ export default class KwiryPlugin extends Plugin {
 
   async copyDiagnostics(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(this.diagnostics.format({
+      const categories = diagnosticCategoryGroup(this.settings.diagnosticsReportScope);
+      const report = this.diagnostics.format({
         pluginVersion: this.manifest.version,
         obsidianVersion: apiVersion,
         platform: diagnosticPlatform(),
         backendProfile: this.settings.backendProfile,
-      }));
-      new Notice("Kwiry: diagnostics copied to the clipboard.");
+      }, {
+        minimumLevel: this.settings.diagnosticsReportLevel,
+        ...(categories === undefined ? {} : { categories }),
+        includeStructuredRecords: this.settings.diagnosticsReportDetail === "full",
+      });
+      await navigator.clipboard.writeText(report);
+      new Notice(`Kwiry: diagnostics copied (${Math.ceil(report.length / 1024)} KB).`);
     } catch (error) {
       this.recordCaughtFailure("ui", "copy", error);
       new Notice("Kwiry: diagnostics could not be copied.");

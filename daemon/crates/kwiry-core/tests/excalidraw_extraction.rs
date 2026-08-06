@@ -891,6 +891,45 @@ fn excalidraw_is_admitted_by_the_owner_amendment() {
     assert!(!prepared.chunks.is_empty());
 }
 
+#[test]
+fn a_source_that_exhausts_its_extraction_budget_quarantines_without_failing_the_batch() {
+    // One drawing with more elements than the chunk inventory allows must not
+    // reject the whole source batch: a build of thousands of notes cannot hinge
+    // on one oversized file.
+    let mut elements = String::from("[");
+    for index in 0..=crate_max_sections() {
+        if index > 0 {
+            elements.push(',');
+        }
+        elements.push_str(&format!(
+            r#"{{"id":"e{index}","type":"text","originalText":"element {index}"}}"#,
+        ));
+    }
+    elements.push(']');
+    let document = format!(r#"{{"type":"excalidraw","elements":{elements}}}"#);
+
+    let prepared = prepare_source_buffer(
+        &SourceDescriptor {
+            vault_id: "excalidraw-fixture".to_owned(),
+            room: None,
+            path: "Drawings/huge.excalidraw".to_owned(),
+            format: SourceFormat::Excalidraw,
+            byte_length: document.len() as u64,
+            mtime: 42,
+            mtime_nanos: 42_000_000_000,
+        },
+        document.as_bytes(),
+    )
+    .expect("an over-budget source is a per-source outcome, never a batch failure");
+    assert_eq!(prepared.coverage, ExtractionCoverage::Quarantined);
+    assert!(prepared.chunks.is_empty());
+    assert!(prepared.warning.is_some());
+}
+
+fn crate_max_sections() -> usize {
+    kwiry_core::MAX_PREPARED_CHUNKS_PER_SOURCE
+}
+
 fn section_contents(extracted: &ExtractedSource) -> Vec<&str> {
     extracted
         .sections

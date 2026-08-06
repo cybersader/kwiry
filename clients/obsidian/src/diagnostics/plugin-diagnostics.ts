@@ -12,6 +12,7 @@ import {
   type DiagnosticEventCode,
   type DiagnosticExportContext,
   type DiagnosticLevel,
+  type DiagnosticReportOptions,
 } from "./log";
 import type { DiagnosticsLogLevel } from "../settings";
 import type { StartupTimelineRecord } from "./startup-timeline";
@@ -83,9 +84,17 @@ export class PluginDiagnostics {
     }
   }
 
-  format(context: DiagnosticExportContext): string {
+  format(context: DiagnosticExportContext, options: DiagnosticReportOptions = {}): string {
     try {
-      return formatDiagnosticLog(this.log, context, minimumLevel(this.level));
+      return formatDiagnosticLog(this.log, context, {
+        // Capture level is still the floor: a report can narrow what was
+        // recorded but can never widen it into events that were never kept.
+        minimumLevel: widerOf(minimumLevel(this.level), options.minimumLevel),
+        ...(options.categories === undefined ? {} : { categories: options.categories }),
+        ...(options.includeStructuredRecords === undefined
+          ? {}
+          : { includeStructuredRecords: options.includeStructuredRecords }),
+      });
     } catch {
       return "Kwiry diagnostics log\nreport_unavailable: true\n";
     }
@@ -133,4 +142,18 @@ function safeEvent(event: DiagnosticEventBuilder): DiagnosticEventBuilder {
 
 function minimumLevel(level: DiagnosticsLogLevel): DiagnosticLevel {
   return level === "error" || level === "off" ? "error" : "info";
+}
+
+const REPORT_LEVEL_ORDER: readonly DiagnosticLevel[] = ["debug", "info", "warn", "error"];
+
+/// Returns whichever threshold keeps fewer events, so a requested report level
+/// can narrow the capture floor but never reach below it.
+function widerOf(
+  capture: DiagnosticLevel,
+  requested: DiagnosticLevel | undefined,
+): DiagnosticLevel {
+  if (requested === undefined) return capture;
+  return REPORT_LEVEL_ORDER.indexOf(requested) > REPORT_LEVEL_ORDER.indexOf(capture)
+    ? requested
+    : capture;
 }

@@ -187,9 +187,9 @@ pub use semantic::{
 };
 #[cfg(feature = "portable")]
 pub use source::{
-    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourceExactMetadata, SourcePreparation,
-    SourcePreparationError, SourcePreparationKind, prepare_oversized_source, prepare_source_buffer,
-    source_key,
+    MAX_PREPARED_CHUNKS_PER_SOURCE, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor,
+    SourceExactMetadata, SourcePreparation, SourcePreparationError, SourcePreparationKind,
+    prepare_oversized_source, prepare_source_buffer, source_key,
 };
 #[cfg(feature = "portable")]
 pub use status::{

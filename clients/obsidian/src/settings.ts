@@ -12,6 +12,13 @@ import {
 
 export type DiagnosticsLogLevel = "off" | "error" | "info";
 
+/// Report shaping is separate from capture. Capture decides what is recorded;
+/// these decide what a copied report contains, so a field report stays small
+/// enough to actually send from a phone.
+export type DiagnosticsReportLevel = "debug" | "info" | "warn" | "error";
+export type DiagnosticsReportScope = "all" | "indexing" | "search" | "startup" | "failures";
+export type DiagnosticsReportDetail = "compact" | "full";
+
 export const SOURCE_ROW_LIMIT_SETTING_NAME = "Source row limit";
 export const SOURCE_ROW_LIMIT_SETTING_DESCRIPTION =
   "Sources shown per search (1–100). Grouping examines up to 100 ranked sections.";
@@ -31,6 +38,9 @@ export interface KwiryPluginSettings {
   showRibbonIcon: boolean;
   enabledSourceFormats: EnabledSourceFormats;
   diagnosticsLogLevel: DiagnosticsLogLevel;
+  diagnosticsReportLevel: DiagnosticsReportLevel;
+  diagnosticsReportScope: DiagnosticsReportScope;
+  diagnosticsReportDetail: DiagnosticsReportDetail;
 }
 
 export const DEFAULT_SETTINGS: KwiryPluginSettings = {
@@ -44,6 +54,9 @@ export const DEFAULT_SETTINGS: KwiryPluginSettings = {
   showRibbonIcon: true,
   enabledSourceFormats: { ...DEFAULT_ENABLED_SOURCE_FORMATS },
   diagnosticsLogLevel: "info",
+  diagnosticsReportLevel: "info",
+  diagnosticsReportScope: "all",
+  diagnosticsReportDetail: "compact",
 };
 
 /** Merges stored data over defaults, discarding unknown keys. */
@@ -91,6 +104,29 @@ export function loadSettings(stored: unknown): KwiryPluginSettings {
     || source.diagnosticsLogLevel === "info"
   ) {
     settings.diagnosticsLogLevel = source.diagnosticsLogLevel;
+  }
+  if (
+    source.diagnosticsReportLevel === "debug"
+    || source.diagnosticsReportLevel === "info"
+    || source.diagnosticsReportLevel === "warn"
+    || source.diagnosticsReportLevel === "error"
+  ) {
+    settings.diagnosticsReportLevel = source.diagnosticsReportLevel;
+  }
+  if (
+    source.diagnosticsReportScope === "all"
+    || source.diagnosticsReportScope === "indexing"
+    || source.diagnosticsReportScope === "search"
+    || source.diagnosticsReportScope === "startup"
+    || source.diagnosticsReportScope === "failures"
+  ) {
+    settings.diagnosticsReportScope = source.diagnosticsReportScope;
+  }
+  if (
+    source.diagnosticsReportDetail === "compact"
+    || source.diagnosticsReportDetail === "full"
+  ) {
+    settings.diagnosticsReportDetail = source.diagnosticsReportDetail;
   }
   return settings;
 }

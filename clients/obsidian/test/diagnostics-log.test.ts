@@ -246,7 +246,7 @@ describe("DiagnosticLog", () => {
     });
 
     expect(output).toContain("Kwiry diagnostics log\nplugin_version: 0.2.2");
-    expect(output).toContain("dropped_entries: 0\nminimum_level: debug\n\nSummary:");
+    expect(output).toContain("dropped_entries: 0\nminimum_level: debug\ncategories: all\n\nSummary:");
     expect(output).toContain(
       "1 1970-01-01T00:00:00.000Z +1000ms ERROR failure.caught profile=in_plugin outcome=succeeded",
     );
