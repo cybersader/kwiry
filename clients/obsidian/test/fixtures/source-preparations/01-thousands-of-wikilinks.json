@@ -1,10 +1,11 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "source_key": "50a4522ffd926fbf2ab7738bd88ab2f8d90c615078eec37bfc51bd21473d8531",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Thousands of Wikilinks.md",
   "format": "markdown",
+  "extraction_profile": "portable",
   "coverage": "indexed-complete",
   "content_hash": "b731e004d29ef018d60ca8cc23d7c5dda88c1f47c4b7a96a2d24e3b2124d8b1d",
   "byte_length": 40645,

@@ -1,10 +1,11 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "source_key": "65d552ed4f1e82450a3c375f9075154301d01c3566ec51ce8c058cac0aae86e3",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Research Board.canvas",
   "format": "canvas",
+  "extraction_profile": "portable",
   "coverage": "indexed-complete",
   "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
   "byte_length": 1735,

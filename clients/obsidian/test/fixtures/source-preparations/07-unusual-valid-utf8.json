@@ -1,10 +1,11 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "source_key": "4aa6fadab99c7e1fd2cc3f3343548909300f1b6a59600863479b8843616d9f83",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Unusual Valid UTF-8.md",
   "format": "markdown",
+  "extraction_profile": "portable",
   "coverage": "indexed-complete",
   "content_hash": "d1c13c4a1f975b9268c3fc3eb1a6377b7b18ceda168faefc83987254546dbeba",
   "byte_length": 166,

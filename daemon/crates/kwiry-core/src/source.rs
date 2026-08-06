@@ -17,8 +17,9 @@ use crate::model::{
     CHUNK_OVERLAP_CHARS, CHUNKING_VERSION, Chunk, Frontmatter, MAX_CHUNK_CHARS, MAX_FILE_BYTES,
     PreparedChunk, PropertyBag, RetrievalMetadata,
 };
+use crate::policy::{ExtractionProfile, extraction_profile_for};
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 8;
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 9;
 pub const MAX_PREPARED_CHUNKS_PER_SOURCE: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
 pub const MAX_PREPARED_HEADING_BYTES_PER_SOURCE: usize = MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE;
 
@@ -61,6 +62,11 @@ pub struct SourcePreparation {
     pub room: Option<String>,
     pub path: String,
     pub format: SourceFormat,
+    /// Which extractor set produced this preparation. Recorded rather than
+    /// inferred: without it no downstream store can honestly answer "what
+    /// produced this row", and two tiers that segment the same source
+    /// differently would mint colliding chunk identities.
+    pub extraction_profile: ExtractionProfile,
     pub coverage: ExtractionCoverage,
     pub content_hash: Option<String>,
     pub byte_length: u64,
@@ -89,6 +95,7 @@ struct SourcePreparationWire {
     room: Option<String>,
     path: String,
     format: SourceFormat,
+    extraction_profile: ExtractionProfile,
     coverage: ExtractionCoverage,
     content_hash: Option<String>,
     byte_length: u64,
@@ -125,6 +132,7 @@ impl<'de> Deserialize<'de> for SourcePreparation {
             room: wire.room,
             path: wire.path,
             format: wire.format,
+            extraction_profile: wire.extraction_profile,
             coverage: wire.coverage,
             content_hash: wire.content_hash,
             byte_length: wire.byte_length,
@@ -137,6 +145,43 @@ impl<'de> Deserialize<'de> for SourcePreparation {
             kind: wire.kind,
             warning: wire.warning,
         })
+    }
+}
+
+impl SourcePreparation {
+    /// Refuse a preparation this build did not produce.
+    ///
+    /// A preparation is only reusable by a build that would have produced the
+    /// same one. Two things can make that false: the preparation schema itself
+    /// changed, or the same format was prepared by a different extractor tier.
+    /// The second is the dangerous one, because it is invisible everywhere
+    /// else — chunk identity is path-derived and freshness is byte-shaped, so a
+    /// preparation from the other tier reuses without a single mismatch to
+    /// notice. Refusing here means a tier switch re-reads the source instead of
+    /// serving rows one tier minted under the other tier's segmentation.
+    pub fn ensure_current_policy(&self) -> Result<(), SourcePreparationError> {
+        if self.schema_version != SOURCE_PREPARATION_SCHEMA_VERSION {
+            return Err(SourcePreparationError {
+                code: "preparation_schema_mismatch".to_owned(),
+                message: format!(
+                    "source preparation schema {} is not schema {SOURCE_PREPARATION_SCHEMA_VERSION}",
+                    self.schema_version
+                ),
+            });
+        }
+        let active = extraction_profile_for(self.format);
+        if self.extraction_profile != active {
+            return Err(SourcePreparationError {
+                code: "extraction_profile_mismatch".to_owned(),
+                message: format!(
+                    "source preparation was produced by the {} extraction profile for {}; this build compiled {}",
+                    self.extraction_profile.as_str(),
+                    self.format.as_str(),
+                    active.as_str()
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +213,7 @@ pub fn prepare_oversized_source(
         room: descriptor.room.clone(),
         path: descriptor.path.clone(),
         format: descriptor.format,
+        extraction_profile: extraction_profile_for(descriptor.format),
         coverage: ExtractionCoverage::Unreadable,
         content_hash: None,
         byte_length: descriptor.byte_length,
@@ -332,6 +378,7 @@ pub fn prepare_source_buffer(
         room: descriptor.room.clone(),
         path: descriptor.path.clone(),
         format: descriptor.format,
+        extraction_profile: extraction_profile_for(descriptor.format),
         coverage,
         content_hash: Some(content_hash),
         byte_length: descriptor.byte_length,
@@ -416,6 +463,7 @@ fn skipped_preparation(
         room: descriptor.room.clone(),
         path: descriptor.path.clone(),
         format: descriptor.format,
+        extraction_profile: extraction_profile_for(descriptor.format),
         coverage,
         content_hash,
         byte_length: descriptor.byte_length,

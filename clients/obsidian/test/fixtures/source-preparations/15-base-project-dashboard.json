@@ -1,10 +1,11 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "source_key": "8f1891e1a2ad5e751840fe6aaa8a7041f8b71d25cfdd2b919788bff692c84fe6",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Project Dashboard.base",
   "format": "base",
+  "extraction_profile": "portable",
   "coverage": "indexed-complete",
   "content_hash": "2b80f5265f6ffb718da9ba8512b660fb5e31d9bfb145dfa8dfa99d6a134fa41d",
   "byte_length": 379,

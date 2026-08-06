@@ -527,6 +527,7 @@ async fn search(
     let mut response = Json(ApiSearchResponse {
         hits: result.hits,
         next_cursor: None,
+        extraction_policy_fingerprint: kwiry_core::extraction_policy_fingerprint().to_owned(),
     })
     .into_response();
     response.headers_mut().insert(
@@ -634,6 +635,8 @@ pub(crate) fn status_from_manifest(
         version: env!("CARGO_PKG_VERSION").to_owned(),
         generation,
         chunking_version: kwiry_core::CHUNKING_VERSION,
+        extraction_policy_fingerprint: kwiry_core::extraction_policy_fingerprint().to_owned(),
+        extraction_policy: kwiry_core::active_extraction_policy(),
         documents: manifest.document_count(),
         chunks: manifest.chunk_count(),
         source_format_counts: manifest.source_format_counts(),
@@ -945,7 +948,17 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(response_keys, BTreeSet::from(["hits", "next_cursor"]));
+        // The envelope gains exactly one field: the policy identity of the
+        // index these hits came out of. Deliberately not per-hit — an index is
+        // a single-profile artifact, so a per-hit copy could only repeat itself.
+        assert_eq!(
+            response_keys,
+            BTreeSet::from(["extraction_policy_fingerprint", "hits", "next_cursor"])
+        );
+        assert_eq!(
+            value["extraction_policy_fingerprint"],
+            kwiry_core::extraction_policy_fingerprint()
+        );
         let hit_keys: BTreeSet<_> = value["hits"][0]
             .as_object()
             .unwrap()

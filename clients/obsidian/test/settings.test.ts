@@ -148,7 +148,7 @@ describe("loadSettings", () => {
     expect(sourceFormatDescription("pdf")).toContain("not inventoried or read");
   });
 
-  it("fingerprints the effective schema-8 extraction policy deterministically", async () => {
+  it("fingerprints the effective schema-9 extraction policy deterministically", async () => {
     const first = await formatPolicyFingerprint({ ...DEFAULT_ENABLED_SOURCE_FORMATS });
     const reorderedWithDormantLegacyIntent = await formatPolicyFingerprint({
       excalidraw: true,
@@ -163,7 +163,10 @@ describe("loadSettings", () => {
       ...DEFAULT_ENABLED_SOURCE_FORMATS,
       text: false,
     });
-    expect(first).toBe("090269f9386c1e36124dd493ff02688a7921f883c1cebcd9d99ffd3fc2e31029");
+    expect(first).toBe("0f7ed72e927b8488adde1dc323ae861017eca3d036965df7ff2df7382370f2e1");
+    // The schema-8 / policy-v1 digest. Pinned as a negative so a cache built
+    // before the extraction profile existed can never be mistaken for current.
+    expect(first).not.toBe("090269f9386c1e36124dd493ff02688a7921f883c1cebcd9d99ffd3fc2e31029");
     expect(first).not.toBe("c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97");
     expect(reorderedWithDormantLegacyIntent).toBe(first);
     expect(withoutText).not.toBe(first);

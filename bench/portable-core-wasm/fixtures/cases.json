@@ -77,7 +77,11 @@
     },
     "content": {
       "encoding": "bytes",
-      "values": [97, 0, 98]
+      "values": [
+        97,
+        0,
+        98
+      ]
     }
   },
   {
@@ -93,7 +97,10 @@
     },
     "content": {
       "encoding": "bytes",
-      "values": [255, 254]
+      "values": [
+        255,
+        254
+      ]
     }
   },
   {
@@ -272,7 +279,9 @@
       "filters": {
         "vault_id": "fixture",
         "path_prefix": "reference",
-        "tags": ["search"],
+        "tags": [
+          "search"
+        ],
         "frontmatter_equals": {
           "status": "active"
         }
@@ -288,6 +297,16 @@
       "version": "0.1.0",
       "generation": "generation-0001",
       "chunking_version": 2,
+      "extraction_policy_fingerprint": "1b393b155b0af728b1ec9c9131573c105c9e7aba41ff31a4d12c824d4c73adef",
+      "extraction_policy": {
+        "markdown": "portable",
+        "text": "portable",
+        "base": "portable",
+        "canvas": "portable",
+        "docx": "portable",
+        "pdf": "none",
+        "excalidraw": "portable"
+      },
       "documents": 3,
       "chunks": 7,
       "source_format_counts": {

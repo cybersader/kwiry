@@ -11,17 +11,26 @@ use crate::model::{
     CHUNKING_VERSION, FileIngestOutcome, FileOutcomeKind, ResourceKey, SourceFormatCounts,
     VaultRegistration,
 };
+use crate::policy::{ExtractionProfile, extraction_policy_fingerprint, extraction_profile_for};
+use crate::source::SOURCE_PREPARATION_SCHEMA_VERSION;
 pub use crate::source::source_key;
 use crate::state::{read_json, write_json_atomic};
 
-pub const MANIFEST_VERSION: u32 = 3;
-pub const INDEX_FORMAT_VERSION: u32 = 11;
+pub const MANIFEST_VERSION: u32 = 4;
+pub const INDEX_FORMAT_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
     pub manifest_version: u32,
     pub index_format_version: u32,
     pub chunking_version: u64,
+    /// The source-preparation schema every entry below was produced under.
+    pub preparation_schema_version: u32,
+    /// The extraction-policy identity every entry below was produced under.
+    /// This is the daemon's rebuild gate: an index is a single-profile
+    /// artifact, and a build whose compiled extractor set differs cannot reuse
+    /// one row of it.
+    pub extraction_policy_fingerprint: String,
     pub state_revision: u64,
     pub last_sync: Option<String>,
     pub files: BTreeMap<String, ManifestFile>,
@@ -33,6 +42,8 @@ impl Default for Manifest {
             manifest_version: MANIFEST_VERSION,
             index_format_version: INDEX_FORMAT_VERSION,
             chunking_version: CHUNKING_VERSION,
+            preparation_schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
+            extraction_policy_fingerprint: extraction_policy_fingerprint().to_owned(),
             state_revision: 0,
             last_sync: None,
             files: BTreeMap::new(),
@@ -56,10 +67,39 @@ impl Manifest {
         if self.manifest_version != MANIFEST_VERSION
             || self.index_format_version != INDEX_FORMAT_VERSION
             || self.chunking_version != CHUNKING_VERSION
+            || self.preparation_schema_version != SOURCE_PREPARATION_SCHEMA_VERSION
         {
             return Err(Error::State(format!(
-                "unsupported manifest versions: found manifest={}, index={}, chunking={}; expected manifest={MANIFEST_VERSION}, index={INDEX_FORMAT_VERSION}, chunking={CHUNKING_VERSION}; run `kwiry index` to rebuild the disposable index",
-                self.manifest_version, self.index_format_version, self.chunking_version
+                "unsupported manifest versions: found manifest={}, index={}, chunking={}, preparation={}; expected manifest={MANIFEST_VERSION}, index={INDEX_FORMAT_VERSION}, chunking={CHUNKING_VERSION}, preparation={SOURCE_PREPARATION_SCHEMA_VERSION}; run `kwiry index` to rebuild the disposable index",
+                self.manifest_version,
+                self.index_format_version,
+                self.chunking_version,
+                self.preparation_schema_version
+            )));
+        }
+        // A policy change is a full rebuild, never a partial reuse. Selective
+        // per-format invalidation is expressible — `ManifestFile` records its
+        // own profile — but it is deliberately not enabled: a tier switch is a
+        // rare, deliberate action, the index is disposable by contract, and an
+        // optimization that can still be wrong buys nothing here.
+        if self.extraction_policy_fingerprint != extraction_policy_fingerprint() {
+            return Err(Error::State(format!(
+                "manifest was built under extraction policy {} but this build compiles {}; run `kwiry index` to rebuild the disposable index",
+                self.extraction_policy_fingerprint,
+                extraction_policy_fingerprint()
+            )));
+        }
+        if let Some(file) = self
+            .files
+            .values()
+            .find(|file| file.extraction_profile != extraction_profile_for(file.format))
+        {
+            return Err(Error::State(format!(
+                "manifest entry {} was produced by the {} extraction profile but this build compiles {} for {}; run `kwiry index` to rebuild the disposable index",
+                file.path,
+                file.extraction_profile.as_str(),
+                extraction_profile_for(file.format).as_str(),
+                file.format.as_str()
             )));
         }
         if self.files.values().any(|file| {
@@ -138,6 +178,11 @@ pub struct ManifestFile {
     pub vault_id: String,
     pub path: String,
     pub format: crate::format::SourceFormat,
+    /// The extractor tier that produced this entry. Evidence, not authority:
+    /// the top-level fingerprint is what forces the rebuild. This exists so
+    /// status can be honest about what a retained row was made by, and so
+    /// reconciliation can re-read a source whose tier changed.
+    pub extraction_profile: ExtractionProfile,
     pub coverage: crate::extract::ExtractionCoverage,
     pub content_hash: String,
     pub registration_fingerprint: String,
@@ -172,6 +217,7 @@ impl ManifestFile {
                 vault_id: outcome.vault_id.clone(),
                 path: outcome.path.clone(),
                 format: outcome.format,
+                extraction_profile: outcome.extraction_profile,
                 coverage: outcome.coverage,
                 content_hash,
                 registration_fingerprint: registration_fingerprint.to_owned(),
@@ -226,14 +272,98 @@ mod tests {
         assert_ne!(source_key("a", "note.md"), source_key("a", "moved.md"));
     }
 
+    /// Pins the whole version set the extraction-profile wave moved, and the
+    /// two constants it deliberately left alone. Each line is a claim, not a
+    /// snapshot: changing one of these numbers should require editing the
+    /// sentence that says why it moved.
     #[test]
-    fn docx_wave_versions_are_explicit_and_narrow() {
-        assert_eq!(MANIFEST_VERSION, 3);
-        assert_eq!(INDEX_FORMAT_VERSION, 11);
+    fn extraction_profile_wave_versions_are_explicit_and_narrow() {
+        // `Manifest` gained the preparation schema and the policy fingerprint;
+        // `ManifestFile` gained the per-entry profile.
+        assert_eq!(MANIFEST_VERSION, 4);
+        // The document inventory a daemon index may contain is now
+        // policy-dependent, and this is the constant whose mismatch already
+        // emits the rebuild instruction.
+        assert_eq!(INDEX_FORMAT_VERSION, 12);
+        // `SourcePreparation` gained a required field, so old and new builds
+        // cannot read each other's preparations.
+        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 9);
+        // The digest shape is new, so its schema starts at 1.
+        assert_eq!(crate::policy::EXTRACTION_POLICY_SCHEMA_VERSION, 1);
+
+        // Deliberately unchanged. `split_oversized`, `MAX_CHUNK_CHARS`, and
+        // `CHUNK_OVERLAP_CHARS` are untouched: the profile is an *input to*
+        // chunking, not a change to the chunking algorithm. Bumping this would
+        // be a false statement and would invalidate semantic state alongside
+        // lexical for no reason.
         assert_eq!(CHUNKING_VERSION, 2);
-        // Admitting DOCX changes what a source preparation contains, so the
-        // preparation schema advances and incompatible caches must rebuild.
-        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 8);
+        // Also deliberately unchanged: registration identity is *vault*
+        // identity. Folding extraction policy into it would let a policy change
+        // masquerade as a re-registration and corrupt the meaning of a field
+        // that gates re-ingest for an unrelated reason.
+        let vault = VaultRegistration {
+            id: "vault".to_owned(),
+            path: std::path::PathBuf::from("/vault"),
+            room: None,
+        };
+        assert_eq!(
+            registration_fingerprint(&vault),
+            registration_fingerprint(&vault)
+        );
+    }
+
+    #[test]
+    fn a_manifest_from_another_extraction_policy_is_refused() {
+        let manifest = Manifest {
+            extraction_policy_fingerprint: "0".repeat(64),
+            ..Manifest::default()
+        };
+
+        let error = manifest.validate().unwrap_err();
+        assert!(error.to_string().contains("extraction policy"));
+        assert!(error.to_string().contains(extraction_policy_fingerprint()));
+        assert!(error.to_string().contains("kwiry index"));
+    }
+
+    #[test]
+    fn a_manifest_entry_from_another_extraction_profile_is_refused() {
+        let mut manifest = Manifest::default();
+        manifest.files.insert(
+            "foreign".to_owned(),
+            ManifestFile {
+                vault_id: "vault".to_owned(),
+                path: "note.md".to_owned(),
+                format: crate::format::SourceFormat::Markdown,
+                // No build compiles an enhanced Markdown extractor, so this
+                // entry cannot have been produced by any build of this crate.
+                extraction_profile: ExtractionProfile::Enhanced,
+                coverage: crate::extract::ExtractionCoverage::IndexedComplete,
+                content_hash: "hash".to_owned(),
+                registration_fingerprint: "fingerprint".to_owned(),
+                resource: None,
+                byte_length: 4,
+                mtime_nanos: 1,
+                chunk_count: 1,
+                outcome: ManifestFileOutcome::Indexed,
+                warning: None,
+            },
+        );
+
+        let error = manifest.validate().unwrap_err();
+        assert!(error.to_string().contains("enhanced"));
+        assert!(error.to_string().contains("kwiry index"));
+    }
+
+    #[test]
+    fn an_incompatible_preparation_schema_requires_an_explicit_rebuild() {
+        let manifest = Manifest {
+            preparation_schema_version: crate::source::SOURCE_PREPARATION_SCHEMA_VERSION - 1,
+            ..Manifest::default()
+        };
+
+        let error = manifest.validate().unwrap_err();
+        assert!(error.to_string().contains("preparation="));
+        assert!(error.to_string().contains("kwiry index"));
     }
 
     #[test]
@@ -264,6 +394,7 @@ mod tests {
                 vault_id: "vault".to_owned(),
                 path: "broken.base".to_owned(),
                 format: crate::format::SourceFormat::Base,
+                extraction_profile: ExtractionProfile::Portable,
                 coverage: crate::extract::ExtractionCoverage::Quarantined,
                 content_hash: "hash".to_owned(),
                 registration_fingerprint: "fingerprint".to_owned(),
@@ -286,6 +417,7 @@ mod tests {
             vault_id: "vault".to_owned(),
             path: "note.md".to_owned(),
             format: crate::format::SourceFormat::Markdown,
+            extraction_profile: ExtractionProfile::Portable,
             coverage: crate::extract::ExtractionCoverage::IndexedComplete,
             content_hash: "hash".to_owned(),
             registration_fingerprint: "fingerprint".to_owned(),
@@ -309,6 +441,7 @@ mod tests {
                 vault_id: "vault".to_owned(),
                 path: "note.md".to_owned(),
                 format: crate::format::SourceFormat::Markdown,
+                extraction_profile: ExtractionProfile::Portable,
                 coverage: crate::extract::ExtractionCoverage::IndexedPartial,
                 content_hash: "markdown-hash".to_owned(),
                 registration_fingerprint: "fingerprint".to_owned(),
@@ -326,6 +459,7 @@ mod tests {
                 vault_id: "vault".to_owned(),
                 path: "broken.base".to_owned(),
                 format: crate::format::SourceFormat::Base,
+                extraction_profile: ExtractionProfile::Portable,
                 coverage: crate::extract::ExtractionCoverage::Quarantined,
                 content_hash: "base-hash".to_owned(),
                 registration_fingerprint: "fingerprint".to_owned(),

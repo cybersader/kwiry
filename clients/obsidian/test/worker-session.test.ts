@@ -57,8 +57,8 @@ function resultFor(message: WorkerRequest): WorkerResult {
   switch (message.operation) {
     case "initialize":
       return {
-        rustAbiVersion: 2,
-        sourceSchemaVersion: 8,
+        rustAbiVersion: 3,
+        sourceSchemaVersion: 9,
         querySchemaVersion: 4,
         matchPlanSchemaVersion: 3,
         sqliteVersion: "3.53.0",
@@ -456,7 +456,7 @@ describe("InPluginWorkerSession", () => {
     const revoke = vi.fn();
     const session = new InPluginWorkerSession(worker, "blob:kwiry", revoke, 1_000);
 
-    await expect(session.initialize("active-vault")).resolves.toMatchObject({ rustAbiVersion: 2 });
+    await expect(session.initialize("active-vault")).resolves.toMatchObject({ rustAbiVersion: 3 });
     await expect(session.dispose()).resolves.toEqual({ closed: true });
     session.forceDispose();
 

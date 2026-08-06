@@ -16,6 +16,12 @@ axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 directories = "6.0"
+# Legacy CJK byte encodings for the predefined PDF CMap families
+# (RKSJ/EUC/GBK/Big5/UHC). Already in the portable graph — `quick-xml` enables
+# its `encoding` feature for DOCX — so naming it explicitly costs the plugin
+# bundle nothing and makes the PDF reader's use of it visible instead of
+# incidental.
+encoding_rs = { version = "0.8", default-features = false }
 fs2 = "0.4"
 getrandom = "0.3"
 http-body-util = "0.1"
@@ -55,3 +61,8 @@ flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backe
 # wasm32-unknown-unknown. See `kwiry-core/src/formats/pdf.rs` for why the
 # feature is not part of `portable`.
 lopdf = { version = "=0.44.0", default-features = false, features = ["wasm_js"] }
+# Enhanced-tier only. Parses an embedded font program to recover Unicode for
+# `Identity-H` subset fonts that ship no `/ToUnicode`. Absent from the portable
+# graph by construction: nothing in `portable` reaches it, and the feature that
+# does also pulls in `native`.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

@@ -5,6 +5,7 @@ use crate::model::{
     DiscoveredFile, FileIngestOutcome, FileOutcomeKind, IngestReport, IngestWarning, PreparedChunk,
     VaultRegistration,
 };
+use crate::policy::extraction_profile_for;
 use crate::source::{
     SourceDescriptor, SourcePreparation, SourcePreparationKind, prepare_source_buffer,
     retrieval_metadata,
@@ -102,10 +103,35 @@ fn file_outcome_from_preparation(
     file: &DiscoveredFile,
     preparation: SourcePreparation,
 ) -> FileIngestOutcome {
+    // A preparation from another extraction profile is refused, not reused.
+    // Nothing downstream would notice on its own: chunk identity is
+    // path-derived, so the other tier's rows would silently claim the
+    // identities this tier's rows are about to claim.
+    if let Err(error) = preparation.ensure_current_policy() {
+        return FileIngestOutcome {
+            vault_id: preparation.vault_id,
+            path: preparation.path,
+            format: preparation.format,
+            extraction_profile: extraction_profile_for(preparation.format),
+            coverage: crate::extract::ExtractionCoverage::Quarantined,
+            content_hash: preparation.content_hash,
+            byte_length: preparation.byte_length,
+            mtime: preparation.mtime,
+            mtime_nanos: preparation.mtime_nanos,
+            chunks: Vec::new(),
+            retrieval: preparation.retrieval,
+            kind: FileOutcomeKind::Skipped,
+            warning: Some(IngestWarning {
+                path: file.absolute_path.clone(),
+                message: error.message,
+            }),
+        };
+    }
     FileIngestOutcome {
         vault_id: preparation.vault_id,
         path: preparation.path,
         format: preparation.format,
+        extraction_profile: preparation.extraction_profile,
         coverage: preparation.coverage,
         content_hash: preparation.content_hash,
         byte_length: preparation.byte_length,
@@ -138,6 +164,10 @@ fn file_outcome(
         path: file.relative_path.clone(),
         format: SourceFormat::from_extension(&file.extension)
             .expect("vault discovery only admits registered source formats"),
+        extraction_profile: extraction_profile_for(
+            SourceFormat::from_extension(&file.extension)
+                .expect("vault discovery only admits registered source formats"),
+        ),
         coverage,
         content_hash,
         byte_length: file.byte_length,

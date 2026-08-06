@@ -17,6 +17,16 @@ pub use docx::{
     extract_candidate_outcome,
 };
 
+// Admission-disabled PDF reader foundation; see `formats::pdf`. Exposing the
+// entry point does not admit the format: `SourceFormat::Pdf` still reports
+// `extraction_supported() == false` and the `extract_source` arm below still
+// routes PDF to the `not_yet_supported` stub.
+#[cfg(feature = "internal-pdf-extractor")]
+pub use pdf::{
+    PdfCandidate, PdfDocumentGeometry, PdfLimits, PdfPageGeometry, PdfPageLocator, PdfReadError,
+    PdfSection, PdfTextRun, PdfWritingMode, extract_pdf_candidate, pdf_limits, read_pdf_geometry,
+};
+
 #[cfg(feature = "internal-excalidraw-extractor")]
 pub use excalidraw::{
     MAX_EXCALIDRAW_NOTICES, MAX_EXCALIDRAW_PROPERTY_BYTES, MAX_EXCALIDRAW_PROPERTY_ENTRIES,

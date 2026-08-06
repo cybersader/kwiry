@@ -137,11 +137,12 @@ function sourceAt(
   frontmatter: PropertyBag = { title, tags: ["test"] },
 ): SourcePreparation {
   return {
-    schema_version: 8,
+    schema_version: 9,
     source_key: sourceKey,
     vault_id: "active",
     path,
     format: "markdown",
+    extraction_profile: "portable",
     coverage: "indexed-complete",
     content_hash: `hash-${sourceKey}`,
     byte_length: content.length,

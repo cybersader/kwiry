@@ -27,7 +27,7 @@ import {
   type StagePlan,
 } from "./rust-adapter";
 
-const ABI_VERSION = 2;
+const ABI_VERSION = 3;
 const AUTHORIZATION_SCOPE = "obsidian-active-vault" as const;
 const BALANCED_PROFILE = Object.freeze({
   schema_version: 1,

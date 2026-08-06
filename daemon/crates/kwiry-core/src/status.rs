@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::format::SourceFormat;
 use crate::model::{CHUNKING_VERSION, IndexFreshnessBasis, SourceFormatCounts};
+use crate::policy::{ExtractionProfile, active_extraction_policy, extraction_policy_fingerprint};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +108,16 @@ pub struct DaemonStatus {
     pub version: String,
     pub generation: Option<String>,
     pub chunking_version: u64,
+    /// The extraction-policy identity this daemon compiles. A caller comparing
+    /// it against its own gets an explicit signal that it is reading an index
+    /// built under a different extractor tier, instead of rendering those
+    /// results as equivalent to its own. This is the only place cross-*process*
+    /// mistaken identity is addressable; the manifest gate only covers
+    /// cross-*build* identity inside one store.
+    pub extraction_policy_fingerprint: String,
+    /// Per-format profile behind that fingerprint, so the signal is diagnosable
+    /// and not merely a hex mismatch.
+    pub extraction_policy: BTreeMap<SourceFormat, ExtractionProfile>,
     pub documents: usize,
     pub chunks: usize,
     pub source_format_counts: SourceFormatCounts,
@@ -121,6 +135,8 @@ impl DaemonStatus {
             version: version.into(),
             generation: None,
             chunking_version: CHUNKING_VERSION,
+            extraction_policy_fingerprint: extraction_policy_fingerprint().to_owned(),
+            extraction_policy: active_extraction_policy(),
             documents: 0,
             chunks: 0,
             source_format_counts: SourceFormatCounts::default(),
@@ -156,6 +172,14 @@ mod tests {
         assert_eq!(encoded["state"], "starting");
         assert!(encoded["model"].is_null());
         assert_eq!(encoded["chunking_version"], CHUNKING_VERSION);
+        assert_eq!(
+            encoded["extraction_policy_fingerprint"],
+            extraction_policy_fingerprint()
+        );
+        assert_eq!(
+            encoded["extraction_policy"]["markdown"],
+            ExtractionProfile::Portable.as_str()
+        );
         assert_eq!(
             encoded["source_format_counts"]["markdown"]["indexed-complete"],
             0

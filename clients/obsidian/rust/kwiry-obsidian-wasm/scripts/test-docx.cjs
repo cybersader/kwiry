@@ -111,7 +111,7 @@ run("wasm-bindgen", [
 const wasm = require(join(bindingsRoot, "kwiry_obsidian_wasm.js"));
 
 for (const scope of ["current_view", "all_content"]) {
-  const request = { abi_version: 2, operation: "internal_docx_extract", scope };
+  const request = { abi_version: 3, operation: "internal_docx_extract", scope };
   const fixture = [{
     operation: "internal_docx_extract",
     name: scope,

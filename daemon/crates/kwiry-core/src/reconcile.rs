@@ -61,6 +61,11 @@ pub(crate) enum ReadReason {
     StrictHash,
     NewSource,
     RegistrationChanged,
+    /// The manifest entry was produced by a different extractor tier than this
+    /// build compiles. Belt and braces: a policy change already rebuilds the
+    /// whole index at `Manifest::validate`, so nothing should reach here — but
+    /// nothing else in the metadata ladder would notice if it did.
+    ExtractionProfileChanged,
     ResourceChanged,
     SizeChanged,
     MtimeChanged,
@@ -110,6 +115,9 @@ pub(crate) fn plan_observation(
     }
     if previous.registration_fingerprint != registration_fingerprint {
         return ObservationDecision::ReadHash(ReadReason::RegistrationChanged);
+    }
+    if previous.extraction_profile != crate::policy::extraction_profile_for(previous.format) {
+        return ObservationDecision::ReadHash(ReadReason::ExtractionProfileChanged);
     }
     if previous.byte_length != file.byte_length {
         return ObservationDecision::ReadHash(ReadReason::SizeChanged);
@@ -323,6 +331,7 @@ mod tests {
             vault_id: "vault".to_owned(),
             path: "note.md".to_owned(),
             format: crate::format::SourceFormat::Markdown,
+            extraction_profile: crate::policy::ExtractionProfile::Portable,
             coverage: crate::extract::ExtractionCoverage::IndexedComplete,
             content_hash: hash.to_owned(),
             registration_fingerprint: fingerprint.to_owned(),

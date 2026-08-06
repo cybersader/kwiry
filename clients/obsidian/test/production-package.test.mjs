@@ -265,6 +265,7 @@ describe("production release package", () => {
       "SHA256SUMS",
       "THIRD_PARTY_NOTICES.md",
       "gate5.evidence.json",
+      "kwiry-search.zip",
       "main.js",
       "manifest.json",
       "styles.css",

@@ -851,10 +851,12 @@ fn excalidraw_is_admitted_by_the_owner_amendment() {
         Some(SourceFormat::Markdown),
         "the Obsidian wrapper stays classified as markdown by its last extension"
     );
-    assert_eq!(
-        SOURCE_PREPARATION_SCHEMA_VERSION, 8,
-        "admitting a format changes what a preparation contains, so caches rebuild once"
-    );
+    const {
+        assert!(
+            SOURCE_PREPARATION_SCHEMA_VERSION >= 8,
+            "Excalidraw was admitted at schema 8; later waves may advance it, never retreat"
+        );
+    }
 
     // A declared format that disagrees with the path extension is still refused.
     let rejected = prepare_source_buffer(

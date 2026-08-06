@@ -5,7 +5,7 @@
 // free of the WASM import so it is directly testable. The adapter cannot be
 // imported in a unit test because it pulls in the Rust binary.
 
-const SOURCE_SCHEMA_VERSION = 8;
+const SOURCE_SCHEMA_VERSION = 9;
 
 // This mirrors Rust's call-stack safety boundary. It is deliberately the only
 // property-bag bound: source byte limits already protect allocation, while a
@@ -28,6 +28,7 @@ export function sourcePreparationDefect(value: unknown): string | null {
     "vault_id",
     "path",
     "format",
+    "extraction_profile",
     "coverage",
     "content_hash",
     "byte_length",
@@ -50,6 +51,7 @@ export function sourcePreparationDefect(value: unknown): string | null {
     ["room", () => value.room === undefined || isBoundedString(value.room, 1_024)],
     ["path", () => isBoundedString(value.path, 4_096)],
     ["format", () => isSourceFormat(value.format)],
+    ["extraction_profile", () => isExtractionProfile(value.extraction_profile)],
     ["coverage", () => isExtractionCoverage(value.coverage)],
     ["content_hash", () => value.content_hash === null
       || isBoundedString(value.content_hash, 128)],
@@ -331,6 +333,14 @@ function isSourceFormat(value: unknown): boolean {
     || value === "canvas"
     || value === "docx"
     || value === "pdf";
+}
+
+// Mirrors kwiry_core::policy::ExtractionProfile. Recorded on every preparation
+// so a row can name the extractor set that produced it; the plugin only ever
+// produces `portable`, and a preparation claiming anything else did not come
+// from this adapter.
+function isExtractionProfile(value: unknown): boolean {
+  return value === "none" || value === "portable" || value === "enhanced";
 }
 
 function isExtractionCoverage(value: unknown): boolean {

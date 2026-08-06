@@ -45,10 +45,12 @@ pub(super) mod notice {
     pub(in crate::formats::pdf) const DOCUMENT_CONTENT_LIMIT: &str =
         "pdf_document_content_limit_exceeded";
     pub(in crate::formats::pdf) const OPERATION_LIMIT: &str = "pdf_page_operation_limit_exceeded";
+    pub(in crate::formats::pdf) const OPERANDS_LIMIT: &str = "pdf_operation_operand_limit_exceeded";
     pub(in crate::formats::pdf) const RUN_LIMIT: &str = "pdf_page_run_limit_exceeded";
     pub(in crate::formats::pdf) const GLYPH_LIMIT: &str = "pdf_page_glyph_limit_exceeded";
     pub(in crate::formats::pdf) const TEXT_LIMIT: &str = "pdf_extracted_text_limit_exceeded";
     pub(in crate::formats::pdf) const FONT_LIMIT: &str = "pdf_page_font_limit_exceeded";
+    pub(in crate::formats::pdf) const FONT_WIDTH_LIMIT: &str = "pdf_font_width_limit_exceeded";
     pub(in crate::formats::pdf) const GRAPHICS_STACK_LIMIT: &str = "pdf_graphics_stack_limit";
     pub(in crate::formats::pdf) const GRAPHICS_STACK_UNDERFLOW: &str =
         "pdf_graphics_stack_underflow";
@@ -59,4 +61,17 @@ pub(super) mod notice {
     pub(in crate::formats::pdf) const FONT_UNRESOLVED: &str = "pdf_font_unresolved";
     pub(in crate::formats::pdf) const VERTICAL_WRITING: &str = "pdf_vertical_writing_unsupported";
     pub(in crate::formats::pdf) const NON_INVERTIBLE_MATRIX: &str = "pdf_non_invertible_matrix";
+    /// A font uses a predefined CJK CMap the compiled extraction profile cannot
+    /// decode. Source-level, not page-level: see `super::cmap`.
+    pub(in crate::formats::pdf) const UNDECODABLE_FONT: &str = "pdf_undecodable_font";
+
+    // Segmentation-level outcomes. Every message these carry is a fixed string
+    // about structure — never an excerpt, a path, or a count of anything the
+    // author wrote — so a typed outcome can be logged and transported without
+    // carrying document content with it.
+    pub(in crate::formats::pdf) const NO_TEXT_LAYER: &str = "pdf_no_text_layer";
+    pub(in crate::formats::pdf) const NO_READABLE_PAGE: &str = "pdf_no_readable_page";
+    pub(in crate::formats::pdf) const PAGE_WITHOUT_TEXT_LAYER: &str = "pdf_page_without_text_layer";
+    pub(in crate::formats::pdf) const UNORDERED_TEXT: &str = "pdf_unordered_text_appended";
+    pub(in crate::formats::pdf) const NOTICES_TRUNCATED: &str = "pdf_notices_truncated";
 }

@@ -723,6 +723,9 @@ pub(crate) struct FileIngestOutcome {
     pub vault_id: String,
     pub path: String,
     pub format: SourceFormat,
+    /// The extractor tier that produced this outcome. Recorded on the manifest
+    /// entry so a later run can see that its own tier differs.
+    pub extraction_profile: crate::policy::ExtractionProfile,
     pub coverage: ExtractionCoverage,
     pub content_hash: Option<String>,
     pub byte_length: u64,

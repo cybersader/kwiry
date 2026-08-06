@@ -110,8 +110,12 @@ if (nativeJson !== wasmJson) {
 }
 
 const byName = Object.fromEntries(wasmOutput.map((fixture) => [fixture.name, fixture.output]));
-if (byName["abi-identity"].abi_version !== 2
-  || byName["abi-identity"].source_preparation_schema_version !== 8
+if (byName["abi-identity"].abi_version !== 3
+  || byName["abi-identity"].source_preparation_schema_version !== 9
+  // The shipped plugin compiles no PDF extractor in either tier. This is the
+  // artifact the user installs, so it is the right place to assert it: a build
+  // that quietly enabled `internal-pdf-extractor` would report `portable` here.
+  || byName["abi-identity"].extraction_policy.pdf !== "none"
   || byName["abi-identity"].lexical_query_plan_schema_version !== 4
   || byName["abi-identity"].fts5_match_plan_schema_version !== 3
   || byName["ordinary-any-match"].result.execution_plan.stages[0].plan_id

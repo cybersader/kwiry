@@ -303,7 +303,7 @@ function usesOnlyFixtureSources(
   sourceIds: ReadonlySet<string>,
 ): boolean {
   if (!hasExactKeys(request, ["abi_version", "operation", "configuration", "case"])
-    || request.abi_version !== 2
+    || request.abi_version !== 3
     || request.operation !== "internal_d5c_evaluate"
     || !isRecord(request.configuration)
     || request.configuration.scenario_id !== SCENARIO_ID
@@ -342,7 +342,7 @@ function isFixturePath(value: unknown): value is string {
 }
 
 function parseRustIdentity(source: string): {
-  abi_version: 2;
+  abi_version: 3;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
 } {
@@ -353,7 +353,7 @@ function parseRustIdentity(source: string): {
     throw failure("artifact_mismatch", "artifact", "Playground Rust identity is invalid.");
   }
   if (!isRecord(value)
-    || value.abi_version !== 2
+    || value.abi_version !== 3
     || value.adapter !== "kwiry-obsidian-wasm"
     || !isBoundedString(value.adapter_version, 64)
     || !Array.isArray(value.operations)

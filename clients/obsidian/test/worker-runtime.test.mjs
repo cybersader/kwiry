@@ -1989,8 +1989,8 @@ describe("exact generated production Worker", () => {
       await expect(request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" })).resolves.toMatchObject({
         ok: true,
         result: {
-          rustAbiVersion: 2,
-          sourceSchemaVersion: 8,
+          rustAbiVersion: 3,
+          sourceSchemaVersion: 9,
           querySchemaVersion: 4,
           matchPlanSchemaVersion: 3,
           sqliteVersion: "3.53.0",

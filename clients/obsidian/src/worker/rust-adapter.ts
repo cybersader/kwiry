@@ -11,24 +11,36 @@ import {
   prepare_source,
 } from "virtual:kwiry-rust-wasm-bindings";
 
+import {
+  EXTRACTION_PROFILES,
+  SOURCE_FORMATS,
+} from "./protocol";
 import type {
   ExtractionCoverage,
+  ExtractionProfile,
   PropertyBag,
   SourceDescriptorInput,
   SourceFormat,
   SourceLocator,
 } from "./protocol";
 
-const ABI_VERSION = 2;
-const SOURCE_SCHEMA_VERSION = 8;
+const ABI_VERSION = 3;
+const SOURCE_SCHEMA_VERSION = 9;
 const QUERY_SCHEMA_VERSION = 4;
 const MATCH_PLAN_SCHEMA_VERSION = 3;
 
 export interface RustIdentity {
-  abi_version: 2;
+  abi_version: 3;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
-  source_preparation_schema_version: 8;
+  source_preparation_schema_version: 9;
+  /**
+   * The extraction-policy identity the adapter compiles. Mirrored in
+   * `source-formats.ts` because the host needs it before the adapter exists;
+   * a Rust test asserts the two agree.
+   */
+  extraction_policy_fingerprint: string;
+  extraction_policy: Record<string, string>;
   lexical_query_plan_schema_version: 4;
   fts5_match_plan_schema_version: 3;
   /**
@@ -76,12 +88,14 @@ export interface PreparedChunk {
 }
 
 export interface SourcePreparation {
-  schema_version: 8;
+  schema_version: 9;
   source_key: string;
   vault_id: string;
   room?: string;
   path: string;
   format: SourceFormat;
+  /** The extractor set that produced this preparation. */
+  extraction_profile: ExtractionProfile;
   coverage: ExtractionCoverage;
   content_hash: string | null;
   byte_length: number;
@@ -467,6 +481,20 @@ function parseJson(source: string): unknown {
   }
 }
 
+function isHexDigest(value: unknown): boolean {
+  return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
+}
+
+function isExtractionPolicy(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length > 0
+    && entries.length <= 32
+    && entries.every(([format, profile]) =>
+      (SOURCE_FORMATS as readonly string[]).includes(format)
+      && (EXTRACTION_PROFILES as readonly string[]).includes(profile as string));
+}
+
 function isRustIdentity(value: unknown): value is RustIdentity {
   return isRecord(value)
     && hasExactKeys(value, [
@@ -474,6 +502,8 @@ function isRustIdentity(value: unknown): value is RustIdentity {
       "adapter",
       "adapter_version",
       "source_preparation_schema_version",
+      "extraction_policy_fingerprint",
+      "extraction_policy",
       "lexical_query_plan_schema_version",
       "fts5_match_plan_schema_version",
       "chunking_version",
@@ -485,6 +515,11 @@ function isRustIdentity(value: unknown): value is RustIdentity {
     && value.adapter === "kwiry-obsidian-wasm"
     && isBoundedString(value.adapter_version, 128)
     && value.source_preparation_schema_version === SOURCE_SCHEMA_VERSION
+    // The adapter's own policy identity, checked for shape here. The host's
+    // mirrored constant is what the cache is keyed on; a Rust test asserts the
+    // two agree, so this only has to reject a malformed identity.
+    && isHexDigest(value.extraction_policy_fingerprint)
+    && isExtractionPolicy(value.extraction_policy)
     && value.lexical_query_plan_schema_version === QUERY_SCHEMA_VERSION
     && value.fts5_match_plan_schema_version === MATCH_PLAN_SCHEMA_VERSION
     && isNonNegativeSafeInteger(value.chunking_version)

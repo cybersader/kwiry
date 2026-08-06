@@ -7,11 +7,12 @@ import { sourcePreparationDefect } from "../src/worker/source-defect";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
 
 const VALID = {
-  schema_version: 8,
+  schema_version: 9,
   source_key: "a".repeat(64),
   vault_id: "active-vault",
   path: "Notes/Example.md",
   format: "markdown",
+  extraction_profile: "portable",
   coverage: "skipped-no-extractable-text",
   content_hash: "b".repeat(64),
   byte_length: 10,

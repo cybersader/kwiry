@@ -77,7 +77,7 @@ async function initializedWorker() {
     operation: "fixture_initialize",
     ok: true,
     result: {
-      abi_version: 2,
+      abi_version: 3,
       adapter: "kwiry-obsidian-wasm",
       scenario_id: "balanced-playground-v1",
     },

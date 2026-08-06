@@ -16,7 +16,7 @@ import {
   type WorkerError,
 } from "./protocol";
 
-const ABI_VERSION = 2;
+const ABI_VERSION = 3;
 const PREFIX_LIMITATION = "Bounded prefix vocabulary only considers terms sharing the first four ASCII characters; it cannot catch early-character errors such as rettrieval." as const;
 const BOUNDS = Object.freeze({
   prefix_chars: 4,

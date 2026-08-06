@@ -1,10 +1,11 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "source_key": "89bdc68d2f9ba3c5d1f9d9c38eee2b045b994fafcf83ae9d0c805cfce412e058",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Deep Property Map.md",
   "format": "markdown",
+  "extraction_profile": "portable",
   "coverage": "indexed-complete",
   "content_hash": "59b3815f945652198005e7402d72c26d95933ac4b9be2c75d2f05a068fe21ebf",
   "byte_length": 1488,

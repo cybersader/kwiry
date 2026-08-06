@@ -84,7 +84,9 @@ fn scan_nesting_depth(bytes: &[u8]) -> Result<usize, PdfReadError> {
                 depth = depth.saturating_sub(1);
                 index += 1;
             }
-            b's' if starts_stream_keyword(bytes, index) => index = skip_stream_payload(bytes, index),
+            b's' if starts_stream_keyword(bytes, index) => {
+                index = skip_stream_payload(bytes, index)
+            }
             _ => index += 1,
         }
     }

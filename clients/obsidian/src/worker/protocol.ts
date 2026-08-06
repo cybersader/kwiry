@@ -23,6 +23,7 @@ export const SOURCE_PREPARATION_DEFECT_FIELDS = [
   "room",
   "path",
   "format",
+  "extraction_profile",
   "coverage",
   "content_hash",
   "byte_length",
@@ -87,6 +88,14 @@ export const EXTRACTION_COVERAGES = [
   "quarantined",
 ] as const;
 export type ExtractionCoverage = typeof EXTRACTION_COVERAGES[number];
+
+/**
+ * Mirrors `kwiry_core::policy::ExtractionProfile`: which extractor set produced
+ * a preparation. `none` means no extractor was compiled for the format at all.
+ * This plugin only ever produces `portable`.
+ */
+export const EXTRACTION_PROFILES = ["none", "portable", "enhanced"] as const;
+export type ExtractionProfile = typeof EXTRACTION_PROFILES[number];
 
 export type SourceLocator = { kind: "base_view"; view: string };
 export type SourceFormatCounts = Record<
@@ -311,8 +320,8 @@ export type WorkerRequest =
   | (RequestBase & { operation: "dispose" });
 
 export interface InitializeResult {
-  rustAbiVersion: 2;
-  sourceSchemaVersion: 8;
+  rustAbiVersion: 3;
+  sourceSchemaVersion: 9;
   querySchemaVersion: 4;
   matchPlanSchemaVersion: 3;
   sqliteVersion: "3.53.0";
@@ -922,8 +931,8 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
       "sqliteVersion",
       "fts5Enabled",
     ])
-    && value.rustAbiVersion === 2
-    && value.sourceSchemaVersion === 8
+    && value.rustAbiVersion === 3
+    && value.sourceSchemaVersion === 9
     && value.querySchemaVersion === 4
     && value.matchPlanSchemaVersion === 3
     && value.sqliteVersion === "3.53.0"

@@ -421,7 +421,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -558,7 +558,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -695,7 +695,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -832,7 +832,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -969,7 +969,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -1106,7 +1106,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -1243,7 +1243,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -1446,7 +1446,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -1649,7 +1649,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -1798,7 +1798,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -1947,7 +1947,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -2082,7 +2082,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -2217,7 +2217,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -2386,7 +2386,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -2555,7 +2555,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "neutralized_counterfactual",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -2692,7 +2692,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "neutralized_counterfactual",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -2829,7 +2829,7 @@
       "engine": "native_tantivy",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -2964,7 +2964,7 @@
       "engine": "portable_fts5",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3099,7 +3099,7 @@
       "engine": "shared_contract",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3196,7 +3196,7 @@
       "engine": "shared_contract",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3293,7 +3293,7 @@
       "engine": "shared_contract",
       "expected_disposition": "strict_balanced",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3389,7 +3389,7 @@
       "engine": "shared_contract",
       "expected_disposition": "neutralized_counterfactual",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3485,7 +3485,7 @@
       "engine": "shared_contract",
       "expected_disposition": "neutralized_counterfactual",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3581,7 +3581,7 @@
       "engine": "shared_contract",
       "expected_disposition": "neutralized_counterfactual",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3677,7 +3677,7 @@
       "engine": "shared_contract",
       "expected_disposition": "neutralized_counterfactual",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3773,7 +3773,7 @@
       "engine": "shared_contract",
       "expected_disposition": "fatal",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3869,7 +3869,7 @@
       "engine": "shared_contract",
       "expected_disposition": "fatal",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -3965,7 +3965,7 @@
       "engine": "shared_contract",
       "expected_disposition": "fatal",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -4061,7 +4061,7 @@
       "engine": "shared_contract",
       "expected_disposition": "fatal",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -4157,7 +4157,7 @@
       "engine": "shared_contract",
       "expected_disposition": "fatal",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,
@@ -4253,7 +4253,7 @@
       "engine": "shared_contract",
       "expected_disposition": "fatal",
       "request": {
-        "abi_version": 2,
+        "abi_version": 3,
         "operation": "internal_d5c_evaluate",
         "configuration": {
           "schema_version": 1,

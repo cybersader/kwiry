@@ -79,7 +79,28 @@ impl ExtractionCoverage {
 #[non_exhaustive]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SourceLocator {
-    BaseView { view: String },
+    BaseView {
+        view: String,
+    },
+    /// 1-based page in `/Pages` order.
+    ///
+    /// The PDF candidate rests its whole "the page is a locator, never a
+    /// heading" argument on this variant existing: `heading_path` is joined into
+    /// `heading_text`, normalized and matched against queries, so putting
+    /// "Page 7" there would make every page of every PDF a lexical match for
+    /// the word *page*. Without a locator to carry it instead, the page number
+    /// was simply discarded and the justification for the empty heading path
+    /// had no other half.
+    ///
+    /// Declared here rather than at admission because the preparation seam is
+    /// format-agnostic — `PreparedChunk::source_locator` copies whatever the
+    /// section carried — so the vocabulary is the only part that was missing.
+    /// PDF remains inadmissible, so nothing produces this yet; the TypeScript
+    /// mirrors still admit `base_view` alone and have to be widened before a
+    /// PDF locator could survive the wire.
+    PdfPage {
+        page: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -140,6 +140,13 @@ fn validate_path_prefix(prefix: &str) -> std::result::Result<(), ApiRequestError
 pub struct ApiSearchResponse {
     pub hits: Vec<SearchHit>,
     pub next_cursor: Option<String>,
+    /// The extraction-policy identity of the index these hits came out of. One
+    /// value per response rather than per hit: an index is a single-profile
+    /// artifact, so a per-hit copy could only ever repeat itself. A client that
+    /// compares this against its own expectation can say it is reading a
+    /// differently-built index instead of silently treating the results as
+    /// interchangeable.
+    pub extraction_policy_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,6 +266,8 @@ mod tests {
                 frontmatter: crate::model::Frontmatter::default(),
             }],
             next_cursor: None,
+            extraction_policy_fingerprint: crate::policy::extraction_policy_fingerprint()
+                .to_owned(),
         };
 
         assert_eq!(
@@ -276,7 +285,9 @@ mod tests {
                     "excerpt": "excerpt",
                     "frontmatter": {}
                 }],
-                "next_cursor": null
+                "next_cursor": null,
+                "extraction_policy_fingerprint":
+                    crate::policy::extraction_policy_fingerprint()
             })
         );
     }

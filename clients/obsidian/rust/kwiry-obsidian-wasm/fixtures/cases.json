@@ -7,7 +7,7 @@
     "operation": "prepare_source",
     "name": "markdown-source",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_source",
       "descriptor": {
         "vault_id": "active-vault",
@@ -27,7 +27,7 @@
     "operation": "prepare_source",
     "name": "invalid-source-envelope",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_source",
       "descriptor": {
         "vault_id": "active-vault",
@@ -50,7 +50,7 @@
     "operation": "prepare_query",
     "name": "ordinary-query",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_query",
       "query": "dungeons and dragons"
     }
@@ -59,7 +59,7 @@
     "operation": "prepare_query",
     "name": "metadata-probe-query",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_query",
       "query": "iia 2 line"
     }
@@ -68,7 +68,7 @@
     "operation": "prepare_query",
     "name": "invalid-query-envelope",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_query",
       "query": "query",
       "unexpected": true
@@ -78,7 +78,7 @@
     "operation": "finalize_query",
     "name": "ordinary-any-match",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "dungeons and dragons",
       "evidence_report": {
@@ -128,7 +128,7 @@
     "operation": "finalize_query",
     "name": "identifier-all-match",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "IIA 2 line",
       "evidence_report": {
@@ -178,7 +178,7 @@
     "operation": "finalize_query",
     "name": "metadata-promoted-match",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "iia 2 line",
       "evidence_report": {
@@ -228,7 +228,7 @@
     "operation": "finalize_query",
     "name": "allowlisted-explicit-match",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "title:\"IIA guide\" OR content:cache*",
       "evidence_report": {
@@ -243,7 +243,7 @@
     "operation": "finalize_query",
     "name": "inert-sql-looking-query",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "title:notes OR '); DROP TABLE chunks; --",
       "evidence_report": {
@@ -258,7 +258,7 @@
     "operation": "finalize_query",
     "name": "no-evidence-empty",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "quasar",
       "evidence_report": {
@@ -286,7 +286,7 @@
     "operation": "finalize_query",
     "name": "bounded-prefix",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "quasar",
       "evidence_report": {
@@ -326,7 +326,7 @@
     "operation": "prepare_query",
     "name": "numeric-field-explicit",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_query",
       "query": "title:2026"
     }
@@ -335,7 +335,7 @@
     "operation": "prepare_query",
     "name": "natural-question",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_query",
       "query": "cache governance?"
     }
@@ -344,7 +344,7 @@
     "operation": "prepare_query",
     "name": "natural-parenthetical",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_query",
       "query": "cache governance (draft)"
     }
@@ -353,7 +353,7 @@
     "operation": "prepare_query",
     "name": "decomposed-accent-query",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_query",
       "query": "Résumé Cache"
     }
@@ -362,7 +362,7 @@
     "operation": "prepare_query",
     "name": "complete-long-exact",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_query",
       "query": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
@@ -371,7 +371,7 @@
     "operation": "finalize_query",
     "name": "accented-prefix",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "résu*",
       "evidence_report": {
@@ -386,7 +386,7 @@
     "operation": "finalize_query",
     "name": "rfc-exact-identifier",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_query",
       "query": "RFC 9110",
       "evidence_report": {

@@ -3,7 +3,7 @@
 
 import { internal_d5c_evaluate } from "virtual:kwiry-rust-wasm-bindings";
 
-const ABI_VERSION = 2;
+const ABI_VERSION = 3;
 const MAX_ADAPTER_REQUEST_BYTES = 64 * 1024 * 1024;
 
 export function evaluateInternalD5cCase(request: unknown): unknown {

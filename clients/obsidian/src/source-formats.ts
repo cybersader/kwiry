@@ -31,7 +31,20 @@ const EXTRACTABLE_SOURCE_FORMAT_SET: ReadonlySet<SourceFormat> = new Set(
 // Mirrors kwiry_core::source::SOURCE_PREPARATION_SCHEMA_VERSION. This belongs in
 // the policy fingerprint so a preparation-schema change always invalidates a
 // cache even when the enabled extension set is unchanged.
-export const SOURCE_PREPARATION_SCHEMA_VERSION = 8 as const;
+export const SOURCE_PREPARATION_SCHEMA_VERSION = 9 as const;
+
+/**
+ * Mirrors `kwiry_core::policy::extraction_policy_fingerprint()` for a portable
+ * build — the profile set this plugin's WASM adapter compiles.
+ *
+ * A mirrored constant rather than a value read from `abi_identity()`, because
+ * `main.ts` computes the policy hash during `onload()` to decide whether a
+ * cache restore is even attempted, which is before the worker and the WASM
+ * module exist. `rust/kwiry-obsidian-wasm/tests/typescript_mirror.rs` asserts
+ * this constant equals what the adapter reports, so the mirror cannot drift.
+ */
+export const EXTRACTION_POLICY_FINGERPRINT =
+  "1b393b155b0af728b1ec9c9131573c105c9e7aba41ff31a4d12c824d4c73adef" as const;
 
 export const IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION =
   "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, DOCX, and Excalidraw are available; PDF remains unavailable until its extractor ships and its bytes are not read. This profile is lexical-only and never reads the daemon token.";
@@ -133,8 +146,16 @@ export function isEnabledSourcePath(
 
 /**
  * SHA-256 policy identity over a domain separator, the source preparation
- * schema, and the sorted enabled-format set. Object property order is never an
- * input, and disabled formats are represented by their absence from the set.
+ * schema, the compiled extraction policy, and the sorted enabled-format set.
+ * Object property order is never an input, and disabled formats are
+ * represented by their absence from the set.
+ *
+ * The separator carries `-v2` because the digest material gained the extraction
+ * policy. Adding a component already changes every digest, so the bump is not
+ * load-bearing for collision resistance — it is taken because the separator is
+ * the human-readable statement of which generation of policy identity this is,
+ * and a silent material change inside a `-v1` label is exactly the dishonesty
+ * this hash exists to prevent.
  */
 export async function formatPolicyFingerprint(
   enabled: Readonly<EnabledSourceFormats>,
@@ -143,8 +164,9 @@ export async function formatPolicyFingerprint(
     (format) => isSourceFormatEnabled(format, enabled),
   ).sort().join(",");
   const material = [
-    "kwiry-source-format-policy-v1",
+    "kwiry-source-format-policy-v2",
     `source-preparation-schema=${SOURCE_PREPARATION_SCHEMA_VERSION}`,
+    `extraction-policy=${EXTRACTION_POLICY_FINGERPRINT}`,
     `enabled-formats=${enabledSet}`,
   ].join("\0");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(material));

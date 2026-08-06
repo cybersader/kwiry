@@ -1,10 +1,11 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "source_key": "2a376ae7f4ab462ccbd5a869e571e213d33c85fe7c702bdd355b0219dfea4535",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Very Large Single Section.md",
   "format": "markdown",
+  "extraction_profile": "portable",
   "coverage": "indexed-complete",
   "content_hash": "08b4de01b5f56575b475517e50aaaf5b2857ec7b7b55181f598428c4440063dc",
   "byte_length": 26022,

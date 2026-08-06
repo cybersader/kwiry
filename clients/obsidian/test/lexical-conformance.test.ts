@@ -121,14 +121,14 @@ function prepareSourceWithRust(
   bytes: Uint8Array,
 ): SourcePreparation {
   return adapterResult<{ preparation: SourcePreparation }>(rustAdapter.prepare_source(
-    JSON.stringify({ abi_version: 2, operation: "prepare_source", descriptor }),
+    JSON.stringify({ abi_version: 3, operation: "prepare_source", descriptor }),
     bytes,
   )).preparation;
 }
 
 function prepareQueryWithRust(query: string): PreparedQuery {
   return adapterResult<PreparedQuery>(rustAdapter.prepare_query(JSON.stringify({
-    abi_version: 2,
+    abi_version: 3,
     operation: "prepare_query",
     query,
   })));
@@ -139,7 +139,7 @@ function finalizeQueryWithRust(
   evidence: QueryEvidenceObservation,
 ): FinalizedQuery {
   return adapterResult<FinalizedQuery>(rustAdapter.finalize_query(JSON.stringify({
-    abi_version: 2,
+    abi_version: 3,
     operation: "finalize_query",
     query,
     evidence_report: {

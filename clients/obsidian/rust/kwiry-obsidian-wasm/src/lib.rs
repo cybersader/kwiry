@@ -17,8 +17,9 @@ use kwiry_core::{
     QueryAssistanceEligibility, QueryEvidenceReport, QueryEvidenceStageKind,
     QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryMatchOperator, QueryPlanKind,
     QueryTermProjection, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
-    normalize_lexical_value, prepare_lexical_query,
-    prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
+    active_extraction_policy, extraction_policy_fingerprint, normalize_lexical_value,
+    prepare_lexical_query, prepare_oversized_source as prepare_oversized_source_descriptor,
+    prepare_source_buffer,
 };
 #[cfg(feature = "internal-docx-extractor")]
 use kwiry_core::{ExtractionScope, extract_candidate_outcome};
@@ -32,7 +33,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-pub const ADAPTER_ABI_VERSION: u32 = 2;
+pub const ADAPTER_ABI_VERSION: u32 = 3;
 pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 3;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 #[cfg(feature = "internal-d5c-preview")]
@@ -74,6 +75,13 @@ pub struct AbiIdentity {
     pub adapter: &'static str,
     pub adapter_version: &'static str,
     pub source_preparation_schema_version: u32,
+    /// The extraction-policy identity this adapter compiles, and the per-format
+    /// profiles behind it. The host mirrors both as constants because it has to
+    /// decide whether to attempt a cache restore before the adapter is up; this
+    /// is what a test compares the mirror against.
+    pub extraction_policy_fingerprint: &'static str,
+    pub extraction_policy:
+        std::collections::BTreeMap<kwiry_core::SourceFormat, kwiry_core::ExtractionProfile>,
     pub lexical_query_plan_schema_version: u32,
     pub fts5_match_plan_schema_version: u32,
     /// The chunker the adapter will actually apply. Chunk rows carry it too,
@@ -424,6 +432,8 @@ pub fn abi_identity() -> String {
         adapter: "kwiry-obsidian-wasm",
         adapter_version: env!("CARGO_PKG_VERSION"),
         source_preparation_schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
+        extraction_policy_fingerprint: extraction_policy_fingerprint(),
+        extraction_policy: active_extraction_policy(),
         lexical_query_plan_schema_version: LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
         fts5_match_plan_schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
         chunking_version: CHUNKING_VERSION,
@@ -436,7 +446,7 @@ pub fn abi_identity() -> String {
             AdapterOperation::FinalizeQuery,
         ],
     })
-    .unwrap_or_else(|_| "{\"abi_version\":2,\"adapter\":\"kwiry-obsidian-wasm\"}".to_owned())
+    .unwrap_or_else(|_| "{\"abi_version\":3,\"adapter\":\"kwiry-obsidian-wasm\"}".to_owned())
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]

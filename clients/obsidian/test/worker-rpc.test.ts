@@ -261,7 +261,7 @@ describe("WorkerRpcClient", () => {
       operation: "initialize",
       ok: true,
       result: {
-        rustAbiVersion: 2,
+        rustAbiVersion: 3,
         sourceSchemaVersion: 2,
         querySchemaVersion: 3,
         matchPlanSchemaVersion: 2,

@@ -38,6 +38,8 @@ mod model;
 #[cfg(feature = "native")]
 mod partition;
 #[cfg(feature = "portable")]
+mod policy;
+#[cfg(feature = "portable")]
 mod query;
 #[cfg(feature = "internal-d5c-preview")]
 mod ranking;
@@ -107,6 +109,16 @@ pub use formats::{
     MAX_EXCALIDRAW_NOTICES, MAX_EXCALIDRAW_PROPERTY_BYTES, MAX_EXCALIDRAW_PROPERTY_ENTRIES,
     extract_excalidraw_candidate,
 };
+// Admission-disabled PDF reader foundation; see `formats::pdf`. Exposing the
+// entry point does not admit the format: there is no new `SourceFormat`
+// variant, `SourceFormat::Pdf::extraction_supported()` is still `false`,
+// `extract_source` still routes PDF to the unsupported stub, and discovery and
+// every client mirror are untouched.
+#[cfg(feature = "internal-pdf-extractor")]
+pub use formats::{
+    PdfCandidate, PdfDocumentGeometry, PdfLimits, PdfPageGeometry, PdfPageLocator, PdfReadError,
+    PdfSection, PdfTextRun, PdfWritingMode, extract_pdf_candidate, pdf_limits, read_pdf_geometry,
+};
 #[cfg(feature = "native")]
 pub use generation::{DataRoot, DataRootLock, GenerationPaths};
 #[cfg(feature = "native")]
@@ -129,6 +141,11 @@ pub use model::{
     CHUNKING_VERSION, Chunk, ExtractionCoverageCounts, Frontmatter, IndexFreshnessBasis,
     MAX_FILE_BYTES, PreparedChunk, PropertyBag, PropertyValue, RetrievalMetadata, SearchHit,
     SourceFormatCounts,
+};
+#[cfg(feature = "portable")]
+pub use policy::{
+    EXTRACTION_POLICY_SCHEMA_VERSION, ExtractionProfile, active_extraction_policy,
+    extraction_policy_fingerprint, extraction_profile_for,
 };
 #[cfg(feature = "portable")]
 pub use query::{

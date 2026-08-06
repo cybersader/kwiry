@@ -391,6 +391,8 @@ mod tests {
             version: version.into(),
             generation: Some("generation-1".into()),
             chunking_version: CHUNKING_VERSION,
+            extraction_policy_fingerprint: kwiry_core::extraction_policy_fingerprint().to_owned(),
+            extraction_policy: kwiry_core::active_extraction_policy(),
             documents: 1,
             chunks: 1,
             source_format_counts,

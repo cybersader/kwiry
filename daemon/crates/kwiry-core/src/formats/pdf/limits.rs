@@ -17,11 +17,31 @@
 /// buffer as well as the pre-screen scan.
 pub(super) const MAX_INPUT_BYTES: usize = 256 * 1024 * 1024;
 
-/// Passed to `lopdf` as `LoadOptions::max_decompressed_size`. Sized to the
-/// measured worst-case peak allocation recorded by the PDF dependency gate
-/// (100,670,328 B at a 4 GiB cap), which is the property that selected `lopdf`
-/// over the alternatives: it is the only candidate whose peak allocation
-/// actually tracks the cap.
+/// Passed to `lopdf` as `LoadOptions::max_decompressed_size`.
+///
+/// # This bounds decompressed bytes, not peak allocation
+///
+/// The dependency gate recorded 100,670,328 B of peak allocation at a 4 GiB cap
+/// and concluded that `lopdf`'s peak "tracks the cap". That holds for the
+/// *streams* the gate measured; it does not hold for the **object graph**.
+/// `Document::load_mem_with_options` parses every object eagerly, and a
+/// decompressed array of numbers becomes one `Object` per element:
+///
+/// | decompressed `/W` array | file | peak RSS |
+/// |---|---|---|
+/// |  6 MiB | 1,011,770 B |   215 MB |
+/// | 12 MiB | 2,033,062 B |   427 MB |
+/// | 24 MiB | 4,061,256 B |   789 MB |
+///
+/// Linear at roughly 33 bytes of heap per decompressed byte, so this cap admits
+/// about 3.2 GB of peak allocation from a ~16 MB file. That is upstream of
+/// every budget in this file — it happens before any code here runs — and the
+/// per-font [`MAX_FONT_WIDTH_ENTRIES`] cap bounds only this crate's own copy.
+///
+/// Lowering the cap is the lever that would bound it, and lowering it changes
+/// which real documents are readable, so the value is left where the owner set
+/// it and the discrepancy is recorded here rather than in a claim that the
+/// measurement does not support.
 pub(super) const MAX_DECOMPRESSED_STREAM_BYTES: usize = 96 * 1024 * 1024;
 
 /// Pages enumerated per document.
@@ -45,6 +65,34 @@ pub(super) const MAX_OBJECT_NESTING_DEPTH: usize = 64;
 /// Content-stream operators interpreted per page.
 pub(super) const MAX_OPERATIONS_PER_PAGE: usize = 2_000_000;
 
+/// Content-stream bytes decoded into `Vec<Operation>` at one time.
+///
+/// `MAX_OPERATIONS_PER_PAGE` bounds interpretation, not allocation:
+/// [`lopdf::content::Content::decode`] materializes the whole page before the
+/// first operator is seen. Measured peak allocation is about 285 bytes of heap
+/// per content byte, so a page decoded in one shot at
+/// [`MAX_CONTENT_STREAM_BYTES`] peaks near 9.5 GB — unallocatable in an
+/// Obsidian worker, and an abort rather than an unwind. Decoding a window at a
+/// time puts the ceiling here instead: 64 KiB × ~285 ≈ 18 MiB.
+///
+/// This is a floor on the window, never a ceiling on an operation: one
+/// operation larger than the window is decoded whole rather than split, because
+/// splitting it would change what the file says. See `super::split`.
+pub(super) const MAX_CONTENT_WINDOW_BYTES: usize = 64 * 1024;
+
+/// Operands materialized for one operation, counting nested array and
+/// dictionary members.
+///
+/// An operation is never split, so the window budget above cannot bound one
+/// enormous operation: a 12 MB `TJ` array of six million numbers decodes to
+/// 768 MB whatever the window is, and a compressed one reaches that from a few
+/// kilobytes of file. The byte span is the wrong instrument — a one-megabyte
+/// literal string is a single cheap operand — so the count is bounded instead.
+/// A `TJ` array at this cap already holds far more elements than
+/// [`MAX_GLYPHS_PER_PAGE`] admits glyphs, so no page that this reader would
+/// have measured in full is affected.
+pub(super) const MAX_OPERANDS_PER_OPERATION: usize = 262_144;
+
 /// Positioned text runs emitted per page.
 pub(super) const MAX_RUNS_PER_PAGE: usize = 100_000;
 
@@ -59,6 +107,22 @@ pub(super) const MAX_GRAPHICS_STACK_DEPTH: usize = 64;
 /// Distinct font resources resolved per page.
 pub(super) const MAX_FONTS_PER_PAGE: usize = 256;
 
+/// Width entries retained per font: `/Widths` slots for a simple font, `/W`
+/// ranges for a composite one.
+///
+/// Neither array had a budget of its own, and `MAX_FONTS_PER_PAGE` multiplies
+/// whatever one font costs: a 3.5 MB file carrying 1.5 million `/W` entries
+/// inside a compressed object stream reached 1.16 GB and reported
+/// `IndexedComplete` with no notice.
+///
+/// The cap is lossless on every well-formed font. A simple font's codes are
+/// single bytes, so at most 256 `/Widths` slots are reachable; a composite
+/// font's CIDs come from two-byte codes, so at most 65,536 `/W` ranges are.
+/// Entries past the cap fall back to `/MissingWidth` or `/DW` — the existing
+/// "not measured" path, which already clears `geometry_exact` — and the
+/// shortfall is declared through `pdf_font_width_limit_exceeded`.
+pub(super) const MAX_FONT_WIDTH_ENTRIES: usize = 65_536;
+
 /// Bound handed to `Dictionary::get_font_encoding_with_limit` so a crafted
 /// `/ToUnicode` CMap stream cannot inflate without limit.
 pub(super) const MAX_TOUNICODE_BYTES: usize = 4 * 1024 * 1024;
@@ -66,6 +130,28 @@ pub(super) const MAX_TOUNICODE_BYTES: usize = 4 * 1024 * 1024;
 /// Aggregate decoded text retained across the whole document, in UTF-8 bytes.
 /// Matches the DOCX extractor's ceiling.
 pub(super) const MAX_EXTRACTED_TEXT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Enhanced tier only. Decompressed bytes of one embedded font program, read by the enhanced tier
+/// to recover Unicode for an `Identity-H` subset with no `/ToUnicode`. A font
+/// file is small next to a document; this is generous for a full CJK face and
+/// still nowhere near the content-stream budget.
+#[cfg(feature = "native-pdf-extractor")]
+pub(super) const MAX_EMBEDDED_FONT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Glyph-id to character entries retained per embedded font. Above a full
+/// Unicode BMP face.
+///
+/// This bounds the map, which is not the same as bounding the walk that fills
+/// it — see `super::embedded` for the crafted `cmap` that made the difference
+/// an hours-long hang.
+#[cfg(feature = "native-pdf-extractor")]
+pub(super) const MAX_GLYPH_MAP_ENTRIES: usize = 200_000;
+
+/// Unicode `cmap` subtables inverted per embedded font. A real face ships one
+/// to three; the `cmap` header admits 65,535, and each one costs a full walk of
+/// the Unicode scalar range.
+#[cfg(feature = "native-pdf-extractor")]
+pub(super) const MAX_GLYPH_MAP_SUBTABLES: usize = 8;
 
 /// Notices retained on a document. Matches the DOCX extractor's ceiling.
 pub(super) const MAX_NOTICES: usize = 32;

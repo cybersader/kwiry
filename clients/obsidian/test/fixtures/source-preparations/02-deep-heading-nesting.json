@@ -1,9 +1,10 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "source_key": "7355fc5a771229cfc09ecc97863925716ab78d5c9d3e235d025b57ead16e3075",
   "vault_id": "golden-vault",
   "path": "Golden/Deep Heading Nesting.md",
   "format": "markdown",
+  "extraction_profile": "portable",
   "coverage": "indexed-complete",
   "content_hash": "f52cce0e0ab13c6a03a0b020c16d37262f1f2e1ee7f2ef2ebe36fbefa5bb7007",
   "byte_length": 165,
