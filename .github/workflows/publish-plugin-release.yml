@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  # Reading Actions runs is what lets publication verify CI is green at the tag.
+  actions: read
 
 jobs:
   publish:
@@ -23,6 +25,33 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
+      - name: Require a green full CI run at this exact commit
+        # 0.6.0-beta.6 was published with four red CI jobs because nothing
+        # linked publication to a passing run. A local verification cannot
+        # substitute: it never covers Windows, the portable-only build, or a
+        # clean checkout, which is precisely where that release failed.
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag_commit=$(git rev-parse -q --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          runs=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${tag_commit}&per_page=100" \
+            --jq '.workflow_runs[] | select(.status == "completed") | .conclusion')
+          if [ -z "$runs" ]; then
+            printf 'No completed CI run exists for %s (%s). Dispatch ci.yml against the tag first.\n' \
+              "$RELEASE_TAG" "$tag_commit" >&2
+            exit 1
+          fi
+          if printf '%s\n' "$runs" | grep -qvx 'success'; then
+            printf 'CI at %s (%s) is not green. Conclusions seen:\n%s\n' \
+              "$RELEASE_TAG" "$tag_commit" "$runs" >&2
+            exit 1
+          fi
+          printf 'CI is green at %s (%s).\n' "$RELEASE_TAG" "$tag_commit"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22

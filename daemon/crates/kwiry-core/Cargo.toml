@@ -31,6 +31,7 @@ unicode-normalization = { workspace = true, optional = true }
 zerocopy = { workspace = true, optional = true }
 fastembed = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
+lopdf = { workspace = true, optional = true }
 quick-xml = { workspace = true, optional = true }
 rawzip = { workspace = true, optional = true }
 
@@ -87,6 +88,12 @@ internal-docx-extractor = ["portable"]
 # Retained so existing callers keep resolving; Excalidraw extraction is now part
 # of the portable format set following the 2026-08-06 contract amendment.
 internal-excalidraw-extractor = ["portable"]
+# Admission-disabled PDF reader foundation. Deliberately NOT a member of
+# `default`, `portable`, or `native`: enabling it exposes
+# `read_pdf_geometry` and nothing else. `SourceFormat::Pdf` stays
+# `extraction_supported() == false` and `extract_source` keeps routing PDF to
+# the `not_yet_supported` stub under every feature combination.
+internal-pdf-extractor = ["portable", "dep:lopdf"]
 
 [dev-dependencies]
 filetime.workspace = true

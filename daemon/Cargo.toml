@@ -50,3 +50,8 @@ zerocopy = "0.8"
 fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 filetime = "0.2"
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+# Admission-disabled PDF reader spike. `default-features = false` drops chrono,
+# jiff, time, and rayon; `wasm_js` is what getrandom 0.4 requires on
+# wasm32-unknown-unknown. See `kwiry-core/src/formats/pdf.rs` for why the
+# feature is not part of `portable`.
+lopdf = { version = "=0.44.0", default-features = false, features = ["wasm_js"] }
