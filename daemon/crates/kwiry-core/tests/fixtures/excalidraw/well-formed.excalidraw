@@ -1,0 +1,130 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "frame0000000001",
+      "type": "frame",
+      "name": "Research Frame",
+      "x": -120.5,
+      "y": -80.25,
+      "width": 1400.75,
+      "height": 900.5,
+      "angle": 0,
+      "seed": 1234567890,
+      "version": 41,
+      "versionNonce": 987654321,
+      "index": "a0structsentinel",
+      "updated": 1710000000000,
+      "isDeleted": false,
+      "groupIds": [],
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent"
+    },
+    {
+      "id": "rect00000000001",
+      "type": "rectangle",
+      "x": 17.5,
+      "y": -29.75,
+      "width": 420.5,
+      "height": 260.25,
+      "angle": 0.35,
+      "seed": 1234567890,
+      "versionNonce": 111222333,
+      "index": "a1structsentinel",
+      "link": "https://example.com/excalidraw-source",
+      "groupIds": ["groupidsentinelqzx"],
+      "frameId": "frame0000000001",
+      "boundElements": [{ "id": "text00000000001", "type": "text" }],
+      "customData": { "payload": "must not become ordinary text" }
+    },
+    {
+      "id": "text00000000001",
+      "type": "text",
+      "x": 30.0,
+      "y": 40.0,
+      "width": 180.0,
+      "height": 50.0,
+      "containerId": "rect00000000001",
+      "fontSize": 20,
+      "fontFamily": 1,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "lineHeight": 1.25,
+      "originalText": "Bound label",
+      "text": "Bound\nlabel"
+    },
+    {
+      "id": "text00000000002",
+      "type": "text",
+      "x": 600.0,
+      "y": 40.0,
+      "width": 260.0,
+      "height": 25.0,
+      "fontSize": 20,
+      "link": "https://example.com/text-link",
+      "originalText": "# Not a heading",
+      "text": "# Not a heading"
+    },
+    {
+      "id": "arrw00000000001",
+      "type": "arrow",
+      "x": 900.0,
+      "y": 120.0,
+      "width": 200.0,
+      "height": 10.0,
+      "points": [[0.0, 0.0], [200.0, 10.0]],
+      "seed": 1234567890,
+      "boundElements": [{ "id": "text00000000003", "type": "text" }]
+    },
+    {
+      "id": "text00000000003",
+      "type": "text",
+      "x": 950.0,
+      "y": 110.0,
+      "width": 120.0,
+      "height": 25.0,
+      "containerId": "arrw00000000001",
+      "originalText": "Arrow label",
+      "text": "Arrow label"
+    },
+    {
+      "id": "imag00000000001",
+      "type": "image",
+      "x": 520.0,
+      "y": 240.0,
+      "width": 360.0,
+      "height": 260.0,
+      "fileId": "file00000000001",
+      "status": "saved",
+      "scale": [1.0, 1.0],
+      "crop": null
+    },
+    {
+      "id": "embd00000000001",
+      "type": "embeddable",
+      "x": 1200.0,
+      "y": 240.0,
+      "width": 400.0,
+      "height": 300.0,
+      "link": "https://example.com/embedded-frame"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff",
+    "gridSize": null,
+    "gridModeEnabled": true,
+    "zoomValue": 12.5,
+    "maxSentinel": 18446744073709551615
+  },
+  "files": {
+    "file00000000001": {
+      "id": "file00000000001",
+      "mimeType": "image/png",
+      "created": 1710000000000,
+      "lastRetrieved": 1710000000001,
+      "dataURL": "data:image/png;base64,IMAGEPAYLOADSENTINELQZX"
+    }
+  }
+}

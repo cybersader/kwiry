@@ -8,6 +8,7 @@ export const SOURCE_FORMATS = [
   "canvas",
   "docx",
   "pdf",
+  "excalidraw",
 ] as const;
 
 export type SourceFormat = typeof SOURCE_FORMATS[number];
@@ -18,6 +19,7 @@ export const EXTRACTABLE_SOURCE_FORMATS = [
   "base",
   "canvas",
   "docx",
+  "excalidraw",
 ] as const satisfies readonly SourceFormat[];
 
 export type ExtractableSourceFormat = typeof EXTRACTABLE_SOURCE_FORMATS[number];
@@ -29,10 +31,10 @@ const EXTRACTABLE_SOURCE_FORMAT_SET: ReadonlySet<SourceFormat> = new Set(
 // Mirrors kwiry_core::source::SOURCE_PREPARATION_SCHEMA_VERSION. This belongs in
 // the policy fingerprint so a preparation-schema change always invalidates a
 // cache even when the enabled extension set is unchanged.
-export const SOURCE_PREPARATION_SCHEMA_VERSION = 7 as const;
+export const SOURCE_PREPARATION_SCHEMA_VERSION = 8 as const;
 
 export const IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION =
-  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, and DOCX are available; PDF remains unavailable until its extractor ships and its bytes are not read. This profile is lexical-only and never reads the daemon token.";
+  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, DOCX, and Excalidraw are available; PDF remains unavailable until its extractor ships and its bytes are not read. This profile is lexical-only and never reads the daemon token.";
 
 export interface EnabledSourceFormats {
   markdown: boolean;
@@ -41,6 +43,7 @@ export interface EnabledSourceFormats {
   canvas: boolean;
   docx: boolean;
   pdf: boolean;
+  excalidraw: boolean;
 }
 
 export const DEFAULT_ENABLED_SOURCE_FORMATS: Readonly<EnabledSourceFormats> = Object.freeze({
@@ -50,6 +53,7 @@ export const DEFAULT_ENABLED_SOURCE_FORMATS: Readonly<EnabledSourceFormats> = Ob
   canvas: true,
   docx: true,
   pdf: false,
+  excalidraw: true,
 });
 
 const FORMAT_BY_EXTENSION: Readonly<Record<string, SourceFormat>> = Object.freeze({
@@ -59,6 +63,7 @@ const FORMAT_BY_EXTENSION: Readonly<Record<string, SourceFormat>> = Object.freez
   txt: "text",
   base: "base",
   canvas: "canvas",
+  excalidraw: "excalidraw",
   docx: "docx",
   pdf: "pdf",
 });
@@ -95,6 +100,7 @@ export function normalizeEnabledSourceFormats(
     canvas: isSourceFormatEnabled("canvas", enabled),
     docx: isSourceFormatEnabled("docx", enabled),
     pdf: isSourceFormatEnabled("pdf", enabled),
+    excalidraw: isSourceFormatEnabled("excalidraw", enabled),
   };
 }
 
@@ -108,6 +114,8 @@ export function sourceFormatDescription(format: SourceFormat): string {
       return "Extract authored YAML configuration and named views; materialized query rows are never indexed.";
     case "canvas":
       return "Extract authored text cards, group and edge labels, URLs, and file-reference paths without reading referenced files.";
+    case "excalidraw":
+      return "Extract authored text, container labels, frame names, and links from Excalidraw drawings without reading referenced files.";
     case "docx":
       return "Extract body text, tables, headings, comments, notes, and headers or footers. Tracked deletions and hidden text are extracted and marked latent.";
     case "pdf":

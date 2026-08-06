@@ -1990,7 +1990,7 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: {
           rustAbiVersion: 2,
-          sourceSchemaVersion: 7,
+          sourceSchemaVersion: 8,
           querySchemaVersion: 4,
           matchPlanSchemaVersion: 3,
           sqliteVersion: "3.53.0",

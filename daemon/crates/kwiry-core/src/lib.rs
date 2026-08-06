@@ -99,6 +99,14 @@ pub use formats::{
     ContentRole, DocxCandidate, DocxProperties, ExtractionScope, SemanticSection,
     extract_candidate_outcome,
 };
+// Admission-disabled Excalidraw spike; see `formats::excalidraw`. Exposing the
+// entry point does not admit the format: there is no `SourceFormat` variant, no
+// registry entry, and no discovery or source-preparation route.
+#[cfg(feature = "internal-excalidraw-extractor")]
+pub use formats::{
+    MAX_EXCALIDRAW_NOTICES, MAX_EXCALIDRAW_PROPERTY_BYTES, MAX_EXCALIDRAW_PROPERTY_ENTRIES,
+    extract_excalidraw_candidate,
+};
 #[cfg(feature = "native")]
 pub use generation::{DataRoot, DataRootLock, GenerationPaths};
 #[cfg(feature = "native")]

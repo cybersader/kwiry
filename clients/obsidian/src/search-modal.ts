@@ -75,6 +75,7 @@ const FORMAT_CHIP_PRESENTATIONS = {
   text: { label: "TXT", accessibleLabel: "Plain text source format" },
   base: { label: "BASE", accessibleLabel: "Obsidian Base source format" },
   canvas: { label: "CANVAS", accessibleLabel: "Obsidian Canvas source format" },
+  excalidraw: { label: "EXCA", accessibleLabel: "Excalidraw drawing source format" },
   docx: { label: "DOCX", accessibleLabel: "Word document source format" },
   pdf: { label: "PDF", accessibleLabel: "PDF source format" },
 } as const satisfies Record<BackendSearchHit["format"], FormatChipPresentation>;

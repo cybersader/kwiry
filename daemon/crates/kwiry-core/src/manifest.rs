@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(CHUNKING_VERSION, 2);
         // Admitting DOCX changes what a source preparation contains, so the
         // preparation schema advances and incompatible caches must rebuild.
-        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 7);
+        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 8);
     }
 
     #[test]

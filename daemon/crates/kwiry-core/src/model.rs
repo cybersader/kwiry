@@ -637,6 +637,7 @@ pub struct SourceFormatCounts {
     pub canvas: ExtractionCoverageCounts,
     pub docx: ExtractionCoverageCounts,
     pub pdf: ExtractionCoverageCounts,
+    pub excalidraw: ExtractionCoverageCounts,
 }
 
 impl SourceFormatCounts {
@@ -648,6 +649,7 @@ impl SourceFormatCounts {
             SourceFormat::Canvas => &mut self.canvas,
             SourceFormat::Docx => &mut self.docx,
             SourceFormat::Pdf => &mut self.pdf,
+            SourceFormat::Excalidraw => &mut self.excalidraw,
         };
         counts.record(coverage);
     }
@@ -658,6 +660,7 @@ impl SourceFormatCounts {
             + self.base.indexed_documents()
             + self.canvas.indexed_documents()
             + self.docx.indexed_documents()
+            + self.excalidraw.indexed_documents()
             + self.pdf.indexed_documents()
     }
 
@@ -667,6 +670,7 @@ impl SourceFormatCounts {
             + self.base.total_sources()
             + self.canvas.total_sources()
             + self.docx.total_sources()
+            + self.excalidraw.total_sources()
             + self.pdf.total_sources()
     }
 }
@@ -787,6 +791,13 @@ mod tests {
                     "quarantined": 0
                 },
                 "pdf": {
+                    "indexed-complete": 0,
+                    "indexed-partial": 0,
+                    "skipped-no-extractable-text": 0,
+                    "unreadable": 0,
+                    "quarantined": 0
+                },
+                "excalidraw": {
                     "indexed-complete": 0,
                     "indexed-partial": 0,
                     "skipped-no-extractable-text": 0,

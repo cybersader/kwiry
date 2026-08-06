@@ -145,10 +145,18 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
-  it("publishes protocol 10, cache schema 9, and the closed six-format set", () => {
+  it("publishes protocol 10, cache schema 9, and the closed seven-format set", () => {
     expect(WORKER_PROTOCOL_VERSION).toBe(10);
     expect(CACHE_SCHEMA_VERSION).toBe(9);
-    expect(SOURCE_FORMATS).toEqual(["markdown", "text", "base", "canvas", "docx", "pdf"]);
+    expect(SOURCE_FORMATS).toEqual([
+      "markdown",
+      "text",
+      "base",
+      "canvas",
+      "docx",
+      "pdf",
+      "excalidraw",
+    ]);
   });
 
   it("accepts exact bounded source batches", () => {

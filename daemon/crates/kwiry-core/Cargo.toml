@@ -84,6 +84,9 @@ internal-d5c-preview = ["portable"]
 # Retained so existing callers keep resolving; DOCX extraction is now part of
 # the portable format set rather than an opt-in spike.
 internal-docx-extractor = ["portable"]
+# Retained so existing callers keep resolving; Excalidraw extraction is now part
+# of the portable format set following the 2026-08-06 contract amendment.
+internal-excalidraw-extractor = ["portable"]
 
 [dev-dependencies]
 filetime.workspace = true

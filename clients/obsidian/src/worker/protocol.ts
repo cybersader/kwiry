@@ -75,6 +75,7 @@ export const SOURCE_FORMATS = [
   "canvas",
   "docx",
   "pdf",
+  "excalidraw",
 ] as const;
 export type SourceFormat = typeof SOURCE_FORMATS[number];
 
@@ -311,7 +312,7 @@ export type WorkerRequest =
 
 export interface InitializeResult {
   rustAbiVersion: 2;
-  sourceSchemaVersion: 7;
+  sourceSchemaVersion: 8;
   querySchemaVersion: 4;
   matchPlanSchemaVersion: 3;
   sqliteVersion: "3.53.0";
@@ -922,7 +923,7 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
       "fts5Enabled",
     ])
     && value.rustAbiVersion === 2
-    && value.sourceSchemaVersion === 7
+    && value.sourceSchemaVersion === 8
     && value.querySchemaVersion === 4
     && value.matchPlanSchemaVersion === 3
     && value.sqliteVersion === "3.53.0"

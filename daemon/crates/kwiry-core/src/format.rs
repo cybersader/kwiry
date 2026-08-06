@@ -13,6 +13,7 @@ pub enum SourceFormat {
     Canvas,
     Docx,
     Pdf,
+    Excalidraw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,12 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         format: SourceFormat::Canvas,
         name: "canvas",
         extensions: &["canvas"],
+        extraction_supported: true,
+    },
+    FormatSpec {
+        format: SourceFormat::Excalidraw,
+        name: "excalidraw",
+        extensions: &["excalidraw"],
         extraction_supported: true,
     },
     FormatSpec {
@@ -100,6 +107,7 @@ impl SourceFormat {
             Self::Text => "text",
             Self::Base => "base",
             Self::Canvas => "canvas",
+            Self::Excalidraw => "excalidraw",
             Self::Docx => "docx",
             Self::Pdf => "pdf",
         }
@@ -116,7 +124,7 @@ mod tests {
 
     #[test]
     fn registry_is_closed_complete_and_classifies_case_insensitively() {
-        assert_eq!(format_specs().len(), 6);
+        assert_eq!(format_specs().len(), 7);
         assert_eq!(
             SourceFormat::from_path("note.md"),
             Some(SourceFormat::Markdown)
@@ -151,6 +159,16 @@ mod tests {
         assert!(!SourceFormat::Pdf.spec().extraction_supported);
         assert!(SourceFormat::Canvas.is_extractable());
         assert!(SourceFormat::Docx.is_extractable());
+        assert!(SourceFormat::Excalidraw.is_extractable());
+        assert_eq!(
+            SourceFormat::from_extractable_path("Drawings/board.excalidraw"),
+            Some(SourceFormat::Excalidraw)
+        );
+        // Last-extension-wins keeps the Obsidian wrapper a Markdown note.
+        assert_eq!(
+            SourceFormat::from_extractable_path("Drawings/board.excalidraw.md"),
+            Some(SourceFormat::Markdown)
+        );
         assert!(!SourceFormat::Pdf.is_extractable());
         assert_eq!(
             SourceFormat::from_extractable_path("board.canvas"),

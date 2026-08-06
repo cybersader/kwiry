@@ -82,7 +82,7 @@ const get = (name) => {
   return value;
 };
 
-assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 7);
+assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 8);
 assert.equal(get("markdown-frontmatter-links-identifiers").preparation.retrieval.aliases.length, 2);
 assert.ok(
   get("markdown-frontmatter-links-identifiers").preparation.chunks.some((chunk) =>
@@ -137,6 +137,7 @@ assert.deepEqual(get("portable-daemon-status").daemon_status.source_format_count
   canvas: zeroCoverageCounts,
   docx: zeroCoverageCounts,
   pdf: zeroCoverageCounts,
+  excalidraw: zeroCoverageCounts,
 });
 assert.equal(get("portable-daemon-status").daemon_status.state, "ready");
 assert.equal(get("portable-daemon-status").daemon_status.generation, "generation-0001");

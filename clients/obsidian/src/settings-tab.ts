@@ -236,5 +236,6 @@ function sourceFormatLabel(format: SourceFormat): string {
     case "canvas": return "Canvas";
     case "docx": return "DOCX";
     case "pdf": return "PDF";
+    case "excalidraw": return "Excalidraw";
   }
 }

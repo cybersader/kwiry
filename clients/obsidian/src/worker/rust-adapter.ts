@@ -20,7 +20,7 @@ import type {
 } from "./protocol";
 
 const ABI_VERSION = 2;
-const SOURCE_SCHEMA_VERSION = 7;
+const SOURCE_SCHEMA_VERSION = 8;
 const QUERY_SCHEMA_VERSION = 4;
 const MATCH_PLAN_SCHEMA_VERSION = 3;
 
@@ -28,7 +28,7 @@ export interface RustIdentity {
   abi_version: 2;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
-  source_preparation_schema_version: 7;
+  source_preparation_schema_version: 8;
   lexical_query_plan_schema_version: 4;
   fts5_match_plan_schema_version: 3;
   /**
@@ -76,7 +76,7 @@ export interface PreparedChunk {
 }
 
 export interface SourcePreparation {
-  schema_version: 7;
+  schema_version: 8;
   source_key: string;
   vault_id: string;
   room?: string;

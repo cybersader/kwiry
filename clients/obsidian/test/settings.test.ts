@@ -103,6 +103,7 @@ describe("loadSettings", () => {
       canvas: true,
       docx: true,
       pdf: false,
+      excalidraw: true,
     });
     const loaded = loadSettings({
       enabledSourceFormats: {
@@ -112,6 +113,7 @@ describe("loadSettings", () => {
         canvas: "yes",
         docx: true,
         pdf: true,
+        excalidraw: true,
         unknown: false,
       },
     });
@@ -125,6 +127,7 @@ describe("loadSettings", () => {
       docx: true,
       // PDF is still unextractable, so a stored true must not survive.
       pdf: false,
+      excalidraw: true,
     });
     expect(loaded.enabledSourceFormats).not.toBe(DEFAULT_SETTINGS.enabledSourceFormats);
     expect(isSourceFormatExtractable("canvas")).toBe(true);
@@ -134,7 +137,7 @@ describe("loadSettings", () => {
   });
 
   it("describes DOCX as available while PDF remains unavailable and unread", () => {
-    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("Canvas, and DOCX are available");
+    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("DOCX, and Excalidraw are available");
     expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain(
       "PDF remains unavailable until its extractor ships and its bytes are not read",
     );
@@ -145,9 +148,10 @@ describe("loadSettings", () => {
     expect(sourceFormatDescription("pdf")).toContain("not inventoried or read");
   });
 
-  it("fingerprints the effective schema-7 extraction policy deterministically", async () => {
+  it("fingerprints the effective schema-8 extraction policy deterministically", async () => {
     const first = await formatPolicyFingerprint({ ...DEFAULT_ENABLED_SOURCE_FORMATS });
     const reorderedWithDormantLegacyIntent = await formatPolicyFingerprint({
+      excalidraw: true,
       pdf: true,
       docx: true,
       canvas: true,
@@ -159,7 +163,7 @@ describe("loadSettings", () => {
       ...DEFAULT_ENABLED_SOURCE_FORMATS,
       text: false,
     });
-    expect(first).toBe("49dec08d5e192b1026b2093a4377a2a8853af11c1537409b8cdb2961b301ae23");
+    expect(first).toBe("090269f9386c1e36124dd493ff02688a7921f883c1cebcd9d99ffd3fc2e31029");
     expect(first).not.toBe("c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97");
     expect(reorderedWithDormantLegacyIntent).toBe(first);
     expect(withoutText).not.toBe(first);

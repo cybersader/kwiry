@@ -288,7 +288,8 @@ function isSourceFormat(value: unknown): value is SourceFormat {
     || value === "base"
     || value === "canvas"
     || value === "docx"
-    || value === "pdf";
+    || value === "pdf"
+    || value === "excalidraw";
 }
 
 function isExtractionCoverage(value: unknown): value is ExtractionCoverage {

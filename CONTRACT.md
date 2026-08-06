@@ -164,13 +164,21 @@ Name: **kwiry** ("Knowledge Workspace Information Retrieval Yoke", pronounced "q
 
 ## 10. Multi-format and resumable indexing (amendment, 2026-08-02)
 
-1. **Source formats.** The source model admits a closed, versioned set of formats: `markdown`, `text`, `base`, `canvas`, `docx`, `pdf`. Rust core owns all parsing and extraction; hosts only classify files and read bytes.
+1. **Source formats.** The source model admits a closed, versioned set of formats: `markdown`, `text`, `base`, `canvas`, `docx`, `pdf`, `excalidraw`. Rust core owns all parsing and extraction; hosts only classify files and read bytes. Classification is last-extension-wins, so `*.excalidraw.md` remains `markdown`.
 2. **Extracted sections.** Non-Markdown formats produce ordered, deterministic extracted sections that feed the same chunker, property bag, and identifier pipeline as Markdown. Chunk IDs remain deterministic and path-derived.
 3. **Coverage honesty.** Source outcomes are: indexed-complete, indexed-partial, skipped-no-extractable-text, unreadable/omitted, and quarantined. A partially extracted source counts as indexed and as partial; counts are reported per format. No silent skips.
 4. **Locators.** Results may carry a non-ranking locator (for example PDF page, Base view, Canvas node) used only for navigation and display.
 5. **Ranking neutrality by default.** All formats rank by identical text-evidence rules. Format may act as an optional, user-configured ranking signal on the same footing as other bounded relevance-policy signals: it may only reorder equally strong text matches and may never let weaker text evidence outrank stronger text evidence.
 6. **Format policy versioning.** Enabled formats and extraction policy participate in cache and index compatibility; a policy change triggers an honest rebuild and never silent serving of rows built under a different policy.
 7. **Resumable builds.** Interrupted initial builds may checkpoint acknowledged progress to machine-local storage and resume after restart. A checkpoint is never a complete or servable generation; resumed work is reconciled against current file state before continuing, and any identity or policy mismatch discards the checkpoint in favor of an honest fresh build.
+
+## 10a. Excalidraw source format (amendment, 2026-08-06)
+
+1. **Membership.** `excalidraw` joins the closed source-format set of §10.1 and claims the single path extension `.excalidraw`.
+2. **Authored text.** An Excalidraw source is a bare JSON document. Authored text is a text element's `originalText` (falling back to the layout-wrapped `text` for elements written before `originalText` existed), a `frame` or `magicframe` `name`, and any element's `link`. Sections are emitted in element-array order, always carry an empty heading path, and never carry a locator. Excalidraw text is plain, never Markdown.
+3. **No dereference.** No file reference is ever followed and no `files[*].dataURL` payload crosses the source ABI.
+4. **Bounded projection.** The retained property projection lives under the `excalidraw` property root and is bounded by declared entry and byte budgets charged during construction. Exceeding either budget drops the projection and declares it; extracted text is unaffected.
+5. **Compatibility.** Admitting the format advances the source-preparation schema, which forces one honest rebuild of every existing index under §10.6.
 
 ## 11. Reserved later gates
 

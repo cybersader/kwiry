@@ -1,0 +1,65 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "text00000000001",
+      "type": "text",
+      "x": 0.0,
+      "y": 0.0,
+      "width": 200.0,
+      "height": 25.0,
+      "originalText": "Usable text",
+      "text": "Usable text"
+    },
+    {
+      "id": "frame0000000001",
+      "type": "frame",
+      "x": 400.0,
+      "y": 0.0,
+      "width": 600.0,
+      "height": 400.0,
+      "name": "Usable frame"
+    },
+    "not-an-element",
+    {
+      "id": "futr00000000001",
+      "type": "future-element",
+      "x": 800.0,
+      "y": 0.0,
+      "width": 300.0,
+      "height": 160.0,
+      "payload": "must not become ordinary text"
+    },
+    {
+      "type": "text",
+      "x": 0.0,
+      "y": 300.0,
+      "width": 200.0,
+      "height": 25.0,
+      "originalText": "must not become ordinary text"
+    },
+    {
+      "id": "text00000000001",
+      "type": "text",
+      "x": 0.0,
+      "y": 400.0,
+      "width": 200.0,
+      "height": 25.0,
+      "originalText": "must not become ordinary text"
+    },
+    {
+      "id": "text00000000002",
+      "type": "text",
+      "x": 0.0,
+      "y": 500.0,
+      "width": 240.0,
+      "height": 25.0,
+      "containerId": "does-not-exist-anywhere",
+      "frameId": "also-missing",
+      "originalText": "Dangling container label",
+      "text": "Dangling container label"
+    }
+  ]
+}
