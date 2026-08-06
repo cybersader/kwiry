@@ -10,6 +10,13 @@ import type { BackendSearchHit, BackendStatus, SearchBackend } from "./backend";
 import type KwiryPlugin from "./main";
 import { shouldNoticeSearchError } from "./empty-state";
 import {
+  groupSearchExecution,
+  groupedSearchHitLimit,
+  type GroupedSearchResult,
+  type QualifiedSourceIdentity,
+  type SourceSearchGroup,
+} from "./grouped-search";
+import {
   captureLinkInsertionTarget,
   deepestMatchedHeading,
   insertMarkdownLink,
@@ -32,11 +39,45 @@ import {
 } from "./search-shortcuts";
 import { SearchSessionController } from "./search-session";
 
-interface ModalResult {
-  hit: BackendSearchHit;
+type ModalResult =
+  | {
+    kind: "source";
+    group: SourceSearchGroup;
+  }
+  | {
+    kind: "section";
+    group: SourceSearchGroup;
+    hit: BackendSearchHit;
+    returnedSectionIndex: number;
+  };
+
+interface SettledProjection {
+  query: string;
+  mode: SearchMode;
+  backendInstanceId: string;
+  generation: string | null;
+  grouped: GroupedSearchResult;
 }
 
+type ResultView =
+  | { kind: "sources" }
+  | { kind: "sections"; source: QualifiedSourceIdentity };
+
 type OpenPlacement = "current" | "tab" | "split";
+
+interface FormatChipPresentation {
+  label: string;
+  accessibleLabel: string;
+}
+
+const FORMAT_CHIP_PRESENTATIONS = {
+  markdown: { label: "MD", accessibleLabel: "Markdown source format" },
+  text: { label: "TXT", accessibleLabel: "Plain text source format" },
+  base: { label: "BASE", accessibleLabel: "Obsidian Base source format" },
+  canvas: { label: "CANVAS", accessibleLabel: "Obsidian Canvas source format" },
+  docx: { label: "DOCX", accessibleLabel: "Word document source format" },
+  pdf: { label: "PDF", accessibleLabel: "PDF source format" },
+} as const satisfies Record<BackendSearchHit["format"], FormatChipPresentation>;
 
 export const SEARCH_STATUS_ANIMATION_DELAY_MS = 180;
 
@@ -56,8 +97,13 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private lastQueryStatusText = "";
   private lastIndexStatusText = "";
   private lastSearchable: boolean;
+  private latestStatusGeneration: string | null;
   private readonly shortcutPlatform: SearchShortcutPlatform;
   private readonly linkInsertionTarget: LinkInsertionTarget | null;
+  private settledProjection: SettledProjection | null = null;
+  private resultView: ResultView = { kind: "sources" };
+  private localProjectionRefresh = false;
+  private restorationTimer: number | null = null;
 
   constructor(
     private readonly plugin: KwiryPlugin,
@@ -77,6 +123,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       this.mode,
     );
     this.lastSearchable = status.searchable;
+    this.latestStatusGeneration = status.identity.instanceId === backend.identity.instanceId
+      ? status.generation
+      : null;
     this.setPlaceholder("Search your notes with kwiry…");
     this.emptyStateText = "";
     this.createProfileLabel(status);
@@ -94,6 +143,8 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
           this.moveActiveSuggestion(action);
         } else if (action === "cycle-mode") {
           this.selectMode(nextSearchMode(this.mode, this.session.supportedModes));
+        } else if (action === "back-to-sources") {
+          this.returnToSources();
         } else if (action !== null) {
           this.selectActiveSuggestion(event);
         }
@@ -103,6 +154,13 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   async getSuggestions(query: string): Promise<ModalResult[]> {
+    if (this.localProjectionRefresh) {
+      this.localProjectionRefresh = false;
+      const localResults = this.projectedResults(query);
+      if (localResults) return localResults;
+    }
+
+    this.invalidateProjection();
     const epoch = ++this.requestEpoch;
     this.beginQueryStatus(epoch, query.trim().length > 0
       ? { phase: "searching" }
@@ -111,31 +169,44 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       && this.plugin.settings.vaultId.trim().length > 0
       ? { vault_id: this.plugin.settings.vaultId.trim() }
       : undefined;
+    const sourceLimit = this.plugin.settings.resultLimit;
+    const hitLimit = groupedSearchHitLimit(sourceLimit);
     return this.plugin.captureDiagnostic("info", "search.lifecycle", {
       profile: this.backend.identity.profile,
       mode: this.mode,
-      limit: this.plugin.settings.resultLimit,
+      limit: hitLimit,
       operation: "search",
       subsystem: "search_session",
     }, async (event) => {
       const outcome = await this.session.search(query, {
-        limit: this.plugin.settings.resultLimit,
+        limit: hitLimit,
         filters,
       });
       switch (outcome.kind) {
         case "results": {
-          const resultCount = outcome.execution.response.hits.length;
+          const grouped = groupSearchExecution(outcome.execution, sourceLimit);
+          const resultCount = grouped.facts.returnedSectionCount;
           if (!this.completeQueryStatus(epoch, {
             phase: "settled",
             resultCount,
-            candidateWindow: outcome.execution.candidateWindow,
+            displayedSourceCount: grouped.facts.displayedSourceCount,
+            omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
+            candidateWindow: grouped.facts.candidateWindow,
           })) {
             event.set({ outcome: "superseded" });
             return [];
           }
           this.lastErrorCode = null;
+          this.settledProjection = {
+            query,
+            mode: this.mode,
+            backendInstanceId: outcome.execution.backend.instanceId,
+            generation: outcome.execution.generation,
+            grouped,
+          };
+          this.resultView = { kind: "sources" };
           event.set({ outcome: "succeeded", resultCount });
-          return outcome.execution.response.hits.map((hit) => ({ hit }));
+          return this.sourceResults(grouped);
         }
         case "error":
           if (!this.completeQueryStatus(epoch, {
@@ -168,20 +239,45 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
         case "stale":
           event.set({ outcome: "superseded" });
           // A superseded request must not overwrite the newer request's
-          // status or clear its delayed activity indicator.
-          return [];
+          // status, clear its delayed activity indicator, or erase a newer
+          // settled local projection when SuggestModal resolves out of order.
+          return this.projectedResults(this.inputEl.value) ?? [];
       }
     });
   }
 
   renderSuggestion(result: ModalResult, el: HTMLElement): void {
-    const { hit } = result;
+    const hit = this.hitForResult(result);
     el.addClass("kwiry-result");
-    const title = el.createDiv({ cls: "kwiry-result-title" });
-    title.setText(hit.frontmatter.title ?? basename(hit.path));
+    el.addClass(result.kind === "source" ? "kwiry-source-result" : "kwiry-section-result");
+    const heading = el.createDiv({ cls: "kwiry-result-heading" });
+    const title = heading.createDiv({ cls: "kwiry-result-title" });
+    if (result.kind === "source") {
+      title.setText(hit.frontmatter.title ?? basename(hit.path));
+    } else {
+      title.setText(hit.heading_path.at(-1) ?? `Match ${result.returnedSectionIndex + 1}`);
+    }
+    const formatChip = FORMAT_CHIP_PRESENTATIONS[hit.format];
+    heading.createSpan({ cls: "kwiry-result-format", text: formatChip.label }).setAttribute(
+      "aria-label",
+      formatChip.accessibleLabel,
+    );
     const meta = el.createDiv({ cls: "kwiry-result-meta" });
     const breadcrumb = hit.heading_path.length > 0 ? ` › ${hit.heading_path.join(" › ")}` : "";
     meta.setText(`${hit.path}${breadcrumb}`);
+    const context = el.createDiv({ cls: "kwiry-result-context" });
+    if (result.kind === "source") {
+      context.setText(returnedSectionCountText(result.group.observedSectionCount));
+    } else {
+      const sourceTitle = result.group.representative.frontmatter.title
+        ?? basename(result.group.source.path);
+      context.setText(
+        `${sourceTitle} · ${returnedSectionOrdinalText(
+          result.returnedSectionIndex,
+          result.group.observedSectionCount,
+        )}`,
+      );
+    }
     const excerpt = el.createDiv({ cls: "kwiry-result-excerpt" });
     for (const segment of hit.excerpt) {
       const text = segment.text.replace(/\s+/g, " ");
@@ -191,9 +287,14 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   selectSuggestion(result: ModalResult, event: MouseEvent | KeyboardEvent): void {
+    const action = this.shortcutAction(event);
+    if (action === "drill-source") {
+      this.drillIntoSource(result);
+      return;
+    }
     // SuggestModal closes before onChooseSuggestion. Background open is the one
     // action that must bypass that path while still using the active suggestion.
-    if (this.shortcutAction(event) === "open-background") {
+    if (action === "open-background") {
       this.openResult(result, "tab");
       return;
     }
@@ -239,6 +340,101 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     }));
   }
 
+  private drillIntoSource(result: ModalResult): void {
+    if (result.kind !== "source") return;
+    const projection = this.settledProjection;
+    if (!projection) return;
+    const group = findSourceGroup(projection.grouped, result.group.source);
+    if (!group) return;
+    this.clearRestorationTimer();
+    this.resultView = { kind: "sections", source: group.source };
+    this.refreshLocalProjection();
+  }
+
+  private returnToSources(): void {
+    if (this.resultView.kind !== "sections" || !this.settledProjection) return;
+    const source = this.resultView.source;
+    const generation = this.settledProjection.generation;
+    const backendInstanceId = this.settledProjection.backendInstanceId;
+    this.resultView = { kind: "sources" };
+    this.refreshLocalProjection();
+    this.restorationTimer = window.setTimeout(() => {
+      this.restorationTimer = null;
+      const projection = this.settledProjection;
+      if (
+        !projection
+        || this.resultView.kind !== "sources"
+        || projection.generation !== generation
+        || projection.backendInstanceId !== backendInstanceId
+      ) return;
+      const sourceIndex = projection.grouped.groups.findIndex((group) =>
+        sameSource(group.source, source));
+      this.inputEl.focus();
+      for (let index = 0; index < sourceIndex; index += 1) {
+        this.moveActiveSuggestion("move-down");
+      }
+    }, 0);
+  }
+
+  private refreshLocalProjection(): void {
+    this.localProjectionRefresh = true;
+    this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  private projectedResults(query: string): ModalResult[] | null {
+    const projection = this.settledProjection;
+    if (
+      !projection
+      || projection.query !== query
+      || projection.mode !== this.mode
+      || projection.backendInstanceId !== this.backend.identity.instanceId
+      || projection.generation !== this.latestStatusGeneration
+    ) {
+      return null;
+    }
+    if (this.resultView.kind === "sources") return this.sourceResults(projection.grouped);
+    const group = findSourceGroup(projection.grouped, this.resultView.source);
+    if (!group) return null;
+    return group.sections.map((hit, returnedSectionIndex) => ({
+      kind: "section",
+      group,
+      hit,
+      returnedSectionIndex,
+    }));
+  }
+
+  private sourceResults(grouped: GroupedSearchResult): ModalResult[] {
+    return grouped.groups.map((group) => ({ kind: "source", group }));
+  }
+
+  private isCurrentProjectedResult(result: ModalResult): boolean {
+    const currentResults = this.projectedResults(this.inputEl.value);
+    return currentResults?.some((current) => current.kind === result.kind
+      && current.group === result.group
+      && (current.kind === "source" || (
+        result.kind === "section"
+        && current.hit === result.hit
+        && current.returnedSectionIndex === result.returnedSectionIndex
+      ))) ?? false;
+  }
+
+  private hitForResult(result: ModalResult): BackendSearchHit {
+    return result.kind === "source" ? result.group.representative : result.hit;
+  }
+
+  private invalidateProjection(): void {
+    this.clearRestorationTimer();
+    this.settledProjection = null;
+    this.resultView = { kind: "sources" };
+    this.localProjectionRefresh = false;
+  }
+
+  private clearRestorationTimer(): void {
+    if (this.restorationTimer === null) return;
+    window.clearTimeout(this.restorationTimer);
+    this.restorationTimer = null;
+  }
+
   private captureLinkInsertionTarget(): LinkInsertionTarget | null {
     const activeEditor = this.app.workspace.activeEditor;
     const editor = activeEditor?.editor;
@@ -263,9 +459,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   private insertResultLink(result: ModalResult, kind: LinkInsertionKind): void {
+    const hit = this.hitForResult(result);
     const validated = this.validatedResult(result);
     if (!validated) return;
-    if (result.hit.format !== "markdown") {
+    if (hit.format !== "markdown") {
       new Notice("Kwiry: link insertion is available only for Markdown results.");
       return;
     }
@@ -278,20 +475,25 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       this.app.fileManager,
       validated.file,
       target,
-      deepestMatchedHeading(result.hit.heading_path),
+      deepestMatchedHeading(hit.heading_path),
       kind,
     );
     if (!outcome.ok) new Notice(`Kwiry: ${outcome.safeMessage}`);
   }
 
   private validatedResult(result: ModalResult): { file: TFile; target: OpenTarget } | null {
+    const hit = this.hitForResult(result);
+    if (!this.isCurrentProjectedResult(result)) {
+      new Notice("Kwiry: these search results are out of date. Wait for the refreshed results.");
+      return null;
+    }
     const activeBackend = this.plugin.getActiveBackendIdentity();
     if (!activeBackend) {
       new Notice("Kwiry: the search backend is no longer active.");
       return null;
     }
     const decision = validateOpenResult(
-      result.hit,
+      hit,
       activeBackend,
       this.plugin.settings.daemonCurrentVaultId,
     );
@@ -313,6 +515,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   onClose(): void {
     this.activeRequestEpoch = ++this.requestEpoch;
     this.progressEpoch += 1;
+    this.invalidateProjection();
     this.clearQueryAnimationTimer();
     if (this.progressTimer !== null) {
       window.clearTimeout(this.progressTimer);
@@ -411,6 +614,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private renderProgress(status: BackendStatus): void {
     const becameSearchable = !this.lastSearchable && status.searchable;
     this.lastSearchable = status.searchable;
+    this.reconcileStatusGeneration(status);
     const line = this.indexStatusEl;
     if (!line) return;
     const presentation = presentBackgroundIndex(status);
@@ -422,6 +626,28 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     line.classList.toggle("has-status", presentation.state !== "quiet");
     line.classList.toggle("is-attention", presentation.state === "attention");
     if (becameSearchable) this.rerunRetainedQuery(status);
+  }
+
+  private reconcileStatusGeneration(status: BackendStatus): void {
+    if (status.identity.instanceId !== this.backend.identity.instanceId) return;
+    const previousGeneration = this.latestStatusGeneration;
+    this.latestStatusGeneration = status.generation;
+    if (status.generation === previousGeneration) return;
+
+    const projection = this.settledProjection;
+    if (
+      !projection
+      || projection.backendInstanceId !== status.identity.instanceId
+      || projection.generation === status.generation
+    ) {
+      return;
+    }
+
+    this.invalidateProjection();
+    this.resultContainerEl.empty();
+    if (status.searchable && this.inputEl.value.trim().length > 0) {
+      this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    }
   }
 
   private rerunRetainedQuery(status: BackendStatus): void {
@@ -475,6 +701,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private selectMode(mode: SearchMode): void {
     this.session.setMode(mode);
     this.mode = mode;
+    this.invalidateProjection();
     this.syncModeControl();
     this.inputEl.dispatchEvent(new Event("input"));
   }
@@ -493,4 +720,29 @@ function basename(path: string): string {
   const slash = path.lastIndexOf("/");
   const name = slash >= 0 ? path.slice(slash + 1) : path;
   return name.replace(/\.md$/u, "");
+}
+
+function returnedSectionCountText(count: number): string {
+  return `${count} returned ${count === 1 ? "section" : "sections"}`;
+}
+
+function returnedSectionOrdinalText(index: number, count: number): string {
+  return `returned section ${index + 1} of ${count}`;
+}
+
+function findSourceGroup(
+  grouped: GroupedSearchResult,
+  source: QualifiedSourceIdentity,
+): SourceSearchGroup | undefined {
+  return grouped.groups.find((group) => sameSource(group.source, source));
+}
+
+function sameSource(
+  left: QualifiedSourceIdentity,
+  right: QualifiedSourceIdentity,
+): boolean {
+  return left.profile === right.profile
+    && left.backendInstanceId === right.backendInstanceId
+    && left.vaultId === right.vaultId
+    && left.path === right.path;
 }

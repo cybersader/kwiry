@@ -15,6 +15,8 @@ export type QueryStatusFacts =
   | {
     phase: "settled";
     resultCount: number;
+    displayedSourceCount: number;
+    omittedObservedSourceCount: number;
     candidateWindow: CandidateWindowFacts;
   }
   | { phase: "error"; code: string; safeMessage: string };
@@ -74,9 +76,14 @@ export function presentQueryStatus(facts: QueryStatusFacts): QueryStatusPresenta
         };
       }
       const noun = facts.resultCount === 1 ? "result" : "results";
+      const sourceDisplayText = facts.omittedObservedSourceCount > 0
+        ? `${countedNoun(facts.displayedSourceCount, "source")} shown; `
+          + `${countedNoun(facts.omittedObservedSourceCount, "observed source")} `
+          + "omitted by the source-row limit; "
+        : "";
       return {
         state: "results",
-        text: `${facts.resultCount} ${noun} returned — ${windowText}`,
+        text: `${facts.resultCount} ${noun} returned — ${sourceDisplayText}${windowText}`,
         busy: false,
       };
     }
@@ -103,6 +110,10 @@ export function presentBackgroundIndex(status: BackendStatus): BackgroundIndexPr
  */
 function stabilizeInFlightWidth(text: string): string {
   return text.replace(/ · ([0-9]) in flight/u, " ·  $1 in flight");
+}
+
+function countedNoun(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function candidateWindowText(state: CandidateWindowFacts["state"]): string {

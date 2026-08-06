@@ -13,6 +13,8 @@ export type SearchShortcutAction =
   | "insert-section-link"
   | "move-down"
   | "move-up"
+  | "drill-source"
+  | "back-to-sources"
   | "cycle-mode";
 
 export type SearchShortcutModifier = "Mod" | "Ctrl" | "Alt" | "Shift";
@@ -100,6 +102,22 @@ export const SEARCH_SHORTCUT_BINDINGS: readonly SearchShortcutBinding[] = [
     action: "move-up",
     command: "ctrl K",
     purpose: "previous result",
+    register: true,
+  },
+  {
+    modifiers: ["Ctrl"],
+    key: "l",
+    action: "drill-source",
+    command: "ctrl L",
+    purpose: "show returned sections",
+    register: true,
+  },
+  {
+    modifiers: ["Ctrl"],
+    key: "h",
+    action: "back-to-sources",
+    command: "ctrl H",
+    purpose: "return to sources",
     register: true,
   },
   {

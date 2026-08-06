@@ -64,6 +64,8 @@ describe("presentQueryStatus", () => {
       facts: {
         phase: "settled",
         resultCount: 1,
+        displayedSourceCount: 1,
+        omittedObservedSourceCount: 0,
         candidateWindow: window("exhausted"),
       },
       expected: {
@@ -77,6 +79,8 @@ describe("presentQueryStatus", () => {
       facts: {
         phase: "settled",
         resultCount: 7,
+        displayedSourceCount: 3,
+        omittedObservedSourceCount: 0,
         candidateWindow: window("more_available"),
       },
       expected: {
@@ -90,6 +94,8 @@ describe("presentQueryStatus", () => {
       facts: {
         phase: "settled",
         resultCount: 20,
+        displayedSourceCount: 4,
+        omittedObservedSourceCount: 0,
         candidateWindow: window("candidate_limit_reached"),
       },
       expected: {
@@ -103,6 +109,8 @@ describe("presentQueryStatus", () => {
       facts: {
         phase: "settled",
         resultCount: 20,
+        displayedSourceCount: 4,
+        omittedObservedSourceCount: 0,
         candidateWindow: window("unknown"),
       },
       expected: {
@@ -116,6 +124,8 @@ describe("presentQueryStatus", () => {
       facts: {
         phase: "settled",
         resultCount: 0,
+        displayedSourceCount: 0,
+        omittedObservedSourceCount: 0,
         candidateWindow: window("exhausted"),
       },
       expected: {
@@ -129,6 +139,8 @@ describe("presentQueryStatus", () => {
       facts: {
         phase: "settled",
         resultCount: 0,
+        displayedSourceCount: 0,
+        omittedObservedSourceCount: 0,
         candidateWindow: window("candidate_limit_reached"),
       },
       expected: {
@@ -167,10 +179,26 @@ describe("presentQueryStatus", () => {
     expect(presentQueryStatus(facts)).toEqual(expected);
   });
 
+  it("discloses local source-row truncation separately from candidate completeness", () => {
+    expect(presentQueryStatus({
+      phase: "settled",
+      resultCount: 2,
+      displayedSourceCount: 1,
+      omittedObservedSourceCount: 1,
+      candidateWindow: window("exhausted"),
+    })).toEqual({
+      state: "results",
+      text: "2 results returned — 1 source shown; 1 observed source omitted by the source-row limit; search window complete.",
+      busy: false,
+    });
+  });
+
   it("never promotes candidate counts into result or corpus totals", () => {
     const facts: QueryStatusFacts = {
       phase: "settled",
       resultCount: 3,
+      displayedSourceCount: 2,
+      omittedObservedSourceCount: 0,
       candidateWindow: {
         state: "candidate_limit_reached",
         candidateCount: 512,

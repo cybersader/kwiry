@@ -67,8 +67,34 @@
   gap: 2px;
 }
 
+.kwiry-result-heading {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: var(--size-4-2);
+}
+
 .kwiry-result-title {
+  min-width: 0;
+  overflow: hidden;
   font-weight: var(--font-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kwiry-result-format {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 1px 5px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  line-height: 1.2;
+  letter-spacing: 0.03em;
 }
 
 .kwiry-result-meta {

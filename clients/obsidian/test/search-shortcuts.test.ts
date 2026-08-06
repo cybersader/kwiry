@@ -57,6 +57,16 @@ function expectedAction(
       ? "move-up"
       : null;
   }
+  if (key.toLowerCase() === "l") {
+    return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+      ? "drill-source"
+      : null;
+  }
+  if (key.toLowerCase() === "h") {
+    return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+      ? "back-to-sources"
+      : null;
+  }
   return null;
 }
 
@@ -128,6 +138,22 @@ describe("SEARCH_SHORTCUT_BINDINGS", () => {
         register: true,
       },
       {
+        modifiers: ["Ctrl"],
+        key: "l",
+        action: "drill-source",
+        command: "ctrl L",
+        purpose: "show returned sections",
+        register: true,
+      },
+      {
+        modifiers: ["Ctrl"],
+        key: "h",
+        action: "back-to-sources",
+        command: "ctrl H",
+        purpose: "return to sources",
+        register: true,
+      },
+      {
         modifiers: [],
         key: "Tab",
         action: "cycle-mode",
@@ -155,7 +181,7 @@ describe("searchShortcutAction", () => {
   it.each(["other", "macos"] as const)(
     "resolves only physical Ctrl navigation chords on %s",
     (platform) => {
-      for (const key of ["j", "J", "k", "K"]) {
+      for (const key of ["j", "J", "k", "K", "l", "L", "h", "H"]) {
         for (const modifiers of modifierStates) {
           const event = shortcut(key, modifiers);
           expect(searchShortcutAction(event, platform), `${key} ${JSON.stringify(modifiers)}`).toBe(

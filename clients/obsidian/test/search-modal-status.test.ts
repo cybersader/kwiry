@@ -9,6 +9,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { SearchRequest } from "../src/api";
 import {
   type BackendIdentity,
+  type BackendSearchHit,
   type BackendStatus,
   type SearchBackend,
   type SearchExecution,
@@ -49,7 +50,9 @@ class FakeElement {
   textContent = "";
   textSetCount = 0;
   value = "";
+  focusCount = 0;
   readonly dispatchedEvents: Event[] = [];
+  private readonly listeners = new Map<string, Array<(event: Event) => void>>();
 
   constructor(className?: string) {
     if (className) this.classList.add(...className.split(/\s+/u));
@@ -97,6 +100,11 @@ class FakeElement {
     this.textSetCount += 1;
   }
 
+  empty(): void {
+    this.children.splice(0);
+    this.textContent = "";
+  }
+
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);
   }
@@ -113,12 +121,27 @@ class FakeElement {
     this.textContent += text;
   }
 
-  addEventListener(): void {}
-  focus(): void {}
+  addEventListener(type: string, listener: (event: Event) => void): void {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  focus(): void {
+    this.focusCount += 1;
+  }
+
   dispatchEvent(event: Event): boolean {
     this.dispatchedEvents.push(event);
+    for (const listener of this.listeners.get(event.type) ?? []) listener(event);
     return true;
   }
+}
+
+interface FakeScopeRegistration {
+  modifiers: string[];
+  key: string;
+  callback: (event: KeyboardEvent) => boolean;
 }
 
 class FakeSuggestModal<T> {
@@ -126,18 +149,91 @@ class FakeSuggestModal<T> {
   readonly contentEl = new FakeElement("modal-content");
   readonly resultContainerEl = this.contentEl.createDiv({ cls: "suggestion-container" });
   readonly inputEl = new FakeElement("prompt-input");
-  readonly scope = { register(): void {} };
+  readonly scopeRegistrations: FakeScopeRegistration[] = [];
+  readonly scope = {
+    register: (
+      modifiers: string[],
+      key: string,
+      callback: (event: KeyboardEvent) => boolean,
+    ): void => {
+      this.scopeRegistrations.push({ modifiers, key, callback });
+    },
+  };
+  suggestions: T[] = [];
+  activeIndex = 0;
+  closed = false;
   emptyStateText = "";
+  private suggestionUpdate: Promise<void> = Promise.resolve();
 
   constructor(app: unknown) {
     this.app = app;
+    this.inputEl.addEventListener("input", () => {
+      this.suggestionUpdate = Promise.resolve(this.getSuggestions(this.inputEl.value)).then(
+        (suggestions) => {
+          this.suggestions = suggestions;
+          this.activeIndex = 0;
+          this.resultContainerEl.children.splice(0);
+          for (const suggestion of suggestions) {
+            const row = this.resultContainerEl.createDiv();
+            this.renderSuggestion(suggestion, row as unknown as HTMLElement);
+          }
+        },
+      );
+    });
+    this.inputEl.addEventListener("keydown", (event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key === "ArrowDown") {
+        this.activeIndex = Math.min(this.activeIndex + 1, Math.max(0, this.suggestions.length - 1));
+      } else if (key === "ArrowUp") {
+        this.activeIndex = Math.max(0, this.activeIndex - 1);
+      }
+    });
   }
 
   setPlaceholder(): void {}
   setInstructions(): void {}
-  selectSuggestion(_result: T, _event: unknown): void {}
-  selectActiveSuggestion(): void {}
-  onClose(): void {}
+
+  getSuggestions(_query: string): T[] | Promise<T[]> {
+    throw new Error("FakeSuggestModal.getSuggestions must be overridden");
+  }
+
+  renderSuggestion(_result: T, _el: HTMLElement): void {
+    throw new Error("FakeSuggestModal.renderSuggestion must be overridden");
+  }
+
+  onChooseSuggestion(_result: T, _event: MouseEvent | KeyboardEvent): void {
+    throw new Error("FakeSuggestModal.onChooseSuggestion must be overridden");
+  }
+
+  selectSuggestion(result: T, event: MouseEvent | KeyboardEvent): void {
+    this.closed = true;
+    this.onChooseSuggestion(result, event);
+  }
+
+  selectActiveSuggestion(event: MouseEvent | KeyboardEvent): void {
+    const active = this.suggestions[this.activeIndex];
+    if (active !== undefined) this.selectSuggestion(active, event);
+  }
+
+  async flushSuggestions(): Promise<void> {
+    await this.suggestionUpdate;
+  }
+
+  triggerScope(
+    modifiers: string[],
+    key: string,
+    event: KeyboardEvent,
+  ): boolean {
+    const registration = this.scopeRegistrations.find((candidate) =>
+      candidate.key.toLowerCase() === key.toLowerCase()
+      && candidate.modifiers.join("+") === modifiers.join("+"));
+    if (!registration) throw new Error(`Missing scope registration for ${modifiers.join("+")} ${key}`);
+    return registration.callback(event);
+  }
+
+  onClose(): void {
+    this.closed = true;
+  }
 }
 
 const notices: string[] = [];
@@ -146,12 +242,39 @@ class FakeNotice {
     notices.push(message);
   }
 }
-class FakeTFile {}
+class FakeTFile {
+  constructor(readonly path: string) {}
+}
+
+class FakeKeyboardEvent extends Event {
+  readonly key: string;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly altKey: boolean;
+  readonly shiftKey: boolean;
+
+  constructor(type: string, init: KeyboardEventInit = {}) {
+    super(type, init);
+    this.key = init.key ?? "";
+    this.ctrlKey = init.ctrlKey ?? false;
+    this.metaKey = init.metaKey ?? false;
+    this.altKey = init.altKey ?? false;
+    this.shiftKey = init.shiftKey ?? false;
+  }
+}
 
 interface SearchModalLike {
   readonly contentEl: FakeElement;
   readonly inputEl: FakeElement;
+  readonly resultContainerEl: FakeElement;
+  readonly suggestions: unknown[];
+  readonly activeIndex: number;
+  readonly closed: boolean;
   getSuggestions(query: string): Promise<unknown[]>;
+  renderSuggestion(result: unknown, el: FakeElement): void;
+  selectSuggestion(result: unknown, event: MouseEvent | KeyboardEvent): void;
+  flushSuggestions(): Promise<void>;
+  triggerScope(modifiers: string[], key: string, event: KeyboardEvent): boolean;
   onClose(): void;
 }
 
@@ -321,58 +444,100 @@ function status(overrides: Partial<BackendStatus> = {}): BackendStatus {
   };
 }
 
-function execution(
-  resultCount: number,
-  state: SearchExecution["candidateWindow"]["state"],
+function hit(
+  chunkId: string,
+  path: string,
+  headingPath: string[] = [],
+  overrides: Partial<BackendSearchHit> = {},
+): BackendSearchHit {
+  return {
+    chunk_id: chunkId,
+    vault_id: "active-vault",
+    path,
+    format: "markdown",
+    coverage: "indexed-complete",
+    locator: null,
+    heading_path: headingPath,
+    excerpt: [{ text: chunkId, highlighted: true }],
+    score: 1,
+    frontmatter: { title: `Title ${path}` },
+    origin: {
+      profile: "in_plugin",
+      backendInstanceId: "in-plugin-1",
+      vaultId: "active-vault",
+    },
+    ...overrides,
+  };
+}
+
+function executionWithHits(
+  hits: BackendSearchHit[],
+  state: SearchExecution["candidateWindow"]["state"] = "exhausted",
+  overrides: Partial<Pick<
+    SearchExecution,
+    "generation" | "backend" | "requestedMode" | "effectiveMode"
+  >> = {},
 ): SearchExecution {
   return {
-    backend: {
+    backend: overrides.backend ?? {
       profile: "in_plugin",
       instanceId: "in-plugin-1",
       label: "In-plugin",
       boundVaultId: "active-vault",
     },
-    requestedMode: "lexical",
-    effectiveMode: "lexical",
-    generation: "g1",
+    requestedMode: overrides.requestedMode ?? "lexical",
+    effectiveMode: overrides.effectiveMode ?? "lexical",
+    generation: overrides.generation ?? "g1",
     candidateWindow: {
       state,
       candidateCount: state === "unknown" ? null : 24,
       candidateLimit: state === "candidate_limit_reached" ? 24 : null,
     },
-    response: {
-      hits: Array.from({ length: resultCount }, (_, index) => ({
-        chunk_id: `chunk-${index}`,
-        vault_id: "active-vault",
-        path: `Note-${index}.md`,
-        format: "markdown" as const,
-        coverage: "indexed-complete" as const,
-        locator: null,
-        heading_path: [],
-        excerpt: [],
-        score: 1,
-        frontmatter: {},
-        origin: {
-          profile: "in_plugin" as const,
-          backendInstanceId: "in-plugin-1",
-          vaultId: "active-vault",
-        },
-      })),
-      next_cursor: null,
-    },
+    response: { hits, next_cursor: null },
   };
 }
 
-function plugin() {
-  return {
+function execution(
+  resultCount: number,
+  state: SearchExecution["candidateWindow"]["state"],
+): SearchExecution {
+  return executionWithHits(
+    Array.from({ length: resultCount }, (_, index) => hit(
+      `chunk-${index}`,
+      `Note-${index}.md`,
+    )),
+    state,
+  );
+}
+
+function plugin(options: {
+  activeEditor?: unknown;
+  activeBackend?: BackendIdentity | null;
+  resultLimit?: number;
+} = {}) {
+  const openFile = vi.fn(async () => {});
+  const getLeaf = vi.fn(() => ({ openFile }));
+  const getAbstractFileByPath = vi.fn((path: string) => new FakeTFile(path));
+  const generateMarkdownLink = vi.fn(
+    (_file: FakeTFile, _sourcePath: string, subpath?: string) => `[[target${subpath ?? ""}]]`,
+  );
+  const activeBackend = options.activeBackend === undefined
+    ? {
+      profile: "in_plugin" as const,
+      instanceId: "in-plugin-1",
+      label: "In-plugin" as const,
+      boundVaultId: "active-vault",
+    }
+    : options.activeBackend;
+  const instance = {
     app: {
-      workspace: { activeEditor: null, getLeaf: vi.fn() },
-      vault: { getAbstractFileByPath: vi.fn() },
-      fileManager: {},
+      workspace: { activeEditor: options.activeEditor ?? null, getLeaf },
+      vault: { getAbstractFileByPath },
+      fileManager: { generateMarkdownLink },
     },
     settings: {
       defaultMode: "lexical",
-      resultLimit: 20,
+      resultLimit: options.resultLimit ?? 20,
       vaultId: "",
       daemonCurrentVaultId: "",
     },
@@ -387,7 +552,14 @@ function plugin() {
     ) => operation({ set(): void {}, setLevel(): void {} }),
     diagnosticErrorDetails: () => ({}),
     recordCaughtFailure: vi.fn(),
-    getActiveBackendIdentity: () => null,
+    getActiveBackendIdentity: () => activeBackend,
+  };
+  return {
+    instance,
+    openFile,
+    getLeaf,
+    getAbstractFileByPath,
+    generateMarkdownLink,
   };
 }
 
@@ -415,13 +587,47 @@ function findByClass(root: FakeElement, className: string): FakeElement | null {
 function createModal(
   backend: DeferredBackend,
   initialStatus: BackendStatus = status(),
+  pluginHarness = plugin(),
 ): SearchModalLike {
-  return new searchModalModule.KwirySearchModal(plugin(), backend, initialStatus);
+  return new searchModalModule.KwirySearchModal(
+    pluginHarness.instance,
+    backend,
+    initialStatus,
+  );
+}
+
+function keyboard(
+  key: string,
+  overrides: Partial<KeyboardEventInit> = {},
+): KeyboardEvent {
+  return new FakeKeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...overrides,
+  }) as unknown as KeyboardEvent;
+}
+
+async function settleInputSearch(
+  modal: SearchModalLike,
+  backend: DeferredBackend,
+  query: string,
+  result: SearchExecution,
+): Promise<void> {
+  modal.inputEl.value = query;
+  modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+  backend.searches.at(-1)!.resolve(result);
+  await modal.flushSuggestions();
+}
+
+function renderedRows(modal: SearchModalLike): FakeElement[] {
+  return [...modal.resultContainerEl.children];
 }
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal("window", globalThis);
+  vi.stubGlobal("KeyboardEvent", FakeKeyboardEvent);
   notices.length = 0;
 });
 
@@ -458,6 +664,27 @@ describe("KwirySearchModal status rail", () => {
     expect(query.textContent).toBe("1 result returned — search window complete.");
     expect(query.classList.contains("is-animation-ready")).toBe(false);
     expect(results.attributes.get("aria-busy")).toBe("false");
+    modal.onClose();
+  });
+
+  it.each([
+    { state: "exhausted", disclosure: "search window complete." },
+    { state: "more_available", disclosure: "more candidates are available." },
+    { state: "candidate_limit_reached", disclosure: "candidate window limit reached." },
+    { state: "unknown", disclosure: "window completeness is unknown." },
+  ] as const)("preserves exact $state candidate-window disclosure at the modal seam", async ({
+    state,
+    disclosure,
+  }) => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+    const { query } = modalElements(modal);
+
+    const pending = modal.getSuggestions("candidate truth");
+    backend.searches[0]!.resolve(execution(1, state));
+    await expect(pending).resolves.toHaveLength(1);
+
+    expect(query.textContent).toBe(`1 result returned — ${disclosure}`);
     modal.onClose();
   });
 
@@ -674,5 +901,538 @@ describe("KwirySearchModal status rail", () => {
     await expect(pending).resolves.toEqual([]);
     expect(query.textContent).toBe("Searching…");
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("KwirySearchModal grouped interactions", () => {
+  it("renders one source row in first-occurrence order with bounded returned-section counts", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+    const a1 = hit("a1", "Folder/A.md", ["Highest ranked"]);
+    const b1 = hit("b1", "B.md", ["Only section"]);
+    const a2 = hit("a2", "Folder/A.md", ["Lower ranked"]);
+
+    await settleInputSearch(modal, backend, "ranked", executionWithHits([a1, b1, a2]));
+
+    expect(backend.requests).toEqual([{
+      q: "ranked",
+      mode: "lexical",
+      limit: 100,
+      filters: undefined,
+    }]);
+    expect(modal.suggestions).toHaveLength(2);
+    const rows = renderedRows(modal);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.classList.contains("kwiry-source-result")).toBe(true);
+    expect(findByClass(rows[0]!, "kwiry-result-title")?.textContent).toBe("Title Folder/A.md");
+    expect(findByClass(rows[0]!, "kwiry-result-meta")?.textContent).toBe(
+      "Folder/A.md › Highest ranked",
+    );
+    expect(findByClass(rows[0]!, "kwiry-result-context")?.textContent).toBe(
+      "2 returned sections",
+    );
+    expect(findByClass(rows[1]!, "kwiry-result-context")?.textContent).toBe(
+      "1 returned section",
+    );
+    modal.onClose();
+  });
+
+  it("discloses source-row truncation independently from an exhausted candidate window", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend, status(), plugin({ resultLimit: 1 }));
+    const { query } = modalElements(modal);
+
+    await settleInputSearch(modal, backend, "bounded sources", executionWithHits([
+      hit("a1", "A.md", ["A"]),
+      hit("b1", "B.md", ["B"]),
+    ], "exhausted"));
+
+    expect(modal.suggestions).toHaveLength(1);
+    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe("A.md › A");
+    expect(query.textContent).toBe(
+      "2 results returned — 1 source shown; 1 observed source omitted by the source-row limit; search window complete.",
+    );
+    modal.onClose();
+  });
+
+  it("renders visible, accessible format labels for current and future source vocabulary", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+    const formatCases = [
+      { format: "markdown", path: "Note.md", label: "MD", accessibleLabel: "Markdown source format" },
+      { format: "text", path: "Notes.txt", label: "TXT", accessibleLabel: "Plain text source format" },
+      { format: "base", path: "Projects.base", label: "BASE", accessibleLabel: "Obsidian Base source format" },
+      { format: "canvas", path: "Map.canvas", label: "CANVAS", accessibleLabel: "Obsidian Canvas source format" },
+      { format: "docx", path: "Draft.docx", label: "DOCX", accessibleLabel: "Word document source format" },
+      { format: "pdf", path: "Paper.pdf", label: "PDF", accessibleLabel: "PDF source format" },
+    ] as const;
+
+    await settleInputSearch(modal, backend, "formats", executionWithHits(
+      formatCases.map(({ format, path }, index) => hit(`format-${index}`, path, [], { format })),
+    ));
+
+    expect(renderedRows(modal).map((row) => {
+      const chip = findByClass(row, "kwiry-result-format");
+      return {
+        label: chip?.textContent,
+        accessibleLabel: chip?.attributes.get("aria-label"),
+      };
+    })).toEqual(formatCases.map(({ label, accessibleLabel }) => ({ label, accessibleLabel })));
+    modal.onClose();
+  });
+
+  it("uses the exact drilled hit when rendering its format chip", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+    await settleInputSearch(modal, backend, "format", executionWithHits([
+      hit("rep", "Projects.base", ["Overview"], {
+        format: "base",
+        locator: { kind: "base_view", view: "Overview" },
+      }),
+      hit("exact", "Projects.base", ["Details"], {
+        format: "base",
+        locator: { kind: "base_view", view: "Details" },
+      }),
+    ]));
+
+    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-format")?.textContent).toBe("BASE");
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    expect(renderedRows(modal).map((row) => ({
+      title: findByClass(row, "kwiry-result-title")?.textContent,
+      format: findByClass(row, "kwiry-result-format")?.textContent,
+    }))).toEqual([
+      { title: "Overview", format: "BASE" },
+      { title: "Details", format: "BASE" },
+    ]);
+    modal.onClose();
+  });
+
+  it("navigates the visible view and drills/backtracks without searching or live-region churn", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+    const { query } = modalElements(modal);
+    await settleInputSearch(modal, backend, "ranked", executionWithHits([
+      hit("a1", "A.md", ["A"]),
+      hit("b1", "B.md", []),
+      hit("b2", "B.md", ["Second"]),
+      hit("b3", "B.md", ["Third"]),
+    ], "more_available"));
+    const settledText = query.textContent;
+    const settledMutations = query.textSetCount;
+
+    modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
+    expect(modal.activeIndex).toBe(1);
+    modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
+    expect(modal.activeIndex).toBe(1);
+
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    expect(backend.requests).toHaveLength(1);
+    expect(modal.suggestions).toHaveLength(3);
+    expect(renderedRows(modal).map((row) =>
+      findByClass(row, "kwiry-result-title")?.textContent)).toEqual([
+      "Match 1",
+      "Second",
+      "Third",
+    ]);
+    expect(renderedRows(modal).every((row) =>
+      row.classList.contains("kwiry-section-result"))).toBe(true);
+
+    modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
+    modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
+    modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
+    expect(modal.activeIndex).toBe(2);
+    modal.triggerScope(["Ctrl"], "k", keyboard("k", { ctrlKey: true }));
+    expect(modal.activeIndex).toBe(1);
+
+    modal.triggerScope(["Ctrl"], "h", keyboard("h", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backend.requests).toHaveLength(1);
+    expect(modal.suggestions).toHaveLength(2);
+    expect(modal.activeIndex).toBe(1);
+    expect(modal.inputEl.focusCount).toBe(1);
+    expect(query.textContent).toBe(settledText);
+    expect(query.textSetCount).toBe(settledMutations);
+    modal.onClose();
+  });
+
+  it("resets drill state for query and mode changes", async () => {
+    const backend = new DeferredBackend();
+    const multiModeStatus = status({
+      capabilities: {
+        supportedModes: ["lexical", "semantic"],
+        sourceScope: "active_vault",
+        manualRebuild: true,
+      },
+    });
+    const modal = createModal(backend, multiModeStatus);
+    await settleInputSearch(modal, backend, "first", executionWithHits([
+      hit("a1", "A.md", ["A1"]),
+      hit("a2", "A.md", ["A2"]),
+    ]));
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    expect(modal.suggestions).toHaveLength(2);
+
+    modal.inputEl.value = "second";
+    modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    backend.searches.at(-1)!.resolve(executionWithHits([
+      hit("b1", "B.md", ["B1"]),
+      hit("b2", "B.md", ["B2"]),
+    ]));
+    await modal.flushSuggestions();
+    expect(modal.suggestions).toHaveLength(1);
+    expect(renderedRows(modal)[0]?.classList.contains("kwiry-source-result")).toBe(true);
+
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    const requestsBeforeMode = backend.requests.length;
+    modal.triggerScope([], "Tab", keyboard("Tab"));
+    backend.searches.at(-1)!.resolve(executionWithHits(
+      [hit("c1", "C.md", ["C1"]), hit("c2", "C.md", ["C2"])],
+      "exhausted",
+      { requestedMode: "semantic", effectiveMode: "semantic", generation: "g2" },
+    ));
+    await modal.flushSuggestions();
+    expect(backend.requests).toHaveLength(requestsBeforeMode + 1);
+    expect(backend.requests.at(-1)?.mode).toBe("semantic");
+    expect(modal.suggestions).toHaveLength(1);
+    expect(renderedRows(modal)[0]?.classList.contains("kwiry-source-result")).toBe(true);
+    modal.onClose();
+  });
+
+  it("invalidates drilled results and reruns once when status observes a new generation", async () => {
+    const backend = new DeferredBackend();
+    const pluginHarness = plugin();
+    const modal = createModal(backend, status(), pluginHarness);
+    await settleInputSearch(modal, backend, "generation", executionWithHits([
+      hit("a1", "A.md", ["A1"]),
+      hit("a2", "A.md", ["A2"]),
+    ], "exhausted", { generation: "g1" }));
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    expect(renderedRows(modal).every((row) =>
+      row.classList.contains("kwiry-section-result"))).toBe(true);
+    const staleSection = modal.suggestions[0];
+
+    backend.statusValue = status({ generation: "g2" });
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(backend.requests).toHaveLength(2);
+    expect(backend.requests[1]).toEqual(backend.requests[0]);
+    expect(renderedRows(modal)).toEqual([]);
+    modal.triggerScope(["Ctrl"], "h", keyboard("h", { ctrlKey: true }));
+    await Promise.resolve();
+    expect(backend.requests).toHaveLength(2);
+    expect(renderedRows(modal)).toEqual([]);
+
+    modal.selectSuggestion(staleSection, keyboard("Enter"));
+    expect(pluginHarness.openFile).not.toHaveBeenCalled();
+    expect(notices).toContain(
+      "Kwiry: these search results are out of date. Wait for the refreshed results.",
+    );
+
+    backend.searches[1]!.resolve(executionWithHits(
+      [hit("b1", "B.md", ["B1"])],
+      "exhausted",
+      { generation: "g2" },
+    ));
+    await modal.flushSuggestions();
+
+    expect(modal.suggestions).toHaveLength(1);
+    expect(renderedRows(modal)[0]?.classList.contains("kwiry-source-result")).toBe(true);
+    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
+      "B.md › B1",
+    );
+    await vi.advanceTimersByTimeAsync(400);
+    expect(backend.requests).toHaveLength(2);
+    modal.onClose();
+  });
+
+  it("invalidates local drill projection when the backend identity changes", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+    await settleInputSearch(modal, backend, "identity", executionWithHits([
+      hit("a1", "A.md", ["A1"]),
+      hit("a2", "A.md", ["A2"]),
+    ]));
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+
+    (backend.identity as { instanceId: string }).instanceId = "in-plugin-2";
+    modal.triggerScope(["Ctrl"], "h", keyboard("h", { ctrlKey: true }));
+    const replacementOrigin = {
+      profile: "in_plugin" as const,
+      backendInstanceId: "in-plugin-2",
+      vaultId: "active-vault",
+    };
+    backend.searches.at(-1)!.resolve(executionWithHits(
+      [hit("b1", "B.md", ["B1"], { origin: replacementOrigin })],
+      "exhausted",
+      {
+        backend: {
+          profile: "in_plugin",
+          instanceId: "in-plugin-2",
+          label: "In-plugin",
+          boundVaultId: "active-vault",
+        },
+        generation: "g2",
+      },
+    ));
+    await modal.flushSuggestions();
+
+    expect(backend.requests).toHaveLength(2);
+    expect(modal.suggestions).toHaveLength(1);
+    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
+      "B.md › B1",
+    );
+    modal.onClose();
+  });
+
+  it("does not let an older input response erase a newer grouped projection", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+
+    modal.inputEl.value = "older";
+    modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    modal.inputEl.value = "newer";
+    modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+
+    backend.searches[1]!.resolve(executionWithHits([
+      hit("new-1", "New.md", ["New 1"]),
+      hit("new-2", "New.md", ["New 2"]),
+    ]));
+    await modal.flushSuggestions();
+    expect(modal.suggestions).toHaveLength(1);
+    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
+      "New.md › New 1",
+    );
+
+    backend.searches[0]!.resolve(executionWithHits([hit("old", "Old.md", ["Old"])]));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(modal.suggestions).toHaveLength(1);
+    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
+      "New.md › New 1",
+    );
+    modal.onClose();
+  });
+
+  it.each([
+    {
+      format: "markdown",
+      path: "A.md",
+      representativeLocator: null,
+      exactLocator: null,
+      representativeSubpath: "#Representative",
+      exactSubpath: "#Exact",
+    },
+    {
+      format: "text",
+      path: "A.txt",
+      representativeLocator: null,
+      exactLocator: null,
+      representativeSubpath: undefined,
+      exactSubpath: undefined,
+    },
+    {
+      format: "base",
+      path: "A.base",
+      representativeLocator: { kind: "base_view" as const, view: "Representative" },
+      exactLocator: { kind: "base_view" as const, view: "Exact" },
+      representativeSubpath: "#Representative",
+      exactSubpath: "#Exact",
+    },
+    {
+      format: "canvas",
+      path: "A.canvas",
+      representativeLocator: null,
+      exactLocator: null,
+      representativeSubpath: undefined,
+      exactSubpath: undefined,
+    },
+  ] as const)("opens representative and drilled exact $format hits correctly", async ({
+    format,
+    path,
+    representativeLocator,
+    exactLocator,
+    representativeSubpath,
+    exactSubpath,
+  }) => {
+    for (const view of ["source", "section"] as const) {
+      const backend = new DeferredBackend();
+      const pluginHarness = plugin();
+      const modal = createModal(backend, status(), pluginHarness);
+      await settleInputSearch(modal, backend, "format open", executionWithHits([
+        hit("rep", path, ["Representative"], {
+          format,
+          locator: representativeLocator,
+        }),
+        hit("exact", path, ["Exact"], {
+          format,
+          locator: exactLocator,
+        }),
+      ]));
+      if (view === "section") {
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await modal.flushSuggestions();
+      }
+
+      const selected = modal.suggestions[view === "source" ? 0 : 1];
+      modal.selectSuggestion(selected, keyboard("Enter"));
+
+      expect(pluginHarness.getAbstractFileByPath).toHaveBeenCalledWith(path);
+      expect(pluginHarness.getLeaf).toHaveBeenCalledWith(false);
+      expect(pluginHarness.openFile).toHaveBeenCalledWith(
+        expect.any(FakeTFile),
+        {
+          eState: (view === "source" ? representativeSubpath : exactSubpath) === undefined
+            ? undefined
+            : { subpath: view === "source" ? representativeSubpath : exactSubpath },
+        },
+      );
+      modal.onClose();
+    }
+  });
+
+  it.each([
+    { name: "current open", modifiers: null, key: "Enter", placement: false, background: false },
+    { name: "new tab", modifiers: ["Mod"], key: "Enter", placement: "tab", background: false },
+    { name: "new split", modifiers: ["Mod", "Alt"], key: "Enter", placement: "split", background: false },
+    { name: "background tab", modifiers: ["Mod"], key: "o", placement: "tab", background: true },
+  ] as const)("routes representative and exact hits for $name", async ({
+    modifiers,
+    key,
+    placement,
+    background,
+  }) => {
+    for (const view of ["source", "section"] as const) {
+      const backend = new DeferredBackend();
+      const pluginHarness = plugin();
+      const modal = createModal(backend, status(), pluginHarness);
+      await settleInputSearch(modal, backend, "open", executionWithHits([
+        hit("rep", "A.md", ["Representative"]),
+        hit("exact", "A.md", ["Exact"]),
+      ]));
+      if (view === "section") {
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await modal.flushSuggestions();
+        modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
+      }
+      const modifierList: readonly string[] = modifiers ?? [];
+      const event = keyboard(key, {
+        ctrlKey: modifierList.includes("Mod"),
+        altKey: modifierList.includes("Alt"),
+      });
+      if (modifiers === null) {
+        modal.selectSuggestion(modal.suggestions[modal.activeIndex], event);
+      } else {
+        modal.triggerScope([...modifierList], key, event);
+      }
+
+      expect(pluginHarness.getLeaf).toHaveBeenCalledWith(placement);
+      expect(pluginHarness.openFile).toHaveBeenCalledWith(
+        expect.any(FakeTFile),
+        { eState: { subpath: view === "source" ? "#Representative" : "#Exact" } },
+      );
+      expect(modal.activeIndex).toBe(view === "source" ? 0 : 1);
+      expect(modal.closed).toBe(!background);
+      modal.onClose();
+    }
+  });
+
+  it.each([
+    { name: "note link", modifiers: ["Alt"], sectionLink: false },
+    { name: "section link", modifiers: ["Alt", "Shift"], sectionLink: true },
+  ] as const)("routes representative and exact hits for $name insertion", async ({
+    modifiers,
+    sectionLink,
+  }) => {
+    for (const view of ["source", "section"] as const) {
+      const replaceRange = vi.fn();
+      const pluginHarness = plugin({
+        activeEditor: {
+          file: { path: "Source.md" },
+          editor: {
+            getCursor: () => ({ line: 0, ch: 0 }),
+            getRange: () => "",
+            replaceRange,
+          },
+        },
+      });
+      const backend = new DeferredBackend();
+      const modal = createModal(backend, status(), pluginHarness);
+      await settleInputSearch(modal, backend, "insert", executionWithHits([
+        hit("rep", "A.md", ["Representative"]),
+        hit("exact", "A.md", ["Exact"]),
+      ]));
+      if (view === "section") {
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await modal.flushSuggestions();
+        modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
+      }
+      const modifierList: readonly string[] = modifiers;
+      modal.triggerScope([...modifierList], "Enter", keyboard("Enter", {
+        altKey: true,
+        shiftKey: modifierList.includes("Shift"),
+      }));
+
+      const expectedSubpath = sectionLink
+        ? view === "source" ? "#Representative" : "#Exact"
+        : undefined;
+      expect(pluginHarness.generateMarkdownLink).toHaveBeenCalledWith(
+        expect.any(FakeTFile),
+        "Source.md",
+        expectedSubpath,
+        undefined,
+      );
+      expect(replaceRange).toHaveBeenCalledOnce();
+      modal.onClose();
+    }
+  });
+
+  it("keeps background-open selection and resolves mouse source/drill rows consistently", async () => {
+    const backend = new DeferredBackend();
+    const backgroundHarness = plugin();
+    const modal = createModal(backend, status(), backgroundHarness);
+    await settleInputSearch(modal, backend, "open", executionWithHits([
+      hit("a", "A.md", ["A"]),
+      hit("b", "B.md", ["B"]),
+    ]));
+    modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
+    modal.triggerScope(["Mod"], "o", keyboard("o", { ctrlKey: true }));
+    expect(modal.activeIndex).toBe(1);
+    expect(modal.closed).toBe(false);
+    expect(backgroundHarness.openFile).toHaveBeenCalledWith(
+      expect.any(FakeTFile),
+      { eState: { subpath: "#B" } },
+    );
+    modal.onClose();
+
+    for (const view of ["source", "section"] as const) {
+      const mouseBackend = new DeferredBackend();
+      const mouseHarness = plugin();
+      const mouseModal = createModal(mouseBackend, status(), mouseHarness);
+      await settleInputSearch(mouseModal, mouseBackend, "mouse", executionWithHits([
+        hit("rep", "Mouse.md", ["Representative"]),
+        hit("exact", "Mouse.md", ["Exact"]),
+      ]));
+      if (view === "section") {
+        mouseModal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await mouseModal.flushSuggestions();
+      }
+      const selected = mouseModal.suggestions[view === "source" ? 0 : 1];
+      mouseModal.selectSuggestion(selected, {
+        ctrlKey: false,
+        metaKey: false,
+      } as MouseEvent);
+      expect(mouseHarness.openFile).toHaveBeenCalledWith(
+        expect.any(FakeTFile),
+        { eState: { subpath: view === "source" ? "#Representative" : "#Exact" } },
+      );
+      mouseModal.onClose();
+    }
   });
 });

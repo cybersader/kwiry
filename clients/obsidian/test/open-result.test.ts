@@ -127,6 +127,67 @@ describe("openTargetForHit", () => {
   ] as const)("opens %s results file-only", (format, path) => {
     expect(openTargetForHit(hit({ path, format, heading_path: ["Ignored"] }))).toEqual({ path });
   });
+
+  it.each([
+    {
+      format: "markdown",
+      path: "note.md",
+      representative: { locator: null, heading_path: ["Representative"] },
+      exact: { locator: null, heading_path: ["Exact"] },
+      representativeTarget: { path: "note.md", subpath: "#Representative" },
+      exactTarget: { path: "note.md", subpath: "#Exact" },
+    },
+    {
+      format: "text",
+      path: "note.txt",
+      representative: { locator: null, heading_path: ["Representative"] },
+      exact: { locator: null, heading_path: ["Exact"] },
+      representativeTarget: { path: "note.txt" },
+      exactTarget: { path: "note.txt" },
+    },
+    {
+      format: "base",
+      path: "projects.base",
+      representative: {
+        locator: { kind: "base_view" as const, view: "Representative" },
+        heading_path: ["Representative (2)"],
+      },
+      exact: {
+        locator: { kind: "base_view" as const, view: "Exact" },
+        heading_path: ["Exact (1)"],
+      },
+      representativeTarget: { path: "projects.base", subpath: "#Representative" },
+      exactTarget: { path: "projects.base", subpath: "#Exact" },
+    },
+    {
+      format: "canvas",
+      path: "board.canvas",
+      representative: { locator: null, heading_path: ["Representative"] },
+      exact: { locator: null, heading_path: ["Exact"] },
+      representativeTarget: { path: "board.canvas" },
+      exactTarget: { path: "board.canvas" },
+    },
+  ] as const)("keeps representative and exact $format targets format-correct", ({
+    format,
+    path,
+    representative,
+    exact,
+    representativeTarget,
+    exactTarget,
+  }) => {
+    expect(openTargetForHit(hit({
+      path,
+      format,
+      locator: representative.locator,
+      heading_path: [...representative.heading_path],
+    }))).toEqual(representativeTarget);
+    expect(openTargetForHit(hit({
+      path,
+      format,
+      locator: exact.locator,
+      heading_path: [...exact.heading_path],
+    }))).toEqual(exactTarget);
+  });
 });
 
 describe("normalized vault source paths", () => {
