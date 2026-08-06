@@ -2,6 +2,8 @@
 
 use std::{env, fs, process};
 
+#[cfg(feature = "internal-docx-extractor")]
+use kwiry_obsidian_wasm::internal_docx_extract;
 use kwiry_obsidian_wasm::{abi_identity, finalize_query, prepare_query, prepare_source};
 #[cfg(feature = "internal-d5c-preview")]
 use kwiry_obsidian_wasm::{finalize_d5c_preview, internal_d5c_evaluate, prepare_d5c_preview};
@@ -26,6 +28,12 @@ enum FixtureCase {
     FinalizeQuery {
         name: String,
         request: Value,
+    },
+    #[cfg(feature = "internal-docx-extractor")]
+    InternalDocxExtract {
+        name: String,
+        request: Value,
+        content: FixtureContent,
     },
     #[cfg(feature = "internal-d5c-preview")]
     PrepareD5cPreview {
@@ -78,11 +86,21 @@ fn run() -> Result<(), String> {
     let path = arguments
         .next()
         .ok_or_else(|| "expected fixture path".to_owned())?;
-    let raw_adapter_output = arguments.next().as_deref() == Some("--raw-adapter-output");
+    let modes = arguments.collect::<Vec<_>>();
+    let raw_adapter_output = modes.iter().any(|mode| mode == "--raw-adapter-output");
+    let adapter_output_only = modes.iter().any(|mode| mode == "--adapter-output-only");
     let source = fs::read_to_string(path).map_err(|_| "could not read fixtures".to_owned())?;
     let cases: Vec<FixtureCase> =
         serde_json::from_str(&source).map_err(|_| "could not parse fixtures".to_owned())?;
-    if raw_adapter_output {
+    if adapter_output_only {
+        if cases.len() != 1 {
+            return Err("adapter-output-only requires exactly one fixture".to_owned());
+        }
+        let (_, output) = execute_adapter(cases.into_iter().next().expect("one fixture"));
+        serde_json::from_str::<Value>(&output)
+            .map_err(|_| "adapter returned invalid JSON".to_owned())?;
+        println!("{output}");
+    } else if raw_adapter_output {
         let output = cases
             .into_iter()
             .map(execute_raw)
@@ -131,6 +149,15 @@ fn execute_adapter(case: FixtureCase) -> (String, String) {
         FixtureCase::FinalizeQuery { name, request } => {
             (name, finalize_query(&request.to_string()))
         }
+        #[cfg(feature = "internal-docx-extractor")]
+        FixtureCase::InternalDocxExtract {
+            name,
+            request,
+            content,
+        } => (
+            name,
+            internal_docx_extract(&request.to_string(), content.into_bytes()),
+        ),
         #[cfg(feature = "internal-d5c-preview")]
         FixtureCase::PrepareD5cPreview { name, request } => {
             (name, prepare_d5c_preview(&request.to_string()))

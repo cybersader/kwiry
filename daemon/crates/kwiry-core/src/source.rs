@@ -18,7 +18,7 @@ use crate::model::{
     PreparedChunk, PropertyBag, RetrievalMetadata,
 };
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 6;
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 7;
 pub const MAX_PREPARED_CHUNKS_PER_SOURCE: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
 pub const MAX_PREPARED_HEADING_BYTES_PER_SOURCE: usize = MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE;
 
@@ -862,21 +862,33 @@ views:
 
     #[test]
     fn unsupported_document_formats_skip_without_text_decoding() {
-        for (path, format) in [
-            ("report.docx", SourceFormat::Docx),
-            ("paper.pdf", SourceFormat::Pdf),
-        ] {
-            let bytes = [0xff, 0x00, 0xfe];
-            let prepared =
-                prepare_source_buffer(&descriptor(path, format, &bytes), &bytes).unwrap();
-            assert_eq!(prepared.kind, SourcePreparationKind::Skipped);
-            assert_eq!(
-                prepared.coverage,
-                ExtractionCoverage::SkippedNoExtractableText
-            );
-            assert!(prepared.chunks.is_empty());
-            assert!(prepared.warning.unwrap().contains("not yet supported"));
-        }
+        let bytes = [0xff, 0x00, 0xfe];
+        let prepared =
+            prepare_source_buffer(&descriptor("paper.pdf", SourceFormat::Pdf, &bytes), &bytes)
+                .unwrap();
+        assert_eq!(prepared.kind, SourcePreparationKind::Skipped);
+        assert_eq!(
+            prepared.coverage,
+            ExtractionCoverage::SkippedNoExtractableText
+        );
+        assert!(prepared.chunks.is_empty());
+        assert!(prepared.warning.unwrap().contains("not yet supported"));
+    }
+
+    #[test]
+    fn malformed_docx_is_quarantined_rather_than_skipped() {
+        // DOCX is admitted, so a malformed package must reach the extractor and
+        // be quarantined as an invalid source rather than reported as a format
+        // that carries no extractable text.
+        let bytes = [0xff, 0x00, 0xfe];
+        let prepared = prepare_source_buffer(
+            &descriptor("report.docx", SourceFormat::Docx, &bytes),
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(prepared.kind, SourcePreparationKind::Skipped);
+        assert_eq!(prepared.coverage, ExtractionCoverage::Quarantined);
+        assert!(prepared.chunks.is_empty());
     }
 
     #[test]

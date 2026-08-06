@@ -227,11 +227,13 @@ mod tests {
     }
 
     #[test]
-    fn canvas_wave_versions_are_explicit_and_narrow() {
+    fn docx_wave_versions_are_explicit_and_narrow() {
         assert_eq!(MANIFEST_VERSION, 3);
         assert_eq!(INDEX_FORMAT_VERSION, 11);
         assert_eq!(CHUNKING_VERSION, 2);
-        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 6);
+        // Admitting DOCX changes what a source preparation contains, so the
+        // preparation schema advances and incompatible caches must rebuild.
+        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 7);
     }
 
     #[test]

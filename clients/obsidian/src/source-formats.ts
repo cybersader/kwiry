@@ -17,6 +17,7 @@ export const EXTRACTABLE_SOURCE_FORMATS = [
   "text",
   "base",
   "canvas",
+  "docx",
 ] as const satisfies readonly SourceFormat[];
 
 export type ExtractableSourceFormat = typeof EXTRACTABLE_SOURCE_FORMATS[number];
@@ -28,10 +29,10 @@ const EXTRACTABLE_SOURCE_FORMAT_SET: ReadonlySet<SourceFormat> = new Set(
 // Mirrors kwiry_core::source::SOURCE_PREPARATION_SCHEMA_VERSION. This belongs in
 // the policy fingerprint so a preparation-schema change always invalidates a
 // cache even when the enabled extension set is unchanged.
-export const SOURCE_PREPARATION_SCHEMA_VERSION = 6 as const;
+export const SOURCE_PREPARATION_SCHEMA_VERSION = 7 as const;
 
 export const IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION =
-  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, and Canvas are available; PDF and DOCX remain unavailable until extractors ship and their bytes are not read. This profile is lexical-only and never reads the daemon token.";
+  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, and DOCX are available; PDF remains unavailable until its extractor ships and its bytes are not read. This profile is lexical-only and never reads the daemon token.";
 
 export interface EnabledSourceFormats {
   markdown: boolean;
@@ -47,7 +48,7 @@ export const DEFAULT_ENABLED_SOURCE_FORMATS: Readonly<EnabledSourceFormats> = Ob
   text: true,
   base: true,
   canvas: true,
-  docx: false,
+  docx: true,
   pdf: false,
 });
 
@@ -108,6 +109,7 @@ export function sourceFormatDescription(format: SourceFormat): string {
     case "canvas":
       return "Extract authored text cards, group and edge labels, URLs, and file-reference paths without reading referenced files.";
     case "docx":
+      return "Extract body text, tables, headings, comments, notes, and headers or footers. Tracked deletions and hidden text are extracted and marked latent.";
     case "pdf":
       return "Unavailable until an extractor ships. Files of this format are not inventoried or read.";
   }

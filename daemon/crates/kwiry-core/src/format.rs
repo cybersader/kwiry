@@ -52,7 +52,7 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         format: SourceFormat::Docx,
         name: "docx",
         extensions: &["docx"],
-        extraction_supported: false,
+        extraction_supported: true,
     },
     FormatSpec {
         format: SourceFormat::Pdf,
@@ -147,16 +147,19 @@ mod tests {
         );
         assert_eq!(SourceFormat::from_path("image.png"), None);
         assert!(SourceFormat::Canvas.spec().extraction_supported);
-        assert!(!SourceFormat::Docx.spec().extraction_supported);
+        assert!(SourceFormat::Docx.spec().extraction_supported);
         assert!(!SourceFormat::Pdf.spec().extraction_supported);
         assert!(SourceFormat::Canvas.is_extractable());
-        assert!(!SourceFormat::Docx.is_extractable());
+        assert!(SourceFormat::Docx.is_extractable());
         assert!(!SourceFormat::Pdf.is_extractable());
         assert_eq!(
             SourceFormat::from_extractable_path("board.canvas"),
             Some(SourceFormat::Canvas)
         );
-        assert_eq!(SourceFormat::from_extractable_path("report.docx"), None);
+        assert_eq!(
+            SourceFormat::from_extractable_path("report.docx"),
+            Some(SourceFormat::Docx)
+        );
         assert_eq!(SourceFormat::from_extractable_path("paper.PDF"), None);
 
         for spec in format_specs() {

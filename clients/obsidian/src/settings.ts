@@ -12,6 +12,10 @@ import {
 
 export type DiagnosticsLogLevel = "off" | "error" | "info";
 
+export const SOURCE_ROW_LIMIT_SETTING_NAME = "Source row limit";
+export const SOURCE_ROW_LIMIT_SETTING_DESCRIPTION =
+  "Sources shown per search (1–100). Grouping examines up to 100 ranked sections.";
+
 export interface KwiryPluginSettings {
   backendProfile: BackendProfile;
   daemonUrl: string;

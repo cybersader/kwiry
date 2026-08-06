@@ -94,6 +94,11 @@ pub use extract::{
 pub use format::{FormatSpec, SourceFormat, format_specs};
 #[cfg(feature = "portable")]
 pub use formats::extract_source;
+#[cfg(feature = "internal-docx-extractor")]
+pub use formats::{
+    ContentRole, DocxCandidate, DocxProperties, ExtractionScope, SemanticSection,
+    extract_candidate_outcome,
+};
 #[cfg(feature = "native")]
 pub use generation::{DataRoot, DataRootLock, GenerationPaths};
 #[cfg(feature = "native")]

@@ -6,6 +6,10 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 import type KwiryPlugin from "./main";
 import type { SearchMode } from "./api";
 import {
+  SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
+  SOURCE_ROW_LIMIT_SETTING_NAME,
+} from "./settings";
+import {
   IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
   SOURCE_FORMATS,
   isSourceFormatExtractable,
@@ -60,8 +64,8 @@ export class KwirySettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Search").setHeading();
 
     new Setting(containerEl)
-      .setName("Result limit")
-      .setDesc("Results per search (1–100).")
+      .setName(SOURCE_ROW_LIMIT_SETTING_NAME)
+      .setDesc(SOURCE_ROW_LIMIT_SETTING_DESCRIPTION)
       .addText((text) =>
         text.setValue(String(this.plugin.settings.resultLimit)).onChange(async (value) => {
           const parsed = Number.parseInt(value, 10);

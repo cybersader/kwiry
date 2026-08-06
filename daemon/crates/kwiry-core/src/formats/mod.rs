@@ -10,6 +10,12 @@ mod text;
 use crate::extract::{ExtractedSource, ExtractionCoverage, ExtractionError, ExtractionNotice};
 use crate::format::SourceFormat;
 
+#[cfg(feature = "internal-docx-extractor")]
+pub use docx::{
+    ContentRole, DocxCandidate, DocxProperties, ExtractionScope, SemanticSection,
+    extract_candidate_outcome,
+};
+
 pub fn extract_source(
     format: SourceFormat,
     bytes: &[u8],

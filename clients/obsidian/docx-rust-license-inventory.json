@@ -2,10 +2,16 @@
   "schema_version": 1,
   "target": "wasm32-unknown-unknown",
   "features": [
-    "internal-d5c-preview"
+    "internal-docx-extractor"
   ],
   "notice_bundle_sha256": "0de13cf7b3fc02538a961e7ed67020d57053e3665dc628eeff278e95041479b1",
   "dependencies": [
+    {
+      "name": "adler2",
+      "version": "2.0.1",
+      "declared_license": "0BSD OR MIT OR Apache-2.0",
+      "release_license": "Apache-2.0"
+    },
     {
       "name": "ahash",
       "version": "0.8.12",
@@ -73,6 +79,12 @@
       "release_license": "Apache-2.0"
     },
     {
+      "name": "crc32fast",
+      "version": "1.5.0",
+      "declared_license": "MIT OR Apache-2.0",
+      "release_license": "Apache-2.0"
+    },
+    {
       "name": "crypto-common",
       "version": "0.1.7",
       "declared_license": "MIT OR Apache-2.0",
@@ -93,6 +105,12 @@
     {
       "name": "encoding_rs_io",
       "version": "0.1.7",
+      "declared_license": "MIT OR Apache-2.0",
+      "release_license": "Apache-2.0"
+    },
+    {
+      "name": "flate2",
+      "version": "1.1.9",
       "declared_license": "MIT OR Apache-2.0",
       "release_license": "Apache-2.0"
     },
@@ -145,6 +163,12 @@
       "release_license": "Unlicense"
     },
     {
+      "name": "miniz_oxide",
+      "version": "0.8.9",
+      "declared_license": "MIT OR Zlib OR Apache-2.0",
+      "release_license": "Apache-2.0"
+    },
+    {
       "name": "nohash-hasher",
       "version": "0.2.0",
       "declared_license": "Apache-2.0 OR MIT",
@@ -181,10 +205,22 @@
       "release_license": "MIT"
     },
     {
+      "name": "quick-xml",
+      "version": "0.41.0",
+      "declared_license": "MIT",
+      "release_license": "MIT"
+    },
+    {
       "name": "quote",
       "version": "1.0.47",
       "declared_license": "MIT OR Apache-2.0",
       "release_license": "Apache-2.0"
+    },
+    {
+      "name": "rawzip",
+      "version": "0.5.1",
+      "declared_license": "MIT",
+      "release_license": "MIT"
     },
     {
       "name": "regex",
@@ -245,6 +281,12 @@
       "version": "0.10.9",
       "declared_license": "MIT OR Apache-2.0",
       "release_license": "Apache-2.0"
+    },
+    {
+      "name": "simd-adler32",
+      "version": "0.3.10",
+      "declared_license": "MIT",
+      "release_license": "MIT"
     },
     {
       "name": "smallvec",

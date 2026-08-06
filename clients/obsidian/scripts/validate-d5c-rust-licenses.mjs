@@ -9,21 +9,49 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifestPath = resolve(root, "rust/kwiry-obsidian-wasm/Cargo.toml");
-const inventoryPath = resolve(root, "d5c-rust-license-inventory.json");
 const noticeBundlePath = resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md");
 const TARGET = "wasm32-unknown-unknown";
-const FEATURES = Object.freeze(["internal-d5c-preview"]);
+const CONFIGS = Object.freeze({
+  d5c: Object.freeze({
+    label: "D5C",
+    inventoryPath: resolve(root, "d5c-rust-license-inventory.json"),
+    features: Object.freeze(["internal-d5c-preview"]),
+    assertGraph: false,
+  }),
+  docx: Object.freeze({
+    label: "DOCX",
+    inventoryPath: resolve(root, "docx-rust-license-inventory.json"),
+    features: Object.freeze(["internal-docx-extractor"]),
+    assertGraph: true,
+  }),
+});
 
 export async function readD5cRustLicenseInventory() {
+  return readRustLicenseInventory(CONFIGS.d5c);
+}
+
+export async function validateD5cRustLicenses() {
+  return validateRustLicenses(CONFIGS.d5c);
+}
+
+export async function readDocxRustLicenseInventory() {
+  return readRustLicenseInventory(CONFIGS.docx);
+}
+
+export async function validateDocxRustLicenses() {
+  return validateRustLicenses(CONFIGS.docx);
+}
+
+async function readRustLicenseInventory(config) {
   const [inventoryText, noticeBundle] = await Promise.all([
-    readFile(inventoryPath, "utf8"),
+    readFile(config.inventoryPath, "utf8"),
     readFile(noticeBundlePath),
   ]);
   const inventory = JSON.parse(inventoryText);
-  validateInventoryShape(inventory);
+  validateInventoryShape(inventory, config);
   if (createHash("sha256").update(noticeBundle).digest("hex")
     !== inventory.notice_bundle_sha256) {
-    throw new Error("D5C Rust dependency notice bundle does not match its inventory");
+    throw new Error(`${config.label} Rust dependency notice bundle does not match its inventory`);
   }
   return Object.freeze({
     schema_version: inventory.schema_version,
@@ -36,8 +64,8 @@ export async function readD5cRustLicenseInventory() {
   });
 }
 
-export async function validateD5cRustLicenses() {
-  const inventory = await readD5cRustLicenseInventory();
+async function validateRustLicenses(config) {
+  const inventory = await readRustLicenseInventory(config);
   const result = spawnSync("cargo", [
     "metadata",
     "--locked",
@@ -46,7 +74,7 @@ export async function validateD5cRustLicenses() {
     "--format-version",
     "1",
     "--features",
-    FEATURES.join(","),
+    config.features.join(","),
     "--filter-platform",
     TARGET,
   ], {
@@ -55,7 +83,7 @@ export async function validateD5cRustLicenses() {
     maxBuffer: 64 * 1024 * 1024,
   });
   if (result.status !== 0) {
-    throw new Error("Cargo metadata failed while validating D5C Rust licenses");
+    throw new Error(`Cargo metadata failed while validating ${config.label} Rust licenses`);
   }
 
   const metadata = JSON.parse(result.stdout);
@@ -63,7 +91,7 @@ export async function validateD5cRustLicenses() {
     (candidate) => resolve(candidate.manifest_path) === manifestPath,
   );
   if (rootPackage === undefined) {
-    throw new Error("D5C Rust adapter is absent from Cargo metadata");
+    throw new Error(`${config.label} Rust adapter is absent from Cargo metadata`);
   }
 
   const packagesById = new Map(metadata.packages.map((candidate) => [candidate.id, candidate]));
@@ -76,7 +104,7 @@ export async function validateD5cRustLicenses() {
     packageIds.add(packageId);
     const node = nodesById.get(packageId);
     if (node === undefined) {
-      throw new Error("D5C Rust dependency is absent from the resolved Cargo graph");
+      throw new Error(`${config.label} Rust dependency is absent from the resolved Cargo graph`);
     }
     pending.push(...node.dependencies);
   }
@@ -84,10 +112,10 @@ export async function validateD5cRustLicenses() {
   const actual = [...packageIds].map((packageId) => {
     const candidate = packagesById.get(packageId);
     if (candidate === undefined) {
-      throw new Error("D5C Rust dependency metadata is incomplete");
+      throw new Error(`${config.label} Rust dependency metadata is incomplete`);
     }
     if (typeof candidate.license !== "string" || candidate.license.length === 0) {
-      throw new Error(`D5C Rust dependency has no declared license: ${candidate.name}`);
+      throw new Error(`${config.label} Rust dependency has no declared license: ${candidate.name}`);
     }
     return {
       name: candidate.name,
@@ -98,12 +126,39 @@ export async function validateD5cRustLicenses() {
   }).sort(compareDependencies);
 
   if (JSON.stringify(actual) !== JSON.stringify(inventory.dependencies)) {
-    throw new Error("D5C Rust dependency license inventory does not match Cargo.lock");
+    throw new Error(`${config.label} Rust dependency license inventory does not match Cargo.lock`);
   }
+  if (config.assertGraph) assertDocxDependencyFeatures(metadata, packagesById, nodesById);
   return inventory;
 }
 
-function validateInventoryShape(inventory) {
+function assertDocxDependencyFeatures(metadata, packagesById, nodesById) {
+  const featuresByName = new Map();
+  for (const node of metadata.resolve.nodes) {
+    const pkg = packagesById.get(node.id);
+    if (pkg !== undefined) featuresByName.set(pkg.name, [...node.features].sort());
+  }
+  const rawzip = featuresByName.get("rawzip");
+  const flate2 = featuresByName.get("flate2");
+  const quickXml = featuresByName.get("quick-xml");
+  if (JSON.stringify(rawzip) !== "[]") {
+    throw new Error("DOCX rawzip must resolve with an empty feature list");
+  }
+  if (JSON.stringify(flate2) !== JSON.stringify(["any_impl", "miniz_oxide", "rust_backend"])) {
+    throw new Error("DOCX flate2 must resolve only through rust_backend");
+  }
+  if (JSON.stringify(quickXml) !== JSON.stringify(["encoding", "encoding_rs"])) {
+    throw new Error("DOCX quick-xml must resolve only through encoding");
+  }
+  for (const forbidden of ["default", "std", "zlib", "zlib-ng", "zlib-rs"]) {
+    if (rawzip.includes(forbidden) || flate2.includes(forbidden) || quickXml.includes(forbidden)) {
+      throw new Error(`DOCX Rust dependency graph unexpectedly enables ${forbidden}`);
+    }
+  }
+  void nodesById;
+}
+
+function validateInventoryShape(inventory, config) {
   if (!isRecord(inventory)
     || !hasExactKeys(inventory, [
       "schema_version",
@@ -114,11 +169,11 @@ function validateInventoryShape(inventory) {
     ])
     || inventory.schema_version !== 1
     || inventory.target !== TARGET
-    || JSON.stringify(inventory.features) !== JSON.stringify(FEATURES)
+    || JSON.stringify(inventory.features) !== JSON.stringify(config.features)
     || !/^[0-9a-f]{64}$/u.test(inventory.notice_bundle_sha256)
     || !Array.isArray(inventory.dependencies)
     || inventory.dependencies.length === 0) {
-    throw new Error("D5C Rust dependency license inventory is invalid");
+    throw new Error(`${config.label} Rust dependency license inventory is invalid`);
   }
 
   let previous = null;
@@ -139,10 +194,10 @@ function validateInventoryShape(inventory) {
         version: dependency.version,
         license: dependency.declared_license,
       }) !== dependency.release_license) {
-      throw new Error("D5C Rust dependency license entry is invalid");
+      throw new Error(`${config.label} Rust dependency license entry is invalid`);
     }
     if (previous !== null && compareDependencies(previous, dependency) >= 0) {
-      throw new Error("D5C Rust dependency license inventory is not uniquely sorted");
+      throw new Error(`${config.label} Rust dependency license inventory is not uniquely sorted`);
     }
     previous = dependency;
   }
@@ -177,17 +232,20 @@ function selectReleaseLicense(candidate) {
     "generic-array": "0.14.7",
     "pulldown-cmark": "0.13.4",
     "pulldown-cmark-escape": "0.11.0",
+    "quick-xml": "0.41.0",
+    rawzip: "0.5.1",
+    "simd-adler32": "0.3.10",
     zmij: "1.0.23",
   };
   if (candidate.license === "MIT") {
     if (!(candidate.name in mitVersions)) {
-      throw new Error(`D5C Rust dependency requires a component MIT notice: ${candidate.name}`);
+      throw new Error(`Rust dependency requires a component MIT notice: ${candidate.name}`);
     }
     requirePackage(candidate, mitVersions[candidate.name], "MIT");
     return "MIT";
   }
   if (candidate.license.includes("Apache-2.0")) return "Apache-2.0";
-  throw new Error(`D5C Rust dependency has no approved release license: ${candidate.name}`);
+  throw new Error(`Rust dependency has no approved release license: ${candidate.name}`);
 }
 
 function requirePackage(candidate, version, license) {
@@ -216,7 +274,10 @@ function isBoundedString(value, maximum) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const inventory = await validateD5cRustLicenses();
+  const configName = process.argv[2] === "docx" ? "docx" : "d5c";
+  const inventory = configName === "docx"
+    ? await validateDocxRustLicenses()
+    : await validateD5cRustLicenses();
   process.stdout.write(`${JSON.stringify({
     target: inventory.target,
     features: inventory.features,

@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_SETTINGS, loadSettings } from "../src/settings";
+import {
+  DEFAULT_SETTINGS,
+  SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
+  SOURCE_ROW_LIMIT_SETTING_NAME,
+  loadSettings,
+} from "../src/settings";
 import {
   DEFAULT_ENABLED_SOURCE_FORMATS,
   IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
@@ -68,6 +73,14 @@ describe("loadSettings", () => {
     expect(loadSettings({ resultLimit: 2.5 }).resultLimit).toBe(DEFAULT_SETTINGS.resultLimit);
   });
 
+  it("describes resultLimit as a source-row cap over the fixed ranked-section window", () => {
+    expect(SOURCE_ROW_LIMIT_SETTING_NAME).toBe("Source row limit");
+    expect(SOURCE_ROW_LIMIT_SETTING_DESCRIPTION).toBe(
+      "Sources shown per search (1–100). Grouping examines up to 100 ranked sections.",
+    );
+    expect(SOURCE_ROW_LIMIT_SETTING_DESCRIPTION).not.toContain("Results per search");
+  });
+
   it("rejects invalid mode values", () => {
     expect(loadSettings({ defaultMode: "quantum" }).defaultMode).toBe(
       DEFAULT_SETTINGS.defaultMode,
@@ -88,7 +101,7 @@ describe("loadSettings", () => {
       text: true,
       base: true,
       canvas: true,
-      docx: false,
+      docx: true,
       pdf: false,
     });
     const loaded = loadSettings({
@@ -107,26 +120,32 @@ describe("loadSettings", () => {
       text: false,
       base: true,
       canvas: true,
-      docx: false,
+      // DOCX is now extractable, so a stored intent to index it is honoured
+      // rather than silently normalized away.
+      docx: true,
+      // PDF is still unextractable, so a stored true must not survive.
       pdf: false,
     });
     expect(loaded.enabledSourceFormats).not.toBe(DEFAULT_SETTINGS.enabledSourceFormats);
     expect(isSourceFormatExtractable("canvas")).toBe(true);
-    expect(isSourceFormatExtractable("docx")).toBe(false);
-    expect(isSourceFormatEnabled("docx", { ...loaded.enabledSourceFormats, docx: true })).toBe(false);
+    expect(isSourceFormatExtractable("docx")).toBe(true);
+    expect(isSourceFormatExtractable("pdf")).toBe(false);
+    expect(isSourceFormatEnabled("pdf", { ...loaded.enabledSourceFormats, pdf: true })).toBe(false);
   });
 
-  it("describes Canvas as available while DOCX and PDF are unavailable and unread", () => {
-    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("Base, and Canvas are available");
+  it("describes DOCX as available while PDF remains unavailable and unread", () => {
+    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("Canvas, and DOCX are available");
     expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain(
-      "PDF and DOCX remain unavailable until extractors ship and their bytes are not read",
+      "PDF remains unavailable until its extractor ships and its bytes are not read",
     );
     expect(sourceFormatDescription("canvas")).toContain("without reading referenced files");
-    expect(sourceFormatDescription("docx")).toContain("not inventoried or read");
+    // Latent content is extracted but labelled, so the description must not
+    // imply that hidden or deleted text is silently dropped.
+    expect(sourceFormatDescription("docx")).toContain("marked latent");
     expect(sourceFormatDescription("pdf")).toContain("not inventoried or read");
   });
 
-  it("fingerprints the effective schema-6 extraction policy deterministically", async () => {
+  it("fingerprints the effective schema-7 extraction policy deterministically", async () => {
     const first = await formatPolicyFingerprint({ ...DEFAULT_ENABLED_SOURCE_FORMATS });
     const reorderedWithDormantLegacyIntent = await formatPolicyFingerprint({
       pdf: true,
@@ -140,7 +159,7 @@ describe("loadSettings", () => {
       ...DEFAULT_ENABLED_SOURCE_FORMATS,
       text: false,
     });
-    expect(first).toBe("c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860");
+    expect(first).toBe("49dec08d5e192b1026b2093a4377a2a8853af11c1537409b8cdb2961b301ae23");
     expect(first).not.toBe("c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97");
     expect(reorderedWithDormantLegacyIntent).toBe(first);
     expect(withoutText).not.toBe(first);

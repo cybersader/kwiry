@@ -30,6 +30,9 @@ toml = { workspace = true, optional = true }
 unicode-normalization = { workspace = true, optional = true }
 zerocopy = { workspace = true, optional = true }
 fastembed = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true }
+rawzip = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, optional = true }
@@ -42,7 +45,10 @@ required-features = ["internal-d5c-preview", "native"]
 [features]
 default = ["native"]
 portable = [
+  "dep:flate2",
   "dep:pulldown-cmark",
+  "dep:quick-xml",
+  "dep:rawzip",
   "dep:regex",
   "dep:serde",
   "dep:serde-saphyr",
@@ -75,6 +81,9 @@ native = [
 semantic-onnx = ["native", "dep:fastembed"]
 # Exposes the test-only D5C profile contract to explicit preview adapters.
 internal-d5c-preview = ["portable"]
+# Retained so existing callers keep resolving; DOCX extraction is now part of
+# the portable format set rather than an opt-in spike.
+internal-docx-extractor = ["portable"]
 
 [dev-dependencies]
 filetime.workspace = true

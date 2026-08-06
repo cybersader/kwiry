@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "source_key": "67a13bc654d9b97bde0260a68e6001f94224e85eeea2926bc9f7bb096ef2d6b3",
   "vault_id": "golden-vault",
   "room": "fixture-room",

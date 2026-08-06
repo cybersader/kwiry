@@ -187,9 +187,9 @@ mod tests {
             room: None,
         };
         let file = DiscoveredFile {
-            absolute_path: temporary.path().join("missing.docx"),
-            relative_path: "missing.docx".into(),
-            extension: "docx".into(),
+            absolute_path: temporary.path().join("missing.pdf"),
+            relative_path: "missing.pdf".into(),
+            extension: "pdf".into(),
             byte_length: 123,
             mtime: 42,
             mtime_nanos: 42_000_000_000,

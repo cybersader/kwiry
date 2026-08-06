@@ -189,7 +189,16 @@ mod tests {
             .iter()
             .map(|file| file.relative_path.as_str())
             .collect();
-        assert_eq!(paths, ["a.TXT", "board.canvas", "dashboard.base", "z.md"]);
+        assert_eq!(
+            paths,
+            [
+                "a.TXT",
+                "board.canvas",
+                "dashboard.base",
+                "report.docx",
+                "z.md"
+            ]
+        );
         assert!(result.warnings.is_empty());
         assert_eq!(result.completeness, EnumerationCompleteness::Complete);
     }

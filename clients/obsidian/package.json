@@ -13,6 +13,8 @@
     "validate:release:source": "node scripts/production-package.mjs validate-source",
     "package:d5c:brat": "node scripts/package-d5c-brat.mjs",
     "verify:d5c:licenses": "node scripts/validate-d5c-rust-licenses.mjs",
+    "verify:docx:licenses": "node scripts/validate-d5c-rust-licenses.mjs docx",
+    "verify:docx:parity": "node rust/kwiry-obsidian-wasm/scripts/test-docx.cjs",
     "pretest": "node scripts/prewarm-test-wasm.mjs",
     "test": "vitest run",
     "pretest:d5c": "node scripts/prewarm-test-wasm.mjs",

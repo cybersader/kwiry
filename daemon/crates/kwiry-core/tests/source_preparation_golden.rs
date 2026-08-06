@@ -495,7 +495,7 @@ fn assert_adversarial_shape(fixture: &Fixture) {
             );
         }
         "16-canvas-research-board.json" => {
-            assert_eq!(fixture.preparation.schema_version, 6);
+            assert_eq!(fixture.preparation.schema_version, 7);
             assert_eq!(fixture.preparation.format, SourceFormat::Canvas);
             assert_eq!(
                 fixture.preparation.coverage,

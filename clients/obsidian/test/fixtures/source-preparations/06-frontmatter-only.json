@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "source_key": "5c8e11a391032a89efd385316e949adf52b7ef9599cfaedbda6bcf0620827e6a",
   "vault_id": "golden-vault",
   "path": "Golden/Frontmatter Only.md",

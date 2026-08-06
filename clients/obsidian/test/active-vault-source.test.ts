@@ -135,31 +135,20 @@ describe("ObsidianActiveVaultSource", () => {
     expect(events).toEqual([{ kind: "upsert", path: "note.md" }]);
   });
 
-  it("never inventories, inspects, emits, or reads unsupported DOCX and PDF files", async () => {
+  it("never inventories, inspects, emits, or reads unsupported PDF files", async () => {
     const fake = new FakeVault();
-    fake.files.set("report.docx", file("report.docx", 4, 1));
     fake.files.set("paper.PDF", file("paper.PDF", 3, 2));
-    fake.contents.set("report.docx", new Uint8Array([1, 2, 3, 4]));
     fake.contents.set("paper.PDF", new Uint8Array([5, 6, 7]));
     const events: VaultSourceEvent[] = [];
     const legacyEnabled: EnabledSourceFormats = {
       ...DEFAULT_ENABLED_SOURCE_FORMATS,
-      docx: true,
       pdf: true,
     };
     const active = source(fake, legacyEnabled);
     active.subscribe((event) => events.push(event));
 
     expect(active.listSourcePaths()).toEqual([]);
-    expect(active.inspectSource("report.docx")).toEqual({ kind: "missing", path: "report.docx" });
     expect(active.inspectSource("paper.PDF")).toEqual({ kind: "missing", path: "paper.PDF" });
-    await expect(active.readSource({
-      kind: "candidate",
-      path: "report.docx",
-      format: "docx",
-      size: 4,
-      mtime: 1,
-    })).resolves.toEqual({ kind: "missing", path: "report.docx" });
     await expect(active.readSource({
       kind: "candidate",
       path: "paper.PDF",
@@ -167,13 +156,51 @@ describe("ObsidianActiveVaultSource", () => {
       size: 3,
       mtime: 2,
     })).resolves.toEqual({ kind: "missing", path: "paper.PDF" });
-    fake.emit("create", file("new.docx"));
-    fake.emit("modify", file("report.docx"));
     fake.emit("rename", file("renamed.pdf"), "paper.PDF");
     fake.emit("delete", file("renamed.pdf"));
 
     expect(events).toEqual([]);
     expect(fake.readBinary).not.toHaveBeenCalled();
+  });
+
+  it("inventories, inspects, emits, and reads admitted DOCX files", async () => {
+    const fake = new FakeVault();
+    fake.files.set("report.docx", file("report.docx", 4, 1));
+    fake.contents.set("report.docx", new Uint8Array([1, 2, 3, 4]));
+    const events: VaultSourceEvent[] = [];
+    const active = source(fake, { ...DEFAULT_ENABLED_SOURCE_FORMATS, docx: true });
+    active.subscribe((event) => events.push(event));
+
+    expect(active.listSourcePaths()).toEqual(["report.docx"]);
+    expect(active.inspectSource("report.docx")).toEqual({
+      kind: "candidate",
+      path: "report.docx",
+      format: "docx",
+      size: 4,
+      mtime: 1,
+    });
+    await expect(active.readSource({
+      kind: "candidate",
+      path: "report.docx",
+      format: "docx",
+      size: 4,
+      mtime: 1,
+    })).resolves.toEqual({
+      kind: "source",
+      source: {
+        descriptor: {
+          vault_id: "active-vault",
+          path: "report.docx",
+          format: "docx",
+          byte_length: 4,
+          mtime: 0,
+          mtime_nanos: "1000000",
+        },
+        bytes: new Uint8Array([1, 2, 3, 4]),
+      },
+    });
+    fake.emit("modify", file("report.docx"));
+    expect(events).toEqual([{ kind: "upsert", path: "report.docx" }]);
   });
 
   it("maps file events to immutable path intents and rescans folder delete or rename", () => {

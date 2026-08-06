@@ -20,6 +20,8 @@ use kwiry_core::{
     normalize_lexical_value, prepare_lexical_query,
     prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
 };
+#[cfg(feature = "internal-docx-extractor")]
+use kwiry_core::{ExtractionScope, extract_candidate_outcome};
 #[cfg(feature = "internal-typo-prototype")]
 use kwiry_core::{
     TypoSuggestionPlan, TypoSuggestionResult, TypoVocabularyCandidate, finalize_typo_suggestion,
@@ -46,6 +48,8 @@ pub enum AdapterOperation {
     PrepareOversizedSource,
     PrepareQuery,
     FinalizeQuery,
+    #[cfg(feature = "internal-docx-extractor")]
+    InternalDocxExtract,
     #[cfg(feature = "internal-d5c-preview")]
     PrepareD5cPreview,
     #[cfg(feature = "internal-d5c-preview")]
@@ -306,6 +310,23 @@ enum FinalizeQueryOperation {
     FinalizeQuery,
 }
 
+#[cfg(feature = "internal-docx-extractor")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InternalDocxExtractRequest {
+    abi_version: u32,
+    #[serde(rename = "operation")]
+    _operation: InternalDocxExtractOperation,
+    scope: ExtractionScope,
+}
+
+#[cfg(feature = "internal-docx-extractor")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InternalDocxExtractOperation {
+    InternalDocxExtract,
+}
+
 #[cfg(feature = "internal-d5c-preview")]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -448,6 +469,32 @@ pub fn prepare_source(request_json: &str, source_bytes: Vec<u8>) -> String {
             },
         ),
     }
+}
+
+#[cfg(feature = "internal-docx-extractor")]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn internal_docx_extract(request_json: &str, source_bytes: Vec<u8>) -> String {
+    let operation = AdapterOperation::InternalDocxExtract;
+    let request = match parse_request::<InternalDocxExtractRequest>(request_json) {
+        Ok(request) => request,
+        Err(error) => return error_response(operation, error),
+    };
+    if let Err(error) = check_abi(request.abi_version) {
+        return error_response(operation, error);
+    }
+    if source_bytes.len() > MAX_SOURCE_BUFFER_BYTES {
+        return error_response(
+            operation,
+            adapter_error(
+                "source_too_large",
+                "Source buffer exceeds the adapter limit.",
+            ),
+        );
+    }
+    success_response(
+        operation,
+        extract_candidate_outcome(&source_bytes, request.scope),
+    )
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
