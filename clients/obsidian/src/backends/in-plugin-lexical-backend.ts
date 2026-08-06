@@ -23,6 +23,7 @@ import {
 } from "../worker/session";
 import {
   InPluginIndexController,
+  type VaultActivityReport,
   type IndexControllerCacheOptions,
   type IndexControllerStartupObservation,
   type IndexControllerStatus,
@@ -45,6 +46,7 @@ export interface InPluginLexicalBackendOptions {
   /// no indication of which subsystem broke.
   onDiagnosticFailure?: (classification: FailureClassification) => void;
   onStartupObservation?: (observation: InPluginBackendStartupObservation) => void;
+  onVaultActivity?: (activity: VaultActivityReport) => void;
 }
 
 const CAPABILITIES = {
@@ -65,6 +67,7 @@ export class InPluginLexicalBackend implements SearchBackend {
   private readonly cache: IndexControllerCacheOptions | null;
   private readonly onDiagnosticFailure: (classification: FailureClassification) => void;
   private readonly onStartupObservation: (observation: InPluginBackendStartupObservation) => void;
+  private readonly onVaultActivity: ((activity: VaultActivityReport) => void) | undefined;
   private readonly statusListeners = new Set<(status: BackendStatus) => void>();
   private session: InPluginWorkerSession | null = null;
   private controller: InPluginIndexController | null = null;
@@ -92,6 +95,7 @@ export class InPluginLexicalBackend implements SearchBackend {
     this.cache = options.cache ?? null;
     this.onDiagnosticFailure = options.onDiagnosticFailure ?? (() => undefined);
     this.onStartupObservation = options.onStartupObservation ?? (() => undefined);
+    this.onVaultActivity = options.onVaultActivity;
     this.cachedStatus = baseStatus(this.identity);
   }
 
@@ -291,6 +295,14 @@ export class InPluginLexicalBackend implements SearchBackend {
             this.onStartupObservation(observation);
           } catch {
             // Startup instrumentation cannot interrupt backend publication.
+          }
+        },
+        onVaultActivity: (activity) => {
+          if (this.disposed || epoch !== this.epoch || controller !== this.controller) return;
+          try {
+            this.onVaultActivity?.(activity);
+          } catch {
+            // Vault instrumentation cannot interrupt indexing.
           }
         },
         yieldControl: this.yieldControl,

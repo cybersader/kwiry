@@ -27,6 +27,7 @@ import { readDaemonToken } from "./credentials";
 import { PluginDiagnostics } from "./diagnostics/plugin-diagnostics";
 import { StartupTimeline } from "./diagnostics/startup-timeline";
 import { diagnosticCategoryGroup } from "./diagnostics/log";
+import type { VaultActivityReport } from "./backends/in-plugin-index-controller";
 import type {
   DiagnosticDetails,
   DiagnosticEventBuilder,
@@ -53,6 +54,8 @@ const obsidianTransport: Transport = async ({ url, method, headers, body }) => {
   const response = await requestUrl({ url, method, headers, body, throw: false });
   return { status: response.status, text: response.text };
 };
+
+const VAULT_ACTIVITY_INTERVAL_MS = 5_000;
 
 export default class KwiryPlugin extends Plugin {
   settings: KwiryPluginSettings = DEFAULT_SETTINGS;
@@ -129,6 +132,9 @@ export default class KwiryPlugin extends Plugin {
               },
               onStartupObservation: (observation) => {
                 this.observeInPluginStartup(observation, pluginEpoch, activationEpoch);
+              },
+              onVaultActivity: (activity) => {
+                this.observeVaultActivity(activity);
               },
             });
           },
@@ -211,6 +217,38 @@ export default class KwiryPlugin extends Plugin {
 
   setDiagnosticsLogLevel(level: DiagnosticsLogLevel): void {
     this.diagnostics.setLevel(level);
+  }
+
+  private lastVaultActivityAtMs = 0;
+  private lastVaultResurrected = 0;
+
+  /// Vault mutation counts are recorded on a throttle: a vault fighting a sync
+  /// layer can emit thousands of events, and one entry each would evict the
+  /// rest of the report from the bounded ring. A resurrection is reported
+  /// immediately, because that is the observation worth catching.
+  private observeVaultActivity(activity: VaultActivityReport): void {
+    const now = Date.now();
+    const resurrectionSeen = activity.resurrected > this.lastVaultResurrected;
+    if (!resurrectionSeen && now - this.lastVaultActivityAtMs < VAULT_ACTIVITY_INTERVAL_MS) {
+      return;
+    }
+    this.lastVaultActivityAtMs = now;
+    this.lastVaultResurrected = activity.resurrected;
+    void this.captureDiagnostic(
+      activity.resurrected > 0 ? "warn" : "info",
+      "vault.event",
+      {
+        profile: "in_plugin",
+        operation: "apply",
+        subsystem: "vault_source",
+        upserts: activity.upserts,
+        removals: activity.removals,
+        renames: activity.renames,
+        rescans: activity.rescans,
+        resurrected: activity.resurrected,
+      },
+      () => undefined,
+    );
   }
 
   async copyDiagnostics(): Promise<void> {

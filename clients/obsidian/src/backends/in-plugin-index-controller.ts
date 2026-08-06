@@ -188,6 +188,25 @@ export type IndexControllerStartupObservation =
       reason: "sources_omitted" | "vault_unavailable" | "index_capacity" | "backend_unavailable";
     };
 
+/// Aggregate vault mutation counts. Paths are deliberately absent: the shape
+/// of the churn is what diagnoses a vault fighting itself, and note names are
+/// never diagnostic material.
+///
+/// `resurrected` counts a path created again within RESURRECTION_WINDOW_MS of
+/// its own deletion. Ordinary editing does not do that; a sync or CRDT layer
+/// replaying state does, and without this counter the symptom is invisible —
+/// the index simply appears to churn for no reason.
+export interface VaultActivityReport {
+  upserts: number;
+  removals: number;
+  renames: number;
+  rescans: number;
+  resurrected: number;
+}
+
+const RESURRECTION_WINDOW_MS = 30_000;
+const MAX_TRACKED_REMOVALS = 4_096;
+
 export interface InPluginIndexControllerOptions {
   source: ActiveVaultSource;
   worker: IndexWorkerPort;
@@ -195,6 +214,7 @@ export interface InPluginIndexControllerOptions {
   onStatus: (status: IndexControllerStatus) => void;
   onFailure?: (error: unknown) => void;
   onStartupObservation?: (observation: IndexControllerStartupObservation) => void;
+  onVaultActivity?: (activity: VaultActivityReport) => void;
   yieldControl?: () => Promise<void>;
   limits?: Partial<IndexControllerLimits>;
   sourceReadTimeoutMs?: number;
@@ -347,7 +367,18 @@ export class InPluginIndexController {
   private cacheIssue: IndexControllerIssue | null = null;
   private lastPersistedGeneration: string | null = null;
 
+  private readonly onVaultActivity: ((activity: VaultActivityReport) => void) | undefined;
+  private readonly recentRemovals = new Map<string, number>();
+  private vaultActivity: VaultActivityReport = {
+    upserts: 0,
+    removals: 0,
+    renames: 0,
+    rescans: 0,
+    resurrected: 0,
+  };
+
   constructor(options: InPluginIndexControllerOptions) {
+    this.onVaultActivity = options.onVaultActivity;
     this.source = options.source;
     this.worker = options.worker;
     this.nextGeneration = options.nextGeneration;
@@ -494,8 +525,55 @@ export class InPluginIndexController {
     })();
   }
 
+  /// Counts one vault mutation. A create that lands within the resurrection
+  /// window of that same path's deletion is counted separately, because that
+  /// is the signature of something restoring files behind the user rather than
+  /// ordinary editing.
+  private recordVaultActivity(event: VaultSourceEvent): void {
+    const now = Date.now();
+    switch (event.kind) {
+      case "upsert": {
+        this.vaultActivity.upserts += 1;
+        const removedAt = this.recentRemovals.get(event.path);
+        if (removedAt !== undefined && now - removedAt <= RESURRECTION_WINDOW_MS) {
+          this.vaultActivity.resurrected += 1;
+        }
+        this.recentRemovals.delete(event.path);
+        break;
+      }
+      case "remove":
+        this.vaultActivity.removals += 1;
+        this.rememberRemoval(event.path, now);
+        break;
+      case "rename":
+        this.vaultActivity.renames += 1;
+        this.rememberRemoval(event.oldPath, now);
+        break;
+      case "rescan":
+        this.vaultActivity.rescans += 1;
+        break;
+    }
+    this.onVaultActivity?.({ ...this.vaultActivity });
+  }
+
+  /// Bounded and self-pruning: a vault under sustained churn must not grow this
+  /// map without limit just to answer a diagnostic question.
+  private rememberRemoval(path: string, now: number): void {
+    for (const [tracked, at] of this.recentRemovals) {
+      if (now - at > RESURRECTION_WINDOW_MS) this.recentRemovals.delete(tracked);
+      else break;
+    }
+    if (this.recentRemovals.size >= MAX_TRACKED_REMOVALS) {
+      const oldest = this.recentRemovals.keys().next();
+      if (!oldest.done) this.recentRemovals.delete(oldest.value);
+    }
+    this.recentRemovals.delete(path);
+    this.recentRemovals.set(path, now);
+  }
+
   private handleEvent(event: VaultSourceEvent): void {
     if (this.disposed || this.stoppingForCheckpoint) return;
+    this.recordVaultActivity(event);
     const sequence = ++this.eventSequence;
     this.mutationEpoch += 1;
     if (this.cacheIssue === "cache_save_failed") this.cacheIssue = null;

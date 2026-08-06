@@ -246,6 +246,11 @@ export interface DiagnosticDetails {
   batchCount?: number;
   upserts?: number;
   removals?: number;
+  renames?: number;
+  rescans?: number;
+  /// Paths created again within the resurrection window of their own deletion.
+  /// A non-zero value means something is restoring files behind the user.
+  resurrected?: number;
   resultCount?: number;
   cacheBytes?: number;
   pluginLoadCompleteMs?: number | null;
@@ -278,6 +283,9 @@ export type DiagnosticCounter =
   | "batchCount"
   | "upserts"
   | "removals"
+  | "renames"
+  | "rescans"
+  | "resurrected"
   | "resultCount"
   | "cacheBytes";
 
@@ -369,7 +377,8 @@ const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
   "count", "limit", "documents", "chunks", "completed", "total", "inFlight", "warningCount",
   "pending",
   "sourcesEnumerated", "sourcesRead", "sourcesSkipped", "sourcesOversized", "sourcesFailed",
-  "bytesRead", "batchCount", "upserts", "removals", "resultCount", "cacheBytes",
+  "bytesRead", "batchCount", "upserts", "removals", "renames", "rescans", "resurrected",
+  "resultCount", "cacheBytes",
   "pluginLoadCompleteMs", "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs",
   "fullyCurrentMs", "retryable",
   "recoverable", "searchable", "dirty", "rebuilding", "cacheHit", "recovery",
@@ -379,6 +388,7 @@ const NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "completed", "inFlight", "warningCount", "pending", "sourcesEnumerated", "sourcesRead",
   "sourcesSkipped",
   "sourcesOversized", "sourcesFailed", "bytesRead", "batchCount", "upserts", "removals",
+  "renames", "rescans", "resurrected",
   "resultCount", "cacheBytes",
 ]);
 const NULLABLE_NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
@@ -407,7 +417,7 @@ const STARTUP_REASONS = new Set<DiagnosticTextValue>([
 const COUNTERS = new Set<DiagnosticCounter>([
   "count", "documents", "chunks", "completed", "warningCount", "pending", "sourcesEnumerated",
   "sourcesRead", "sourcesSkipped", "sourcesOversized", "sourcesFailed", "bytesRead", "batchCount",
-  "upserts", "removals", "resultCount", "cacheBytes",
+  "upserts", "removals", "renames", "rescans", "resurrected", "resultCount", "cacheBytes",
 ]);
 const TEXT_VALUE_SET = new Set<DiagnosticTextValue>(TEXT_VALUES);
 const INDEX_ACTIVITY_SET = new Set<NonNullable<DiagnosticDetails["activity"]>>([

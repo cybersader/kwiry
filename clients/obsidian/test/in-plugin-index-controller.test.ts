@@ -28,6 +28,7 @@ import { classifyFailure } from "../src/diagnostics/classify-failure";
 import { classifySourcePath, type SourceFormat } from "../src/source-formats";
 import {
   InPluginIndexController,
+  type VaultActivityReport,
   type IndexControllerCacheOptions,
   type IndexControllerStatus,
   type IndexCounts,
@@ -665,6 +666,45 @@ function harness(
   });
   return { controller, worker, statuses, failures };
 }
+
+describe("InPluginIndexController vault activity", () => {
+  it("counts a delete-then-recreate as a resurrection without recording any path", async () => {
+    const source = new FakeSource();
+    const reports: VaultActivityReport[] = [];
+    const controller = new InPluginIndexController({
+      source,
+      worker: new FakeWorker(),
+      nextGeneration: () => "generation-1",
+      onStatus: () => undefined,
+      yieldControl: () => Promise.resolve(),
+      onVaultActivity: (activity) => reports.push(activity),
+    });
+    // The controller subscribes to the vault only once started.
+    controller.start();
+    await controller.whenIdle();
+
+    // Ordinary editing: an edit to a file that was never deleted.
+    source.emit({ kind: "upsert", path: "notes/keep.md" });
+    expect(reports.at(-1)?.resurrected).toBe(0);
+
+    // A sync layer restoring a file it still holds.
+    source.emit({ kind: "remove", path: "notes/deleted.md" });
+    source.emit({ kind: "upsert", path: "notes/deleted.md" });
+    const latest = reports.at(-1);
+    expect(latest?.resurrected).toBe(1);
+    expect(latest?.removals).toBe(1);
+    expect(latest?.upserts).toBe(2);
+
+    // The report is counts only; a note name must never travel with it.
+    expect(JSON.stringify(reports)).not.toContain("deleted.md");
+    expect(JSON.stringify(reports)).not.toContain("keep.md");
+
+    // Re-creating a path that was never deleted is not a resurrection.
+    source.emit({ kind: "upsert", path: "notes/keep.md" });
+    expect(reports.at(-1)?.resurrected).toBe(1);
+    await controller.dispose();
+  });
+});
 
 describe("InPluginIndexController", () => {
   it("subscribes before the snapshot, sorts paths, and publishes only after commit", async () => {
