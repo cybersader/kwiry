@@ -202,12 +202,59 @@ export async function scanSourcePrivacy(sourceRoot = defaultSourceRoot, {
   return sortFindings(findings);
 }
 
+const RUNTIME_ARCHIVE = "kwiry-search.zip";
+
+/// Reads the stored-only archive and requires every entry to be byte-identical
+/// to a scanned sibling. A compressed or unexpected entry is a finding rather
+/// than something to skip: an archive whose contents cannot be shown to match
+/// already-scanned files has escaped the privacy boundary.
+async function verifyRuntimeArchiveMirrors(packageRoot, archivePath) {
+  const bytes = await readFile(archivePath);
+  const relativePath = portableRelative(packageRoot, archivePath);
+  const findings = [];
+  let offset = 0;
+  let entries = 0;
+  while (offset + 30 <= bytes.length && bytes.readUInt32LE(offset) === 0x04034b50) {
+    const method = bytes.readUInt16LE(offset + 8);
+    const size = bytes.readUInt32LE(offset + 18);
+    const nameLength = bytes.readUInt16LE(offset + 26);
+    const extraLength = bytes.readUInt16LE(offset + 28);
+    const name = bytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8");
+    const start = offset + 30 + nameLength + extraLength;
+    const entryBytes = bytes.subarray(start, start + size);
+    if (method !== 0) {
+      findings.push({ file: relativePath, rule: "archive_entry_compressed", value: name });
+    } else {
+      const sibling = resolve(packageRoot, name);
+      const siblingBytes = await readFile(sibling).catch(() => null);
+      if (siblingBytes === null || !siblingBytes.equals(entryBytes)) {
+        findings.push({ file: relativePath, rule: "archive_entry_unscanned", value: name });
+      }
+    }
+    entries += 1;
+    offset = start + size;
+  }
+  if (entries === 0) {
+    findings.push({ file: relativePath, rule: "archive_unreadable", value: RUNTIME_ARCHIVE });
+  }
+  return findings;
+}
+
 export async function scanPackagePrivacy(packageRoot) {
   if (!packageRoot) throw new Error("privacy package path is required");
   packageRoot = resolve(packageRoot);
   await requirePath(packageRoot, "directory");
   const files = await listFiles(packageRoot);
-  const findings = await scanFiles(packageRoot, files);
+  // The runtime archive is a container, not a text artifact. It is exempt from
+  // the text scan only because its entries are proven byte-identical to files
+  // in this same package that the text scan does cover, so nothing reaches a
+  // user through the archive that was not already scanned.
+  const archives = files.filter((path) => path.endsWith(`${sep}${RUNTIME_ARCHIVE}`));
+  const scannable = files.filter((path) => !archives.includes(path));
+  const findings = await scanFiles(packageRoot, scannable);
+  for (const path of archives) {
+    findings.push(...await verifyRuntimeArchiveMirrors(packageRoot, path));
+  }
   const mainFiles = files.filter((path) => path.endsWith(`${sep}main.js`));
   if (mainFiles.length === 0) throw new Error("privacy package is missing main.js");
   for (const path of mainFiles) {
