@@ -63,10 +63,12 @@ fn the_mirrored_extraction_policy_fingerprint_matches_the_adapter() {
 }
 
 /// The adapter compiles the portable extractor set and nothing else, so every
-/// format it reports is `portable` — except PDF, which has no compiled
-/// extractor in any plugin build and is therefore `none`. A plugin reporting
-/// `enhanced` for anything would mean the WASM build had picked up a daemon-only
-/// feature.
+/// format it reports is `portable` — PDF included since its admission, because
+/// the portable PDF tier is part of `portable`. PDF is called out separately
+/// rather than folded into the loop: it is the only format whose profile can
+/// vary, so `enhanced` here would mean the WASM build had picked up the
+/// daemon-only `native-pdf-extractor`, and `none` would mean it had somehow
+/// dropped the reader out of `portable`.
 #[test]
 fn the_adapter_reports_a_portable_only_policy() {
     let identity = identity();
@@ -74,11 +76,8 @@ fn the_adapter_reports_a_portable_only_policy() {
         .as_object()
         .expect("the adapter reports a per-format policy");
 
-    assert_eq!(policy["pdf"], "none");
+    assert_eq!(policy["pdf"], "portable");
     for (format, profile) in policy {
-        if format == "pdf" {
-            continue;
-        }
         assert_eq!(profile, "portable", "{format} reported {profile}");
     }
 }

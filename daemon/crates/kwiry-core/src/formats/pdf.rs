@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! PDF dispatch stub, plus the admission-disabled PDF reader foundation.
+//! PDF extraction: the reader, the layout layer, and the dispatch entry point.
 //!
 //! # Admission status
 //!
-//! Nothing in this file makes PDF readable by the product. `SourceFormat::Pdf`
-//! keeps `extraction_supported() == false`, [`extract`] keeps returning the
-//! shared `not_yet_supported` skip under every feature combination, discovery
-//! keeps excluding PDF, and the TypeScript extractable set is unchanged. The
-//! reader below is compiled only under the non-default `internal-pdf-extractor`
-//! feature and is reachable only through [`read_pdf_geometry`] — the same
-//! admission-disabled seam the DOCX extractor used before its owner-approved
-//! admission.
+//! PDF is admitted. `SourceFormat::Pdf` reports `extraction_supported() ==
+//! true`, discovery accepts `.pdf`, and [`extract`] composes a real
+//! [`ExtractedSource`] from [`extract_pdf_candidate`]. The reader is part of the
+//! `portable` feature set, so the daemon and the plugin's WASM bundle compile
+//! byte-identical extraction — which is what [`ExtractionProfile::Portable`]
+//! asserts and what the extraction-policy fingerprint gates.
 //!
-//! # Scope of this wave
+//! Exactly one thing still varies by feature: `native-pdf-extractor` adds the
+//! embedded-font tier (`embedded`), which recovers Unicode for subset fonts the
+//! portable profile declines. That is a *coverage* superset and never a
+//! different segmentation of a source both tiers index — see `embedded` and
+//! `tier_tests`. The `internal-pdf-extractor` feature no longer changes what is
+//! compiled; it only gates the reader's internal vocabulary as a re-export.
+//!
+//! [`ExtractionProfile::Portable`]: crate::policy::ExtractionProfile::Portable
+//!
+//! # Layering
 //!
 //! Document loading, page enumeration, per-page content-stream access, the
 //! budgets `lopdf` does not provide, and **positioned glyph runs in device
@@ -57,52 +64,80 @@
 //! rejected with [`PdfReadError::EncryptedDocument`] before a single content
 //! stream is touched, so no text from an encrypted PDF is ever produced.
 
-use crate::extract::ExtractedSource;
-use crate::format::SourceFormat;
+use crate::extract::{
+    ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionCoverage, ExtractionNotice,
+};
+use crate::model::{Frontmatter, PropertyBag};
 
-use super::not_yet_supported;
+/// Production PDF extraction.
+///
+/// A PDF carries no frontmatter, no aliases, and no outbound links this project
+/// is willing to claim, so the only things that survive into the index are the
+/// per-page text and the page number — and the page number travels as
+/// [`SourceLocator::PdfPage`] rather than as a heading, because `heading_path`
+/// is ranked text and "Page 7" is not text the author wrote. See `candidate`.
+///
+/// [`SourceLocator::PdfPage`]: crate::extract::SourceLocator::PdfPage
+pub(super) fn extract(bytes: &[u8]) -> ExtractedSource {
+    let candidate = extract_pdf_candidate(bytes);
+    if !candidate.coverage.is_indexed() {
+        let mut source =
+            ExtractedSource::skipped(
+                candidate.coverage,
+                candidate.notices.first().cloned().unwrap_or_else(|| {
+                    ExtractionNotice::new("pdf_unreadable", "PDF was not indexed")
+                }),
+            );
+        source.notices = candidate.notices;
+        return source;
+    }
 
-pub(super) fn extract(_bytes: &[u8]) -> ExtractedSource {
-    not_yet_supported(SourceFormat::Pdf)
+    let completeness = if candidate.coverage == ExtractionCoverage::IndexedPartial {
+        ExtractionCompleteness::Partial
+    } else {
+        ExtractionCompleteness::Complete
+    };
+    ExtractedSource::indexed(
+        PropertyBag::default(),
+        Frontmatter::default(),
+        Vec::new(),
+        Vec::new(),
+        candidate
+            .sections
+            .into_iter()
+            .map(|section| ExtractedSection {
+                heading_path: section.heading_path,
+                content: section.content,
+                locator: Some(section.locator.to_source_locator()),
+            })
+            .collect(),
+        completeness,
+        candidate.notices,
+    )
 }
 
-#[cfg(feature = "internal-pdf-extractor")]
 mod candidate;
-#[cfg(feature = "internal-pdf-extractor")]
 mod cmap;
-#[cfg(feature = "internal-pdf-extractor")]
 mod content;
-#[cfg(feature = "internal-pdf-extractor")]
 mod embedded;
-#[cfg(feature = "internal-pdf-extractor")]
 mod error;
-#[cfg(feature = "internal-pdf-extractor")]
 mod fonts;
-#[cfg(feature = "internal-pdf-extractor")]
 mod layout;
-#[cfg(feature = "internal-pdf-extractor")]
 mod limits;
-#[cfg(feature = "internal-pdf-extractor")]
 mod prescreen;
-#[cfg(feature = "internal-pdf-extractor")]
 mod split;
-#[cfg(feature = "internal-pdf-extractor")]
 mod state;
 
-#[cfg(all(test, feature = "internal-pdf-extractor"))]
+#[cfg(test)]
 mod test_support;
 
-#[cfg(feature = "internal-pdf-extractor")]
 pub use candidate::{PdfCandidate, PdfPageLocator, PdfSection, extract_pdf_candidate};
-#[cfg(feature = "internal-pdf-extractor")]
 pub use error::PdfReadError;
-#[cfg(feature = "internal-pdf-extractor")]
 pub use reader::{
     PdfDocumentGeometry, PdfLimits, PdfPageGeometry, PdfTextRun, PdfWritingMode, pdf_limits,
     read_pdf_geometry,
 };
 
-#[cfg(feature = "internal-pdf-extractor")]
 mod reader {
     use lopdf::{Document, LoadOptions, Object};
     use serde::{Deserialize, Serialize};
@@ -248,6 +283,7 @@ mod reader {
         pub max_operations_per_page: usize,
         pub max_content_window_bytes: usize,
         pub max_runs_per_page: usize,
+        pub max_total_runs: usize,
         pub max_glyphs_per_page: usize,
         pub max_graphics_stack_depth: usize,
         pub max_fonts_per_page: usize,
@@ -267,6 +303,7 @@ mod reader {
             max_operations_per_page: limits::MAX_OPERATIONS_PER_PAGE,
             max_content_window_bytes: limits::MAX_CONTENT_WINDOW_BYTES,
             max_runs_per_page: limits::MAX_RUNS_PER_PAGE,
+            max_total_runs: limits::MAX_TOTAL_RUNS,
             max_glyphs_per_page: limits::MAX_GLYPHS_PER_PAGE,
             max_graphics_stack_depth: limits::MAX_GRAPHICS_STACK_DEPTH,
             max_fonts_per_page: limits::MAX_FONTS_PER_PAGE,
@@ -316,6 +353,10 @@ mod reader {
         };
         let mut text_budget = TextBudget::new();
         let mut content_budget = limits::MAX_TOTAL_CONTENT_STREAM_BYTES;
+        // Every page's runs stay live in `geometry.pages` until `compose` runs,
+        // so this is the bound on the reader's own peak. See
+        // `limits::MAX_TOTAL_RUNS`.
+        let mut run_budget = limits::MAX_TOTAL_RUNS;
 
         for (page_number, page_id) in pages {
             let box_geometry = page_box(&document, page_id);
@@ -385,8 +426,10 @@ mod reader {
                 page_number,
                 base,
                 &content,
+                limits::MAX_RUNS_PER_PAGE.min(run_budget),
                 &mut text_budget,
             );
+            run_budget = run_budget.saturating_sub(outcome.runs.len());
             for (code, message) in outcome.notices {
                 note(&mut geometry, code, message);
             }
@@ -509,9 +552,9 @@ mod reader {
     }
 }
 
-#[cfg(all(test, feature = "internal-pdf-extractor"))]
+#[cfg(test)]
 mod segmentation_tests;
-#[cfg(all(test, feature = "internal-pdf-extractor"))]
+#[cfg(test)]
 mod tests;
-#[cfg(all(test, feature = "internal-pdf-extractor"))]
+#[cfg(test)]
 mod tier_tests;

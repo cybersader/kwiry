@@ -11,6 +11,7 @@ import {
   isExtractionCoverage,
   isSourceFormat,
   isSourceLocator,
+  locatorMatchesFormat,
 } from "./protocol";
 import type {
   ExtractionCoverage,
@@ -1364,7 +1365,7 @@ export class Fts5GenerationIndex {
         || !isSourceFormat(row.source_format)
         || !isExtractionCoverage(row.extraction_coverage)
         || locator === undefined
-        || (locator !== null && row.source_format !== "base")
+        || !locatorMatchesFormat(locator, row.source_format)
         || byChunkId.has(row.chunk_id)) {
         throw new Error("SQLite returned invalid stored search content");
       }
@@ -1855,7 +1856,7 @@ function validateRestoredChunk(
     || source.outcome !== "indexed"
     || row.vault_id !== source.vault_id
     || row.path !== source.path
-    || (locator !== null && source.source_format !== "base")
+    || !locatorMatchesFormat(locator, source.source_format)
     || row.frontmatter_json !== displayFrontmatterJsonFromTitle(legacy.title)) {
     throw new CacheImageInvalidError("cache chunk identity does not match its source");
   }

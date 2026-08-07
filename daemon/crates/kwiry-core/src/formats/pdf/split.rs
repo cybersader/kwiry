@@ -14,10 +14,10 @@
 //! per content byte, and `MAX_CONTENT_STREAM_BYTES` was the only thing between
 //! an attacker and that number.
 //!
-//! That matters most in the tier that can be selected by a wasm32 build:
-//! `internal-pdf-extractor` is a member of `portable`, an Obsidian worker
-//! cannot allocate 9.5 GB, and Rust's allocation-failure path aborts rather
-//! than unwinds — no `catch_unwind` would help.
+//! That matters most in the tier that can be selected by a wasm32 build: the
+//! PDF reader is part of `portable`, so it ships in the Obsidian worker, which
+//! cannot allocate 9.5 GB — and Rust's allocation-failure path aborts rather
+//! than unwinds, so no `catch_unwind` would help.
 //!
 //! So the stream is decoded in **windows**: each window is at least
 //! [`limits::MAX_CONTENT_WINDOW_BYTES`] long and ends exactly one byte past a

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Project-owned budgets for the admission-disabled PDF reader.
+//! Project-owned budgets for the PDF reader.
 //!
 //! `lopdf` provides exactly one bound of its own —
 //! [`LoadOptions::max_decompressed_size`](lopdf::LoadOptions::max_decompressed_size),
@@ -95,6 +95,51 @@ pub(super) const MAX_OPERANDS_PER_OPERATION: usize = 262_144;
 
 /// Positioned text runs emitted per page.
 pub(super) const MAX_RUNS_PER_PAGE: usize = 100_000;
+
+/// Positioned text runs retained across the whole document.
+///
+/// # Why the per-page bound is not a document bound
+///
+/// The reader builds one [`PdfDocumentGeometry`](super::PdfDocumentGeometry)
+/// holding *every* page's runs at once, and nothing is released until
+/// `candidate::compose` has run. `MAX_PAGES * MAX_RUNS_PER_PAGE` is 409.6
+/// million runs, so the per-page bound alone bounds nothing — the same reasoning
+/// [`MAX_TOTAL_CONTENT_STREAM_BYTES`] already records for content bytes, which
+/// was never applied to runs.
+///
+/// Neither existing document-wide budget bounds them:
+///
+/// * [`MAX_EXTRACTED_TEXT_BYTES`] charges only *decoded* bytes. A show operator
+///   whose codes map to nothing — `()Tj`, or any font whose encoding drops the
+///   code — costs zero text budget and still pushes a full run, because
+///   `content::show` pushes unconditionally and empty runs are only discarded
+///   later, in `layout::collect`.
+/// * [`MAX_TOTAL_CONTENT_STREAM_BYTES`] costs about 5 bytes per `()Tj`, so
+///   128 MiB of content admits roughly 26.8 million runs.
+///
+/// Measured on the admitted `prepare_source_buffer` path, a `()Tj` document
+/// reached 403 MB of peak RSS from 4,263 bytes (20 pages, 2 million runs) and
+/// 1.97 GB from 16,597 bytes (100 pages, 10 million runs) — about 197 bytes of
+/// heap per retained run, linear, and reported as a benign "no text layer" skip
+/// with nothing in the coverage vocabulary recording the cost. A 47,797-byte
+/// file reached 5.25 GB, and a 63,397-byte one aborted under a 4 GiB cap. Both
+/// hosts cap a source at 10 MiB, so the size gate never sees any of them.
+///
+/// # Why 2,000,000
+///
+/// The value is set where this budget and [`MAX_EXTRACTED_TEXT_BYTES`] bite
+/// together rather than one masking the other. A word-granular generator emits
+/// roughly 5 to 6 text bytes per run, so 10 MiB of text is about 2 million runs:
+/// below this cap the text budget is always the first to stop a document that is
+/// actually carrying text, and this cap only bites on documents whose runs are
+/// mostly empty — which is exactly the shape that has no legitimate reading.
+/// Line-granular real documents are nowhere near it: 4,096 pages at 488 runs per
+/// page is the break-even, and real prose runs 50 to 400.
+///
+/// Retained-run memory is therefore bounded at about 400 MB rather than at the
+/// 5.25 GB above, and any shortfall is declared through
+/// `pdf_document_run_limit_exceeded` instead of being reported as a clean skip.
+pub(super) const MAX_TOTAL_RUNS: usize = 2_000_000;
 
 /// Glyphs measured per page. A run holds glyphs, so this bounds the work done
 /// inside a single enormous show operand as well as across many small ones.

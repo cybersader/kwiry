@@ -10,7 +10,9 @@ import {
 } from "../src/settings";
 import {
   DEFAULT_ENABLED_SOURCE_FORMATS,
+  EXTRACTION_POLICY_FINGERPRINT,
   IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
+  SOURCE_PREPARATION_SCHEMA_VERSION,
   classifySourcePath,
   formatPolicyFingerprint,
   isSourceFormatEnabled,
@@ -125,51 +127,105 @@ describe("loadSettings", () => {
       // DOCX is now extractable, so a stored intent to index it is honoured
       // rather than silently normalized away.
       docx: true,
-      // PDF is still unextractable, so a stored true must not survive.
-      pdf: false,
+      // PDF is extractable now too, and this file records the consequence
+      // rather than hiding it: normalization no longer neutralizes a stored
+      // `pdf: true`, so a toggle written before admission becomes live on
+      // upgrade. This follows the DOCX precedent above — the stored value was
+      // a real expressed intent, and the same upgrade forces a rebuild anyway
+      // because the extraction-policy fingerprint moved. PDF costs far more to
+      // index than DOCX, so the cost of honouring it is named in the settings
+      // description rather than left for the user to discover.
+      pdf: true,
       excalidraw: true,
     });
     expect(loaded.enabledSourceFormats).not.toBe(DEFAULT_SETTINGS.enabledSourceFormats);
     expect(isSourceFormatExtractable("canvas")).toBe(true);
     expect(isSourceFormatExtractable("docx")).toBe(true);
-    expect(isSourceFormatExtractable("pdf")).toBe(false);
-    expect(isSourceFormatEnabled("pdf", { ...loaded.enabledSourceFormats, pdf: true })).toBe(false);
+    expect(isSourceFormatExtractable("pdf")).toBe(true);
+    // Extractable but off by default: the toggle, not the format registry, is
+    // what keeps a reference library out of a first-run index.
+    expect(DEFAULT_ENABLED_SOURCE_FORMATS.pdf).toBe(false);
+    expect(isSourceFormatEnabled("pdf", { ...loaded.enabledSourceFormats, pdf: false }))
+      .toBe(false);
+    expect(isSourceFormatEnabled("pdf", { ...loaded.enabledSourceFormats, pdf: true }))
+      .toBe(true);
   });
 
-  it("describes DOCX as available while PDF remains unavailable and unread", () => {
-    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("DOCX, and Excalidraw are available");
+  it("describes every admitted format including PDF and its cost", () => {
     expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain(
-      "PDF remains unavailable until its extractor ships and its bytes are not read",
+      "DOCX, Excalidraw, and PDF are available",
     );
+    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("PDF is off by default");
+    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).not.toContain("remains unavailable");
     expect(sourceFormatDescription("canvas")).toContain("without reading referenced files");
     // Latent content is extracted but labelled, so the description must not
     // imply that hidden or deleted text is silently dropped.
     expect(sourceFormatDescription("docx")).toContain("marked latent");
-    expect(sourceFormatDescription("pdf")).toContain("not inventoried or read");
+    // The PDF description has to state what a user cannot otherwise find out:
+    // that a page is the section unit, that the page is not searchable text,
+    // that encrypted files are refused unread, and that an undecodable font
+    // costs the whole document rather than part of it.
+    expect(sourceFormatDescription("pdf")).toContain("one section per page");
+    expect(sourceFormatDescription("pdf")).toContain("never searchable text");
+    expect(sourceFormatDescription("pdf")).toContain("no heading path");
+    expect(sourceFormatDescription("pdf")).toContain("Encrypted documents are refused");
+    expect(sourceFormatDescription("pdf")).toContain("no text at all rather than a partial");
+    expect(sourceFormatDescription("pdf")).not.toContain("Unavailable");
   });
 
   it("fingerprints the effective schema-9 extraction policy deterministically", async () => {
     const first = await formatPolicyFingerprint({ ...DEFAULT_ENABLED_SOURCE_FORMATS });
-    const reorderedWithDormantLegacyIntent = await formatPolicyFingerprint({
+    const reorderedDefaults = await formatPolicyFingerprint({
       excalidraw: true,
-      pdf: true,
+      pdf: false,
       docx: true,
       canvas: true,
       base: true,
       text: true,
       markdown: true,
     });
+    const withPdf = await formatPolicyFingerprint({
+      ...DEFAULT_ENABLED_SOURCE_FORMATS,
+      pdf: true,
+    });
     const withoutText = await formatPolicyFingerprint({
       ...DEFAULT_ENABLED_SOURCE_FORMATS,
       text: false,
     });
-    expect(first).toBe("0f7ed72e927b8488adde1dc323ae861017eca3d036965df7ff2df7382370f2e1");
+    expect(first).toBe("1711871671c89fe225a8cd2043ba9aa6bd6466b4e8496fa3bef25c65d8cfcb8b");
     // The schema-8 / policy-v1 digest. Pinned as a negative so a cache built
     // before the extraction profile existed can never be mistaken for current.
     expect(first).not.toBe("090269f9386c1e36124dd493ff02688a7921f883c1cebcd9d99ffd3fc2e31029");
     expect(first).not.toBe("c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97");
-    expect(reorderedWithDormantLegacyIntent).toBe(first);
+    // The pre-PDF-admission digest, when the adapter compiled no PDF extractor
+    // and reported `pdf=none`. Pinned as a negative because the schema is still
+    // 9 and the enabled set is unchanged, so this digest is the *only* thing
+    // that refuses a cache image built by the previous adapter.
+    expect(first).not.toBe("0f7ed72e927b8488adde1dc323ae861017eca3d036965df7ff2df7382370f2e1");
+    expect(reorderedDefaults).toBe(first);
     expect(withoutText).not.toBe(first);
+    // Turning PDF on is a different policy, not a different amount of the same
+    // one: the enabled set is digest material, so a vault that adds PDF cannot
+    // restore the cache it built without it.
+    expect(withPdf).toBe("e7a23540578a11ebe9830cec2f744716bcf8722100ebf32c01ddbd97a99e126c");
+    expect(withPdf).not.toBe(first);
+  });
+
+  it("pins the shipped extraction policy to the portable PDF tier", () => {
+    // Mirrors `kwiry_core::policy::SHIPPED_FINGERPRINT`, asserted equal to what
+    // the WASM adapter reports by rust/kwiry-obsidian-wasm's typescript_mirror
+    // test. Pinned here as well because main.ts folds this constant into the
+    // policy hash during onload(), before the adapter exists — so a drifted
+    // mirror would restore a cache the adapter could never have produced.
+    expect(EXTRACTION_POLICY_FINGERPRINT)
+      .toBe("efbc627c533ae797104dcf65540dcf6f96edd7b9d96826c4bac7e93672f26ff2");
+    // The pre-admission digest, when the adapter compiled no PDF extractor at
+    // all and reported `pdf=none`. Pinned as a negative because the source
+    // preparation schema is still 9 and the default enabled set is unchanged,
+    // so this fingerprint is the only thing that refuses a pre-PDF cache image.
+    expect(EXTRACTION_POLICY_FINGERPRINT)
+      .not.toBe("1b393b155b0af728b1ec9c9131573c105c9e7aba41ff31a4d12c824d4c73adef");
+    expect(SOURCE_PREPARATION_SCHEMA_VERSION).toBe(9);
   });
 
   it("keeps normal settings unaware of private-build namespaces", () => {

@@ -255,6 +255,38 @@ describe("Fts5GenerationIndex", () => {
     expect(index.sourceFormatCounts.markdown["indexed-complete"]).toBe(0);
   });
 
+  it("hydrates a PDF page locator without letting the page reach ranked text", () => {
+    const pdf = sourceAt(
+      "report",
+      "papers/report.pdf",
+      "chunk-report-page-7",
+      "reactor coolant survey",
+      "Report",
+    );
+    pdf.format = "pdf";
+    // A PDF section has no heading path by construction — the page travels as a
+    // locator instead, which is exactly why it must survive hydration.
+    pdf.chunks[0]!.chunk.heading_path = [];
+    pdf.chunks[0]!.heading_text = "";
+    pdf.chunks[0]!.normalized_heading = null;
+    pdf.chunks[0]!.source_locator = { kind: "pdf_page", page: 7 };
+    index.replaceSource(pdf);
+
+    expect(index.search(anyPlan("coolant"), 20)).toEqual([expect.objectContaining({
+      chunk_id: "chunk-report-page-7",
+      format: "pdf",
+      coverage: "indexed-complete",
+      locator: { kind: "pdf_page", page: 7 },
+      heading_path: [],
+      excerpt: "reactor coolant survey",
+    })]);
+    expect(index.sourceFormatCounts.pdf["indexed-complete"]).toBe(1);
+    // The page is navigation metadata and nothing else: it is not a column of
+    // `chunk_search`, so no query for it can match the source it came from.
+    expect(index.search(anyPlan("page"), 20)).toEqual([]);
+    expect(index.search(anyPlan("7"), 20)).toEqual([]);
+  });
+
   it("persists Canvas JSON without projecting structural properties into search or D5C rows", () => {
     const db = new sqlite.oo1.DB(":memory:", "c");
     const scoped = new Fts5GenerationIndex(db);

@@ -23,7 +23,7 @@ import {
   type LinkInsertionKind,
   type LinkInsertionTarget,
 } from "./link-insertion";
-import { validateOpenResult, type OpenTarget } from "./open-result";
+import { pageNavigationShortfall, validateOpenResult, type OpenTarget } from "./open-result";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
 import {
   presentBackgroundIndex,
@@ -70,7 +70,7 @@ interface FormatChipPresentation {
   accessibleLabel: string;
 }
 
-const FORMAT_CHIP_PRESENTATIONS = {
+export const FORMAT_CHIP_PRESENTATIONS = {
   markdown: { label: "MD", accessibleLabel: "Markdown source format" },
   text: { label: "TXT", accessibleLabel: "Plain text source format" },
   base: { label: "BASE", accessibleLabel: "Obsidian Base source format" },
@@ -81,6 +81,35 @@ const FORMAT_CHIP_PRESENTATIONS = {
 } as const satisfies Record<BackendSearchHit["format"], FormatChipPresentation>;
 
 export const SEARCH_STATUS_ANIMATION_DELAY_MS = 180;
+
+/**
+ * Title for one drilled section row. A PDF has no heading path by construction,
+ * so without the page locator every drilled row of every PDF would read
+ * "Match 1", "Match 2" and name nothing the user could act on. The page is a
+ * label here and nowhere else: it is never added to `heading_path`, never
+ * queried, never scored.
+ */
+export function sectionResultTitle(
+  hit: Pick<BackendSearchHit, "format" | "locator" | "heading_path">,
+  returnedSectionIndex: number,
+): string {
+  const heading = hit.heading_path.at(-1);
+  if (heading !== undefined) return heading;
+  if (hit.format === "pdf" && hit.locator?.kind === "pdf_page") {
+    return `Page ${hit.locator.page}`;
+  }
+  return `Match ${returnedSectionIndex + 1}`;
+}
+
+/** The view type a leaf is showing, or null when it cannot be observed. */
+function openedViewType(leaf: { view?: unknown }): string | null {
+  const view = leaf.view;
+  if (typeof view !== "object" || view === null) return null;
+  const getViewType = (view as { getViewType?: unknown }).getViewType;
+  if (typeof getViewType !== "function") return null;
+  const type: unknown = (getViewType as () => unknown).call(view);
+  return typeof type === "string" ? type : null;
+}
 
 export class KwirySearchModal extends SuggestModal<ModalResult> {
   private readonly session: SearchSessionController;
@@ -256,7 +285,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     if (result.kind === "source") {
       title.setText(hit.frontmatter.title ?? basename(hit.path));
     } else {
-      title.setText(hit.heading_path.at(-1) ?? `Match ${result.returnedSectionIndex + 1}`);
+      title.setText(sectionResultTitle(hit, result.returnedSectionIndex));
     }
     const formatChip = FORMAT_CHIP_PRESENTATIONS[hit.format];
     heading.createSpan({ cls: "kwiry-result-format", text: formatChip.label }).setAttribute(
@@ -452,6 +481,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       eState: validated.target.subpath === undefined
         ? undefined
         : { subpath: validated.target.subpath },
+    }).then(() => {
+      const shortfall = pageNavigationShortfall(validated.target, openedViewType(leaf));
+      if (shortfall) new Notice(`Kwiry: ${shortfall}`);
     }).catch((error: unknown) => {
       this.plugin.recordCaughtFailure("ui", "open", error, {
         profile: this.backend.identity.profile,
@@ -507,9 +539,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       new Notice("Kwiry: this result is not present in the current vault.");
       return null;
     }
-    const target: OpenTarget = decision.subpath === undefined
-      ? { path: decision.path }
-      : { path: decision.path, subpath: decision.subpath };
+    const target: OpenTarget = { path: decision.path };
+    if (decision.subpath !== undefined) target.subpath = decision.subpath;
+    if (decision.page !== undefined) target.page = decision.page;
     return { file, target };
   }
 

@@ -934,6 +934,34 @@ describe("Worker protocol", () => {
       generation: "g1",
       hits: [{ ...hit, locator: { kind: "base_view", view: "Active" } }],
     }))).toBe(false);
+    const pdfHit = {
+      ...hit,
+      path: "papers/report.pdf",
+      format: "pdf",
+      heading_path: [],
+      locator: { kind: "pdf_page", page: 7 },
+    };
+    expect(isWorkerResponse(response({ generation: "g1", hits: [pdfHit] }))).toBe(true);
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...pdfHit, locator: null },
+      ],
+    }))).toBe(true);
+    // Each locator kind pairs with exactly one format, in both directions.
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...hit, locator: { kind: "pdf_page", page: 7 } }],
+    }))).toBe(false);
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...pdfHit, locator: { kind: "base_view", view: "Active" } }],
+    }))).toBe(false);
+    for (const page of [0, -1, 1.5, "7"]) {
+      expect(isWorkerResponse(response({
+        generation: "g1",
+        hits: [{ ...pdfHit, locator: { kind: "pdf_page", page } }],
+      }))).toBe(false);
+    }
     expect(isWorkerResponse(response({
       generation: "g1",
       hits: [{ ...hit, excerpt: "x".repeat(16_385) }],

@@ -17,10 +17,10 @@ base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 directories = "6.0"
 # Legacy CJK byte encodings for the predefined PDF CMap families
-# (RKSJ/EUC/GBK/Big5/UHC). Already in the portable graph — `quick-xml` enables
-# its `encoding` feature for DOCX — so naming it explicitly costs the plugin
-# bundle nothing and makes the PDF reader's use of it visible instead of
-# incidental.
+# (RKSJ/EUC/GBK/Big5/UHC). Already in the portable graph before PDF named it —
+# `quick-xml` enables its `encoding` feature for DOCX — so naming it explicitly
+# costs the plugin bundle nothing and makes the PDF reader's use of it visible
+# instead of incidental.
 encoding_rs = { version = "0.8", default-features = false }
 fs2 = "0.4"
 getrandom = "0.3"
@@ -56,10 +56,11 @@ zerocopy = "0.8"
 fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 filetime = "0.2"
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
-# Admission-disabled PDF reader spike. `default-features = false` drops chrono,
-# jiff, time, and rayon; `wasm_js` is what getrandom 0.4 requires on
-# wasm32-unknown-unknown. See `kwiry-core/src/formats/pdf.rs` for why the
-# feature is not part of `portable`.
+# The PDF reader's document/object layer, in the portable format set since PDF
+# admission. `default-features = false` drops chrono, jiff, time, and rayon;
+# `wasm_js` is what getrandom 0.4 requires on wasm32-unknown-unknown. See
+# `kwiry-core/src/formats/pdf.rs` for the budgets this crate does not provide
+# and this project therefore imposes.
 lopdf = { version = "=0.44.0", default-features = false, features = ["wasm_js"] }
 # Enhanced-tier only. Parses an embedded font program to recover Unicode for
 # `Identity-H` subset fonts that ship no `/ToUnicode`. Absent from the portable

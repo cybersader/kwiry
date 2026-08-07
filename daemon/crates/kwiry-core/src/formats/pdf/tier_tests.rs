@@ -259,22 +259,35 @@ fn a_source_neither_tier_declines_composes_identically() {
     assert!(candidate.coverage.is_indexed());
 }
 
-/// Admission is not what changed. Both tiers still refuse to extract PDF
-/// through the dispatch seam, with the feature on and the candidate composing
-/// real text from the same bytes.
+/// The inverse of the pre-admission `neither_tier_makes_pdf_admissible`: both
+/// tiers now reach the dispatch seam, and a source neither declines is admitted
+/// identically by either. Which tier is compiled is a coverage fact, never an
+/// admission fact.
 #[test]
-fn neither_tier_makes_pdf_admissible() {
+fn both_tiers_admit_pdf_through_the_dispatch_seam() {
     let bytes = helvetica_document(&[b"BT /F1 11 Tf 72 700 Td (Admissible) Tj ET"]);
     assert!(!extract_pdf_candidate(&bytes).sections.is_empty());
 
-    assert!(!SourceFormat::Pdf.is_extractable());
-    assert_eq!(SourceFormat::from_extractable_path("paper.pdf"), None);
-    let extracted = crate::formats::extract_source(SourceFormat::Pdf, &bytes).unwrap();
+    assert!(SourceFormat::Pdf.is_extractable());
     assert_eq!(
-        extracted.coverage,
-        ExtractionCoverage::SkippedNoExtractableText
+        SourceFormat::from_extractable_path("paper.pdf"),
+        Some(SourceFormat::Pdf)
     );
-    assert!(extracted.sections.is_empty());
+    let extracted = crate::formats::extract_source(SourceFormat::Pdf, &bytes).unwrap();
+    assert_eq!(extracted.coverage, ExtractionCoverage::IndexedComplete);
+    assert_eq!(
+        extracted
+            .sections
+            .iter()
+            .map(|section| section.content.as_str())
+            .collect::<Vec<_>>(),
+        ["Admissible"]
+    );
+    // Admission is tier-independent; only the reported profile differs.
+    assert_ne!(
+        extraction_profile_for(SourceFormat::Pdf),
+        ExtractionProfile::None
+    );
 }
 
 // ---------------------------------------------------------------------------

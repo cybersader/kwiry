@@ -8,7 +8,7 @@ mod markdown;
 mod pdf;
 mod text;
 
-use crate::extract::{ExtractedSource, ExtractionCoverage, ExtractionError, ExtractionNotice};
+use crate::extract::{ExtractedSource, ExtractionError, ExtractionNotice};
 use crate::format::SourceFormat;
 
 #[cfg(feature = "internal-docx-extractor")]
@@ -17,11 +17,12 @@ pub use docx::{
     extract_candidate_outcome,
 };
 
-// Admission-disabled PDF reader foundation; see `formats::pdf`. Exposing the
-// entry point does not admit the format: `SourceFormat::Pdf` still reports
-// `extraction_supported() == false` and the `extract_source` arm below still
-// routes PDF to the `not_yet_supported` stub.
-#[cfg(feature = "internal-pdf-extractor")]
+// The PDF reader's own vocabulary — geometry, limits, and the page candidate.
+// PDF is admitted, so `extract_source` below composes an `ExtractedSource` from
+// `extract_pdf_candidate`. These are exported unconditionally now that the
+// reader is part of `portable`: gating them on `internal-pdf-extractor` would
+// leave the shipped portable build compiling a reader whose entry points
+// nothing names, which is a dead-code warning rather than a boundary.
 pub use pdf::{
     PdfCandidate, PdfDocumentGeometry, PdfLimits, PdfPageGeometry, PdfPageLocator, PdfReadError,
     PdfSection, PdfTextRun, PdfWritingMode, extract_pdf_candidate, pdf_limits, read_pdf_geometry,
@@ -64,15 +65,7 @@ fn decode_utf8(bytes: &[u8]) -> Result<&str, ExtractionNotice> {
     Ok(source)
 }
 
-fn not_yet_supported(format: SourceFormat) -> ExtractedSource {
-    ExtractedSource::skipped(
-        ExtractionCoverage::SkippedNoExtractableText,
-        ExtractionNotice::new(
-            "format_not_yet_supported",
-            format!(
-                "{} extraction is not yet supported; skipped with no extractable text",
-                format.as_str()
-            ),
-        ),
-    )
-}
+// PDF was the last format routed to a `not_yet_supported` stub. Every member of
+// the closed set now has a real extractor, so the stub and its
+// `format_not_yet_supported` notice code are gone rather than kept as an
+// unreachable branch that a future reader would mistake for a live outcome.

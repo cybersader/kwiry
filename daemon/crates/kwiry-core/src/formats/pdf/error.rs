@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/// Document-level refusals from the admission-disabled PDF reader.
+/// Document-level refusals from the PDF reader.
 ///
 /// These are the conditions under which no geometry is produced at all. A
 /// *page*-level budget exhaustion is not an error: it truncates that page,
@@ -47,6 +47,10 @@ pub(super) mod notice {
     pub(in crate::formats::pdf) const OPERATION_LIMIT: &str = "pdf_page_operation_limit_exceeded";
     pub(in crate::formats::pdf) const OPERANDS_LIMIT: &str = "pdf_operation_operand_limit_exceeded";
     pub(in crate::formats::pdf) const RUN_LIMIT: &str = "pdf_page_run_limit_exceeded";
+    /// The document-wide retained-run budget, distinct from [`RUN_LIMIT`]: this
+    /// one says the *document* stopped emitting runs, which can happen on a page
+    /// that never came close to its own cap.
+    pub(in crate::formats::pdf) const DOCUMENT_RUN_LIMIT: &str = "pdf_document_run_limit_exceeded";
     pub(in crate::formats::pdf) const GLYPH_LIMIT: &str = "pdf_page_glyph_limit_exceeded";
     pub(in crate::formats::pdf) const TEXT_LIMIT: &str = "pdf_extracted_text_limit_exceeded";
     pub(in crate::formats::pdf) const FONT_LIMIT: &str = "pdf_page_font_limit_exceeded";

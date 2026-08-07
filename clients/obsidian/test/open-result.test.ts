@@ -5,9 +5,11 @@ import { describe, expect, it } from "vitest";
 
 import type { BackendIdentity, BackendSearchHit } from "../src/backend";
 import {
+  PDF_VIEW_TYPE,
   isNormalizedMarkdownPath,
   isNormalizedVaultFilePath,
   openTargetForHit,
+  pageNavigationShortfall,
   pathMatchesFormat,
   validateOpenResult,
 } from "../src/open-result";
@@ -91,6 +93,19 @@ describe("validateOpenResult", () => {
     expect(validateOpenResult(local, backend, "ignored").ok).toBe(true);
   });
 
+  it("carries a validated PDF page through to the open decision", () => {
+    expect(validateOpenResult(
+      hit({
+        path: "papers/report.pdf",
+        format: "pdf",
+        locator: { kind: "pdf_page", page: 12 },
+        heading_path: [],
+      }),
+      DAEMON,
+      "notes",
+    )).toEqual({ ok: true, path: "papers/report.pdf", subpath: "#page=12", page: 12 });
+  });
+
   it("rejects safe paths whose extension disagrees with the declared format", () => {
     expect(validateOpenResult(hit({ format: "base" }), DAEMON, "notes")).toMatchObject({
       ok: false,
@@ -123,9 +138,44 @@ describe("openTargetForHit", () => {
     ["text", "notes.txt"],
     ["canvas", "board.canvas"],
     ["docx", "report.docx"],
-    ["pdf", "paper.pdf"],
+    ["excalidraw", "sketch.excalidraw"],
   ] as const)("opens %s results file-only", (format, path) => {
     expect(openTargetForHit(hit({ path, format, heading_path: ["Ignored"] }))).toEqual({ path });
+  });
+
+  it("opens a PDF at the page its locator names", () => {
+    expect(openTargetForHit(hit({
+      path: "papers/report.pdf",
+      format: "pdf",
+      locator: { kind: "pdf_page", page: 7 },
+      heading_path: [],
+    }))).toEqual({ path: "papers/report.pdf", subpath: "#page=7", page: 7 });
+  });
+
+  it("opens a PDF file-only when no page survived to the hit", () => {
+    expect(openTargetForHit(hit({
+      path: "papers/report.pdf",
+      format: "pdf",
+      locator: null,
+      heading_path: [],
+    }))).toEqual({ path: "papers/report.pdf" });
+  });
+
+  it("never turns a foreign locator into a page jump", () => {
+    // The wire validators reject these pairings before a hit reaches here; this
+    // asserts the open path does not invent navigation if one ever slipped past.
+    expect(openTargetForHit(hit({
+      path: "papers/report.pdf",
+      format: "pdf",
+      locator: { kind: "base_view", view: "Active" },
+      heading_path: [],
+    }))).toEqual({ path: "papers/report.pdf" });
+    expect(openTargetForHit(hit({
+      path: "board.canvas",
+      format: "canvas",
+      locator: { kind: "pdf_page", page: 3 },
+      heading_path: [],
+    }))).toEqual({ path: "board.canvas" });
   });
 
   it.each([
@@ -167,6 +217,17 @@ describe("openTargetForHit", () => {
       representativeTarget: { path: "board.canvas" },
       exactTarget: { path: "board.canvas" },
     },
+    {
+      // Grouped search opens a source row from its representative hit and a
+      // drilled row from its own hit. A PDF has no heading path, so the page
+      // locator is the only thing that keeps those two apart.
+      format: "pdf",
+      path: "papers/report.pdf",
+      representative: { locator: { kind: "pdf_page" as const, page: 4 }, heading_path: [] },
+      exact: { locator: { kind: "pdf_page" as const, page: 19 }, heading_path: [] },
+      representativeTarget: { path: "papers/report.pdf", subpath: "#page=4", page: 4 },
+      exactTarget: { path: "papers/report.pdf", subpath: "#page=19", page: 19 },
+    },
   ] as const)("keeps representative and exact $format targets format-correct", ({
     format,
     path,
@@ -187,6 +248,30 @@ describe("openTargetForHit", () => {
       locator: exact.locator,
       heading_path: [...exact.heading_path],
     }))).toEqual(exactTarget);
+  });
+});
+
+describe("pageNavigationShortfall", () => {
+  const pdfTarget = { path: "papers/report.pdf", subpath: "#page=7", page: 7 };
+
+  it("reports nothing for an open that asked for no page", () => {
+    expect(pageNavigationShortfall({ path: "note.md", subpath: "#Deep" }, "markdown")).toBeNull();
+    expect(pageNavigationShortfall({ path: "papers/report.pdf" }, "pdf")).toBeNull();
+    expect(pageNavigationShortfall({ path: "papers/report.pdf" }, null)).toBeNull();
+  });
+
+  it("reports nothing when Obsidian's own PDF view took the page", () => {
+    expect(pageNavigationShortfall(pdfTarget, PDF_VIEW_TYPE)).toBeNull();
+    expect(PDF_VIEW_TYPE).toBe("pdf");
+  });
+
+  it("names the page it aimed at when the opened view cannot honour one", () => {
+    // A vault whose .pdf extension is claimed by another view still opens the
+    // file. Saying nothing would present page one as the found location.
+    expect(pageNavigationShortfall(pdfTarget, "annotator-view"))
+      .toBe("opened this PDF, but the view showing it cannot jump to page 7.");
+    expect(pageNavigationShortfall(pdfTarget, null))
+      .toBe("opened this PDF, but the view showing it cannot jump to page 7.");
   });
 });
 

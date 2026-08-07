@@ -92,12 +92,11 @@ pub enum SourceLocator {
     /// was simply discarded and the justification for the empty heading path
     /// had no other half.
     ///
-    /// Declared here rather than at admission because the preparation seam is
-    /// format-agnostic — `PreparedChunk::source_locator` copies whatever the
-    /// section carried — so the vocabulary is the only part that was missing.
-    /// PDF remains inadmissible, so nothing produces this yet; the TypeScript
-    /// mirrors still admit `base_view` alone and have to be widened before a
-    /// PDF locator could survive the wire.
+    /// Produced by `formats::pdf::extract` for every indexed page and copied
+    /// verbatim into `PreparedChunk::source_locator` by the chunk-split loop,
+    /// so all chunks of one page report the same page. It is stored and never
+    /// tokenized: `STORED`-only in the Tantivy schema and a plain `locator_json`
+    /// column in FTS5, so it cannot reach a ranking decision.
     PdfPage {
         page: u32,
     },

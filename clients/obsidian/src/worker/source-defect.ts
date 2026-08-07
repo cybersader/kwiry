@@ -309,7 +309,7 @@ function preparedChunkDefect(
     return "chunks_contents";
   }
   if (value.source_locator !== undefined
-    && (!isSourceLocator(value.source_locator) || owner.format !== "base")) {
+    && !locatorMatchesOwnerFormat(value.source_locator, owner.format)) {
     return "chunks_source_locator";
   }
   if (chunk.vault_id !== owner.vault_id
@@ -351,11 +351,29 @@ function isExtractionCoverage(value: unknown): boolean {
     || value === "quarantined";
 }
 
-function isSourceLocator(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ["kind", "view"])
-    && value.kind === "base_view"
-    && isBoundedString(value.view, 4_096);
+/**
+ * A chunk locator is valid only when its kind is the one its owning source's
+ * format produces: `base_view` for a Base, `pdf_page` for a PDF. A locator on
+ * any other format did not come from this adapter.
+ */
+function locatorMatchesOwnerFormat(value: unknown, format: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (hasExactKeys(value, ["kind", "view"])) {
+    return value.kind === "base_view"
+      && isBoundedString(value.view, 4_096)
+      && format === "base";
+  }
+  if (hasExactKeys(value, ["kind", "page"])) {
+    // Bounded by the Rust field's `u32` domain, not the extractor's page
+    // ceiling: the ceiling is policy and may move, the type domain cannot.
+    return value.kind === "pdf_page"
+      && typeof value.page === "number"
+      && Number.isSafeInteger(value.page)
+      && value.page >= 1
+      && value.page <= 4_294_967_295
+      && format === "pdf";
+  }
+  return false;
 }
 
 function isBoundedString(value: unknown, maximum: number, allowEmpty = false): value is string {

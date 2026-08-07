@@ -130,6 +130,36 @@ describe("chunk/source correlation", () => {
     expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
     preparation.format = "canvas";
     expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+    preparation.format = "pdf";
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+  });
+
+  it("accepts PDF page locators and rejects them on every other format", () => {
+    const preparation = indexed();
+    preparation.format = "pdf";
+    const chunk = preparation.chunks[0] as Record<string, unknown>;
+    chunk.source_locator = { kind: "pdf_page", page: 7 };
+    expect(sourcePreparationDefect(preparation)).toBeNull();
+
+    for (const format of ["markdown", "text", "base", "canvas", "docx"]) {
+      preparation.format = format;
+      expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+    }
+
+    // Pages are 1-based `u32`s. Anything outside that domain did not come from
+    // the Rust extractor, so the chunk is quarantined rather than stored.
+    preparation.format = "pdf";
+    for (const page of [0, -1, 1.5, "7", null]) {
+      chunk.source_locator = { kind: "pdf_page", page };
+      expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+    }
+    chunk.source_locator = { kind: "pdf_page", page: 7, view: "Active" };
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+
+    // Absent is always legal: a PDF page that produced no locator is a chunk
+    // that opens file-only, not a defect.
+    delete chunk.source_locator;
+    expect(sourcePreparationDefect(preparation)).toBeNull();
   });
 });
 

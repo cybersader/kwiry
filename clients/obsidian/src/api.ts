@@ -49,10 +49,19 @@ export type SourceFormatCounts = Record<
   Record<ExtractionCoverage, number>
 >;
 
-export type SourceLocator = {
-  kind: "base_view";
-  view: string;
-};
+/**
+ * Mirrors `kwiry_core::extract::SourceLocator`: non-ranking navigation metadata
+ * a chunk carries so a result can be opened where it was found. Never tokenized
+ * and never part of scoring on either backend — Tantivy stores the field
+ * `STORED`-only and FTS5 keeps it out of `chunk_search`.
+ *
+ * Each variant pairs with exactly one source format, which `locatorMatchesFormat`
+ * enforces: a locator on the wrong format is an invalid daemon response, not a
+ * hit to be shown without navigation.
+ */
+export type SourceLocator =
+  | { kind: "base_view"; view: string }
+  | { kind: "pdf_page"; page: number };
 
 export interface SearchHit {
   chunk_id: string;
@@ -297,14 +306,33 @@ function isExtractionCoverage(value: unknown): value is ExtractionCoverage {
 }
 
 function isSourceLocator(value: unknown): value is SourceLocator | null {
-  return value === null
-    || (isExactRecord(value, ["kind", "view"])
-      && value.kind === "base_view"
-      && isBoundedString(value.view, MAX_SHORT_TEXT_CHARACTERS));
+  if (value === null) return true;
+  if (isExactRecord(value, ["kind", "view"])) {
+    return value.kind === "base_view"
+      && isBoundedString(value.view, MAX_SHORT_TEXT_CHARACTERS);
+  }
+  if (isExactRecord(value, ["kind", "page"])) {
+    return value.kind === "pdf_page" && isPdfPageNumber(value.page);
+  }
+  return false;
+}
+
+/**
+ * Bounds a page by the Rust field's type (`u32`, 1-based) rather than by the
+ * extractor's current page ceiling. The ceiling is a policy the daemon owns and
+ * may raise; pinning it here would turn a legitimate deep-page hit into a
+ * rejected response the moment the two drift.
+ */
+function isPdfPageNumber(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 1
+    && value <= 4_294_967_295;
 }
 
 function locatorMatchesFormat(locator: SourceLocator | null, format: SourceFormat): boolean {
-  return locator === null || format === "base";
+  if (locator === null) return true;
+  return locator.kind === "base_view" ? format === "base" : format === "pdf";
 }
 
 function parseFrontmatter(value: unknown): Frontmatter {

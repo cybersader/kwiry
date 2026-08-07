@@ -287,7 +287,27 @@ mod tests {
         assert_eq!(INDEX_FORMAT_VERSION, 12);
         // `SourcePreparation` gained a required field, so old and new builds
         // cannot read each other's preparations.
+        //
+        // Deliberately still 9 after PDF admission, unlike the DOCX and
+        // Excalidraw waves that each advanced it. Those changed the *shape* of a
+        // preparation; PDF admission changes only which sources produce one.
+        // `SourceLocator::PdfPage`, `ExtractedSection::locator`, and
+        // `PreparedChunk::source_locator` all already existed at 9, so bumping
+        // would be a false claim — and the extraction-policy fingerprint below
+        // already forces the rebuild, on both hosts, without dragging semantic
+        // state along with it.
         assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 9);
+        // The one value PDF admission does move, and it moves by recomputation
+        // rather than by a bump: PDF's profile went `none` -> `portable`, which
+        // changes the digest material. `policy::tests` pins the new digest.
+        assert_eq!(
+            crate::policy::extraction_profile_for(crate::format::SourceFormat::Pdf),
+            if cfg!(feature = "native-pdf-extractor") {
+                crate::policy::ExtractionProfile::Enhanced
+            } else {
+                crate::policy::ExtractionProfile::Portable
+            }
+        );
         // The digest shape is new, so its schema starts at 1.
         assert_eq!(crate::policy::EXTRACTION_POLICY_SCHEMA_VERSION, 1);
 

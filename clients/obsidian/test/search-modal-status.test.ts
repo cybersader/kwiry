@@ -292,6 +292,7 @@ interface SearchModalModule {
     safeMessage: string,
   ) => Error;
   SEARCH_STATUS_ANIMATION_DELAY_MS: number;
+  FORMAT_CHIP_PRESENTATIONS: Record<string, { label: string; accessibleLabel: string }>;
 }
 
 const SEARCH_MODAL_PATH = new URL("../src/search-modal.ts", import.meta.url).pathname;
@@ -514,9 +515,18 @@ function plugin(options: {
   activeEditor?: unknown;
   activeBackend?: BackendIdentity | null;
   resultLimit?: number;
+  /**
+   * View type the leaf reports after the open. `undefined` leaves the leaf with
+   * no observable view at all, which is what every non-PDF assertion here has
+   * always exercised.
+   */
+  leafViewType?: string;
 } = {}) {
   const openFile = vi.fn(async () => {});
-  const getLeaf = vi.fn(() => ({ openFile }));
+  const leaf = options.leafViewType === undefined
+    ? { openFile }
+    : { openFile, view: { getViewType: () => options.leafViewType } };
+  const getLeaf = vi.fn(() => leaf);
   const getAbstractFileByPath = vi.fn((path: string) => new FakeTFile(path));
   const generateMarkdownLink = vi.fn(
     (_file: FakeTFile, _sourcePath: string, subpath?: string) => `[[target${subpath ?? ""}]]`,
@@ -1253,6 +1263,17 @@ describe("KwirySearchModal grouped interactions", () => {
       representativeSubpath: undefined,
       exactSubpath: undefined,
     },
+    {
+      // The heading paths below are ignored for a PDF: only the page locator
+      // decides where each row opens, so the source row lands on the
+      // representative's page and the drilled row on its own.
+      format: "pdf",
+      path: "A.pdf",
+      representativeLocator: { kind: "pdf_page" as const, page: 4 },
+      exactLocator: { kind: "pdf_page" as const, page: 19 },
+      representativeSubpath: "#page=4",
+      exactSubpath: "#page=19",
+    },
   ] as const)("opens representative and drilled exact $format hits correctly", async ({
     format,
     path,
@@ -1263,7 +1284,7 @@ describe("KwirySearchModal grouped interactions", () => {
   }) => {
     for (const view of ["source", "section"] as const) {
       const backend = new DeferredBackend();
-      const pluginHarness = plugin();
+      const pluginHarness = plugin(format === "pdf" ? { leafViewType: "pdf" } : {});
       const modal = createModal(backend, status(), pluginHarness);
       await settleInputSearch(modal, backend, "format open", executionWithHits([
         hit("rep", path, ["Representative"], {
@@ -1293,8 +1314,99 @@ describe("KwirySearchModal grouped interactions", () => {
             : { subpath: view === "source" ? representativeSubpath : exactSubpath },
         },
       );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notices).toEqual([]);
       modal.onClose();
     }
+  });
+
+  it("says so when the view a PDF opened in cannot take a page", async () => {
+    for (const leafViewType of ["markdown", "third-party-pdf"]) {
+      notices.length = 0;
+      const backend = new DeferredBackend();
+      const pluginHarness = plugin({ leafViewType });
+      const modal = createModal(backend, status(), pluginHarness);
+      await settleInputSearch(modal, backend, "page open", executionWithHits([
+        hit("page-31", "A.pdf", [], { format: "pdf", locator: { kind: "pdf_page", page: 31 } }),
+      ]));
+
+      modal.selectSuggestion(modal.suggestions[0], keyboard("Enter"));
+
+      // The file still opens: a page jump is an enhancement, and losing it must
+      // never cost the user the document.
+      expect(pluginHarness.openFile).toHaveBeenCalledWith(
+        expect.any(FakeTFile),
+        { eState: { subpath: "#page=31" } },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(notices).toEqual([
+        "Kwiry: opened this PDF, but the view showing it cannot jump to page 31.",
+      ]);
+      modal.onClose();
+    }
+  });
+
+  it("stays silent when a PDF opens in the view that understands the page", async () => {
+    const backend = new DeferredBackend();
+    const pluginHarness = plugin({ leafViewType: "pdf" });
+    const modal = createModal(backend, status(), pluginHarness);
+    await settleInputSearch(modal, backend, "page open", executionWithHits([
+      hit("page-31", "A.pdf", [], { format: "pdf", locator: { kind: "pdf_page", page: 31 } }),
+    ]));
+
+    modal.selectSuggestion(modal.suggestions[0], keyboard("Enter"));
+
+    expect(pluginHarness.openFile).toHaveBeenCalledWith(
+      expect.any(FakeTFile),
+      { eState: { subpath: "#page=31" } },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(notices).toEqual([]);
+    modal.onClose();
+  });
+
+  it("names the page on a drilled PDF row and chips every admitted format", async () => {
+    const backend = new DeferredBackend();
+    const pluginHarness = plugin({ leafViewType: "pdf" });
+    const modal = createModal(backend, status(), pluginHarness);
+    await settleInputSearch(modal, backend, "page rows", executionWithHits([
+      hit("p4", "A.pdf", [], { format: "pdf", locator: { kind: "pdf_page", page: 4 } }),
+      hit("p19", "A.pdf", [], { format: "pdf", locator: { kind: "pdf_page", page: 19 } }),
+      hit("nowhere", "A.pdf", [], { format: "pdf", locator: null }),
+    ]));
+
+    const sourceRow = renderedRows(modal)[0]!;
+    expect(findByClass(sourceRow, "kwiry-result-format")?.textContent).toBe("PDF");
+    expect(findByClass(sourceRow, "kwiry-result-format")?.attributes.get("aria-label"))
+      .toBe("PDF source format");
+
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+
+    // Without the locator every drilled PDF row would read "Match 1", "Match 2"
+    // — a PDF section has no heading path by construction. The page is a label
+    // only; it is never added to heading_path and never queried.
+    const titles = renderedRows(modal).map(
+      (row) => findByClass(row, "kwiry-result-title")?.textContent,
+    );
+    expect(titles).toEqual(["Page 4", "Page 19", "Match 3"]);
+    modal.onClose();
+  });
+
+  it("presents a chip for every source format the backend can return", () => {
+    expect(Object.keys(searchModalModule.FORMAT_CHIP_PRESENTATIONS).sort()).toEqual([
+      "base",
+      "canvas",
+      "docx",
+      "excalidraw",
+      "markdown",
+      "pdf",
+      "text",
+    ]);
+    expect(searchModalModule.FORMAT_CHIP_PRESENTATIONS.pdf).toEqual({
+      label: "PDF",
+      accessibleLabel: "PDF source format",
+    });
   });
 
   it.each([

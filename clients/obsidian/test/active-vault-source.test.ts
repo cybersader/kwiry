@@ -135,16 +135,17 @@ describe("ObsidianActiveVaultSource", () => {
     expect(events).toEqual([{ kind: "upsert", path: "note.md" }]);
   });
 
-  it("never inventories, inspects, emits, or reads unsupported PDF files", async () => {
+  // PDF is extractable now, so admission is decided by the toggle alone. The
+  // default is off, and a default-off format must be inert in exactly the way
+  // an unextractable one used to be: not listed, not inspected, not emitted,
+  // and above all not read.
+  it("never inventories, inspects, emits, or reads PDF files while PDF is off", async () => {
     const fake = new FakeVault();
     fake.files.set("paper.PDF", file("paper.PDF", 3, 2));
     fake.contents.set("paper.PDF", new Uint8Array([5, 6, 7]));
     const events: VaultSourceEvent[] = [];
-    const legacyEnabled: EnabledSourceFormats = {
-      ...DEFAULT_ENABLED_SOURCE_FORMATS,
-      pdf: true,
-    };
-    const active = source(fake, legacyEnabled);
+    expect(DEFAULT_ENABLED_SOURCE_FORMATS.pdf).toBe(false);
+    const active = source(fake, { ...DEFAULT_ENABLED_SOURCE_FORMATS });
     active.subscribe((event) => events.push(event));
 
     expect(active.listSourcePaths()).toEqual([]);
@@ -161,6 +162,47 @@ describe("ObsidianActiveVaultSource", () => {
 
     expect(events).toEqual([]);
     expect(fake.readBinary).not.toHaveBeenCalled();
+  });
+
+  it("inventories, inspects, emits, and reads PDF files once the format is on", async () => {
+    const fake = new FakeVault();
+    fake.files.set("paper.PDF", file("paper.PDF", 3, 2));
+    fake.contents.set("paper.PDF", new Uint8Array([5, 6, 7]));
+    const events: VaultSourceEvent[] = [];
+    const enabled: EnabledSourceFormats = { ...DEFAULT_ENABLED_SOURCE_FORMATS, pdf: true };
+    const active = source(fake, enabled);
+    active.subscribe((event) => events.push(event));
+
+    expect(active.listSourcePaths()).toEqual(["paper.PDF"]);
+    expect(active.inspectSource("paper.PDF")).toEqual({
+      kind: "candidate",
+      path: "paper.PDF",
+      format: "pdf",
+      size: 3,
+      mtime: 2,
+    });
+    await expect(active.readSource({
+      kind: "candidate",
+      path: "paper.PDF",
+      format: "pdf",
+      size: 3,
+      mtime: 2,
+    })).resolves.toEqual({
+      kind: "source",
+      source: {
+        descriptor: {
+          vault_id: "active-vault",
+          path: "paper.PDF",
+          format: "pdf",
+          byte_length: 3,
+          mtime: 0,
+          mtime_nanos: "2000000",
+        },
+        bytes: new Uint8Array([5, 6, 7]),
+      },
+    });
+    fake.emit("modify", file("paper.PDF"));
+    expect(events).toEqual([{ kind: "upsert", path: "paper.PDF" }]);
   });
 
   it("inventories, inspects, emits, and reads admitted DOCX files", async () => {

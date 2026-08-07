@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The admission-disabled PDF extraction candidate.
+//! The PDF extraction candidate: per-page sections composed from geometry.
 //!
 //! # Admission status
 //!
-//! This is a candidate, not an admission. `SourceFormat::Pdf` still reports
-//! `extraction_supported() == false`, `extract_source` still routes PDF to the
-//! `not_yet_supported` stub, discovery still excludes `.pdf`, and the
-//! TypeScript extractable set is unchanged. Everything here is compiled only
-//! under the non-default `internal-pdf-extractor` feature — the same seam the
-//! DOCX extractor sat behind before its owner-approved admission.
+//! Admitted. `SourceFormat::Pdf` reports `extraction_supported() == true`,
+//! discovery accepts `.pdf`, and `formats::pdf::extract` maps every
+//! [`PdfSection`] below onto an `ExtractedSection` — content verbatim, empty
+//! heading path, and [`PdfPageLocator::to_source_locator`] as the locator.
+//! Everything here compiles in the `portable` feature set, so the daemon and
+//! the plugin's WASM bundle produce the same sections for the same bytes.
 //!
 //! # Why the page is the outer section
 //!
@@ -52,8 +52,9 @@ impl PdfPageLocator {
     ///
     /// The mapping is code rather than prose so the receiving end is a fact the
     /// suite can check. `ExtractedSection::locator` is copied verbatim into
-    /// `PreparedChunk::source_locator`, so admission is a wiring step from here
-    /// and not a design one.
+    /// `PreparedChunk::source_locator` — including into every chunk an
+    /// oversized page splits into — so the page survives to navigation without
+    /// ever entering ranked text.
     pub const fn to_source_locator(self) -> SourceLocator {
         SourceLocator::PdfPage { page: self.page }
     }
@@ -80,8 +81,9 @@ pub struct PdfCandidate {
 
 /// Compose a PDF's positioned text into per-page sections.
 ///
-/// Calling this does not make PDF an indexable format; nothing in
-/// `extract_source` reaches it.
+/// This is what `extract_source` reaches for `SourceFormat::Pdf`; the
+/// `formats::pdf::extract` wrapper only adapts the outcome to
+/// `ExtractedSource`, adding no text and dropping none.
 pub fn extract_pdf_candidate(bytes: &[u8]) -> PdfCandidate {
     match read_pdf_geometry(bytes) {
         Ok(geometry) => compose(geometry),

@@ -130,11 +130,34 @@ describe("KwiryClient.search", () => {
     });
   });
 
+  it("parses a PDF page locator", async () => {
+    const pdfHit = {
+      ...HIT,
+      path: "papers/report.pdf",
+      format: "pdf",
+      heading_path: [],
+      locator: { kind: "pdf_page", page: 7 },
+    };
+    const { transport } = mockTransport(200, { hits: [pdfHit], next_cursor: null });
+    await expect(client(transport).search({ q: "a", mode: "lexical" })).resolves.toMatchObject({
+      hits: [{ format: "pdf", locator: { kind: "pdf_page", page: 7 } }],
+    });
+  });
+
   it.each([
     { format: "epub" },
     { locator: { kind: "base_view", view: "Active" } },
     { locator: { kind: "page", page: 3 } },
     { locator: { kind: "base_view", view: "" } },
+    // A page locator on a Markdown hit: the kind is real but the pairing is not.
+    { locator: { kind: "pdf_page", page: 3 } },
+    // Pages are 1-based and integral; a `u32` field cannot carry these.
+    { format: "pdf", path: "paper.pdf", locator: { kind: "pdf_page", page: 0 } },
+    { format: "pdf", path: "paper.pdf", locator: { kind: "pdf_page", page: -1 } },
+    { format: "pdf", path: "paper.pdf", locator: { kind: "pdf_page", page: 1.5 } },
+    { format: "pdf", path: "paper.pdf", locator: { kind: "pdf_page", page: "3" } },
+    // The exact-key rule holds on the new variant as well.
+    { format: "pdf", path: "paper.pdf", locator: { kind: "pdf_page", page: 3, view: "x" } },
   ])("rejects an invalid format or locator projection: %j", async (overrides) => {
     const { transport } = mockTransport(200, {
       hits: [{ ...HIT, ...overrides }],

@@ -65,7 +65,7 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         format: SourceFormat::Pdf,
         name: "pdf",
         extensions: &["pdf"],
-        extraction_supported: false,
+        extraction_supported: true,
     },
 ];
 
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(SourceFormat::from_path("image.png"), None);
         assert!(SourceFormat::Canvas.spec().extraction_supported);
         assert!(SourceFormat::Docx.spec().extraction_supported);
-        assert!(!SourceFormat::Pdf.spec().extraction_supported);
+        assert!(SourceFormat::Pdf.spec().extraction_supported);
         assert!(SourceFormat::Canvas.is_extractable());
         assert!(SourceFormat::Docx.is_extractable());
         assert!(SourceFormat::Excalidraw.is_extractable());
@@ -169,7 +169,7 @@ mod tests {
             SourceFormat::from_extractable_path("Drawings/board.excalidraw.md"),
             Some(SourceFormat::Markdown)
         );
-        assert!(!SourceFormat::Pdf.is_extractable());
+        assert!(SourceFormat::Pdf.is_extractable());
         assert_eq!(
             SourceFormat::from_extractable_path("board.canvas"),
             Some(SourceFormat::Canvas)
@@ -178,11 +178,21 @@ mod tests {
             SourceFormat::from_extractable_path("report.docx"),
             Some(SourceFormat::Docx)
         );
-        assert_eq!(SourceFormat::from_extractable_path("paper.PDF"), None);
+        assert_eq!(
+            SourceFormat::from_extractable_path("paper.PDF"),
+            Some(SourceFormat::Pdf)
+        );
 
+        // The closed set is now wholly extractable: no registry entry may claim
+        // a format the dispatcher has no extractor for.
         for spec in format_specs() {
             assert_eq!(spec.format.spec(), spec);
             assert!(!spec.extensions.is_empty());
+            assert!(
+                spec.extraction_supported,
+                "{} is registered but not extractable",
+                spec.name
+            );
         }
     }
 }

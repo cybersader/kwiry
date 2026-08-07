@@ -19,6 +19,7 @@ export const EXTRACTABLE_SOURCE_FORMATS = [
   "base",
   "canvas",
   "docx",
+  "pdf",
   "excalidraw",
 ] as const satisfies readonly SourceFormat[];
 
@@ -44,10 +45,10 @@ export const SOURCE_PREPARATION_SCHEMA_VERSION = 9 as const;
  * this constant equals what the adapter reports, so the mirror cannot drift.
  */
 export const EXTRACTION_POLICY_FINGERPRINT =
-  "1b393b155b0af728b1ec9c9131573c105c9e7aba41ff31a4d12c824d4c73adef" as const;
+  "efbc627c533ae797104dcf65540dcf6f96edd7b9d96826c4bac7e93672f26ff2" as const;
 
 export const IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION =
-  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, DOCX, and Excalidraw are available; PDF remains unavailable until its extractor ships and its bytes are not read. This profile is lexical-only and never reads the daemon token.";
+  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, DOCX, Excalidraw, and PDF are available. PDF is off by default because a page is parsed and laid out rather than read, so a reference library costs far more to index than authored notes. This profile is lexical-only and never reads the daemon token.";
 
 export interface EnabledSourceFormats {
   markdown: boolean;
@@ -132,7 +133,7 @@ export function sourceFormatDescription(format: SourceFormat): string {
     case "docx":
       return "Extract body text, tables, headings, comments, notes, and headers or footers. Tracked deletions and hidden text are extracted and marked latent.";
     case "pdf":
-      return "Unavailable until an extractor ships. Files of this format are not inventoried or read.";
+      return "Extract text one section per page, recovering reading order from glyph positions. A page is navigation metadata, never searchable text, so PDF results carry no heading path. Encrypted documents are refused without being read, and a document using a font this profile cannot decode contributes no text at all rather than a partial reading. Off by default: pages are laid out rather than read, so a reference library costs far more to index than authored notes.";
   }
 }
 

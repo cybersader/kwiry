@@ -97,7 +97,15 @@ export type ExtractionCoverage = typeof EXTRACTION_COVERAGES[number];
 export const EXTRACTION_PROFILES = ["none", "portable", "enhanced"] as const;
 export type ExtractionProfile = typeof EXTRACTION_PROFILES[number];
 
-export type SourceLocator = { kind: "base_view"; view: string };
+/**
+ * Mirrors `kwiry_core::extract::SourceLocator`. Non-ranking navigation metadata:
+ * it is stored on the chunk row but is not a `chunk_search` column, so it can
+ * never reach MATCH or BM25. Each variant pairs with exactly one source format;
+ * see `locatorMatchesFormat`.
+ */
+export type SourceLocator =
+  | { kind: "base_view"; view: string }
+  | { kind: "pdf_page"; page: number };
 export type SourceFormatCounts = Record<
   SourceFormat,
   Record<ExtractionCoverage, number>
@@ -1218,7 +1226,7 @@ function isSearchHit(value: unknown): value is WorkerSearchHit {
     && isSourceFormat(value.format)
     && (value.coverage === "indexed-complete" || value.coverage === "indexed-partial")
     && (value.locator === null || isSourceLocator(value.locator))
-    && (value.locator === null || value.format === "base")
+    && locatorMatchesFormat(value.locator as SourceLocator | null, value.format)
     && Array.isArray(value.heading_path)
     && value.heading_path.length <= 64
     && value.heading_path.every((heading) => isBoundedString(heading, 1_024))
@@ -1246,10 +1254,39 @@ export function isExtractionCoverage(value: unknown): value is ExtractionCoverag
 }
 
 export function isSourceLocator(value: unknown): value is SourceLocator {
-  return isRecord(value)
-    && hasExactKeys(value, ["kind", "view"])
-    && value.kind === "base_view"
-    && isBoundedString(value.view, 4_096);
+  if (!isRecord(value)) return false;
+  if (hasExactKeys(value, ["kind", "view"])) {
+    return value.kind === "base_view" && isBoundedString(value.view, 4_096);
+  }
+  if (hasExactKeys(value, ["kind", "page"])) {
+    return value.kind === "pdf_page" && isPdfPageNumber(value.page);
+  }
+  return false;
+}
+
+/**
+ * Bounded by the Rust field's `u32` domain, not by the extractor's page ceiling.
+ * The ceiling is extraction policy and may move; the type domain cannot.
+ */
+function isPdfPageNumber(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 1
+    && value <= 4_294_967_295;
+}
+
+/**
+ * The single format-to-locator pairing rule for the in-plugin profile. A chunk
+ * may carry no locator at all; when it carries one, the kind must be the one
+ * its format produces. Anything else is a corrupt row or a foreign preparation,
+ * never a hit to publish.
+ */
+export function locatorMatchesFormat(
+  locator: SourceLocator | null,
+  format: SourceFormat,
+): boolean {
+  if (locator === null) return true;
+  return locator.kind === "base_view" ? format === "base" : format === "pdf";
 }
 
 export function isSourceFormatCounts(value: unknown): value is SourceFormatCounts {

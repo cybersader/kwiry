@@ -66,6 +66,10 @@ struct Interpreter<'a, 'doc> {
     text_object_index: u32,
 
     runs: Vec<PdfTextRun>,
+    /// Runs this page may emit: `MAX_RUNS_PER_PAGE`, or less when the
+    /// document-wide budget has less than that left. Passed in rather than read
+    /// from `limits` so the page cannot outlive the document's remaining budget.
+    max_runs: usize,
     glyphs: usize,
     /// Operations interpreted so far on this page. A field rather than a loop
     /// index because the page is decoded in windows and the budget is a page
@@ -84,6 +88,7 @@ pub(super) fn interpret_page(
     page_number: u32,
     base: Matrix,
     content: &[u8],
+    max_runs: usize,
     text_budget: &mut TextBudget,
 ) -> PageOutcome {
     let fonts = PageFonts::resolve(document, page_id);
@@ -98,6 +103,7 @@ pub(super) fn interpret_page(
         in_text_object: false,
         text_object_index: 0,
         runs: Vec::new(),
+        max_runs,
         glyphs: 0,
         operations: 0,
         stopped: false,
@@ -386,14 +392,30 @@ impl Interpreter<'_, '_> {
     }
 
     fn show(&mut self, bytes: &[u8]) -> std::ops::ControlFlow<()> {
-        if self.runs.len() >= limits::MAX_RUNS_PER_PAGE {
-            self.note(
-                notice::RUN_LIMIT,
-                format!(
-                    "page exceeds {} text runs; the remainder was not emitted",
-                    limits::MAX_RUNS_PER_PAGE
-                ),
-            );
+        if self.runs.len() >= self.max_runs {
+            // Which budget ran out is a different fact, and the page cannot tell
+            // from its own run count alone: a page stopped at run 3 by an
+            // exhausted document budget has not exceeded anything of its own.
+            // A page budget below the per-page cap is only ever the document's
+            // remainder, so that is the discriminator.
+            let (code, message) = if self.max_runs < limits::MAX_RUNS_PER_PAGE {
+                (
+                    notice::DOCUMENT_RUN_LIMIT,
+                    format!(
+                        "document exceeds {} text runs; the remainder was not emitted",
+                        limits::MAX_TOTAL_RUNS
+                    ),
+                )
+            } else {
+                (
+                    notice::RUN_LIMIT,
+                    format!(
+                        "page exceeds {} text runs; the remainder was not emitted",
+                        limits::MAX_RUNS_PER_PAGE
+                    ),
+                )
+            };
+            self.note(code, message);
             self.truncated = true;
             return std::ops::ControlFlow::Break(());
         }

@@ -109,12 +109,11 @@ pub use formats::{
     MAX_EXCALIDRAW_NOTICES, MAX_EXCALIDRAW_PROPERTY_BYTES, MAX_EXCALIDRAW_PROPERTY_ENTRIES,
     extract_excalidraw_candidate,
 };
-// Admission-disabled PDF reader foundation; see `formats::pdf`. Exposing the
-// entry point does not admit the format: there is no new `SourceFormat`
-// variant, `SourceFormat::Pdf::extraction_supported()` is still `false`,
-// `extract_source` still routes PDF to the unsupported stub, and discovery and
-// every client mirror are untouched.
-#[cfg(feature = "internal-pdf-extractor")]
+// The PDF reader's vocabulary; see `formats::pdf`. PDF itself is admitted and
+// needs none of this — `extract_source` reaches the extractor through the
+// registry like every other format — but the geometry and tier harnesses name
+// these directly, and the reader now compiles in every `portable` build, so the
+// export is unconditional rather than feature-gated.
 pub use formats::{
     PdfCandidate, PdfDocumentGeometry, PdfLimits, PdfPageGeometry, PdfPageLocator, PdfReadError,
     PdfSection, PdfTextRun, PdfWritingMode, extract_pdf_candidate, pdf_limits, read_pdf_geometry,

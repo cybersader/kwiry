@@ -7,7 +7,22 @@ import { pathMatchesFormat } from "./vault-path";
 export interface OpenTarget {
   path: string;
   subpath?: string;
+  /**
+   * Set only when `subpath` is a PDF page jump, carrying the 1-based page the
+   * jump asks for. The subpath alone cannot be checked after the fact — Obsidian
+   * accepts any ephemeral state and silently ignores what a view does not
+   * understand — so the host keeps the page here in order to say what it aimed
+   * at when the opened view turns out not to be one that can honour it.
+   */
+  page?: number;
 }
+
+/**
+ * Obsidian's built-in PDF view type. `#page=N` is its documented link syntax,
+ * and it is the only view known to consume a page jump; a vault whose `.pdf`
+ * extension is claimed by another view gets the file opened and told so.
+ */
+export const PDF_VIEW_TYPE = "pdf";
 
 export type OpenResultDecision =
   | ({ ok: true } & OpenTarget)
@@ -31,7 +46,38 @@ export function openTargetForHit(
   if (hit.format === "base" && hit.locator?.kind === "base_view") {
     return { path: hit.path, subpath: `#${hit.locator.view}` };
   }
+  // A PDF has no headings, so the page locator is the only route back to where
+  // a match was found. Grouped search needs no special case: a source row is
+  // opened from its representative hit and a drilled row from its own hit, so
+  // each already arrives here carrying the page it means.
+  if (hit.format === "pdf" && hit.locator?.kind === "pdf_page") {
+    return {
+      path: hit.path,
+      subpath: `#page=${hit.locator.page}`,
+      page: hit.locator.page,
+    };
+  }
   return { path: hit.path };
+}
+
+/**
+ * What to tell the user when an open could not land where the result was found,
+ * or `null` when there is nothing to report.
+ *
+ * Only the *view* is checkable. `openFile` resolves whether or not the view
+ * consumed the ephemeral state, so a page jump into Obsidian's own PDF view is
+ * reported as achieved on the strength of `#page=N` being that view's
+ * documented syntax. What this refuses to do is stay silent when the file
+ * opened in a view that certainly cannot honour a page jump — that is the case
+ * where the result would otherwise appear to have opened at page one on purpose.
+ */
+export function pageNavigationShortfall(
+  target: OpenTarget,
+  openedViewType: string | null,
+): string | null {
+  if (target.page === undefined) return null;
+  if (openedViewType === PDF_VIEW_TYPE) return null;
+  return `opened this PDF, but the view showing it cannot jump to page ${target.page}.`;
 }
 
 export function validateOpenResult(

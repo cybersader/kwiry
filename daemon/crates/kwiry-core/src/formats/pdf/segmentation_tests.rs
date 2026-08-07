@@ -306,28 +306,99 @@ fn rotated_text_is_kept_but_never_placed_into_the_reading_order() {
 // 4. Outcomes
 // ---------------------------------------------------------------------------
 
+/// The pre-admission form of this test asserted that the candidate's text
+/// reached nothing. Kept as the same comparison, now asserting that the
+/// dispatcher's output *is* the candidate — no text added, none dropped, and
+/// the page carried through as a locator.
 #[test]
-fn pdf_is_still_not_admitted_now_that_a_candidate_exists() {
+fn the_dispatcher_publishes_exactly_what_the_candidate_composed() {
+    use crate::extract::SourceLocator;
     use crate::format::SourceFormat;
 
-    let bytes = measured_document(b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (Indexable) Tj ET");
-    // The candidate composes real text …
+    let bytes = measured_pages(&[
+        b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (Indexable) Tj ET",
+        b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (Second) Tj ET",
+    ]);
     let candidate = extract_pdf_candidate(&bytes);
     assert_eq!(candidate.coverage, ExtractionCoverage::IndexedComplete);
     assert_eq!(candidate.sections[0].content, "Indexable");
 
-    // … and none of it reaches the product.
-    assert!(!SourceFormat::Pdf.is_extractable());
-    assert!(!SourceFormat::Pdf.spec().extraction_supported);
-    assert!(SourceFormat::from_extractable_path("notes.pdf").is_none());
-    let extracted =
-        crate::formats::extract_source(SourceFormat::Pdf, &bytes).expect("the stub never errors");
+    assert!(SourceFormat::Pdf.is_extractable());
+    assert!(SourceFormat::Pdf.spec().extraction_supported);
     assert_eq!(
-        extracted.coverage,
-        ExtractionCoverage::SkippedNoExtractableText
+        SourceFormat::from_extractable_path("notes.pdf"),
+        Some(SourceFormat::Pdf)
     );
-    assert!(extracted.sections.is_empty());
-    assert_eq!(extracted.notices[0].code, "format_not_yet_supported");
+
+    let extracted = crate::formats::extract_source(SourceFormat::Pdf, &bytes)
+        .expect("an admitted PDF reports an outcome rather than an error");
+    assert_eq!(extracted.coverage, candidate.coverage);
+    assert_eq!(extracted.sections.len(), candidate.sections.len());
+    for (published, composed) in extracted.sections.iter().zip(&candidate.sections) {
+        assert_eq!(published.content, composed.content);
+        assert_eq!(published.heading_path, composed.heading_path);
+        assert_eq!(
+            published.locator,
+            Some(SourceLocator::PdfPage {
+                page: composed.locator.page
+            })
+        );
+    }
+    assert_eq!(
+        extracted
+            .sections
+            .iter()
+            .map(|section| section.locator.clone())
+            .collect::<Vec<_>>(),
+        [
+            Some(SourceLocator::PdfPage { page: 1 }),
+            Some(SourceLocator::PdfPage { page: 2 }),
+        ]
+    );
+}
+
+/// Admission's actual payload: the page number has to survive `extract_source`
+/// *and* the chunk-split loop to be reachable by navigation, and `heading_path`
+/// is empty for PDF so the locator is the only route back to a page.
+#[test]
+fn source_preparation_carries_the_page_locator_onto_every_chunk() {
+    use crate::extract::SourceLocator;
+    use crate::format::SourceFormat;
+    use crate::source::{SourceDescriptor, SourcePreparationKind, prepare_source_buffer};
+
+    let bytes = measured_pages(&[
+        b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (alpha) Tj ET",
+        b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (bravo) Tj ET",
+    ]);
+    let prepared = prepare_source_buffer(
+        &SourceDescriptor {
+            vault_id: "fixture".into(),
+            room: None,
+            path: "papers/measured.pdf".into(),
+            format: SourceFormat::Pdf,
+            byte_length: bytes.len() as u64,
+            mtime: 42,
+            mtime_nanos: 42_000_000_000,
+        },
+        &bytes,
+    )
+    .expect("an admitted PDF prepares");
+
+    assert_eq!(prepared.kind, SourcePreparationKind::Indexed);
+    assert_eq!(prepared.chunks.len(), 2);
+    for (index, chunk) in prepared.chunks.iter().enumerate() {
+        assert_eq!(
+            chunk.source_locator,
+            Some(SourceLocator::PdfPage {
+                page: index as u32 + 1
+            })
+        );
+        // The page is navigation metadata, never ranked text.
+        assert!(chunk.heading_path.is_empty());
+        assert!(!chunk.content.contains("Page"));
+    }
+    assert_eq!(prepared.chunks[0].content, "alpha");
+    assert_eq!(prepared.chunks[1].content, "bravo");
 }
 
 #[test]

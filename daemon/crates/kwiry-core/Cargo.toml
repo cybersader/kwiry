@@ -48,7 +48,9 @@ required-features = ["internal-d5c-preview", "native"]
 [features]
 default = ["native"]
 portable = [
+  "dep:encoding_rs",
   "dep:flate2",
+  "dep:lopdf",
   "dep:pulldown-cmark",
   "dep:quick-xml",
   "dep:rawzip",
@@ -90,16 +92,16 @@ internal-docx-extractor = ["portable"]
 # Retained so existing callers keep resolving; Excalidraw extraction is now part
 # of the portable format set following the 2026-08-06 contract amendment.
 internal-excalidraw-extractor = ["portable"]
-# Admission-disabled PDF reader foundation. Deliberately NOT a member of
-# `default`, `portable`, or `native`: enabling it exposes
-# `read_pdf_geometry` and nothing else. `SourceFormat::Pdf` stays
-# `extraction_supported() == false` and `extract_source` keeps routing PDF to
-# the `not_yet_supported` stub under every feature combination.
-internal-pdf-extractor = ["portable", "dep:lopdf", "dep:encoding_rs"]
-# The enhanced (size-unconstrained) PDF tier. Deliberately depends on `native`
-# as well as `internal-pdf-extractor`: enabling it drags in the whole native
-# dependency set, so it structurally cannot be selected by a wasm32 build.
-# Coverage-only divergence — see `formats/pdf/embedded.rs`.
+# Retained so existing callers keep resolving; the portable PDF tier is now part
+# of the portable format set rather than an opt-in spike. It gates nothing at
+# all any more — no `cfg` in the crate names it — so enabling it is a no-op that
+# `default = ["native"]` already implies.
+internal-pdf-extractor = ["portable"]
+# The enhanced (size-unconstrained) PDF tier, and the only remaining PDF feature
+# that changes what is compiled. Deliberately depends on `native` as well as
+# `internal-pdf-extractor`: enabling it drags in the whole native dependency
+# set, so it structurally cannot be selected by a wasm32 build. Coverage-only
+# divergence — see `formats/pdf/embedded.rs`.
 native-pdf-extractor = ["native", "internal-pdf-extractor", "dep:ttf-parser"]
 
 [dev-dependencies]

@@ -21,8 +21,11 @@
 //! wrong.
 //!
 //! [`ExtractionProfile::None`] is a first-class value rather than an absent
-//! field, so the shipped state — PDF has no compiled extractor anywhere — is
-//! expressible without the field being optional.
+//! field, so "this build compiled no extractor for that format" is expressible
+//! without the field being optional. Since PDF admission no shipped
+//! configuration reports it — the portable PDF tier is in `portable` — but the
+//! vocabulary keeps it, because a format admitted ahead of its extractor is the
+//! state the digest most needs to be able to name.
 //!
 //! # What the fingerprint gates
 //!
@@ -93,19 +96,17 @@ pub const fn extraction_profile_for(format: SourceFormat) -> ExtractionProfile {
     }
 }
 
-/// PDF is the only format with a tiered extractor set, and both tiers are
-/// non-default features. With neither enabled — the shipped configuration —
-/// there is no compiled PDF extractor at all, so the honest answer is `None`.
-/// What the enhanced tier adds is in `formats::pdf::embedded`.
+/// PDF is the only format with a tiered extractor set. The portable tier is in
+/// `portable`, so every build that can extract anything can extract PDF and
+/// `None` is no longer reachable — the variant stays because it is the honest
+/// answer for a format admitted without an extractor and removing it would make
+/// the vocabulary unable to say that. `native-pdf-extractor` is the one feature
+/// that still changes what is compiled; what it adds is in
+/// `formats::pdf::embedded`.
 #[cfg(feature = "native-pdf-extractor")]
 const PDF_PROFILE: ExtractionProfile = ExtractionProfile::Enhanced;
-#[cfg(all(
-    feature = "internal-pdf-extractor",
-    not(feature = "native-pdf-extractor")
-))]
+#[cfg(not(feature = "native-pdf-extractor"))]
 const PDF_PROFILE: ExtractionProfile = ExtractionProfile::Portable;
-#[cfg(not(feature = "internal-pdf-extractor"))]
-const PDF_PROFILE: ExtractionProfile = ExtractionProfile::None;
 
 /// Every format's compiled profile, in `SourceFormat` declaration order.
 pub fn active_extraction_policy() -> BTreeMap<SourceFormat, ExtractionProfile> {
@@ -149,12 +150,14 @@ fn update_component(digest: &mut Sha256, bytes: &[u8]) {
 mod tests {
     use super::*;
 
-    /// The digest that a build with no PDF extractor compiled — the shipped
-    /// configuration, and the one the TypeScript host mirrors — must produce.
-    /// Pinned so a change to the material is a deliberate edit here rather than
-    /// a silent drift away from the plugin's copy.
+    /// The digest the shipped configuration — every format `portable`,
+    /// including PDF — must produce. This is the value the TypeScript host
+    /// mirrors in `src/source-formats.ts` and the bench fixture pins in
+    /// `bench/portable-core-wasm/fixtures/cases.json`. Pinned so a change to the
+    /// material is a deliberate edit here rather than a silent drift away from
+    /// the plugin's copy.
     const SHIPPED_FINGERPRINT: &str =
-        "1b393b155b0af728b1ec9c9131573c105c9e7aba41ff31a4d12c824d4c73adef";
+        "efbc627c533ae797104dcf65540dcf6f96edd7b9d96826c4bac7e93672f26ff2";
 
     #[test]
     fn every_format_has_a_profile() {
@@ -225,18 +228,25 @@ mod tests {
         );
     }
 
+    /// Before PDF admission this test early-returned unless PDF was `None`,
+    /// which after admission would make it vacuous on exactly the configuration
+    /// it exists to pin. The guard is inverted: the shipped build is the
+    /// portable one, and only the enhanced daemon tier — a deliberate
+    /// non-shipped divergence — is excused.
     #[test]
     fn the_shipped_policy_digest_is_pinned() {
-        if extraction_profile_for(SourceFormat::Pdf) != ExtractionProfile::None {
+        if extraction_profile_for(SourceFormat::Pdf) == ExtractionProfile::Enhanced {
             return;
         }
+        assert_eq!(
+            extraction_profile_for(SourceFormat::Pdf),
+            ExtractionProfile::Portable,
+            "the shipped configuration extracts PDF with the portable tier"
+        );
         assert_eq!(extraction_policy_fingerprint(), SHIPPED_FINGERPRINT);
     }
 
-    #[cfg(all(
-        feature = "internal-pdf-extractor",
-        not(feature = "native-pdf-extractor")
-    ))]
+    #[cfg(not(feature = "native-pdf-extractor"))]
     #[test]
     fn the_portable_pdf_tier_reports_portable() {
         assert_eq!(

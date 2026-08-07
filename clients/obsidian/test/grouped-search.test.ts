@@ -240,6 +240,39 @@ describe("groupSearchExecution", () => {
     expect(rawHits).toEqual([a1, b1, a2]);
   });
 
+  it("keeps every PDF page distinct under one source group", () => {
+    // A PDF has no heading path, so the page locator is the only thing that
+    // distinguishes two matches in the same document. Grouping must neither
+    // merge them nor let the representative's page leak onto a drilled row.
+    const page19 = hit("P19", "papers/report.pdf", {
+      format: "pdf",
+      locator: { kind: "pdf_page", page: 19 },
+      headingPath: [],
+      score: 88,
+    });
+    const page4 = hit("P4", "papers/report.pdf", {
+      format: "pdf",
+      locator: { kind: "pdf_page", page: 4 },
+      headingPath: [],
+      score: 12,
+    });
+
+    const grouped = groupSearchExecution(execution([page19, page4]), 100);
+
+    expect(grouped.groups).toHaveLength(1);
+    const group = grouped.groups[0]!;
+    expect(group.source.path).toBe("papers/report.pdf");
+    // The representative is the highest-ranked hit, so opening the source row
+    // lands on the best-matching page rather than page one.
+    expect(group.representative).toBe(page19);
+    expect(group.sections).toEqual([page19, page4]);
+    expect(group.sections.map((section) => section.locator)).toEqual([
+      { kind: "pdf_page", page: 19 },
+      { kind: "pdf_page", page: 4 },
+    ]);
+    expect(group.observedSectionCount).toBe(2);
+  });
+
   it("does not use format or coverage as grouping or ordering inputs", () => {
     const baselineHits = [
       hit("A1", "a.md"),

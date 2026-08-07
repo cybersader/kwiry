@@ -195,6 +195,9 @@ mod tests {
                 "a.TXT",
                 "board.canvas",
                 "dashboard.base",
+                // PDF is admitted, so an uppercase extension is discovered the
+                // same way `a.TXT` is; only `image.png` stays unsupported.
+                "paper.PDF",
                 "report.docx",
                 "z.md"
             ]

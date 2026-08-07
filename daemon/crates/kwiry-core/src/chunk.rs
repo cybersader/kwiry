@@ -48,6 +48,11 @@ pub(crate) fn ingest_vault_files(
 pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> FileIngestOutcome {
     let format = SourceFormat::from_extension(&file.extension)
         .expect("vault discovery only admits registered source formats");
+    // Dormant since PDF admission — every registered format is extractable, and
+    // `format::tests` asserts that. Kept because the registry is what discovery
+    // trusts: a format admitted to the closed set ahead of its extractor must
+    // skip without reading bytes rather than reach a dispatcher arm that has
+    // nothing to dispatch to.
     if !format.is_extractable() {
         return file_outcome(
             vault,
@@ -208,38 +213,52 @@ mod tests {
         assert!(report.warnings[0].message.contains("NUL"));
     }
 
+    /// This test used `.pdf` as the stand-in for an unextractable format. PDF is
+    /// admitted, and it was the last such format, so the pre-read refusal in
+    /// `ingest_file` is now dormant by construction rather than removed — and
+    /// that is what is asserted here, together with the fact that a `.pdf` now
+    /// reaches the extractor instead of being turned away with an
+    /// "extraction is not yet supported" warning.
     #[test]
-    fn native_ingest_refuses_unextractable_formats_before_reading_bytes() {
+    fn native_ingest_reads_pdf_bytes_and_no_registered_format_is_refused_pre_read() {
+        for spec in crate::format::format_specs() {
+            assert!(
+                spec.extraction_supported,
+                "{} would trip the dormant pre-read refusal",
+                spec.name
+            );
+        }
+
         let temporary = tempdir().unwrap();
+        fs::write(temporary.path().join("paper.pdf"), b"not a pdf at all").unwrap();
         let vault = VaultRegistration {
             id: "fixture".into(),
             path: temporary.path().to_path_buf(),
             room: None,
         };
         let file = DiscoveredFile {
-            absolute_path: temporary.path().join("missing.pdf"),
-            relative_path: "missing.pdf".into(),
+            absolute_path: temporary.path().join("paper.pdf"),
+            relative_path: "paper.pdf".into(),
             extension: "pdf".into(),
-            byte_length: 123,
+            byte_length: b"not a pdf at all".len() as u64,
             mtime: 42,
             mtime_nanos: 42_000_000_000,
         };
 
         let outcome = ingest_file(&vault, &file);
 
+        // The bytes were read and judged: a quarantine is an extraction verdict,
+        // which the pre-read refusal could never have produced.
         assert_eq!(outcome.kind, FileOutcomeKind::Skipped);
         assert_eq!(
             outcome.coverage,
-            crate::extract::ExtractionCoverage::SkippedNoExtractableText
+            crate::extract::ExtractionCoverage::Quarantined
         );
-        assert!(outcome.content_hash.is_none());
         assert!(outcome.chunks.is_empty());
         assert!(
             outcome
                 .warning
-                .unwrap()
-                .message
-                .contains("without reading source bytes")
+                .is_none_or(|warning| !warning.message.contains("not yet supported"))
         );
     }
 

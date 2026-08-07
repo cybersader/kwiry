@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Tests for the admission-disabled PDF reader.
+//! Tests for the PDF reader.
 //!
 //! Three groups, in this order:
 //!
-//! 1. **Admission invariants.** The feature being on must change nothing about
-//!    what the product will index. These run first because every other test in
-//!    this file would still pass if PDF had been quietly admitted.
+//! 1. **Admission invariants.** What the product will index for a `.pdf`, end
+//!    to end through `extract_source`. These run first because every other test
+//!    in this file would still pass if the dispatcher had been left wired to a
+//!    stub — which is exactly how the format sat before admission.
 //! 2. **Geometry.** Positions are asserted as arithmetic that can be checked by
 //!    hand from the fixture's content stream, not by re-running the code under
 //!    test and recording what it said.
@@ -53,42 +54,75 @@ fn notice_codes(geometry: &super::PdfDocumentGeometry) -> Vec<&str> {
 // 1. Admission invariants
 // ---------------------------------------------------------------------------
 
+/// The inverse of the pre-admission test that stood here: this asserted PDF was
+/// unreachable from the product, and it is kept as the same end-to-end walk
+/// asserting the opposite, so the admission is proven at the seam it changed
+/// rather than merely deleted from the suite.
 #[test]
-fn pdf_is_not_admitted_while_the_reader_feature_is_on() {
-    use crate::extract::ExtractionCoverage;
+fn pdf_is_admitted_end_to_end_through_the_dispatcher() {
+    use crate::extract::{ExtractionCoverage, SourceLocator};
     use crate::format::SourceFormat;
 
-    assert!(!SourceFormat::Pdf.is_extractable());
-    assert!(!SourceFormat::Pdf.spec().extraction_supported);
+    assert!(SourceFormat::Pdf.is_extractable());
+    assert!(SourceFormat::Pdf.spec().extraction_supported);
     // Discovery goes through `from_extractable_path`, so a `.pdf` on disk is
-    // still invisible to it.
-    assert!(SourceFormat::from_extractable_path("notes.pdf").is_none());
+    // now visible to it.
+    assert_eq!(
+        SourceFormat::from_extractable_path("notes.pdf"),
+        Some(SourceFormat::Pdf)
+    );
 
     let extracted = crate::formats::extract_source(
         SourceFormat::Pdf,
         &measured_document(b"BT /F1 12 Tf 1 0 0 1 72 700 Tm (Hi) Tj ET"),
     )
-    .expect("the stub never errors");
+    .expect("an admitted PDF reports an outcome rather than an error");
+    assert_eq!(extracted.coverage, ExtractionCoverage::IndexedComplete);
     assert_eq!(
-        extracted.coverage,
-        ExtractionCoverage::SkippedNoExtractableText
+        extracted
+            .sections
+            .iter()
+            .map(|section| section.content.as_str())
+            .collect::<Vec<_>>(),
+        ["Hi"]
     );
-    assert!(extracted.sections.is_empty());
+    // The page is the locator and never the heading, and nothing invents
+    // frontmatter, aliases, or links for a PDF.
+    assert!(extracted.sections[0].heading_path.is_empty());
     assert_eq!(
+        extracted.sections[0].locator,
+        Some(SourceLocator::PdfPage { page: 1 })
+    );
+    assert!(extracted.aliases.is_empty());
+    assert!(extracted.links_out.is_empty());
+    assert!(extracted.notices.is_empty());
+    // The retired stub's notice code must not survive anywhere in the outcome.
+    assert!(
         extracted
             .notices
             .iter()
-            .map(|notice| notice.code.as_str())
-            .collect::<Vec<_>>(),
-        vec!["format_not_yet_supported"]
+            .all(|notice| notice.code != "format_not_yet_supported")
     );
 }
 
 #[test]
+fn an_unreadable_pdf_is_quarantined_rather_than_reported_as_an_unsupported_format() {
+    use crate::extract::ExtractionCoverage;
+    use crate::format::SourceFormat;
+
+    let extracted = crate::formats::extract_source(SourceFormat::Pdf, b"not a pdf at all")
+        .expect("an admitted PDF reports an outcome rather than an error");
+    assert_eq!(extracted.coverage, ExtractionCoverage::Quarantined);
+    assert!(extracted.sections.is_empty());
+    assert_eq!(extracted.notices[0].code, "pdf_not_a_pdf");
+}
+
+#[test]
 fn reading_geometry_produces_no_extracted_source() {
-    // The reader's return type carries no sections, properties, or coverage, so
-    // there is no route from it into an index. Pinning the shape keeps a later
-    // refactor from quietly growing one.
+    // Geometry is the reader's own layer: its return type carries no sections,
+    // properties, or coverage, so text only reaches an index by going through
+    // `candidate` and the layout rules that live there. Pinning the shape keeps
+    // a later refactor from growing a second, unruled route.
     let geometry = geometry(&measured_document(b"BT /F1 12 Tf 1 0 0 1 0 0 Tm (a) Tj ET"));
     assert_eq!(geometry.page_count, 1);
     assert_eq!(geometry.pages[0].runs.len(), 1);
@@ -610,6 +644,7 @@ fn the_reported_limits_match_the_constants_the_reader_enforces() {
         limits::MAX_OPERATIONS_PER_PAGE
     );
     assert_eq!(reported.max_runs_per_page, limits::MAX_RUNS_PER_PAGE);
+    assert_eq!(reported.max_total_runs, limits::MAX_TOTAL_RUNS);
     assert_eq!(reported.max_glyphs_per_page, limits::MAX_GLYPHS_PER_PAGE);
     assert_eq!(
         reported.max_graphics_stack_depth,
@@ -850,6 +885,129 @@ fn runs_per_page_boundary() {
     assert_eq!(over_limit.pages[0].runs.len(), limits::MAX_RUNS_PER_PAGE);
     assert!(over_limit.truncated);
     assert!(notice_codes(&over_limit).contains(&"pdf_page_run_limit_exceeded"));
+    assert!(
+        !notice_codes(&over_limit).contains(&"pdf_document_run_limit_exceeded"),
+        "a page that exhausts its own cap has not exhausted the document's"
+    );
+}
+
+/// `()Tj`: the shape the document-wide run budget exists for. It decodes to no
+/// text, so it charges the aggregate *text* budget nothing, and it still retains
+/// a full run — five content bytes each, against a 128 MiB aggregate content
+/// budget. Before the document budget existed this reached 5.25 GB of peak RSS
+/// from a 47,797-byte file and reported a benign "no text layer" skip.
+fn empty_run_pages(pages: usize, runs_per_page: usize) -> Vec<u8> {
+    let mut content = b"BT /F1 10 Tf 1 0 0 1 0 700 Tm ".to_vec();
+    for _ in 0..runs_per_page {
+        content.extend_from_slice(b"()Tj ");
+    }
+    content.extend_from_slice(b"ET");
+    let contents: Vec<&[u8]> = vec![content.as_slice(); pages];
+    helvetica_document(&contents)
+}
+
+/// Every other budget test in this file derives its fixture from the constant it
+/// exercises, which pins the *mechanism* but not the *value*: widening the
+/// constant merely scales the fixture and the test still passes. That is fine
+/// for budgets whose value is a performance choice, and not fine for this one,
+/// where the value is the memory ceiling itself — 2,000,000 runs is about 400 MB
+/// of retained `PdfTextRun` at the measured ~197 bytes each, and doubling it
+/// silently doubles what a 47 KB file can spend in an Obsidian worker with a
+/// 4 GiB address space. So the value is pinned literally here.
+#[test]
+fn the_document_run_budget_is_pinned_to_its_measured_ceiling() {
+    assert_eq!(
+        limits::MAX_TOTAL_RUNS,
+        2_000_000,
+        "changing this changes the reader's peak memory; see limits::MAX_TOTAL_RUNS"
+    );
+    const {
+        assert!(
+            limits::MAX_TOTAL_RUNS >= limits::MAX_RUNS_PER_PAGE,
+            "a document budget below the page budget would make the page cap unreachable"
+        );
+    }
+}
+
+/// The document budget is enforced through the budget the reader *passes* the
+/// page interpreter, not through the per-page constant, so this pins the two
+/// facts that separation creates without building a two-million-run fixture:
+/// a page stops at the budget it was handed, and a budget below the per-page cap
+/// is reported as the *document's* limit — a page stopped at run 8 has exceeded
+/// nothing of its own, and saying `pdf_page_run_limit_exceeded` there would be a
+/// false statement about which document is at fault.
+#[test]
+fn a_page_stops_at_the_budget_it_was_handed() {
+    let bytes = many_run_document(64);
+    let document = lopdf::Document::load_mem(&bytes).expect("fixture should load");
+    let (_, page_id) = document
+        .get_pages()
+        .into_iter()
+        .next()
+        .expect("the fixture has one page");
+    let content = document
+        .get_page_content_with_limit(page_id, limits::MAX_CONTENT_STREAM_BYTES)
+        .expect("content should decode");
+
+    let mut text_budget = super::content::TextBudget::new();
+    let outcome = super::content::interpret_page(
+        &document,
+        page_id,
+        1,
+        super::state::Matrix::IDENTITY,
+        &content,
+        8,
+        &mut text_budget,
+    );
+
+    assert_eq!(
+        outcome.runs.len(),
+        8,
+        "the page emits the budget it was handed, not MAX_RUNS_PER_PAGE"
+    );
+    assert!(outcome.truncated);
+    let codes: Vec<&str> = outcome.notices.iter().map(|(code, _)| *code).collect();
+    assert!(
+        codes.contains(&"pdf_document_run_limit_exceeded"),
+        "a sub-page budget is the document's remainder, got {codes:?}"
+    );
+    assert!(!codes.contains(&"pdf_page_run_limit_exceeded"));
+}
+
+/// Retains `MAX_TOTAL_RUNS` runs, about 400 MB, which is more memory than the
+/// rest of the suite combined. Excluded from the default run rather than
+/// deleted, for the same reason as [`total_content_stream_boundary`] — a budget
+/// nobody exercises is a comment:
+///
+/// ```text
+/// cargo test -p kwiry-core -- --ignored total_runs_boundary
+/// ```
+#[test]
+#[ignore = "retains 2 million runs, about 400 MB; see the doc comment"]
+fn total_runs_boundary() {
+    let per_page = limits::MAX_RUNS_PER_PAGE;
+    let pages = limits::MAX_TOTAL_RUNS / per_page;
+
+    let at_limit = geometry(&empty_run_pages(pages, per_page));
+    let total: usize = at_limit.pages.iter().map(|page| page.runs.len()).sum();
+    assert_eq!(total, limits::MAX_TOTAL_RUNS);
+    assert!(!at_limit.truncated);
+    assert!(!notice_codes(&at_limit).contains(&"pdf_document_run_limit_exceeded"));
+
+    // One page more. The aggregate budget is spent, so the extra page emits no
+    // run at all and is refused under the document-level code — note that it is
+    // refused despite being nowhere near its own per-page cap, which is the
+    // whole point of the budget being document-wide.
+    let over_limit = geometry(&empty_run_pages(pages + 1, per_page));
+    let total: usize = over_limit.pages.iter().map(|page| page.runs.len()).sum();
+    assert_eq!(
+        total,
+        limits::MAX_TOTAL_RUNS,
+        "a hard ceiling on retained runs, not a soft target"
+    );
+    assert!(over_limit.truncated);
+    assert!(over_limit.pages[pages].runs.is_empty());
+    assert!(notice_codes(&over_limit).contains(&"pdf_document_run_limit_exceeded"));
 }
 
 fn operation_document(filler_operations: usize) -> Vec<u8> {
@@ -947,9 +1105,13 @@ fn many_large_pages(pages: usize, content_len: usize) -> Vec<u8> {
 /// deleted, because a budget nobody exercises is a comment:
 ///
 /// ```text
-/// cargo test -p kwiry-core --features internal-pdf-extractor \
-///     -- --ignored total_content_stream_boundary
+/// cargo test -p kwiry-core -- --ignored total_content_stream_boundary
 /// ```
+///
+/// No feature flag: PDF is admitted, so the reader compiles in the default
+/// build. The `--features internal-pdf-extractor` this line used to carry became
+/// a no-op when that feature was reduced to an alias for `portable`, which
+/// `default = ["native"]` already implies.
 #[test]
 #[ignore = "builds a ~160 MiB fixture; see the doc comment"]
 fn total_content_stream_boundary() {

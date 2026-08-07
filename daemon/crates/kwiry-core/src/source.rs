@@ -945,19 +945,19 @@ views:
         );
     }
 
+    /// This test previously asserted that PDF skipped as an unsupported format
+    /// without its bytes being decoded. PDF is admitted, so the same bytes now
+    /// reach the extractor and are quarantined as an invalid source — the same
+    /// change DOCX made at its admission, asserted rather than deleted.
     #[test]
-    fn unsupported_document_formats_skip_without_text_decoding() {
+    fn malformed_pdf_is_quarantined_rather_than_skipped() {
         let bytes = [0xff, 0x00, 0xfe];
         let prepared =
             prepare_source_buffer(&descriptor("paper.pdf", SourceFormat::Pdf, &bytes), &bytes)
                 .unwrap();
         assert_eq!(prepared.kind, SourcePreparationKind::Skipped);
-        assert_eq!(
-            prepared.coverage,
-            ExtractionCoverage::SkippedNoExtractableText
-        );
+        assert_eq!(prepared.coverage, ExtractionCoverage::Quarantined);
         assert!(prepared.chunks.is_empty());
-        assert!(prepared.warning.unwrap().contains("not yet supported"));
     }
 
     #[test]
