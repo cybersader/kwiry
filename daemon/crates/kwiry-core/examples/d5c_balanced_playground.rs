@@ -14,7 +14,14 @@ use kwiry_core::{
 use serde::{Deserialize, Serialize};
 
 const CORPUS_SCHEMA_VERSION: u32 = 1;
-const ADAPTER_ABI_VERSION: u32 = 2;
+// The adapter owns this number, but it lives in the crate that depends on this
+// one, so the value cannot be imported and has to be restated here. Nothing
+// makes the two agree, and they silently stopped agreeing when admitting PDF
+// moved the ABI to 3: the corpus was carried forward and this copy was not, so
+// every evaluation was rejected as incompatible. Advance this whenever
+// ADAPTER_ABI_VERSION in clients/obsidian/rust/kwiry-obsidian-wasm/src/lib.rs
+// moves.
+const ADAPTER_ABI_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
