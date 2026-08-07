@@ -3,7 +3,7 @@
     "name": "prepare-full-profile",
     "operation": "prepare_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -63,7 +63,7 @@
     "name": "tier-dominance",
     "operation": "finalize_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -132,7 +132,7 @@
     "name": "same-tier-recency",
     "operation": "finalize_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -201,7 +201,7 @@
     "name": "source-fanout",
     "operation": "finalize_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -299,7 +299,7 @@
     "name": "mixed-full-range-types",
     "operation": "finalize_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -504,7 +504,7 @@
     "name": "component-hierarchy",
     "operation": "finalize_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -624,7 +624,7 @@
     "name": "stable-ties",
     "operation": "finalize_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -685,7 +685,7 @@
     "name": "qualified-authorization",
     "operation": "finalize_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -758,7 +758,7 @@
     "name": "malformed-profile",
     "operation": "prepare_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "prepare_d5c_preview",
       "profile": {
         "schema_version": 1,
@@ -776,7 +776,7 @@
     "name": "incomplete-observations",
     "operation": "finalize_d5c_preview",
     "request": {
-      "abi_version": 2,
+      "abi_version": 3,
       "operation": "finalize_d5c_preview",
       "profile": {
         "schema_version": 1,
