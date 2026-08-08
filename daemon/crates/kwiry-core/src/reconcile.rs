@@ -31,6 +31,14 @@ pub(crate) enum ChangeReason {
     RegistrationFingerprintChanged,
     ResourceChanged,
     OutcomeChanged,
+    /// The previous row was produced under a different per-format identity.
+    ///
+    /// Belt and braces, matching [`ReadReason::ExtractionProfileChanged`]:
+    /// open-time eviction removes such a row before any plan can observe it, so
+    /// this arm should be unreachable — but `plan_source` otherwise decides on
+    /// presence, scope, registration, outcome, and content hash alone, and
+    /// would happily call an identity-stale row `Unchanged`.
+    FormatIdentityChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,10 +69,12 @@ pub(crate) enum ReadReason {
     StrictHash,
     NewSource,
     RegistrationChanged,
-    /// The manifest entry was produced by a different extractor tier than this
-    /// build compiles. Belt and braces: a policy change already rebuilds the
-    /// whole index at `Manifest::validate`, so nothing should reach here — but
-    /// nothing else in the metadata ladder would notice if it did.
+    /// The manifest entry was produced under a different per-format identity
+    /// than this build compiles — a different extractor tier, or a bumped
+    /// extractor version. Belt and braces: open-time eviction removes such a
+    /// row before any pass observes it, so nothing should reach here — but
+    /// nothing else in the metadata ladder would notice if it did, and the
+    /// ladder must not reuse metadata for a row it cannot vouch for.
     ExtractionProfileChanged,
     ResourceChanged,
     SizeChanged,
@@ -116,7 +126,7 @@ pub(crate) fn plan_observation(
     if previous.registration_fingerprint != registration_fingerprint {
         return ObservationDecision::ReadHash(ReadReason::RegistrationChanged);
     }
-    if previous.extraction_profile != crate::policy::extraction_profile_for(previous.format) {
+    if !previous.identity_matches() {
         return ObservationDecision::ReadHash(ReadReason::ExtractionProfileChanged);
     }
     if previous.byte_length != file.byte_length {
@@ -312,6 +322,13 @@ pub(crate) fn plan_source(
     if previous.registration_fingerprint != next.registration_fingerprint {
         return SourceDecision::Reingest(ChangeReason::RegistrationFingerprintChanged);
     }
+    // `next` was just produced by this build, so its identity is the running
+    // one by construction; comparing `previous` against the running identity
+    // directly is what makes an absent identity a re-ingest rather than a
+    // `None == None` match.
+    if !previous.identity_matches() {
+        return SourceDecision::Reingest(ChangeReason::FormatIdentityChanged);
+    }
     if previous.outcome != next.outcome {
         return SourceDecision::Reingest(ChangeReason::OutcomeChanged);
     }
@@ -332,6 +349,10 @@ mod tests {
             path: "note.md".to_owned(),
             format: crate::format::SourceFormat::Markdown,
             extraction_profile: crate::policy::ExtractionProfile::Portable,
+            format_identity: Some(
+                crate::policy::format_identity_fingerprint(crate::format::SourceFormat::Markdown)
+                    .to_owned(),
+            ),
             coverage: crate::extract::ExtractionCoverage::IndexedComplete,
             content_hash: hash.to_owned(),
             registration_fingerprint: fingerprint.to_owned(),
@@ -395,6 +416,78 @@ mod tests {
                 Some(&previous),
             ),
             SourceDecision::Reingest(ChangeReason::ResourceChanged)
+        );
+    }
+
+    /// Hole (a): a source whose bytes, mtime, registration, and outcome are all
+    /// unchanged but whose recorded format identity moved must be re-ingested,
+    /// not called `Unchanged`. Open-time eviction already removes such a row,
+    /// so this arm is belt and braces — but without it `plan_source` would
+    /// happily reuse it, because it inspects nothing else that would notice.
+    #[test]
+    fn a_stale_format_identity_precedes_content_equality() {
+        let mut previous = manifest_file("hash", "fingerprint");
+        previous.format_identity = Some("f".repeat(64));
+        assert_eq!(
+            plan_source(
+                Some(&previous),
+                &manifest_file("hash", "fingerprint"),
+                &PartitionScope::Whole,
+                None,
+            ),
+            SourceDecision::Reingest(ChangeReason::FormatIdentityChanged)
+        );
+    }
+
+    /// The same for an identity that was never recorded. `None` must never
+    /// compare equal to the running identity, nor to another `None`.
+    #[test]
+    fn an_absent_format_identity_forces_reingest_and_a_byte_read() {
+        let mut previous = manifest_file("hash", "fingerprint");
+        previous.format_identity = None;
+        let mut next = manifest_file("hash", "fingerprint");
+        next.format_identity = None;
+        assert_eq!(
+            plan_source(Some(&previous), &next, &PartitionScope::Whole, None),
+            SourceDecision::Reingest(ChangeReason::FormatIdentityChanged)
+        );
+        assert_eq!(
+            plan_observation(
+                Some(&previous),
+                &discovered(previous.byte_length, previous.mtime_nanos),
+                "fingerprint",
+                &PartitionScope::Whole,
+                Some(&PartitionScope::Whole),
+                policy(
+                    IndexFreshnessBasis::MetadataAudit,
+                    previous.mtime_nanos + 10_000_000_000,
+                ),
+                SourceSignals::default(),
+            ),
+            ObservationDecision::ReadHash(ReadReason::ExtractionProfileChanged)
+        );
+    }
+
+    /// The metadata ladder must not reuse metadata for a row whose identity it
+    /// cannot vouch for, even when every other signal says the file is settled.
+    #[test]
+    fn metadata_reuse_is_refused_for_a_stale_format_identity() {
+        let mut previous = manifest_file("hash", "fingerprint");
+        previous.format_identity = Some("0".repeat(64));
+        assert_eq!(
+            plan_observation(
+                Some(&previous),
+                &discovered(previous.byte_length, previous.mtime_nanos),
+                "fingerprint",
+                &PartitionScope::Whole,
+                Some(&PartitionScope::Whole),
+                policy(
+                    IndexFreshnessBasis::MetadataAudit,
+                    previous.mtime_nanos + 10_000_000_000,
+                ),
+                SourceSignals::default(),
+            ),
+            ObservationDecision::ReadHash(ReadReason::ExtractionProfileChanged)
         );
     }
 

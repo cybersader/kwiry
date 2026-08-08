@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 use zerocopy::IntoBytes;
 
 use crate::error::{Error, Result};
+use crate::format::SourceFormat;
+use crate::policy::format_identity_fingerprint;
 
 /// Canonical description of everything that changes embedding outputs.
 /// Any fingerprint change invalidates all stored vectors.
@@ -62,6 +64,32 @@ pub fn embedding_text(heading_path: &[String], content: &str) -> String {
     }
     text.push_str(content);
     text
+}
+
+/// The identity of the *text* a source's vectors were computed from, and the
+/// only thing `embed_and_replace_source` may reuse vectors on.
+///
+/// The source bytes alone are not enough, and the split identity is what makes
+/// that concrete. Evicting a format's rows deletes its postings and re-ingests
+/// the source from **byte-identical** input, so `content_hash` does not move —
+/// while the extractor that turns those bytes into chunk text has changed by
+/// definition. Reusing the stored vectors there would rank `semantic` and
+/// `hybrid` results by an embedding of text the running build no longer emits:
+/// retrieval evidence served under an identity it was not built under, and
+/// silently, because the hit bodies are hydrated from the current lexical
+/// index. Binding the per-format identity in makes that case refuse to reuse
+/// and re-embed instead, which is the only safe narrowing available.
+///
+/// Domain-separated and length-prefixed so the two components cannot be
+/// re-partitioned into the same digest.
+pub fn embedding_source_identity(content_hash: &str, format: SourceFormat) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"kwiry-embedding-source-identity-v1\0");
+    for component in [content_hash, format_identity_fingerprint(format)] {
+        digest.update((component.len() as u64).to_le_bytes());
+        digest.update(component.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
 }
 
 pub trait Embedder: Send {

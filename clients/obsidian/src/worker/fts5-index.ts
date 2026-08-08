@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import { FORMAT_IDENTITIES, formatIdentity } from "../source-formats";
 import { openPlainBlockVfs, type BlockVfsHandle } from "./block-vfs";
 import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "./exact-identifier-token";
 import {
   CACHE_SCHEMA_VERSION,
   MAX_EXPORT_BLOB_BYTES,
   MAX_RECONCILIATION_SOURCES,
+  SOURCE_FORMATS,
   emptySourceFormatCounts,
+  emptySourceFormatTally,
   isExtractionCoverage,
   isSourceFormat,
   isSourceLocator,
@@ -16,6 +19,8 @@ import {
 import type {
   ExtractionCoverage,
   ReconciliationPlanResult,
+  RestoreEvictionReport,
+  SourceFormatTally,
   ReconciliationSourceMetadata,
   SourceFormat,
   SourceFormatCounts,
@@ -274,7 +279,9 @@ CREATE TABLE sources (
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
   source_format TEXT NOT NULL
-    CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf')),
+    CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf','excalidraw')),
+  format_identity TEXT NOT NULL
+    CHECK(length(format_identity) = 64 AND format_identity NOT GLOB '*[^0-9a-f]*'),
   extraction_coverage TEXT NOT NULL
     CHECK(extraction_coverage IN (
       'indexed-complete','indexed-partial','skipped-no-extractable-text','unreadable','quarantined'
@@ -511,12 +518,13 @@ const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "table", name: "source_property_text_fts_data", table: "source_property_text_fts_data", sql: "CREATE TABLE 'source_property_text_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
   { type: "table", name: "source_property_text_fts_docsize", table: "source_property_text_fts_docsize", sql: "CREATE TABLE 'source_property_text_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)" },
   { type: "table", name: "source_property_text_fts_idx", table: "source_property_text_fts_idx", sql: "CREATE TABLE 'source_property_text_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
-  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,source_format TEXT NOT NULL CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf')),extraction_coverage TEXT NOT NULL CHECK(extraction_coverage IN ('indexed-complete','indexed-partial','skipped-no-extractable-text','unreadable','quarantined')),outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),exact_filename TEXT,exact_stem TEXT,exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),exact_title TEXT,aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK((outcome = 'indexed' AND extraction_coverage IN ('indexed-complete','indexed-partial')) OR (outcome = 'skipped' AND extraction_coverage IN ('skipped-no-extractable-text','unreadable','quarantined'))),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
+  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,source_format TEXT NOT NULL CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf','excalidraw')),format_identity TEXT NOT NULL CHECK(length(format_identity) = 64 AND format_identity NOT GLOB '*[^0-9a-f]*'),extraction_coverage TEXT NOT NULL CHECK(extraction_coverage IN ('indexed-complete','indexed-partial','skipped-no-extractable-text','unreadable','quarantined')),outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),exact_filename TEXT,exact_stem TEXT,exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),exact_title TEXT,aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK((outcome = 'indexed' AND extraction_coverage IN ('indexed-complete','indexed-partial')) OR (outcome = 'skipped' AND extraction_coverage IN ('skipped-no-extractable-text','unreadable','quarantined'))),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
   { type: "view", name: "chunk_search", table: "chunk_search", sql: "CREATE VIEW chunk_search AS SELECT c.rowid AS rowid,json_extract(s.retrieval_json,'$.filename') AS filename,json_extract(s.retrieval_json,'$.stem') AS stem,s.aliases_text AS aliases,s.title_text AS title,c.heading_text AS heading_text,s.path AS path_text,s.tags_text AS tags,c.content AS content FROM chunks c JOIN sources s ON s.source_key = c.source_key" },
 ];
 
 const SOURCE_COLUMNS_SQL = `
-source_key, vault_id, path, source_format, extraction_coverage, outcome, content_hash, byte_length,
+source_key, vault_id, path, source_format, format_identity, extraction_coverage, outcome,
+content_hash, byte_length,
 mtime_nanos, retrieval_json, exact_filename, exact_stem, exact_aliases_json, exact_title,
 aliases_text, title_text, tags_text, chunk_count, property_count, property_scalar_count
 `;
@@ -542,7 +550,8 @@ LIMIT ?
 `;
 
 const INSERT_SOURCE_SQL = `
-INSERT INTO sources(${SOURCE_COLUMNS_SQL}) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO sources(${SOURCE_COLUMNS_SQL})
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 const INSERT_PROPERTY_SQL = `
@@ -700,7 +709,14 @@ SELECT
        (SELECT count(*) FROM source_properties p WHERE p.source_key = s.source_key)
      OR s.property_scalar_count <>
        (SELECT count(*) FROM source_property_scalars p WHERE p.source_key = s.source_key)
-  ) AS source_tally_mismatches
+  ) AS source_tally_mismatches,
+  -- Post-eviction invariant. Every surviving row must carry the identity this
+  -- build compiles for its own format. IS NOT rather than <> so a format
+  -- missing from the bound identity map counts as a mismatch instead of
+  -- evaluating to NULL and being dropped by the comparison.
+  (SELECT count(*) FROM sources
+     WHERE format_identity IS NOT json_extract(?, '$.' || source_format))
+    AS foreign_format_identities
 `;
 
 interface ExistingGenerationState {
@@ -728,6 +744,10 @@ export class Fts5GenerationIndex {
   private readonly closeStrategy: () => void;
   private readonly compactOnExport: boolean;
   private latestLexicalTrace: InternalLexicalTrace | null = null;
+  private restoreEvictions: RestoreEvictionReport = {
+    stale_identity: emptySourceFormatTally(),
+    disabled_format: emptySourceFormatTally(),
+  };
 
   constructor(
     private readonly db: SQLiteDatabase,
@@ -990,6 +1010,10 @@ export class Fts5GenerationIndex {
                 change.preparation.vault_id,
                 change.preparation.path,
                 change.preparation.format,
+                // Never a fallback: a format with no compiled identity must
+                // fail the whole source batch rather than persist a row whose
+                // reusability could never be proven.
+                formatIdentity(change.preparation.format),
                 change.preparation.coverage,
                 change.preparation.kind,
                 change.preparation.content_hash,
@@ -1438,6 +1462,19 @@ export class Fts5GenerationIndex {
     }
   }
 
+  /**
+   * What `openRestoredFts5Generation` refused to reuse. Set once, at open time;
+   * a generation built from scratch reports zeros because it reused nothing.
+   */
+  get evictions(): RestoreEvictionReport {
+    return this.restoreEvictions;
+  }
+
+  /** @internal Only the restore path may state this, and only once. */
+  recordRestoreEvictions(report: RestoreEvictionReport): void {
+    this.restoreEvictions = report;
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -1494,7 +1531,10 @@ export class Fts5GenerationIndex {
     expectedSources: number,
     validateExactProjection = true,
   ): void {
-    const rows = this.db.selectObjects(RECONCILE_SQL, [this.vaultId, this.sourcePolicyHash]);
+    const rows = this.db.selectObjects(
+      RECONCILE_SQL,
+      [this.vaultId, this.sourcePolicyHash, JSON.stringify(FORMAT_IDENTITIES)],
+    );
     if (rows.length !== 1) {
       throw new IndexIntegrityError("FTS5 reconciliation query returned no row");
     }
@@ -1530,7 +1570,8 @@ export class Fts5GenerationIndex {
       || !isNonNegativeSafeInteger(row.orphan_properties)
       || !isNonNegativeSafeInteger(row.orphan_property_scalars)
       || !isNonNegativeSafeInteger(row.skipped_with_rows)
-      || !isNonNegativeSafeInteger(row.source_tally_mismatches)) {
+      || !isNonNegativeSafeInteger(row.source_tally_mismatches)
+      || !isNonNegativeSafeInteger(row.foreign_format_identities)) {
       throw new IndexIntegrityError("FTS5 reconciliation query returned invalid counts");
     }
     if (row.identity !== 1
@@ -1564,7 +1605,8 @@ export class Fts5GenerationIndex {
       || row.orphan_property_fts !== 0
       || row.missing_property_fts !== 0
       || row.skipped_with_rows !== 0
-      || row.source_tally_mismatches !== 0) {
+      || row.source_tally_mismatches !== 0
+      || row.foreign_format_identities !== 0) {
       throw new IndexIntegrityError("FTS5 index and chunk metadata disagree");
     }
     if (validateExactProjection) {
@@ -1622,6 +1664,7 @@ export function openRestoredFts5Generation(
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   expectedVaultId = "active",
   expectedSourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
+  enabledSourceFormats: readonly SourceFormat[] = SOURCE_FORMATS,
 ): Fts5GenerationIndex {
   let handle: BlockVfsHandle | null = null;
   try {
@@ -1660,6 +1703,12 @@ export function openRestoredFts5Generation(
       throw new CacheImageInvalidError("cache image failed FTS5 integrity validation");
     }
     validatePositiveRestoredRowids(db);
+    // Eviction happens here, before the inventory is read, so every count,
+    // every reconciliation plan, and every query afterwards is computed from
+    // surviving rows alone. Deriving the tallies from what is left is also why
+    // no ledger arithmetic can go wrong: nothing is decremented.
+    const evictions = projectRestoredSources(db, enabledSourceFormats);
+    requireDatabaseWithinLimit(db, effectiveDatabaseByteLimit);
     const inventory = readRestoredInventory(
       db,
       limits,
@@ -1693,6 +1742,7 @@ export function openRestoredFts5Generation(
       exportImage: () => ownedHandle.exportImage(),
       close: () => ownedHandle.close(),
     }, expectedVaultId, expectedSourcePolicyHash);
+    index.recordRestoreEvictions(evictions);
     try {
       index.assertIntegrity();
     } catch {
@@ -1709,6 +1759,88 @@ export function openRestoredFts5Generation(
       throw error;
     }
     throw error;
+  }
+}
+
+/**
+ * Deletes, before anything observes the restored image, every source row this
+ * build refuses to reuse.
+ *
+ * Two independent reasons, deliberately kept apart because they are different
+ * claims:
+ *
+ * * **Stale identity.** The row's format identity is not the one this build
+ *   compiles for that format, so the extractor that produced it is gone. The
+ *   row is evidence about a pipeline that no longer exists; it is removed and
+ *   the source is re-read by the ordinary reconciliation that follows.
+ * * **Disabled format.** The row is perfectly valid, but the user no longer
+ *   wants that format indexed. Removal is justified by configuration, so it
+ *   needs no filesystem probe: it involves no I/O and cannot be transiently
+ *   wrong, unlike an absent file which might only be an unreachable vault.
+ *
+ * This is a mandatory transformation at open time, never a read-time filter.
+ * Everything downstream — the inventory, the reconciliation plan, the search
+ * path — then holds by construction instead of by remembering to check. The
+ * restore path publishes the generation as searchable before reconciling, so a
+ * filter applied any later would answer queries from rows this build has
+ * already refused.
+ */
+function projectRestoredSources(
+  db: SQLiteDatabase,
+  enabledFormats: readonly SourceFormat[],
+): RestoreEvictionReport {
+  const identities = JSON.stringify(FORMAT_IDENTITIES);
+  const enabled = JSON.stringify([...enabledFormats]);
+  const report: RestoreEvictionReport = {
+    stale_identity: emptySourceFormatTally(),
+    disabled_format: emptySourceFormatTally(),
+  };
+  db.transaction("IMMEDIATE", () => {
+    // `IS NOT` rather than `<>`: a format absent from the compiled identity map
+    // yields NULL, and `<>` would evaluate to NULL and be dropped by the WHERE,
+    // silently retaining exactly the row that can least prove itself.
+    evictProjectedSources(
+      db,
+      `SELECT source_key, source_format FROM sources
+       WHERE format_identity IS NOT json_extract(?, '$.' || source_format)
+       ORDER BY source_key`,
+      [identities],
+      report.stale_identity,
+    );
+    evictProjectedSources(
+      db,
+      `SELECT source_key, source_format FROM sources
+       WHERE source_format NOT IN (SELECT value FROM json_each(?))
+       ORDER BY source_key`,
+      [enabled],
+      report.disabled_format,
+    );
+  });
+  return report;
+}
+
+function evictProjectedSources(
+  db: SQLiteDatabase,
+  selectSql: string,
+  bind: unknown[],
+  tally: SourceFormatTally,
+): void {
+  const rows = db.selectObjects(selectSql, bind);
+  for (const row of rows) {
+    if (typeof row.source_key !== "string" || !isSourceFormat(row.source_format)) {
+      throw new CacheImageInvalidError("cache source inventory is invalid");
+    }
+    // Same order as an ordinary source replacement: contentless postings must
+    // be cleared while the metadata rows that name their rowids still exist.
+    db.exec(DELETE_SOURCE_FTS_SQL, { bind: [row.source_key] });
+    db.exec(DELETE_SOURCE_PROPERTY_FTS_SQL, { bind: [row.source_key] });
+    db.exec(DELETE_SOURCE_EXACT_IDENTIFIERS_SQL, { bind: [row.source_key] });
+    db.exec(DELETE_SOURCE_EXACT_ALIASES_SQL, { bind: [row.source_key] });
+    db.exec(DELETE_SOURCE_CHUNKS_SQL, { bind: [row.source_key] });
+    db.exec(DELETE_SOURCE_PROPERTY_SCALARS_SQL, { bind: [row.source_key] });
+    db.exec(DELETE_SOURCE_PROPERTIES_SQL, { bind: [row.source_key] });
+    db.exec(DELETE_SOURCE_SQL, { bind: [row.source_key] });
+    tally[row.source_format] += 1;
   }
 }
 
@@ -2310,6 +2442,12 @@ interface StoredSource {
   vault_id: string;
   path: string;
   source_format: SourceFormat;
+  /**
+   * The per-format identity this row was built under. Always the running
+   * build's by the time a row is observed: `openRestoredFts5Generation`
+   * evicts every foreign row before anything reads the inventory.
+   */
+  format_identity: string;
   extraction_coverage: ExtractionCoverage;
   outcome: "indexed" | "skipped";
   content_hash: string | null;
@@ -2781,6 +2919,10 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
     || row.vault_id.length > 1_024
     || !isNormalizedVaultRelativePath(row.path)
     || !isSourceFormat(row.source_format)
+    // Exact equality against this build's identity for this row's format.
+    // Never `row.a === other.b`, never a default: a row that cannot prove it
+    // was built by the extractor now compiled is not observable at all.
+    || row.format_identity !== formatIdentity(row.source_format)
     || !isExtractionCoverage(row.extraction_coverage)
     || (row.outcome !== "indexed" && row.outcome !== "skipped")
     || !coverageMatchesOutcome(row.extraction_coverage, row.outcome)
@@ -2815,6 +2957,7 @@ function parseStoredSource(rows: Record<string, unknown>[]): StoredSource | null
     vault_id: row.vault_id,
     path: row.path,
     source_format: row.source_format,
+    format_identity: row.format_identity,
     extraction_coverage: row.extraction_coverage,
     outcome: row.outcome,
     content_hash: row.content_hash,

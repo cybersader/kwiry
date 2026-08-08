@@ -172,6 +172,7 @@ function diagnosticErrorCode(code: unknown): DiagnosticTextValue {
     case "index_update_failed":
     case "index_limit_exceeded":
     case "index_reconciling":
+    case "cache_partially_reused":
     case "index_building":
     case "cache_absent":
     case "cache_unavailable":

@@ -23,11 +23,15 @@ import {
 import {
   EXTRACTION_COVERAGES,
   SOURCE_FORMATS,
+  emptyRestoreEvictionReport,
   emptySourceFormatCounts,
+  evictedFormats,
 } from "../worker/protocol";
 import type {
   BuildResult,
   ExportGenerationResult,
+  RestoreEvictionReport,
+  SourceFormat,
   InitialBuildCheckpointExportResult,
   InitialBuildCheckpointReconciliationPlanResult,
   RestoreInitialBuildCheckpointResult,
@@ -40,10 +44,15 @@ import type {
 } from "../worker/protocol";
 
 export type IndexCounts = BuildResult;
+export type RestoredIndexCounts = BuildResult & { evictions: RestoreEvictionReport };
 export type { SourceRemoval } from "../worker/protocol";
 
 export interface IndexWorkerPort {
-  initialize(vaultId: string, sourcePolicyHash: string): Promise<unknown>;
+  initialize(
+    vaultId: string,
+    sourcePolicyHash: string,
+    enabledSourceFormats: readonly SourceFormat[],
+  ): Promise<unknown>;
   beginBuild(generation: string): Promise<IndexCounts>;
   addSourceBatch(generation: string, sources: SourceUpsert[]): Promise<IndexCounts>;
   applySourceChanges(
@@ -61,7 +70,7 @@ export interface CacheIndexWorkerPort extends IndexWorkerPort {
     hit: Extract<CacheLoad, { kind: "hit" }>,
     expectedCacheIdentity: string,
     expectedSourcePolicyHash: string,
-  ): Promise<IndexCounts>;
+  ): Promise<RestoredIndexCounts>;
   planReconciliation(
     generation: string,
     vaultId: string,
@@ -114,6 +123,14 @@ export type IndexControllerIssue =
   | "sources_quarantined"
   | "sources_unreadable"
   | "index_reconciling"
+  /**
+   * The cache was restored and is answering queries, but some of it was
+   * refused: a format's identity moved, or the user disabled a format. This is
+   * deliberately not `cache_incompatible` — nothing is being rebuilt, and
+   * telling the user their index is being rebuilt when one format is being
+   * reindexed is a false statement about how long they will wait.
+   */
+  | "cache_partially_reused"
   | "cache_absent"
   | "cache_unavailable"
   | "cache_corrupt"
@@ -152,6 +169,8 @@ export interface IndexControllerStatus {
   dirty: boolean;
   rebuilding: boolean;
   mutationEpoch?: number;
+  /** Present only while a partially reused cache is still being reconciled. */
+  partialReuse?: PartialReuseReport;
   progress?: {
     activity: IndexControllerActivity;
     completed: number;
@@ -188,6 +207,19 @@ export type IndexControllerStartupObservation =
       reason: "sources_omitted" | "vault_unavailable" | "index_capacity" | "backend_unavailable";
     };
 
+/**
+ * Which formats a restore refused, and why, so the status line can say what
+ * actually happened instead of collapsing every refusal into "rebuilding".
+ *
+ * `reindexing` formats will be read again by the reconciliation that follows.
+ * `removed` formats will not: their rows are gone because the user asked for
+ * that, and nothing replaces them.
+ */
+export interface PartialReuseReport {
+  reindexing: SourceFormat[];
+  removed: SourceFormat[];
+}
+
 /// Aggregate vault mutation counts. Paths are deliberately absent: the shape
 /// of the churn is what diagnoses a vault fighting itself, and note names are
 /// never diagnostic material.
@@ -220,6 +252,12 @@ export interface InPluginIndexControllerOptions {
   sourceReadTimeoutMs?: number;
   cache?: IndexControllerCacheOptions;
   initialColdPreview?: { enabled: true };
+  /**
+   * The formats the user currently wants indexed. Configuration, never
+   * identity: it is handed to the Worker so a restored image can be projected
+   * before publication, and it is never digested or persisted.
+   */
+  enabledSourceFormats?: readonly SourceFormat[];
 }
 
 const DEFAULT_LIMITS: IndexControllerLimits = {
@@ -299,6 +337,7 @@ export class InPluginIndexController {
   private readonly limits: IndexControllerLimits;
   private readonly cache: IndexControllerCacheOptions | null;
   private readonly sourcePolicyHash: string;
+  private readonly enabledSourceFormats: readonly SourceFormat[];
   private readonly initialColdPreviewEnabled: boolean;
   private readonly idleExportMs: number;
   private readonly sourceReadTimeoutMs: number;
@@ -365,6 +404,7 @@ export class InPluginIndexController {
   private initialBuildCheckpointToken: InitialBuildCheckpointToken | null = null;
   private cacheStore: CacheStorePort | null = null;
   private cacheIssue: IndexControllerIssue | null = null;
+  private partialReuse: PartialReuseReport | null = null;
   private lastPersistedGeneration: string | null = null;
 
   private readonly onVaultActivity: ((activity: VaultActivityReport) => void) | undefined;
@@ -389,6 +429,7 @@ export class InPluginIndexController {
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     this.cache = options.cache ?? null;
     this.sourcePolicyHash = options.cache?.sourcePolicyHash ?? DEFAULT_SOURCE_POLICY_HASH;
+    this.enabledSourceFormats = [...new Set(options.enabledSourceFormats ?? SOURCE_FORMATS)].sort();
     this.initialColdPreviewEnabled = options.initialColdPreview?.enabled === true;
     this.idleExportMs = options.cache?.idleExportMs ?? DEFAULT_IDLE_EXPORT_MS;
     this.sourceReadTimeoutMs = options.sourceReadTimeoutMs ?? DEFAULT_SOURCE_READ_TIMEOUT_MS;
@@ -695,7 +736,11 @@ export class InPluginIndexController {
 
   private async runLoop(): Promise<void> {
     if (!this.workerInitialized) {
-      await this.worker.initialize(ACTIVE_VAULT_ID, this.sourcePolicyHash);
+      await this.worker.initialize(
+        ACTIVE_VAULT_ID,
+        this.sourcePolicyHash,
+        this.enabledSourceFormats,
+      );
       this.requireActive();
       this.workerInitialized = true;
     }
@@ -720,7 +765,13 @@ export class InPluginIndexController {
     if (this.startupReconciling) {
       this.startupReconciling = false;
       this.replaySubphase = null;
-      if (this.cacheIssue === "index_reconciling") this.cacheIssue = null;
+      // The refused rows have now been re-read (or deliberately not), so the
+      // partial-reuse statement has stopped being true and must stop being made.
+      this.partialReuse = null;
+      if (this.cacheIssue === "index_reconciling"
+        || this.cacheIssue === "cache_partially_reused") {
+        this.cacheIssue = null;
+      }
       this.emit("ready");
     }
   }
@@ -786,7 +837,7 @@ export class InPluginIndexController {
       this.emit("starting");
       return;
     } else {
-      let counts: IndexCounts | null = null;
+      let counts: RestoredIndexCounts | null = null;
       try {
         counts = await this.worker.restoreGeneration(
           loaded,
@@ -818,7 +869,10 @@ export class InPluginIndexController {
         this.setActiveCounts(counts);
         this.lastPersistedGeneration = counts.generation;
         this.startupReconciling = true;
-        this.cacheIssue = "index_reconciling";
+        this.recordPartialReuse(counts.evictions);
+        this.cacheIssue = this.partialReuse === null
+          ? "index_reconciling"
+          : "cache_partially_reused";
         this.replaySubphase = "planning";
         this.completed = 0;
         this.total = null;
@@ -835,6 +889,21 @@ export class InPluginIndexController {
 
     if (checkpointEligible && await this.tryResumeInitialBuildCheckpoint()) return;
     this.emit("starting");
+  }
+
+  /**
+   * Turns a Worker eviction report into the statement the status line makes.
+   *
+   * A report with no evicted row leaves `partialReuse` null, so the ordinary
+   * "reconciling" statement stands: a restore that reused everything is not a
+   * partial reuse and must not be described as one.
+   */
+  private recordPartialReuse(report: RestoreEvictionReport): void {
+    const reindexing = evictedFormats(report.stale_identity);
+    const removed = evictedFormats(report.disabled_format);
+    this.partialReuse = reindexing.length === 0 && removed.length === 0
+      ? null
+      : { reindexing, removed };
   }
 
   private async classifyCacheMissReason(
@@ -945,6 +1014,7 @@ export class InPluginIndexController {
       return false;
     }
 
+    this.recordPartialReuse(restored.evictions);
     try {
       await this.resumeInitialBuildFromCheckpoint(
         worker,
@@ -1008,7 +1078,9 @@ export class InPluginIndexController {
     this.completed = 0;
     this.total = null;
     this.currentPath = null;
-    this.cacheIssue = "index_reconciling";
+    this.cacheIssue = this.partialReuse === null
+      ? "index_reconciling"
+      : "cache_partially_reused";
     this.emit("replay");
 
     const reconciled = await this.reconcileCheckpointPrefix(worker, generation, cursor, restored);
@@ -1074,6 +1146,7 @@ export class InPluginIndexController {
     this.inFlight = 0;
     this.stallCategory = null;
     this.cacheIssue = null;
+    this.partialReuse = null;
     this.emit(this.hasPendingChanges() ? "replay" : "ready");
     await this.discardInitialBuildCheckpoint("completed", null);
     if (this.cacheIssue === "checkpoint_discard_failed") this.emit("ready");
@@ -2496,7 +2569,7 @@ export class InPluginIndexController {
         : undefined;
     const issue = explicitIssue
       ?? (this.startupReconciling
-        ? "index_reconciling"
+        ? this.partialReuse === null ? "index_reconciling" : "cache_partially_reused"
         : this.cacheIssue ?? omissionIssue);
     const status: IndexControllerStatus = {
       stage,
@@ -2514,6 +2587,7 @@ export class InPluginIndexController {
       dirty,
       rebuilding: stage === "rebuild",
       mutationEpoch: this.mutationEpoch,
+      ...(this.partialReuse === null ? {} : { partialReuse: clonePartialReuse(this.partialReuse) }),
       ...(progress ? { progress } : {}),
       ...(issue ? { issue } : {}),
     };
@@ -2894,6 +2968,10 @@ function assertCompleteReconciliationPlan(
     || plan.matched_source_count + plan.remove.length !== plan.stored_source_count) {
     throw new Error("reconciliation plan did not prove complete ledger coverage");
   }
+}
+
+function clonePartialReuse(report: PartialReuseReport): PartialReuseReport {
+  return { reindexing: [...report.reindexing], removed: [...report.removed] };
 }
 
 function cloneSourceFormatCounts(counts: SourceFormatCounts): SourceFormatCounts {

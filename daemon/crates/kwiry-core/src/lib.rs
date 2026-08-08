@@ -119,15 +119,15 @@ pub use formats::{
     PdfSection, PdfTextRun, PdfWritingMode, extract_pdf_candidate, pdf_limits, read_pdf_geometry,
 };
 #[cfg(feature = "native")]
-pub use generation::{DataRoot, DataRootLock, GenerationPaths};
+pub use generation::{DataRoot, DataRootLock, DiscardedGeneration, GenerationPaths};
 #[cfg(feature = "native")]
 pub use index::build_index;
 #[cfg(feature = "portable")]
 pub use lexical::normalize_lexical_value;
 #[cfg(feature = "native")]
 pub use manifest::{
-    INDEX_FORMAT_VERSION, MANIFEST_VERSION, Manifest, ManifestFile, ManifestFileOutcome,
-    registration_fingerprint,
+    EvictedSource, EvictionReport, INDEX_FORMAT_VERSION, MANIFEST_VERSION, Manifest, ManifestFile,
+    ManifestFileOutcome, ManifestOnDisk, registration_fingerprint,
 };
 #[cfg(feature = "native")]
 pub use model::{
@@ -143,8 +143,9 @@ pub use model::{
 };
 #[cfg(feature = "portable")]
 pub use policy::{
-    EXTRACTION_POLICY_SCHEMA_VERSION, ExtractionProfile, active_extraction_policy,
-    extraction_policy_fingerprint, extraction_profile_for,
+    EXTRACTION_POLICY_SCHEMA_VERSION, ExtractionProfile, FORMAT_IDENTITY_SCHEMA_VERSION,
+    active_extraction_policy, active_format_identities, extraction_policy_fingerprint,
+    extraction_profile_for, extractor_version_for, format_identity_fingerprint,
 };
 #[cfg(feature = "portable")]
 pub use query::{

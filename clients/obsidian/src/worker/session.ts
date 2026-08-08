@@ -15,12 +15,15 @@ import type {
   InitializeResult,
   ReconciliationPlanResult,
   ReconciliationSourceMetadata,
+  RestoreGenerationResult,
   RestoreInitialBuildCheckpointResult,
+  SourceFormat,
   SearchResult,
   SourceUpsert,
   SourceRemoval,
   StatusResult,
 } from "./protocol";
+import { SOURCE_FORMATS } from "./protocol";
 import {
   WorkerRpcClient,
   type WorkerLike,
@@ -46,11 +49,18 @@ export class InPluginWorkerSession {
     );
   }
 
-  initialize(vaultId: string, sourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH): Promise<InitializeResult> {
+  initialize(
+    vaultId: string,
+    sourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH,
+    enabledSourceFormats: readonly SourceFormat[] = SOURCE_FORMATS,
+  ): Promise<InitializeResult> {
     return this.client.request({
       operation: "initialize",
       vault_id: vaultId,
       source_policy_hash: sourcePolicyHash,
+      // Sorted here rather than trusted: the Worker requires a sorted,
+      // duplicate-free set, and the caller's own ordering is not evidence.
+      enabled_source_formats: [...new Set(enabledSourceFormats)].sort(),
     }) as Promise<InitializeResult>;
   }
 
@@ -124,7 +134,7 @@ export class InPluginWorkerSession {
     hit: Extract<CacheLoad, { kind: "hit" }>,
     expectedCacheIdentity: string,
     expectedSourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH,
-  ): Promise<BuildResult> {
+  ): Promise<RestoreGenerationResult> {
     const { record } = hit;
     return this.client.request({
       operation: "restore_generation",
@@ -136,7 +146,7 @@ export class InPluginWorkerSession {
       ...record.identity,
       expected_cache_identity: expectedCacheIdentity,
       expected_source_policy_hash: expectedSourcePolicyHash,
-    }) as Promise<BuildResult>;
+    }) as Promise<RestoreGenerationResult>;
   }
 
   restoreInitialBuildCheckpoint(

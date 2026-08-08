@@ -38,14 +38,63 @@ export const SOURCE_PREPARATION_SCHEMA_VERSION = 9 as const;
  * Mirrors `kwiry_core::policy::extraction_policy_fingerprint()` for a portable
  * build — the profile set this plugin's WASM adapter compiles.
  *
- * A mirrored constant rather than a value read from `abi_identity()`, because
- * `main.ts` computes the policy hash during `onload()` to decide whether a
- * cache restore is even attempted, which is before the worker and the WASM
- * module exist. `rust/kwiry-obsidian-wasm/tests/typescript_mirror.rs` asserts
+ * **Report-only.** It answers "which extractor set is this build running" for
+ * diagnostics and for the daemon status surface. It is deliberately *not*
+ * folded into the cache policy hash any more: a single digest over every
+ * format's profile makes one format's tier change invalidate every other
+ * format's rows, which is exactly the conflation `FORMAT_IDENTITIES` splits
+ * apart. `rust/kwiry-obsidian-wasm/tests/typescript_mirror.rs` still asserts
  * this constant equals what the adapter reports, so the mirror cannot drift.
  */
 export const EXTRACTION_POLICY_FINGERPRINT =
   "efbc627c533ae797104dcf65540dcf6f96edd7b9d96826c4bac7e93672f26ff2" as const;
+
+/**
+ * Mirrors `kwiry_core::policy::FORMAT_IDENTITY_SCHEMA_VERSION`.
+ *
+ * This is **core** identity: it names the *shape* of a per-format identity, so
+ * a new component in that digest invalidates every row of every format. That
+ * is the escape hatch which lets the per-format digest stay deliberately small.
+ */
+export const FORMAT_IDENTITY_SCHEMA_VERSION = 1 as const;
+
+/**
+ * Mirrors `kwiry_core::policy::format_identity_fingerprint()` for every format
+ * this build compiles: SHA-256 over a domain separator, the identity schema
+ * version, and exactly three facts — the format, the extraction profile
+ * compiled for it, and its extractor version.
+ *
+ * These are **per-row** identity. Each cached `sources` row stores the identity
+ * it was built under, and a row whose stored identity differs from this map's
+ * value for its format is evicted at restore time; every other format's rows
+ * survive untouched. Whether a format is *enabled* is never part of an
+ * identity — enablement is configuration, it is never persisted, and it is
+ * applied as a stateless projection instead.
+ *
+ * A mirrored constant rather than a value read from `abi_identity()` for the
+ * same reason as the policy fingerprint: `main.ts` needs the core policy hash
+ * during `onload()`, before the worker and WASM module exist. The mirror test
+ * asserts both the values and the key set against the adapter, so a format
+ * added in Rust cannot go missing here.
+ */
+export const FORMAT_IDENTITIES: Readonly<Record<SourceFormat, string>> = Object.freeze({
+  markdown: "b678d0ea2d77d7a79ccc79f4f8a3a1d96aed9bb98757afb1381e5661a1fb96f7",
+  text: "c89bb1c6cb87c1e6371d7d03956f1c6bf8bff605c847441c2c72d7599bbd464b",
+  base: "d3eeb5a8e3246a07f0c1e41782a7f61628921f43f7afdd722f3a060104e7e079",
+  canvas: "01eae3d6859de3287237e366b7fcd9f346dbab395453ef9422bcd67dc527858c",
+  docx: "b4f9cff615a917e09d800c2784e17c836ef79cc767c49091818a7b1f8598a38e",
+  pdf: "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
+  excalidraw: "e1f6868bd320172f6b8d9afc3ac716e309499b065c62fa1b17ae4c2c09d98348",
+});
+
+/** The identity a row of `format` must carry to be reusable by this build. */
+export function formatIdentity(format: SourceFormat): string {
+  const identity = FORMAT_IDENTITIES[format];
+  // Never a default: a format with no compiled identity cannot have its rows
+  // proven reusable, so it must fail closed rather than borrow another's.
+  if (identity === undefined) throw new Error("source format has no compiled identity");
+  return identity;
+}
 
 export const IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION =
   "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, DOCX, Excalidraw, and PDF are available. PDF is off by default because a page is parsed and laid out rather than read, so a reference library costs far more to index than authored notes. This profile is lexical-only and never reads the daemon token.";
@@ -118,6 +167,23 @@ export function normalizeEnabledSourceFormats(
   };
 }
 
+/**
+ * The enabled formats as a sorted, deduplicated list.
+ *
+ * This is configuration, not identity. It is never digested and never
+ * persisted; it travels to the Worker so a restored image can be projected
+ * down to the formats the user currently wants, before that image is published
+ * as searchable.
+ */
+export function enabledSourceFormatList(
+  enabled: Readonly<EnabledSourceFormats>,
+): SourceFormat[] {
+  return SOURCE_FORMATS
+    .filter((format) => isSourceFormatEnabled(format, enabled))
+    .slice()
+    .sort();
+}
+
 export function sourceFormatDescription(format: SourceFormat): string {
   switch (format) {
     case "markdown":
@@ -146,29 +212,27 @@ export function isEnabledSourcePath(
 }
 
 /**
- * SHA-256 policy identity over a domain separator, the source preparation
- * schema, the compiled extraction policy, and the sorted enabled-format set.
- * Object property order is never an input, and disabled formats are
- * represented by their absence from the set.
+ * SHA-256 **core** identity: a domain separator, the source preparation schema,
+ * and the per-format identity schema. Nothing format-specific and nothing
+ * configuration-specific belongs here.
  *
- * The separator carries `-v2` because the digest material gained the extraction
- * policy. Adding a component already changes every digest, so the bump is not
- * load-bearing for collision resistance — it is taken because the separator is
- * the human-readable statement of which generation of policy identity this is,
- * and a silent material change inside a `-v1` label is exactly the dishonesty
- * this hash exists to prevent.
+ * It takes no argument. That is the whole point of the split: the enabled set
+ * used to be digest material, so toggling one format in Settings discarded a
+ * complete cache; and the extraction policy used to be digest material, so one
+ * format's tier change discarded every other format's rows. Both facts moved —
+ * enablement to a stateless restore-time projection, per-format extraction to
+ * `FORMAT_IDENTITIES` and the per-row predicate. What is left is exactly the
+ * set of facts for which no row of any format is usable.
+ *
+ * The separator carries `-v3` because the material changed. A silent material
+ * change inside a `-v2` label is exactly the dishonesty this hash exists to
+ * prevent, so the generation is stated even though the digest already moves.
  */
-export async function formatPolicyFingerprint(
-  enabled: Readonly<EnabledSourceFormats>,
-): Promise<string> {
-  const enabledSet = SOURCE_FORMATS.filter(
-    (format) => isSourceFormatEnabled(format, enabled),
-  ).sort().join(",");
+export async function corePolicyFingerprint(): Promise<string> {
   const material = [
-    "kwiry-source-format-policy-v2",
+    "kwiry-source-core-policy-v3",
     `source-preparation-schema=${SOURCE_PREPARATION_SCHEMA_VERSION}`,
-    `extraction-policy=${EXTRACTION_POLICY_FINGERPRINT}`,
-    `enabled-formats=${enabledSet}`,
+    `format-identity-schema=${FORMAT_IDENTITY_SCHEMA_VERSION}`,
   ].join("\0");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(material));
   return [...new Uint8Array(digest)]

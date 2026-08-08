@@ -41,6 +41,17 @@ pub struct DataRoot {
     root: PathBuf,
 }
 
+/// An active generation [`DataRoot::prepare`] refused and dropped, so the
+/// caller can say *why* the rebuild that follows is happening.
+///
+/// `generation` is `None` only when the pointer itself could not be parsed, in
+/// which case there is no ID to name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardedGeneration {
+    pub generation: Option<String>,
+    pub reason: String,
+}
+
 impl DataRoot {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -71,9 +82,57 @@ impl DataRoot {
         Ok(DataRootLock { file })
     }
 
-    pub fn prepare(&self) -> Result<()> {
+    /// Prepares the root and reports what it had to throw away.
+    ///
+    /// A core-incompatible generation is discarded here and rebuilt from
+    /// scratch by the caller. That is correct, and it used to be silent: the
+    /// gate that refused it produced a `run kwiry index` message which the
+    /// classification in `read_current` then dropped on the floor, so an
+    /// operator saw a full rebuild with no stated cause — while the *narrower*
+    /// per-format eviction announces itself by name. Returning the reason makes
+    /// the blunt instrument at least as explicable as the precise one.
+    pub fn prepare(&self) -> Result<Option<DiscardedGeneration>> {
+        let discarded = self.discarded_generation();
         drop(self.acquire_writer_lock()?);
-        Ok(())
+        Ok(discarded)
+    }
+
+    /// Why the active pointer is about to be discarded, when there is one and
+    /// it is unusable. Derived by re-running the gate rather than by
+    /// remembering its error, so it can never disagree with the decision.
+    fn discarded_generation(&self) -> Option<DiscardedGeneration> {
+        let current_path = self.root.join("current.json");
+        if !current_path.is_file() {
+            return None;
+        }
+        let current: CurrentGeneration = match read_json(&current_path) {
+            Ok(current) => current,
+            Err(error) => {
+                return Some(DiscardedGeneration {
+                    generation: None,
+                    reason: error.to_string(),
+                });
+            }
+        };
+        // Mirrors `read_current`: an unsupported *layout* is retained, not
+        // discarded — `active()` refuses it with its own remedy — so reporting
+        // it here would name a rebuild that is not happening.
+        if !current.has_supported_versions() {
+            return None;
+        }
+        let paths = GenerationPaths::new(
+            current.generation.clone(),
+            self.root.join("generations").join(&current.generation),
+        );
+        let reason = current
+            .validate()
+            .and_then(|()| paths.validate())
+            .err()?
+            .to_string();
+        Some(DiscardedGeneration {
+            generation: Some(current.generation),
+            reason,
+        })
     }
 
     pub fn create_candidate(&self) -> Result<CandidateGeneration> {
@@ -122,8 +181,18 @@ impl DataRoot {
         Ok(Some(paths))
     }
 
+    /// The index directory a **reader** may open, or a refusal.
+    ///
+    /// `IndexManager::open` reaches a serveable state by evicting the rows this
+    /// build cannot reuse; that publishes a generation and needs the writer
+    /// lock, which no reader holds. So this door refuses instead. Without the
+    /// check, every row the daemon would have evicted is served verbatim by
+    /// `kwiry search` under an identity it was not built under — which is
+    /// precisely the property the split identity is supposed to preserve, and
+    /// which the whole-artifact policy gate used to enforce here for free.
     pub fn active_or_legacy_index(&self) -> Result<PathBuf> {
         if let Some(active) = self.active()? {
+            Manifest::load(&active.manifest_path)?.require_every_row_reusable()?;
             return Ok(active.index_dir);
         }
         if self.root.join("meta.json").is_file() {
@@ -422,7 +491,11 @@ impl GenerationPaths {
         match (has_desktop_index, has_partition_layout) {
             (true, false) => {
                 validate_index_dir(&self.index_dir)?;
-                if manifest.files.values().any(|file| file.resource.is_some()) {
+                if manifest
+                    .recorded_files()
+                    .values()
+                    .any(|file| file.resource.is_some())
+                {
                     return Err(Error::State(format!(
                         "desktop generation contains resource-scoped manifest entries: {}",
                         self.root.display()
@@ -445,7 +518,7 @@ impl GenerationPaths {
                     }
                     validate_index_dir(&index_dir)?;
                 }
-                for file in manifest.files.values() {
+                for file in manifest.recorded_files().values() {
                     let Some(resource) = &file.resource else {
                         return Err(Error::State(format!(
                             "OpenClast manifest entry is missing its resource: {}",
@@ -801,6 +874,52 @@ mod tests {
 
     fn publish_complete_desktop(root: &DataRoot) -> GenerationPaths {
         root.publish(complete_desktop_candidate(root)).unwrap()
+    }
+
+    /// A core-identity mismatch discards the whole generation, and the rebuild
+    /// that follows is far larger than a per-format eviction — so it must not
+    /// be the quieter of the two. The refusal message was produced and then
+    /// thrown away by the classification; `prepare` hands it back.
+    #[test]
+    fn prepare_reports_the_generation_it_discarded_and_why() {
+        let temporary = tempdir().unwrap();
+        let root = DataRoot::new(temporary.path());
+        let active = {
+            let _lock = root.acquire_writer_lock().unwrap();
+            publish_complete_desktop(&root)
+        };
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&active.manifest_path).unwrap()).unwrap();
+        document["chunking_version"] = serde_json::json!(crate::model::CHUNKING_VERSION + 1);
+        fs::write(
+            &active.manifest_path,
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+
+        let discarded = root.prepare().unwrap().expect("a discard must be reported");
+        assert_eq!(discarded.generation.as_deref(), Some(active.id.as_str()));
+        assert!(discarded.reason.contains("chunking="), "{discarded:?}");
+        assert!(discarded.reason.contains("kwiry index"), "{discarded:?}");
+        // And it really was discarded, not merely described.
+        assert!(root.active().unwrap().is_none());
+    }
+
+    /// A usable generation is reported as nothing at all: a rebuild that is not
+    /// happening must not be announced.
+    #[test]
+    fn prepare_reports_nothing_for_a_usable_generation() {
+        let temporary = tempdir().unwrap();
+        let root = DataRoot::new(temporary.path());
+        {
+            let _lock = root.acquire_writer_lock().unwrap();
+            publish_complete_desktop(&root);
+        }
+        assert_eq!(root.prepare().unwrap(), None);
+        assert!(root.active().unwrap().is_some());
+        // Nor is an empty root a discard.
+        let empty = tempdir().unwrap();
+        assert_eq!(DataRoot::new(empty.path()).prepare().unwrap(), None);
     }
 
     #[test]

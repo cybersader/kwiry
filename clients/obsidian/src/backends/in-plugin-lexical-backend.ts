@@ -21,12 +21,14 @@ import {
   InPluginWorkerSession,
   createBrowserWorkerSession,
 } from "../worker/session";
+import type { SourceFormat } from "../worker/protocol";
 import {
   InPluginIndexController,
   type VaultActivityReport,
   type IndexControllerCacheOptions,
   type IndexControllerStartupObservation,
   type IndexControllerStatus,
+  type PartialReuseReport,
 } from "./in-plugin-index-controller";
 
 export type InPluginBackendStartupObservation = IndexControllerStartupObservation
@@ -41,6 +43,9 @@ export interface InPluginLexicalBackendOptions {
   nextGeneration?: () => string;
   yieldControl?: () => Promise<void>;
   cache?: IndexControllerCacheOptions;
+  /// The formats the user currently wants indexed. Handed to the controller so
+  /// a restored cache can be projected down to that set before publication.
+  enabledSourceFormats?: readonly SourceFormat[];
   /// Records a safe classification of an indexing failure. Without this the
   /// controller's catch-all `index_build_failed` reaches a field report with
   /// no indication of which subsystem broke.
@@ -65,6 +70,7 @@ export class InPluginLexicalBackend implements SearchBackend {
   private readonly nextGeneration: () => string;
   private readonly yieldControl: () => Promise<void>;
   private readonly cache: IndexControllerCacheOptions | null;
+  private readonly enabledSourceFormats: readonly SourceFormat[] | null;
   private readonly onDiagnosticFailure: (classification: FailureClassification) => void;
   private readonly onStartupObservation: (observation: InPluginBackendStartupObservation) => void;
   private readonly onVaultActivity: ((activity: VaultActivityReport) => void) | undefined;
@@ -93,6 +99,7 @@ export class InPluginLexicalBackend implements SearchBackend {
       ?? (() => `${options.instanceId}-generation-${++generation}`);
     this.yieldControl = options.yieldControl ?? yieldToBrowser;
     this.cache = options.cache ?? null;
+    this.enabledSourceFormats = options.enabledSourceFormats ?? null;
     this.onDiagnosticFailure = options.onDiagnosticFailure ?? (() => undefined);
     this.onStartupObservation = options.onStartupObservation ?? (() => undefined);
     this.onVaultActivity = options.onVaultActivity;
@@ -307,6 +314,9 @@ export class InPluginLexicalBackend implements SearchBackend {
         },
         yieldControl: this.yieldControl,
         ...(this.cache ? { cache: this.cache } : {}),
+        ...(this.enabledSourceFormats
+          ? { enabledSourceFormats: this.enabledSourceFormats }
+          : {}),
       });
       this.session = session;
       this.controller = controller;
@@ -494,6 +504,12 @@ function controllerIssue(
         safeMessage: "Cached index searchable; reconciling vault changes…",
         recoverable: true,
       };
+    case "cache_partially_reused":
+      return {
+        code: issue,
+        safeMessage: partialReuseMessage(status.partialReuse),
+        recoverable: true,
+      };
     case "cache_absent":
       return {
         code: issue,
@@ -586,6 +602,53 @@ function controllerIssue(
         safeMessage: "Initial build continues, but checkpoint save failed.",
         recoverable: true,
       };
+  }
+}
+
+/**
+ * Names what is actually happening, format by format.
+ *
+ * The whole reason this issue exists is that "rebuilding the index" is false
+ * when one format is being reindexed out of seven: it overstates the wait and
+ * it overstates what is missing from search in the meantime. The two reasons
+ * are reported separately because a removed format is not coming back and a
+ * reindexed one is.
+ */
+function partialReuseMessage(report: PartialReuseReport | undefined): string {
+  const reindexing = report?.reindexing ?? [];
+  const removed = report?.removed ?? [];
+  const clauses = [
+    ...(reindexing.length === 0 ? [] : [`reindexing ${formatList(reindexing)}`]),
+    ...(removed.length === 0 ? [] : [`removed ${formatList(removed)}`]),
+  ];
+  if (clauses.length === 0) return "Cached index searchable; reconciling vault changes…";
+  return `Cached index searchable; ${clauses.join(" and ")}…`;
+}
+
+function formatList(formats: readonly SourceFormat[]): string {
+  const labels = formats.map(sourceFormatLabel);
+  const listed = labels.length === 1
+    ? labels[0]!
+    : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]!}`;
+  return `${listed} sources`;
+}
+
+function sourceFormatLabel(format: SourceFormat): string {
+  switch (format) {
+    case "markdown":
+      return "Markdown";
+    case "text":
+      return "plain-text";
+    case "base":
+      return "Base";
+    case "canvas":
+      return "Canvas";
+    case "docx":
+      return "DOCX";
+    case "pdf":
+      return "PDF";
+    case "excalidraw":
+      return "Excalidraw";
   }
 }
 

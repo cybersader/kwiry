@@ -21,7 +21,8 @@ use crate::index::{
     Fields, build_schema, chunk_document, open_index_dir, register_lexical_analyzer,
 };
 use crate::manifest::{
-    Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint, source_key,
+    EvictionReport, Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint,
+    source_key,
 };
 use crate::model::{
     Config, FileIngestOutcome, FileOutcomeKind, HostProfile, IndexFreshnessBasis, IngestWarning,
@@ -42,7 +43,9 @@ use crate::reconcile::{
 use crate::search::{PartitionReader, search_partitions, search_reader};
 #[cfg(feature = "internal-d5c-preview")]
 use crate::search::{ProfileExecution, search_partitions_with_profile, search_reader_with_profile};
-use crate::semantic::{SemanticRuntime, embedding_text, rrf_fuse_traced};
+use crate::semantic::{
+    SemanticRuntime, embedding_source_identity, embedding_text, rrf_fuse_traced,
+};
 use crate::walk::{EnumerationResult, discover_vault};
 
 /// Candidate depth fetched from each leg before RRF fusion.
@@ -664,8 +667,18 @@ fn observe_vault(
         let semantic_backfill = context.policy.basis != IndexFreshnessBasis::StrictHash
             && match (context.semantic, previous_file) {
                 (Some(runtime), Some(previous_file)) if previous_file.chunk_count > 0 => {
+                    // Compared against the same value the store records, which
+                    // binds the format identity as well as the bytes — so a
+                    // format whose extractor moved is backfilled rather than
+                    // left with vectors of text that is no longer produced.
                     runtime.source_hash(&key).ok().flatten().as_deref()
-                        != Some(previous_file.content_hash.as_str())
+                        != Some(
+                            embedding_source_identity(
+                                &previous_file.content_hash,
+                                previous_file.format,
+                            )
+                            .as_str(),
+                        )
                 }
                 _ => false,
             };
@@ -752,16 +765,51 @@ struct DesktopIndexManager {
     manifest: Manifest,
     config: Config,
     audit_cursor: usize,
+    evictions: EvictionReport,
 }
 
 impl DesktopIndexManager {
     fn open(config: Config, data_dir: &Path, runtime: SearchRuntime) -> Result<Self> {
         let data_root = DataRoot::new(data_dir);
         let lock = data_root.acquire_writer_lock()?;
-        let active = data_root.active()?.ok_or_else(|| {
+        let mut active = data_root.active()?.ok_or_else(|| {
             Error::State("Vertical 2 generation is missing; run `kwiry index` first".to_owned())
         })?;
-        let manifest = Manifest::load(&active.manifest_path)?;
+        // Eviction is a mandatory open-time transformation, never a read-time
+        // filter: every downstream stage — planning, retention, publication,
+        // search — then holds by construction instead of by remembering to
+        // check. It runs before the index is made searchable, so a row whose
+        // format identity moved is never served in the interim.
+        let (mut manifest, evictions) = Manifest::load(&active.manifest_path)?.adopt();
+        if !evictions.is_empty() {
+            // Crash-safe order: delete the index rows, write the evicted
+            // manifest, then publish. A crash before publication leaves the
+            // previous generation intact and the next open evicts again —
+            // idempotent. The reverse order is unrecoverable: postings the
+            // manifest no longer names can never be discovered again.
+            manifest.mark_synced()?;
+            let candidate = data_root.create_candidate_from(&active)?;
+            let staging_dir = candidate.staging_dir.clone();
+            let evicted_keys: BTreeSet<String> = evictions.evicted.keys().cloned().collect();
+            let update_result = (|| -> Result<()> {
+                let candidate_search =
+                    SearchIndex::open(candidate.id.clone(), &candidate.index_dir)?;
+                apply_index_updates(
+                    &candidate_search.index,
+                    &candidate_search.fields,
+                    Some(&evicted_keys),
+                    None,
+                    None,
+                )?;
+                manifest.save(&candidate.manifest_path())?;
+                Ok(())
+            })();
+            if let Err(error) = update_result {
+                let _ = fs::remove_dir_all(staging_dir);
+                return Err(error);
+            }
+            active = data_root.publish(candidate)?;
+        }
         let audit_cursor = manifest.state_revision as usize;
         let search = Arc::new(SearchIndex::open(active.id.clone(), &active.index_dir)?);
         search.source_key_field()?;
@@ -776,6 +824,7 @@ impl DesktopIndexManager {
             manifest,
             config,
             audit_cursor,
+            evictions,
         })
     }
 
@@ -901,7 +950,11 @@ impl DesktopIndexManager {
                     semantic_sources.insert(
                         key.clone(),
                         (
-                            next_file.content_hash.clone(),
+                            // Not the raw content hash: an evicted row is
+                            // re-ingested from byte-identical input, so that
+                            // value cannot notice that the extractor which
+                            // produced the embedded text is gone.
+                            embedding_source_identity(&next_file.content_hash, next_file.format),
                             outcome
                                 .chunks
                                 .iter()
@@ -1055,16 +1108,57 @@ struct OpenClastIndexManager {
     manifest: Manifest,
     config: Config,
     audit_cursor: usize,
+    evictions: EvictionReport,
 }
 
 impl OpenClastIndexManager {
     fn open(config: Config, data_dir: &Path, runtime: SearchRuntime) -> Result<Self> {
         let data_root = DataRoot::new(data_dir);
         let lock = data_root.acquire_writer_lock()?;
-        let active = data_root.active()?.ok_or_else(|| {
+        let mut active = data_root.active()?.ok_or_else(|| {
             Error::State("IG-1 generation is missing; run `kwiry index` first".to_owned())
         })?;
-        let manifest = Manifest::load(&active.manifest_path)?;
+        // Same mandatory open-time eviction as the desktop profile, addressed
+        // per partition. `GenerationPaths::validate` has already refused any
+        // OpenClast row without a resource, so every evicted key is addressable.
+        let (mut manifest, evictions) = Manifest::load(&active.manifest_path)?.adopt();
+        if !evictions.is_empty() {
+            let mut evicted_by_resource = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
+            for (key, evicted) in &evictions.evicted {
+                let Some(resource) = evicted.resource.clone() else {
+                    return Err(Error::State(format!(
+                        "OpenClast manifest entry {} is missing its resource; run `kwiry index` to rebuild the disposable index",
+                        evicted.path
+                    )));
+                };
+                evicted_by_resource
+                    .entry(resource)
+                    .or_default()
+                    .insert(key.clone());
+            }
+            manifest.mark_synced()?;
+            let candidate = data_root.create_candidate_from(&active)?;
+            let staging_dir = candidate.staging_dir.clone();
+            let update_result = (|| -> Result<()> {
+                for (resource, keys) in &evicted_by_resource {
+                    let index_dir = partition_index_dir(&candidate.partitions_dir, resource);
+                    // A resource whose partition is absent is retained state
+                    // whose content is already withheld: nothing to delete.
+                    if !index_dir.join("meta.json").is_file() {
+                        continue;
+                    }
+                    let (index, fields) = open_index_dir(&index_dir)?;
+                    apply_index_updates(&index, &fields, Some(keys), None, Some(resource))?;
+                }
+                manifest.save(&candidate.manifest_path())?;
+                Ok(())
+            })();
+            if let Err(error) = update_result {
+                let _ = fs::remove_dir_all(staging_dir);
+                return Err(error);
+            }
+            active = data_root.publish(candidate)?;
+        }
         let audit_cursor = manifest.state_revision as usize;
         let layout = GenerationLayout::load(&active.layout_path)?;
         let search = Arc::new(PartitionedSearchIndex::open(&active)?);
@@ -1079,6 +1173,7 @@ impl OpenClastIndexManager {
             manifest,
             config,
             audit_cursor,
+            evictions,
         })
     }
 
@@ -1578,6 +1673,16 @@ impl IndexManager {
         }
     }
 
+    /// What open-time eviction removed, if anything. Empty on the ordinary
+    /// path; non-empty exactly when a format's identity moved under a
+    /// reusable index, which must be reported rather than narrowed silently.
+    pub fn open_evictions(&self) -> &EvictionReport {
+        match &self.inner {
+            IndexManagerInner::Desktop(manager) => &manager.evictions,
+            IndexManagerInner::OpenClast(manager) => &manager.evictions,
+        }
+    }
+
     pub fn config(&self) -> &Config {
         match &self.inner {
             IndexManagerInner::Desktop(manager) => manager.config(),
@@ -1643,6 +1748,7 @@ mod tests {
 
     use super::*;
     use crate::chunk::ingest_vault_files;
+    use crate::format::SourceFormat;
     use crate::index::build_index;
     use crate::model::VaultRegistration;
 
@@ -3688,5 +3794,477 @@ mod tests {
         assert_eq!(report.unavailable_vaults, ["fixture"]);
         assert_eq!(runtime.search(&request("retainedterm")).unwrap().len(), 1);
         manager.shutdown().unwrap();
+    }
+
+    // ------------------------------------------------- split-identity wave
+
+    /// Rewrites one format's recorded identity in the active generation's
+    /// manifest, which is exactly what a build with a bumped
+    /// `extractor_version_for` would look like to the *next* open.
+    fn forge_foreign_identity(data_root: &Path, format: crate::format::SourceFormat) -> usize {
+        let active = DataRoot::new(data_root).active().unwrap().unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&active.manifest_path).unwrap()).unwrap();
+        let mut forged = 0;
+        for (_, file) in document["files"].as_object_mut().unwrap() {
+            if file["format"] == serde_json::json!(format.as_str()) {
+                file["format_identity"] = serde_json::json!("f".repeat(64));
+                forged += 1;
+            }
+        }
+        fs::write(
+            &active.manifest_path,
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+        forged
+    }
+
+    fn two_format_vault() -> (tempfile::TempDir, PathBuf, PathBuf, Config) {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        fs::write(vault_path.join("note.md"), "# Note\nmarkdownterm").unwrap();
+        fs::write(vault_path.join("log.txt"), "plainterm").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            indexing: crate::model::IndexingConfig {
+                basis: IndexFreshnessBasis::MetadataAudit,
+                audit_sources_per_pass: 0,
+                audit_bytes_per_pass: 0,
+                racy_window_millis: 0,
+            },
+            ..Config::default()
+        };
+        (temporary, vault_path, data_root, config)
+    }
+
+    /// The property this whole wave exists to preserve: an evicted row's
+    /// postings are gone from the *first* search after open, before any
+    /// reconciliation pass has run. Eviction is an open-time transformation,
+    /// not a read-time filter.
+    #[test]
+    fn an_evicted_format_is_unsearchable_from_the_first_query_after_open() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        assert_eq!(forge_foreign_identity(&data_root, SourceFormat::Text), 1);
+
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config, &data_root, runtime.clone()).unwrap();
+
+        // Narrow: only the Text row was evicted.
+        let evictions = manager.open_evictions();
+        assert_eq!(evictions.total(), 1);
+        assert_eq!(
+            evictions.by_format,
+            BTreeMap::from([(SourceFormat::Text, 1)])
+        );
+        // Removed, never orphaned: gone from the manifest *and* from the index.
+        assert!(runtime.search(&request("plainterm")).unwrap().is_empty());
+        assert_eq!(runtime.search(&request("markdownterm")).unwrap().len(), 1);
+        assert_eq!(manager.manifest().files.len(), 1);
+        assert_eq!(manager.manifest().document_count(), 1);
+        manager.manifest().validate().unwrap();
+        manager.shutdown().unwrap();
+    }
+
+    /// The eviction is durable and idempotent: reopening finds nothing left to
+    /// evict, and the published manifest is the evicted one.
+    #[test]
+    fn eviction_is_published_atomically_and_is_idempotent() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        let before = DataRoot::new(&data_root).active().unwrap().unwrap().id;
+        forge_foreign_identity(&data_root, SourceFormat::Text);
+
+        let first = IndexManager::open(config.clone(), &data_root, SearchRuntime::new()).unwrap();
+        assert_eq!(first.open_evictions().total(), 1);
+        let after = DataRoot::new(&data_root).active().unwrap().unwrap().id;
+        assert_ne!(after, before, "eviction publishes a new generation");
+        first.shutdown().unwrap();
+
+        let runtime = SearchRuntime::new();
+        let second = IndexManager::open(config, &data_root, runtime.clone()).unwrap();
+        assert!(second.open_evictions().is_empty());
+        assert!(runtime.search(&request("plainterm")).unwrap().is_empty());
+        assert_eq!(runtime.search(&request("markdownterm")).unwrap().len(), 1);
+        second.shutdown().unwrap();
+    }
+
+    /// After eviction only the evicted format's sources are read again; every
+    /// other format's row is reused without touching its bytes. This is the
+    /// saving the narrowing buys.
+    #[test]
+    fn reingest_after_eviction_reads_only_the_evicted_formats_sources() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        forge_foreign_identity(&data_root, SourceFormat::Text);
+
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        let report = manager.reconcile(config).unwrap();
+
+        assert_eq!(
+            report.source_files_read, 1,
+            "only the evicted format's source may be re-read"
+        );
+        assert_eq!(report.changed_sources, 1);
+        assert_eq!(report.documents, 2);
+        assert_eq!(runtime.search(&request("plainterm")).unwrap().len(), 1);
+        assert_eq!(runtime.search(&request("markdownterm")).unwrap().len(), 1);
+        // And the rebuilt row now carries the running identity.
+        for file in report.manifest.files.values() {
+            assert!(file.identity_matches());
+        }
+        manager.shutdown().unwrap();
+    }
+
+    /// Eviction before retention. An offline vault must not resurrect a stale
+    /// row, and an identity change must not delete a healthy one: the evicted
+    /// format goes, every other format is retained, and nothing is re-read.
+    #[test]
+    fn an_offline_vault_retains_surviving_formats_while_the_evicted_one_stays_gone() {
+        let (_temporary, vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        forge_foreign_identity(&data_root, SourceFormat::Text);
+        fs::remove_dir_all(&vault_path).unwrap();
+
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        assert_eq!(manager.open_evictions().total(), 1);
+        assert!(runtime.search(&request("plainterm")).unwrap().is_empty());
+
+        let report = manager.reconcile(config).unwrap();
+        assert_eq!(report.unavailable_vaults, ["fixture"]);
+        assert_eq!(report.source_files_read, 0);
+        assert_eq!(
+            runtime.search(&request("markdownterm")).unwrap().len(),
+            1,
+            "a surviving format must be retained across an offline pass"
+        );
+        assert!(runtime.search(&request("plainterm")).unwrap().is_empty());
+        assert_eq!(report.manifest.files.len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    /// A run whose identities all match must not publish anything: the
+    /// ordinary path pays nothing for the eviction machinery.
+    #[test]
+    fn an_unchanged_identity_set_publishes_no_generation_at_open() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        let before = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let snapshot = snapshot_tree(&before.root);
+
+        let manager = IndexManager::open(config, &data_root, SearchRuntime::new()).unwrap();
+        assert!(manager.open_evictions().is_empty());
+        let after = DataRoot::new(&data_root).active().unwrap().unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(snapshot_tree(&after.root), snapshot);
+        manager.shutdown().unwrap();
+    }
+
+    /// A core mismatch is refused whole, with the rebuild instruction — never
+    /// narrowed into a partial eviction.
+    #[test]
+    fn a_core_mismatch_refuses_the_open_instead_of_evicting() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        let active = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&active.manifest_path).unwrap()).unwrap();
+        document["format_identity_schema_version"] =
+            serde_json::json!(crate::policy::FORMAT_IDENTITY_SCHEMA_VERSION + 1);
+        fs::write(
+            &active.manifest_path,
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+
+        let Err(error) = IndexManager::open(config, &data_root, SearchRuntime::new()) else {
+            panic!("a core mismatch must refuse the open");
+        };
+        assert!(error.to_string().contains("run `kwiry index`"));
+    }
+
+    /// The OpenClast profile evicts per partition, and an evicted row's
+    /// postings are gone from the authorized partition before the first search.
+    #[test]
+    fn openclast_evicts_a_stale_format_from_its_partition_before_serving() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        fs::write(vault_path.join("note.md"), "# Note\nmarkdownterm").unwrap();
+        fs::write(vault_path.join("log.txt"), "plainterm").unwrap();
+        let config = openclast_config(vec![VaultRegistration {
+            id: "fixture".into(),
+            path: vault_path,
+            room: Some("room-a".into()),
+        }]);
+        build_index(&config, &data_root).unwrap();
+        assert_eq!(forge_foreign_identity(&data_root, SourceFormat::Text), 1);
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config, &data_root, runtime.clone()).unwrap();
+
+        assert_eq!(manager.open_evictions().total(), 1);
+        let search = |query: &str| {
+            runtime
+                .search_authorized(
+                    query,
+                    20,
+                    &SearchFilters::default(),
+                    std::slice::from_ref(&resource),
+                )
+                .unwrap()
+        };
+        assert!(search("plainterm").is_empty());
+        assert_eq!(search("markdownterm").len(), 1);
+        assert_eq!(manager.manifest().files.len(), 1);
+        manager.shutdown().unwrap();
+    }
+
+    // ------------------------------------- the read-only door (`kwiry search`)
+
+    /// Rewrites one format's recorded identity to a *literal* that no build
+    /// derives. Deliberately not `format_identity_fingerprint(other_format)`
+    /// and deliberately not built from the constant under test: a fixture
+    /// derived from the guarded constant moves with a widened predicate and
+    /// keeps passing while the guard stops guarding.
+    fn forge_absent_identity(data_root: &Path, format: crate::format::SourceFormat) -> usize {
+        let active = DataRoot::new(data_root).active().unwrap().unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&active.manifest_path).unwrap()).unwrap();
+        let mut forged = 0;
+        for (_, file) in document["files"].as_object_mut().unwrap() {
+            if file["format"] == serde_json::json!(format.as_str()) {
+                file.as_object_mut().unwrap().remove("format_identity");
+                forged += 1;
+            }
+        }
+        fs::write(
+            &active.manifest_path,
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+        forged
+    }
+
+    /// `kwiry search` opens the index directly and holds no writer lock, so it
+    /// cannot evict. Its only honest alternative is to refuse — and until this
+    /// gate existed it did neither: it served every row the daemon would have
+    /// evicted, under an identity that row was not built under, while the
+    /// per-row rule was enforced on no CLI path at all.
+    ///
+    /// Filtering the stale rows out of the result set instead would not fix it:
+    /// the postings would still be there for the next reader, which is the
+    /// read-time filter this design rules out in favour of an open-time
+    /// transformation.
+    #[test]
+    fn the_read_only_search_path_refuses_an_identity_stale_generation() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        // Reads fine while every row is one this build could have produced.
+        assert_eq!(
+            crate::search::search_index(&data_root, &request("plainterm"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(forge_foreign_identity(&data_root, SourceFormat::Text), 1);
+
+        let error = crate::search::search_index(&data_root, &request("plainterm"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("log.txt"), "{error}");
+        assert!(error.contains(&"f".repeat(64)), "{error}");
+        assert!(error.contains("kwiry index"), "{error}");
+        // The whole read is refused, including the format whose identity is
+        // intact: answering from the survivors is the read-time filter.
+        assert!(crate::search::search_index(&data_root, &request("markdownterm")).is_err());
+    }
+
+    /// The same for a row carrying no identity at all — the state a record
+    /// written before the field existed presents, and the one a `None`-accepts
+    /// widening of the predicate would wave through.
+    #[test]
+    fn the_read_only_search_path_refuses_a_row_with_no_recorded_identity() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        assert_eq!(forge_absent_identity(&data_root, SourceFormat::Markdown), 1);
+
+        let error = crate::search::search_index(&data_root, &request("markdownterm"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("note.md"), "{error}");
+        assert!(error.contains("<absent>"), "{error}");
+        assert!(error.contains("kwiry index"), "{error}");
+    }
+
+    /// And a row whose recorded tier contradicts the compiled one, which the
+    /// per-row predicate refuses even though its digest string matches. This is
+    /// the exact state the pre-wave whole-artifact gate caught on this path,
+    /// so it is the regression's own boundary.
+    #[test]
+    fn the_read_only_search_path_refuses_a_row_whose_profile_contradicts_this_build() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        let active = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&active.manifest_path).unwrap()).unwrap();
+        for (_, file) in document["files"].as_object_mut().unwrap() {
+            if file["format"] == serde_json::json!("markdown") {
+                file["extraction_profile"] = serde_json::json!("enhanced");
+            }
+        }
+        fs::write(
+            &active.manifest_path,
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+
+        let error = crate::search::search_index(&data_root, &request("markdownterm"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("note.md"), "{error}");
+        assert!(error.contains("enhanced"), "{error}");
+        assert!(error.contains("kwiry index"), "{error}");
+    }
+
+    /// The daemon still evicts rather than refuses: the reader's gate must not
+    /// leak into the writer's path, or one format's identity change would cost
+    /// the whole index again — the exact conflation this wave undoes.
+    #[test]
+    fn the_reader_gate_does_not_stop_the_daemon_from_evicting() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        forge_foreign_identity(&data_root, SourceFormat::Text);
+
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config, &data_root, runtime.clone()).unwrap();
+        assert_eq!(manager.open_evictions().total(), 1);
+        assert_eq!(runtime.search(&request("markdownterm")).unwrap().len(), 1);
+        manager.shutdown().unwrap();
+
+        // And once the daemon has evicted, the reader is satisfied again.
+        assert_eq!(
+            crate::search::search_index(&data_root, &request("markdownterm"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            crate::search::search_index(&data_root, &request("plainterm"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // ------------------------------------------------ semantic reuse key
+
+    /// Vectors may only be reused on the identity of the *text* they were
+    /// computed from, never on the source bytes alone.
+    ///
+    /// Eviction re-ingests from byte-identical input, so `content_hash` cannot
+    /// move across an extractor change — which means a store keyed on it hands
+    /// `semantic` and `hybrid` an embedding of text the running build no longer
+    /// emits, silently, because the hit bodies are hydrated from the current
+    /// lexical index. The legacy state is constructed here directly, which is
+    /// also exactly what an existing store looks like on first upgrade.
+    #[test]
+    fn semantic_vectors_are_keyed_by_extraction_identity_not_by_source_bytes() {
+        use crate::semantic::{embedding_source_identity, test_support::HashEmbedder};
+
+        let (temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let semantic = Arc::new(
+            SemanticRuntime::open(
+                &temporary.path().join("semantic.db"),
+                Box::new(HashEmbedder::new()),
+            )
+            .unwrap(),
+        );
+        runtime.install_semantic(semantic.clone());
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
+
+        let key = source_key("fixture", "log.txt");
+        let content_hash = manager.manifest().files[&key].content_hash.clone();
+        let bound = embedding_source_identity(&content_hash, SourceFormat::Text);
+        assert_ne!(
+            bound, content_hash,
+            "the reuse key must not be the source-bytes digest"
+        );
+        assert_eq!(
+            semantic.source_hash(&key).unwrap().as_deref(),
+            Some(&*bound)
+        );
+
+        // Force the store into the state a build keyed on bytes alone leaves
+        // behind, with a vector for a chunk the current extractor never
+        // produced. Nothing about the source changed, so every lexical signal
+        // says "settled".
+        semantic
+            .embed_and_replace_source(
+                &key,
+                &content_hash,
+                &[(
+                    "stale-chunk".to_owned(),
+                    "text no extractor emits".to_owned(),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            semantic.source_hash(&key).unwrap().as_deref(),
+            Some(&*content_hash)
+        );
+
+        // The next pass must read that source again and replace its vectors.
+        let report = manager.reconcile(config).unwrap();
+        assert!(
+            report.source_files_read >= 1,
+            "a source whose embedded text cannot be vouched for must be re-read"
+        );
+        assert_eq!(
+            semantic.source_hash(&key).unwrap().as_deref(),
+            Some(&*bound)
+        );
+        // The vector that named a chunk no extractor produces is gone. It never
+        // surfaced as a wrong *hit* — `hydrate_ordered` resolves against the
+        // lexical index and silently drops an unknown chunk id — which is the
+        // point: the loss was invisible, and only the reuse key could see it.
+        let hits = runtime
+            .search_semantic("plainterm", 5, &SearchFilters::default())
+            .unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.path == "log.txt"),
+            "the re-embedded source must be retrievable again"
+        );
+        assert!(hits.iter().all(|hit| hit.chunk_id != "stale-chunk"));
+        manager.shutdown().unwrap();
+    }
+
+    /// The bound key must actually depend on the format, or binding it in buys
+    /// nothing: two formats' rows sharing a content hash would share vectors.
+    /// Asserted against literals rather than against the derivation.
+    #[test]
+    fn the_semantic_reuse_key_separates_formats_sharing_a_content_hash() {
+        use crate::semantic::embedding_source_identity;
+
+        let hash = "9".repeat(64);
+        let markdown = embedding_source_identity(&hash, SourceFormat::Markdown);
+        let text = embedding_source_identity(&hash, SourceFormat::Text);
+        assert_ne!(markdown, text);
+        assert_ne!(markdown, hash);
+        assert_eq!(markdown.len(), 64);
+        assert!(markdown.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

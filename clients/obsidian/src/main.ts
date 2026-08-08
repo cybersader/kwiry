@@ -38,7 +38,7 @@ import type {
 import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
 import { LatestRequestEpoch } from "./latest-request-epoch";
 import { KwirySearchModal } from "./search-modal";
-import { formatPolicyFingerprint } from "./source-formats";
+import { corePolicyFingerprint, enabledSourceFormatList } from "./source-formats";
 import { formatStatus } from "./status-format";
 import {
   DEFAULT_SETTINGS,
@@ -79,9 +79,10 @@ export default class KwiryPlugin extends Plugin {
       try {
         const storedData = await this.loadData();
         this.settings = loadSettings(storedData);
-        this.sourcePolicyHash = await formatPolicyFingerprint({
-          ...this.settings.enabledSourceFormats,
-        });
+        // The core identity no longer depends on which formats are enabled, so
+        // this value survives a Settings toggle: the cache is restored and
+        // projected down to the new set rather than discarded.
+        this.sourcePolicyHash = await corePolicyFingerprint();
         this.privateTools = createPrivateTools(this, storedData);
         this.diagnostics.setLevel(this.settings.diagnosticsLogLevel);
         this.startupTimeline?.setProfile(this.settings.backendProfile);
@@ -112,6 +113,7 @@ export default class KwiryPlugin extends Plugin {
                 this.app.vault,
                 { ...this.settings.enabledSourceFormats },
               ),
+              enabledSourceFormats: enabledSourceFormatList(this.settings.enabledSourceFormats),
               workerSource,
               ...(cache === undefined ? {} : { cache }),
               onDiagnosticFailure: (
@@ -319,9 +321,7 @@ export default class KwiryPlugin extends Plugin {
 
     try {
       if (profile === "in_plugin") {
-        const sourcePolicyHash = await formatPolicyFingerprint({
-          ...this.settings.enabledSourceFormats,
-        });
+        const sourcePolicyHash = await corePolicyFingerprint();
         if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
         this.sourcePolicyHash = sourcePolicyHash;
       }
@@ -682,6 +682,7 @@ function diagnosticErrorCode(code: unknown): DiagnosticTextValue {
     case "index_update_failed":
     case "index_limit_exceeded":
     case "index_reconciling":
+    case "cache_partially_reused":
     case "index_building":
     case "cache_absent":
     case "cache_unavailable":

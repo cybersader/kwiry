@@ -41,6 +41,7 @@ import {
   INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
   INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   MAX_EXPORT_BLOB_BYTES,
+  SOURCE_FORMATS,
   SOURCE_QUARANTINE_WARNING_CODE,
   WORKER_PROTOCOL_VERSION,
   type BuildResult,
@@ -50,8 +51,10 @@ import {
   type InitialBuildCheckpointReconciliationPlanResult,
   type InitializeResult,
   type ReconciliationPlanResult,
+  type RestoreGenerationResult,
   type RestoreInitialBuildCheckpointResult,
   type SearchResult,
+  type SourceFormat,
   type SourcePreparationDefectField,
   type SourceRemoval,
   type SourceUpsert,
@@ -125,6 +128,10 @@ let guards: GuardCounters | null = null;
 let declaredChunkingVersion: number | null = null;
 let initializedVaultId: string | null = null;
 let initializedSourcePolicyHash: string | null = null;
+// Configuration, not identity: never digested, never persisted, and never a
+// reason to refuse a cache. It exists so a restored image can be projected
+// down to the formats the user currently wants before it answers a query.
+let initializedEnabledFormats: readonly SourceFormat[] | null = null;
 const handleInternalPrototypeMessage = createInternalPrototypeHandler({
   scope,
   getActive: () => active,
@@ -166,6 +173,7 @@ const handleInternalD5cPreviewMessage = __KWIRY_D5C_OWNER_WORKER__
 async function initialize(
   vaultId: string,
   sourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
+  enabledFormats: readonly SourceFormat[] = SOURCE_FORMATS,
 ): Promise<InitializeResult> {
   if (state !== "cold") {
     throw fixedWorkerError("invalid_state", "lifecycle", "Worker is already initialized.", false);
@@ -179,6 +187,7 @@ async function initialize(
     declaredChunkingVersion = rustIdentity.chunking_version;
     initializedVaultId = vaultId;
     initializedSourcePolicyHash = sourcePolicyHash;
+    initializedEnabledFormats = [...enabledFormats];
 
     const initializeSqlite = sqlite3InitModule as unknown as SQLiteInitializer;
     const originalWarn = console.warn;
@@ -252,6 +261,7 @@ async function initialize(
     declaredChunkingVersion = null;
     initializedVaultId = null;
     initializedSourcePolicyHash = null;
+    initializedEnabledFormats = null;
     if (isWorkerError(error)) throw error;
     if (error instanceof RustAdapterError) {
       throw fixedWorkerError(
@@ -665,7 +675,7 @@ async function exportInitialBuildCheckpoint(
 
 async function restoreGeneration(
   request: Extract<WorkerRequest, { operation: "restore_generation" }>,
-): Promise<BuildResult> {
+): Promise<RestoreGenerationResult> {
   requireInitialized();
   if (!sqlite || declaredChunkingVersion === null || staging || usedGenerations.has(request.generation)) {
     throw fixedWorkerError(
@@ -752,6 +762,7 @@ async function restoreGeneration(
       undefined,
       requireInitializedVaultId(),
       requireInitializedSourcePolicyHash(),
+      requireInitializedEnabledFormats(),
     );
     staging = {
       id: request.generation,
@@ -761,7 +772,10 @@ async function restoreGeneration(
     usedGenerations.add(request.generation);
     state = "building";
     try {
-      return publishStaging(staging, false);
+      const published = publishStaging(staging, false);
+      // The eviction report travels with the publication so the host can say
+      // what was refused at the moment it starts serving the rest.
+      return { ...published, evictions: index.evictions };
     } catch (error) {
       if (isWorkerError(error) && error.code === "integrity_failed") {
         throw fixedWorkerError(
@@ -910,6 +924,7 @@ async function restoreInitialBuildCheckpoint(
       undefined,
       requireInitializedVaultId(),
       requireInitializedSourcePolicyHash(),
+      requireInitializedEnabledFormats(),
     );
     const restored: Generation = {
       id: request.generation,
@@ -922,6 +937,7 @@ async function restoreInitialBuildCheckpoint(
       publication: "initial_staging",
       searchable: false,
       cursor: request.cursor,
+      evictions: candidate.evictions,
     };
     staging = restored;
     candidate = null;
@@ -1201,6 +1217,19 @@ function requireInitializedSourcePolicyHash(): string {
   return initializedSourcePolicyHash;
 }
 
+function requireInitializedEnabledFormats(): readonly SourceFormat[] {
+  requireInitialized();
+  if (initializedEnabledFormats === null) {
+    throw fixedWorkerError(
+      "invalid_state",
+      "lifecycle",
+      "Worker source format selection is unavailable.",
+      false,
+    );
+  }
+  return initializedEnabledFormats;
+}
+
 function requireInitialized(): void {
   if (state === "disposed") {
     throw fixedWorkerError("disposed", "lifecycle", "Worker is disposed.", false);
@@ -1419,7 +1448,11 @@ async function dispatchProduction(request: WorkerRequest): Promise<unknown> {
   lastRequestId = request.id;
   switch (request.operation) {
     case "initialize":
-      return initialize(request.vault_id, request.source_policy_hash);
+      return initialize(
+        request.vault_id,
+        request.source_policy_hash,
+        request.enabled_source_formats,
+      );
     case "begin_build":
       return beginBuild(request.generation);
     case "add_source_batch":

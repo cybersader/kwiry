@@ -104,7 +104,23 @@ pub(crate) async fn serve(
         .with_context(|| format!("failed to bind {address}"))?;
 
     let data_root = DataRoot::new(&paths.data_dir);
-    data_root.prepare()?;
+    // A core-identity mismatch discards the whole generation here, and the
+    // rebuild that follows is far larger than the per-format eviction reported
+    // below — so it must not be the quieter of the two. The gate's message is
+    // produced and then classified away inside `prepare`; this is where it is
+    // handed back to the operator.
+    if let Some(discarded) = data_root.prepare()? {
+        let generation = discarded.generation.as_deref().unwrap_or("<unreadable>");
+        tracing::warn!(
+            generation,
+            reason = %discarded.reason,
+            "the stored index cannot be reused by this build; rebuilding from scratch"
+        );
+        println!(
+            "kwiry: the stored index cannot be reused by this build ({}); rebuilding every source from scratch",
+            discarded.reason
+        );
+    }
 
     let runtime = SearchRuntime::new();
     let semantic_enabled = profile == HostProfile::Desktop && (semantic || config.semantic.enabled);
@@ -166,6 +182,30 @@ pub(crate) async fn serve(
             return Ok(());
         }
     };
+
+    // Open-time eviction removed rows whose per-format identity moved. It is a
+    // narrowing, not a silent one: the formats it touched are named here so the
+    // reindex that follows is explicable rather than mysterious.
+    {
+        let evictions = manager.open_evictions();
+        if !evictions.is_empty() {
+            let formats = evictions
+                .by_format
+                .iter()
+                .map(|(format, count)| format!("{}={count}", format.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                sources = evictions.total(),
+                formats = %formats,
+                "extraction identity changed; evicted those formats' rows and will reindex their sources"
+            );
+            println!(
+                "kwiry: extraction identity changed for {formats}; {} source(s) evicted and will be reindexed",
+                evictions.total()
+            );
+        }
+    }
 
     // Seed observable counts from the manifest while the boot pass runs.
     // status.generation stays None until the boot pass finishes: a served

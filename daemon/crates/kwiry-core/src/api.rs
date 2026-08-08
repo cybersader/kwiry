@@ -140,12 +140,14 @@ fn validate_path_prefix(prefix: &str) -> std::result::Result<(), ApiRequestError
 pub struct ApiSearchResponse {
     pub hits: Vec<SearchHit>,
     pub next_cursor: Option<String>,
-    /// The extraction-policy identity of the index these hits came out of. One
-    /// value per response rather than per hit: an index is a single-profile
-    /// artifact, so a per-hit copy could only ever repeat itself. A client that
-    /// compares this against its own expectation can say it is reading a
-    /// differently-built index instead of silently treating the results as
-    /// interchangeable.
+    /// The extraction-policy identity of the build that served these hits.
+    ///
+    /// One value per response rather than per hit, and still exact: reuse is
+    /// now decided per format, but eviction runs at open, so no row is ever
+    /// served under an identity other than the running build's. A per-hit copy
+    /// could still only repeat itself. A client that compares this against its
+    /// own expectation can say it is reading a differently-built index instead
+    /// of silently treating the results as interchangeable.
     pub extraction_policy_fingerprint: String,
 }
 

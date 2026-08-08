@@ -117,6 +117,14 @@ if (byName["abi-identity"].abi_version !== 3
   // assert it: a build that had picked up `native-pdf-extractor` would report
   // `enhanced` here, and one that had lost the reader would report `none`.
   || byName["abi-identity"].extraction_policy.pdf !== "portable"
+  // The per-format identities the cache keys its rows on, asserted on the
+  // artifact the user installs. `source-formats.ts` mirrors these, and a
+  // drifted mirror would restore rows this adapter could not have produced.
+  || byName["abi-identity"].format_identity_schema_version !== 1
+  || byName["abi-identity"].format_identities.pdf
+    !== "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc"
+  || byName["abi-identity"].format_identities.markdown
+    !== "b678d0ea2d77d7a79ccc79f4f8a3a1d96aed9bb98757afb1381e5661a1fb96f7"
   || byName["abi-identity"].lexical_query_plan_schema_version !== 4
   || byName["abi-identity"].fts5_match_plan_schema_version !== 3
   || byName["ordinary-any-match"].result.execution_plan.stages[0].plan_id

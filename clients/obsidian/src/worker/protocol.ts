@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 10 as const;
+export const WORKER_PROTOCOL_VERSION = 11 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -52,7 +52,7 @@ export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIEL
  * `PRAGMA user_version`). Any schema edit must bump it: an image whose value
  * differs from the running build's is not restorable.
  */
-export const CACHE_SCHEMA_VERSION = 9;
+export const CACHE_SCHEMA_VERSION = 10;
 export const INITIAL_BUILD_CHECKPOINT_RECORD_VERSION = 1 as const;
 export const INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION = 1 as const;
 export const INITIAL_BUILD_CHECKPOINT_RECORD_KIND = "initial_build_checkpoint" as const;
@@ -116,6 +116,48 @@ export function emptySourceFormatCounts(): SourceFormatCounts {
     format,
     Object.fromEntries(EXTRACTION_COVERAGES.map((coverage) => [coverage, 0])),
   ])) as SourceFormatCounts;
+}
+
+/** One count per compiled format. Absent formats are `0`, never missing. */
+export type SourceFormatTally = Record<SourceFormat, number>;
+
+export function emptySourceFormatTally(): SourceFormatTally {
+  return Object.fromEntries(SOURCE_FORMATS.map((format) => [format, 0])) as SourceFormatTally;
+}
+
+export function isSourceFormatTally(value: unknown): value is SourceFormatTally {
+  return isRecord(value)
+    && hasExactKeys(value, [...SOURCE_FORMATS])
+    && SOURCE_FORMATS.every((format) => isNonNegativeSafeInteger(value[format]));
+}
+
+/**
+ * What a restore refused to reuse, per format and per reason.
+ *
+ * This is what makes a partial reuse reportable truthfully. A restore that
+ * evicts only PDF rows is not a rebuild, and the two reasons are different
+ * statements to the user: `stale_identity` rows will be read again, while
+ * `disabled_format` rows are simply gone because the user asked for that.
+ */
+export interface RestoreEvictionReport {
+  stale_identity: SourceFormatTally;
+  disabled_format: SourceFormatTally;
+}
+
+export function emptyRestoreEvictionReport(): RestoreEvictionReport {
+  return { stale_identity: emptySourceFormatTally(), disabled_format: emptySourceFormatTally() };
+}
+
+export function isRestoreEvictionReport(value: unknown): value is RestoreEvictionReport {
+  return isRecord(value)
+    && hasExactKeys(value, ["stale_identity", "disabled_format"])
+    && isSourceFormatTally(value.stale_identity)
+    && isSourceFormatTally(value.disabled_format);
+}
+
+/** The formats with at least one evicted row, in compiled order. */
+export function evictedFormats(tally: SourceFormatTally): SourceFormat[] {
+  return SOURCE_FORMATS.filter((format) => tally[format] > 0);
 }
 
 export type WorkerOperation =
@@ -272,7 +314,26 @@ interface RequestBase {
 }
 
 export type WorkerRequest =
-  | (RequestBase & { operation: "initialize"; vault_id: string; source_policy_hash: string })
+  | (RequestBase & {
+      operation: "initialize";
+      vault_id: string;
+      /**
+       * The **core** policy identity: the facts for which no row of any format
+       * is reusable. Per-format identities are compiled into the Worker and
+       * never travel here.
+       */
+      source_policy_hash: string;
+      /**
+       * The formats the user currently wants indexed, sorted and deduplicated.
+       *
+       * Configuration, not identity: it is never digested and never persisted.
+       * The Worker holds it so a restored image can be projected down to the
+       * enabled set before it is published as searchable — otherwise disabling
+       * a format would leave its rows answering queries for the whole of the
+       * following reconciliation.
+       */
+      enabled_source_formats: SourceFormat[];
+    })
   | (RequestBase & { operation: "begin_build"; generation: string })
   | (RequestBase & {
       operation: "add_source_batch";
@@ -474,16 +535,30 @@ export interface InitialBuildCheckpointExportResult extends BuildResult {
   source_policy_hash: string;
 }
 
+/**
+ * A restored generation, plus what the restore refused to reuse.
+ *
+ * The report is part of the result rather than a later query because the host
+ * has to describe the restore honestly at the moment it publishes it: "cached
+ * index searchable, reindexing PDF" and "rebuilding the index" are different
+ * claims, and only the Worker knows which one happened.
+ */
+export interface RestoreGenerationResult extends BuildResult {
+  evictions: RestoreEvictionReport;
+}
+
 export interface RestoreInitialBuildCheckpointResult extends BuildResult {
   record_kind: typeof INITIAL_BUILD_CHECKPOINT_RECORD_KIND;
   publication: "initial_staging";
   searchable: false;
   cursor: InitialBuildCheckpointCursor;
+  evictions: RestoreEvictionReport;
 }
 
 export type WorkerResult =
   | InitializeResult
   | BuildResult
+  | RestoreGenerationResult
   | StatusResult
   | SearchResult
   | ExportGenerationResult
@@ -525,10 +600,16 @@ export function parseWorkerRequest(value: unknown): WorkerRequest | WorkerError 
   const base = ["version", "id", "operation"];
   switch (value.operation) {
     case "initialize":
-      return hasExactKeys(value, [...base, "vault_id", "source_policy_hash"])
+      return hasExactKeys(value, [
+        ...base,
+        "vault_id",
+        "source_policy_hash",
+        "enabled_source_formats",
+      ])
         && isBoundedString(value.vault_id, 1_024)
         && value.vault_id.trim().length > 0
         && isSha256Hex(value.source_policy_hash)
+        && isSortedSourceFormatSet(value.enabled_source_formats)
         ? value as unknown as WorkerRequest
         : fixedWorkerError("invalid_request", "protocol", "Invalid Worker request.", false);
     case "status":
@@ -908,8 +989,9 @@ function isResultForOperation(operation: WorkerOperation, value: unknown): boole
     case "apply_source_changes":
     case "commit_build":
     case "abort_build":
-    case "restore_generation":
       return isBuildResult(value);
+    case "restore_generation":
+      return isRestoreGenerationResult(value);
     case "restore_initial_build_checkpoint":
       return isRestoreInitialBuildCheckpointResult(value);
     case "export_generation":
@@ -962,6 +1044,13 @@ export function isBuildResult(value: unknown): value is BuildResult {
   return isRecord(value)
     && hasExactKeys(value, BUILD_RESULT_KEYS)
     && hasValidBuildResultFields(value);
+}
+
+export function isRestoreGenerationResult(value: unknown): value is RestoreGenerationResult {
+  return isRecord(value)
+    && hasExactKeys(value, [...BUILD_RESULT_KEYS, "evictions"])
+    && hasValidBuildResultFields(value)
+    && isRestoreEvictionReport(value.evictions);
 }
 
 function hasValidBuildResultFields(value: Record<string, unknown>): boolean {
@@ -1082,12 +1171,14 @@ function isRestoreInitialBuildCheckpointResult(
       "publication",
       "searchable",
       "cursor",
+      "evictions",
     ])
     && hasValidBuildResultFields(value)
     && value.record_kind === INITIAL_BUILD_CHECKPOINT_RECORD_KIND
     && value.publication === "initial_staging"
     && value.searchable === false
-    && isInitialBuildCheckpointCursor(value.cursor);
+    && isInitialBuildCheckpointCursor(value.cursor)
+    && isRestoreEvictionReport(value.evictions);
 }
 
 function isInitialBuildCheckpointReconciliationPlanResult(
@@ -1246,6 +1337,25 @@ function isFrontmatter(value: unknown): value is WorkerFrontmatter {
 
 export function isSourceFormat(value: unknown): value is SourceFormat {
   return typeof value === "string" && (SOURCE_FORMATS as readonly string[]).includes(value);
+}
+
+/**
+ * A sorted, duplicate-free subset of the compiled formats.
+ *
+ * Sortedness is required rather than merely tolerated: the enabled set decides
+ * which restored rows are deleted before publication, and an ordering the
+ * sender chose freely is an ordering a test can disagree with silently. The
+ * empty set is legal — a user may disable every format.
+ */
+export function isSortedSourceFormatSet(value: unknown): value is SourceFormat[] {
+  if (!Array.isArray(value) || value.length > SOURCE_FORMATS.length) return false;
+  let previous: string | null = null;
+  for (const entry of value) {
+    if (!isSourceFormat(entry)) return false;
+    if (previous !== null && entry <= previous) return false;
+    previous = entry;
+  }
+  return true;
 }
 
 export function isExtractionCoverage(value: unknown): value is ExtractionCoverage {

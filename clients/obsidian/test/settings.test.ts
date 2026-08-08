@@ -11,10 +11,15 @@ import {
 import {
   DEFAULT_ENABLED_SOURCE_FORMATS,
   EXTRACTION_POLICY_FINGERPRINT,
+  FORMAT_IDENTITIES,
+  FORMAT_IDENTITY_SCHEMA_VERSION,
   IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
+  SOURCE_FORMATS,
   SOURCE_PREPARATION_SCHEMA_VERSION,
   classifySourcePath,
-  formatPolicyFingerprint,
+  corePolicyFingerprint,
+  enabledSourceFormatList,
+  formatIdentity,
   isSourceFormatEnabled,
   isSourceFormatExtractable,
   sourceFormatDescription,
@@ -173,42 +178,69 @@ describe("loadSettings", () => {
     expect(sourceFormatDescription("pdf")).not.toContain("Unavailable");
   });
 
-  it("fingerprints the effective schema-9 extraction policy deterministically", async () => {
-    const first = await formatPolicyFingerprint({ ...DEFAULT_ENABLED_SOURCE_FORMATS });
-    const reorderedDefaults = await formatPolicyFingerprint({
-      excalidraw: true,
-      pdf: false,
-      docx: true,
-      canvas: true,
-      base: true,
-      text: true,
-      markdown: true,
-    });
-    const withPdf = await formatPolicyFingerprint({
-      ...DEFAULT_ENABLED_SOURCE_FORMATS,
-      pdf: true,
-    });
-    const withoutText = await formatPolicyFingerprint({
-      ...DEFAULT_ENABLED_SOURCE_FORMATS,
-      text: false,
-    });
-    expect(first).toBe("1711871671c89fe225a8cd2043ba9aa6bd6466b4e8496fa3bef25c65d8cfcb8b");
-    // The schema-8 / policy-v1 digest. Pinned as a negative so a cache built
-    // before the extraction profile existed can never be mistaken for current.
+  it("digests only core facts, so a Settings toggle no longer moves the identity", async () => {
+    const first = await corePolicyFingerprint();
+    const again = await corePolicyFingerprint();
+    expect(again).toBe(first);
+    // The whole point of the split. Under the old single fingerprint the
+    // enabled set was digest material, so every one of these was a different
+    // identity and every one of them discarded a complete cache.
+    expect(first).toBe("ed64b7acaeaa182997208b295449aa71ba8f436f382554612347d86fb55de7e9");
+    // The `-v2` digest of the shipped default set, and of that set with PDF
+    // turned on. Pinned as negatives: the material changed, so a cache written
+    // under either must be refused rather than silently reused.
+    expect(first).not.toBe("1711871671c89fe225a8cd2043ba9aa6bd6466b4e8496fa3bef25c65d8cfcb8b");
+    expect(first).not.toBe("e7a23540578a11ebe9830cec2f744716bcf8722100ebf32c01ddbd97a99e126c");
+    // The schema-8 / policy-v1 and pre-PDF-admission digests. Still pinned as
+    // negatives so no earlier generation of policy identity can be mistaken
+    // for the current one.
     expect(first).not.toBe("090269f9386c1e36124dd493ff02688a7921f883c1cebcd9d99ffd3fc2e31029");
     expect(first).not.toBe("c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97");
-    // The pre-PDF-admission digest, when the adapter compiled no PDF extractor
-    // and reported `pdf=none`. Pinned as a negative because the schema is still
-    // 9 and the enabled set is unchanged, so this digest is the *only* thing
-    // that refuses a cache image built by the previous adapter.
     expect(first).not.toBe("0f7ed72e927b8488adde1dc323ae861017eca3d036965df7ff2df7382370f2e1");
-    expect(reorderedDefaults).toBe(first);
-    expect(withoutText).not.toBe(first);
-    // Turning PDF on is a different policy, not a different amount of the same
-    // one: the enabled set is digest material, so a vault that adds PDF cannot
-    // restore the cache it built without it.
-    expect(withPdf).toBe("e7a23540578a11ebe9830cec2f744716bcf8722100ebf32c01ddbd97a99e126c");
-    expect(withPdf).not.toBe(first);
+  });
+
+  it("gives every format a distinct identity and refuses one it cannot name", () => {
+    expect(FORMAT_IDENTITY_SCHEMA_VERSION).toBe(1);
+    // Mirrors `kwiry_core::policy::tests::the_shipped_format_identities_are_pinned`,
+    // asserted equal to the adapter by rust/kwiry-obsidian-wasm's
+    // typescript_mirror test. Pinned here too because these values decide which
+    // cached rows survive a restore, and main.ts needs them before the adapter
+    // exists.
+    expect(FORMAT_IDENTITIES).toEqual({
+      markdown: "b678d0ea2d77d7a79ccc79f4f8a3a1d96aed9bb98757afb1381e5661a1fb96f7",
+      text: "c89bb1c6cb87c1e6371d7d03956f1c6bf8bff605c847441c2c72d7599bbd464b",
+      base: "d3eeb5a8e3246a07f0c1e41782a7f61628921f43f7afdd722f3a060104e7e079",
+      canvas: "01eae3d6859de3287237e366b7fcd9f346dbab395453ef9422bcd67dc527858c",
+      docx: "b4f9cff615a917e09d800c2784e17c836ef79cc767c49091818a7b1f8598a38e",
+      pdf: "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
+      excalidraw: "e1f6868bd320172f6b8d9afc3ac716e309499b065c62fa1b17ae4c2c09d98348",
+    });
+    // Total over the compiled set: a format with no identity has no way to
+    // prove a cached row of it is reusable.
+    expect(Object.keys(FORMAT_IDENTITIES).sort()).toEqual([...SOURCE_FORMATS].sort());
+    // Distinct, or evicting one format would evict another.
+    expect(new Set(Object.values(FORMAT_IDENTITIES)).size).toBe(SOURCE_FORMATS.length);
+    for (const format of SOURCE_FORMATS) {
+      expect(formatIdentity(format)).toMatch(/^[0-9a-f]{64}$/u);
+    }
+    // Fails closed rather than borrowing another format's identity.
+    expect(() => formatIdentity("unknown" as never)).toThrow();
+  });
+
+  it("reports the enabled set as configuration, sorted and never digested", () => {
+    expect(enabledSourceFormatList(DEFAULT_ENABLED_SOURCE_FORMATS))
+      .toEqual(["base", "canvas", "docx", "excalidraw", "markdown", "text"]);
+    expect(enabledSourceFormatList({ ...DEFAULT_ENABLED_SOURCE_FORMATS, pdf: true }))
+      .toEqual(["base", "canvas", "docx", "excalidraw", "markdown", "pdf", "text"]);
+    expect(enabledSourceFormatList({
+      markdown: false,
+      text: false,
+      base: false,
+      canvas: false,
+      docx: false,
+      pdf: false,
+      excalidraw: false,
+    })).toEqual([]);
   });
 
   it("pins the shipped extraction policy to the portable PDF tier", () => {

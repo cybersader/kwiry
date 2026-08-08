@@ -12,6 +12,10 @@ import {
 } from "virtual:kwiry-rust-wasm-bindings";
 
 import {
+  FORMAT_IDENTITIES,
+  FORMAT_IDENTITY_SCHEMA_VERSION,
+} from "../source-formats";
+import {
   EXTRACTION_PROFILES,
   SOURCE_FORMATS,
 } from "./protocol";
@@ -41,6 +45,16 @@ export interface RustIdentity {
    */
   extraction_policy_fingerprint: string;
   extraction_policy: Record<string, string>;
+  /** Core: the shape of a per-format identity. */
+  format_identity_schema_version: number;
+  /**
+   * Per-row identity, one digest per compiled format. Mirrored in
+   * `source-formats.ts` for the same reason as the policy fingerprint, and
+   * compared here by exact equality rather than shape: this map decides which
+   * cached rows are evicted, so a mirror that merely looks well-formed is not
+   * enough.
+   */
+  format_identities: Record<string, string>;
   lexical_query_plan_schema_version: 4;
   fts5_match_plan_schema_version: 3;
   /**
@@ -495,6 +509,23 @@ function isExtractionPolicy(value: unknown): boolean {
       && (EXTRACTION_PROFILES as readonly string[]).includes(profile as string));
 }
 
+/**
+ * Exact equality against the host's mirrored map, both directions.
+ *
+ * A shape check would accept an adapter that compiles a different extractor
+ * for a format the host thinks it knows, and every cached row of that format
+ * would then be reused under an identity it was not built with. It would also
+ * accept an adapter that compiles a format the host cannot name at all.
+ */
+function mirrorsCompiledFormatIdentities(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const reported = Object.keys(value).sort();
+  const mirrored = Object.keys(FORMAT_IDENTITIES).sort();
+  return reported.length === mirrored.length
+    && reported.every((format, index) => format === mirrored[index])
+    && mirrored.every((format) => value[format] === FORMAT_IDENTITIES[format as SourceFormat]);
+}
+
 function isRustIdentity(value: unknown): value is RustIdentity {
   return isRecord(value)
     && hasExactKeys(value, [
@@ -504,6 +535,8 @@ function isRustIdentity(value: unknown): value is RustIdentity {
       "source_preparation_schema_version",
       "extraction_policy_fingerprint",
       "extraction_policy",
+      "format_identity_schema_version",
+      "format_identities",
       "lexical_query_plan_schema_version",
       "fts5_match_plan_schema_version",
       "chunking_version",
@@ -520,6 +553,8 @@ function isRustIdentity(value: unknown): value is RustIdentity {
     // two agree, so this only has to reject a malformed identity.
     && isHexDigest(value.extraction_policy_fingerprint)
     && isExtractionPolicy(value.extraction_policy)
+    && value.format_identity_schema_version === FORMAT_IDENTITY_SCHEMA_VERSION
+    && mirrorsCompiledFormatIdentities(value.format_identities)
     && value.lexical_query_plan_schema_version === QUERY_SCHEMA_VERSION
     && value.fts5_match_plan_schema_version === MATCH_PLAN_SCHEMA_VERSION
     && isNonNegativeSafeInteger(value.chunking_version)

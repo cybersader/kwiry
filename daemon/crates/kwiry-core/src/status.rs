@@ -112,8 +112,12 @@ pub struct DaemonStatus {
     /// it against its own gets an explicit signal that it is reading an index
     /// built under a different extractor tier, instead of rendering those
     /// results as equivalent to its own. This is the only place cross-*process*
-    /// mistaken identity is addressable; the manifest gate only covers
+    /// mistaken identity is addressable; the manifest gates cover only
     /// cross-*build* identity inside one store.
+    ///
+    /// Report-only since the split-identity wave: it is derived from the
+    /// running build, never persisted, and it gates nothing. What decides reuse
+    /// is `policy::format_identity_fingerprint`, compared per manifest row.
     pub extraction_policy_fingerprint: String,
     /// Per-format profile behind that fingerprint, so the signal is diagnosable
     /// and not merely a hex mismatch.

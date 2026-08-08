@@ -13,13 +13,13 @@ use kwiry_core::{
     evaluate_balanced_playground, rerank_candidates,
 };
 use kwiry_core::{
-    CHUNKING_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_FILE_BYTES,
-    QueryAssistanceEligibility, QueryEvidenceReport, QueryEvidenceStageKind,
-    QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryMatchOperator, QueryPlanKind,
-    QueryTermProjection, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
-    active_extraction_policy, extraction_policy_fingerprint, normalize_lexical_value,
-    prepare_lexical_query, prepare_oversized_source as prepare_oversized_source_descriptor,
-    prepare_source_buffer,
+    CHUNKING_VERSION, FORMAT_IDENTITY_SCHEMA_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
+    LexicalQueryPlan, MAX_FILE_BYTES, QueryAssistanceEligibility, QueryEvidenceReport,
+    QueryEvidenceStageKind, QueryExecutionDisposition, QueryField, QueryFieldGroup,
+    QueryMatchOperator, QueryPlanKind, QueryTermProjection, SOURCE_PREPARATION_SCHEMA_VERSION,
+    SourceDescriptor, SourcePreparation, active_extraction_policy, active_format_identities,
+    extraction_policy_fingerprint, normalize_lexical_value, prepare_lexical_query,
+    prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
 };
 #[cfg(feature = "internal-docx-extractor")]
 use kwiry_core::{ExtractionScope, extract_candidate_outcome};
@@ -82,6 +82,16 @@ pub struct AbiIdentity {
     pub extraction_policy_fingerprint: &'static str,
     pub extraction_policy:
         std::collections::BTreeMap<kwiry_core::SourceFormat, kwiry_core::ExtractionProfile>,
+    /// The shape of a per-format identity. Core: a new component here means no
+    /// row of any format is reusable, so the host mirrors it into its core
+    /// policy hash.
+    pub format_identity_schema_version: u32,
+    /// Every format's compiled identity. Per-row, not core: a cached source row
+    /// carries the identity it was built under, and only rows whose format's
+    /// identity moved are evicted. The host mirrors the whole map as constants
+    /// because it must decide about a restore before the adapter exists, and
+    /// `tests/typescript_mirror.rs` compares both the values and the key set.
+    pub format_identities: std::collections::BTreeMap<kwiry_core::SourceFormat, &'static str>,
     pub lexical_query_plan_schema_version: u32,
     pub fts5_match_plan_schema_version: u32,
     /// The chunker the adapter will actually apply. Chunk rows carry it too,
@@ -434,6 +444,8 @@ pub fn abi_identity() -> String {
         source_preparation_schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
         extraction_policy_fingerprint: extraction_policy_fingerprint(),
         extraction_policy: active_extraction_policy(),
+        format_identity_schema_version: FORMAT_IDENTITY_SCHEMA_VERSION,
+        format_identities: active_format_identities(),
         lexical_query_plan_schema_version: LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
         fts5_match_plan_schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
         chunking_version: CHUNKING_VERSION,

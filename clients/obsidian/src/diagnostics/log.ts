@@ -112,6 +112,7 @@ export type DiagnosticTextValue =
   | "index_update_failed"
   | "index_limit_exceeded"
   | "index_reconciling"
+  | "cache_partially_reused"
   | "index_building"
   | "worker_recovering"
   | "worker_failed"
@@ -349,7 +350,8 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "backend_manager", "daemon_backend", "in_plugin_backend", "index_controller", "cache_store",
   "vault_source", "search_session", "worker", "rpc", "vfs", "settings", "ui",
   "vault_read_failed", "index_build_failed", "index_update_failed", "index_limit_exceeded",
-  "index_reconciling", "index_building", "worker_recovering", "worker_failed", "cache_absent",
+  "index_reconciling", "cache_partially_reused", "index_building", "worker_recovering",
+  "worker_failed", "cache_absent",
   "cache_unavailable", "cache_corrupt", "cache_incompatible", "cache_restore_unavailable",
   "cache_discard_failed", "cache_save_failed", "absent", "pointer_unreadable", "pointer_corrupt",
   "identity_mismatch", "image_absent", "image_unreadable", "image_length_mismatch",
