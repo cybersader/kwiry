@@ -408,7 +408,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       !("path" in record.details))).toBe(true);
   });
 
-  it("reactivates with an awaited new policy hash and a fresh source policy snapshot", async () => {
+  it("keeps the core policy hash across a format toggle and re-snapshots the enabled set", async () => {
     const KwiryPlugin = await loadProductionPlugin();
     const plugin = new KwiryPlugin();
 
@@ -428,7 +428,11 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(harness.backendDisposals).toBe(1);
     expect(harness.cachePolicyHashes).toHaveLength(2);
     expect(harness.cachePolicyHashes[1]).toMatch(/^[0-9a-f]{64}$/u);
-    expect(harness.cachePolicyHashes[1]).not.toBe(initialHash);
+    // The identity that decides whether the cache is even opened is core, and
+    // enablement is not core. Under the old single fingerprint this assertion
+    // was `not.toBe` and the toggle threw away the whole index; now the cache
+    // is restored and projected down to the new enabled set instead.
+    expect(harness.cachePolicyHashes[1]).toBe(initialHash);
     expect(harness.sourcePolicies[1]?.text).toBe(false);
     expect(harness.sourcePolicies[0]?.text).toBe(true);
     expect(harness.sourcePolicies[1]?.pdf).toBe(false);

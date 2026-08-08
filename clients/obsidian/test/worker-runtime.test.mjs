@@ -10,6 +10,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { buildPlugin } from "../esbuild.config.mjs";
 import {
   CACHE_SCHEMA_VERSION,
+  SOURCE_FORMATS,
   WORKER_PROTOCOL_VERSION,
   isWorkerResponse,
 } from "../src/worker/protocol";
@@ -111,6 +112,9 @@ function request(worker, message, timeoutMs = 30_000) {
       ...message,
       ...(message.operation === "initialize" && message.source_policy_hash === undefined
         ? { source_policy_hash: SOURCE_POLICY_HASH }
+        : {}),
+      ...(message.operation === "initialize" && message.enabled_source_formats === undefined
+        ? { enabled_source_formats: [...SOURCE_FORMATS].sort() }
         : {}),
     });
   });
@@ -1371,7 +1375,7 @@ describe("restored cache generation", () => {
     let injected = guardWorkerSource;
     for (const [needle, replacement] of [
       ["state = \"ready\";\n      return {", "state = \"ready\";\n      scope.postMessage({ probe: 'initialized-wasm', wasmBytes: sqlite.wasm.memory.buffer.byteLength });\n      return {"],
-      ["return publishStaging(staging, false);", "const published = publishStaging(staging, false);\n      scope.postMessage({ probe: 'restored-wasm', wasmBytes: sqlite.wasm.memory.buffer.byteLength });\n      return published;"],
+      ["const published = publishStaging(staging, false);", "const published = publishStaging(staging, false);\n      scope.postMessage({ probe: 'restored-wasm', wasmBytes: sqlite.wasm.memory.buffer.byteLength });"],
       ["image = target.index.exportImage(sqlite);", "image = target.index.exportImage(sqlite);\n    scope.postMessage({ probe: 'exported-wasm', wasmBytes: sqlite.wasm.memory.buffer.byteLength });"],
     ]) {
       const next = injected.replace(needle, replacement);
@@ -1513,7 +1517,7 @@ describe("restored cache generation", () => {
       ["if (await sha256Hex(request.bytes) !== request.blob_sha256)", "scope.postMessage({ probe: 'hash' });\n  if (await sha256Hex(request.bytes) !== request.blob_sha256)"],
       ["const header = validateSQLiteImage(request.bytes);", "scope.postMessage({ probe: 'header' });\n    const header = validateSQLiteImage(request.bytes);"],
       ["const index = openRestoredFts5Generation(", "scope.postMessage({ probe: 'vfs' });\n    const index = openRestoredFts5Generation("],
-      ["return publishStaging(staging, false);", "scope.postMessage({ probe: 'publish' });\n      return publishStaging(staging, false);"],
+      ["const published = publishStaging(staging, false);", "scope.postMessage({ probe: 'publish' });\n      const published = publishStaging(staging, false);"],
     ]) {
       const next = injected.replace(needle, replacement);
       expect(next).not.toBe(injected);

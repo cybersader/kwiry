@@ -5,7 +5,11 @@ import { Worker } from "node:worker_threads";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { buildPlugin } from "../esbuild.config.mjs";
-import { WORKER_PROTOCOL_VERSION, isWorkerResponse } from "../src/worker/protocol";
+import {
+  SOURCE_FORMATS,
+  WORKER_PROTOCOL_VERSION,
+  isWorkerResponse,
+} from "../src/worker/protocol";
 
 const SOURCE_POLICY_HASH = "0".repeat(64);
 
@@ -86,6 +90,7 @@ async function initializedWorker() {
     operation: "initialize",
     vault_id: "active-vault",
     source_policy_hash: SOURCE_POLICY_HASH,
+    enabled_source_formats: [...SOURCE_FORMATS].sort(),
   });
   return worker;
 }

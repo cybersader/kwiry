@@ -33,19 +33,24 @@ import {
   type IndexControllerStatus,
   type IndexCounts,
   type IndexWorkerPort,
+  type RestoredIndexCounts,
   type SourceRemoval,
 } from "../src/backends/in-plugin-index-controller";
 import {
   CACHE_SCHEMA_VERSION,
   INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
+  SOURCE_FORMATS,
   WORKER_PROTOCOL_VERSION,
+  emptyRestoreEvictionReport,
   emptySourceFormatCounts,
+  emptySourceFormatTally,
   parseWorkerRequest,
   type ExportGenerationResult,
   type InitialBuildCheckpointCursor,
   type InitialBuildCheckpointExportResult,
   type InitialBuildCheckpointReconciliationPlanResult,
   type ReconciliationPlanResult,
+  type RestoreEvictionReport,
   type RestoreInitialBuildCheckpointResult,
   type ReconciliationSourceMetadata,
   type SourceInput,
@@ -162,8 +167,15 @@ class FakeWorker implements IndexWorkerPort {
   quarantinedSources = 0;
   quarantineFields: SourcePreparationDefectField[] = [];
 
-  async initialize(_vaultId: string, _sourcePolicyHash: string): Promise<void> {
+  enabledSourceFormats: readonly SourceFormat[] = SOURCE_FORMATS;
+
+  async initialize(
+    _vaultId: string,
+    _sourcePolicyHash: string,
+    enabledSourceFormats: readonly SourceFormat[] = SOURCE_FORMATS,
+  ): Promise<void> {
     this.calls.push("initialize");
+    this.enabledSourceFormats = enabledSourceFormats;
   }
 
   async beginBuild(generation: string): Promise<IndexCounts> {
@@ -265,16 +277,27 @@ class FakeCacheWorker extends FakeWorker {
   exportGate: Promise<void> | null = null;
   sourcePolicyHash = SOURCE_POLICY_HASH;
 
-  override async initialize(vaultId: string, sourcePolicyHash: string): Promise<void> {
-    await super.initialize(vaultId, sourcePolicyHash);
+  restoreEvictions: RestoreEvictionReport = emptyRestoreEvictionReport();
+
+  override async initialize(
+    vaultId: string,
+    sourcePolicyHash: string,
+    enabledSourceFormats: readonly SourceFormat[] = SOURCE_FORMATS,
+  ): Promise<void> {
+    await super.initialize(vaultId, sourcePolicyHash, enabledSourceFormats);
     this.sourcePolicyHash = sourcePolicyHash;
   }
 
-  async restoreGeneration(hit: Extract<CacheLoad, { kind: "hit" }>): Promise<IndexCounts> {
+  async restoreGeneration(
+    hit: Extract<CacheLoad, { kind: "hit" }>,
+  ): Promise<RestoredIndexCounts> {
     this.restoreCalls += 1;
     this.activeGeneration = hit.record.generationId;
     this.activePaths = new Set(this.restoredLedger.keys());
-    return this.countsFor(hit.record.generationId, this.activePaths);
+    return {
+      ...this.countsFor(hit.record.generationId, this.activePaths),
+      evictions: this.restoreEvictions,
+    };
   }
 
   async planReconciliation(
@@ -481,6 +504,7 @@ class FakeCheckpointWorker extends FakeCacheWorker {
       publication: "initial_staging",
       searchable: false,
       cursor: { ...hit.record.cursor },
+      evictions: this.restoreEvictions,
     };
   }
 
@@ -1916,6 +1940,110 @@ describe("InPluginIndexController", () => {
     expect(worker.checkpointExportCursors).toEqual([]);
     expect(store.checkpointPuts).toEqual([]);
     expect(worker.activeGeneration).toBe("generation-2");
+  });
+
+  it("reports a partial reuse by format instead of claiming a rebuild", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "fresh", 1);
+    const worker = new FakeCacheWorker();
+    worker.restoredLedger.set("note.md", {
+      path: "note.md",
+      byte_length: 5,
+      mtime_nanos: "1000000",
+      indexable: true,
+      content_hash: await sha256Text("fresh"),
+    });
+    // One format's extractor moved and one format was switched off. Neither is
+    // a reason to discard the cache, and neither is a rebuild.
+    worker.restoreEvictions = {
+      stale_identity: { ...emptySourceFormatTally(), pdf: 4 },
+      disabled_format: { ...emptySourceFormatTally(), docx: 2 },
+    };
+    let releasePlan!: () => void;
+    const planGate = new Promise<void>((resolve) => {
+      releasePlan = resolve;
+    });
+    const originalPlan = worker.planReconciliation.bind(worker);
+    worker.planReconciliation = vi.fn(async (generation, vaultId, currentSources) => {
+      await planGate;
+      return originalPlan(generation, vaultId, currentSources);
+    });
+    const store = new FakeCacheStore(cacheHit());
+    const { controller, statuses } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await vi.waitFor(() => expect(worker.planReconciliation).toHaveBeenCalledTimes(1));
+
+    // The cache was kept and is answering queries. Saying "rebuilding" here
+    // would overstate both the wait and what is missing from search.
+    expect(store.discards).toEqual([]);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "replay",
+      searchable: true,
+      generation: "cached-generation",
+      issue: "cache_partially_reused",
+      partialReuse: { reindexing: ["pdf"], removed: ["docx"] },
+    });
+
+    releasePlan();
+    await controller.whenIdle();
+
+    // Once the refused rows have been dealt with, the statement stops being
+    // made rather than lingering as a permanent label on the index.
+    expect(statuses.at(-1)?.issue).toBeUndefined();
+    expect(statuses.at(-1)?.partialReuse).toBeUndefined();
+  });
+
+  it("keeps the ordinary reconciling statement when a restore reused everything", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "fresh", 1);
+    const worker = new FakeCacheWorker();
+    let releasePlan!: () => void;
+    const planGate = new Promise<void>((resolve) => {
+      releasePlan = resolve;
+    });
+    const originalPlan = worker.planReconciliation.bind(worker);
+    worker.planReconciliation = vi.fn(async (generation, vaultId, currentSources) => {
+      await planGate;
+      return originalPlan(generation, vaultId, currentSources);
+    });
+    const store = new FakeCacheStore(cacheHit());
+    const { controller, statuses } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await vi.waitFor(() => expect(worker.planReconciliation).toHaveBeenCalledTimes(1));
+    expect(statuses.at(-1)).toMatchObject({ issue: "index_reconciling" });
+    expect(statuses.at(-1)?.partialReuse).toBeUndefined();
+
+    releasePlan();
+    await controller.whenIdle();
+  });
+
+  it("hands the Worker the enabled format set as sorted configuration", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "fresh", 1);
+    const worker = new FakeCacheWorker();
+    const statuses: IndexControllerStatus[] = [];
+    let generation = 0;
+    const controller = new InPluginIndexController({
+      source,
+      worker,
+      nextGeneration: () => `generation-${++generation}`,
+      onStatus: (status) => statuses.push(status),
+      yieldControl: () => Promise.resolve(),
+      // Deliberately unsorted and duplicated: the controller normalises it,
+      // because the Worker requires a sorted duplicate-free set and the
+      // caller's ordering is not evidence of anything.
+      enabledSourceFormats: ["text", "markdown", "text"],
+    });
+    controller.start();
+    await controller.whenIdle();
+    expect(worker.enabledSourceFormats).toEqual(["markdown", "text"]);
+    await controller.dispose();
   });
 
   it("refuses an old source policy cache and exports the fresh generation under the new hash", async () => {

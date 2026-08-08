@@ -26,7 +26,9 @@ import {
   CACHE_SCHEMA_VERSION,
   INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
   WORKER_PROTOCOL_VERSION,
+  emptyRestoreEvictionReport,
   emptySourceFormatCounts,
+  emptySourceFormatTally,
   type ExportGenerationResult,
   type InitialBuildCheckpointCursor,
   type InitialBuildCheckpointExportResult,
@@ -314,6 +316,7 @@ function fakeSession(options: {
       quarantined_sources: 0,
       quarantine_fields: [],
       source_format_counts: emptySourceFormatCounts(),
+      evictions: emptyRestoreEvictionReport(),
     }))),
     planReconciliation: vi.fn(options.plan ?? (async () => ({
       generation: "cached-generation",
@@ -766,6 +769,68 @@ describe("InPluginLexicalBackend", () => {
         dirty: false,
         issue: { code: "cache_unavailable" },
       });
+    });
+  });
+
+  it("names the formats being reindexed instead of announcing a rebuild", async () => {
+    let releasePlan!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releasePlan = resolve;
+    });
+    const source = new FakeSource();
+    const session = fakeSession({
+      restore: async (hit: Extract<CacheLoad, { kind: "hit" }>) => ({
+        generation: hit.record.generationId,
+        documents: 0,
+        chunks: 0,
+        database_bytes: 0,
+        database_byte_limit: 1_000_000,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(),
+        evictions: {
+          stale_identity: { ...emptySourceFormatTally(), pdf: 4, docx: 1 },
+          disabled_format: { ...emptySourceFormatTally(), canvas: 2 },
+        },
+      }),
+      plan: async () => {
+        await gate;
+        return {
+          generation: "cached-generation",
+          unchanged: [],
+          refresh: [],
+          remove: [],
+          audit: [],
+          stored_source_count: 0,
+          matched_source_count: 0,
+        };
+      },
+    });
+    const store = new FakeCacheStore(cacheHit());
+    const inPlugin = backend(source, [session], {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    await inPlugin.initialize();
+    await vi.waitFor(() => expect(session.planReconciliation).toHaveBeenCalledTimes(1));
+    await expect(inPlugin.status()).resolves.toMatchObject({
+      searchable: true,
+      generation: "cached-generation",
+      issue: {
+        code: "cache_partially_reused",
+        // Both reasons stated, and stated apart: the DOCX and PDF sources will
+        // be read again, the Canvas rows will not.
+        safeMessage:
+          "Cached index searchable; reindexing DOCX and PDF sources "
+          + "and removed Canvas sources…",
+      },
+    });
+    // The cache was reused, not thrown away.
+    expect(store.discards).toEqual([]);
+
+    releasePlan();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({ phase: "ready", dirty: false });
     });
   });
 

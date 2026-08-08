@@ -12,6 +12,7 @@ import {
   INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
   INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   WORKER_PROTOCOL_VERSION,
+  emptyRestoreEvictionReport,
   emptySourceFormatCounts,
   type WorkerRequest,
 } from "../src/worker/protocol";
@@ -377,6 +378,7 @@ describe("WorkerRpcClient", () => {
         quarantined_sources: 0,
         quarantine_fields: [],
         source_format_counts: sourceFormatCounts(1),
+        evictions: emptyRestoreEvictionReport(),
       },
     });
     await expect(pending).resolves.toMatchObject({ generation: "g1" });
@@ -410,6 +412,7 @@ describe("WorkerRpcClient", () => {
         quarantined_sources: 0,
         quarantine_fields: [],
         source_format_counts: sourceFormatCounts(1),
+        evictions: emptyRestoreEvictionReport(),
       },
     });
     await expect(pending).resolves.toMatchObject({ generation: "g1" });
@@ -433,6 +436,7 @@ describe("WorkerRpcClient", () => {
         quarantined_sources: 0,
         quarantine_fields: [],
         source_format_counts: sourceFormatCounts(1),
+        evictions: emptyRestoreEvictionReport(),
       },
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
@@ -449,7 +453,7 @@ describe("WorkerRpcClient", () => {
       id: 1,
       operation: "restore_initial_build_checkpoint",
       ok: true,
-      result: checkpointRestoreResult(),
+      result: { ...checkpointRestoreResult(), evictions: emptyRestoreEvictionReport() },
     });
     await expect(pending).resolves.toMatchObject({
       generation: "g1",
@@ -467,7 +471,7 @@ describe("WorkerRpcClient", () => {
       id: 1,
       operation: "restore_initial_build_checkpoint",
       ok: true,
-      result: checkpointRestoreResult("g2"),
+      result: { ...checkpointRestoreResult("g2"), evictions: emptyRestoreEvictionReport() },
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
   });

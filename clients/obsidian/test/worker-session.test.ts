@@ -9,6 +9,7 @@ import {
   INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
   INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
   WORKER_PROTOCOL_VERSION,
+  emptyRestoreEvictionReport,
   emptySourceFormatCounts,
   type WorkerRequest,
   type WorkerResult,
@@ -68,6 +69,16 @@ function resultFor(message: WorkerRequest): WorkerResult {
     case "add_source_batch":
     case "commit_build":
     case "abort_build":
+      return {
+        generation: message.generation,
+        documents: 0,
+        chunks: 0,
+        database_bytes: 0,
+        database_byte_limit: 1,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(),
+      };
     case "restore_generation":
       return {
         generation: message.generation,
@@ -78,6 +89,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
         quarantined_sources: 0,
         quarantine_fields: [],
         source_format_counts: emptySourceFormatCounts(),
+        evictions: emptyRestoreEvictionReport(),
       };
     case "restore_initial_build_checkpoint":
       return {
@@ -93,6 +105,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
         publication: "initial_staging",
         searchable: false,
         cursor: message.cursor,
+        evictions: emptyRestoreEvictionReport(),
       };
     case "apply_source_changes":
       return {

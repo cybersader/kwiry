@@ -15,7 +15,9 @@ import {
   MAX_SOURCE_CHANGES,
   SOURCE_FORMATS,
   WORKER_PROTOCOL_VERSION,
+  emptyRestoreEvictionReport,
   emptySourceFormatCounts,
+  emptySourceFormatTally,
   type SourceInput,
   isWorkerResponse,
   parseWorkerRequest,
@@ -145,9 +147,12 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
-  it("publishes protocol 10, cache schema 9, and the closed seven-format set", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(10);
-    expect(CACHE_SCHEMA_VERSION).toBe(9);
+  it("publishes protocol 11, cache schema 10, and the closed seven-format set", () => {
+    // Both moved in the split-identity wave: the initialize request gained the
+    // enabled-format set, and the `sources` table gained `format_identity`
+    // (and the `excalidraw` CHECK value it had been missing).
+    expect(WORKER_PROTOCOL_VERSION).toBe(11);
+    expect(CACHE_SCHEMA_VERSION).toBe(10);
     expect(SOURCE_FORMATS).toEqual([
       "markdown",
       "text",
@@ -157,6 +162,49 @@ describe("Worker protocol", () => {
       "pdf",
       "excalidraw",
     ]);
+  });
+
+  it("requires initialize to declare a sorted, duplicate-free enabled format set", () => {
+    const initialize = (overrides: Record<string, unknown> = {}) => parseWorkerRequest({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "initialize",
+      vault_id: "active-vault",
+      source_policy_hash: "a".repeat(64),
+      enabled_source_formats: ["base", "markdown"],
+      ...overrides,
+    });
+
+    expect(initialize()).toMatchObject({ operation: "initialize" });
+    // The empty set is legal: a user may disable every format, and that is a
+    // configuration choice, not a malformed request.
+    expect(initialize({ enabled_source_formats: [] }))
+      .toMatchObject({ operation: "initialize" });
+    expect(initialize({ enabled_source_formats: [...SOURCE_FORMATS].sort() }))
+      .toMatchObject({ operation: "initialize" });
+
+    // Sortedness is required rather than tolerated: the set decides which
+    // restored rows are deleted before publication, so an ordering the sender
+    // chose freely is an ordering nothing can check against.
+    expect(initialize({ enabled_source_formats: ["markdown", "base"] }))
+      .toMatchObject({ code: "invalid_request" });
+    expect(initialize({ enabled_source_formats: ["base", "base"] }))
+      .toMatchObject({ code: "invalid_request" });
+    expect(initialize({ enabled_source_formats: ["base", "sqlite"] }))
+      .toMatchObject({ code: "invalid_request" });
+    expect(initialize({ enabled_source_formats: "markdown" }))
+      .toMatchObject({ code: "invalid_request" });
+    // Absent is a refusal, not a default: a Worker that guessed the enabled
+    // set could publish rows of a format the user switched off.
+    const { enabled_source_formats: _omitted, ...withoutFormats } = {
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "initialize" as const,
+      vault_id: "active-vault",
+      source_policy_hash: "a".repeat(64),
+      enabled_source_formats: ["markdown"],
+    };
+    expect(parseWorkerRequest(withoutFormats)).toMatchObject({ code: "invalid_request" });
   });
 
   it("accepts exact bounded source batches", () => {
@@ -582,6 +630,7 @@ describe("Worker protocol", () => {
         publication: "initial_staging",
         searchable: false,
         cursor: CHECKPOINT_CURSOR,
+        evictions: emptyRestoreEvictionReport(),
       },
     })).toBe(true);
     expect(isWorkerResponse({
@@ -621,13 +670,57 @@ describe("Worker protocol", () => {
   });
 
   it("validates restore responses and typed refusal envelopes", () => {
+    const restored = (evictions: unknown) => ({
+      version: WORKER_PROTOCOL_VERSION,
+      id: 1,
+      operation: "restore_generation" as const,
+      ok: true as const,
+      result: {
+        generation: "g1",
+        documents: 1,
+        chunks: 2,
+        database_bytes: 65_536,
+        database_byte_limit: 1024 * 1024,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+        source_format_counts: sourceFormatCounts(1),
+        evictions,
+      },
+    });
+    expect(isWorkerResponse(restored(emptyRestoreEvictionReport()))).toBe(true);
+    expect(isWorkerResponse(restored({
+      stale_identity: { ...emptySourceFormatTally(), pdf: 3 },
+      disabled_format: { ...emptySourceFormatTally(), docx: 1 },
+    }))).toBe(true);
+    // A restore that cannot state what it refused is not a restore this host
+    // will accept: the status line would have to guess.
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
       id: 1,
       operation: "restore_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 2, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [], source_format_counts: sourceFormatCounts(1) },
-    })).toBe(true);
+      result: {
+        generation: "g1",
+        documents: 1,
+        chunks: 2,
+        database_bytes: 65_536,
+        database_byte_limit: 1024 * 1024,
+        quarantined_sources: 0,
+        quarantine_fields: [],
+        source_format_counts: sourceFormatCounts(1),
+      },
+    })).toBe(false);
+    // A tally is per compiled format and total: a partial map cannot say that
+    // a format had nothing evicted, only that nobody looked.
+    expect(isWorkerResponse(restored({
+      stale_identity: { pdf: 1 },
+      disabled_format: emptySourceFormatTally(),
+    }))).toBe(false);
+    expect(isWorkerResponse(restored({
+      stale_identity: { ...emptySourceFormatTally(), pdf: -1 },
+      disabled_format: emptySourceFormatTally(),
+    }))).toBe(false);
+    expect(isWorkerResponse(restored({ stale_identity: emptySourceFormatTally() }))).toBe(false);
     for (const code of [
       "cache_identity_mismatch",
       "cache_version_mismatch",

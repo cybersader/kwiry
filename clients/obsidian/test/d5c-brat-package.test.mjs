@@ -162,14 +162,30 @@ describe("D5C BRAT package", () => {
       target: "wasm32-unknown-unknown",
       features: ["internal-d5c-preview"],
     });
-    expect(tracked.dependencies).toHaveLength(59);
+    expect(tracked.dependencies).toHaveLength(95);
+    // Every crate here must have a verbatim notice in licenses/Rust-DEPENDENCY-LICENSES.md,
+    // because MIT is the one release license in this graph that carries no shared file.
+    // The DOCX and PDF waves both grew this list without the gate running, which is how
+    // lopdf, nom and ecb shipped with no notice at all.
     expect(tracked.dependencies.filter(({ release_license: license }) => license === "MIT"))
       .toEqual([
+        expect.objectContaining({ name: "ecb", version: "0.2.0" }),
         expect.objectContaining({ name: "generic-array", version: "0.14.7" }),
+        expect.objectContaining({ name: "lopdf", version: "0.44.0" }),
+        expect.objectContaining({ name: "nom", version: "8.0.0" }),
         expect.objectContaining({ name: "pulldown-cmark", version: "0.13.4" }),
         expect.objectContaining({ name: "pulldown-cmark-escape", version: "0.11.0" }),
+        expect.objectContaining({ name: "quick-xml", version: "0.41.0" }),
+        expect.objectContaining({ name: "rawzip", version: "0.5.1" }),
+        expect.objectContaining({ name: "simd-adler32", version: "0.3.10" }),
         expect.objectContaining({ name: "zmij", version: "1.0.23" }),
       ]);
+    // Each MIT crate's notice must actually be present, not merely inventoried.
+    const notices = await readFile(resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md"), "utf8");
+    for (const { name, version } of tracked.dependencies
+      .filter(({ release_license: license }) => license === "MIT")) {
+      expect(notices).toContain(`${name} ${version}`);
+    }
     expect(JSON.stringify(tracked)).not.toMatch(/\/home\/|\/Users\/|\/mnt\/[a-z]\//u);
   });
 

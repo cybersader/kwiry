@@ -4,6 +4,7 @@
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { FORMAT_IDENTITIES } from "../src/source-formats";
 import { encodeExactIdentifierToken } from "../src/worker/exact-identifier-token";
 import {
   CacheImageInvalidError,
@@ -16,7 +17,12 @@ import {
   type SQLiteApi,
   type SQLiteDatabase,
 } from "../src/worker/fts5-index";
-import { CACHE_SCHEMA_VERSION, type PropertyBag } from "../src/worker/protocol";
+import {
+  CACHE_SCHEMA_VERSION,
+  SOURCE_FORMATS,
+  type PropertyBag,
+  type SourceFormat,
+} from "../src/worker/protocol";
 import type {
   PreparedFrontmatter,
   PreparedPropertyValue,
@@ -119,6 +125,19 @@ function source(
   title = "Title",
 ): SourcePreparation {
   return sourceAt(sourceKey, `${sourceKey}.md`, chunkId, content, title);
+}
+
+/** A prepared source of a chosen format, for the per-format identity tests. */
+function formatted(
+  sourceKey: string,
+  path: string,
+  format: SourceFormat,
+  chunkId: string,
+  content: string,
+): SourcePreparation {
+  const prepared = sourceAt(sourceKey, path, chunkId, content);
+  prepared.format = format;
+  return prepared;
 }
 
 function normalizedFixtureExact(value: string): string | null {
@@ -1625,6 +1644,9 @@ describe("Fts5GenerationIndex", () => {
         vault_id: "active",
         path: "binary.md",
         source_format: "markdown",
+        // The identity this build compiles for Markdown. A restore compares
+        // this per row, so a row that cannot state it is not reusable.
+        format_identity: FORMAT_IDENTITIES.markdown,
         extraction_coverage: "skipped-no-extractable-text",
         outcome: "skipped",
         content_hash: "hash-binary",
@@ -1701,6 +1723,7 @@ describe("Fts5GenerationIndex", () => {
         vault_id: "active",
         path: "alpha.md",
         source_format: "markdown",
+        format_identity: FORMAT_IDENTITIES.markdown,
         extraction_coverage: "indexed-complete",
         outcome: "indexed",
         content_hash: "hash-alpha",
@@ -1782,7 +1805,9 @@ describe("Fts5GenerationIndex", () => {
     ],
     [
       "an invented source row",
-      "INSERT INTO sources VALUES('ghost','active','ghost.md','markdown','unreadable',"
+      "INSERT INTO sources VALUES('ghost','active','ghost.md','markdown',"
+        + `'${FORMAT_IDENTITIES.markdown}',`
+        + "'unreadable',"
         + "'skipped',NULL,0,'1','{\"filename\":\"ghost.md\",\"stem\":\"ghost\","
         + "\"aliases\":[]}','ghost.md','ghost','[]',NULL,'','','',0,0,0)",
     ],
@@ -2099,6 +2124,133 @@ describe("Fts5GenerationIndex", () => {
       expect(scoped.search(anyPlan("nebulaterm"), 20)).toEqual([]);
     } finally {
       scoped.close();
+    }
+  });
+
+  it("evicts only the format whose identity moved and keeps every other row", () => {
+    index.applySourceChanges([
+      source("alpha", "chunk-a", "alphaterm"),
+      formatted("notes", "notes.txt", "text", "chunk-n", "notesterm"),
+      formatted("board", "board.excalidraw", "excalidraw", "chunk-b", "boardterm"),
+    ], []);
+    index.assertIntegrity();
+
+    // Exactly what a shipped `extractor_version_for(Text)` bump looks like from
+    // the cache's point of view: the plain-text extractor moved, nothing else.
+    const image = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec("UPDATE sources SET format_identity = ? WHERE source_format = 'text'", {
+        bind: ["b".repeat(64)],
+      });
+    });
+
+    const restored = openRestoredFts5Generation(sqlite, image, 1);
+    try {
+      expect(restored.evictions.stale_identity.text).toBe(1);
+      expect(restored.evictions.stale_identity.markdown).toBe(0);
+      expect(restored.evictions.stale_identity.excalidraw).toBe(0);
+      expect(restored.evictions.disabled_format.text).toBe(0);
+      // Every other format's rows are reusable and reused. That is the whole
+      // saving: one extractor moved, one format's sources get re-read.
+      expect(restored.sources).toBe(2);
+      expect(restored.documents).toBe(2);
+      expect(restored.chunks).toBe(2);
+      expect(restored.sourceFormatCounts.markdown["indexed-complete"]).toBe(1);
+      expect(restored.sourceFormatCounts.excalidraw["indexed-complete"]).toBe(1);
+      expect(restored.sourceFormatCounts.text["indexed-complete"]).toBe(0);
+      expect(restored.search(anyPlan("alphaterm"), 20)).toHaveLength(1);
+      expect(restored.search(anyPlan("boardterm"), 20)).toHaveLength(1);
+      // Eviction is an open-time transformation, not a read-time filter: the
+      // very first query after restore must already be unable to see the row.
+      expect(restored.search(anyPlan("notesterm"), 20)).toEqual([]);
+      // Nothing is orphaned: the chunk, its FTS posting, its exact aliases,
+      // its properties, and its per-source tallies all left with the row, or
+      // the reconciliation check inside assertIntegrity would refuse the image.
+      expect(() => restored.assertIntegrity()).not.toThrow();
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("removes a disabled format's rows before the restored image answers anything", () => {
+    index.applySourceChanges([
+      source("alpha", "chunk-a", "alphaterm"),
+      formatted("paper", "paper.pdf", "pdf", "chunk-p", "paperterm"),
+    ], []);
+    const image = index.exportImage(sqlite);
+
+    const restored = openRestoredFts5Generation(
+      sqlite,
+      image,
+      1,
+      undefined,
+      undefined,
+      undefined,
+      ["markdown"],
+    );
+    try {
+      // Configuration, not identity: the rows were built correctly and are
+      // still valid, the user simply stopped wanting them. No filesystem probe
+      // is involved, because a disabled format cannot be transiently wrong.
+      expect(restored.evictions.disabled_format.pdf).toBe(1);
+      expect(restored.evictions.stale_identity.pdf).toBe(0);
+      expect(restored.sources).toBe(1);
+      expect(restored.documents).toBe(1);
+      expect(restored.search(anyPlan("paperterm"), 20)).toEqual([]);
+      expect(restored.search(anyPlan("alphaterm"), 20)).toHaveLength(1);
+      expect(() => restored.assertIntegrity()).not.toThrow();
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("reports nothing evicted when every stored format is still current", () => {
+    index.applySourceChanges([source("alpha", "chunk-a", "alphaterm")], []);
+    const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
+    try {
+      // A restore that reused everything must not be describable as a partial
+      // reuse; the host keys its status line on exactly these zeros.
+      for (const format of SOURCE_FORMATS) {
+        expect(restored.evictions.stale_identity[format]).toBe(0);
+        expect(restored.evictions.disabled_format[format]).toBe(0);
+      }
+      expect(restored.sources).toBe(1);
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("carries an Excalidraw source through insert, restore, and reconciliation", () => {
+    // The schema's `source_format` CHECK omitted 'excalidraw' while the format
+    // was enabled by default, so this row could not be inserted at all. The
+    // fix rides the same CACHE_SCHEMA_VERSION bump the identity column needs.
+    index.replaceSource(formatted("board", "board.excalidraw", "excalidraw", "chunk-b", "boardterm"));
+    expect(() => index.assertIntegrity()).not.toThrow();
+
+    const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
+    try {
+      expect(restored.sourceFormatCounts.excalidraw["indexed-complete"]).toBe(1);
+      expect(restored.search(anyPlan("boardterm"), 20)).toHaveLength(1);
+      expect(() => restored.assertIntegrity()).not.toThrow();
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("refuses the whole image when a surviving row carries a foreign identity", () => {
+    index.replaceSource(source("alpha", "chunk-a", "alphaterm"));
+    // Forge an identity that is not any compiled format's, so the projection's
+    // own DELETE is bypassed only if the predicate is written wrongly. The
+    // structural reconciliation check is the belt to the projection's braces.
+    const image = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec("UPDATE sources SET format_identity = ?", { bind: ["c".repeat(64)] });
+    });
+    const restored = openRestoredFts5Generation(sqlite, image, 1);
+    try {
+      expect(restored.evictions.stale_identity.markdown).toBe(1);
+      expect(restored.sources).toBe(0);
+      expect(() => restored.assertIntegrity()).not.toThrow();
+    } finally {
+      restored.close();
     }
   });
 

@@ -125,6 +125,9 @@ async function validateRustLicenses(config) {
     };
   }).sort(compareDependencies);
 
+  if (process.env.KWIRY_WRITE_RUST_LICENSE_INVENTORY === "1") {
+    return { ...inventory, dependencies: actual, regenerated: true };
+  }
   if (JSON.stringify(actual) !== JSON.stringify(inventory.dependencies)) {
     throw new Error(`${config.label} Rust dependency license inventory does not match Cargo.lock`);
   }
@@ -144,14 +147,33 @@ function assertDocxDependencyFeatures(metadata, packagesById, nodesById) {
   if (JSON.stringify(rawzip) !== "[]") {
     throw new Error("DOCX rawzip must resolve with an empty feature list");
   }
-  if (JSON.stringify(flate2) !== JSON.stringify(["any_impl", "miniz_oxide", "rust_backend"])) {
-    throw new Error("DOCX flate2 must resolve only through rust_backend");
+  // The property that matters is that no C zlib backend reaches the WASM build,
+  // not that a particular feature name is absent. Banning "default" outright
+  // stood in for that and stopped being equivalent once lopdf arrived: it
+  // depends on flate2 without default-features = false, so "default" resolves,
+  // and flate2 1.1.x defines default = ["rust_backend"] — the very backend this
+  // gate requires. Assert the backend directly instead, and assert that no
+  // C-zlib feature or sys crate is in the graph at all.
+  for (const required of ["rust_backend", "miniz_oxide"]) {
+    if (!flate2.includes(required)) {
+      throw new Error(`DOCX flate2 must resolve through ${required}`);
+    }
+  }
+  for (const forbidden of ["any_c_zlib", "any_zlib", "cloudflare_zlib", "zlib", "zlib-ng", "zlib-rs"]) {
+    if (flate2.includes(forbidden)) {
+      throw new Error(`DOCX flate2 unexpectedly enables the C backend feature ${forbidden}`);
+    }
+  }
+  for (const sys of ["libz-sys", "libz-ng-sys", "libz-rs-sys", "cloudflare-zlib-sys"]) {
+    if (featuresByName.has(sys)) {
+      throw new Error(`DOCX Rust dependency graph unexpectedly contains ${sys}`);
+    }
   }
   if (JSON.stringify(quickXml) !== JSON.stringify(["encoding", "encoding_rs"])) {
     throw new Error("DOCX quick-xml must resolve only through encoding");
   }
   for (const forbidden of ["default", "std", "zlib", "zlib-ng", "zlib-rs"]) {
-    if (rawzip.includes(forbidden) || flate2.includes(forbidden) || quickXml.includes(forbidden)) {
+    if (rawzip.includes(forbidden) || quickXml.includes(forbidden)) {
       throw new Error(`DOCX Rust dependency graph unexpectedly enables ${forbidden}`);
     }
   }
@@ -230,6 +252,9 @@ function selectReleaseLicense(candidate) {
   }
   const mitVersions = {
     "generic-array": "0.14.7",
+    ecb: "0.2.0",
+    lopdf: "0.44.0",
+    nom: "8.0.0",
     "pulldown-cmark": "0.13.4",
     "pulldown-cmark-escape": "0.11.0",
     "quick-xml": "0.41.0",
