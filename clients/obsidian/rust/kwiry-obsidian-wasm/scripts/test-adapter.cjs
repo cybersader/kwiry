@@ -110,11 +110,43 @@ if (nativeJson !== wasmJson) {
 }
 
 const byName = Object.fromEntries(wasmOutput.map((fixture) => [fixture.name, fixture.output]));
-if (byName["abi-identity"].abi_version !== 1
-  || byName["ordinary-any-match"].result.match_plan.plan_id !== "lexical_any_v1"
-  || byName["identifier-all-match"].result.match_plan.plan_id !== "lexical_all_v1"
+if (byName["abi-identity"].abi_version !== 3
+  || byName["abi-identity"].source_preparation_schema_version !== 9
+  // The shipped plugin compiles the portable PDF tier and never the enhanced
+  // one. This is the artifact the user installs, so it is the right place to
+  // assert it: a build that had picked up `native-pdf-extractor` would report
+  // `enhanced` here, and one that had lost the reader would report `none`.
+  || byName["abi-identity"].extraction_policy.pdf !== "portable"
+  // The per-format identities the cache keys its rows on, asserted on the
+  // artifact the user installs. `source-formats.ts` mirrors these, and a
+  // drifted mirror would restore rows this adapter could not have produced.
+  || byName["abi-identity"].format_identity_schema_version !== 1
+  || byName["abi-identity"].format_identities.pdf
+    !== "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc"
+  || byName["abi-identity"].format_identities.markdown
+    !== "b678d0ea2d77d7a79ccc79f4f8a3a1d96aed9bb98757afb1381e5661a1fb96f7"
+  || byName["abi-identity"].lexical_query_plan_schema_version !== 4
+  || byName["abi-identity"].fts5_match_plan_schema_version !== 3
+  || byName["ordinary-any-match"].result.execution_plan.stages[0].plan_id
+    !== "lexical_exact_metadata_v3"
+  || byName["ordinary-any-match"].result.execution_plan.stages[0].match_value !== undefined
+  || byName["ordinary-any-match"].result.execution_plan.stages[0].exact_value
+    !== "dungeons and dragons"
+  || byName["identifier-all-match"].result.plan.kind !== "identifier"
   || byName["metadata-promoted-match"].result.plan.kind !== "identifier"
-  || byName["allowlisted-explicit-match"].result.match_plan.plan_id !== "lexical_explicit_v1"
+  || byName["allowlisted-explicit-match"].result.execution_plan.stages[0].plan_id
+    !== "lexical_explicit_v3"
+  || byName["no-evidence-empty"].result.execution_plan.disposition !== "empty_no_evidence"
+  || byName["bounded-prefix"].result.execution_plan.stages.at(-1).plan_id !== "lexical_prefix_v3"
+  || byName["numeric-field-explicit"].result.plan.kind !== "explicit"
+  || byName["natural-question"].result.plan.kind !== "ordinary"
+  || byName["natural-parenthetical"].result.plan.kind !== "ordinary"
+  || byName["decomposed-accent-query"].result.plan.normalized_exact !== "resume cache"
+  || byName["complete-long-exact"].result.plan.normalized_exact.length !== 4096
+  || byName["accented-prefix"].result.execution_plan.stages[0].match_value !== "\"resu\"*"
+  || byName["rfc-exact-identifier"].result.plan.terms[0] !== "rfc 9110"
+  || byName["rfc-exact-identifier"].result.execution_plan.stages[0].required_identifiers[0]
+    !== "rfc 9110"
   || byName["inert-sql-looking-query"].error.code !== "explicit_query_unsupported"
   || JSON.stringify(byName["inert-sql-looking-query"]).includes("DROP TABLE")
   || byName["invalid-source-envelope"].error.code !== "invalid_request"

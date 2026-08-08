@@ -1,0 +1,41 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "gone00000000001",
+      "type": "text",
+      "x": 0.0,
+      "y": 0.0,
+      "width": 200.0,
+      "height": 25.0,
+      "isDeleted": true,
+      "originalText": "DELETEDTEXTSENTINELQZX",
+      "text": "DELETEDTEXTSENTINELQZX",
+      "link": "https://example.com/DELETEDLINKSENTINELQZX",
+      "customData": { "note": "DELETEDCUSTOMDATASENTINELQZX" }
+    },
+    {
+      "id": "gone00000000002",
+      "type": "frame",
+      "x": 0.0,
+      "y": 100.0,
+      "width": 400.0,
+      "height": 300.0,
+      "isDeleted": true,
+      "name": "DELETEDFRAMESENTINELQZX"
+    },
+    {
+      "id": "live00000000001",
+      "type": "text",
+      "x": 0.0,
+      "y": 500.0,
+      "width": 200.0,
+      "height": 25.0,
+      "isDeleted": false,
+      "originalText": "Live text",
+      "text": "Live text"
+    }
+  ]
+}

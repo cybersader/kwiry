@@ -6,7 +6,9 @@ D5B remains the urgent desktop need. The first approved engine path reached a te
 
 The approved boundary prohibited a Tantivy fork or replacement writer, so broad plugin/core integration stopped before daemon behavior changed. The owner subsequently selected **official SQLite FTS5-WASM** as the next bounded feasibility path. Its isolated Gate 1 runtime checkpoint passed without a patch, custom build, persistence, network dependency, or production integration.
 
-The no-daemon host remains contractual but not delivered. The existing released Obsidian plugin remains daemon-backed. Gates 1–4 are owner-accepted GO. Gate 4's backend-neutral shell, credential boundary, production Rust adapter, fixed FTS5 Worker, generation isolation, deterministic two-WASM one-file artifact, complete automated matrix, and installed disposable-vault UI-foundation witness pass in the current Gate 4 baseline. Active-vault lifecycle, field performance, packaging/update acceptance, and a delivered-profile claim remain Gate 5. Historical Tantivy evidence lives in [`../../bench/tantivy-wasm/README.md`](../../bench/tantivy-wasm/README.md); the verified FTS5 Gate 1 evidence lives in [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md), and the Gate 3 native/WASM parity witness lives in [`../../bench/portable-core-wasm/README.md`](../../bench/portable-core-wasm/README.md).
+The no-daemon host remains contractual but not delivered. The existing released Obsidian plugin remains daemon-backed. Gates 1–4 are owner-accepted GO. The Gate 5 candidate implements active-vault snapshotting, bounded reads, atomic complete-generation publication, live create/modify/delete/rename reconciliation, progress, manual rebuild, explicit capacity failures, and bounded Worker replacement. The owner-authorized Gate 6 durable-cache design now has an implemented and verified B6.1–B6.4 review checkpoint, including preservation of the complete active generation when a replacement rebuild is incomplete. The automated lifecycle and exact-Worker matrices pass. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional added-memory target; installed startup/progress and declared-reference-hardware measurements remain unavailable. Installed Obsidian, packaging/update/rollback acceptance, private aggregate-only evidence, and explicit owner/field acceptance still block a delivered-profile claim.
+
+The 2026-07-25 durability amendment permits the machine-local disposable cache and explicit stale/reconciling warm start now implemented in current review work. It does not approve OPFS, a helper Worker, a third WASM input, vault-relative/synced cache storage, merge, release, publication, or a delivered claim. Historical Tantivy evidence lives in [`../../bench/tantivy-wasm/README.md`](../../bench/tantivy-wasm/README.md); the verified FTS5 Gate 1 evidence lives in [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md), and the Gate 3 native/WASM parity witness lives in [`../../bench/portable-core-wasm/README.md`](../../bench/portable-core-wasm/README.md).
 
 ## Problem
 
@@ -20,7 +22,7 @@ Some managed desktops permit Obsidian plugins but prohibit a native binary or ba
 | Source scope | Registered Markdown/text trees | Current open vault, Markdown only |
 | Transport | Authenticated loopback HTTP | Direct project-owned worker interface |
 | Modes | Lexical; semantic/hybrid when loaded | Lexical only |
-| Derived state | Native disposable index | Initially in-memory disposable index |
+| Derived state | Versioned machine-local disposable index | In-memory active index plus an optional validated machine-local disposable startup cache |
 | Credential | Local token file | None |
 
 Selection is explicit. Daemon failure never activates lite mode, and lite never pretends to serve semantic or hybrid search.
@@ -51,11 +53,17 @@ Automation reported **`READY_FOR_FIELD_TEST`** and could not issue GO. The owner
 
 The Gate 4 production baseline has explicit daemon/in-plugin selection, capability-aware status/modes, fresh bounded no-follow token-file reads, literal-loopback daemon validation, safe exact response parsing, stale-session rejection, and identity-safe result opening with a separate daemon-to-current-vault mapping. A standalone production Rust adapter emits fixed metadata/search plan identities and opaque FTS5 MATCH values. One long-lived classic Worker embeds that Rust WASM plus the exact official SQLite WASM, owns fixed parameterized SQL and complete/staging generations, and denies network, persistence, and nested-Worker capabilities. Automated evidence reports `READY_FOR_OWNER_REVIEW`; the complete matrix and installed disposable-vault Obsidian UI-foundation witness passed before the owner accepted Gate 4 as GO.
 
-The in-plugin profile initializes both runtimes but remains `index_building`, because this gate deliberately stops before active-vault enumeration, file reads/events, reconciliation, or a delivered-profile claim.
+Gate 4 deliberately stopped at `index_building` before active-vault enumeration, file reads/events, reconciliation, or a delivered-profile claim. The Gate 5 candidate now supplies that lifecycle without changing Gate 4's accepted host boundary.
 
-### Gate 5 — active-vault lifecycle and acceptance
+### Gate 5 — active-vault lifecycle and acceptance — Implemented, awaiting field acceptance
 
-Implement atomic initial build plus create/modify/delete/rename reconciliation, measure generated and real vaults, field-test the exact one-file artifact through installed Obsidian and BRAT upgrades/rollback, and obtain owner acceptance before calling the profile delivered.
+The candidate implements atomic initial build plus create/modify/delete/rename reconciliation, bounded stable reads and event accumulation, and deterministic corpus, aggregate-evidence, lifecycle, exact-Worker, disposable-vault, and candidate-package automation. The generated Node Worker capture reports all seven target records: four measurable runtime targets met, added memory missed, and the two installed-host startup/progress targets unavailable. Declared-reference-hardware measurement, installed Obsidian and BRAT upgrade/rollback testing, private aggregate-only evidence, and explicit owner acceptance remain required before calling the profile delivered.
+
+### Gate 6 — durable cache and differential warm start — Implemented and verified in current review work; acceptance pending
+
+A complete versioned FTS5 generation is exported from the Worker and stored by a main-thread cache port outside the vault on machine-local storage. On restart, the host restores and validates it into staging, publishes it as searchable but stale/reconciling, then reconciles under the declared policy: `strict_hash` reads and hashes every discovered source, while opt-in `metadata_audit` may reuse settled metadata matches with racy-file checks and bounded rolling audits. `producer_manifest` remains unimplemented architecture. Cache corruption or incompatibility discards the cache and performs a clean same-profile build. An incomplete replacement rebuild cannot displace the complete active generation or prove deletions.
+
+The feasibility gate in [`../../bench/fts5-export-restore/README.md`](../../bench/fts5-export-restore/README.md) proved official SQLite export/deserialize integrity, restore speed, event-loop behavior, and bounded memory on the generated 10,000-note/50-MiB corpus, and its comparison matrix measured the cache mechanism and schema variants that the integration uses. Installed production-stack proof, owner/field acceptance, merge, release, publication, and delivery remain pending; the checkpoint does not authorize OPFS, another Worker, another WASM payload, or a custom SQLite build.
 
 ## Portable Rust boundary
 
@@ -89,36 +97,47 @@ Lite UI truthfulness requirements:
 - do not cycle to semantic or hybrid;
 - return `mode_unavailable` for unsupported requests;
 - return `index_building` until an atomic complete generation is ready;
-- never persist note content, queries, the index, or a bearer token in plugin settings.
+- distinguish `current`, `reconciling`, `stale`, and `unavailable`; a restored complete generation may be searchable while stale, but must not be labeled ready/current;
+- identify the effective freshness basis (`strict_hash` or `metadata_audit`) and whether a bounded audit remains pending;
+- never persist note content, queries, index bytes, source paths, or a bearer token in plugin settings. The machine-local cache store holds opaque versioned disposable derived files outside the vault instead.
 
 ## Active-vault lifecycle
 
-The first implementation is desktop-only, Markdown-only, and in-memory:
+The Gate 5 candidate is desktop-only and Markdown-only:
 
 1. register vault events before taking the initial snapshot;
-2. enumerate Markdown files and read source text through Obsidian APIs;
+2. enumerate Markdown files and read stable source bytes through Obsidian APIs;
 3. build aside while buffering create/modify/delete/rename events;
 4. replay buffered changes and atomically publish the ready generation;
 5. serialize/coalesce later mutations;
 6. implement rename as old-path removal plus new-path insertion because IDs are path-derived;
 7. release handlers, pending work, and WASM resources on unload.
 
-Partial-corpus search is not exposed as success.
+The Gate 6 warm-start extension preserves those barriers:
+
+1. the Worker remains persistence-blind;
+2. a main-thread store loads a bounded machine-local cache and verifies its exact identity/hash;
+3. restore occurs into staging, validates schema/triggers/counters/FTS integrity, then commits;
+4. the restored generation is searchable with explicit stale/reconciling status;
+5. reconciliation follows the declared policy: `strict_hash` reads and hashes every discovered source, while opt-in `metadata_audit` may reuse settled metadata matches with Git-style racy timestamp handling and bounded rolling strong-hash audits; `producer_manifest` remains unimplemented;
+6. only a clean complete active generation may be exported and atomically persisted.
+
+Partial-corpus search is never exposed as success. Cache failure affects startup acceleration, not source authority, backend selection, or search mode.
 
 ## D5B lexical profile
 
-The MVP preserves existing lexical fields and technical-identifier behavior: filename/stem, title, selected tags, heading breadcrumb, path text, and section content. Path text is searchable, but folder depth or ancestor importance does not yet change scores.
+The MVP preserves existing ordinary lexical fields and technical-identifier behavior: filename/stem, title, selected tags, heading breadcrumb, path text, and section content. Path text is searchable, but folder depth or ancestor importance does not yet change scores. Separately, the complete recursive typed property bag is projected by default into durable Tantivy and SQLite disposable derived state; ordinary lexical eligibility and scoring do not yet read that bag.
 
 ## D5C relevance phases
 
-These are designed after the dependable lexical host exists:
+The open-property projection foundation is implemented and verified in current review work. Its ranking and public-behavior phases remain separately designed and owner-reviewed:
 
-- **Recency:** decay horizon, query/global behavior, mtime trust, and protection for authoritative older notes.
-- **Properties:** typed normalization, allowlists, exact filters, per-property weighting, privacy exclusions, and rebuild semantics.
-- **Folder hierarchy:** path segments, depth, ancestor matching, archive penalties, active-folder proximity, and named authority folders.
-- **Configuration:** named tested profiles first, bounded values, reset, effective-profile disclosure, schema/profile versions, and migrations.
+- **Recency:** decay horizon, query/global behavior, source-of-time trust, and protection for authoritative older notes; no default or ranking effect is accepted yet.
+- **Properties:** resolve bounded scopes/rules, policy ownership, exact/range/text behavior, per-property weighting, privacy exclusions, validation, disclosure, degradation, and rebuild semantics. Allowlists and bounds govern future query/ranking policy, not the default durable projection of the source-owned bag. Open-default projection does not authorize unrestricted search or ranking exposure of private metadata.
+- **Folder hierarchy:** path segments, depth, ancestor matching, archive penalties, active-folder proximity, and named authority folders; no defaults are accepted yet.
+- **Configuration:** evaluate named tested profiles first, with bounded values, reset, effective-profile disclosure, schema/profile versions, migrations, and deterministic evidence. No profile, field set, weight, default, explanation envelope, or changed result ordering is accepted yet.
 
-Each signal needs judged queries and reproducible regressions; arbitrary sliders are not an adequate relevance design.
+Each signal needs judged queries and reproducible regressions; arbitrary sliders are not an adequate relevance design. Zero-result copy is implemented, field scopes remain conditionally authorized and design-gated rather than accepted as a final grammar/default, and typo assistance remains prototype-only pending performance and visible-limitation evidence.
 
 ## Verification and release gates
 
@@ -138,4 +157,4 @@ Provisional release targets on declared reference hardware are: asynchronous sta
 
 ## Non-goals
 
-D5B does not include semantic-lite, hybrid-lite, external trees, enterprise authorization, connector APIs, persistent index state, new ranking formulas, or fully configurable relevance.
+D5B does not include semantic-lite, hybrid-lite, external trees, enterprise authorization, connector APIs, source-system ETL, new ranking formulas, or fully configurable relevance. Gate 6 permits only a disposable machine-local startup cache; a cache inside the vault/`.obsidian`, OPFS, a helper Worker, a custom SQLite build, or any cache that cannot be deleted and deterministically rebuilt remains out of scope.

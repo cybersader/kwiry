@@ -1,0 +1,54 @@
+{
+  "schema_version": 9,
+  "source_key": "92ee9075935525a64b9e9ca43e67d2bb2186980f4f49191c70fc528ae03787c4",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Golden/Shared Key String.md",
+  "format": "markdown",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "364efb58a74799fe8369fdf1d9b705db6c7fb6cd99ddd70e3b7466be76e2be1f",
+  "byte_length": 62,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Shared Key String.md",
+    "stem": "Shared Key String",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "shared key string.md",
+    "stem": "shared key string",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {
+    "shared_signal": {
+      "type": "string",
+      "value": "7"
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "6daec6fe3d2c3b395a6a4ee9aa87d16c4c15dab0c0b50db0f5daa52e4d8601b0",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Shared Key String.md",
+        "heading_path": [
+          "Body"
+        ],
+        "content": "# Body\nCross-note property typing.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "364efb58a74799fe8369fdf1d9b705db6c7fb6cd99ddd70e3b7466be76e2be1f",
+        "chunking_version": 2
+      },
+      "heading_text": "Body",
+      "normalized_heading": "body",
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

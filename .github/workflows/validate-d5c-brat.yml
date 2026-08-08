@@ -1,0 +1,129 @@
+name: Validate private D5C BRAT candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - test/d5c-balanced-playground
+    tags:
+      - d5c-balanced-playground-*-source
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: Verify shared Rust D5C contract
+        run: |
+          cargo fmt --manifest-path daemon/Cargo.toml --all --check
+          cargo clippy --manifest-path daemon/Cargo.toml -p kwiry-core --all-targets --features internal-d5c-preview -- -D warnings
+          cargo test --manifest-path daemon/Cargo.toml -p kwiry-core --features internal-d5c-preview
+
+  plugin:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    defaults:
+      run:
+        working-directory: clients/obsidian
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: clients/obsidian/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Install
+        run: npm ci
+      - name: Verify source tag identity when tagged
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = tag ]; then
+            expected=$(node -p "require('./d5c-brat.config.json').source.tag")
+            test "$REF_NAME" = "$expected"
+          fi
+      - name: Verify D5C adapter and exact native-WASM parity
+        run: |
+          cargo fmt --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all -- --check
+          cargo clippy --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all-targets --features internal-d5c-preview -- -D warnings
+          cargo test --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --features internal-d5c-preview
+          cargo check --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --target wasm32-unknown-unknown --features internal-d5c-preview
+          node rust/kwiry-obsidian-wasm/scripts/test-d5c-preview.cjs
+          node rust/kwiry-obsidian-wasm/scripts/test-d5c-evaluation.cjs
+      - name: Verify plugin and isolated package
+        run: |
+          npm run verify:d5c:licenses
+          npm run typecheck
+          npm run test:d5c
+          npm test
+          npm run build
+          npm run package:d5c:brat
+          git diff --exit-code
+      - name: Verify candidate publication state
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          config = json.loads(pathlib.Path("d5c-brat.config.json").read_text())
+          package = pathlib.Path("d5c-brat.tmp") / config["plugin"]["version"]
+          path = package / "support/d5c-balanced-playground.attestation.json"
+          attestation = json.loads(path.read_text())
+          expected = os.environ["REF_TYPE"] == "tag"
+          if attestation["publishable"] is not expected:
+              raise SystemExit("candidate publishable state does not match the source ref")
+          if attestation["source"]["tag_verified"] is not expected:
+              raise SystemExit("candidate source-tag verification does not match the source ref")
+          revision = attestation["source"]["tag"] if expected else attestation["source"]["commit"]
+          source_url = f'{attestation["source"]["repository"]}/tree/{revision}'
+          main = (package / "plugin/main.js").read_text()
+          if source_url not in main[:2_000]:
+              raise SystemExit("candidate corresponding-source banner does not match the verified ref")
+          PY
+      - name: Verify candidate privacy and exact file boundary
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./d5c-brat.config.json').plugin.version")
+          package="d5c-brat.tmp/$version"
+          test "$(find "$package/plugin" -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find "$package/support" -maxdepth 1 -type f | wc -l)" -eq 7
+          ! find "$package/plugin" -type f \( -name '*.wasm' -o -name '*.map' -o -name '*.db' -o -name '*worker*.js' \) | grep -q .
+          npm run validate:privacy -- package "$package"
+      - name: Upload immutable candidate for separate publication authorization
+        if: matrix.node == 22
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwiry-d5c-balanced-playground-candidate
+          path: clients/obsidian/d5c-brat.tmp/*/
+          retention-days: 14
+          if-no-files-found: error

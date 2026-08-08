@@ -67,8 +67,34 @@
   gap: 2px;
 }
 
+.kwiry-result-heading {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: var(--size-4-2);
+}
+
 .kwiry-result-title {
+  min-width: 0;
+  overflow: hidden;
   font-weight: var(--font-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kwiry-result-format {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 1px 5px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  line-height: 1.2;
+  letter-spacing: 0.03em;
 }
 
 .kwiry-result-meta {
@@ -89,4 +115,85 @@
 .kwiry-result-excerpt mark {
   background-color: var(--text-highlight-bg);
   color: inherit;
+}
+
+/* Stable two-line rail: query state is live; aggregate indexing is ambient. */
+.kwiry-status-rail {
+  display: grid;
+  grid-template-rows: minmax(1.35em, auto) minmax(1.35em, auto);
+  min-height: calc(2.7em + 8px);
+  gap: 2px;
+  box-sizing: border-box;
+  padding: 4px var(--size-4-3);
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: color-mix(in srgb, var(--background-secondary) 48%, transparent);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+
+.kwiry-query-status,
+.kwiry-index-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.35;
+}
+
+.kwiry-query-status {
+  position: relative;
+  padding-inline-start: 16px;
+  color: var(--text-muted);
+  font-weight: var(--font-medium);
+}
+
+.kwiry-query-status::before {
+  position: absolute;
+  inset-inline-start: 1px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid transparent;
+  border-radius: 50%;
+  content: "";
+  opacity: 0;
+  transform: translateY(-50%);
+}
+
+.kwiry-query-status.is-searching.is-animation-ready::before {
+  border-color: var(--text-faint);
+  border-top-color: var(--interactive-accent);
+  opacity: 1;
+  animation: kwiry-status-spin 720ms linear infinite;
+}
+
+.kwiry-query-status.is-error {
+  color: var(--text-error);
+}
+
+.kwiry-index-status {
+  padding-inline-start: 16px;
+  color: var(--text-faint);
+  visibility: hidden;
+}
+
+.kwiry-index-status.has-status {
+  visibility: visible;
+}
+
+.kwiry-index-status.is-attention {
+  color: var(--text-muted);
+}
+
+@keyframes kwiry-status-spin {
+  to {
+    transform: translateY(-50%) rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kwiry-query-status.is-searching.is-animation-ready::before {
+    animation: none;
+  }
 }

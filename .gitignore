@@ -18,3 +18,14 @@
 /CLAUDE.local.md
 /kwir.portagenty.toml
 /tests/
+
+# Regenerable feasibility-gate artifacts
+/bench/fts5-export-restore/experiments/*.db
+/bench/fts5-export-restore/experiments/sizes.json
+
+# Fixture plugin build output and deps
+/tools/kwiry-fixtures/node_modules/
+/tools/kwiry-fixtures/main.js
+
+# Disk-usage evidence: multi-MB per-sample series, regenerate with run.mjs
+/bench/premerge/disk-usage/evidence/latest.json

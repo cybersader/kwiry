@@ -18,6 +18,46 @@
         { "vault_id": "technical-a", "path": "missing-2-line.md", "grade": 0, "hard_negative": true, "rationale": "missing_iia" },
         { "vault_id": "technical-a", "path": "partial-tokens.md", "grade": 0, "hard_negative": true, "rationale": "partial_tokens_only" }
       ]
+    },
+    {
+      "id": "lexical-ladder",
+      "text": "lexical ladder exact",
+      "known_item": true,
+      "judgments": [
+        { "vault_id": "technical-a", "path": "lexical-ladder-exact.md", "grade": 3, "rationale": "title_exact" },
+        { "vault_id": "technical-a", "path": "lexical-ladder-phrase.md", "grade": 2, "rationale": "body_phrase" },
+        { "vault_id": "technical-a", "path": "lexical-ladder-all-terms.md", "grade": 1, "rationale": "all_terms_non_phrase" }
+      ]
+    },
+    {
+      "id": "rfc-anchor-with-unsupported-context",
+      "text": "RFC 9110 unfindablecontext",
+      "known_item": true,
+      "judgments": [
+        { "vault_id": "technical-a", "path": "rfc-9110.md", "grade": 3, "rationale": "required_anchor_with_relaxed_context" }
+      ]
+    },
+    {
+      "id": "cve-anchor-with-unsupported-context",
+      "text": "CVE-2026-1234 unfindablecontext",
+      "known_item": true,
+      "judgments": [
+        { "vault_id": "technical-a", "path": "cve-2026-1234.md", "grade": 3, "rationale": "compound_required_anchor_with_relaxed_context" }
+      ]
+    },
+    {
+      "id": "bounded-prefix",
+      "text": "prefixab",
+      "known_item": true,
+      "judgments": [
+        { "vault_id": "technical-a", "path": "prefix-evidence.md", "grade": 1, "rationale": "prefix_only" }
+      ]
+    },
+    {
+      "id": "zero-evidence",
+      "text": "totallyunknown nowhereword",
+      "known_item": false,
+      "judgments": []
     }
   ]
 }

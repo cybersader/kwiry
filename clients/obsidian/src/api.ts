@@ -7,6 +7,7 @@
 // token-file read for every authenticated call.
 
 import { normalizeDaemonBaseUrl, normalizeDaemonToken } from "./credentials";
+import { SOURCE_FORMATS, type SourceFormat as PluginSourceFormat } from "./source-formats";
 
 export type SearchMode = "lexical" | "semantic" | "hybrid";
 
@@ -33,10 +34,42 @@ export interface Frontmatter {
   date?: string;
 }
 
+export type SourceFormat = PluginSourceFormat;
+
+export const EXTRACTION_COVERAGES = [
+  "indexed-complete",
+  "indexed-partial",
+  "skipped-no-extractable-text",
+  "unreadable",
+  "quarantined",
+] as const;
+export type ExtractionCoverage = typeof EXTRACTION_COVERAGES[number];
+export type SourceFormatCounts = Record<
+  SourceFormat,
+  Record<ExtractionCoverage, number>
+>;
+
+/**
+ * Mirrors `kwiry_core::extract::SourceLocator`: non-ranking navigation metadata
+ * a chunk carries so a result can be opened where it was found. Never tokenized
+ * and never part of scoring on either backend — Tantivy stores the field
+ * `STORED`-only and FTS5 keeps it out of `chunk_search`.
+ *
+ * Each variant pairs with exactly one source format, which `locatorMatchesFormat`
+ * enforces: a locator on the wrong format is an invalid daemon response, not a
+ * hit to be shown without navigation.
+ */
+export type SourceLocator =
+  | { kind: "base_view"; view: string }
+  | { kind: "pdf_page"; page: number };
+
 export interface SearchHit {
   chunk_id: string;
   vault_id: string;
   path: string;
+  format: SourceFormat;
+  coverage: ExtractionCoverage;
+  locator: SourceLocator | null;
   heading_path: string[];
   score: number;
   excerpt: string;
@@ -71,6 +104,7 @@ export interface DaemonStatus {
   chunking_version: number;
   chunks: number;
   documents: number;
+  source_format_counts: SourceFormatCounts;
   last_sync: string | null;
   dirty: boolean;
   rebuilding: boolean;
@@ -219,6 +253,9 @@ function parseSearchHit(value: unknown): SearchHit {
       "chunk_id",
       "vault_id",
       "path",
+      "format",
+      "coverage",
+      "locator",
       "heading_path",
       "score",
       "excerpt",
@@ -227,6 +264,10 @@ function parseSearchHit(value: unknown): SearchHit {
     || !isBoundedString(value.chunk_id, MAX_SHORT_TEXT_CHARACTERS)
     || !isBoundedString(value.vault_id, MAX_SHORT_TEXT_CHARACTERS)
     || !isBoundedString(value.path, MAX_PATH_CHARACTERS)
+    || !isSourceFormat(value.format)
+    || !isExtractionCoverage(value.coverage)
+    || !isSourceLocator(value.locator)
+    || !locatorMatchesFormat(value.locator, value.format)
     || !Array.isArray(value.heading_path)
     || value.heading_path.length > 64
     || !value.heading_path.every((heading) => isBoundedString(heading, MAX_SHORT_TEXT_CHARACTERS))
@@ -240,11 +281,58 @@ function parseSearchHit(value: unknown): SearchHit {
     chunk_id: value.chunk_id,
     vault_id: value.vault_id,
     path: value.path,
+    format: value.format,
+    coverage: value.coverage,
+    locator: value.locator,
     heading_path: value.heading_path,
     score: value.score,
     excerpt: value.excerpt,
     frontmatter: parseFrontmatter(value.frontmatter),
   };
+}
+
+function isSourceFormat(value: unknown): value is SourceFormat {
+  return value === "markdown"
+    || value === "text"
+    || value === "base"
+    || value === "canvas"
+    || value === "docx"
+    || value === "pdf"
+    || value === "excalidraw";
+}
+
+function isExtractionCoverage(value: unknown): value is ExtractionCoverage {
+  return EXTRACTION_COVERAGES.includes(value as ExtractionCoverage);
+}
+
+function isSourceLocator(value: unknown): value is SourceLocator | null {
+  if (value === null) return true;
+  if (isExactRecord(value, ["kind", "view"])) {
+    return value.kind === "base_view"
+      && isBoundedString(value.view, MAX_SHORT_TEXT_CHARACTERS);
+  }
+  if (isExactRecord(value, ["kind", "page"])) {
+    return value.kind === "pdf_page" && isPdfPageNumber(value.page);
+  }
+  return false;
+}
+
+/**
+ * Bounds a page by the Rust field's type (`u32`, 1-based) rather than by the
+ * extractor's current page ceiling. The ceiling is a policy the daemon owns and
+ * may raise; pinning it here would turn a legitimate deep-page hit into a
+ * rejected response the moment the two drift.
+ */
+function isPdfPageNumber(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 1
+    && value <= 4_294_967_295;
+}
+
+function locatorMatchesFormat(locator: SourceLocator | null, format: SourceFormat): boolean {
+  if (locator === null) return true;
+  return locator.kind === "base_view" ? format === "base" : format === "pdf";
 }
 
 function parseFrontmatter(value: unknown): Frontmatter {
@@ -281,6 +369,7 @@ function parseDaemonStatus(value: unknown): DaemonStatus {
       "chunking_version",
       "documents",
       "chunks",
+      "source_format_counts",
       "last_sync",
       "dirty",
       "rebuilding",
@@ -301,6 +390,10 @@ function parseDaemonStatus(value: unknown): DaemonStatus {
   ) {
     throw invalidResponse("Daemon returned an invalid status response.");
   }
+  const sourceFormatCounts = parseSourceFormatCounts(value.source_format_counts);
+  if (indexedSourceCount(sourceFormatCounts) !== value.documents) {
+    throw invalidResponse("Daemon status format counts did not match its document total.");
+  }
   const model = value.model === null ? null : parseModelStatus(value.model);
   const vaults = value.vaults.map(parseVaultStatus);
   return {
@@ -310,12 +403,38 @@ function parseDaemonStatus(value: unknown): DaemonStatus {
     chunking_version: value.chunking_version,
     documents: value.documents,
     chunks: value.chunks,
+    source_format_counts: sourceFormatCounts,
     last_sync: value.last_sync,
     dirty: value.dirty,
     rebuilding: value.rebuilding,
     model,
     vaults,
   };
+}
+
+function parseSourceFormatCounts(value: unknown): SourceFormatCounts {
+  if (!isExactRecord(value, SOURCE_FORMATS)) {
+    throw invalidResponse("Daemon returned invalid source format counts.");
+  }
+  for (const format of SOURCE_FORMATS) {
+    const counts = value[format];
+    if (
+      !isExactRecord(counts, EXTRACTION_COVERAGES)
+      || !EXTRACTION_COVERAGES.every((coverage) => isNonNegativeInteger(counts[coverage]))
+    ) {
+      throw invalidResponse("Daemon returned invalid source format counts.");
+    }
+  }
+  return value as SourceFormatCounts;
+}
+
+function indexedSourceCount(counts: SourceFormatCounts): number {
+  return SOURCE_FORMATS.reduce(
+    (total, format) => total
+      + counts[format]["indexed-complete"]
+      + counts[format]["indexed-partial"],
+    0,
+  );
 }
 
 function parseModelStatus(value: unknown): DaemonModelStatus {
@@ -373,6 +492,7 @@ function safeApiMessage(code: string): string {
     case "mode_unavailable":
       return "The selected search mode is unavailable for this backend.";
     case "index_not_ready":
+    case "index_building":
       return "The selected backend does not have a ready index.";
     case "invalid_query":
       return "The query is not valid for the selected backend.";

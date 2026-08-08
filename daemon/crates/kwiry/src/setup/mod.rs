@@ -31,7 +31,7 @@ mod tests {
 
     use kwiry_core::{
         CHUNKING_VERSION, Config, ConnectionDescriptor, DaemonState, DaemonStatus, ModelStatus,
-        Paths, VaultRegistration, VaultStatus, write_connection_descriptor,
+        Paths, SourceFormatCounts, VaultRegistration, VaultStatus, write_connection_descriptor,
     };
     use tempfile::tempdir;
 
@@ -381,13 +381,21 @@ mod tests {
     }
 
     fn status(version: &str, semantic: bool) -> DaemonStatus {
+        let mut source_format_counts = SourceFormatCounts::default();
+        source_format_counts.record(
+            kwiry_core::SourceFormat::Markdown,
+            kwiry_core::ExtractionCoverage::IndexedComplete,
+        );
         DaemonStatus {
             state: DaemonState::Ready,
             version: version.into(),
             generation: Some("generation-1".into()),
             chunking_version: CHUNKING_VERSION,
+            extraction_policy_fingerprint: kwiry_core::extraction_policy_fingerprint().to_owned(),
+            extraction_policy: kwiry_core::active_extraction_policy(),
             documents: 1,
             chunks: 1,
+            source_format_counts,
             last_sync: None,
             dirty: false,
             rebuilding: false,

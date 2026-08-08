@@ -1,17 +1,20 @@
 use std::fs;
 
+use crate::format::SourceFormat;
 use crate::model::{
     DiscoveredFile, FileIngestOutcome, FileOutcomeKind, IngestReport, IngestWarning, PreparedChunk,
-    RetrievalMetadata, VaultRegistration,
+    VaultRegistration,
 };
+use crate::policy::extraction_profile_for;
 use crate::source::{
-    SourceDescriptor, SourceFormat, SourcePreparation, SourcePreparationKind,
-    prepare_source_buffer, retrieval_metadata,
+    SourceDescriptor, SourcePreparation, SourcePreparationKind, prepare_source_buffer,
+    retrieval_metadata,
 };
-use crate::walk::discover_vault;
+use crate::walk::{EnumerationResult, discover_vault};
 
 pub fn ingest_vault(vault: &VaultRegistration) -> IngestReport {
-    let (outcomes, mut warnings) = ingest_vault_files(vault);
+    let (outcomes, enumeration) = ingest_vault_files(vault);
+    let mut warnings = enumeration.warnings;
     let mut report = IngestReport::default();
 
     for outcome in outcomes {
@@ -32,22 +35,47 @@ pub fn ingest_vault(vault: &VaultRegistration) -> IngestReport {
 
 pub(crate) fn ingest_vault_files(
     vault: &VaultRegistration,
-) -> (Vec<FileIngestOutcome>, Vec<IngestWarning>) {
-    let (files, warnings) = discover_vault(vault);
-    let outcomes = files.iter().map(|file| ingest_file(vault, file)).collect();
-    (outcomes, warnings)
+) -> (Vec<FileIngestOutcome>, EnumerationResult) {
+    let enumeration = discover_vault(vault);
+    let outcomes = enumeration
+        .files
+        .iter()
+        .map(|file| ingest_file(vault, file))
+        .collect();
+    (outcomes, enumeration)
 }
 
 pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> FileIngestOutcome {
+    let format = SourceFormat::from_extension(&file.extension)
+        .expect("vault discovery only admits registered source formats");
+    // Dormant since PDF admission — every registered format is extractable, and
+    // `format::tests` asserts that. Kept because the registry is what discovery
+    // trusts: a format admitted to the closed set ahead of its extractor must
+    // skip without reading bytes rather than reach a dispatcher arm that has
+    // nothing to dispatch to.
+    if !format.is_extractable() {
+        return file_outcome(
+            vault,
+            file,
+            crate::extract::ExtractionCoverage::SkippedNoExtractableText,
+            None,
+            Vec::new(),
+            FileOutcomeKind::Skipped,
+            Some(format!(
+                "{} extraction is not yet supported; skipped without reading source bytes",
+                format.as_str()
+            )),
+        );
+    }
     let bytes = match fs::read(&file.absolute_path) {
         Ok(bytes) => bytes,
         Err(error) => {
             return file_outcome(
                 vault,
                 file,
+                crate::extract::ExtractionCoverage::Unreadable,
                 None,
                 Vec::new(),
-                retrieval_metadata(&file.relative_path, Vec::new()),
                 FileOutcomeKind::TransientError,
                 Some(error.to_string()),
             );
@@ -57,11 +85,7 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
         vault_id: vault.id.clone(),
         room: vault.room.clone(),
         path: file.relative_path.clone(),
-        format: if file.extension == "txt" {
-            SourceFormat::Text
-        } else {
-            SourceFormat::Markdown
-        },
+        format,
         byte_length: file.byte_length,
         mtime: file.mtime,
         mtime_nanos: file.mtime_nanos,
@@ -71,9 +95,9 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
         Err(error) => file_outcome(
             vault,
             file,
+            crate::extract::ExtractionCoverage::Unreadable,
             None,
             Vec::new(),
-            retrieval_metadata(&file.relative_path, Vec::new()),
             FileOutcomeKind::Skipped,
             Some(error.to_string()),
         ),
@@ -84,9 +108,36 @@ fn file_outcome_from_preparation(
     file: &DiscoveredFile,
     preparation: SourcePreparation,
 ) -> FileIngestOutcome {
+    // A preparation from another extraction profile is refused, not reused.
+    // Nothing downstream would notice on its own: chunk identity is
+    // path-derived, so the other tier's rows would silently claim the
+    // identities this tier's rows are about to claim.
+    if let Err(error) = preparation.ensure_current_policy() {
+        return FileIngestOutcome {
+            vault_id: preparation.vault_id,
+            path: preparation.path,
+            format: preparation.format,
+            extraction_profile: extraction_profile_for(preparation.format),
+            coverage: crate::extract::ExtractionCoverage::Quarantined,
+            content_hash: preparation.content_hash,
+            byte_length: preparation.byte_length,
+            mtime: preparation.mtime,
+            mtime_nanos: preparation.mtime_nanos,
+            chunks: Vec::new(),
+            retrieval: preparation.retrieval,
+            kind: FileOutcomeKind::Skipped,
+            warning: Some(IngestWarning {
+                path: file.absolute_path.clone(),
+                message: error.message,
+            }),
+        };
+    }
     FileIngestOutcome {
         vault_id: preparation.vault_id,
         path: preparation.path,
+        format: preparation.format,
+        extraction_profile: preparation.extraction_profile,
+        coverage: preparation.coverage,
         content_hash: preparation.content_hash,
         byte_length: preparation.byte_length,
         mtime: preparation.mtime,
@@ -107,21 +158,28 @@ fn file_outcome_from_preparation(
 fn file_outcome(
     vault: &VaultRegistration,
     file: &DiscoveredFile,
+    coverage: crate::extract::ExtractionCoverage,
     content_hash: Option<String>,
     chunks: Vec<PreparedChunk>,
-    retrieval: RetrievalMetadata,
     kind: FileOutcomeKind,
     warning: Option<String>,
 ) -> FileIngestOutcome {
     FileIngestOutcome {
         vault_id: vault.id.clone(),
         path: file.relative_path.clone(),
+        format: SourceFormat::from_extension(&file.extension)
+            .expect("vault discovery only admits registered source formats"),
+        extraction_profile: extraction_profile_for(
+            SourceFormat::from_extension(&file.extension)
+                .expect("vault discovery only admits registered source formats"),
+        ),
+        coverage,
         content_hash,
         byte_length: file.byte_length,
         mtime: file.mtime,
         mtime_nanos: file.mtime_nanos,
         chunks,
-        retrieval,
+        retrieval: retrieval_metadata(&file.relative_path, Vec::new()),
         kind,
         warning: warning.map(|message| IngestWarning {
             path: file.absolute_path.clone(),
@@ -153,6 +211,55 @@ mod tests {
         assert!(report.chunks.is_empty());
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].message.contains("NUL"));
+    }
+
+    /// This test used `.pdf` as the stand-in for an unextractable format. PDF is
+    /// admitted, and it was the last such format, so the pre-read refusal in
+    /// `ingest_file` is now dormant by construction rather than removed — and
+    /// that is what is asserted here, together with the fact that a `.pdf` now
+    /// reaches the extractor instead of being turned away with an
+    /// "extraction is not yet supported" warning.
+    #[test]
+    fn native_ingest_reads_pdf_bytes_and_no_registered_format_is_refused_pre_read() {
+        for spec in crate::format::format_specs() {
+            assert!(
+                spec.extraction_supported,
+                "{} would trip the dormant pre-read refusal",
+                spec.name
+            );
+        }
+
+        let temporary = tempdir().unwrap();
+        fs::write(temporary.path().join("paper.pdf"), b"not a pdf at all").unwrap();
+        let vault = VaultRegistration {
+            id: "fixture".into(),
+            path: temporary.path().to_path_buf(),
+            room: None,
+        };
+        let file = DiscoveredFile {
+            absolute_path: temporary.path().join("paper.pdf"),
+            relative_path: "paper.pdf".into(),
+            extension: "pdf".into(),
+            byte_length: b"not a pdf at all".len() as u64,
+            mtime: 42,
+            mtime_nanos: 42_000_000_000,
+        };
+
+        let outcome = ingest_file(&vault, &file);
+
+        // The bytes were read and judged: a quarantine is an extraction verdict,
+        // which the pre-read refusal could never have produced.
+        assert_eq!(outcome.kind, FileOutcomeKind::Skipped);
+        assert_eq!(
+            outcome.coverage,
+            crate::extract::ExtractionCoverage::Quarantined
+        );
+        assert!(outcome.chunks.is_empty());
+        assert!(
+            outcome
+                .warning
+                .is_none_or(|warning| !warning.message.contains("not yet supported"))
+        );
     }
 
     #[test]
@@ -203,6 +310,8 @@ mod tests {
 
             assert_eq!(native.vault_id, portable.vault_id);
             assert_eq!(native.path, portable.path);
+            assert_eq!(native.format, portable.format);
+            assert_eq!(native.coverage, portable.coverage);
             assert_eq!(native.content_hash, portable.content_hash);
             assert_eq!(native.byte_length, portable.byte_length);
             assert_eq!(native.mtime, portable.mtime);

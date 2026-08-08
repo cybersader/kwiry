@@ -4,9 +4,10 @@ use std::time::UNIX_EPOCH;
 
 use ignore::{DirEntry, WalkBuilder};
 
+use crate::format::SourceFormat;
 use crate::model::{DiscoveredFile, IngestWarning, MAX_FILE_BYTES, VaultRegistration};
+use crate::reconcile::EnumerationCompleteness;
 
-const EXTENSIONS: &[&str] = &["md", "markdown", "mdx", "txt"];
 const SKIPPED_DIRECTORIES: &[&str] = &[
     ".git",
     ".hg",
@@ -17,9 +18,14 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "target",
 ];
 
-pub(crate) fn discover_vault(
-    vault: &VaultRegistration,
-) -> (Vec<DiscoveredFile>, Vec<IngestWarning>) {
+#[derive(Debug)]
+pub(crate) struct EnumerationResult {
+    pub files: Vec<DiscoveredFile>,
+    pub warnings: Vec<IngestWarning>,
+    pub completeness: EnumerationCompleteness,
+}
+
+pub(crate) fn discover_vault(vault: &VaultRegistration) -> EnumerationResult {
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let root = vault.path.clone();
@@ -121,7 +127,16 @@ pub(crate) fn discover_vault(
     }
 
     files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    (files, warnings)
+    let completeness = if warnings.is_empty() {
+        EnumerationCompleteness::Complete
+    } else {
+        EnumerationCompleteness::Defective
+    };
+    EnumerationResult {
+        files,
+        warnings,
+        completeness,
+    }
 }
 
 fn keep_entry(entry: &DirEntry) -> bool {
@@ -138,10 +153,8 @@ fn keep_entry(entry: &DirEntry) -> bool {
 }
 
 fn normalized_extension(path: &Path) -> Option<String> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    EXTENSIONS
-        .contains(&extension.as_str())
-        .then_some(extension)
+    SourceFormat::from_extractable_path(path)?;
+    Some(path.extension()?.to_str()?.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -157,6 +170,10 @@ mod tests {
         let temporary = tempdir().unwrap();
         fs::write(temporary.path().join("z.md"), "z").unwrap();
         fs::write(temporary.path().join("a.TXT"), "a").unwrap();
+        fs::write(temporary.path().join("dashboard.base"), "views: []").unwrap();
+        fs::write(temporary.path().join("board.canvas"), "{}").unwrap();
+        fs::write(temporary.path().join("report.docx"), "docx").unwrap();
+        fs::write(temporary.path().join("paper.PDF"), "pdf").unwrap();
         fs::write(temporary.path().join("image.png"), "png").unwrap();
         fs::create_dir(temporary.path().join(".hidden")).unwrap();
         fs::write(temporary.path().join(".hidden/secret.md"), "secret").unwrap();
@@ -166,12 +183,46 @@ mod tests {
             room: None,
         };
 
-        let (files, warnings) = discover_vault(&vault);
-        let paths: Vec<_> = files
+        let result = discover_vault(&vault);
+        let paths: Vec<_> = result
+            .files
             .iter()
             .map(|file| file.relative_path.as_str())
             .collect();
-        assert_eq!(paths, ["a.TXT", "z.md"]);
-        assert!(warnings.is_empty());
+        assert_eq!(
+            paths,
+            [
+                "a.TXT",
+                "board.canvas",
+                "dashboard.base",
+                // PDF is admitted, so an uppercase extension is discovered the
+                // same way `a.TXT` is; only `image.png` stays unsupported.
+                "paper.PDF",
+                "report.docx",
+                "z.md"
+            ]
+        );
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.completeness, EnumerationCompleteness::Complete);
+    }
+
+    #[test]
+    fn warning_marks_enumeration_defective() {
+        let temporary = tempdir().unwrap();
+        fs::File::create(temporary.path().join("oversized.md"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        let vault = VaultRegistration {
+            id: "fixture".into(),
+            path: temporary.path().to_path_buf(),
+            room: None,
+        };
+
+        let result = discover_vault(&vault);
+
+        assert!(result.files.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.completeness, EnumerationCompleteness::Defective);
     }
 }

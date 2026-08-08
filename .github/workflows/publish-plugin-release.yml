@@ -1,0 +1,116 @@
+name: Publish validated Obsidian plugin release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing validated plain semantic-version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  # Reading Actions runs is what lets publication verify CI is green at the tag.
+  actions: read
+
+jobs:
+  publish:
+    environment: obsidian-release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/obsidian
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - name: Require a green full CI run at this exact commit
+        # 0.6.0-beta.6 was published with four red CI jobs because nothing
+        # linked publication to a passing run. A local verification cannot
+        # substitute: it never covers Windows, the portable-only build, or a
+        # clean checkout, which is precisely where that release failed.
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag_commit=$(git rev-parse -q --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          runs=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${tag_commit}&per_page=100" \
+            --jq '.workflow_runs[] | select(.status == "completed") | .conclusion')
+          if [ -z "$runs" ]; then
+            printf 'No completed CI run exists for %s (%s). Dispatch ci.yml against the tag first.\n' \
+              "$RELEASE_TAG" "$tag_commit" >&2
+            exit 1
+          fi
+          if printf '%s\n' "$runs" | grep -qvx 'success'; then
+            printf 'CI at %s (%s) is not green. Conclusions seen:\n%s\n' \
+              "$RELEASE_TAG" "$tag_commit" "$runs" >&2
+            exit 1
+          fi
+          printf 'CI is green at %s (%s).\n' "$RELEASE_TAG" "$tag_commit"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clients/obsidian/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Install and independently verify candidate
+        run: |
+          npm ci
+          npm run verify
+      - name: Verify tag identity and package versions
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag=$RELEASE_TAG
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            printf 'Publication tag is not a plain semantic version.\n' >&2
+            exit 1
+          fi
+          tag_commit=$(git rev-parse -q --verify "refs/tags/$tag^{commit}")
+          test "$(git rev-parse HEAD)" = "$tag_commit"
+          manifest=$(node -p "require('./manifest.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$manifest" ] || [ "$tag" != "$pkg" ]; then
+            printf 'Publication tag does not match package versions.\n' >&2
+            exit 1
+          fi
+      - name: Prepare exact release assets and checksums
+        run: |
+          set -euo pipefail
+          npm run --silent evidence > gate5.evidence.json
+          npm run validate:evidence -- gate5.evidence.json
+          npm run validate:privacy
+          npm run package:release -- .tmp/release-assets gate5.evidence.json
+      - name: Create explicitly authorized release
+        run: |
+          set -euo pipefail
+          {
+            echo "Kwiry Search Obsidian plugin ${RELEASE_TAG} (GPL-3.0-only)."
+            echo
+            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy main.js, manifest.json, and styles.css into the plugin directory."
+            echo
+            echo "Corresponding source: https://github.com/${GITHUB_REPOSITORY}/tree/${RELEASE_TAG}/clients/obsidian"
+            echo
+            echo "Gate 5 automation evidence requires separate owner field acceptance and does not itself declare the in-plugin profile delivered."
+          } > /tmp/release-notes.md
+          gh release create "$RELEASE_TAG" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "kwiry-search $RELEASE_TAG" \
+            --notes-file /tmp/release-notes.md \
+            .tmp/release-assets/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}

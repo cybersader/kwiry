@@ -13,8 +13,22 @@ export interface ExcerptSegment {
 
 const HIGHLIGHT_OPEN = "<b>";
 const HIGHLIGHT_CLOSE = "</b>";
-export const FTS_HIGHLIGHT_START = "";
-export const FTS_HIGHLIGHT_END = "";
+/**
+ * Private-use codepoints the excerpt pipeline reserves for itself. The
+ * in-plugin path now emits typed segments directly and never round-trips a
+ * marked string, so a note can no longer forge a highlight structurally.
+ * Hydrated vault text is still scrubbed of these codepoints so they can never
+ * reach the DOM and so a future marker-parsing consumer cannot be fooled.
+ */
+export const RESERVED_EXCERPT_MARKERS = ["", ""] as const;
+
+export function sanitizeExcerptText(value: string): string {
+  let sanitized = value;
+  for (const marker of RESERVED_EXCERPT_MARKERS) {
+    sanitized = sanitized.replaceAll(marker, "�");
+  }
+  return sanitized;
+}
 
 /**
  * Splits a daemon excerpt into plain and highlighted segments. Only the
@@ -23,15 +37,6 @@ export const FTS_HIGHLIGHT_END = "";
  */
 export function parseExcerpt(excerpt: string): ExcerptSegment[] {
   return parseMarkedExcerpt(excerpt, HIGHLIGHT_OPEN, HIGHLIGHT_CLOSE, decodeEntities);
-}
-
-export function parseFtsExcerpt(excerpt: string): ExcerptSegment[] {
-  return parseMarkedExcerpt(
-    excerpt,
-    FTS_HIGHLIGHT_START,
-    FTS_HIGHLIGHT_END,
-    (text) => text,
-  );
 }
 
 function parseMarkedExcerpt(

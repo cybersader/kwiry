@@ -140,6 +140,15 @@ fn validate_path_prefix(prefix: &str) -> std::result::Result<(), ApiRequestError
 pub struct ApiSearchResponse {
     pub hits: Vec<SearchHit>,
     pub next_cursor: Option<String>,
+    /// The extraction-policy identity of the build that served these hits.
+    ///
+    /// One value per response rather than per hit, and still exact: reuse is
+    /// now decided per format, but eviction runs at open, so no row is ever
+    /// served under an identity other than the running build's. A per-hit copy
+    /// could still only repeat itself. A client that compares this against its
+    /// own expectation can say it is reading a differently-built index instead
+    /// of silently treating the results as interchangeable.
+    pub extraction_policy_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,11 +260,16 @@ mod tests {
                 vault_id: "notes".into(),
                 path: "folder/note.md".into(),
                 heading_path: vec!["Heading".into()],
+                format: crate::format::SourceFormat::Markdown,
+                coverage: crate::extract::ExtractionCoverage::IndexedComplete,
+                locator: None,
                 score: 1.5,
                 excerpt: "excerpt".into(),
                 frontmatter: crate::model::Frontmatter::default(),
             }],
             next_cursor: None,
+            extraction_policy_fingerprint: crate::policy::extraction_policy_fingerprint()
+                .to_owned(),
         };
 
         assert_eq!(
@@ -266,11 +280,16 @@ mod tests {
                     "vault_id": "notes",
                     "path": "folder/note.md",
                     "heading_path": ["Heading"],
+                    "format": "markdown",
+                    "coverage": "indexed-complete",
+                    "locator": null,
                     "score": 1.5,
                     "excerpt": "excerpt",
                     "frontmatter": {}
                 }],
-                "next_cursor": null
+                "next_cursor": null,
+                "extraction_policy_fingerprint":
+                    crate::policy::extraction_policy_fingerprint()
             })
         );
     }

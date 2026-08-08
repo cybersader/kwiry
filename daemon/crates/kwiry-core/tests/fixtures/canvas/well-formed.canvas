@@ -1,0 +1,77 @@
+{
+  "nodes": [
+    {
+      "id": "1111111111111111",
+      "type": "text",
+      "x": 17,
+      "y": -29,
+      "width": 420,
+      "height": 260,
+      "text": "---\ntitle: Card-only title\ntags: [nested, card]\n---\nAuthored card preamble.\n\n# Alpha\nAlpha body.\n\n## Detail\nDetail body.\n"
+    },
+    {
+      "id": "2222222222222222",
+      "type": "group",
+      "x": -100,
+      "y": -120,
+      "width": 1400,
+      "height": 900,
+      "label": "Research Cluster",
+      "background": "Attachments/geometrysentinelqzx.png",
+      "backgroundStyle": "cover"
+    },
+    {
+      "id": "3333333333333333",
+      "type": "link",
+      "x": 520,
+      "y": 20,
+      "width": 360,
+      "height": 160,
+      "url": "https://example.com/canvas-source"
+    },
+    {
+      "id": "4444444444444444",
+      "type": "file",
+      "x": 520,
+      "y": 240,
+      "width": 360,
+      "height": 260,
+      "file": "References/target.md",
+      "subpath": "#Only Authored Subpath"
+    },
+    {
+      "id": "5555555555555555",
+      "type": "text",
+      "x": 920,
+      "y": 40,
+      "width": 320,
+      "height": 180,
+      "text": "## Closing\nFinal card body.\n"
+    }
+  ],
+  "edges": [
+    {
+      "id": "aaaaaaaaaaaaaaaa",
+      "fromNode": "1111111111111111",
+      "toNode": "3333333333333333",
+      "label": "supports source"
+    },
+    {
+      "id": "bbbbbbbbbbbbbbbb",
+      "fromNode": "3333333333333333",
+      "toNode": "4444444444444444"
+    },
+    {
+      "id": "cccccccccccccccc",
+      "fromNode": "4444444444444444",
+      "toNode": "5555555555555555",
+      "label": "resolves into"
+    }
+  ],
+  "metadata": {
+    "enabled": true,
+    "threshold": 12.5,
+    "max_items": 18446744073709551615,
+    "optional": null
+  }
+}

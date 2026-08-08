@@ -146,16 +146,37 @@ mod tests {
         assert!(ServiceSpec::new(PathBuf::from("kwiry"), config, data_dir).is_err());
     }
 
+    /// The payload contains `;` and `&`, which a shell would treat as command
+    /// separators. Seeing them arrive intact proves the runner passed the
+    /// argument straight to the process rather than through a shell.
     #[test]
     fn captured_command_runner_never_interprets_shell_syntax() {
-        let output = ProcessCommandRunner
-            .run(
-                OsStr::new("printf"),
-                &[OsString::from("%s"), OsString::from("literal; false")],
-            )
-            .unwrap();
+        const PAYLOAD: &str = "literal; false & echo no";
+
+        // `printf` does not exist on Windows, so use each platform's own
+        // echo-the-argument program. The property under test is the same.
+        // PowerShell's Write-Output is used rather than `cmd /c echo` because
+        // cmd re-parses its command line and echoes back the quoting Rust
+        // added, which would fail the comparison for a reason unrelated to
+        // shell interpretation.
+        #[cfg(not(windows))]
+        let (program, arguments) = (
+            OsStr::new("printf"),
+            vec![OsString::from("%s"), OsString::from(PAYLOAD)],
+        );
+        #[cfg(windows)]
+        let (program, arguments) = (
+            OsStr::new("powershell"),
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from(format!("Write-Output '{PAYLOAD}'")),
+            ],
+        );
+
+        let output = ProcessCommandRunner.run(program, &arguments).unwrap();
 
         assert!(output.success());
-        assert_eq!(output.stdout, "literal; false");
+        assert_eq!(output.stdout.trim_end(), PAYLOAD);
     }
 }

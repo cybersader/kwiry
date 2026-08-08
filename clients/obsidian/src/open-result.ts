@@ -2,9 +2,30 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import type { BackendIdentity, BackendSearchHit } from "./backend";
+import { pathMatchesFormat } from "./vault-path";
+
+export interface OpenTarget {
+  path: string;
+  subpath?: string;
+  /**
+   * Set only when `subpath` is a PDF page jump, carrying the 1-based page the
+   * jump asks for. The subpath alone cannot be checked after the fact — Obsidian
+   * accepts any ephemeral state and silently ignores what a view does not
+   * understand — so the host keeps the page here in order to say what it aimed
+   * at when the opened view turns out not to be one that can honour it.
+   */
+  page?: number;
+}
+
+/**
+ * Obsidian's built-in PDF view type. `#page=N` is its documented link syntax,
+ * and it is the only view known to consume a page jump; a vault whose `.pdf`
+ * extension is claimed by another view gets the file opened and told so.
+ */
+export const PDF_VIEW_TYPE = "pdf";
 
 export type OpenResultDecision =
-  | { ok: true; path: string }
+  | ({ ok: true } & OpenTarget)
   | {
       ok: false;
       code:
@@ -14,6 +35,50 @@ export type OpenResultDecision =
         | "invalid_path";
       safeMessage: string;
     };
+
+export function openTargetForHit(
+  hit: Pick<BackendSearchHit, "path" | "format" | "locator" | "heading_path">,
+): OpenTarget {
+  if (hit.format === "markdown") {
+    const heading = hit.heading_path.at(-1);
+    return heading ? { path: hit.path, subpath: `#${heading}` } : { path: hit.path };
+  }
+  if (hit.format === "base" && hit.locator?.kind === "base_view") {
+    return { path: hit.path, subpath: `#${hit.locator.view}` };
+  }
+  // A PDF has no headings, so the page locator is the only route back to where
+  // a match was found. Grouped search needs no special case: a source row is
+  // opened from its representative hit and a drilled row from its own hit, so
+  // each already arrives here carrying the page it means.
+  if (hit.format === "pdf" && hit.locator?.kind === "pdf_page") {
+    return {
+      path: hit.path,
+      subpath: `#page=${hit.locator.page}`,
+      page: hit.locator.page,
+    };
+  }
+  return { path: hit.path };
+}
+
+/**
+ * What to tell the user when an open could not land where the result was found,
+ * or `null` when there is nothing to report.
+ *
+ * Only the *view* is checkable. `openFile` resolves whether or not the view
+ * consumed the ephemeral state, so a page jump into Obsidian's own PDF view is
+ * reported as achieved on the strength of `#page=N` being that view's
+ * documented syntax. What this refuses to do is stay silent when the file
+ * opened in a view that certainly cannot honour a page jump — that is the case
+ * where the result would otherwise appear to have opened at page one on purpose.
+ */
+export function pageNavigationShortfall(
+  target: OpenTarget,
+  openedViewType: string | null,
+): string | null {
+  if (target.page === undefined) return null;
+  if (openedViewType === PDF_VIEW_TYPE) return null;
+  return `opened this PDF, but the view showing it cannot jump to page ${target.page}.`;
+}
 
 export function validateOpenResult(
   hit: BackendSearchHit,
@@ -30,11 +95,11 @@ export function validateOpenResult(
       safeMessage: "This result belongs to an inactive search backend.",
     };
   }
-  if (!isNormalizedMarkdownPath(hit.path)) {
+  if (!pathMatchesFormat(hit.path, hit.format)) {
     return {
       ok: false,
       code: "invalid_path",
-      safeMessage: "This result does not contain a safe vault-relative Markdown path.",
+      safeMessage: "This result does not contain a safe vault-relative path for its source format.",
     };
   }
 
@@ -66,22 +131,11 @@ export function validateOpenResult(
     };
   }
 
-  return { ok: true, path: hit.path };
+  return { ok: true, ...openTargetForHit(hit) };
 }
 
-export function isNormalizedMarkdownPath(value: string): boolean {
-  if (
-    value.length === 0
-    || value.length > 4_096
-    || value.startsWith("/")
-    || value.includes("\\")
-    || value.includes("\0")
-    || !value.toLowerCase().endsWith(".md")
-  ) {
-    return false;
-  }
-  const components = value.split("/");
-  return components.every(
-    (component) => component.length > 0 && component !== "." && component !== "..",
-  );
-}
+export {
+  isNormalizedMarkdownPath,
+  isNormalizedVaultFilePath,
+  pathMatchesFormat,
+} from "./vault-path";

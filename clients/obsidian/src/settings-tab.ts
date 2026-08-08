@@ -5,6 +5,20 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 
 import type KwiryPlugin from "./main";
 import type { SearchMode } from "./api";
+import {
+  SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
+  SOURCE_ROW_LIMIT_SETTING_NAME,
+  type DiagnosticsReportDetail,
+  type DiagnosticsReportLevel,
+  type DiagnosticsReportScope,
+} from "./settings";
+import {
+  IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
+  SOURCE_FORMATS,
+  isSourceFormatExtractable,
+  sourceFormatDescription,
+  type SourceFormat,
+} from "./source-formats";
 
 export class KwirySettingTab extends PluginSettingTab {
   constructor(
@@ -38,16 +52,23 @@ export class KwirySettingTab extends PluginSettingTab {
     } else {
       new Setting(containerEl)
         .setName("In-plugin · Lexical")
-        .setDesc(
-          "This profile is lexical-only and never reads the daemon token. Gate 4 integration is still building its in-memory Worker index.",
+        .setDesc(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION);
+      this.renderSourceFormatSettings(containerEl);
+      new Setting(containerEl)
+        .setName("Rebuild in-plugin lexical index")
+        .setDesc("Build a complete replacement generation while the current index remains searchable.")
+        .addButton((button) =>
+          button
+            .setButtonText("Rebuild")
+            .onClick(() => void this.plugin.rebuildInPluginIndex()),
         );
     }
 
     new Setting(containerEl).setName("Search").setHeading();
 
     new Setting(containerEl)
-      .setName("Result limit")
-      .setDesc("Results per search (1–100).")
+      .setName(SOURCE_ROW_LIMIT_SETTING_NAME)
+      .setDesc(SOURCE_ROW_LIMIT_SETTING_DESCRIPTION)
       .addText((text) =>
         text.setValue(String(this.plugin.settings.resultLimit)).onChange(async (value) => {
           const parsed = Number.parseInt(value, 10);
@@ -66,6 +87,131 @@ export class KwirySettingTab extends PluginSettingTab {
           this.plugin.settings.showRibbonIcon = value;
           await this.plugin.saveSettings();
         }),
+      );
+
+    this.renderDiagnosticsSettings(containerEl);
+    this.plugin.renderPrivateSettings(containerEl);
+  }
+
+  private renderSourceFormatSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Indexed source formats")
+      .setDesc(
+        "Changing any format rebuilds the index from scratch. Search is unavailable until the rebuild completes.",
+      )
+      .setHeading();
+
+    for (const format of SOURCE_FORMATS) {
+      const setting = new Setting(containerEl)
+        .setName(sourceFormatLabel(format))
+        .setDesc(sourceFormatDescription(format));
+      if (!isSourceFormatExtractable(format)) continue;
+      setting.addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enabledSourceFormats[format])
+          .onChange(async (value) => {
+            if (this.plugin.settings.enabledSourceFormats[format] === value) return;
+            this.plugin.settings.enabledSourceFormats[format] = value;
+            await this.plugin.saveSettings();
+            await this.plugin.onSourcePolicyChanged();
+          }),
+      );
+    }
+  }
+
+  private renderDiagnosticsSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Diagnostics").setHeading();
+
+    new Setting(containerEl)
+      .setName("Log level")
+      .setDesc(
+        "Keeps a bounded in-memory log for field diagnosis. It is cleared when the plugin unloads and never includes note text, queries, excerpts, or credentials.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            off: "Off",
+            error: "Errors only",
+            info: "Field information",
+          })
+          .setValue(this.plugin.settings.diagnosticsLogLevel)
+          .onChange(async (value) => {
+            const level = value === "off" || value === "error" ? value : "info";
+            this.plugin.settings.diagnosticsLogLevel = level;
+            this.plugin.setDiagnosticsLogLevel(level);
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Report level")
+      .setDesc(
+        "Which events a copied report contains. It can narrow the log level but never include events the log level above did not record.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            debug: "Everything recorded",
+            info: "Info and above",
+            warn: "Warnings and errors",
+            error: "Errors only",
+          })
+          .setValue(this.plugin.settings.diagnosticsReportLevel)
+          .onChange(async (value) => {
+            this.plugin.settings.diagnosticsReportLevel = value as DiagnosticsReportLevel;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Report scope")
+      .setDesc("Restrict a copied report to one area so it stays small enough to send.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            all: "Everything",
+            indexing: "Indexing, cache, and Worker",
+            search: "Search",
+            startup: "Startup and backend",
+            failures: "Failures only",
+          })
+          .setValue(this.plugin.settings.diagnosticsReportScope)
+          .onChange(async (value) => {
+            this.plugin.settings.diagnosticsReportScope = value as DiagnosticsReportScope;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Report detail")
+      .setDesc(
+        "The full report appends every event again as JSON, which dominates its size. Compact keeps the readable summary only.",
+      )
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            compact: "Compact summary",
+            full: "Full, with JSON records",
+          })
+          .setValue(this.plugin.settings.diagnosticsReportDetail)
+          .onChange(async (value) => {
+            this.plugin.settings.diagnosticsReportDetail = value as DiagnosticsReportDetail;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Diagnostic report")
+      .setDesc("Copy the current in-memory report for a support conversation, or clear it now.")
+      .addButton((button) =>
+        button
+          .setButtonText("Copy diagnostics")
+          .onClick(() => void this.plugin.copyDiagnostics()),
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Clear diagnostics")
+          .onClick(() => this.plugin.clearDiagnostics(true)),
       );
   }
 
@@ -139,5 +285,17 @@ export class KwirySettingTab extends PluginSettingTab {
   private async reconfigureDaemon(): Promise<void> {
     await this.plugin.saveSettings();
     await this.plugin.activateBackendProfile();
+  }
+}
+
+function sourceFormatLabel(format: SourceFormat): string {
+  switch (format) {
+    case "markdown": return "Markdown";
+    case "text": return "Plain text";
+    case "base": return "Base";
+    case "canvas": return "Canvas";
+    case "docx": return "DOCX";
+    case "pdf": return "PDF";
+    case "excalidraw": return "Excalidraw";
   }
 }

@@ -1,0 +1,470 @@
+{
+  "schema_version": 9,
+  "source_key": "65d552ed4f1e82450a3c375f9075154301d01c3566ec51ce8c058cac0aae86e3",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Golden/Research Board.canvas",
+  "format": "canvas",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+  "byte_length": 1735,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Research Board.canvas",
+    "stem": "Research Board",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "research board.canvas",
+    "stem": "research board",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {
+    "canvas": {
+      "type": "map",
+      "value": {
+        "edges": {
+          "type": "sequence",
+          "value": [
+            {
+              "type": "map",
+              "value": {
+                "fromNode": {
+                  "type": "string",
+                  "value": "1111111111111111"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "aaaaaaaaaaaaaaaa"
+                },
+                "label": {
+                  "type": "string",
+                  "value": "supports source"
+                },
+                "toNode": {
+                  "type": "string",
+                  "value": "3333333333333333"
+                }
+              }
+            },
+            {
+              "type": "map",
+              "value": {
+                "fromNode": {
+                  "type": "string",
+                  "value": "3333333333333333"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "bbbbbbbbbbbbbbbb"
+                },
+                "toNode": {
+                  "type": "string",
+                  "value": "4444444444444444"
+                }
+              }
+            },
+            {
+              "type": "map",
+              "value": {
+                "fromNode": {
+                  "type": "string",
+                  "value": "4444444444444444"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "cccccccccccccccc"
+                },
+                "label": {
+                  "type": "string",
+                  "value": "resolves into"
+                },
+                "toNode": {
+                  "type": "string",
+                  "value": "5555555555555555"
+                }
+              }
+            }
+          ]
+        },
+        "metadata": {
+          "type": "map",
+          "value": {
+            "enabled": {
+              "type": "boolean",
+              "value": true
+            },
+            "max_items": {
+              "type": "u64",
+              "value": "18446744073709551615"
+            },
+            "optional": {
+              "type": "null"
+            },
+            "threshold": {
+              "type": "f64",
+              "value": "4029000000000000"
+            }
+          }
+        },
+        "nodes": {
+          "type": "sequence",
+          "value": [
+            {
+              "type": "map",
+              "value": {
+                "height": {
+                  "type": "i64",
+                  "value": "260"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "1111111111111111"
+                },
+                "text": {
+                  "type": "string",
+                  "value": "---\ntitle: Card-only title\ntags: [nested, card]\n---\nAuthored card preamble.\n\n# Alpha\nAlpha body.\n\n## Detail\nDetail body.\n"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "text"
+                },
+                "width": {
+                  "type": "i64",
+                  "value": "420"
+                },
+                "x": {
+                  "type": "i64",
+                  "value": "17"
+                },
+                "y": {
+                  "type": "i64",
+                  "value": "-29"
+                }
+              }
+            },
+            {
+              "type": "map",
+              "value": {
+                "background": {
+                  "type": "string",
+                  "value": "Attachments/geometrysentinelqzx.png"
+                },
+                "backgroundStyle": {
+                  "type": "string",
+                  "value": "cover"
+                },
+                "height": {
+                  "type": "i64",
+                  "value": "900"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "2222222222222222"
+                },
+                "label": {
+                  "type": "string",
+                  "value": "Research Cluster"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "group"
+                },
+                "width": {
+                  "type": "i64",
+                  "value": "1400"
+                },
+                "x": {
+                  "type": "i64",
+                  "value": "-100"
+                },
+                "y": {
+                  "type": "i64",
+                  "value": "-120"
+                }
+              }
+            },
+            {
+              "type": "map",
+              "value": {
+                "height": {
+                  "type": "i64",
+                  "value": "160"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "3333333333333333"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "link"
+                },
+                "url": {
+                  "type": "string",
+                  "value": "https://example.com/canvas-source"
+                },
+                "width": {
+                  "type": "i64",
+                  "value": "360"
+                },
+                "x": {
+                  "type": "i64",
+                  "value": "520"
+                },
+                "y": {
+                  "type": "i64",
+                  "value": "20"
+                }
+              }
+            },
+            {
+              "type": "map",
+              "value": {
+                "file": {
+                  "type": "string",
+                  "value": "References/target.md"
+                },
+                "height": {
+                  "type": "i64",
+                  "value": "260"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "4444444444444444"
+                },
+                "subpath": {
+                  "type": "string",
+                  "value": "#Only Authored Subpath"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "file"
+                },
+                "width": {
+                  "type": "i64",
+                  "value": "360"
+                },
+                "x": {
+                  "type": "i64",
+                  "value": "520"
+                },
+                "y": {
+                  "type": "i64",
+                  "value": "240"
+                }
+              }
+            },
+            {
+              "type": "map",
+              "value": {
+                "height": {
+                  "type": "i64",
+                  "value": "180"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "5555555555555555"
+                },
+                "text": {
+                  "type": "string",
+                  "value": "## Closing\nFinal card body.\n"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "text"
+                },
+                "width": {
+                  "type": "i64",
+                  "value": "320"
+                },
+                "x": {
+                  "type": "i64",
+                  "value": "920"
+                },
+                "y": {
+                  "type": "i64",
+                  "value": "40"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "8dbdabcea476789f2758dcef532d654aab92574e5f03008f01864cc572c5de20",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [],
+        "content": "---\ntitle: Card-only title\ntags: [nested, card]\n---\nAuthored card preamble.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "e2ff459b7d903ec8781dc8f0bf252013f30b948b56a42f0b5fd8b8c3d385ff6d",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [
+          "Alpha"
+        ],
+        "content": "# Alpha\nAlpha body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "Alpha",
+      "normalized_heading": "alpha",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "cc754a6f846a5a640ec52162eb593da92178dbf8df850d76de26ded040780032",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [
+          "Alpha",
+          "Detail"
+        ],
+        "content": "## Detail\nDetail body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "Alpha Detail",
+      "normalized_heading": "alpha detail",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "abf05e6285a22b5e6ba842cb6d2d668a532348a07f7dec7c15d3cedac1984234",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [],
+        "content": "Research Cluster",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "37b79a1720fdb230d4c9650bc325a434c5a1a1da99ecea51d5cf066dc6688afd",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [],
+        "content": "https://example.com/canvas-source",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "70e646a6b6caca0d921eaaae19d99abb2f97764fc27b23a018a53e43aeb84e01",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [],
+        "content": "References/target.md\n#Only Authored Subpath",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "b29bed44148ac78180bddf7998e329d71a483c8917c45c1d437d207a6f7b966b",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [
+          "Closing"
+        ],
+        "content": "## Closing\nFinal card body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "Closing",
+      "normalized_heading": "closing",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "0dd76274763fd52eb5568e440dccbcd7617f8b3d8044cba2d38c3b858feb638e",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [],
+        "content": "supports source",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "20c3d9e80a7c971646e9113582e19a92acebe14bf64bbaa93b6402d287ced8cd",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Research Board.canvas",
+        "heading_path": [],
+        "content": "resolves into",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e5d24658013a127f1d0c93ea913b12fbacdeee5594d089600b8ce1c7c98f6c97",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

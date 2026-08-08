@@ -82,14 +82,17 @@ const get = (name) => {
   return value;
 };
 
-assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 1);
+assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 9);
 assert.equal(get("markdown-frontmatter-links-identifiers").preparation.retrieval.aliases.length, 2);
 assert.ok(
   get("markdown-frontmatter-links-identifiers").preparation.chunks.some((chunk) =>
     chunk.technical_identifiers.includes("rfc 9110")
   ),
 );
-assert.equal(get("crlf-frontmatter").preparation.chunks[0].chunk.frontmatter.title, "Windows note");
+assert.deepEqual(get("crlf-frontmatter").preparation.frontmatter.title, {
+  type: "string",
+  value: "Windows note",
+});
 assert.ok(get("malformed-frontmatter").preparation.warning);
 assert.equal(get("plain-text").preparation.format, "text");
 assert.equal(get("nul-source").preparation.kind, "skipped");
@@ -105,7 +108,7 @@ assert.equal(get("invalid-relative-path").status, "error");
 assert.equal(get("oversized-source").preparation.kind, "skipped");
 assert.equal(get("underreported-source-length").status, "error");
 assert.equal(get("overreported-source-length").status, "error");
-assert.equal(get("ordinary-query").plan.schema_version, 2);
+assert.equal(get("ordinary-query").plan.schema_version, 4);
 assert.equal(get("metadata-probe-unmatched").plan.kind, "ordinary");
 assert.equal(get("metadata-probe-unmatched").plan.match_operator, "any");
 assert.equal(get("metadata-probe-matched").plan.kind, "identifier");
@@ -120,8 +123,28 @@ assert.match(get("sql-looking-query").plan.query, /DROP TABLE/);
 assert.equal(get("empty-query").status, "error");
 assert.equal(get("portable-api-request").request.mode, "lexical");
 assert.equal(get("portable-api-request").request.filters.vault_id, "fixture");
+const zeroCoverageCounts = {
+  "indexed-complete": 0,
+  "indexed-partial": 0,
+  "skipped-no-extractable-text": 0,
+  unreadable: 0,
+  quarantined: 0,
+};
+assert.deepEqual(get("portable-daemon-status").daemon_status.source_format_counts, {
+  markdown: { ...zeroCoverageCounts, "indexed-complete": 2 },
+  text: { ...zeroCoverageCounts, "indexed-complete": 1 },
+  base: zeroCoverageCounts,
+  canvas: zeroCoverageCounts,
+  docx: zeroCoverageCounts,
+  pdf: zeroCoverageCounts,
+  excalidraw: zeroCoverageCounts,
+});
 assert.equal(get("portable-daemon-status").daemon_status.state, "ready");
 assert.equal(get("portable-daemon-status").daemon_status.generation, "generation-0001");
+assert.equal(
+  get("portable-daemon-status").daemon_status.chunking_version,
+  get("markdown-frontmatter-links-identifiers").preparation.chunks[0].chunk.chunking_version,
+);
 assert.equal(
   typeof get("markdown-frontmatter-links-identifiers").preparation.mtime_nanos,
   "string",

@@ -1,0 +1,259 @@
+{
+  "schema_version": 9,
+  "source_key": "8f1891e1a2ad5e751840fe6aaa8a7041f8b71d25cfdd2b919788bff692c84fe6",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Golden/Project Dashboard.base",
+  "format": "base",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "2b80f5265f6ffb718da9ba8512b660fb5e31d9bfb145dfa8dfa99d6a134fa41d",
+  "byte_length": 379,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Project Dashboard.base",
+    "stem": "Project Dashboard",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "project dashboard.base",
+    "stem": "project dashboard",
+    "aliases": [],
+    "title": "project dashboard"
+  },
+  "frontmatter": {
+    "base": {
+      "type": "map",
+      "value": {
+        "enabled": {
+          "type": "boolean",
+          "value": true
+        },
+        "filters": {
+          "type": "map",
+          "value": {
+            "and": {
+              "type": "sequence",
+              "value": [
+                {
+                  "type": "string",
+                  "value": "file.inFolder(\"Projects\")"
+                },
+                {
+                  "type": "string",
+                  "value": "status == \"active\""
+                }
+              ]
+            }
+          }
+        },
+        "max_items": {
+          "type": "u64",
+          "value": "18446744073709551615"
+        },
+        "optional": {
+          "type": "null"
+        },
+        "tags": {
+          "type": "sequence",
+          "value": [
+            {
+              "type": "string",
+              "value": "projects"
+            },
+            {
+              "type": "string",
+              "value": "active"
+            }
+          ]
+        },
+        "threshold": {
+          "type": "f64",
+          "value": "4029000000000000"
+        },
+        "title": {
+          "type": "string",
+          "value": "Project dashboard"
+        },
+        "views": {
+          "type": "sequence",
+          "value": [
+            {
+              "type": "map",
+              "value": {
+                "name": {
+                  "type": "string",
+                  "value": "Active"
+                },
+                "order": {
+                  "type": "sequence",
+                  "value": [
+                    {
+                      "type": "string",
+                      "value": "file.name"
+                    },
+                    {
+                      "type": "string",
+                      "value": "status"
+                    }
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "value": "table"
+                }
+              }
+            },
+            {
+              "type": "map",
+              "value": {
+                "cover": {
+                  "type": "string",
+                  "value": "note.cover"
+                },
+                "name": {
+                  "type": "string",
+                  "value": "Gallery"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "cards"
+                }
+              }
+            },
+            {
+              "type": "map",
+              "value": {
+                "groupBy": {
+                  "type": "string",
+                  "value": "status"
+                },
+                "name": {
+                  "type": "string",
+                  "value": "Active"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "list"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "tags": {
+      "type": "sequence",
+      "value": [
+        {
+          "type": "string",
+          "value": "projects"
+        },
+        {
+          "type": "string",
+          "value": "active"
+        }
+      ]
+    },
+    "title": {
+      "type": "string",
+      "value": "Project dashboard"
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "c8a8bac7f6f3f3a8fb68694c242284975da425c5f0c539933bc4b4f6831a35b6",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Project Dashboard.base",
+        "heading_path": [],
+        "content": "enabled: true\nfilters.and[0]: file.inFolder(\"Projects\")\nfilters.and[1]: status == \"active\"\nmax_items: 18446744073709551615\noptional: null\ntags[0]: projects\ntags[1]: active\nthreshold: 12.5\ntitle: Project dashboard",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "2b80f5265f6ffb718da9ba8512b660fb5e31d9bfb145dfa8dfa99d6a134fa41d",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": [
+        "12.5"
+      ]
+    },
+    {
+      "chunk": {
+        "chunk_id": "589e9aaa14ee1b3618582ade369b1d347116e27265483e289a0dbc6b8017408f",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Project Dashboard.base",
+        "heading_path": [
+          "Active"
+        ],
+        "content": "name: Active\norder[0]: file.name\norder[1]: status\ntype: table",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "2b80f5265f6ffb718da9ba8512b660fb5e31d9bfb145dfa8dfa99d6a134fa41d",
+        "chunking_version": 2
+      },
+      "heading_text": "Active",
+      "normalized_heading": "active",
+      "technical_identifiers": [],
+      "source_locator": {
+        "kind": "base_view",
+        "view": "Active"
+      }
+    },
+    {
+      "chunk": {
+        "chunk_id": "38965f6250b3267cfec04f5b7ca1b889e216344307d1499f3d91310c4b07a3ec",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Project Dashboard.base",
+        "heading_path": [
+          "Gallery"
+        ],
+        "content": "cover: note.cover\nname: Gallery\ntype: cards",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "2b80f5265f6ffb718da9ba8512b660fb5e31d9bfb145dfa8dfa99d6a134fa41d",
+        "chunking_version": 2
+      },
+      "heading_text": "Gallery",
+      "normalized_heading": "gallery",
+      "technical_identifiers": [],
+      "source_locator": {
+        "kind": "base_view",
+        "view": "Gallery"
+      }
+    },
+    {
+      "chunk": {
+        "chunk_id": "22192230c560b987c1a52f13d431753377c6458ba9d3f762e43143c6b8279bf2",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Project Dashboard.base",
+        "heading_path": [
+          "Active (2)"
+        ],
+        "content": "groupBy: status\nname: Active\ntype: list",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "2b80f5265f6ffb718da9ba8512b660fb5e31d9bfb145dfa8dfa99d6a134fa41d",
+        "chunking_version": 2
+      },
+      "heading_text": "Active (2)",
+      "normalized_heading": "active (2)",
+      "technical_identifiers": [],
+      "source_locator": {
+        "kind": "base_view",
+        "view": "Active"
+      }
+    }
+  ],
+  "kind": "indexed"
+}

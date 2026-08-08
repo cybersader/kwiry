@@ -1,8 +1,9 @@
 # Kwiry Obsidian production Rust WASM adapter
 
-This standalone crate is the browser-Worker boundary between the production Obsidian plugin and `kwiry-core` with only the `portable` feature enabled. It exposes three bounded, versioned operations:
+This standalone crate is the browser-Worker boundary between the production Obsidian plugin and `kwiry-core` with only the `portable` feature enabled. It exposes four bounded, versioned operations:
 
 - prepare source bytes from a strict `SourceDescriptor` envelope;
+- record a Rust-authored oversized skip from the same descriptor without content bytes;
 - prepare lexical query data and an optional fixed metadata-probe plan;
 - rerun/finalize query preparation from the original query plus the Boolean probe result and return an allowlisted opaque FTS5 MATCH plan.
 

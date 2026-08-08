@@ -1,0 +1,91 @@
+{
+  "schema_version": 9,
+  "source_key": "5c8e11a391032a89efd385316e949adf52b7ef9599cfaedbda6bcf0620827e6a",
+  "vault_id": "golden-vault",
+  "path": "Golden/Frontmatter Only.md",
+  "format": "markdown",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "c76507261ce04ff239bc2e636940912360fdf8c5e42bc1744d6481c21ed3d3d5",
+  "byte_length": 117,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Frontmatter Only.md",
+    "stem": "Frontmatter Only",
+    "aliases": [
+      "First alias",
+      "Second alias"
+    ]
+  },
+  "normalized_exact": {
+    "filename": "frontmatter only.md",
+    "stem": "frontmatter only",
+    "aliases": [
+      "first alias",
+      "second alias"
+    ],
+    "title": "metadata only"
+  },
+  "frontmatter": {
+    "aliases": {
+      "type": "sequence",
+      "value": [
+        {
+          "type": "string",
+          "value": "First alias"
+        },
+        {
+          "type": "string",
+          "value": "Second alias"
+        }
+      ]
+    },
+    "date": {
+      "type": "string",
+      "value": "2026-07-28"
+    },
+    "status": {
+      "type": "string",
+      "value": "draft"
+    },
+    "tags": {
+      "type": "sequence",
+      "value": [
+        {
+          "type": "string",
+          "value": "alpha"
+        },
+        {
+          "type": "string",
+          "value": "beta"
+        }
+      ]
+    },
+    "title": {
+      "type": "string",
+      "value": "Metadata only"
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "b526f240fc0c0aa641ff0329d61125e7cf07465ff04895fc9a9050aeaeba9134",
+        "vault_id": "golden-vault",
+        "room": null,
+        "path": "Golden/Frontmatter Only.md",
+        "heading_path": [],
+        "content": "",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "c76507261ce04ff239bc2e636940912360fdf8c5e42bc1744d6481c21ed3d3d5",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

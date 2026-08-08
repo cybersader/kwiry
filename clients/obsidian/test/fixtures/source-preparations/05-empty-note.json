@@ -1,0 +1,28 @@
+{
+  "schema_version": 9,
+  "source_key": "59adfafe5f4eed42f7c2a1557dcf38576796360423d69cc818ec31b5410467b9",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Golden/Empty Note.md",
+  "format": "markdown",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "byte_length": 0,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Empty Note.md",
+    "stem": "Empty Note",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "empty note.md",
+    "stem": "empty note",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {},
+  "chunks": [],
+  "kind": "indexed"
+}

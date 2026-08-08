@@ -3,6 +3,10 @@
 
 import type { SearchMode, SearchRequest, SearchResponse } from "./api";
 import type { ExcerptSegment } from "./excerpt";
+import type {
+  SourceFormatCounts,
+  SourcePreparationDefectField,
+} from "./worker/protocol";
 
 export type BackendProfile = "daemon" | "in_plugin";
 export type BackendPhase =
@@ -14,6 +18,12 @@ export type BackendPhase =
   | "unavailable"
   | "disposed";
 export type BackendLiveness = "unknown" | "alive" | "unreachable" | "terminated";
+export type BackendIndexActivity = "inventory" | "read" | "prepare" | "apply";
+export type BackendIndexStallCategory =
+  | "source_read_timeout"
+  | "source_read_capacity"
+  | "worker_timeout";
+export type BackendRebuildResult = "scheduled" | "already_building";
 
 export interface BackendIdentity {
   profile: BackendProfile;
@@ -25,6 +35,7 @@ export interface BackendIdentity {
 export interface BackendCapabilities {
   supportedModes: readonly SearchMode[];
   sourceScope: "registered_trees" | "active_vault";
+  manualRebuild: boolean;
 }
 
 export interface BackendIssue {
@@ -42,8 +53,21 @@ export interface BackendStatus {
   capabilities: BackendCapabilities;
   documents: number;
   chunks: number;
+  sourceFormatCounts?: SourceFormatCounts;
+  quarantinedSources?: number;
+  unreadableSources?: number;
+  quarantineValidatorFields?: readonly SourcePreparationDefectField[];
   dirty: boolean;
   rebuilding: boolean;
+  progress?: {
+    stage: "snapshot" | "replay" | "rebuild" | "degraded" | "failed";
+    activity: BackendIndexActivity;
+    subphase?: "planning" | "verifying" | "applying";
+    completed: number;
+    total: number | null;
+    inFlight: number;
+    stallCategory?: BackendIndexStallCategory;
+  };
   issue?: BackendIssue;
 }
 
@@ -63,11 +87,29 @@ export interface BackendSearchResponse {
   next_cursor: string | null;
 }
 
+export type CandidateWindowState =
+  | "exhausted"
+  | "more_available"
+  | "candidate_limit_reached"
+  | "unknown";
+
+/**
+ * Facts about the bounded candidate collection that produced this execution.
+ * `candidateCount` is inspected work, never a corpus/result total. Null counts
+ * mean the backend's frozen response does not expose candidate-window evidence.
+ */
+export interface CandidateWindowFacts {
+  state: CandidateWindowState;
+  candidateCount: number | null;
+  candidateLimit: number | null;
+}
+
 export interface SearchExecution {
   backend: BackendIdentity;
   requestedMode: SearchMode;
   effectiveMode: SearchMode;
   generation: string | null;
+  candidateWindow: CandidateWindowFacts;
   response: BackendSearchResponse;
 }
 
@@ -75,6 +117,8 @@ export interface SearchBackend {
   readonly identity: BackendIdentity;
   initialize(): Promise<void>;
   status(): Promise<BackendStatus>;
+  subscribeStatus?(listener: (status: BackendStatus) => void): () => void;
+  rebuild?(): Promise<BackendRebuildResult>;
   search(request: SearchRequest): Promise<SearchExecution>;
   dispose(): Promise<void>;
 }

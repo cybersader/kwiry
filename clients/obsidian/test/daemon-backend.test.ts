@@ -7,6 +7,57 @@ import type { Transport } from "../src/api";
 import { DaemonBackend } from "../src/backends/daemon-backend";
 
 const TOKEN = "A".repeat(43);
+const SOURCE_FORMAT_COUNTS = {
+  markdown: {
+    "indexed-complete": 2,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  text: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  base: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  canvas: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  docx: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  pdf: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+  excalidraw: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
+};
 const STATUS = {
   state: "ready",
   version: "0.1.0",
@@ -14,6 +65,7 @@ const STATUS = {
   chunking_version: 1,
   documents: 2,
   chunks: 4,
+  source_format_counts: SOURCE_FORMAT_COUNTS,
   last_sync: null,
   dirty: false,
   rebuilding: false,
@@ -24,6 +76,9 @@ const HIT = {
   chunk_id: "chunk-1",
   vault_id: "notes",
   path: "folder/note.md",
+  format: "markdown",
+  coverage: "indexed-complete",
+  locator: null,
   heading_path: ["Heading"],
   score: 1,
   excerpt: "before <b>match</b> after",
@@ -75,8 +130,16 @@ describe("DaemonBackend", () => {
     const execution = await daemon.search({ q: "match", mode: "hybrid" });
     expect(execution.requestedMode).toBe("hybrid");
     expect(execution.effectiveMode).toBe("hybrid");
+    expect(execution.candidateWindow).toEqual({
+      state: "unknown",
+      candidateCount: null,
+      candidateLimit: null,
+    });
     expect(execution.response.hits[0]).toMatchObject({
       path: "folder/note.md",
+      format: "markdown",
+      coverage: "indexed-complete",
+      locator: null,
       excerpt: [
         { text: "before ", highlighted: false },
         { text: "match", highlighted: true },
@@ -88,6 +151,63 @@ describe("DaemonBackend", () => {
         vaultId: "notes",
       },
     });
+  });
+
+  it("does not infer exhaustion or a total from an exact-limit response with next_cursor null", async () => {
+    const exactLimitHits = Array.from({ length: 100 }, (_, index) => ({
+      ...HIT,
+      chunk_id: `chunk-${index}`,
+      path: `note-${index}.md`,
+    }));
+    const daemon = backend(jsonTransport((url) =>
+      url.endsWith("/v0/status")
+        ? { status: 200, body: STATUS }
+        : { status: 200, body: { hits: exactLimitHits, next_cursor: null } },
+    ));
+    await daemon.status();
+
+    const execution = await daemon.search({ q: "match", mode: "lexical", limit: 100 });
+    expect(execution.response.hits).toHaveLength(100);
+    expect(execution.candidateWindow).toEqual({
+      state: "unknown",
+      candidateCount: null,
+      candidateLimit: null,
+    });
+  });
+
+  it("reports more_available only when the daemon supplies a continuation cursor", async () => {
+    const daemon = backend(jsonTransport((url) =>
+      url.endsWith("/v0/status")
+        ? { status: 200, body: STATUS }
+        : { status: 200, body: { hits: [HIT], next_cursor: "opaque-next-page" } },
+    ));
+    await daemon.status();
+
+    const execution = await daemon.search({ q: "match", mode: "lexical", limit: 100 });
+    expect(execution.candidateWindow).toEqual({
+      state: "more_available",
+      candidateCount: null,
+      candidateLimit: null,
+    });
+  });
+
+  it("rejects search hits with invalid coverage or format-incompatible locators", async () => {
+    const invalidHits = [
+      { ...HIT, coverage: "complete" },
+      { ...HIT, locator: { kind: "base_view", view: "Table" } },
+    ];
+
+    for (const invalidHit of invalidHits) {
+      const daemon = backend(jsonTransport((url) =>
+        url.endsWith("/v0/status")
+          ? { status: 200, body: STATUS }
+          : { status: 200, body: { hits: [invalidHit], next_cursor: null } },
+      ));
+      await daemon.status();
+      await expect(daemon.search({ q: "match", mode: "lexical" })).rejects.toMatchObject({
+        code: "invalid_response",
+      });
+    }
   });
 
   it("reads the token provider for each authenticated status and search request", async () => {

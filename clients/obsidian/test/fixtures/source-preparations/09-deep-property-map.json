@@ -1,0 +1,219 @@
+{
+  "schema_version": 9,
+  "source_key": "89bdc68d2f9ba3c5d1f9d9c38eee2b045b994fafcf83ae9d0c805cfce412e058",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Golden/Deep Property Map.md",
+  "format": "markdown",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "59b3815f945652198005e7402d72c26d95933ac4b9be2c75d2f05a068fe21ebf",
+  "byte_length": 1488,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Deep Property Map.md",
+    "stem": "Deep Property Map",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "deep property map.md",
+    "stem": "deep property map",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {
+    "nested": {
+      "type": "map",
+      "value": {
+        "level_0": {
+          "type": "map",
+          "value": {
+            "level_1": {
+              "type": "map",
+              "value": {
+                "level_2": {
+                  "type": "map",
+                  "value": {
+                    "level_3": {
+                      "type": "map",
+                      "value": {
+                        "level_4": {
+                          "type": "map",
+                          "value": {
+                            "level_5": {
+                              "type": "map",
+                              "value": {
+                                "level_6": {
+                                  "type": "map",
+                                  "value": {
+                                    "level_7": {
+                                      "type": "map",
+                                      "value": {
+                                        "level_8": {
+                                          "type": "map",
+                                          "value": {
+                                            "level_9": {
+                                              "type": "map",
+                                              "value": {
+                                                "level_10": {
+                                                  "type": "map",
+                                                  "value": {
+                                                    "level_11": {
+                                                      "type": "map",
+                                                      "value": {
+                                                        "level_12": {
+                                                          "type": "map",
+                                                          "value": {
+                                                            "level_13": {
+                                                              "type": "map",
+                                                              "value": {
+                                                                "level_14": {
+                                                                  "type": "map",
+                                                                  "value": {
+                                                                    "level_15": {
+                                                                      "type": "map",
+                                                                      "value": {
+                                                                        "level_16": {
+                                                                          "type": "map",
+                                                                          "value": {
+                                                                            "level_17": {
+                                                                              "type": "map",
+                                                                              "value": {
+                                                                                "level_18": {
+                                                                                  "type": "map",
+                                                                                  "value": {
+                                                                                    "level_19": {
+                                                                                      "type": "map",
+                                                                                      "value": {
+                                                                                        "level_20": {
+                                                                                          "type": "map",
+                                                                                          "value": {
+                                                                                            "level_21": {
+                                                                                              "type": "map",
+                                                                                              "value": {
+                                                                                                "level_22": {
+                                                                                                  "type": "map",
+                                                                                                  "value": {
+                                                                                                    "level_23": {
+                                                                                                      "type": "map",
+                                                                                                      "value": {
+                                                                                                        "level_24": {
+                                                                                                          "type": "map",
+                                                                                                          "value": {
+                                                                                                            "level_25": {
+                                                                                                              "type": "map",
+                                                                                                              "value": {
+                                                                                                                "level_26": {
+                                                                                                                  "type": "map",
+                                                                                                                  "value": {
+                                                                                                                    "level_27": {
+                                                                                                                      "type": "map",
+                                                                                                                      "value": {
+                                                                                                                        "level_28": {
+                                                                                                                          "type": "map",
+                                                                                                                          "value": {
+                                                                                                                            "level_29": {
+                                                                                                                              "type": "map",
+                                                                                                                              "value": {
+                                                                                                                                "level_30": {
+                                                                                                                                  "type": "map",
+                                                                                                                                  "value": {
+                                                                                                                                    "level_31": {
+                                                                                                                                      "type": "map",
+                                                                                                                                      "value": {
+                                                                                                                                        "leaf": {
+                                                                                                                                          "type": "string",
+                                                                                                                                          "value": "value"
+                                                                                                                                        }
+                                                                                                                                      }
+                                                                                                                                    }
+                                                                                                                                  }
+                                                                                                                                }
+                                                                                                                              }
+                                                                                                                            }
+                                                                                                                          }
+                                                                                                                        }
+                                                                                                                      }
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              }
+                                                                                                            }
+                                                                                                          }
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  }
+                                                                                                }
+                                                                                              }
+                                                                                            }
+                                                                                          }
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  }
+                                                                }
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "8afeb27c8b23a2f0f4456ef2e8c7d86addd00d88c3c8ab97067e3e5ff6308411",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Deep Property Map.md",
+        "heading_path": [
+          "Body"
+        ],
+        "content": "# Body\nNested property map.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "59b3815f945652198005e7402d72c26d95933ac4b9be2c75d2f05a068fe21ebf",
+        "chunking_version": 2
+      },
+      "heading_text": "Body",
+      "normalized_heading": "body",
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

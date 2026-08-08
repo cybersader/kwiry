@@ -16,13 +16,22 @@ axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 directories = "6.0"
+# Legacy CJK byte encodings for the predefined PDF CMap families
+# (RKSJ/EUC/GBK/Big5/UHC). Already in the portable graph before PDF named it —
+# `quick-xml` enables its `encoding` feature for DOCX — so naming it explicitly
+# costs the plugin bundle nothing and makes the PDF reader's use of it visible
+# instead of incidental.
+encoding_rs = { version = "0.8", default-features = false }
 fs2 = "0.4"
 getrandom = "0.3"
 http-body-util = "0.1"
 ignore = "0.4"
+libc = "0.2"
 notify = "8.2"
 predicates = "3.1"
 pulldown-cmark = "0.13"
+quick-xml = { version = "=0.41.0", default-features = false, features = ["encoding"] }
+rawzip = { version = "=0.5.1", default-features = false }
 regex = "1.11"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -37,10 +46,24 @@ thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "serde"] }
 tokio = { version = "1.47", features = ["full"] }
 toml = "0.9"
+unicode-normalization = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_WindowsProgramming"] }
 zerocopy = "0.8"
 fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
+filetime = "0.2"
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+# The PDF reader's document/object layer, in the portable format set since PDF
+# admission. `default-features = false` drops chrono, jiff, time, and rayon;
+# `wasm_js` is what getrandom 0.4 requires on wasm32-unknown-unknown. See
+# `kwiry-core/src/formats/pdf.rs` for the budgets this crate does not provide
+# and this project therefore imposes.
+lopdf = { version = "=0.44.0", default-features = false, features = ["wasm_js"] }
+# Enhanced-tier only. Parses an embedded font program to recover Unicode for
+# `Identity-H` subset fonts that ship no `/ToUnicode`. Absent from the portable
+# graph by construction: nothing in `portable` reaches it, and the feature that
+# does also pulls in `native`.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

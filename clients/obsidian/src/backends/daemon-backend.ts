@@ -24,6 +24,7 @@ export interface DaemonBackendOptions {
 const LEXICAL_ONLY: BackendCapabilities = {
   supportedModes: ["lexical"],
   sourceScope: "registered_trees",
+  manualRebuild: false,
 };
 
 export class DaemonBackend implements SearchBackend {
@@ -59,6 +60,7 @@ export class DaemonBackend implements SearchBackend {
         ? {
             supportedModes: ["lexical", "semantic", "hybrid"],
             sourceScope: "registered_trees",
+            manualRebuild: false,
           }
         : LEXICAL_ONLY;
       const searchable = daemon.generation !== null && daemon.state !== "starting";
@@ -133,6 +135,13 @@ export class DaemonBackend implements SearchBackend {
         requestedMode: request.mode,
         effectiveMode: request.mode,
         generation: status.generation,
+        candidateWindow: {
+          // The frozen daemon body exposes only positive continuation evidence.
+          // A null cursor says nothing about exhaustion or candidate totals.
+          state: response.next_cursor === null ? "unknown" : "more_available",
+          candidateCount: null,
+          candidateLimit: null,
+        },
         response: {
           hits: response.hits.map((hit) => ({
             ...hit,

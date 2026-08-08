@@ -1,59 +1,81 @@
-name: Release Obsidian plugin
+name: Validate Obsidian plugin release candidate
 
-# Tag with the plain manifest version (e.g. `0.1.0`, no `v` prefix).
-# BRAT and the Obsidian directory both resolve releases by that tag and
-# expect main.js / manifest.json / styles.css as release-level assets.
 on:
-  push:
-    tags:
-      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing plain semantic-version tag to validate
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  candidate:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: clients/obsidian
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: clients/obsidian/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - name: Install
         run: npm ci
-      - name: Test
-        run: npm test
-      - name: Build
-        run: npm run build
-      - name: Verify tag matches manifest version
+      - name: Verify production Rust adapter
         run: |
-          tag="${GITHUB_REF_NAME}"
+          cargo fmt --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all -- --check
+          cargo clippy --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml
+          cargo check --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --target wasm32-unknown-unknown
+          npm test --prefix rust/kwiry-obsidian-wasm
+      - name: Verify plugin and deterministic evidence
+        run: npm run verify
+      - name: Verify tag identity and package versions
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag=$CANDIDATE_TAG
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            printf 'Candidate tag is not a plain semantic version.\n' >&2
+            exit 1
+          fi
+          tag_commit=$(git rev-parse -q --verify "refs/tags/$tag^{commit}")
+          test "$(git rev-parse HEAD)" = "$tag_commit"
           manifest=$(node -p "require('./manifest.json').version")
           pkg=$(node -p "require('./package.json').version")
           if [ "$tag" != "$manifest" ] || [ "$tag" != "$pkg" ]; then
-            echo "tag=$tag manifest=$manifest package=$pkg mismatch" >&2
+            printf 'Candidate tag does not match package versions.\n' >&2
             exit 1
           fi
-      - name: Verify GPL banner survived bundling
-        run: head -20 main.js | grep -q "GNU General Public License"
-      - name: Create release with plugin assets
+      - name: Prepare exact candidate package
         run: |
-          {
-            echo "Kwiry Search Obsidian plugin ${GITHUB_REF_NAME} (GPL-3.0-only)."
-            echo
-            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy the attached main.js, manifest.json, and styles.css into \`.obsidian/plugins/kwiry-search/\`."
-            echo
-            echo "Corresponding source for this build: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_REF_NAME}/clients/obsidian"
-          } > /tmp/release-notes.md
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "kwiry-search ${GITHUB_REF_NAME}" \
-            --notes-file /tmp/release-notes.md \
-            main.js manifest.json styles.css LICENSE
-        env:
-          GH_TOKEN: ${{ github.token }}
+          set -euo pipefail
+          npm run --silent evidence > gate5.evidence.json
+          npm run validate:evidence -- gate5.evidence.json
+          npm run validate:privacy
+          npm run package:release -- .tmp/release-candidate gate5.evidence.json
+      - name: Upload candidate for separate publication authorization
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwiry-obsidian-candidate-${{ inputs.tag }}
+          path: clients/obsidian/.tmp/release-candidate/
+          retention-days: 14
+          if-no-files-found: error

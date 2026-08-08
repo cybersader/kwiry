@@ -3,11 +3,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  FTS_HIGHLIGHT_END,
-  FTS_HIGHLIGHT_START,
+  RESERVED_EXCERPT_MARKERS,
   flattenExcerpt,
   parseExcerpt,
-  parseFtsExcerpt,
+  sanitizeExcerptText,
 } from "../src/excerpt";
 
 describe("parseExcerpt", () => {
@@ -42,15 +41,17 @@ describe("parseExcerpt", () => {
       { text: "just plain text", highlighted: false },
     ]);
   });
+});
 
-  it("parses private FTS5 markers without treating markup as HTML", () => {
-    expect(parseFtsExcerpt(
-      `before ${FTS_HIGHLIGHT_START}<img>${FTS_HIGHLIGHT_END} after`,
-    )).toEqual([
-      { text: "before ", highlighted: false },
-      { text: "<img>", highlighted: true },
-      { text: " after", highlighted: false },
-    ]);
+describe("sanitizeExcerptText", () => {
+  it("neutralizes every reserved private marker a note could contain", () => {
+    const forged = `${RESERVED_EXCERPT_MARKERS[0]}forged${RESERVED_EXCERPT_MARKERS[1]} tail`;
+    const sanitized = sanitizeExcerptText(forged);
+    for (const marker of RESERVED_EXCERPT_MARKERS) {
+      expect(sanitized).not.toContain(marker);
+    }
+    expect(sanitized).toContain("forged");
+    expect(sanitized).toHaveLength(forged.length);
   });
 });
 

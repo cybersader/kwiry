@@ -1,0 +1,1000 @@
+{
+  "schema_version": 1,
+  "profile_id": "lexical-v1",
+  "documents": [
+    {
+      "scope": "allowed",
+      "path": "exact-title.md",
+      "markdown": "---\ntitle: Exact Metadata Signal\n---\n\n# Exact title\nThe strongest metadata document."
+    },
+    {
+      "scope": "allowed",
+      "path": "phrase-body.md",
+      "markdown": "# Phrase body\nThe phrase exact metadata signal appears in body content."
+    },
+    {
+      "scope": "allowed",
+      "path": "all-terms.md",
+      "markdown": "# All terms\nExact evidence is separated from metadata and the final signal token."
+    },
+    {
+      "scope": "allowed",
+      "path": "all-supported.md",
+      "markdown": "# Supported conjunction\nalpha beta"
+    },
+    {
+      "scope": "allowed",
+      "path": "alpha-only.md",
+      "markdown": "# Alpha only\nalpha"
+    },
+    {
+      "scope": "allowed",
+      "path": "beta-only.md",
+      "markdown": "# Beta only\nbeta"
+    },
+    {
+      "scope": "allowed",
+      "path": "voice-filler.md",
+      "markdown": "# Voice result\ncache governance"
+    },
+    {
+      "scope": "allowed",
+      "path": "please-only.md",
+      "markdown": "# Supported context elsewhere\nplease"
+    },
+    {
+      "scope": "allowed",
+      "path": "prefixes.md",
+      "markdown": "# Prefixes\nprefixaa00 prefixaa01 prefixaa02 prefixaa03 prefixaa04 prefixaa05 prefixaa06 prefixaa07 prefixaa08 prefixaa09 prefixaa10 prefixaa11 prefixaa12 prefixaa13 prefixaa14 prefixaa15 prefixaa16 prefixaa17 prefixaa18 prefixaa19"
+    },
+    {
+      "scope": "allowed",
+      "path": "rfc.md",
+      "markdown": "# RFC authority\nRFC 9110 caching requirements"
+    },
+    {
+      "scope": "allowed",
+      "path": "cve.md",
+      "markdown": "# CVE authority\nCVE-2026-1234 mitigation"
+    },
+    {
+      "scope": "allowed",
+      "path": "iia.md",
+      "markdown": "---\ntitle: IIA 2 line\n---\n\n# IIA authority\nThe control line is authoritative."
+    },
+    {
+      "scope": "allowed",
+      "path": "filename-signal.md",
+      "markdown": "# Filename field\nordinary body"
+    },
+    {
+      "scope": "allowed",
+      "path": "alias-field.md",
+      "markdown": "---\naliases:\n  - Alias Signal\n---\n\n# Alias field\nordinary body"
+    },
+    {
+      "scope": "allowed",
+      "path": "title-field.md",
+      "markdown": "---\ntitle: Title Signal\n---\n\n# Title field\nordinary body"
+    },
+    {
+      "scope": "allowed",
+      "path": "heading-field.md",
+      "markdown": "# Heading Signal\nordinary body"
+    },
+    {
+      "scope": "allowed",
+      "path": "content-field.md",
+      "markdown": "# Content field\ncontent signal"
+    },
+    {
+      "scope": "allowed",
+      "path": "unicode.md",
+      "markdown": "---\ntitle: Résumé Cache\n---\n\n# Unicode\nnaïve café 東京"
+    },
+    {
+      "scope": "allowed",
+      "path": "natural-punctuation.md",
+      "markdown": "# Natural punctuation\ncache governance draft"
+    },
+    {
+      "scope": "allowed",
+      "path": "comma-separated.md",
+      "markdown": "# Comma terms\nalpha something beta"
+    },
+    {
+      "scope": "allowed",
+      "path": "cve-separated.md",
+      "markdown": "# Separated CVE components\nCVE mitigation in 2026 addressed item 1234"
+    },
+    {
+      "scope": "allowed",
+      "path": "scope-allowed.md",
+      "markdown": "# Scoped authority\nscopeanchor allowed evidence"
+    },
+    {
+      "scope": "forbidden",
+      "path": "scope-forbidden.md",
+      "markdown": "# Forbidden authority\nscopeanchor forbiddenterm secretprefix00 secretprefix01 secretprefix02 secretprefix03"
+    },
+    {
+      "scope": "allowed",
+      "path": "numeric-title.md",
+      "markdown": "---\ntitle: 2026\n---\n\n# Numeric title\ncalendar archive"
+    },
+    {
+      "scope": "allowed",
+      "path": "unicode-decomposed.md",
+      "markdown": "---\ntitle: Cöoperate Archive\n---\n\n# Decomposed Unicode\nnaïveté reference"
+    },
+    {
+      "scope": "allowed",
+      "path": "cve-spaced-exact.md",
+      "markdown": "# Spaced CVE identity\nCVE 2026 1234 mitigation"
+    },
+    {
+      "scope": "allowed",
+      "path": "rfc-separated.md",
+      "markdown": "# Separated RFC components\nRFC caching guidance eventually mentions 9110"
+    },
+    {
+      "scope": "allowed",
+      "path": "product-id.md",
+      "markdown": "# Product identity\nproduct/v2.4.1 release notes"
+    },
+    {
+      "scope": "allowed",
+      "path": "long-exact-match.md",
+      "markdown": "---\ntitle: marker aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaax\n---\n\nbody"
+    },
+    {
+      "scope": "allowed",
+      "path": "long-exact-other.md",
+      "markdown": "---\ntitle: marker aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay\n---\n\nbody"
+    }
+  ],
+  "generated_documents": [
+    {
+      "scope": "allowed",
+      "path_prefix": "stable-tie-",
+      "count": 12,
+      "width": 2,
+      "markdown": "# Stable tie\nstabletie"
+    }
+  ],
+  "cases": [
+    {
+      "id": "voice-typed-filler",
+      "query": "um kindly cache governance florp",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "voice-filler.md",
+          "tier": "partial_coverage"
+        }
+      ]
+    },
+    {
+      "id": "supported-context-is-not-relaxed",
+      "query": "please cache governance florp",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [],
+      "expected_paths": [],
+      "excluded_paths": [
+        "voice-filler.md",
+        "please-only.md"
+      ]
+    },
+    {
+      "id": "all-supported-conjunction",
+      "query": "alpha beta",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "all-supported.md",
+          "tier": "exact_phrase"
+        }
+      ],
+      "excluded_paths": [
+        "alpha-only.md",
+        "beta-only.md"
+      ]
+    },
+    {
+      "id": "unsupported-context-relaxation",
+      "query": "cache governance unsupportedcontext",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "voice-filler.md",
+          "tier": "partial_coverage"
+        }
+      ]
+    },
+    {
+      "id": "backend-tokenless-optional-term",
+      "query": "cache zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "voice-filler.md",
+          "tier": "partial_coverage"
+        }
+      ]
+    },
+    {
+      "id": "natural-question-punctuation",
+      "query": "cache governance?",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "natural-punctuation.md",
+          "tier": "exact_phrase"
+        }
+      ]
+    },
+    {
+      "id": "natural-parenthetical-context",
+      "query": "cache governance (draft)",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "natural-punctuation.md",
+          "tier": "exact_phrase"
+        }
+      ]
+    },
+    {
+      "id": "ordinary-comma-boundaries",
+      "query": "alpha,beta",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "comma-separated.md",
+          "tier": "all_terms"
+        }
+      ],
+      "excluded_paths": [
+        "alpha-only.md",
+        "beta-only.md"
+      ]
+    },
+    {
+      "id": "unique-prefix-probe-budget",
+      "query": "zzzz zzzz zzzz zzzz zzzz zzzz zzzz zzzz prefixaa",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "prefix"
+      ],
+      "anchors": [],
+      "prefix_expansions": 16,
+      "expected_paths": [
+        {
+          "path": "prefixes.md",
+          "tier": "prefix"
+        }
+      ]
+    },
+    {
+      "id": "bounded-prefix",
+      "query": "prefixaa",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "all_terms",
+        "prefix"
+      ],
+      "anchors": [],
+      "prefix_expansions": 16,
+      "expected_paths": [
+        {
+          "path": "prefixes.md",
+          "tier": "prefix"
+        }
+      ]
+    },
+    {
+      "id": "rfc-anchor-optional-context",
+      "query": "RFC 9110 optionalmissing",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [
+        "rfc 9110"
+      ],
+      "expected_paths": [
+        {
+          "path": "rfc.md",
+          "tier": "partial_coverage"
+        }
+      ]
+    },
+    {
+      "id": "cve-anchor-optional-context",
+      "query": "CVE-2026-1234 optionalmissing",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [
+        "cve-2026-1234"
+      ],
+      "expected_paths": [
+        {
+          "path": "cve.md",
+          "tier": "partial_coverage"
+        }
+      ],
+      "excluded_paths": [
+        "cve-separated.md"
+      ]
+    },
+    {
+      "id": "iia-anchor-optional-context",
+      "query": "IIA 2 optionalmissing",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [
+        "iia",
+        "2"
+      ],
+      "expected_paths": [
+        {
+          "path": "iia.md",
+          "tier": "partial_coverage"
+        }
+      ]
+    },
+    {
+      "id": "lowercase-iia-metadata-promotion",
+      "query": "iia 2 line",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [
+        "iia",
+        "2"
+      ],
+      "expected_paths": [
+        {
+          "path": "iia.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "filename-field",
+      "query": "filename signal",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "filename-signal.md",
+          "tier": "exact_phrase"
+        }
+      ]
+    },
+    {
+      "id": "title-field-exact",
+      "query": "title signal",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "title-field.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "alias-field-exact",
+      "query": "alias signal",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "alias-field.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "heading-field-exact",
+      "query": "heading signal",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "heading-field.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "content-field-phrase",
+      "query": "content signal",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "content-field.md",
+          "tier": "exact_phrase"
+        }
+      ]
+    },
+    {
+      "id": "tier-dominance",
+      "query": "exact metadata signal",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "exact-title.md",
+          "tier": "exact_metadata"
+        },
+        {
+          "path": "phrase-body.md",
+          "tier": "exact_phrase"
+        },
+        {
+          "path": "all-terms.md",
+          "tier": "all_terms"
+        }
+      ]
+    },
+    {
+      "id": "unicode-exact",
+      "query": "Résumé Cache",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "unicode.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "explicit-field-bypass",
+      "query": "title:\"Exact Metadata Signal\"",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "explicit_syntax_bypass",
+      "execution": "explicit_bypass",
+      "stages": [],
+      "anchors": []
+    },
+    {
+      "id": "explicit-boolean-bypass",
+      "query": "alpha AND beta",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "explicit_syntax_bypass",
+      "execution": "explicit_bypass",
+      "stages": [],
+      "anchors": []
+    },
+    {
+      "id": "explicit-prefix-bypass",
+      "query": "prefixaa*",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "explicit_syntax_bypass",
+      "execution": "explicit_bypass",
+      "stages": [],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "prefixes.md",
+          "tier": "explicit"
+        }
+      ]
+    },
+    {
+      "id": "punctuation-empty",
+      "query": "...",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "empty_no_evidence",
+      "stages": [],
+      "anchors": [],
+      "expected_paths": []
+    },
+    {
+      "id": "unknown-empty",
+      "query": "totallyunknown nowhereword",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "empty_no_evidence",
+      "stages": [],
+      "anchors": [],
+      "expected_paths": []
+    },
+    {
+      "id": "stable-ties",
+      "query": "stabletie",
+      "scope": "allowed",
+      "limit": 8,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "all_terms"
+      ],
+      "anchors": [],
+      "stable_ties": true
+    },
+    {
+      "id": "authorized-scope-noninterference",
+      "query": "scopeanchor forbiddenterm",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "scope-allowed.md",
+          "tier": "partial_coverage"
+        }
+      ],
+      "combined_scope_changes_evidence": true
+    },
+    {
+      "id": "numeric-field-syntax",
+      "query": "title:2026",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "explicit_syntax_bypass",
+      "execution": "explicit_bypass",
+      "stages": [],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "numeric-title.md",
+          "tier": "explicit"
+        }
+      ]
+    },
+    {
+      "id": "explicit-prefix-negative",
+      "query": "prefixzz*",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "explicit_syntax_bypass",
+      "execution": "explicit_bypass",
+      "stages": [],
+      "anchors": [],
+      "expected_paths": [],
+      "excluded_paths": [
+        "prefixes.md"
+      ]
+    },
+    {
+      "id": "unicode-unaccented-exact",
+      "query": "Resume Cache",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "unicode.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "unicode-decomposed-exact-query",
+      "query": "Résumé Cache",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "unicode.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "unicode-unaccented-support",
+      "query": "naive cafe",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "unicode.md",
+          "tier": "exact_phrase"
+        }
+      ]
+    },
+    {
+      "id": "unicode-decomposed-source-exact",
+      "query": "Cooperate Archive",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "unicode-decomposed.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "unicode-decomposed-source-support",
+      "query": "naivete",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "all_terms"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "unicode-decomposed.md",
+          "tier": "all_terms"
+        }
+      ]
+    },
+    {
+      "id": "unicode-accented-explicit-prefix",
+      "query": "résu*",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "explicit_syntax_bypass",
+      "execution": "explicit_bypass",
+      "stages": [],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "unicode.md",
+          "tier": "explicit"
+        }
+      ]
+    },
+    {
+      "id": "unicode-accented-explicit-prefix-negative",
+      "query": "résx*",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "explicit_syntax_bypass",
+      "execution": "explicit_bypass",
+      "stages": [],
+      "anchors": [],
+      "expected_paths": [],
+      "excluded_paths": [
+        "unicode.md"
+      ]
+    },
+    {
+      "id": "unicode-unaccented-assisted-prefix",
+      "query": "resu",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "all_terms",
+        "prefix"
+      ],
+      "anchors": [],
+      "prefix_expansions": 2,
+      "expected_paths": [
+        {
+          "path": "unicode.md",
+          "tier": "prefix"
+        }
+      ]
+    },
+    {
+      "id": "long-complete-exact-value",
+      "query": "marker aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaax",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "long-exact-match.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    },
+    {
+      "id": "rfc-full-identity",
+      "query": "RFC 9110",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "all_terms"
+      ],
+      "anchors": [
+        "rfc 9110"
+      ],
+      "expected_paths": [
+        {
+          "path": "rfc.md",
+          "tier": "exact_metadata"
+        }
+      ],
+      "excluded_paths": [
+        "rfc-separated.md"
+      ]
+    },
+    {
+      "id": "cve-spaced-full-identity",
+      "query": "CVE 2026 1234",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "all_terms"
+      ],
+      "anchors": [
+        "cve 2026 1234"
+      ],
+      "expected_paths": [
+        {
+          "path": "cve-spaced-exact.md",
+          "tier": "exact_metadata"
+        }
+      ],
+      "excluded_paths": [
+        "cve.md",
+        "cve-separated.md"
+      ]
+    },
+    {
+      "id": "product-full-identity",
+      "query": "product/v2.4.1",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "all_terms"
+      ],
+      "anchors": [
+        "product/v2.4.1"
+      ],
+      "expected_paths": [
+        {
+          "path": "product-id.md",
+          "tier": "exact_metadata"
+        }
+      ]
+    }
+  ],
+  "bounds": {
+    "maximum_terms": 128,
+    "over_limit_terms": 129,
+    "maximum_query_bytes": 4096,
+    "over_limit_unicode": "é",
+    "maximum_prefix_terms": 8,
+    "maximum_prefix_expansions_per_term": 16,
+    "maximum_candidates_per_stage": 256,
+    "maximum_total_candidates": 512
+  }
+}

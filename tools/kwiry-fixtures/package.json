@@ -1,0 +1,15 @@
+{
+  "name": "kwiry-fixtures",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "build": "tsc --noEmit && node esbuild.config.mjs",
+    "install-into": "node scripts/install-into-vault.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "obsidian": "1.7.2",
+    "typescript": "5.9.3"
+  }
+}

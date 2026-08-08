@@ -9,9 +9,11 @@ license.workspace = true
 arc-swap = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 directories = { workspace = true, optional = true }
+encoding_rs = { workspace = true, optional = true }
 fs2 = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 ignore = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
 pulldown-cmark = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
@@ -26,22 +28,39 @@ tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
+unicode-normalization = { workspace = true, optional = true }
 zerocopy = { workspace = true, optional = true }
 fastembed = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+lopdf = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true }
+rawzip = { workspace = true, optional = true }
+ttf-parser = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, optional = true }
 
+[[example]]
+name = "d5c_balanced_playground"
+path = "examples/d5c_balanced_playground.rs"
+required-features = ["internal-d5c-preview", "native"]
+
 [features]
 default = ["native"]
 portable = [
+  "dep:encoding_rs",
+  "dep:flate2",
+  "dep:lopdf",
   "dep:pulldown-cmark",
+  "dep:quick-xml",
+  "dep:rawzip",
   "dep:regex",
   "dep:serde",
   "dep:serde-saphyr",
   "dep:serde_json",
   "dep:sha2",
   "dep:thiserror",
+  "dep:unicode-normalization",
 ]
 native = [
   "portable",
@@ -51,6 +70,7 @@ native = [
   "dep:fs2",
   "dep:getrandom",
   "dep:ignore",
+  "dep:libc",
   "dep:rusqlite",
   "dep:sqlite-vec",
   "dep:subtle",
@@ -64,3 +84,28 @@ native = [
 # Enables the fastembed/ONNX embedder. Native sqlite-vec state and RRF remain
 # covered without ONNX so tests do not need to load the model.
 semantic-onnx = ["native", "dep:fastembed"]
+# Exposes the test-only D5C profile contract to explicit preview adapters.
+internal-d5c-preview = ["portable"]
+# Retained so existing callers keep resolving; DOCX extraction is now part of
+# the portable format set rather than an opt-in spike.
+internal-docx-extractor = ["portable"]
+# Retained so existing callers keep resolving; Excalidraw extraction is now part
+# of the portable format set following the 2026-08-06 contract amendment.
+internal-excalidraw-extractor = ["portable"]
+# Retained so existing callers keep resolving; the portable PDF tier is now part
+# of the portable format set rather than an opt-in spike. It gates nothing at
+# all any more — no `cfg` in the crate names it — so enabling it is a no-op that
+# `default = ["native"]` already implies.
+internal-pdf-extractor = ["portable"]
+# The enhanced (size-unconstrained) PDF tier, and the only remaining PDF feature
+# that changes what is compiled. Deliberately depends on `native` as well as
+# `internal-pdf-extractor`: enabling it drags in the whole native dependency
+# set, so it structurally cannot be selected by a wasm32 build. Coverage-only
+# divergence — see `formats/pdf/embedded.rs`.
+native-pdf-extractor = ["native", "internal-pdf-extractor", "dep:ttf-parser"]
+
+[dev-dependencies]
+filetime.workspace = true
+# Test-only: `tests/portable_graph.rs` reads the real manifests rather than a
+# second copy of what they are supposed to say.
+toml.workspace = true

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -16,9 +16,10 @@ use tokio::sync::RwLock;
 
 use kwiry_core::{
     ApiErrorEnvelope, ApiSearchRequest, ApiSearchResponse, Config, ConnectionDescriptor,
-    DaemonState, DaemonStatus, DataRoot, HealthResponse, HostProfile, IndexManager, Manifest,
-    ManifestFileOutcome, ModelStatus, Paths, Principal, Scope, SearchMode, SearchRuntime,
-    VaultStatus, bootstrap_desktop, build_index, load_config, write_connection_descriptor,
+    DaemonState, DaemonStatus, DataRoot, HealthResponse, HostProfile, IndexFreshness,
+    IndexFreshnessBasis, IndexFreshnessState, IndexManager, Manifest, ManifestFileOutcome,
+    ModelStatus, Paths, Principal, ReconcileScope, Scope, SearchMode, SearchRuntime, VaultStatus,
+    bootstrap_desktop, build_index, load_config, write_connection_descriptor,
 };
 
 use crate::auth::{AuthState, require_auth};
@@ -26,6 +27,9 @@ use crate::capability::CapabilityVerifier;
 use crate::logging::Redacted;
 use crate::runtime::{ManagerHandle, spawn_manager};
 use crate::watcher::spawn_watcher;
+
+const INDEX_FRESHNESS_HEADER: &str = "x-kwiry-index-freshness";
+const GENERATION_HEADER: &str = "x-kwiry-generation";
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -100,40 +104,196 @@ pub(crate) async fn serve(
         .with_context(|| format!("failed to bind {address}"))?;
 
     let data_root = DataRoot::new(&paths.data_dir);
-    if data_root.active()?.is_none() {
-        build_index(&config, &paths.data_dir)?;
+    // A core-identity mismatch discards the whole generation here, and the
+    // rebuild that follows is far larger than the per-format eviction reported
+    // below — so it must not be the quieter of the two. The gate's message is
+    // produced and then classified away inside `prepare`; this is where it is
+    // handed back to the operator.
+    if let Some(discarded) = data_root.prepare()? {
+        let generation = discarded.generation.as_deref().unwrap_or("<unreadable>");
+        tracing::warn!(
+            generation,
+            reason = %discarded.reason,
+            "the stored index cannot be reused by this build; rebuilding from scratch"
+        );
+        println!(
+            "kwiry: the stored index cannot be reused by this build ({}); rebuilding every source from scratch",
+            discarded.reason
+        );
     }
 
     let runtime = SearchRuntime::new();
-    if profile == HostProfile::Desktop && (semantic || config.semantic.enabled) {
-        install_semantic(&paths, &runtime)?;
+    let semantic_enabled = profile == HostProfile::Desktop && (semantic || config.semantic.enabled);
+    if semantic_enabled && cfg!(not(feature = "semantic-onnx")) {
+        return Err(anyhow!(
+            "this build does not include semantic support; rebuild with --features semantic-onnx"
+        ));
     }
-    let mut manager = IndexManager::open(config.clone(), &paths.data_dir, runtime.clone())?;
-    let report = manager.reconcile(config.clone())?;
-    let mut status = status_from_manifest(
-        &config,
-        manager.manifest(),
-        &report.unavailable_vaults,
-        runtime.generation(),
-    );
-    status.model = runtime.semantic_profile().map(|profile| ModelStatus {
-        name: profile.model_id.clone(),
-        version: profile.fingerprint(),
-    });
+
+    let status = Arc::new(RwLock::new(DaemonStatus::starting(env!(
+        "CARGO_PKG_VERSION"
+    ))));
     let state = AppState {
         profile,
-        runtime,
-        status: Arc::new(RwLock::new(status)),
+        runtime: runtime.clone(),
+        status: status.clone(),
     };
-    let (manager_handle, manager_task) = spawn_manager(manager);
-    let watcher = spawn_watcher(
-        paths.clone(),
-        config,
-        manager_handle.clone(),
-        state.status.clone(),
-    )?;
     let router = build_router(state, auth, profile);
     let local_address = listener.local_addr()?;
+
+    // Owner ruling (KWIRY-Q-0022, 2026-07-25): the desktop profile serves
+    // immediately — searches answered from the last complete generation are
+    // labeled stale, and a daemon with no generation yet returns the typed
+    // 503 index_building. OpenClast keeps boot-before-serve until its
+    // layout-vs-config classification equality check exists.
+    let mut serving = None;
+    let mut pending_server = None;
+    if profile == HostProfile::Desktop {
+        serving = Some(spawn_server(listener, router));
+    } else {
+        pending_server = Some((listener, router));
+    }
+
+    let (manager, freshly_built) = match boot_index(&config, &paths, &runtime).await {
+        Ok(bootstrapped) => bootstrapped,
+        Err(error) => {
+            let Some(server) = serving else {
+                // OpenClast is not serving yet; fail fast exactly as before.
+                return Err(error);
+            };
+            // Desktop keeps the surface alive: health answers, search
+            // returns the typed index_building state, and status says
+            // degraded until an operator fixes registration and the
+            // daemon is restarted.
+            tracing::warn!(
+                error = %error,
+                "index bootstrap failed; serving without an index"
+            );
+            {
+                let mut current = status.write().await;
+                current.state = DaemonState::Degraded;
+                current.dirty = true;
+                current.rebuilding = false;
+            }
+            println!("kwiry listening on http://{local_address}; index unavailable: {error}");
+            let server_result = server.await;
+            server_result.context("HTTP server task failed")??;
+            tracing::info!("kwiry daemon stopped");
+            return Ok(());
+        }
+    };
+
+    // Open-time eviction removed rows whose per-format identity moved. It is a
+    // narrowing, not a silent one: the formats it touched are named here so the
+    // reindex that follows is explicable rather than mysterious.
+    {
+        let evictions = manager.open_evictions();
+        if !evictions.is_empty() {
+            let formats = evictions
+                .by_format
+                .iter()
+                .map(|(format, count)| format!("{}={count}", format.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                sources = evictions.total(),
+                formats = %formats,
+                "extraction identity changed; evicted those formats' rows and will reindex their sources"
+            );
+            println!(
+                "kwiry: extraction identity changed for {formats}; {} source(s) evicted and will be reindexed",
+                evictions.total()
+            );
+        }
+    }
+
+    // Seed observable counts from the manifest while the boot pass runs.
+    // status.generation stays None until the boot pass finishes: a served
+    // previous generation must read as stale, never current.
+    let boot_manifest = manager.manifest().clone();
+    {
+        let mut seeded = status_from_manifest(&config, &boot_manifest, &[], None);
+        seeded.state = DaemonState::Starting;
+        seeded.generation = None;
+        seeded.dirty = true;
+        seeded.rebuilding = !freshly_built;
+        *status.write().await = seeded;
+    }
+
+    let (manager_handle, manager_task) = spawn_manager(manager);
+    // The watcher is armed before the boot pass so nothing observed while
+    // it runs is lost; the manager actor serializes the passes.
+    let watcher = spawn_watcher(
+        paths.clone(),
+        config.clone(),
+        manager_handle.clone(),
+        status.clone(),
+    )?;
+    if semantic_enabled {
+        // Owner ruling (KWIRY-Q-0022): the embedding model loads in the
+        // background; semantic and hybrid answer an honest mode_unavailable
+        // until it is ready, then a backfill pass embeds the corpus.
+        spawn_semantic_loader(
+            paths.clone(),
+            runtime.clone(),
+            status.clone(),
+            manager_handle.clone(),
+            config.clone(),
+        );
+    }
+
+    // Boot reconciliation catches offline changes against a pre-existing
+    // generation. A generation built moments ago in this same process has
+    // none, so it publishes directly as current.
+    if freshly_built {
+        let next = status_with_model(
+            status_from_manifest(&config, &boot_manifest, &[], runtime.generation()),
+            &status,
+        )
+        .await;
+        *status.write().await = next;
+    } else {
+        match manager_handle
+            .reconcile_scoped(config.clone(), ReconcileScope::Full)
+            .await
+        {
+            Ok(report) => {
+                let next = status_with_model(
+                    status_from_manifest(
+                        &config,
+                        &report.manifest,
+                        &report.unavailable_vaults,
+                        report.generation,
+                    ),
+                    &status,
+                )
+                .await;
+                *status.write().await = next;
+            }
+            // A failed boot pass must not kill a daemon holding a complete
+            // serviceable generation: serve it, report degraded/stale, and
+            // let the watcher's retry and safety passes recover.
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "boot reconciliation failed; serving the last complete generation as degraded"
+                );
+                let mut next = status_with_model(
+                    status_from_manifest(&config, &boot_manifest, &[], None),
+                    &status,
+                )
+                .await;
+                next.state = DaemonState::Degraded;
+                next.dirty = true;
+                next.rebuilding = false;
+                *status.write().await = next;
+            }
+        }
+    }
+
+    if let Some((listener, router)) = pending_server {
+        serving = Some(spawn_server(listener, router));
+    }
     match identity {
         StartupIdentity::Desktop { token_path } => {
             let connection_path = paths.connection_path();
@@ -160,15 +320,104 @@ pub(crate) async fn serve(
         }
     }
 
-    let server_result = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+    let server_result = serving
+        .expect("the HTTP server is started in every non-degraded path")
         .await;
     watcher.shutdown().await;
     let shutdown_result = shutdown_manager(manager_handle, manager_task).await;
-    server_result.context("HTTP server failed")?;
+    server_result.context("HTTP server task failed")??;
     shutdown_result?;
     tracing::info!("kwiry daemon stopped");
     Ok(())
+}
+
+fn spawn_server(
+    listener: TcpListener,
+    router: Router,
+) -> tokio::task::JoinHandle<std::result::Result<(), std::io::Error>> {
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    })
+}
+
+/// Builds the first generation when none exists and opens the manager,
+/// off the async executor because both are blocking filesystem work.
+async fn boot_index(
+    config: &Config,
+    paths: &Paths,
+    runtime: &SearchRuntime,
+) -> Result<(IndexManager, bool)> {
+    let config = config.clone();
+    let data_dir = paths.data_dir.clone();
+    let runtime = runtime.clone();
+    tokio::task::spawn_blocking(move || -> Result<(IndexManager, bool)> {
+        let data_root = DataRoot::new(&data_dir);
+        let freshly_built = if data_root.active()?.is_none() {
+            build_index(&config, &data_dir)?;
+            true
+        } else {
+            false
+        };
+        let manager = IndexManager::open(config, &data_dir, runtime)?;
+        Ok((manager, freshly_built))
+    })
+    .await
+    .context("index bootstrap task failed")?
+}
+
+async fn status_with_model(
+    mut next: DaemonStatus,
+    status: &Arc<RwLock<DaemonStatus>>,
+) -> DaemonStatus {
+    // The model identity is owned by the semantic loader.
+    next.model = status.read().await.model.clone();
+    next
+}
+
+fn spawn_semantic_loader(
+    paths: Paths,
+    runtime: SearchRuntime,
+    status: Arc<RwLock<DaemonStatus>>,
+    manager: ManagerHandle,
+    config: Config,
+) {
+    tokio::spawn(async move {
+        let loaded = tokio::task::spawn_blocking({
+            let paths = paths.clone();
+            let runtime = runtime.clone();
+            move || install_semantic(&paths, &runtime)
+        })
+        .await;
+        match loaded {
+            Ok(Ok(())) => {
+                if let Some(profile) = runtime.semantic_profile() {
+                    status.write().await.model = Some(ModelStatus {
+                        name: profile.model_id.clone(),
+                        version: profile.fingerprint(),
+                    });
+                }
+                // Backfill embeddings for the already-committed lexical
+                // corpus; failures stay warnings and never degrade lexical.
+                if let Err(error) = manager.reconcile_scoped(config, ReconcileScope::Full).await {
+                    tracing::warn!(
+                        error = %error,
+                        "semantic backfill reconciliation failed; lexical unaffected"
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    error = %error,
+                    "semantic model load failed; semantic and hybrid stay explicitly unavailable"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "semantic loader task failed");
+            }
+        }
+    });
 }
 
 #[cfg(feature = "semantic-onnx")]
@@ -236,7 +485,7 @@ async fn search(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     payload: std::result::Result<Json<ApiSearchRequest>, JsonRejection>,
-) -> std::result::Result<Json<ApiSearchResponse>, HttpError> {
+) -> std::result::Result<Response, HttpError> {
     if principal.profile != state.profile || !principal.has_scope(Scope::Search) {
         return Err(HttpError::new(
             StatusCode::FORBIDDEN,
@@ -273,17 +522,24 @@ async fn search(
     let profile = state.profile;
     let resources = principal.resources.clone();
     // Semantic legs run ONNX inference; keep them off the async executor.
-    let hits = tokio::task::spawn_blocking(move || match profile {
+    let result = tokio::task::spawn_blocking(move || match profile {
         HostProfile::Desktop => match request.mode {
-            SearchMode::Lexical => runtime.search_filtered(&query, request.limit, &request.filters),
-            SearchMode::Semantic => {
-                runtime.search_semantic(&query, request.limit, &request.filters)
+            SearchMode::Lexical => {
+                runtime.search_filtered_with_generation(&query, request.limit, &request.filters)
             }
-            SearchMode::Hybrid => runtime.search_hybrid(&query, request.limit, &request.filters),
+            SearchMode::Semantic => {
+                runtime.search_semantic_with_generation(&query, request.limit, &request.filters)
+            }
+            SearchMode::Hybrid => {
+                runtime.search_hybrid_with_generation(&query, request.limit, &request.filters)
+            }
         },
-        HostProfile::OpenClast => {
-            runtime.search_authorized(&query, request.limit, &request.filters, &resources)
-        }
+        HostProfile::OpenClast => runtime.search_authorized_with_generation(
+            &query,
+            request.limit,
+            &request.filters,
+            &resources,
+        ),
     })
     .await
     .map_err(|_| {
@@ -300,14 +556,52 @@ async fn search(
             subject = %subject_digest(&principal.subject),
             actor = %principal.actor,
             resources = principal.resources.len(),
-            results = hits.len(),
+            results = result.hits.len(),
             "OpenClast search enforced"
         );
     }
-    Ok(Json(ApiSearchResponse {
-        hits,
+
+    let status = state.status.read().await;
+    let freshness =
+        response_freshness(&status, &result.generation, state.runtime.freshness_basis());
+    let mut response = Json(ApiSearchResponse {
+        hits: result.hits,
         next_cursor: None,
-    }))
+        extraction_policy_fingerprint: kwiry_core::extraction_policy_fingerprint().to_owned(),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        INDEX_FRESHNESS_HEADER,
+        HeaderValue::from_static(freshness.header_value()),
+    );
+    response.headers_mut().insert(
+        GENERATION_HEADER,
+        HeaderValue::from_str(&result.generation).map_err(|_| {
+            HttpError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "the search generation could not be represented safely",
+            )
+        })?,
+    );
+    Ok(response)
+}
+
+fn response_freshness(
+    status: &DaemonStatus,
+    generation: &str,
+    basis: IndexFreshnessBasis,
+) -> IndexFreshness {
+    let state = if status.generation.as_deref() != Some(generation) {
+        IndexFreshnessState::Stale
+    } else if status.rebuilding {
+        IndexFreshnessState::Reconciling
+    } else if status.dirty {
+        IndexFreshnessState::Stale
+    } else {
+        IndexFreshnessState::Current
+    };
+    IndexFreshness::new(state, basis)
 }
 
 fn subject_digest(subject: &str) -> String {
@@ -322,9 +616,11 @@ fn map_core_error(error: kwiry_core::Error) -> HttpError {
         kwiry_core::Error::Query(message) => {
             HttpError::new(StatusCode::BAD_REQUEST, "invalid_query", message)
         }
-        kwiry_core::Error::Index(message) if message == "index is not ready" => {
-            HttpError::new(StatusCode::SERVICE_UNAVAILABLE, "index_not_ready", message)
-        }
+        kwiry_core::Error::IndexBuilding => HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "index_building",
+            "the index is still building",
+        ),
         kwiry_core::Error::SemanticUnavailable(message) => {
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "mode_unavailable", message)
         }
@@ -379,8 +675,11 @@ pub(crate) fn status_from_manifest(
         version: env!("CARGO_PKG_VERSION").to_owned(),
         generation,
         chunking_version: kwiry_core::CHUNKING_VERSION,
+        extraction_policy_fingerprint: kwiry_core::extraction_policy_fingerprint().to_owned(),
+        extraction_policy: kwiry_core::active_extraction_policy(),
         documents: manifest.document_count(),
         chunks: manifest.chunk_count(),
+        source_format_counts: manifest.source_format_counts(),
         last_sync: manifest.last_sync.clone(),
         dirty: degraded,
         rebuilding: false,
@@ -518,6 +817,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn freshness_tracks_the_generation_and_reconciliation_state() {
+        let mut status = DaemonStatus::starting("0.1.0");
+        status.generation = Some("generation-a".to_owned());
+        status.dirty = false;
+        assert_eq!(
+            response_freshness(&status, "generation-a", IndexFreshnessBasis::StrictHash)
+                .header_value(),
+            "current; basis=strict_hash"
+        );
+        assert_eq!(
+            response_freshness(&status, "generation-a", IndexFreshnessBasis::MetadataAudit)
+                .header_value(),
+            "current; basis=metadata_audit"
+        );
+
+        status.rebuilding = true;
+        status.dirty = true;
+        assert_eq!(
+            response_freshness(&status, "generation-a", IndexFreshnessBasis::StrictHash)
+                .header_value(),
+            "reconciling; basis=strict_hash"
+        );
+
+        status.rebuilding = false;
+        assert_eq!(
+            response_freshness(&status, "generation-a", IndexFreshnessBasis::StrictHash)
+                .header_value(),
+            "stale; basis=strict_hash"
+        );
+        assert_eq!(
+            response_freshness(&status, "generation-b", IndexFreshnessBasis::StrictHash)
+                .header_value(),
+            "stale; basis=strict_hash"
+        );
+    }
+
     #[tokio::test]
     async fn health_is_public_and_status_requires_authentication() {
         let app = build_router(
@@ -606,11 +942,16 @@ mod tests {
         build_index(&config, &data).unwrap();
         let runtime = SearchRuntime::new();
         let manager = IndexManager::open(config, &data, runtime.clone()).unwrap();
+        let generation = runtime.generation().unwrap();
+        let mut status = DaemonStatus::starting("0.1.0");
+        status.state = DaemonState::Ready;
+        status.generation = Some(generation.clone());
+        status.dirty = false;
         let app = build_router(
             AppState {
                 profile: HostProfile::Desktop,
                 runtime,
-                status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
+                status: Arc::new(RwLock::new(status)),
             },
             AuthState::desktop("secret".to_owned()),
             HostProfile::Desktop,
@@ -631,6 +972,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(INDEX_FRESHNESS_HEADER).unwrap(),
+            "current; basis=strict_hash"
+        );
+        assert_eq!(
+            response.headers().get(GENERATION_HEADER).unwrap(),
+            generation.as_str()
+        );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let response_keys: BTreeSet<_> = value
@@ -639,7 +988,17 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(response_keys, BTreeSet::from(["hits", "next_cursor"]));
+        // The envelope gains exactly one field: the policy identity of the
+        // index these hits came out of. Deliberately not per-hit — an index is
+        // a single-profile artifact, so a per-hit copy could only repeat itself.
+        assert_eq!(
+            response_keys,
+            BTreeSet::from(["extraction_policy_fingerprint", "hits", "next_cursor"])
+        );
+        assert_eq!(
+            value["extraction_policy_fingerprint"],
+            kwiry_core::extraction_policy_fingerprint()
+        );
         let hit_keys: BTreeSet<_> = value["hits"][0]
             .as_object()
             .unwrap()
@@ -650,9 +1009,12 @@ mod tests {
             hit_keys,
             BTreeSet::from([
                 "chunk_id",
+                "coverage",
                 "excerpt",
+                "format",
                 "frontmatter",
                 "heading_path",
+                "locator",
                 "path",
                 "score",
                 "vault_id",
@@ -684,6 +1046,32 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let error: ApiErrorEnvelope = serde_json::from_slice(&body).unwrap();
         assert_eq!(error.error.code, "mode_unavailable");
+    }
+
+    #[tokio::test]
+    async fn missing_generation_returns_typed_index_building_error() {
+        let app = build_router(
+            test_state(),
+            AuthState::desktop("secret".to_owned()),
+            HostProfile::Desktop,
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v0/search")
+                    .header(AUTHORIZATION, "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"q":"notes","mode":"lexical","limit":20}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let error: ApiErrorEnvelope = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.error.code, "index_building");
     }
 
     #[tokio::test]
@@ -789,11 +1177,16 @@ mod tests {
         build_index(&config, &data).unwrap();
         let runtime = SearchRuntime::new();
         let manager = IndexManager::open(config, &data, runtime.clone()).unwrap();
+        let generation = runtime.generation().unwrap();
+        let mut status = DaemonStatus::starting("0.1.0");
+        status.state = DaemonState::Ready;
+        status.generation = Some(generation.clone());
+        status.dirty = false;
         let app = build_router(
             AppState {
                 profile: HostProfile::OpenClast,
                 runtime,
-                status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
+                status: Arc::new(RwLock::new(status)),
             },
             AuthState::openclast(CapabilityVerifier::load(&auth_config).unwrap()),
             HostProfile::OpenClast,
@@ -816,6 +1209,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(INDEX_FRESHNESS_HEADER).unwrap(),
+            "current; basis=strict_hash"
+        );
+        assert_eq!(
+            response.headers().get(GENERATION_HEADER).unwrap(),
+            generation.as_str()
+        );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let response: ApiSearchResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(response.hits.len(), 1);

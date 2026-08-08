@@ -1,0 +1,54 @@
+{
+  "schema_version": 9,
+  "source_key": "67a13bc654d9b97bde0260a68e6001f94224e85eeea2926bc9f7bb096ef2d6b3",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Golden/Shared Key Integer.md",
+  "format": "markdown",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "ea35c84d4a494a0b8162d4ab68fe89a7d8bcc874de20508ba54698f02fe6cd76",
+  "byte_length": 60,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "Shared Key Integer.md",
+    "stem": "Shared Key Integer",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "shared key integer.md",
+    "stem": "shared key integer",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {
+    "shared_signal": {
+      "type": "i64",
+      "value": "7"
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "5bb47dcc51e43b5f3f21d09208d16bf3e042a12a366004cc2a9b37e56f19c3f8",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Golden/Shared Key Integer.md",
+        "heading_path": [
+          "Body"
+        ],
+        "content": "# Body\nCross-note property typing.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "ea35c84d4a494a0b8162d4ab68fe89a7d8bcc874de20508ba54698f02fe6cd76",
+        "chunking_version": 2
+      },
+      "heading_text": "Body",
+      "normalized_heading": "body",
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

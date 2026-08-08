@@ -5,10 +5,10 @@ Kwiry Search bundles portable Rust code and the official SQLite WebAssembly runt
 ## Kwiry portable core and Rust WebAssembly support
 
 - `kwiry-core` is available under the MIT License or Apache License 2.0.
-- `wasm-bindgen` and the Rust dependencies linked into the portable adapter retain their respective upstream MIT, Apache-2.0, or MIT-or-Apache licensing.
-- Source and dependency identities are preserved by `daemon/Cargo.lock` and `rust/kwiry-obsidian-wasm/Cargo.lock` in the Kwiry source repository.
+- `wasm-bindgen` and the Rust dependencies linked into the portable adapter retain their respective upstream license terms.
+- Source and dependency identities are preserved by `daemon/Cargo.lock`, `rust/kwiry-obsidian-wasm/Cargo.lock`, `d5c-rust-license-inventory.json`, and `docx-rust-license-inventory.json` in the Kwiry source repository.
 
-The Apache License 2.0 text is included at [`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt). The MIT License text is available from <https://opensource.org/license/mit>.
+The Apache License 2.0 text is included at [`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt). Exact Rust dependency selections and required MIT, Unlicense, WHATWG BSD-3-Clause, and Unicode License v3 notices are included at [`licenses/Rust-DEPENDENCY-LICENSES.md`](licenses/Rust-DEPENDENCY-LICENSES.md).
 
 ## Official SQLite WASM package
 
@@ -16,6 +16,7 @@ This plugin bundles `@sqlite.org/sqlite-wasm` version `3.53.0-build1`.
 
 - Package wrapper: Apache License 2.0.
 - SQLite core: public-domain dedication as distributed by the SQLite project.
+- Emscripten-generated glue code: MIT License and University of Illinois/NCSA Open Source License. The complete upstream terms are included at [`licenses/Emscripten-LICENSE.txt`](licenses/Emscripten-LICENSE.txt).
 - Official `sqlite3.wasm` byte length: `864752`.
 - Official `sqlite3.wasm` SHA-256: `02d7e48164395fa68f81c6ec33e9da5461be397dc57602ac0cd89b4bbba1d312`.
 
