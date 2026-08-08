@@ -211,6 +211,7 @@ pub use source::{
 #[cfg(feature = "portable")]
 pub use status::{
     DaemonState, DaemonStatus, IndexFreshness, IndexFreshnessState, ModelStatus, VaultStatus,
+    owned_format_identities,
 };
 #[cfg(feature = "portable")]
 pub use typo::{

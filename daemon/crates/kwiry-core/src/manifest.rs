@@ -681,6 +681,79 @@ mod tests {
         adopted.validate().unwrap();
     }
 
+    /// The join the forged-literal tests could not make: a row written by a
+    /// build whose **extractor version** for that format differs is evicted,
+    /// and every other format's rows survive.
+    ///
+    /// Every other eviction test above hands `adopt` a hand-written literal
+    /// (`"f" * 64`, `"0" * 64`) — a string no build would ever stamp. Those
+    /// prove the predicate rejects a foreign identity; they cannot prove that a
+    /// *version* bump produces a foreign identity, because they never derive
+    /// one. `identity_at_extractor_version` does, from the same code
+    /// `format_identity_fingerprint` runs, so the only fact separating the
+    /// stale row from the running build here is the number in
+    /// `extractor_version_for`.
+    ///
+    /// Both directions are asserted. A build must refuse a row written by an
+    /// *older* extractor exactly as firmly as one written by a newer one: the
+    /// predicate is equality, and a rollback is as much a behavior change as a
+    /// bump.
+    ///
+    /// Mutation check: delete the `extractor=` component from
+    /// `policy::identity_for_material` and every iteration fails at the opening
+    /// `assert_ne!`, because the neighbouring version's digest collapses onto
+    /// the running one and the row becomes reusable.
+    #[test]
+    fn a_row_written_under_a_different_extractor_version_is_evicted() {
+        for spec in crate::format::format_specs() {
+            let running = crate::policy::extractor_version_for(spec.format);
+            for foreign in [running + 1, running.saturating_sub(1)] {
+                if foreign == running {
+                    continue;
+                }
+                let identity = crate::policy::identity_at_extractor_version(spec.format, foreign);
+                assert_ne!(
+                    identity,
+                    format_identity_fingerprint(spec.format),
+                    "{} at extractor version {foreign} must not claim this build's identity",
+                    spec.name
+                );
+
+                // One row of the bumped format, and one row of every other
+                // format, all otherwise identical to what this build writes.
+                let mut stale = file_of(spec.format, spec.name);
+                stale.format_identity = Some(identity.clone());
+                assert!(
+                    !stale.identity_matches(),
+                    "{} row written at extractor version {foreign} must not be reusable",
+                    spec.name
+                );
+                let survivors: Vec<ManifestFile> = crate::format::format_specs()
+                    .iter()
+                    .filter(|other| other.format != spec.format)
+                    .map(|other| file_of(other.format, other.name))
+                    .collect();
+                let manifest = manifest_of(survivors.iter().cloned().chain([stale.clone()]));
+
+                let (adopted, report) = on_disk(manifest).adopt();
+
+                assert_eq!(report.total(), 1, "{} eviction is not narrow", spec.name);
+                assert_eq!(report.by_format, BTreeMap::from([(spec.format, 1)]));
+                assert_eq!(
+                    report.evicted[&source_key("vault", spec.name)].recorded_identity,
+                    Some(identity)
+                );
+                // Every other format's rows are untouched: a bump is a claim
+                // about one extractor, and it costs exactly that extractor.
+                assert_eq!(adopted.files.len(), survivors.len());
+                for file in &survivors {
+                    assert_eq!(adopted.files[&source_key("vault", &file.path)], *file);
+                }
+                adopted.validate().unwrap();
+            }
+        }
+    }
+
     /// A row carrying no identity at all is refused, not adopted. Asserted
     /// directly with the version forced current, so the core gate cannot mask
     /// it — this is the case that becomes reachable at the *next* version bump.

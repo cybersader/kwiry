@@ -9,8 +9,15 @@ import {
   loadSettings,
 } from "../src/settings";
 import {
+  identityAfterBump,
+  identityAtExtractorVersion,
+  identityForMaterial,
+} from "./format-identity-material";
+import {
   DEFAULT_ENABLED_SOURCE_FORMATS,
   EXTRACTION_POLICY_FINGERPRINT,
+  EXTRACTION_PROFILES,
+  EXTRACTOR_VERSIONS,
   FORMAT_IDENTITIES,
   FORMAT_IDENTITY_SCHEMA_VERSION,
   IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION,
@@ -225,6 +232,52 @@ describe("loadSettings", () => {
     }
     // Fails closed rather than borrowing another format's identity.
     expect(() => formatIdentity("unknown" as never)).toThrow();
+  });
+
+  it("derives every mirrored identity from the mirrored material", () => {
+    // The pinned map above is seven opaque strings. This is what makes them
+    // checkable without a WASM build: each one is re-derived from the format,
+    // the compiled profile, and the extractor version, in the exact byte layout
+    // `kwiry_core::policy::identity_for_material` uses. A hand-copy slip in
+    // either map now fails here rather than at install time.
+    for (const format of SOURCE_FORMATS) {
+      expect(identityForMaterial(format, EXTRACTION_PROFILES[format], EXTRACTOR_VERSIONS[format]))
+        .toBe(FORMAT_IDENTITIES[format]);
+    }
+    expect(Object.keys(EXTRACTOR_VERSIONS).sort()).toEqual([...SOURCE_FORMATS].sort());
+    expect(Object.keys(EXTRACTION_PROFILES).sort()).toEqual([...SOURCE_FORMATS].sort());
+    // The adapter compiles the portable set and nothing else; `enhanced` here
+    // would mean this bundle had somehow picked up a daemon-only extractor.
+    for (const format of SOURCE_FORMATS) {
+      expect(EXTRACTION_PROFILES[format]).toBe("portable");
+      expect(EXTRACTOR_VERSIONS[format]).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("gives a bumped extractor version an identity no shipped format claims", () => {
+    // The property the cache's eviction predicate rests on, asserted on derived
+    // material rather than on a forged literal: bumping one format's extractor
+    // version moves that format's identity and nothing else's, and the moved
+    // value collides with no other format at any version.
+    const shipped = new Set(Object.values(FORMAT_IDENTITIES));
+    const derived = new Set<string>();
+    for (const format of SOURCE_FORMATS) {
+      expect(identityAfterBump(format)).not.toBe(FORMAT_IDENTITIES[format]);
+      expect(shipped.has(identityAfterBump(format))).toBe(false);
+      for (let version = 0; version <= 12; version += 1) {
+        const identity = identityAtExtractorVersion(format, version);
+        expect(identity).toMatch(/^[0-9a-f]{64}$/u);
+        expect(derived.has(identity)).toBe(false);
+        derived.add(identity);
+      }
+    }
+    expect(derived.size).toBe(SOURCE_FORMATS.length * 13);
+    // A rollback is as much a behaviour change as a bump: the predicate is
+    // equality, so an older version must be refused just as firmly.
+    for (const format of SOURCE_FORMATS) {
+      expect(identityAtExtractorVersion(format, EXTRACTOR_VERSIONS[format] - 1))
+        .not.toBe(FORMAT_IDENTITIES[format]);
+    }
   });
 
   it("reports the enabled set as configuration, sorted and never digested", () => {

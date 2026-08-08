@@ -117,14 +117,7 @@ if (byName["abi-identity"].abi_version !== 3
   // assert it: a build that had picked up `native-pdf-extractor` would report
   // `enhanced` here, and one that had lost the reader would report `none`.
   || byName["abi-identity"].extraction_policy.pdf !== "portable"
-  // The per-format identities the cache keys its rows on, asserted on the
-  // artifact the user installs. `source-formats.ts` mirrors these, and a
-  // drifted mirror would restore rows this adapter could not have produced.
   || byName["abi-identity"].format_identity_schema_version !== 1
-  || byName["abi-identity"].format_identities.pdf
-    !== "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc"
-  || byName["abi-identity"].format_identities.markdown
-    !== "b678d0ea2d77d7a79ccc79f4f8a3a1d96aed9bb98757afb1381e5661a1fb96f7"
   || byName["abi-identity"].lexical_query_plan_schema_version !== 4
   || byName["abi-identity"].fts5_match_plan_schema_version !== 3
   || byName["ordinary-any-match"].result.execution_plan.stages[0].plan_id
@@ -153,6 +146,34 @@ if (byName["abi-identity"].abi_version !== 3
   || byName["invalid-query-envelope"].error.code !== "invalid_request"
   || byName["wrong-abi"].error.code !== "abi_mismatch") {
   throw new Error("production adapter fixture assertion failed");
+}
+
+// The per-format identities the cache keys its rows on, asserted on the
+// artifact the user installs. `source-formats.ts` mirrors these, and a drifted
+// mirror would restore rows this adapter could not have produced.
+//
+// Every format, not a sample. This block previously pinned `pdf` and `markdown`
+// only, so a drifted `base`, `canvas`, `docx`, `text`, or `excalidraw` identity
+// — including one produced by a half-applied extractor version bump — passed
+// the check on the shipped artifact.
+const PINNED_FORMAT_IDENTITIES = {
+  markdown: "b678d0ea2d77d7a79ccc79f4f8a3a1d96aed9bb98757afb1381e5661a1fb96f7",
+  text: "c89bb1c6cb87c1e6371d7d03956f1c6bf8bff605c847441c2c72d7599bbd464b",
+  base: "d3eeb5a8e3246a07f0c1e41782a7f61628921f43f7afdd722f3a060104e7e079",
+  canvas: "01eae3d6859de3287237e366b7fcd9f346dbab395453ef9422bcd67dc527858c",
+  docx: "b4f9cff615a917e09d800c2784e17c836ef79cc767c49091818a7b1f8598a38e",
+  pdf: "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
+  excalidraw: "e1f6868bd320172f6b8d9afc3ac716e309499b065c62fa1b17ae4c2c09d98348",
+};
+const reportedIdentities = byName["abi-identity"].format_identities;
+if (JSON.stringify(Object.keys(reportedIdentities).sort())
+  !== JSON.stringify(Object.keys(PINNED_FORMAT_IDENTITIES).sort())) {
+  throw new Error("the adapter reports a different format set than is pinned here");
+}
+for (const [format, expected] of Object.entries(PINNED_FORMAT_IDENTITIES)) {
+  if (reportedIdentities[format] !== expected) {
+    throw new Error(`production adapter ${format} identity is not the pinned one`);
+  }
 }
 
 const nodeWasmPath = path.join(nodePackageDirectory, "kwiry_obsidian_wasm_bg.wasm");

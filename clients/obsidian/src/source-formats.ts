@@ -58,6 +58,57 @@ export const EXTRACTION_POLICY_FINGERPRINT =
  */
 export const FORMAT_IDENTITY_SCHEMA_VERSION = 1 as const;
 
+/** Mirrors `kwiry_core::policy::ExtractionProfile`. */
+export type ExtractionProfile = "none" | "portable" | "enhanced";
+
+/**
+ * Mirrors `kwiry_core::policy::extraction_profile_for()` for this build.
+ *
+ * The WASM adapter compiles the portable extractor set and nothing else, PDF
+ * included — the portable PDF tier is part of `portable`, and the enhanced tier
+ * is a daemon-only feature this bundle can never pick up.
+ */
+export const EXTRACTION_PROFILES: Readonly<Record<SourceFormat, ExtractionProfile>> = Object.freeze({
+  markdown: "portable",
+  text: "portable",
+  base: "portable",
+  canvas: "portable",
+  docx: "portable",
+  pdf: "portable",
+  excalidraw: "portable",
+});
+
+/**
+ * Mirrors `kwiry_core::policy::extractor_version_for()`.
+ *
+ * How many times each format's extractor has been given the ability to produce
+ * different output for byte-identical input. Not a release number and not a
+ * tier — the fact that lets a behavior change be stated without lying about a
+ * schema.
+ *
+ * Declared here, beside the profiles, because together they are the *material*
+ * `FORMAT_IDENTITIES` is derived from. Before this map existed the identities
+ * were seven opaque hand-copied digests: a wrong one was indistinguishable from
+ * a right one on inspection, and the only thing that could catch a slip was a
+ * WASM build. Now `test/settings.test.ts` re-derives every identity from this
+ * material and `rust/kwiry-obsidian-wasm/tests/typescript_mirror.rs` checks
+ * these numbers against `extractor_version_for` itself, so a bump that edits
+ * one of the two halves and forgets the other fails.
+ *
+ * Rust is the authority. A bump changes `extractor_version_for`, its pin, that
+ * format's pinned digest, and then this map and the matching
+ * `FORMAT_IDENTITIES` entry.
+ */
+export const EXTRACTOR_VERSIONS: Readonly<Record<SourceFormat, number>> = Object.freeze({
+  markdown: 1,
+  text: 1,
+  base: 1,
+  canvas: 1,
+  docx: 1,
+  pdf: 1,
+  excalidraw: 1,
+});
+
 /**
  * Mirrors `kwiry_core::policy::format_identity_fingerprint()` for every format
  * this build compiles: SHA-256 over a domain separator, the identity schema

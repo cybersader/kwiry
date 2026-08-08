@@ -439,6 +439,70 @@ mod tests {
         );
     }
 
+    /// The bump reaches the freshness plan too, and it must precede content
+    /// equality: a source whose bytes, mtime, registration, and outcome are all
+    /// unchanged still has to be re-read and re-ingested, because the extractor
+    /// that will read it now states different output for those same bytes.
+    ///
+    /// The stale identity is **derived from an extractor version**, not forged.
+    /// `a_stale_format_identity_precedes_content_equality` above uses
+    /// `"f" * 64` deliberately — a literal cannot drift with the predicate —
+    /// but a literal also cannot prove that a version bump is what produces a
+    /// mismatch in the first place. This one does, and it asserts both
+    /// decisions on the same row, since a re-ingest that skipped the byte read
+    /// would re-chunk the *old* extraction.
+    ///
+    /// Mutation check: delete the `extractor=` component from
+    /// `policy::identity_for_material` and the row becomes reusable, so both
+    /// arms return `Unchanged`/no-read and the test fails.
+    #[test]
+    fn a_bumped_extractor_version_forces_a_reingest_and_a_byte_read() {
+        let format = crate::format::SourceFormat::Markdown;
+        let running = crate::policy::extractor_version_for(format);
+        for foreign in [running + 1, running.saturating_sub(1)] {
+            if foreign == running {
+                continue;
+            }
+            let mut previous = manifest_file("hash", "fingerprint");
+            previous.format_identity = Some(crate::policy::identity_at_extractor_version(
+                format, foreign,
+            ));
+            assert_ne!(
+                previous.format_identity.as_deref(),
+                Some(crate::policy::format_identity_fingerprint(format)),
+                "extractor version {foreign} must not claim this build's identity"
+            );
+
+            // Same bytes, same hash, same registration, same outcome.
+            assert_eq!(
+                plan_source(
+                    Some(&previous),
+                    &manifest_file("hash", "fingerprint"),
+                    &PartitionScope::Whole,
+                    None,
+                ),
+                SourceDecision::Reingest(ChangeReason::FormatIdentityChanged)
+            );
+            // And the bytes are read again rather than trusted from the
+            // recorded hash, well outside any racy window.
+            assert_eq!(
+                plan_observation(
+                    Some(&previous),
+                    &discovered(previous.byte_length, previous.mtime_nanos),
+                    "fingerprint",
+                    &PartitionScope::Whole,
+                    Some(&PartitionScope::Whole),
+                    policy(
+                        IndexFreshnessBasis::MetadataAudit,
+                        previous.mtime_nanos + 10_000_000_000,
+                    ),
+                    SourceSignals::default(),
+                ),
+                ObservationDecision::ReadHash(ReadReason::ExtractionProfileChanged)
+            );
+        }
+    }
+
     /// The same for an identity that was never recorded. `None` must never
     /// compare equal to the running identity, nor to another `None`.
     #[test]

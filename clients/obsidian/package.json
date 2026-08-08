@@ -27,7 +27,10 @@
     "performance:gate5": "node --expose-gc scripts/gate5-performance.mjs",
     "test-vault": "node scripts/create-test-vault.mjs",
     "test-vault:smoke": "node scripts/gate5-test-vault-smoke.mjs",
-    "verify": "npm run typecheck && npm test && npm run corpus:smoke && npm run build && npm run test-vault:smoke && npm run evidence"
+    "verify": "npm run typecheck && npm test && npm run verify:d5c:licenses && npm run verify:docx:licenses && npm run verify:mit:notices && npm run corpus:smoke && npm run build && npm run test-vault:smoke && npm run evidence",
+    "verify:mit:notices": "node scripts/verify-mit-notices.mjs",
+    "regenerate:d5c:licenses": "node scripts/validate-d5c-rust-licenses.mjs regenerate",
+    "regenerate:docx:licenses": "node scripts/validate-d5c-rust-licenses.mjs regenerate docx"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

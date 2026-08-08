@@ -5,6 +5,7 @@ use std::path::Path;
 #[cfg(feature = "internal-d5c-preview")]
 use tantivy::collector::DocSetCollector;
 use tantivy::collector::{Collector, Count, SegmentCollector, TopDocs};
+use tantivy::fieldnorm::FieldNormReader;
 #[cfg(feature = "internal-d5c-preview")]
 use tantivy::query::TermSetQuery;
 use tantivy::query::{
@@ -97,12 +98,13 @@ pub(crate) fn search_reader(
         resource: None,
     };
     let resolved = resolve_query_plan(std::slice::from_ref(&context), query_text)?;
+    let statistics = AuthorizedStatistics::new(vec![searcher.clone()]);
     execute_lexical_plan(
         std::slice::from_ref(&context),
         &resolved,
         limit.min(MAX_RESULTS),
         filters,
-        &searcher,
+        &statistics,
     )
 }
 
@@ -138,12 +140,13 @@ pub(crate) fn search_reader_with_profile(
         resource: None,
     };
     let resolved = resolve_query_plan(std::slice::from_ref(&context), query_text)?;
+    let statistics = AuthorizedStatistics::new(vec![searcher.clone()]);
     execute_d5c_profile(
         std::slice::from_ref(&context),
         &resolved,
         limit.min(MAX_RESULTS),
         filters,
-        &searcher,
+        &statistics,
         execution.profile,
         execution.query_time_epoch_seconds,
     )
@@ -169,19 +172,110 @@ struct ResolvedLexicalPlan {
     prefix_expansions: BTreeMap<u16, Vec<String>>,
 }
 
+/// The collection length BM25 divides by, summed from the live documents
+/// themselves rather than read off a segment header.
+///
+/// The header value (`InvertedIndexReader::total_num_tokens`) is written once,
+/// when a segment is created, and is *not* a function of the segment's live
+/// content afterwards. Tantivy rewrites it on merge, and when a merged segment
+/// carries deletions it cannot recover the exact figure: `merger.rs`'s
+/// `estimate_total_num_tokens_in_single_segment` re-derives the total by
+/// summing quantised fieldnorms over the alive documents, which
+/// `fieldnorm::code` rounds down for every length above 40. `runtime`'s
+/// `expunge_resident_deletions` merges exactly the segments carrying deletions,
+/// so it takes that lossy branch by construction and bakes an under-count into
+/// the segment it publishes. A rebuild of byte-identical content writes exact
+/// headers, so the two build paths would report different collection lengths
+/// for the same vault — a different `avgdl`, a different score for every
+/// document, and, because each evidence stage of the ladder is a bounded
+/// top-k, a different *answer set* and not merely a different order.
+///
+/// Summing `id_to_fieldnorm(fieldnorm_id(doc))` over the live documents closes
+/// that gap exactly, and is the only formulation that can. A document's
+/// fieldnorm id is derived from its own content and is copied verbatim through
+/// every merge (`merger.rs::write_fieldnorms` pushes the id through
+/// unchanged), so this sum depends on the set of live documents and nothing
+/// else — identical for a rebuild and for any incremental history that arrives
+/// at the same vault. It is also the length the scorer actually uses:
+/// `Bm25Weight` divides each document's contribution by its quantised
+/// fieldnorm, so an exact header made `avgdl` disagree with the very lengths
+/// it normalises. Correctness here is measured against reproducibility, not
+/// against the untruncated token count.
+fn live_collection_length(searchers: &[Searcher], field: Field) -> tantivy::Result<u64> {
+    let mut total = 0_u64;
+    for searcher in searchers {
+        for segment in searcher.segment_readers() {
+            let Some(fieldnorms) = segment.fieldnorms_readers().get_field(field)? else {
+                // A field indexed without fieldnorms has no per-document
+                // length for this figure to be the mean of, and tantivy scores
+                // it without BM25 length normalisation. Nothing else can be
+                // derived from live content, so report the header.
+                total += segment.inverted_index(field)?.total_num_tokens();
+                continue;
+            };
+            let mut histogram = [0_u64; 256];
+            for doc in segment.doc_ids_alive() {
+                histogram[usize::from(fieldnorms.fieldnorm_id(doc))] += 1;
+            }
+            for (id, count) in histogram.iter().enumerate() {
+                total += count * u64::from(FieldNormReader::id_to_fieldnorm(id as u8));
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// BM25 corpus statistics summed over exactly the partitions a request is
+/// authorized to read, so an unauthorized partition cannot influence a score.
+///
+/// Every statistic here must be drawn from the same view of the segments.
+/// `doc_freq` is read off the term dictionary and so counts any document still
+/// resident in the segment files; `Searcher::num_docs` counts only the live
+/// ones. Mixing the two is not a smaller error than using either — it can make
+/// `doc_freq` exceed the document count, and `Bm25Weight::idf` asserts against
+/// exactly that in release builds. `runtime`'s publication invariant means a
+/// served index holds no dead documents, so the two agree; summing `max_doc`
+/// keeps them agreeing even if that invariant is ever weakened, and matches
+/// how tantivy's own `Searcher` answers. The collection length is the one
+/// statistic that cannot be made history-independent by removing dead
+/// documents, so it is derived from live fieldnorms instead — see
+/// `live_collection_length`.
+///
+/// The collection length is memoised per field. It is a scan of the live
+/// documents, and a single request builds a `Bm25Weight` for every term in
+/// every one of the seven boosted fields at every stage of the ladder, so
+/// without the cache one query would rescan the index dozens of times.
 struct AuthorizedStatistics {
     searchers: Vec<Searcher>,
+    collection_lengths: std::cell::RefCell<HashMap<Field, u64>>,
+}
+
+impl AuthorizedStatistics {
+    fn new(searchers: Vec<Searcher>) -> Self {
+        Self {
+            searchers,
+            collection_lengths: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
 }
 
 impl Bm25StatisticsProvider for AuthorizedStatistics {
     fn total_num_tokens(&self, field: Field) -> tantivy::Result<u64> {
-        self.searchers.iter().try_fold(0_u64, |total, searcher| {
-            Ok(total + searcher.total_num_tokens(field)?)
-        })
+        if let Some(cached) = self.collection_lengths.borrow().get(&field) {
+            return Ok(*cached);
+        }
+        let total = live_collection_length(&self.searchers, field)?;
+        self.collection_lengths.borrow_mut().insert(field, total);
+        Ok(total)
     }
 
     fn total_num_docs(&self) -> tantivy::Result<u64> {
-        Ok(self.searchers.iter().map(Searcher::num_docs).sum())
+        Ok(self
+            .searchers
+            .iter()
+            .flat_map(Searcher::segment_readers)
+            .map(|segment| u64::from(segment.max_doc()))
+            .sum())
     }
 
     fn doc_freq(&self, term: &Term) -> tantivy::Result<u64> {
@@ -221,9 +315,7 @@ pub(crate) fn search_partitions(
             resource: Some(partition.resource),
         })
         .collect();
-    let statistics = AuthorizedStatistics {
-        searchers: searchers.clone(),
-    };
+    let statistics = AuthorizedStatistics::new(searchers.clone());
     let resolved = resolve_query_plan(&contexts, query_text)?;
     execute_lexical_plan(
         &contexts,
@@ -269,9 +361,7 @@ pub(crate) fn search_partitions_with_profile(
             resource: Some(partition.resource),
         })
         .collect();
-    let statistics = AuthorizedStatistics {
-        searchers: searchers.clone(),
-    };
+    let statistics = AuthorizedStatistics::new(searchers.clone());
     let resolved = resolve_query_plan(&contexts, query_text)?;
     execute_d5c_profile(
         &contexts,
@@ -419,6 +509,33 @@ fn support_document_frequency(
     Ok(total)
 }
 
+/// The `limit` lexicographically first distinct terms extending `term`, taken
+/// over the whole authorized vocabulary.
+///
+/// This reads the term dictionary directly rather than counting matches, so it
+/// sees every term a segment records, live or not. That is only safe because
+/// `runtime` publishes no index holding deleted documents: were dead documents
+/// left resident, terms that exist nowhere in the vault would sort ahead of a
+/// live one and could crowd it out of the expansion set, and the typo ladder
+/// would silently fail to match a note that is really there.
+///
+/// The budget is spent on *distinct terms*, not on dictionary entries visited,
+/// and each segment is streamed independently up to the same bound. That
+/// distinction is what makes the result a function of the vault rather than of
+/// the index's segment layout. Charging every visited entry against one shared
+/// counter — as this did before — makes a term that appears in three segments
+/// cost three times what the same term costs in a freshly merged index, so an
+/// incrementally maintained index and a rebuild of byte-identical content
+/// expand the same prefix to different term sets, and the prefix stage of the
+/// ladder then contributes different candidates to a bounded pool. See
+/// `runtime::tests::an_incremental_index_and_a_rebuild_rank_a_vault_identically`.
+///
+/// Taking the first `limit` from each stream and then the first `limit` of
+/// their union yields exactly the globally first `limit`: if a term is among
+/// the globally first `limit`, then within any single segment fewer than
+/// `limit` prefix terms can precede it, because every one of those also
+/// precedes it globally. The work is bounded by `limit` entries per segment
+/// per field, and `limit` is `MAX_PREFIX_EXPANSIONS_PER_TERM`.
 fn collect_prefix_expansions(
     contexts: &[NativeSearchContext<'_>],
     plan: &LexicalQueryPlan,
@@ -442,7 +559,6 @@ fn collect_prefix_expansions(
     }
     let prefix = tokens[0].as_bytes();
     let mut expansions = BTreeSet::new();
-    let mut examined_terms = 0_usize;
 
     for context in contexts {
         let bindings = field_bindings(
@@ -461,23 +577,21 @@ fn collect_prefix_expansions(
                     .ge(prefix)
                     .into_stream()
                     .map_err(|error| Error::Index(error.to_string()))?;
-                while stream.advance() {
+                let mut taken = 0_usize;
+                while taken < limit && stream.advance() {
                     let key = stream.key();
                     if !key.starts_with(prefix) {
                         break;
                     }
-                    examined_terms += 1;
+                    taken += 1;
                     if let Ok(expansion) = std::str::from_utf8(key) {
                         expansions.insert(expansion.to_owned());
-                    }
-                    if expansions.len() == limit || examined_terms == limit {
-                        return Ok(expansions.into_iter().collect());
                     }
                 }
             }
         }
     }
-    Ok(expansions.into_iter().collect())
+    Ok(expansions.into_iter().take(limit).collect())
 }
 
 fn execute_lexical_plan(
@@ -2864,6 +2978,120 @@ mod tests {
             resolved.plan.bounds.max_prefix_expansions_per_term
         );
         assert!(search(&data, "crowdedpre", 100).len() <= expansions.len());
+    }
+
+    /// The prefix ladder must expand a term the same way for the same vault,
+    /// however the index arrived at it.
+    ///
+    /// The budget used to be charged per dictionary entry visited, against one
+    /// counter shared by every segment and every prefix field. A term recorded
+    /// in three segments therefore cost three times what the same term costs
+    /// once the segments are merged, so an incrementally maintained index
+    /// reached the cap after fewer *distinct* terms than a rebuild of identical
+    /// content and expanded the same query to a strictly smaller set. The
+    /// prefix stage then contributed different candidates to a bounded pool,
+    /// which is a difference in the answer, not in its order.
+    ///
+    /// Charging the budget per distinct term, per segment, removes the
+    /// dependence: `limit` entries are taken from each stream, and the first
+    /// `limit` of their union is exactly the globally first `limit`, because a
+    /// term among the globally first `limit` can be preceded within any one
+    /// segment only by terms that also precede it globally.
+    ///
+    /// Mutation check: restore the shared `examined_terms` counter and this
+    /// fails. Both indexes still reach the cap, but on different terms — the
+    /// rebuild returns `crowdedprefix00` and then `03`..`17`, having spent two
+    /// of its sixteen visits re-reading `01` and `02` out of a second prefix
+    /// field, while the incremental index returns `00`..`15`. Neither is the
+    /// vault's answer to the query; they are two readings of its segment
+    /// layout.
+    #[test]
+    fn prefix_expansion_depends_on_the_vocabulary_not_on_the_segment_layout() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let incremental = temporary.path().join("incremental");
+        let rebuilt = temporary.path().join("rebuilt");
+        fs::create_dir(&vault).unwrap();
+        let write = |count: usize| {
+            for index in 0..count {
+                fs::write(
+                    vault.join(format!("crowded-{index:02}.md")),
+                    format!("crowdedprefix{index:02}"),
+                )
+                .unwrap();
+            }
+        };
+        write(10);
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "prefixes".into(),
+                path: vault.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+
+        // Four publications, so the live vocabulary ends up spread over
+        // several segments instead of arriving in one.
+        build_index(&config, &incremental).unwrap();
+        let runtime = crate::runtime::SearchRuntime::new();
+        let mut manager =
+            crate::runtime::IndexManager::open(config.clone(), &incremental, runtime.clone())
+                .unwrap();
+        for count in [20, 30, 40] {
+            write(count);
+            manager.reconcile(config.clone()).unwrap();
+        }
+        manager.shutdown().unwrap();
+
+        build_index(&config, &rebuilt).unwrap();
+
+        let expansions_for = |data: &Path| {
+            let (index, fields) = open_index(data).unwrap();
+            let reader = index.reader().unwrap();
+            let searcher = reader.searcher();
+            let context = NativeSearchContext {
+                index: &index,
+                fields: &fields,
+                searcher: &searcher,
+                resource: None,
+            };
+            let segments = searcher.segment_readers().len();
+            let resolved =
+                resolve_query_plan(std::slice::from_ref(&context), "crowdedpre").unwrap();
+            (
+                segments,
+                resolved.prefix_expansions.values().next().unwrap().clone(),
+            )
+        };
+        let (incremental_segments, incremental_expansions) = expansions_for(&incremental);
+        let (rebuilt_segments, rebuilt_expansions) = expansions_for(&rebuilt);
+
+        assert!(
+            incremental_segments > rebuilt_segments,
+            "the fixture must actually produce two different segment layouts, \
+             or this asserts nothing (incremental {incremental_segments}, \
+             rebuilt {rebuilt_segments})"
+        );
+        assert_eq!(
+            rebuilt_expansions.len(),
+            crate::query::MAX_PREFIX_EXPANSIONS_PER_TERM,
+            "the corpus must be crowded enough to reach the cap"
+        );
+        assert_eq!(
+            incremental_expansions, rebuilt_expansions,
+            "the same vocabulary must expand to the same terms"
+        );
+        assert_eq!(
+            search(&incremental, "crowdedpre", 100)
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect::<Vec<_>>(),
+            search(&rebuilt, "crowdedpre", 100)
+                .into_iter()
+                .map(|hit| hit.path)
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[test]

@@ -183,136 +183,18 @@ describe("D5C BRAT package", () => {
     expect(JSON.stringify(tracked)).not.toMatch(/\/home\/|\/Users\/|\/mnt\/[a-z]\//u);
   });
 
-  // Substring-matching "<name> <version>" against the bundle only proved a heading
-  // existed. beta.11 and beta.12 both shipped rawzip's licence text under the
-  // quick-xml heading and passed that check, because the heading itself supplied
-  // the substring. MIT requires each crate's own copyright notice, so the notice
-  // *body* is what has to be pinned — and two crates that are not documented as
-  // sharing one notice must never carry byte-identical text.
-  it("reproduces every MIT crate's own notice body, not merely its heading", async () => {
-    const notices = await readFile(resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md"), "utf8");
-    const bodies = new Map();
-    for (const section of notices.split(/^## /mu).slice(1)) {
-      const heading = section.slice(0, section.indexOf("\n"));
-      const body = /```text\n([\S\s]*?)```/u.exec(section)?.[1];
-      if (body !== undefined) bodies.set(heading, body);
-    }
-
-    // Each digest is the sha256 of that crate's own upstream licence file as
-    // vendored by Cargo, normalised to LF (quick-xml ships CRLF) and stored with
-    // a single trailing newline. Regenerate a digest only after diffing the block
-    // against the upstream file it claims to reproduce.
-    const expected = {
-      "ecb 0.2.0 — MIT": {
-        crates: [["ecb", "0.2.0"]],
-        sha256: "6f58f94baa693514ec6212fd23914c356cdfea0370f7d1e154d5b7fbd5bbdcc1",
-        holder: "Copyright (c) magic-akari",
-      },
-      "generic-array 0.14.7 — MIT": {
-        crates: [["generic-array", "0.14.7"]],
-        sha256: "eb69613e00e596e13d2f58e820aee10e9d51754b91d7111bc997f1fc90791f66",
-        holder: "Copyright (c) 2015 Bartłomiej Kamiński",
-      },
-      "lopdf 0.44.0 — MIT": {
-        crates: [["lopdf", "0.44.0"]],
-        sha256: "2fb01e6708ea9d53e8b7e74bd82af23bce5256f19f4de93915027a53173c50d8",
-        holder: "Copyright (c) 2016 Junfeng Liu",
-      },
-      "nom 8.0.0 — MIT": {
-        crates: [["nom", "8.0.0"]],
-        sha256: "4dbda04344456f09a7a588140455413a9ac59b6b26a1ef7cdf9c800c012d87f0",
-        holder: "Copyright (c) 2014-2019 Geoffroy Couprie",
-      },
-      "pulldown-cmark 0.13.4 and pulldown-cmark-escape 0.11.0 — MIT": {
-        crates: [["pulldown-cmark", "0.13.4"], ["pulldown-cmark-escape", "0.11.0"]],
-        sha256: "c4f10f55904bdb9f27d3fbf94c354926d6cfe8b982276e556238c258941b243b",
-        holder: "Copyright 2015 Google Inc. All rights reserved.",
-      },
-      "quick-xml 0.41.0 — MIT": {
-        crates: [["quick-xml", "0.41.0"]],
-        sha256: "f0cf9b1c62bbe3bd3a69f5f79c7158f513f612b4940a0a812d1db39d605318bc",
-        holder: "Copyright (c) 2016 Johann Tuffe",
-      },
-      // rawzip's upstream LICENSE.txt genuinely names no holder. Recording that as
-      // null is what stops a future edit from "fixing" it with someone else's line.
-      "rawzip 0.5.1 — MIT": {
-        crates: [["rawzip", "0.5.1"]],
-        sha256: "91276db973f25602d1aa43491f59cbc84cb88e6f151e1d0cc82a755563ce0195",
-        holder: null,
-      },
-      "simd-adler32 0.3.10 — MIT": {
-        crates: [["simd-adler32", "0.3.10"]],
-        sha256: "42a35170233e83e18856792e748de4c1ce4a63b2afce9a370c89ef3fe23f9f2d",
-        holder: "Copyright (c) [2021] [Marvin Countryman]",
-      },
-      "zmij 1.0.23 — MIT": {
-        crates: [["zmij", "1.0.23"]],
-        sha256: "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
-        holder: null,
-      },
-    };
-
-    const tracked = JSON.parse(
-      await readFile(resolve(root, "d5c-rust-license-inventory.json"), "utf8"),
+  // The notice *bodies* are verified against each crate's vendored upstream
+  // licence file in test/mit-notice-pins.test.mjs, which runs in under a second.
+  // What has to be proved here is only that the packaged artifact ships the
+  // exact bundle those pins were verified against — otherwise the fast gate
+  // would be checking a file the release never carries.
+  it("packages the exact notice bundle the MIT pins were verified against", async () => {
+    const packagedBundle = await readFile(
+      resolve(packaged.supportRoot, "Rust-DEPENDENCY-LICENSES.md"),
     );
-    const inventoried = tracked.dependencies
-      .filter(({ release_license: license }) => license === "MIT")
-      .map(({ name, version }) => `${name} ${version}`)
-      .sort();
-    const documented = Object.values(expected)
-      .flatMap(({ crates }) => crates.map(([name, version]) => `${name} ${version}`))
-      .sort();
-    // No MIT crate may enter the graph without a notice body pinned here, and no
-    // pinned notice may outlive the crate it covers.
-    expect(documented).toEqual(inventoried);
-
-    for (const [heading, { sha256: digest, holder }] of Object.entries(expected)) {
-      const body = bodies.get(heading);
-      expect(body, `missing notice body for ${heading}`).toBeTypeOf("string");
-      expect(sha256(Buffer.from(body, "utf8")), `notice body changed for ${heading}`)
-        .toBe(digest);
-      if (holder === null) {
-        expect(body, `${heading} must not invent a copyright holder`)
-          .not.toMatch(/^Copyright/mu);
-      } else {
-        expect(body).toContain(holder);
-      }
-    }
-
-    // The defect this test exists for: one crate's notice standing in for another's.
-    const digests = Object.values(expected).map(({ sha256: digest }) => digest);
-    expect(new Set(digests).size, "two MIT crates share one notice body")
-      .toBe(digests.length);
-  });
-
-  // The "Release license selections" roll-up is prose, so nothing re-derived it
-  // when the DOCX and PDF waves grew the graph and it silently under-reported 29
-  // of the 95 shipped crates. Derive it from the validated inventory instead.
-  it("keeps the release license roll-up derived from the locked inventory", async () => {
-    const notices = await readFile(resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md"), "utf8");
-    const tracked = JSON.parse(
-      await readFile(resolve(root, "d5c-rust-license-inventory.json"), "utf8"),
-    );
-    const grouped = new Map();
-    for (const { name, version, release_license: license } of tracked.dependencies) {
-      if (!grouped.has(license)) grouped.set(license, []);
-      grouped.get(license).push(`${name} ${version}`);
-    }
-    expect([...grouped.keys()].sort()).toEqual([
-      "Apache-2.0",
-      "Apache-2.0 AND BSD-3-Clause",
-      "Apache-2.0 AND Unicode-3.0",
-      "GPL-3.0-only",
-      "MIT",
-      "Unlicense",
-    ]);
-    let covered = 0;
-    for (const [license, crates] of grouped) {
-      covered += crates.length;
-      expect(notices, `roll-up line for ${license} does not match the inventory`)
-        .toContain(`- ${license}: ${crates.join(", ")}.`);
-    }
-    expect(covered).toBe(95);
+    const tracked = await readFile(resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md"));
+    expect(sha256(packagedBundle)).toBe(sha256(tracked));
+    expect(sha256(packagedBundle)).toBe(packaged.rustLicenseInventory.notice_bundle_sha256);
   });
 
   it("ships owner-only styles without adding them to production CSS", async () => {
