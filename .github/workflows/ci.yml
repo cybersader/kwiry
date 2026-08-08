@@ -165,6 +165,12 @@ jobs:
           set -euo pipefail
           npm run validate:evidence -- gate5.evidence.json
           npm run validate:release:source -- gate5.evidence.json
+          # Publication requires this workflow green at the tag, so running the
+          # licence gate here is what makes it a required check. It previously
+          # ran only in validate-d5c-brat.yml, which is how the DOCX and PDF
+          # waves grew the dependency graph past its notices unnoticed.
+          npm run verify:d5c:licenses
+          npm run verify:docx:licenses
           test "$(find . -maxdepth 1 -type f \( -name '*.wasm' -o -name '*worker*.js' -o -name '*.map' -o -name '*.db' -o -name '*.sqlite' \) | wc -l)" -eq 0
       - name: Validate first-party privacy and Worker authority
         run: npm run validate:privacy

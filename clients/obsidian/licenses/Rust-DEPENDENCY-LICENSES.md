@@ -1,12 +1,12 @@
 # Rust dependency license notices
 
-This notice bundle covers the exact `wasm32-unknown-unknown` dependency graphs for the D5C owner artifact with `internal-d5c-preview` and the admission-disabled DOCX candidate with `internal-docx-extractor`. Exact package versions and declared SPDX expressions are recorded in `d5c-rust-license-inventory.json` and `docx-rust-license-inventory.json` in the corresponding source.
+This notice bundle covers the exact `wasm32-unknown-unknown` dependency graph the plugin's WebAssembly is built from. That graph is the same 95 packages for the shipped production build (default features), the D5C owner artifact with `internal-d5c-preview`, and the admission-disabled DOCX candidate with `internal-docx-extractor`; no package is present in one and absent from another. Exact package versions and declared SPDX expressions are recorded in `d5c-rust-license-inventory.json` and `docx-rust-license-inventory.json` in the corresponding source.
 
 ## Release license selections
 
 - GPL-3.0-only: kwiry-obsidian-wasm 0.1.0. The complete text is distributed as `LICENSE`.
-- Apache-2.0: adler2 2.0.1, ahash 0.8.12, annotate-snippets 0.12.16, anstyle 1.0.14, arraydeque 0.5.1, autocfg 1.5.1, base64 0.22.1, bitflags 2.13.1, block-buffer 0.10.4, bumpalo 3.20.3, cfg-if 1.0.4, crc32fast 1.5.0, crypto-common 0.1.7, digest 0.10.7, encoding_rs_io 0.1.7, flate2 1.1.9, getopts 0.2.24, getrandom 0.3.4, granit-parser 0.0.7, itoa 1.0.18, kwiry-core 0.1.0, miniz_oxide 0.8.9, nohash-hasher 0.2.0, num-traits 0.2.19, once_cell 1.21.4, proc-macro2 1.0.107, quote 1.0.47, regex 1.13.1, regex-automata 0.4.16, regex-syntax 0.8.11, rustversion 1.0.23, serde 1.0.229, serde-saphyr 0.0.29, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.151, sha2 0.10.9, smallvec 1.15.2, syn 2.0.119, syn 3.0.3, thiserror 2.0.19, thiserror-impl 2.0.19, tinyvec 1.12.0, tinyvec_macros 0.1.1, typenum 1.20.1, unicase 2.9.0, unicode-normalization 0.1.25, unicode-width 0.2.2, version_check 0.9.5, wasm-bindgen 0.2.126, wasm-bindgen-macro 0.2.126, wasm-bindgen-macro-support 0.2.126, wasm-bindgen-shared 0.2.126, zerocopy 0.8.55. The complete text is distributed as `Apache-2.0.txt`.
-- MIT: generic-array 0.14.7, pulldown-cmark 0.13.4, pulldown-cmark-escape 0.11.0, quick-xml 0.41.0, rawzip 0.5.1, simd-adler32 0.3.10, zmij 1.0.23. Component-specific notices follow below.
+- Apache-2.0: adler2 2.0.1, aes 0.9.2, ahash 0.8.12, annotate-snippets 0.12.16, anstyle 1.0.14, arraydeque 0.5.1, autocfg 1.5.1, base64 0.22.1, bitflags 2.13.1, block-buffer 0.10.4, block-buffer 0.12.1, block-padding 0.4.2, bumpalo 3.20.3, cbc 0.2.1, cfg-if 1.0.4, chacha20 0.10.1, cipher 0.5.2, const-oid 0.10.2, cpubits 0.1.1, crc32fast 1.5.0, crypto-common 0.1.7, crypto-common 0.2.2, digest 0.10.7, digest 0.11.3, encoding_rs_io 0.1.7, equivalent 1.0.2, flate2 1.1.9, getopts 0.2.24, getrandom 0.3.4, getrandom 0.4.3, granit-parser 0.0.7, hashbrown 0.17.1, hybrid-array 0.4.14, indexmap 2.14.0, inout 0.2.2, itoa 1.0.18, kwiry-core 0.1.0, log 0.4.33, md-5 0.11.0, miniz_oxide 0.8.9, nohash-hasher 0.2.0, num-traits 0.2.19, once_cell 1.21.4, proc-macro2 1.0.107, quote 1.0.47, rand 0.10.2, rand_core 0.10.1, rangemap 1.7.1, regex 1.13.1, regex-automata 0.4.16, regex-syntax 0.8.11, rustversion 1.0.23, serde 1.0.229, serde-saphyr 0.0.29, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.151, sha2 0.10.9, sha2 0.11.0, smallvec 1.15.2, stringprep 0.1.5, syn 2.0.119, syn 3.0.3, thiserror 2.0.19, thiserror-impl 2.0.19, tinyvec 1.12.0, tinyvec_macros 0.1.1, typenum 1.20.1, unicase 2.9.0, unicode-bidi 0.3.18, unicode-normalization 0.1.25, unicode-properties 0.1.4, unicode-width 0.2.2, version_check 0.9.5, wasm-bindgen 0.2.126, wasm-bindgen-macro 0.2.126, wasm-bindgen-macro-support 0.2.126, wasm-bindgen-shared 0.2.126, weezl 0.2.1, zerocopy 0.8.55. The complete text is distributed as `Apache-2.0.txt`.
+- MIT: ecb 0.2.0, generic-array 0.14.7, lopdf 0.44.0, nom 8.0.0, pulldown-cmark 0.13.4, pulldown-cmark-escape 0.11.0, quick-xml 0.41.0, rawzip 0.5.1, simd-adler32 0.3.10, zmij 1.0.23. Component-specific notices follow below.
 - Unlicense: aho-corasick 1.1.4, memchr 2.8.3. The complete dedication follows below.
 - Apache-2.0 AND BSD-3-Clause: encoding_rs 0.8.35. The required BSD notice follows below.
 - Apache-2.0 AND Unicode-3.0: unicode-ident 1.0.24. The required Unicode notice follows below.
@@ -98,23 +98,29 @@ DEALINGS IN THE SOFTWARE.
 ## quick-xml 0.41.0 — MIT
 
 ```text
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
+The MIT License (MIT)
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Copyright (c) 2016 Johann Tuffe
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ## rawzip 0.5.1 — MIT

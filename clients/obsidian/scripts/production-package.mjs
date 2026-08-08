@@ -141,7 +141,7 @@ export async function prepareProductionPackage({
     flattenNoticeLinks(source.noticeSource),
   );
   await copyFile(evidencePath, resolve(outputRoot, "gate5.evidence.json"));
-  await writeRuntimeArchive(sourceRoot, outputRoot);
+  await writeRuntimeArchive(outputRoot, source.noticeFiles);
   await writeChecksums(outputRoot);
   await validateProductionPackage({ sourceRoot, packageRoot: outputRoot, evidencePath });
   return { packageRoot: outputRoot, files: productionPackageFiles(source.noticeFiles) };
@@ -218,6 +218,7 @@ export async function validateProductionPackage({
     throw new Error("production package main.js is missing its GPL banner");
   }
 
+  await validateRuntimeArchive(packageRoot, noticeFiles);
   await assertPackagePrivacy(packageRoot);
   await validateChecksums(packageRoot, expectedFiles.filter((name) => name !== CHECKSUM_FILE));
   return { packageRoot, files: expectedFiles };
@@ -311,14 +312,58 @@ function productionPackageFiles(noticeFiles) {
   ].sort();
 }
 
-/// Builds a deterministic store-only zip of the runtime files. Deflate would
-/// make the bytes depend on the zlib build, and the release evidence asserts
-/// exact bytes, so the archive is stored rather than compressed. Timestamps are
-/// fixed for the same reason.
-async function writeRuntimeArchive(sourceRoot, packageRoot) {
+/// A conveyance defect is invisible from outside: the archive still opens and
+/// still installs. Assert its exact entry list, so dropping the licence back out
+/// of the install-by-hand path fails the release rather than shipping.
+async function validateRuntimeArchive(packageRoot, noticeFiles) {
+  const bytes = await readFile(resolve(packageRoot, RUNTIME_ARCHIVE));
+  const names = [];
+  let offset = 0;
+  while (offset + 30 <= bytes.length && bytes.readUInt32LE(offset) === 0x04034b50) {
+    const method = bytes.readUInt16LE(offset + 8);
+    const size = bytes.readUInt32LE(offset + 18);
+    const nameLength = bytes.readUInt16LE(offset + 26);
+    const start = offset + 30 + nameLength + bytes.readUInt16LE(offset + 28);
+    const name = bytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8");
+    if (method !== 0) {
+      throw new Error("runtime archive entries must be stored, not compressed");
+    }
+    const sibling = await readFile(resolve(packageRoot, name)).catch(() => null);
+    if (sibling === null || !sibling.equals(bytes.subarray(start, start + size))) {
+      throw new Error(`runtime archive entry does not match the package file: ${name}`);
+    }
+    names.push(name);
+    offset = start + size;
+  }
+  if (JSON.stringify(names.sort()) !== JSON.stringify(runtimeArchiveFiles(noticeFiles))) {
+    throw new Error("runtime archive must contain exactly the runtime and license files");
+  }
+}
+
+/// The archive is the advertised install-by-hand path, so whoever takes only it
+/// still receives a complete conveyance of GPL-3.0-only software: the licence
+/// text and every third-party notice travel with the binary rather than being
+/// left behind as sibling release assets. Only the two files that describe the
+/// release rather than license it — gate5.evidence.json and SHA256SUMS — are
+/// excluded, the latter because it is derived from this archive.
+function runtimeArchiveFiles(noticeFiles) {
+  return [
+    ...RUNTIME_FILES,
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    ...noticeFiles,
+  ].sort();
+}
+
+/// Builds a deterministic store-only zip. Deflate would make the bytes depend on
+/// the zlib build, and the release evidence asserts exact bytes, so the archive
+/// is stored rather than compressed. Timestamps are fixed for the same reason.
+/// Entries are read from the package so each is byte-identical to the sibling
+/// the privacy scan already covered.
+async function writeRuntimeArchive(packageRoot, noticeFiles) {
   const entries = [];
-  for (const name of RUNTIME_FILES) {
-    entries.push({ name, bytes: await readFile(resolve(sourceRoot, name)) });
+  for (const name of runtimeArchiveFiles(noticeFiles)) {
+    entries.push({ name, bytes: await readFile(resolve(packageRoot, name)) });
   }
   await writeFile(resolve(packageRoot, RUNTIME_ARCHIVE), buildStoredZip(entries));
 }

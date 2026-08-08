@@ -95,21 +95,41 @@ jobs:
           npm run validate:privacy
           npm run package:release -- .tmp/release-assets gate5.evidence.json
       - name: Create explicitly authorized release
+        # The release body used to be generated entirely here, so nothing a
+        # release documented about itself — rebuild costs, licence corrections,
+        # known issues — ever reached the person installing it. When the tag has
+        # written notes, they lead the body; the standing block still follows so
+        # the licence and source pointers cannot go missing.
         run: |
           set -euo pipefail
+          notes="../../docs/releases/${RELEASE_TAG}.md"
+          : > /tmp/release-notes.md
+          if [ -f "$notes" ]; then
+            cat "$notes" >> /tmp/release-notes.md
+            printf '\n---\n\n' >> /tmp/release-notes.md
+          else
+            printf 'No release notes were written for %s.\n\n' "$RELEASE_TAG" >> /tmp/release-notes.md
+          fi
           {
             echo "Kwiry Search Obsidian plugin ${RELEASE_TAG} (GPL-3.0-only)."
             echo
-            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy main.js, manifest.json, and styles.css into the plugin directory."
+            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy main.js, manifest.json, and styles.css into the plugin directory. \`kwiry-search.zip\` contains those three files together with the licence and third-party notices."
             echo
             echo "Corresponding source: https://github.com/${GITHUB_REPOSITORY}/tree/${RELEASE_TAG}/clients/obsidian"
             echo
             echo "Gate 5 automation evidence requires separate owner field acceptance and does not itself declare the in-plugin profile delivered."
-          } > /tmp/release-notes.md
+          } >> /tmp/release-notes.md
+          # A tag carrying a prerelease identifier must not be presented as
+          # "Latest". The publisher, not the release notes, decides that.
+          prerelease=()
+          case "$RELEASE_TAG" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
           gh release create "$RELEASE_TAG" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "kwiry-search $RELEASE_TAG" \
             --notes-file /tmp/release-notes.md \
+            "${prerelease[@]}" \
             .tmp/release-assets/*
         env:
           GH_TOKEN: ${{ github.token }}
