@@ -291,6 +291,50 @@ describe("production release package", () => {
     await expect(validateProductionPackage({ sourceRoot, packageRoot })).resolves.toEqual(packaged);
   });
 
+  // The archive is advertised as the install-by-hand path. Shipping only the
+  // three runtime files inside it handed someone a GPL-3.0-only binary with no
+  // licence and no third-party notices, because the notices sat beside the zip
+  // as separate release assets that a hand installer never takes.
+  it("conveys the license and every notice inside the runtime archive", async () => {
+    const sourceRoot = await createSourceFixture();
+    const packageRoot = resolve(sourceRoot, ".tmp/release");
+    await prepareProductionPackage({ sourceRoot, outputRoot: packageRoot });
+
+    const bytes = await readFile(resolve(packageRoot, "kwiry-search.zip"));
+    const entries = new Map();
+    let offset = 0;
+    while (offset + 30 <= bytes.length && bytes.readUInt32LE(offset) === 0x04034b50) {
+      const size = bytes.readUInt32LE(offset + 18);
+      const nameLength = bytes.readUInt16LE(offset + 26);
+      const start = offset + 30 + nameLength + bytes.readUInt16LE(offset + 28);
+      expect(bytes.readUInt16LE(offset + 8), "archive entries must be stored").toBe(0);
+      entries.set(
+        bytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8"),
+        bytes.subarray(start, start + size),
+      );
+      offset = start + size;
+    }
+
+    expect([...entries.keys()].sort()).toEqual([
+      "Apache-2.0.txt",
+      "Emscripten-LICENSE.txt",
+      "LICENSE",
+      "Rust-DEPENDENCY-LICENSES.md",
+      "THIRD_PARTY_NOTICES.md",
+      "main.js",
+      "manifest.json",
+      "styles.css",
+    ]);
+    // Every entry must be the package's own file, so nothing reaches a user
+    // through the archive that the package validation did not already cover.
+    for (const [name, entryBytes] of entries) {
+      expect(await readFile(resolve(packageRoot, name)), name).toEqual(entryBytes);
+    }
+    // The archive must not carry the release's own description or checksums.
+    expect(entries.has("gate5.evidence.json")).toBe(false);
+    expect(entries.has("SHA256SUMS")).toBe(false);
+  });
+
   it.each([
     ["source root", (sourceRoot) => sourceRoot],
     ["source ancestor", (sourceRoot) => dirname(sourceRoot)],

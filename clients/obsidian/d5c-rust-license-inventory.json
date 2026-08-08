@@ -4,7 +4,7 @@
   "features": [
     "internal-d5c-preview"
   ],
-  "notice_bundle_sha256": "b5ba0c92452f0ffb0d833c2063284e0731441f164648a7d11caeb26a4c64fa78",
+  "notice_bundle_sha256": "045452658ef072dfb80434cfda22472cd4ee5e19d916e4695619b8586ce7d6c8",
   "dependencies": [
     {
       "name": "adler2",
