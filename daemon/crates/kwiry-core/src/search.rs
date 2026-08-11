@@ -20,6 +20,7 @@ use tantivy::{DocId, Index, IndexReader, Score, Searcher, SegmentOrdinal, Segmen
 
 use crate::api::SearchFilters;
 use crate::error::{Error, Result};
+use crate::format::SourceFormat;
 use crate::index::{Fields, open_index};
 #[cfg(feature = "internal-d5c-preview")]
 use crate::index::{
@@ -44,6 +45,7 @@ use crate::ranking::{
     PropertyRule, QualifiedSourceId, RERANK_INPUT_SCHEMA_VERSION, RankingScalar, RelevanceProfile,
     RerankCandidate, RerankInput, SourceSignalObservation, rerank_candidates_with_initial_work,
 };
+use crate::source::excel_content_role_from_chunk_id;
 
 const MAX_RESULTS: usize = 100;
 const BOOST_FILENAME: f32 = 5.0;
@@ -870,6 +872,7 @@ fn collect_stable_rerank_hits(
         limit,
         chunk_id: context.fields.chunk_id,
         path: context.fields.path,
+        source_format: context.fields.source_format,
     };
     let documents = context
         .searcher
@@ -1922,12 +1925,14 @@ struct StableDocCollector {
     limit: usize,
     chunk_id: Field,
     path: Field,
+    source_format: Field,
 }
 
 struct StableSegmentCollector {
     limit: usize,
     chunk_id: Field,
     path: Field,
+    source_format: Field,
     store: StoreReader,
     documents: Vec<RankedDocument>,
     error: Option<String>,
@@ -1958,6 +1963,7 @@ impl Collector for StableDocCollector {
             limit: self.limit,
             chunk_id: self.chunk_id,
             path: self.path,
+            source_format: self.source_format,
             store: segment.get_store_reader(10)?,
             documents: Vec::new(),
             error: None,
@@ -1992,17 +1998,6 @@ impl SegmentCollector for StableSegmentCollector {
         if self.error.is_some() || self.limit == 0 {
             return;
         }
-        if self.documents.len() == self.limit
-            && score.total_cmp(
-                &self
-                    .documents
-                    .last()
-                    .expect("bounded segment list is nonempty")
-                    .score,
-            ) == Ordering::Less
-        {
-            return;
-        }
         let document = match self.store.get::<TantivyDocument>(doc) {
             Ok(document) => document,
             Err(error) => {
@@ -2026,6 +2021,32 @@ impl SegmentCollector for StableSegmentCollector {
             self.error = Some("scored document is missing its path".to_owned());
             return;
         };
+        let Some(source_format) = document
+            .get_first(self.source_format)
+            .and_then(|value| value.as_str())
+        else {
+            self.error = Some("scored document is missing its source format".to_owned());
+            return;
+        };
+        let source_format = match serde_json::from_str::<SourceFormat>(source_format) {
+            Ok(source_format) => source_format,
+            Err(error) => {
+                self.error = Some(format!(
+                    "scored document has an invalid source format: {error}"
+                ));
+                return;
+            }
+        };
+        if source_format == SourceFormat::Excel
+            && excel_content_role_from_chunk_id(&chunk_id).is_none()
+        {
+            self.error = Some("scored Excel document has an invalid content-role tag".to_owned());
+            return;
+        }
+        // The role never touches the score (§10.5: identical text-evidence
+        // rules for every format). Its tie-break is the chunk ID itself: the
+        // role byte leads the ID, so at equal score the existing ascending
+        // chunk-ID comparison orders primary before supporting before latent.
         insert_bounded_document(
             &mut self.documents,
             RankedDocument {
@@ -2087,6 +2108,7 @@ fn collect_stable_hits(
         limit,
         chunk_id: fields.chunk_id,
         path: fields.path,
+        source_format: fields.source_format,
     };
     let documents = searcher
         .search_with_statistics_provider(query, &collector, statistics)
@@ -2475,6 +2497,61 @@ mod tests {
         let title_rank = paths.iter().position(|path| path == "titled.md").unwrap();
         let tag_rank = paths.iter().position(|path| path == "tagged.md").unwrap();
         assert!(title_rank < tag_rank);
+    }
+
+    #[test]
+    fn excel_formula_text_ranks_by_the_same_text_evidence_rules_as_every_format() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("roles.xlsx"),
+            crate::formats::excel::tests::ranking_fixture(),
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let hits = search(&data, "rankbeacon", 40);
+        let cells = hits
+            .iter()
+            .filter_map(|hit| match hit.locator.as_ref() {
+                Some(crate::extract::SourceLocator::ExcelCell { cell, .. }) => {
+                    Some((cell.as_str(), hit.score))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cells.len(), 33, "formula text must remain searchable");
+        // The cached value is never hidden by its weaker class.
+        assert!(cells.iter().any(|(cell, _)| *cell == "B1"));
+        // Each latent formula cell is a short exact match; B1's cached value
+        // sits inside the sheet's long primary section. Under the identical
+        // text-evidence rules of contract 10.5 the tighter matches score
+        // higher, so B1 must NOT lead. The retired class bands forced B1
+        // first by construction, letting the weakest text evidence in the
+        // result set outrank the strongest; this assertion fails if any
+        // banding comes back.
+        assert_ne!(cells[0].0, "B1");
+        // Latent matches with equal evidence tie exactly and order
+        // deterministically; nothing about the class perturbs the score.
+        let latent: Vec<f32> = cells
+            .iter()
+            .filter(|(cell, _)| *cell != "B1")
+            .map(|(_, score)| *score)
+            .collect();
+        assert!(latent.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]

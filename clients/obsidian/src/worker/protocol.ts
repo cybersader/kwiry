@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 11 as const;
+export const WORKER_PROTOCOL_VERSION = 12 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -34,6 +34,7 @@ export const SOURCE_PREPARATION_DEFECT_FIELDS = [
   "chunks_shape",
   "chunks_contents",
   "chunks_source_correlation",
+  "chunks_content_role",
   "chunks_source_locator",
   "frontmatter_not_a_record",
   "frontmatter_property_value",
@@ -52,7 +53,7 @@ export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIEL
  * `PRAGMA user_version`). Any schema edit must bump it: an image whose value
  * differs from the running build's is not restorable.
  */
-export const CACHE_SCHEMA_VERSION = 10;
+export const CACHE_SCHEMA_VERSION = 11;
 export const INITIAL_BUILD_CHECKPOINT_RECORD_VERSION = 1 as const;
 export const INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION = 1 as const;
 export const INITIAL_BUILD_CHECKPOINT_RECORD_KIND = "initial_build_checkpoint" as const;
@@ -77,6 +78,7 @@ export const SOURCE_FORMATS = [
   "docx",
   "pdf",
   "excalidraw",
+  "excel",
 ] as const;
 export type SourceFormat = typeof SOURCE_FORMATS[number];
 
@@ -105,7 +107,8 @@ export type ExtractionProfile = typeof EXTRACTION_PROFILES[number];
  */
 export type SourceLocator =
   | { kind: "base_view"; view: string }
-  | { kind: "pdf_page"; page: number };
+  | { kind: "pdf_page"; page: number }
+  | { kind: "excel_cell"; sheet: string; cell: string };
 export type SourceFormatCounts = Record<
   SourceFormat,
   Record<ExtractionCoverage, number>
@@ -1371,6 +1374,11 @@ export function isSourceLocator(value: unknown): value is SourceLocator {
   if (hasExactKeys(value, ["kind", "page"])) {
     return value.kind === "pdf_page" && isPdfPageNumber(value.page);
   }
+  if (hasExactKeys(value, ["kind", "sheet", "cell"])) {
+    return value.kind === "excel_cell"
+      && isBoundedString(value.sheet, 4_096)
+      && isBoundedString(value.cell, 32);
+  }
   return false;
 }
 
@@ -1396,7 +1404,11 @@ export function locatorMatchesFormat(
   format: SourceFormat,
 ): boolean {
   if (locator === null) return true;
-  return locator.kind === "base_view" ? format === "base" : format === "pdf";
+  switch (locator.kind) {
+    case "base_view": return format === "base";
+    case "pdf_page": return format === "pdf";
+    case "excel_cell": return format === "excel";
+  }
 }
 
 export function isSourceFormatCounts(value: unknown): value is SourceFormatCounts {

@@ -138,6 +138,7 @@ assert.deepEqual(get("portable-daemon-status").daemon_status.source_format_count
   docx: zeroCoverageCounts,
   pdf: zeroCoverageCounts,
   excalidraw: zeroCoverageCounts,
+  excel: zeroCoverageCounts,
 });
 assert.equal(get("portable-daemon-status").daemon_status.state, "ready");
 assert.equal(get("portable-daemon-status").daemon_status.generation, "generation-0001");

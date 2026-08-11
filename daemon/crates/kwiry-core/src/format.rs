@@ -14,6 +14,7 @@ pub enum SourceFormat {
     Docx,
     Pdf,
     Excalidraw,
+    Excel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +68,12 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         extensions: &["pdf"],
         extraction_supported: true,
     },
+    FormatSpec {
+        format: SourceFormat::Excel,
+        name: "excel",
+        extensions: &["xlsx", "xlsm"],
+        extraction_supported: true,
+    },
 ];
 
 impl SourceFormat {
@@ -108,6 +115,7 @@ impl SourceFormat {
             Self::Base => "base",
             Self::Canvas => "canvas",
             Self::Excalidraw => "excalidraw",
+            Self::Excel => "excel",
             Self::Docx => "docx",
             Self::Pdf => "pdf",
         }
@@ -124,7 +132,7 @@ mod tests {
 
     #[test]
     fn registry_is_closed_complete_and_classifies_case_insensitively() {
-        assert_eq!(format_specs().len(), 7);
+        assert_eq!(format_specs().len(), 8);
         assert_eq!(
             SourceFormat::from_path("note.md"),
             Some(SourceFormat::Markdown)
@@ -153,6 +161,14 @@ mod tests {
             SourceFormat::from_path("paper.PDF"),
             Some(SourceFormat::Pdf)
         );
+        assert_eq!(
+            SourceFormat::from_path("book.XLSX"),
+            Some(SourceFormat::Excel)
+        );
+        assert_eq!(
+            SourceFormat::from_path("macros.xlsm"),
+            Some(SourceFormat::Excel)
+        );
         assert_eq!(SourceFormat::from_path("image.png"), None);
         assert!(SourceFormat::Canvas.spec().extraction_supported);
         assert!(SourceFormat::Docx.spec().extraction_supported);
@@ -170,6 +186,15 @@ mod tests {
             Some(SourceFormat::Markdown)
         );
         assert!(SourceFormat::Pdf.is_extractable());
+        assert!(SourceFormat::Excel.is_extractable());
+        assert_eq!(
+            SourceFormat::from_extractable_path("book.XLSX"),
+            Some(SourceFormat::Excel)
+        );
+        assert_eq!(
+            SourceFormat::from_extractable_path("macros.xlsm"),
+            Some(SourceFormat::Excel)
+        );
         assert_eq!(
             SourceFormat::from_extractable_path("board.canvas"),
             Some(SourceFormat::Canvas)

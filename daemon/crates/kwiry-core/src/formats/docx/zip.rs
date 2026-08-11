@@ -16,22 +16,22 @@ use super::limits::{
 use super::opc::canonicalize_zip_name;
 
 #[derive(Debug, Clone)]
-pub(super) struct ArchiveEntry {
-    pub(super) compression_method: CompressionMethod,
-    pub(super) compressed_size: u64,
-    pub(super) uncompressed_size: u64,
+pub(crate) struct ArchiveEntry {
+    pub(crate) compression_method: CompressionMethod,
+    pub(crate) compressed_size: u64,
+    pub(crate) uncompressed_size: u64,
     wayfinder: ZipArchiveEntryWayfinder,
 }
 
 #[derive(Debug)]
-pub(super) struct ArchiveInventory<'a> {
+pub(crate) struct ArchiveInventory<'a> {
     archive: rawzip::ZipSliceArchive<&'a [u8]>,
     entries: BTreeMap<String, ArchiveEntry>,
     selected_uncompressed: u64,
 }
 
 impl<'a> ArchiveInventory<'a> {
-    pub(super) fn new(bytes: &'a [u8]) -> Result<Self, DocxError> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Result<Self, DocxError> {
         if bytes.len() > MAX_FILE_BYTES as usize {
             return Err(DocxError::PackageLimitExceeded);
         }
@@ -198,11 +198,11 @@ impl<'a> ArchiveInventory<'a> {
         })
     }
 
-    pub(super) fn contains(&self, part_uri: &str) -> bool {
+    pub(crate) fn contains(&self, part_uri: &str) -> bool {
         self.entries.contains_key(part_uri)
     }
 
-    pub(super) fn open_selected_xml(&mut self, part_uri: &str) -> Result<Vec<u8>, DocxError> {
+    pub(crate) fn open_selected_xml(&mut self, part_uri: &str) -> Result<Vec<u8>, DocxError> {
         let entry = self
             .entries
             .get(part_uri)

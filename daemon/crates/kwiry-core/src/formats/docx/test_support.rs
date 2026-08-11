@@ -3,7 +3,7 @@
 use std::io::Write;
 
 #[derive(Clone, Copy)]
-pub(super) enum Method {
+pub(crate) enum Method {
     Store,
     Deflate,
     Other(u16),
@@ -19,16 +19,16 @@ impl Method {
     }
 }
 
-pub(super) struct TestEntry<'a> {
-    pub(super) name: &'a str,
-    pub(super) bytes: &'a [u8],
-    pub(super) method: Method,
-    pub(super) flags: u16,
-    pub(super) descriptor: bool,
+pub(crate) struct TestEntry<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) bytes: &'a [u8],
+    pub(crate) method: Method,
+    pub(crate) flags: u16,
+    pub(crate) descriptor: bool,
 }
 
 impl<'a> TestEntry<'a> {
-    pub(super) fn stored(name: &'a str, bytes: &'a [u8]) -> Self {
+    pub(crate) fn stored(name: &'a str, bytes: &'a [u8]) -> Self {
         Self {
             name,
             bytes,
@@ -38,7 +38,7 @@ impl<'a> TestEntry<'a> {
         }
     }
 
-    pub(super) fn deflated(name: &'a str, bytes: &'a [u8]) -> Self {
+    pub(crate) fn deflated(name: &'a str, bytes: &'a [u8]) -> Self {
         Self {
             name,
             bytes,
@@ -50,20 +50,20 @@ impl<'a> TestEntry<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct EntryLocation {
-    pub(super) local_offset: usize,
-    pub(super) data_offset: usize,
-    pub(super) compressed_len: usize,
-    pub(super) descriptor_offset: Option<usize>,
-    pub(super) central_offset: usize,
+pub(crate) struct EntryLocation {
+    pub(crate) local_offset: usize,
+    pub(crate) data_offset: usize,
+    pub(crate) compressed_len: usize,
+    pub(crate) descriptor_offset: Option<usize>,
+    pub(crate) central_offset: usize,
 }
 
-pub(super) struct BuiltZip {
-    pub(super) bytes: Vec<u8>,
-    pub(super) entries: Vec<EntryLocation>,
+pub(crate) struct BuiltZip {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) entries: Vec<EntryLocation>,
 }
 
-pub(super) fn build_zip(entries: &[TestEntry<'_>]) -> BuiltZip {
+pub(crate) fn build_zip(entries: &[TestEntry<'_>]) -> BuiltZip {
     struct Pending {
         name: Vec<u8>,
         flags: u16,
@@ -182,11 +182,11 @@ pub(super) fn build_zip(entries: &[TestEntry<'_>]) -> BuiltZip {
     }
 }
 
-pub(super) fn set_u16(bytes: &mut [u8], offset: usize, value: u16) {
+pub(crate) fn set_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
-pub(super) fn set_u32(bytes: &mut [u8], offset: usize, value: u32) {
+pub(crate) fn set_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
@@ -198,35 +198,35 @@ fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
-pub(super) const CONTENT_TYPES_TRANSITIONAL: &str =
+pub(crate) const CONTENT_TYPES_TRANSITIONAL: &str =
     "http://schemas.openxmlformats.org/package/2006/content-types";
-pub(super) const RELATIONSHIPS_TRANSITIONAL: &str =
+pub(crate) const RELATIONSHIPS_TRANSITIONAL: &str =
     "http://schemas.openxmlformats.org/package/2006/relationships";
-pub(super) const OFFICE_REL_TRANSITIONAL: &str =
+pub(crate) const OFFICE_REL_TRANSITIONAL: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-pub(super) const WORDPROCESSING_TRANSITIONAL: &str =
+pub(crate) const WORDPROCESSING_TRANSITIONAL: &str =
     "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-pub(super) const CONTENT_TYPES_STRICT: &str = "http://purl.oclc.org/ooxml/package/content-types";
-pub(super) const RELATIONSHIPS_STRICT: &str = "http://purl.oclc.org/ooxml/package/relationships";
-pub(super) const OFFICE_REL_STRICT: &str =
+pub(crate) const CONTENT_TYPES_STRICT: &str = "http://purl.oclc.org/ooxml/package/content-types";
+pub(crate) const RELATIONSHIPS_STRICT: &str = "http://purl.oclc.org/ooxml/package/relationships";
+pub(crate) const OFFICE_REL_STRICT: &str =
     "http://purl.oclc.org/ooxml/officeDocument/relationships";
-pub(super) const WORDPROCESSING_STRICT: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
+pub(crate) const WORDPROCESSING_STRICT: &str = "http://purl.oclc.org/ooxml/wordprocessingml/main";
 
-pub(super) fn content_types(namespace: &str, main_part: &str, main_type: &str) -> String {
+pub(crate) fn content_types(namespace: &str, main_part: &str, main_type: &str) -> String {
     format!(
         r#"<Types xmlns="{namespace}"><Override PartName="{main_part}" ContentType="{main_type}"/></Types>"#,
     )
 }
 
-pub(super) fn root_relationships(namespace: &str, office_prefix: &str, target: &str) -> String {
+pub(crate) fn root_relationships(namespace: &str, office_prefix: &str, target: &str) -> String {
     format!(
         r#"<Relationships xmlns="{namespace}"><Relationship Id="rId1" Type="{office_prefix}/officeDocument" Target="{target}"/></Relationships>"#,
     )
 }
 
-pub(super) fn document(namespace: &str) -> String {
+pub(crate) fn document(namespace: &str) -> String {
     format!(r#"<w:document xmlns:w="{namespace}"><w:body><w:p/></w:body></w:document>"#)
 }
 
-pub(super) const MAIN_CONTENT_TYPE: &str =
+pub(crate) const MAIN_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";

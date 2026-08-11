@@ -147,12 +147,11 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
-  it("publishes protocol 11, cache schema 10, and the closed seven-format set", () => {
-    // Both moved in the split-identity wave: the initialize request gained the
-    // enabled-format set, and the `sources` table gained `format_identity`
-    // (and the `excalidraw` CHECK value it had been missing).
-    expect(WORKER_PROTOCOL_VERSION).toBe(11);
-    expect(CACHE_SCHEMA_VERSION).toBe(10);
+  it("publishes protocol 12, cache schema 11, and the closed eight-format set", () => {
+    // Excel extends the transported format and locator unions. Cache schema 11
+    // widens only the sources-table format check and migrates schema 10 in place.
+    expect(WORKER_PROTOCOL_VERSION).toBe(12);
+    expect(CACHE_SCHEMA_VERSION).toBe(11);
     expect(SOURCE_FORMATS).toEqual([
       "markdown",
       "text",
@@ -161,6 +160,7 @@ describe("Worker protocol", () => {
       "docx",
       "pdf",
       "excalidraw",
+      "excel",
     ]);
   });
 

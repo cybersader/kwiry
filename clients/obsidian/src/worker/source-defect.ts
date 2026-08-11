@@ -273,7 +273,7 @@ function preparedChunkDefect(
     || !hasRequiredAndOptionalKeys(
       value,
       ["chunk", "heading_text", "normalized_heading", "technical_identifiers"],
-      ["source_locator"],
+      ["content_role", "source_locator"],
     )
     || !isRecord(value.chunk)) {
     return "chunks_contents";
@@ -305,8 +305,16 @@ function preparedChunkDefect(
     || !isBoundedString(value.heading_text, 8_192, true)
     || !(value.normalized_heading === null
       || isBoundedNormalizedExact(value.normalized_heading))
-    || !isStringArray(value.technical_identifiers)) {
+    || !isStringArray(value.technical_identifiers)
+    || (value.content_role !== undefined
+      && value.content_role !== "primary"
+      && value.content_role !== "supporting"
+      && value.content_role !== "latent")) {
     return "chunks_contents";
+  }
+  if (owner.format === "excel"
+    && excelContentRoleFromChunkId(chunk.chunk_id) !== (value.content_role ?? "primary")) {
+    return "chunks_content_role";
   }
   if (value.source_locator !== undefined
     && !locatorMatchesOwnerFormat(value.source_locator, owner.format)) {
@@ -322,6 +330,17 @@ function preparedChunkDefect(
   return propertyBagDefect(chunk.frontmatter);
 }
 
+function excelContentRoleFromChunkId(
+  value: unknown,
+): "primary" | "supporting" | "latent" | null {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) return null;
+  const nibble = Number.parseInt(value[0]!, 16);
+  if (nibble <= 3) return "primary";
+  if (nibble <= 7) return "supporting";
+  if (nibble <= 11) return "latent";
+  return null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -332,7 +351,9 @@ function isSourceFormat(value: unknown): boolean {
     || value === "base"
     || value === "canvas"
     || value === "docx"
-    || value === "pdf";
+    || value === "pdf"
+    || value === "excalidraw"
+    || value === "excel";
 }
 
 // Mirrors kwiry_core::policy::ExtractionProfile. Recorded on every preparation
@@ -372,6 +393,12 @@ function locatorMatchesOwnerFormat(value: unknown, format: unknown): boolean {
       && value.page >= 1
       && value.page <= 4_294_967_295
       && format === "pdf";
+  }
+  if (hasExactKeys(value, ["kind", "sheet", "cell"])) {
+    return value.kind === "excel_cell"
+      && isBoundedString(value.sheet, 4_096)
+      && isBoundedString(value.cell, 32)
+      && format === "excel";
   }
   return false;
 }

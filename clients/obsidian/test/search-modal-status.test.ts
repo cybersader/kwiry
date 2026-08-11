@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 import { build, type Plugin as EsbuildPlugin } from "esbuild";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -295,8 +296,8 @@ interface SearchModalModule {
   FORMAT_CHIP_PRESENTATIONS: Record<string, { label: string; accessibleLabel: string }>;
 }
 
-const SEARCH_MODAL_PATH = new URL("../src/search-modal.ts", import.meta.url).pathname;
-const BACKEND_PATH = new URL("../src/backend.ts", import.meta.url).pathname;
+const SEARCH_MODAL_PATH = fileURLToPath(new URL("../src/search-modal.ts", import.meta.url));
+const BACKEND_PATH = fileURLToPath(new URL("../src/backend.ts", import.meta.url));
 const require = createRequire(import.meta.url);
 let searchModalModule: SearchModalModule;
 
@@ -1399,6 +1400,7 @@ describe("KwirySearchModal grouped interactions", () => {
       "canvas",
       "docx",
       "excalidraw",
+      "excel",
       "markdown",
       "pdf",
       "text",

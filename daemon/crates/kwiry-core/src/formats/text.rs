@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::extract::{ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionError};
+use crate::extract::{
+    ContentRole, ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionError,
+};
 
 use super::decode_utf8;
 
@@ -22,6 +24,7 @@ pub(super) fn extract(bytes: &[u8]) -> Result<ExtractedSource, ExtractionError> 
         vec![ExtractedSection {
             heading_path: Vec::new(),
             content: source.to_owned(),
+            role: ContentRole::Primary,
             locator: None,
         }],
         ExtractionCompleteness::Complete,

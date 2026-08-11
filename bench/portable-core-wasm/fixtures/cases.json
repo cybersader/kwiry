@@ -305,7 +305,8 @@
         "canvas": "portable",
         "docx": "portable",
         "pdf": "portable",
-        "excalidraw": "portable"
+        "excalidraw": "portable",
+        "excel": "portable"
       },
       "format_identities": {
         "markdown": "0101010101010101010101010101010101010101010101010101010101010101",
@@ -314,7 +315,8 @@
         "canvas": "0404040404040404040404040404040404040404040404040404040404040404",
         "docx": "0505050505050505050505050505050505050505050505050505050505050505",
         "pdf": "0606060606060606060606060606060606060606060606060606060606060606",
-        "excalidraw": "0707070707070707070707070707070707070707070707070707070707070707"
+        "excalidraw": "0707070707070707070707070707070707070707070707070707070707070707",
+        "excel": "0808080808080808080808080808080808080808080808080808080808080808"
       },
       "documents": 3,
       "chunks": 7,
@@ -362,6 +364,13 @@
           "quarantined": 0
         },
         "excalidraw": {
+          "indexed-complete": 0,
+          "indexed-partial": 0,
+          "skipped-no-extractable-text": 0,
+          "unreadable": 0,
+          "quarantined": 0
+        },
+        "excel": {
           "indexed-complete": 0,
           "indexed-partial": 0,
           "skipped-no-extractable-text": 0,

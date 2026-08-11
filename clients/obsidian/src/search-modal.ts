@@ -78,6 +78,7 @@ export const FORMAT_CHIP_PRESENTATIONS = {
   excalidraw: { label: "EXCA", accessibleLabel: "Excalidraw drawing source format" },
   docx: { label: "DOCX", accessibleLabel: "Word document source format" },
   pdf: { label: "PDF", accessibleLabel: "PDF source format" },
+  excel: { label: "XLSX", accessibleLabel: "Excel workbook source format" },
 } as const satisfies Record<BackendSearchHit["format"], FormatChipPresentation>;
 
 export const SEARCH_STATUS_ANIMATION_DELAY_MS = 180;
@@ -97,6 +98,9 @@ export function sectionResultTitle(
   if (heading !== undefined) return heading;
   if (hit.format === "pdf" && hit.locator?.kind === "pdf_page") {
     return `Page ${hit.locator.page}`;
+  }
+  if (hit.format === "excel" && hit.locator?.kind === "excel_cell") {
+    return `${hit.locator.sheet} · ${hit.locator.cell}`;
   }
   return `Match ${returnedSectionIndex + 1}`;
 }

@@ -153,8 +153,8 @@ if (byName["abi-identity"].abi_version !== 3
 // mirror would restore rows this adapter could not have produced.
 //
 // Every format, not a sample. This block previously pinned `pdf` and `markdown`
-// only, so a drifted `base`, `canvas`, `docx`, `text`, or `excalidraw` identity
-// — including one produced by a half-applied extractor version bump — passed
+// only, so a drifted `base`, `canvas`, `docx`, `text`, `excalidraw`, or `excel`
+// identity — including one produced by a half-applied extractor version bump — passed
 // the check on the shipped artifact.
 const PINNED_FORMAT_IDENTITIES = {
   markdown: "b678d0ea2d77d7a79ccc79f4f8a3a1d96aed9bb98757afb1381e5661a1fb96f7",
@@ -164,6 +164,7 @@ const PINNED_FORMAT_IDENTITIES = {
   docx: "b4f9cff615a917e09d800c2784e17c836ef79cc767c49091818a7b1f8598a38e",
   pdf: "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
   excalidraw: "e1f6868bd320172f6b8d9afc3ac716e309499b065c62fa1b17ae4c2c09d98348",
+  excel: "ddfee1499472f960540644e47069db3942a572e883d2328e2b5df856dbd04889",
 };
 const reportedIdentities = byName["abi-identity"].format_identities;
 if (JSON.stringify(Object.keys(reportedIdentities).sort())

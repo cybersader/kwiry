@@ -65,7 +65,8 @@
 //! stream is touched, so no text from an encrypted PDF is ever produced.
 
 use crate::extract::{
-    ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionCoverage, ExtractionNotice,
+    ContentRole, ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionCoverage,
+    ExtractionNotice,
 };
 use crate::model::{Frontmatter, PropertyBag};
 
@@ -108,6 +109,7 @@ pub(super) fn extract(bytes: &[u8]) -> ExtractedSource {
             .map(|section| ExtractedSection {
                 heading_path: section.heading_path,
                 content: section.content,
+                role: ContentRole::Primary,
                 locator: Some(section.locator.to_source_locator()),
             })
             .collect(),

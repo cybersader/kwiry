@@ -56,7 +56,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::extract::{
-    ExtractedSection, ExtractedSource, ExtractionBudget, ExtractionCompleteness,
+    ContentRole, ExtractedSection, ExtractedSource, ExtractionBudget, ExtractionCompleteness,
     ExtractionCoverage, ExtractionError, ExtractionNotice,
 };
 use crate::model::{Frontmatter, PropertyBag, PropertyValue};
@@ -470,6 +470,7 @@ impl Extractor {
         self.sections.push(ExtractedSection {
             heading_path: Vec::new(),
             content,
+            role: ContentRole::Primary,
             locator: None,
         });
         Ok(())

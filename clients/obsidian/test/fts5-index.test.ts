@@ -251,6 +251,49 @@ describe("Fts5GenerationIndex", () => {
     });
   });
 
+  it("ranks Excel formula text by the same text-evidence rules as every format", () => {
+    const primary = formatted(
+      "primary",
+      "primary.xlsx",
+      "excel",
+      `00${"1".repeat(62)}`,
+      `rankbeacon ${"primaryfiller ".repeat(1_100)}`,
+    );
+    primary.chunks[0]!.content_role = "primary";
+    index.replaceSource(primary);
+
+    const latentChunkIds: string[] = [];
+    for (let ordinal = 0; ordinal < 32; ordinal += 1) {
+      const latent = formatted(
+        `latent-${ordinal}`,
+        `latent-${ordinal}.xlsx`,
+        "excel",
+        `80${ordinal.toString(16).padStart(62, "0")}`,
+        "rankbeacon",
+      );
+      latent.chunks[0]!.content_role = "latent";
+      latentChunkIds.push(latent.chunks[0]!.chunk.chunk_id);
+      index.replaceSource(latent);
+    }
+
+    const hits = index.search(anyPlan("rankbeacon"), 40);
+    expect(hits).toHaveLength(33);
+    // Contract 10.5: identical text-evidence rules for every format. Each
+    // latent cell is a one-term exact match while the cached value sits in a
+    // deliberately long primary chunk, so BM25 ranks the tighter matches
+    // first. The retired class bands forced the primary chunk to the top,
+    // letting the weakest text evidence in the set outrank the strongest;
+    // this expectation fails if any banding comes back.
+    expect(hits[hits.length - 1]!.chunk_id).toBe(primary.chunks[0]!.chunk.chunk_id);
+    // Equal-evidence latent matches tie exactly and order deterministically
+    // by chunk ID; the class never perturbs a score.
+    const latentScores = hits.slice(0, -1).map((hit) => hit.score);
+    expect(new Set(latentScores).size).toBe(1);
+    expect(hits.slice(0, -1).map((hit) => hit.chunk_id)).toEqual(latentChunkIds);
+    // Primary is searchable and scored by the same rules, just weaker here.
+    expect(hits[hits.length - 1]!.score).toBeLessThan(latentScores[0]!);
+  });
+
   it("hydrates Base format, coverage, locator, excerpt, and status counts after ranking", () => {
     const base = sourceAt(
       "projects",
@@ -2084,6 +2127,42 @@ describe("Fts5GenerationIndex", () => {
         + "WHERE chunks_fts MATCH ?",
         ['"quasarterm"'],
       )).toBe("alpha.md");
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("migrates schema 10 in place without reindexing another format", () => {
+    index.replaceSource(source("alpha", "chunk-a", "legacyterm"));
+    const legacy = mutateExportedImage(index.exportImage(sqlite), (db) => {
+      db.exec("PRAGMA writable_schema = ON");
+      db.exec(
+        "UPDATE sqlite_schema SET sql = replace(sql, ?, '') WHERE name = 'sources'",
+        { bind: [",'excel'"] },
+      );
+      db.exec("PRAGMA writable_schema = OFF");
+      db.exec("PRAGMA user_version = 10");
+    });
+
+    const restored = openRestoredFts5Generation(sqlite, legacy, 1);
+    try {
+      expect(restored.sources).toBe(1);
+      expect(restored.documents).toBe(1);
+      expect(restored.chunks).toBe(1);
+      expect(restored.search(anyPlan("legacyterm"), 20).map((hit) => hit.chunk_id))
+        .toEqual(["chunk-a"]);
+      for (const format of SOURCE_FORMATS) {
+        expect(restored.evictions.stale_identity[format]).toBe(0);
+      }
+      const migrated = deserialize(sqlite, restored.exportImage(sqlite));
+      try {
+        expect(Number(migrated.selectValue("PRAGMA user_version"))).toBe(11);
+        expect(String(migrated.selectValue(
+          "SELECT sql FROM sqlite_schema WHERE name = 'sources'",
+        ))).toContain("'excel'");
+      } finally {
+        migrated.close();
+      }
     } finally {
       restored.close();
     }

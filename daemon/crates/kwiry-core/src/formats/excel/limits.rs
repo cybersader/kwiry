@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+use crate::extract::{MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE, MAX_EXTRACTED_SECTIONS_PER_SOURCE};
+use crate::formats::ooxml::limits::{MAX_EXTRACTED_TEXT_BYTES, MAX_SELECTED_XML_PARTS};
+
+pub(super) const MAX_WORKBOOK_SHEETS: usize = MAX_SELECTED_XML_PARTS;
+pub(super) const MAX_SHEET_NAME_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_SHARED_STRING_ENTRIES: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
+pub(super) const MAX_SHARED_STRING_BYTES: usize = MAX_EXTRACTED_TEXT_BYTES;
+pub(super) const MAX_CELL_RECORDS: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
+pub(super) const MAX_COMMENTS: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
+pub(super) const MAX_COMMENT_BYTES: usize = MAX_EXTRACTED_TEXT_BYTES;
+pub(super) const MAX_DEFINED_NAMES: usize = 4_096;
+pub(super) const MAX_DEFINED_NAME_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_COLUMN_RANGES_PER_SHEET: usize = 4_096;
+pub(super) const MAX_OUTPUT_BYTES: usize = MAX_EXTRACTED_TEXT_BYTES;
+pub(super) const MAX_OUTPUT_SECTIONS: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
+pub(super) const MAX_OUTPUT_HEADING_BYTES: usize = MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE;
+pub(super) const MAX_EXCEL_ROWS: u32 = 1_048_576;
+pub(super) const MAX_EXCEL_COLUMNS: u32 = 16_384;

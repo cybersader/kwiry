@@ -101,6 +101,12 @@ pub use formats::{
     ContentRole, DocxCandidate, DocxProperties, ExtractionScope, SemanticSection,
     extract_candidate_outcome,
 };
+// Feature-gated direct SpreadsheetML candidate API. Normal Excel extraction is
+// admitted through the portable SourceFormat registry and dispatcher.
+#[cfg(feature = "internal-excel-extractor")]
+pub use formats::{
+    ExcelCandidate, ExcelCellLocator, ExcelSection, extract_excel_candidate_outcome,
+};
 // Admission-disabled Excalidraw spike; see `formats::excalidraw`. Exposing the
 // entry point does not admit the format: there is no `SourceFormat` variant, no
 // registry entry, and no discovery or source-preparation route.

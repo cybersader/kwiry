@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 import { build, type Plugin as EsbuildPlugin } from "esbuild";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,7 +33,7 @@ const harness: LifecycleHarness = {
   rebuildResult: "scheduled",
 };
 
-const MAIN_PATH = new URL("../src/main.ts", import.meta.url).pathname;
+const MAIN_PATH = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 const require = createRequire(import.meta.url);
 
 async function loadProductionPlugin(): Promise<new () => {

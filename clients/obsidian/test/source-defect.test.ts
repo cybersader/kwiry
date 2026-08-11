@@ -134,6 +134,26 @@ describe("chunk/source correlation", () => {
     expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
   });
 
+  it("accepts only matching Excel role tags and cell locators", () => {
+    const preparation = indexed();
+    preparation.format = "excel";
+    const chunk = preparation.chunks[0] as Record<string, unknown>;
+    const body = chunk.chunk as Record<string, unknown>;
+    body.chunk_id = `80${"a".repeat(62)}`;
+    chunk.content_role = "latent";
+    chunk.source_locator = { kind: "excel_cell", sheet: "Roles", cell: "A1" };
+    expect(sourcePreparationDefect(preparation)).toBeNull();
+
+    chunk.content_role = "primary";
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_content_role");
+    chunk.content_role = "latent";
+    body.chunk_id = `c0${"a".repeat(62)}`;
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_content_role");
+    body.chunk_id = `80${"a".repeat(62)}`;
+    chunk.source_locator = { kind: "excel_cell", sheet: "Roles", cell: "" };
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+  });
+
   it("accepts PDF page locators and rejects them on every other format", () => {
     const preparation = indexed();
     preparation.format = "pdf";

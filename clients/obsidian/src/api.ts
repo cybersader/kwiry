@@ -61,7 +61,8 @@ export type SourceFormatCounts = Record<
  */
 export type SourceLocator =
   | { kind: "base_view"; view: string }
-  | { kind: "pdf_page"; page: number };
+  | { kind: "pdf_page"; page: number }
+  | { kind: "excel_cell"; sheet: string; cell: string };
 
 export interface SearchHit {
   chunk_id: string;
@@ -298,7 +299,8 @@ function isSourceFormat(value: unknown): value is SourceFormat {
     || value === "canvas"
     || value === "docx"
     || value === "pdf"
-    || value === "excalidraw";
+    || value === "excalidraw"
+    || value === "excel";
 }
 
 function isExtractionCoverage(value: unknown): value is ExtractionCoverage {
@@ -313,6 +315,11 @@ function isSourceLocator(value: unknown): value is SourceLocator | null {
   }
   if (isExactRecord(value, ["kind", "page"])) {
     return value.kind === "pdf_page" && isPdfPageNumber(value.page);
+  }
+  if (isExactRecord(value, ["kind", "sheet", "cell"])) {
+    return value.kind === "excel_cell"
+      && isBoundedString(value.sheet, MAX_PATH_CHARACTERS)
+      && isBoundedString(value.cell, 32);
   }
   return false;
 }
@@ -332,7 +339,11 @@ function isPdfPageNumber(value: unknown): value is number {
 
 function locatorMatchesFormat(locator: SourceLocator | null, format: SourceFormat): boolean {
   if (locator === null) return true;
-  return locator.kind === "base_view" ? format === "base" : format === "pdf";
+  switch (locator.kind) {
+    case "base_view": return format === "base";
+    case "pdf_page": return format === "pdf";
+    case "excel_cell": return format === "excel";
+  }
 }
 
 function parseFrontmatter(value: unknown): Frontmatter {

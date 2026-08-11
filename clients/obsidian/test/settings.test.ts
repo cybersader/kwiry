@@ -118,6 +118,7 @@ describe("loadSettings", () => {
       docx: true,
       pdf: false,
       excalidraw: true,
+      excel: false,
     });
     const loaded = loadSettings({
       enabledSourceFormats: {
@@ -128,6 +129,7 @@ describe("loadSettings", () => {
         docx: true,
         pdf: true,
         excalidraw: true,
+        excel: true,
         unknown: false,
       },
     });
@@ -149,6 +151,7 @@ describe("loadSettings", () => {
       // description rather than left for the user to discover.
       pdf: true,
       excalidraw: true,
+      excel: true,
     });
     expect(loaded.enabledSourceFormats).not.toBe(DEFAULT_SETTINGS.enabledSourceFormats);
     expect(isSourceFormatExtractable("canvas")).toBe(true);
@@ -157,17 +160,19 @@ describe("loadSettings", () => {
     // Extractable but off by default: the toggle, not the format registry, is
     // what keeps a reference library out of a first-run index.
     expect(DEFAULT_ENABLED_SOURCE_FORMATS.pdf).toBe(false);
+    expect(DEFAULT_ENABLED_SOURCE_FORMATS.excel).toBe(false);
+    expect(isSourceFormatExtractable("excel")).toBe(true);
     expect(isSourceFormatEnabled("pdf", { ...loaded.enabledSourceFormats, pdf: false }))
       .toBe(false);
     expect(isSourceFormatEnabled("pdf", { ...loaded.enabledSourceFormats, pdf: true }))
       .toBe(true);
   });
 
-  it("describes every admitted format including PDF and its cost", () => {
+  it("describes every admitted format including PDF and Excel costs", () => {
     expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain(
-      "DOCX, Excalidraw, and PDF are available",
+      "DOCX, Excalidraw, PDF, and Excel are available",
     );
-    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("PDF is off by default");
+    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("PDF and Excel are off by default");
     expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).not.toContain("remains unavailable");
     expect(sourceFormatDescription("canvas")).toContain("without reading referenced files");
     // Latent content is extracted but labelled, so the description must not
@@ -221,6 +226,7 @@ describe("loadSettings", () => {
       docx: "b4f9cff615a917e09d800c2784e17c836ef79cc767c49091818a7b1f8598a38e",
       pdf: "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
       excalidraw: "e1f6868bd320172f6b8d9afc3ac716e309499b065c62fa1b17ae4c2c09d98348",
+      excel: "ddfee1499472f960540644e47069db3942a572e883d2328e2b5df856dbd04889",
     });
     // Total over the compiled set: a format with no identity has no way to
     // prove a cached row of it is reusable.
@@ -293,6 +299,7 @@ describe("loadSettings", () => {
       docx: false,
       pdf: false,
       excalidraw: false,
+      excel: false,
     })).toEqual([]);
   });
 
@@ -303,7 +310,7 @@ describe("loadSettings", () => {
     // policy hash during onload(), before the adapter exists — so a drifted
     // mirror would restore a cache the adapter could never have produced.
     expect(EXTRACTION_POLICY_FINGERPRINT)
-      .toBe("efbc627c533ae797104dcf65540dcf6f96edd7b9d96826c4bac7e93672f26ff2");
+      .toBe("15c0642d97954a127fc6cb7a929dd4e2361a679cf6f251c47b4e99668cb26b8a");
     // The pre-admission digest, when the adapter compiled no PDF extractor at
     // all and reported `pdf=none`. Pinned as a negative because the source
     // preparation schema is still 9 and the default enabled set is unchanged,

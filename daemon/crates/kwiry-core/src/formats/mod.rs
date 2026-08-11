@@ -4,7 +4,9 @@ mod base;
 mod canvas;
 mod docx;
 mod excalidraw;
+pub(crate) mod excel;
 mod markdown;
+mod ooxml;
 mod pdf;
 mod text;
 
@@ -16,6 +18,10 @@ pub use docx::{
     ContentRole, DocxCandidate, DocxProperties, ExtractionScope, SemanticSection,
     extract_candidate_outcome,
 };
+
+#[cfg(feature = "internal-excel-extractor")]
+#[allow(unused_imports)]
+pub use excel::{ExcelCandidate, ExcelCellLocator, ExcelSection, extract_excel_candidate_outcome};
 
 // The PDF reader's own vocabulary — geometry, limits, and the page candidate.
 // PDF is admitted, so `extract_source` below composes an `ExtractedSource` from
@@ -46,6 +52,7 @@ pub fn extract_source(
         SourceFormat::Excalidraw => excalidraw::extract_excalidraw_candidate(bytes),
         SourceFormat::Docx => Ok(docx::extract(bytes)),
         SourceFormat::Pdf => Ok(pdf::extract(bytes)),
+        SourceFormat::Excel => Ok(excel::extract(bytes)),
     }
 }
 

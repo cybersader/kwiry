@@ -649,6 +649,8 @@ function sourceFormatLabel(format: SourceFormat): string {
       return "PDF";
     case "excalidraw":
       return "Excalidraw";
+    case "excel":
+      return "Excel";
   }
 }
 
