@@ -65,19 +65,25 @@ jobs:
           workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
       - name: Install pinned wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      - name: Install and independently verify candidate
-        # This job restores no warm caches for a tag ref, so the suite runs its
-        # slowest here while vitest spawns a worker per advertised CPU. On that
-        # starved layout the main thread misses vitest's internal RPC deadline
-        # ("Timeout calling onTaskUpdate"), which vitest reports as an unhandled
-        # error and fails a run whose 1050 tests all passed. Capping the workers
-        # leaves the main thread headroom; it changes no test and hides no error.
+      - name: Install and pre-warm the build outside the test runner
+        # The suite's setup builds the plugin through a synchronous subprocess,
+        # which blocks its vitest worker's event loop for the whole build. Cold,
+        # that exceeds vitest's fixed 60 s worker-RPC deadline and the run fails
+        # as an unhandled "Timeout calling onTaskUpdate" even with every test
+        # green — which is exactly how attempts 3 and 4 died. This job's Rust
+        # cache cannot save it: rust-cache keys embed the job name, so CI's
+        # caches never match here, and a failed run saves nothing, so the job
+        # can never warm itself. Running the same build once in a plain step
+        # first pays the cold cost where no RPC deadline exists; the in-test
+        # builds then run incremental in seconds.
+        run: |
+          npm ci
+          npm run build
+      - name: Independently verify candidate
         env:
           VITEST_MAX_THREADS: 2
           VITEST_MAX_FORKS: 2
-        run: |
-          npm ci
-          npm run verify
+        run: npm run verify
       - name: Verify tag identity and package versions
         env:
           RELEASE_TAG: ${{ inputs.tag }}
