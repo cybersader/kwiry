@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
 use crate::extract::{
-    ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionCoverage, ExtractionError,
-    ExtractionNotice, SourceLocator,
+    ContentRole, ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionCoverage,
+    ExtractionError, ExtractionNotice, SourceLocator,
 };
 use crate::frontmatter::parse_yaml_value;
 use crate::links::extract_wikilinks;
@@ -61,6 +61,7 @@ pub(super) fn extract(bytes: &[u8]) -> Result<ExtractedSource, ExtractionError> 
     let mut sections = vec![ExtractedSection {
         heading_path: Vec::new(),
         content: render_map(&top_level),
+        role: ContentRole::Primary,
         locator: None,
     }];
     let mut notices = Vec::new();
@@ -100,6 +101,7 @@ pub(super) fn extract(bytes: &[u8]) -> Result<ExtractedSource, ExtractionError> 
                 sections.push(ExtractedSection {
                     heading_path: vec![heading],
                     content: render_map(&view),
+                    role: ContentRole::Primary,
                     locator: Some(SourceLocator::BaseView {
                         view: name.to_owned(),
                     }),

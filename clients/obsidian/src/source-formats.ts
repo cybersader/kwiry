@@ -9,6 +9,7 @@ export const SOURCE_FORMATS = [
   "docx",
   "pdf",
   "excalidraw",
+  "excel",
 ] as const;
 
 export type SourceFormat = typeof SOURCE_FORMATS[number];
@@ -21,6 +22,7 @@ export const EXTRACTABLE_SOURCE_FORMATS = [
   "docx",
   "pdf",
   "excalidraw",
+  "excel",
 ] as const satisfies readonly SourceFormat[];
 
 export type ExtractableSourceFormat = typeof EXTRACTABLE_SOURCE_FORMATS[number];
@@ -47,7 +49,7 @@ export const SOURCE_PREPARATION_SCHEMA_VERSION = 9 as const;
  * this constant equals what the adapter reports, so the mirror cannot drift.
  */
 export const EXTRACTION_POLICY_FINGERPRINT =
-  "efbc627c533ae797104dcf65540dcf6f96edd7b9d96826c4bac7e93672f26ff2" as const;
+  "15c0642d97954a127fc6cb7a929dd4e2361a679cf6f251c47b4e99668cb26b8a" as const;
 
 /**
  * Mirrors `kwiry_core::policy::FORMAT_IDENTITY_SCHEMA_VERSION`.
@@ -76,6 +78,7 @@ export const EXTRACTION_PROFILES: Readonly<Record<SourceFormat, ExtractionProfil
   docx: "portable",
   pdf: "portable",
   excalidraw: "portable",
+  excel: "portable",
 });
 
 /**
@@ -107,6 +110,7 @@ export const EXTRACTOR_VERSIONS: Readonly<Record<SourceFormat, number>> = Object
   docx: 1,
   pdf: 1,
   excalidraw: 1,
+  excel: 1,
 });
 
 /**
@@ -136,6 +140,7 @@ export const FORMAT_IDENTITIES: Readonly<Record<SourceFormat, string>> = Object.
   docx: "b4f9cff615a917e09d800c2784e17c836ef79cc767c49091818a7b1f8598a38e",
   pdf: "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
   excalidraw: "e1f6868bd320172f6b8d9afc3ac716e309499b065c62fa1b17ae4c2c09d98348",
+  excel: "ddfee1499472f960540644e47069db3942a572e883d2328e2b5df856dbd04889",
 });
 
 /** The identity a row of `format` must carry to be reusable by this build. */
@@ -148,7 +153,7 @@ export function formatIdentity(format: SourceFormat): string {
 }
 
 export const IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION =
-  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, DOCX, Excalidraw, and PDF are available. PDF is off by default because a page is parsed and laid out rather than read, so a reference library costs far more to index than authored notes. This profile is lexical-only and never reads the daemon token.";
+  "Indexes enabled, extractable sources from the active vault. Markdown, plain text, Base, Canvas, DOCX, Excalidraw, PDF, and Excel are available. PDF and Excel are off by default because a page is parsed and laid out rather than read, so a reference library costs far more to index than authored notes. This profile is lexical-only and never reads the daemon token.";
 
 export interface EnabledSourceFormats {
   markdown: boolean;
@@ -158,6 +163,7 @@ export interface EnabledSourceFormats {
   docx: boolean;
   pdf: boolean;
   excalidraw: boolean;
+  excel: boolean;
 }
 
 export const DEFAULT_ENABLED_SOURCE_FORMATS: Readonly<EnabledSourceFormats> = Object.freeze({
@@ -168,6 +174,7 @@ export const DEFAULT_ENABLED_SOURCE_FORMATS: Readonly<EnabledSourceFormats> = Ob
   docx: true,
   pdf: false,
   excalidraw: true,
+  excel: false,
 });
 
 const FORMAT_BY_EXTENSION: Readonly<Record<string, SourceFormat>> = Object.freeze({
@@ -180,6 +187,8 @@ const FORMAT_BY_EXTENSION: Readonly<Record<string, SourceFormat>> = Object.freez
   excalidraw: "excalidraw",
   docx: "docx",
   pdf: "pdf",
+  xlsx: "excel",
+  xlsm: "excel",
 });
 
 /** Classifies one normalized vault-relative path into the closed format set. */
@@ -215,6 +224,7 @@ export function normalizeEnabledSourceFormats(
     docx: isSourceFormatEnabled("docx", enabled),
     pdf: isSourceFormatEnabled("pdf", enabled),
     excalidraw: isSourceFormatEnabled("excalidraw", enabled),
+    excel: isSourceFormatEnabled("excel", enabled),
   };
 }
 
@@ -251,6 +261,8 @@ export function sourceFormatDescription(format: SourceFormat): string {
       return "Extract body text, tables, headings, comments, notes, and headers or footers. Tracked deletions and hidden text are extracted and marked latent.";
     case "pdf":
       return "Extract text one section per page, recovering reading order from glyph positions. A page is navigation metadata, never searchable text, so PDF results carry no heading path. Encrypted documents are refused without being read, and a document using a font this profile cannot decode contributes no text at all rather than a partial reading. Off by default: pages are laid out rather than read, so a reference library costs far more to index than authored notes.";
+    case "excel":
+      return "Extract stored cell text, sheet and defined names, cached formula values, formula text, and classic comments. Hidden content, formulas, and comments remain searchable latent text; formulas are never evaluated and VBA is never opened. Off by default because workbooks can contribute many cell records.";
   }
 }
 

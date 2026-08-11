@@ -632,7 +632,7 @@ fn add_notice(notices: &mut Vec<ExtractionNotice>, code: &'static str, message: 
     }
 }
 
-pub(super) fn canonicalize_zip_name(name: &str, is_directory: bool) -> Result<String, DocxError> {
+pub(crate) fn canonicalize_zip_name(name: &str, is_directory: bool) -> Result<String, DocxError> {
     if name.is_empty()
         || name.starts_with('/')
         || name.contains(['\\', '\0', '?', '#'])
@@ -734,7 +734,10 @@ fn hex_value(value: u8) -> Option<u8> {
     }
 }
 
-fn resolve_relationship_target(source_part: &str, target: &str) -> Result<String, DocxError> {
+pub(crate) fn resolve_relationship_target(
+    source_part: &str,
+    target: &str,
+) -> Result<String, DocxError> {
     if target.is_empty()
         || target.len() > MAX_RELATIONSHIP_TARGET_BYTES
         || target.contains(['\\', '\0', '?', '#'])
@@ -771,7 +774,7 @@ fn resolve_relationship_target(source_part: &str, target: &str) -> Result<String
     Ok(resolved)
 }
 
-fn relationships_part_uri(source_part: &str) -> Result<String, DocxError> {
+pub(crate) fn relationships_part_uri(source_part: &str) -> Result<String, DocxError> {
     if source_part == "/" {
         return Ok(ROOT_RELATIONSHIPS_PART.to_owned());
     }

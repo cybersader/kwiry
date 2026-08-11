@@ -10,7 +10,7 @@ use serde::{
     de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
 };
 
-use crate::extract::{ExtractionCoverage, SourceLocator};
+use crate::extract::{ContentRole, ExtractionCoverage, SourceLocator};
 use crate::format::SourceFormat;
 
 pub const CHUNKING_VERSION: u64 = 2;
@@ -530,6 +530,10 @@ pub struct PreparedChunk {
     pub heading_text: String,
     pub normalized_heading: Option<String>,
     pub technical_identifiers: Vec<String>,
+    /// Format-local lexical class. Primary is omitted so every pre-Excel
+    /// preparation remains byte-for-byte identical under schema 9.
+    #[serde(default, skip_serializing_if = "ContentRole::is_primary")]
+    pub content_role: ContentRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_locator: Option<SourceLocator>,
     // Native indexing needs source-level projections and non-ranking extraction metadata while
@@ -638,6 +642,7 @@ pub struct SourceFormatCounts {
     pub docx: ExtractionCoverageCounts,
     pub pdf: ExtractionCoverageCounts,
     pub excalidraw: ExtractionCoverageCounts,
+    pub excel: ExtractionCoverageCounts,
 }
 
 impl SourceFormatCounts {
@@ -650,6 +655,7 @@ impl SourceFormatCounts {
             SourceFormat::Docx => &mut self.docx,
             SourceFormat::Pdf => &mut self.pdf,
             SourceFormat::Excalidraw => &mut self.excalidraw,
+            SourceFormat::Excel => &mut self.excel,
         };
         counts.record(coverage);
     }
@@ -662,6 +668,7 @@ impl SourceFormatCounts {
             + self.docx.indexed_documents()
             + self.excalidraw.indexed_documents()
             + self.pdf.indexed_documents()
+            + self.excel.indexed_documents()
     }
 
     pub const fn total_sources(&self) -> usize {
@@ -672,6 +679,7 @@ impl SourceFormatCounts {
             + self.docx.total_sources()
             + self.excalidraw.total_sources()
             + self.pdf.total_sources()
+            + self.excel.total_sources()
     }
 }
 
@@ -801,6 +809,13 @@ mod tests {
                     "quarantined": 0
                 },
                 "excalidraw": {
+                    "indexed-complete": 0,
+                    "indexed-partial": 0,
+                    "skipped-no-extractable-text": 0,
+                    "unreadable": 0,
+                    "quarantined": 0
+                },
+                "excel": {
                     "indexed-complete": 0,
                     "indexed-partial": 0,
                     "skipped-no-extractable-text": 0,

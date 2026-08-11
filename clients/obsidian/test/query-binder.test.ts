@@ -120,7 +120,12 @@ describe("fixed FTS5 query binder", () => {
     }, 20);
     expect(identifierOnly.sql).not.toContain("chunks_fts MATCH");
     expect(identifierOnly.sql).toContain("chunk_exact_identifier_fts MATCH ?");
-    expect(identifierOnly.sql).toContain("5.0 AS score");
+    expect(identifierOnly.sql).toContain("(5.0) AS score");
+    // The score expression must stay a bare BM25 term: contract 10.5 ranks
+    // every format by identical text-evidence rules, so no role or format may
+    // transform a score. The retired class CASE started "THEN 2.0 +".
+    expect(identifierOnly.sql).not.toContain("CASE");
+    expect(identifierOnly.sql).toContain("(5.0) AS score");
     expect(identifierOnly.bind).toEqual([encodeExactIdentifierToken("rfc 9110"), 20]);
   });
 

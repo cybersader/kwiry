@@ -17,7 +17,7 @@ use super::limits::{
 };
 
 #[derive(Debug, Default)]
-pub(super) struct XmlBudget {
+pub(crate) struct XmlBudget {
     events: usize,
     attributes: usize,
     attribute_bytes: usize,
@@ -26,14 +26,14 @@ pub(super) struct XmlBudget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct XmlElement {
-    pub(super) namespace: Option<Vec<u8>>,
-    pub(super) local_name: Vec<u8>,
-    pub(super) attributes: Vec<(Vec<u8>, String)>,
+pub(crate) struct XmlElement {
+    pub(crate) namespace: Option<Vec<u8>>,
+    pub(crate) local_name: Vec<u8>,
+    pub(crate) attributes: Vec<(Vec<u8>, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum XmlEvent {
+pub(crate) enum XmlEvent {
     Start(XmlElement),
     Empty(XmlElement),
     End {
@@ -43,7 +43,7 @@ pub(super) enum XmlEvent {
     Text(String),
 }
 
-pub(super) fn parse_xml(
+pub(crate) fn parse_xml(
     bytes: &[u8],
     budget: &mut XmlBudget,
     mut on_element: impl FnMut(&XmlElement) -> Result<(), DocxError>,
@@ -56,7 +56,7 @@ pub(super) fn parse_xml(
     })
 }
 
-pub(super) fn parse_xml_events(
+pub(crate) fn parse_xml_events(
     bytes: &[u8],
     budget: &mut XmlBudget,
     mut on_event: impl FnMut(&XmlEvent) -> Result<(), DocxError>,

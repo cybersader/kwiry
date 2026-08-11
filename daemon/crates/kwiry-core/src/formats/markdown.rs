@@ -3,8 +3,8 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::extract::{
-    ExtractedSection, ExtractedSource, ExtractionBudget, ExtractionCompleteness, ExtractionError,
-    ExtractionNotice,
+    ContentRole, ExtractedSection, ExtractedSource, ExtractionBudget, ExtractionCompleteness,
+    ExtractionError, ExtractionNotice,
 };
 use crate::frontmatter::parse_frontmatter;
 use crate::links::extract_wikilinks;
@@ -108,6 +108,7 @@ fn sections_from_markers(source: &str, markers: Vec<HeadingMarker>) -> Vec<Extra
         return vec![ExtractedSection {
             heading_path: Vec::new(),
             content: source.to_owned(),
+            role: ContentRole::Primary,
             locator: None,
         }];
     }
@@ -117,6 +118,7 @@ fn sections_from_markers(source: &str, markers: Vec<HeadingMarker>) -> Vec<Extra
         sections.push(ExtractedSection {
             heading_path: Vec::new(),
             content: source[..markers[0].start].to_owned(),
+            role: ContentRole::Primary,
             locator: None,
         });
     }
@@ -131,6 +133,7 @@ fn sections_from_markers(source: &str, markers: Vec<HeadingMarker>) -> Vec<Extra
         sections.push(ExtractedSection {
             heading_path: marker.path,
             content: source[marker.start..end].to_owned(),
+            role: ContentRole::Primary,
             locator: None,
         });
     }

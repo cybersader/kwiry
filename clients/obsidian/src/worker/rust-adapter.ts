@@ -81,6 +81,8 @@ export interface PreparedFrontmatter {
   [name: string]: PreparedPropertyValue;
 }
 
+export type ContentRole = "primary" | "supporting" | "latent";
+
 export interface PreparedChunk {
   chunk: {
     chunk_id: string;
@@ -98,6 +100,7 @@ export interface PreparedChunk {
   heading_text: string;
   normalized_heading: string | null;
   technical_identifiers: string[];
+  content_role?: ContentRole;
   source_locator?: SourceLocator;
 }
 

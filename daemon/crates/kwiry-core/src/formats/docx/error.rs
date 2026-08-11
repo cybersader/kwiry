@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(super) enum DocxError {
+pub(crate) enum DocxError {
     #[error("invalid DOCX package")]
     InvalidPackage,
     #[error("DOCX package integrity verification failed")]
@@ -23,7 +23,7 @@ pub(super) enum DocxError {
 }
 
 impl DocxError {
-    pub(super) const fn notice_code(self) -> &'static str {
+    pub(crate) const fn notice_code(self) -> &'static str {
         match self {
             Self::InvalidPackage => "invalid_docx_package",
             Self::IntegrityFailed => "docx_integrity_failed",

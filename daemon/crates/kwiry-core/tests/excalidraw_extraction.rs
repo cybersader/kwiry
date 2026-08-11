@@ -833,8 +833,8 @@ fn the_layout_wrapped_text_fallback_is_indexed_but_is_not_identity_neutral() {
 fn excalidraw_is_admitted_by_the_owner_amendment() {
     assert_eq!(
         format_specs().len(),
-        7,
-        "the 2026-08-06 amendment extends the source-format set to seven members"
+        8,
+        "the Excel amendment extends the source-format set to eight members"
     );
     assert!(
         format_specs()

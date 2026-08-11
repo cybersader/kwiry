@@ -7,6 +7,19 @@ import type { EvidenceProbePlan, ExecutionPlan, StagePlan } from "./rust-adapter
 export const FTS5_PROFILE_ID = "lexical-v1" as const;
 export const FTS5_WEIGHTS = [5, 6, 6, 6, 3, 1, 2, 1] as const;
 
+// A content role never transforms a score: contract §10.5 ranks every format
+// by identical text-evidence rules, and banding Excel scores into [0,3) both
+// demoted strong Excel matches below mid-strength Markdown matches and
+// promoted weak ones above them. Non-primary content is kept un-boosted at
+// preparation instead (it carries no heading or identifier fields), and it
+// loses ties to primary content because the role byte leads the chunk ID,
+// which ORDER BY already sorts ascending after score.
+function contentRoleScoreSql(rawScore: string): string {
+  return `(${rawScore})`;
+}
+
+const BM25_SCORE_SQL = `-bm25(chunks_fts, ${FTS5_WEIGHTS.join(", ")})`;
+
 const SEARCH_SQL = `
 SELECT
   c.chunk_id,
@@ -14,9 +27,10 @@ SELECT
   c.path,
   c.heading_path_json,
   c.frontmatter_json,
-  -bm25(chunks_fts, ${FTS5_WEIGHTS.join(", ")}) AS score
+  ${contentRoleScoreSql(BM25_SCORE_SQL)} AS score
 FROM chunks_fts
 JOIN chunks AS c ON c.rowid = chunks_fts.rowid
+JOIN sources AS s ON s.source_key = c.source_key
 WHERE chunks_fts MATCH ?
 ORDER BY score DESC, c.chunk_id ASC, c.path ASC
 LIMIT ?
@@ -34,9 +48,10 @@ SELECT
   c.path,
   c.heading_path_json,
   c.frontmatter_json,
-  -bm25(chunks_fts, ${FTS5_WEIGHTS.join(", ")}) AS score
+  ${contentRoleScoreSql(BM25_SCORE_SQL)} AS score
 FROM chunks_fts
 JOIN chunks AS c ON c.rowid = chunks_fts.rowid
+JOIN sources AS s ON s.source_key = c.source_key
 JOIN eligible ON eligible.rowid = c.rowid
 WHERE chunks_fts MATCH ?
 ORDER BY score DESC, c.chunk_id ASC, c.path ASC
@@ -55,8 +70,9 @@ SELECT
   c.path,
   c.heading_path_json,
   c.frontmatter_json,
-  5.0 AS score
+  ${contentRoleScoreSql("5.0")} AS score
 FROM eligible JOIN chunks AS c ON c.rowid = eligible.rowid
+JOIN sources AS s ON s.source_key = c.source_key
 ORDER BY score DESC, c.chunk_id ASC, c.path ASC
 LIMIT ?
 `;
@@ -104,9 +120,10 @@ SELECT
   c.path,
   c.heading_path_json,
   c.frontmatter_json,
-  ranked.score
+  ${contentRoleScoreSql("ranked.score")} AS score
 FROM ranked JOIN chunks AS c ON c.rowid = ranked.rowid
-ORDER BY ranked.score DESC, c.chunk_id ASC, c.path ASC
+JOIN sources AS s ON s.source_key = c.source_key
+ORDER BY score DESC, c.chunk_id ASC, c.path ASC
 LIMIT ?
 `;
 
@@ -136,9 +153,10 @@ SELECT
   c.path,
   c.heading_path_json,
   c.frontmatter_json,
-  ranked.score
+  ${contentRoleScoreSql("ranked.score")} AS score
 FROM ranked JOIN chunks AS c ON c.rowid = ranked.rowid
-ORDER BY ranked.score DESC, c.chunk_id ASC, c.path ASC
+JOIN sources AS s ON s.source_key = c.source_key
+ORDER BY score DESC, c.chunk_id ASC, c.path ASC
 LIMIT ?
 `;
 

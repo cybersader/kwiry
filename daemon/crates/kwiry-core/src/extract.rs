@@ -100,6 +100,11 @@ pub enum SourceLocator {
     PdfPage {
         page: u32,
     },
+    /// Stored-only sheet and A1 cell coordinate for an Excel section.
+    ExcelCell {
+        sheet: String,
+        cell: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,10 +123,35 @@ impl ExtractionNotice {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentRole {
+    #[default]
+    Primary,
+    Supporting,
+    Latent,
+}
+
+impl ContentRole {
+    pub const fn is_primary(&self) -> bool {
+        matches!(self, Self::Primary)
+    }
+}
+
+// A role never transforms a score. Contract §10.5 makes text evidence supreme
+// across every format — weaker evidence may never outrank stronger — so a
+// class band like primary=[2,3) would both demote a strong Excel match below
+// any mid-strength Markdown match and promote a weak Excel match above one,
+// in the same clamp. Amendment 10b asks only that non-primary content be
+// "searchable, never boosted": it takes no boost fields at preparation, and
+// it loses ties to primary content through the role byte that leads the
+// chunk ID, which both engines already order ascending after score.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedSection {
     pub heading_path: Vec<String>,
     pub content: String,
+    pub role: ContentRole,
     pub locator: Option<SourceLocator>,
 }
 

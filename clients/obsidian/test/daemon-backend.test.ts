@@ -57,6 +57,13 @@ const SOURCE_FORMAT_COUNTS = {
     unreadable: 0,
     quarantined: 0,
   },
+  excel: {
+    "indexed-complete": 0,
+    "indexed-partial": 0,
+    "skipped-no-extractable-text": 0,
+    unreadable: 0,
+    quarantined: 0,
+  },
 };
 const STATUS = {
   state: "ready",

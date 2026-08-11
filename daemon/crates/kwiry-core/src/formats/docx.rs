@@ -5,16 +5,16 @@ use crate::extract::{
 };
 use crate::model::{Frontmatter, PropertyBag};
 
-mod error;
-mod limits;
-mod opc;
+pub(crate) mod error;
+pub(crate) mod limits;
+pub(crate) mod opc;
 mod properties;
 mod wordprocessing;
-mod xml;
-mod zip;
+pub(crate) mod xml;
+pub(crate) mod zip;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 /// Production DOCX extraction. The scope is `AllContent` so latent material
 /// (tracked deletions, hidden text, field instructions) stays searchable; the
@@ -49,6 +49,7 @@ pub(super) fn extract(bytes: &[u8]) -> ExtractedSource {
             .map(|section| ExtractedSection {
                 heading_path: section.heading_path,
                 content: section.content,
+                role: section.role,
                 locator: None,
             })
             .collect(),
@@ -69,8 +70,9 @@ pub struct DocxCandidate {
     pub notices: Vec<crate::extract::ExtractionNotice>,
 }
 
+pub use crate::extract::ContentRole;
 pub use properties::DocxProperties;
-pub use wordprocessing::{ContentRole, ExtractionScope, SemanticSection};
+pub use wordprocessing::{ExtractionScope, SemanticSection};
 
 #[cfg(test)]
 fn extract_candidate(bytes: &[u8]) -> Result<DocxCandidate, error::DocxError> {

@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::extract::{MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE, MAX_EXTRACTED_SECTIONS_PER_SOURCE};
+use crate::extract::{
+    ContentRole, MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE, MAX_EXTRACTED_SECTIONS_PER_SOURCE,
+};
 
 use super::error::DocxError;
 use super::limits::{MAX_EXTRACTED_TEXT_BYTES, MAX_OUTLINE_LEVEL};
@@ -23,14 +25,6 @@ pub(super) enum PartKind {
     Endnotes,
     Comments,
     Styles,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum ContentRole {
-    Primary,
-    Supporting,
-    Latent,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

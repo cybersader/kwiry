@@ -191,7 +191,8 @@ pub const fn extraction_profile_for(format: SourceFormat) -> ExtractionProfile {
         | SourceFormat::Base
         | SourceFormat::Canvas
         | SourceFormat::Docx
-        | SourceFormat::Excalidraw => ExtractionProfile::Portable,
+        | SourceFormat::Excalidraw
+        | SourceFormat::Excel => ExtractionProfile::Portable,
         SourceFormat::Pdf => PDF_PROFILE,
     }
 }
@@ -271,6 +272,7 @@ pub const fn extractor_version_for(format: SourceFormat) -> u32 {
         SourceFormat::Docx => 1,
         SourceFormat::Pdf => 1,
         SourceFormat::Excalidraw => 1,
+        SourceFormat::Excel => 1,
     }
 }
 
@@ -399,7 +401,7 @@ mod tests {
     /// material is a deliberate edit here rather than a silent drift away from
     /// the plugin's copy.
     const SHIPPED_FINGERPRINT: &str =
-        "efbc627c533ae797104dcf65540dcf6f96edd7b9d96826c4bac7e93672f26ff2";
+        "15c0642d97954a127fc6cb7a929dd4e2361a679cf6f251c47b4e99668cb26b8a";
 
     #[test]
     fn every_format_has_a_profile() {
@@ -695,6 +697,10 @@ mod tests {
                 SourceFormat::Pdf,
                 "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
             ),
+            (
+                SourceFormat::Excel,
+                "ddfee1499472f960540644e47069db3942a572e883d2328e2b5df856dbd04889",
+            ),
         ];
 
         // The enhanced daemon tier is a deliberate non-shipped divergence; only
@@ -734,6 +740,7 @@ mod tests {
         (SourceFormat::Docx, 1),
         (SourceFormat::Excalidraw, 1),
         (SourceFormat::Pdf, 1),
+        (SourceFormat::Excel, 1),
     ];
 
     #[test]

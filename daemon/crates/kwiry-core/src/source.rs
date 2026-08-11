@@ -8,7 +8,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::extract::{
-    ExtractionCoverage, MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE, MAX_EXTRACTED_SECTIONS_PER_SOURCE,
+    ContentRole, ExtractionCoverage, MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE,
+    MAX_EXTRACTED_SECTIONS_PER_SOURCE,
 };
 use crate::format::SourceFormat;
 use crate::formats::extract_source;
@@ -314,6 +315,7 @@ pub fn prepare_source_buffer(
                     &descriptor.path,
                     &section.heading_path,
                     chunk_ix,
+                    (descriptor.format == SourceFormat::Excel).then_some(section.role),
                 ),
                 vault_id: descriptor.vault_id.clone(),
                 room: descriptor.room.clone(),
@@ -326,10 +328,26 @@ pub fn prepare_source_buffer(
                 content_hash: content_hash.clone(),
                 chunking_version: CHUNKING_VERSION,
             };
+            // Amendment 10b: non-primary Excel content is "searchable, never
+            // boosted". Its text still lands in the plain content field, but
+            // it must not feed the boosted heading or technical-identifier
+            // lanes — formula text in particular parses as identifiers, which
+            // would hand latent content the largest boost in the schema.
+            let boosted_fields =
+                descriptor.format != SourceFormat::Excel || section.role.is_primary();
             chunks.push(PreparedChunk {
-                normalized_heading,
-                heading_text,
-                technical_identifiers: technical_identifiers(&chunk.content),
+                normalized_heading: boosted_fields.then_some(normalized_heading).flatten(),
+                heading_text: if boosted_fields {
+                    heading_text
+                } else {
+                    String::new()
+                },
+                technical_identifiers: if boosted_fields {
+                    technical_identifiers(&chunk.content)
+                } else {
+                    Vec::new()
+                },
+                content_role: section.role,
                 source_locator: section.locator.clone(),
                 source_format: Some(descriptor.format),
                 extraction_coverage: Some(coverage),
@@ -346,7 +364,13 @@ pub fn prepare_source_buffer(
     // source-owned views.
     if chunks.is_empty() && !properties.is_empty() {
         let chunk = Chunk {
-            chunk_id: chunk_id(&descriptor.vault_id, &descriptor.path, &[], 0),
+            chunk_id: chunk_id(
+                &descriptor.vault_id,
+                &descriptor.path,
+                &[],
+                0,
+                (descriptor.format == SourceFormat::Excel).then_some(ContentRole::Primary),
+            ),
             vault_id: descriptor.vault_id.clone(),
             room: descriptor.room.clone(),
             path: descriptor.path.clone(),
@@ -362,6 +386,7 @@ pub fn prepare_source_buffer(
             heading_text: String::new(),
             normalized_heading: None,
             technical_identifiers: Vec::new(),
+            content_role: ContentRole::Primary,
             source_locator: None,
             source_format: Some(descriptor.format),
             extraction_coverage: Some(coverage),
@@ -586,7 +611,13 @@ fn find_split(source: &str, boundaries: &[usize], start: usize, target: usize) -
     target
 }
 
-fn chunk_id(vault_id: &str, path: &str, heading_path: &[String], chunk_ix: u64) -> String {
+fn chunk_id(
+    vault_id: &str,
+    path: &str,
+    heading_path: &[String],
+    chunk_ix: u64,
+    excel_role: Option<ContentRole>,
+) -> String {
     let heading_json = serde_json::to_vec(heading_path).expect("heading paths serialize");
     let mut digest = Sha256::new();
     digest.update(b"kwiry-chunk-v1\0");
@@ -594,7 +625,28 @@ fn chunk_id(vault_id: &str, path: &str, heading_path: &[String], chunk_ix: u64) 
     update_component(&mut digest, path.as_bytes());
     update_component(&mut digest, &heading_json);
     digest.update(chunk_ix.to_le_bytes());
-    format!("{:x}", digest.finalize())
+    let mut digest = digest.finalize();
+    if let Some(role) = excel_role {
+        let tag = match role {
+            ContentRole::Primary => 0x00,
+            ContentRole::Supporting => 0x40,
+            ContentRole::Latent => 0x80,
+        };
+        digest[0] = (digest[0] & 0x3f) | tag;
+    }
+    format!("{digest:x}")
+}
+
+#[cfg(feature = "native")]
+pub(crate) fn excel_content_role_from_chunk_id(chunk_id: &str) -> Option<ContentRole> {
+    let prefix = chunk_id.get(..2)?;
+    let first = u8::from_str_radix(prefix, 16).ok()?;
+    match first & 0xc0 {
+        0x00 => Some(ContentRole::Primary),
+        0x40 => Some(ContentRole::Supporting),
+        0x80 => Some(ContentRole::Latent),
+        _ => None,
+    }
 }
 
 fn update_component(digest: &mut Sha256, bytes: &[u8]) {
@@ -869,6 +921,22 @@ mod tests {
     }
 
     #[test]
+    fn excel_role_bytes_order_primary_before_supporting_before_latent() {
+        // The role byte leads the chunk ID, and both engines break score ties
+        // by ascending chunk ID. This lexicographic property is therefore the
+        // whole tie-break: at equal text evidence a primary cell outranks a
+        // supporting one, which outranks a latent one. If the tag values or
+        // their position ever change, ranking silently loses that guarantee,
+        // so the ordering is pinned here rather than assumed.
+        let id = |role| chunk_id("vault", "sheet.xlsx", &["Sheet1".to_owned()], 0, Some(role));
+        let primary = id(ContentRole::Primary);
+        let supporting = id(ContentRole::Supporting);
+        let latent = id(ContentRole::Latent);
+        assert!(primary < supporting);
+        assert!(supporting < latent);
+    }
+
+    #[test]
     fn chunk_ids_are_stable_but_change_with_path() {
         let source = b"# Heading\nBody";
         let first =
@@ -882,7 +950,35 @@ mod tests {
                 .unwrap();
 
         assert_eq!(first.chunks[0].chunk_id, second.chunks[0].chunk_id);
+        assert_eq!(
+            first.chunks[0].chunk_id,
+            "a61e028408e29dd7c2e149c54d04780b797c7caed86a05550b9e395d65da6d99"
+        );
         assert_ne!(first.chunks[0].chunk_id, moved.chunks[0].chunk_id);
+        let serialized = serde_json::to_value(&first).unwrap();
+        assert!(serialized["chunks"][0].get("content_role").is_none());
+    }
+
+    #[test]
+    fn excel_chunk_ids_carry_the_rust_authored_content_role() {
+        let bytes = crate::formats::excel::tests::ranking_fixture();
+        let prepared = prepare_source_buffer(
+            &descriptor("roles.xlsx", SourceFormat::Excel, &bytes),
+            &bytes,
+        )
+        .unwrap();
+
+        let roles = prepared
+            .chunks
+            .iter()
+            .map(|chunk| {
+                let first = u8::from_str_radix(&chunk.chunk_id[..2], 16).unwrap();
+                (chunk.content_role, first & 0xc0)
+            })
+            .collect::<Vec<_>>();
+        assert!(roles.contains(&(ContentRole::Primary, 0x00)));
+        assert!(roles.contains(&(ContentRole::Latent, 0x80)));
+        assert!(!roles.iter().any(|(_, tag)| *tag == 0xc0));
     }
 
     #[test]
