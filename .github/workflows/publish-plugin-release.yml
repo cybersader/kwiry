@@ -63,26 +63,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
+          # rust-cache keys embed the job name by default, so this job could
+          # never restore what CI's plugin jobs saved and — because a failed
+          # run saves nothing — could never warm itself either. The shared key
+          # (also set in ci.yml) lets a tag dispatch reuse main's warm cache.
+          shared-key: obsidian-wasm
       - name: Install pinned wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      - name: Install and pre-warm the build outside the test runner
-        # The suite's setup builds the plugin through a synchronous subprocess,
-        # which blocks its vitest worker's event loop for the whole build. Cold,
-        # that exceeds vitest's fixed 60 s worker-RPC deadline and the run fails
-        # as an unhandled "Timeout calling onTaskUpdate" even with every test
-        # green — which is exactly how attempts 3 and 4 died. This job's Rust
-        # cache cannot save it: rust-cache keys embed the job name, so CI's
-        # caches never match here, and a failed run saves nothing, so the job
-        # can never warm itself. Running the same build once in a plain step
-        # first pays the cold cost where no RPC deadline exists; the in-test
-        # builds then run incremental in seconds.
+      - name: Install and pre-warm the suite's builds outside the test runner
+        # The worker-runtime suite's setup performs three builds — production,
+        # guard, and a prototype variant with a different Rust feature graph —
+        # through a synchronous subprocess that blocks its vitest worker's
+        # event loop. Any one of them running cache-cold past vitest's fixed
+        # 60 s worker-RPC deadline fails the run as an unhandled "Timeout
+        # calling onTaskUpdate" with every test green; warming only the
+        # production build was measured insufficient because the prototype
+        # graph stayed cold (167 s in-suite vs CI's 76 s). This script runs
+        # the suite's exact three builds where no deadline exists.
         run: |
           npm ci
-          npm run build
+          node scripts/prewarm-test-builds.mjs
       - name: Independently verify candidate
-        env:
-          VITEST_MAX_THREADS: 2
-          VITEST_MAX_FORKS: 2
         run: npm run verify
       - name: Verify tag identity and package versions
         env:

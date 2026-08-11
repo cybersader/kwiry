@@ -139,6 +139,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
+          # Shared with publish-plugin-release.yml so a tag dispatch can
+          # restore the warm cache this job saves; rust-cache's default key
+          # embeds the job name, which no other job can match.
+          shared-key: obsidian-wasm
       - name: Install pinned wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - name: Install
