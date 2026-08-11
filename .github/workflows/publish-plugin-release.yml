@@ -66,6 +66,15 @@ jobs:
       - name: Install pinned wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - name: Install and independently verify candidate
+        # This job restores no warm caches for a tag ref, so the suite runs its
+        # slowest here while vitest spawns a worker per advertised CPU. On that
+        # starved layout the main thread misses vitest's internal RPC deadline
+        # ("Timeout calling onTaskUpdate"), which vitest reports as an unhandled
+        # error and fails a run whose 1050 tests all passed. Capping the workers
+        # leaves the main thread headroom; it changes no test and hides no error.
+        env:
+          VITEST_MAX_THREADS: 2
+          VITEST_MAX_FORKS: 2
         run: |
           npm ci
           npm run verify
