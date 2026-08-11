@@ -50,7 +50,11 @@ beforeAll(async () => {
     production: true,
     internalTypoPrototype: true,
   }));
-}, 120_000);
+  // Three full production-grade builds. On a runner with no warm Rust or
+  // esbuild cache — the publish workflow restores none for a tag ref — the
+  // cold path does not fit 120 s, and it failed there twice at this budget
+  // while passing in cache-warmed CI at the same commit.
+}, 600_000);
 
 function postMessageShim({ dropTransfer, failTransfer }) {
   // Rejects any post that carries a transfer list, which is what a real
