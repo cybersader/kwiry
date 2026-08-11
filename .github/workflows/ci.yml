@@ -171,6 +171,14 @@ jobs:
           # waves grew the dependency graph past its notices unnoticed.
           npm run verify:d5c:licenses
           npm run verify:docx:licenses
+          # The two lines above only prove the graph matches the inventory and
+          # the bundle matches its own digest. That digest is self-referential:
+          # it is sha256 of the body in the bundle, not of the crate's upstream
+          # file, which is how rawzip's licence shipped under the quick-xml
+          # heading. This third gate compares each pinned body against the
+          # crate's own vendored licence file, and fails closed when a crate or
+          # its licence file is absent rather than skipping it.
+          npm run verify:mit:notices
           test "$(find . -maxdepth 1 -type f \( -name '*.wasm' -o -name '*worker*.js' -o -name '*.map' -o -name '*.db' -o -name '*.sqlite' \) | wc -l)" -eq 0
       - name: Validate first-party privacy and Worker authority
         run: npm run validate:privacy

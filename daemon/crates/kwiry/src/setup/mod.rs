@@ -393,6 +393,7 @@ mod tests {
             chunking_version: CHUNKING_VERSION,
             extraction_policy_fingerprint: kwiry_core::extraction_policy_fingerprint().to_owned(),
             extraction_policy: kwiry_core::active_extraction_policy(),
+            format_identities: kwiry_core::owned_format_identities(),
             documents: 1,
             chunks: 1,
             source_format_counts,

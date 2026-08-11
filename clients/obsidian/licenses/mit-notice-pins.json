@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "notices": [
+    {
+      "heading": "ecb 0.2.0 — MIT",
+      "crates": [
+        {
+          "name": "ecb",
+          "version": "0.2.0",
+          "license_file": "LICENSE"
+        }
+      ],
+      "sha256": "6f58f94baa693514ec6212fd23914c356cdfea0370f7d1e154d5b7fbd5bbdcc1",
+      "holder": "Copyright (c) magic-akari",
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    },
+    {
+      "heading": "generic-array 0.14.7 — MIT",
+      "crates": [
+        {
+          "name": "generic-array",
+          "version": "0.14.7",
+          "license_file": "LICENSE"
+        }
+      ],
+      "sha256": "eb69613e00e596e13d2f58e820aee10e9d51754b91d7111bc997f1fc90791f66",
+      "holder": "Copyright (c) 2015 Bartłomiej Kamiński",
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    },
+    {
+      "heading": "lopdf 0.44.0 — MIT",
+      "crates": [
+        {
+          "name": "lopdf",
+          "version": "0.44.0",
+          "license_file": "LICENSE"
+        }
+      ],
+      "sha256": "2fb01e6708ea9d53e8b7e74bd82af23bce5256f19f4de93915027a53173c50d8",
+      "holder": "Copyright (c) 2016 Junfeng Liu",
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    },
+    {
+      "heading": "nom 8.0.0 — MIT",
+      "crates": [
+        {
+          "name": "nom",
+          "version": "8.0.0",
+          "license_file": "LICENSE"
+        }
+      ],
+      "sha256": "4dbda04344456f09a7a588140455413a9ac59b6b26a1ef7cdf9c800c012d87f0",
+      "holder": "Copyright (c) 2014-2019 Geoffroy Couprie",
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    },
+    {
+      "heading": "pulldown-cmark 0.13.4 and pulldown-cmark-escape 0.11.0 — MIT",
+      "crates": [
+        {
+          "name": "pulldown-cmark",
+          "version": "0.13.4",
+          "license_file": "LICENSE"
+        },
+        {
+          "name": "pulldown-cmark-escape",
+          "version": "0.11.0",
+          "license_file": "LICENSE"
+        }
+      ],
+      "sha256": "c4f10f55904bdb9f27d3fbf94c354926d6cfe8b982276e556238c258941b243b",
+      "holder": "Copyright 2015 Google Inc. All rights reserved.",
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    },
+    {
+      "heading": "quick-xml 0.41.0 — MIT",
+      "crates": [
+        {
+          "name": "quick-xml",
+          "version": "0.41.0",
+          "license_file": "LICENSE-MIT.md"
+        }
+      ],
+      "sha256": "f0cf9b1c62bbe3bd3a69f5f79c7158f513f612b4940a0a812d1db39d605318bc",
+      "holder": "Copyright (c) 2016 Johann Tuffe",
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    },
+    {
+      "heading": "rawzip 0.5.1 — MIT",
+      "crates": [
+        {
+          "name": "rawzip",
+          "version": "0.5.1",
+          "license_file": "LICENSE.txt"
+        }
+      ],
+      "sha256": "91276db973f25602d1aa43491f59cbc84cb88e6f151e1d0cc82a755563ce0195",
+      "holder": null,
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    },
+    {
+      "heading": "simd-adler32 0.3.10 — MIT",
+      "crates": [
+        {
+          "name": "simd-adler32",
+          "version": "0.3.10",
+          "license_file": "LICENSE.md"
+        }
+      ],
+      "sha256": "42a35170233e83e18856792e748de4c1ce4a63b2afce9a370c89ef3fe23f9f2d",
+      "holder": "Copyright (c) [2021] [Marvin Countryman]",
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    },
+    {
+      "heading": "zmij 1.0.23 — MIT",
+      "crates": [
+        {
+          "name": "zmij",
+          "version": "1.0.23",
+          "license_file": "LICENSE-MIT"
+        }
+      ],
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "holder": null,
+      "reviewed_by": "owner",
+      "reviewed_at": "2026-08-08"
+    }
+  ]
+}

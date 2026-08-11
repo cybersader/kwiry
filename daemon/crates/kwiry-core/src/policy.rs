@@ -73,6 +73,67 @@
 //!
 //! `tests::the_shipped_format_identities_are_pinned` makes every such bump a
 //! deliberate edit to a pinned constant rather than a silent drift.
+//!
+//! # Bumping one format's extractor version
+//!
+//! A version is a **claim that this build's extractor produces different output
+//! for byte-identical input**. Moving one that has not changed is a false claim
+//! that costs every user of that format a re-read, so a bump belongs in the
+//! same change as the behavior it describes and never on its own.
+//!
+//! Five tracked lines move together, and nothing else. This list is not
+//! folklore: bumping Markdown to 2 and running the gates fails at exactly these
+//! and at nothing else.
+//!
+//! 1. [`extractor_version_for`] — the number.
+//! 2. `tests::EXTRACTOR_VERSIONS` — that format's pinned number.
+//! 3. `tests::the_shipped_format_identities_are_pinned`'s `PINNED` — that
+//!    format's digest. Exactly one entry moves; a bump that moves two means the
+//!    material changed and a core version is owed instead.
+//! 4. `clients/obsidian/src/source-formats.ts` — `EXTRACTOR_VERSIONS` and the
+//!    matching `FORMAT_IDENTITIES` entry, the map the plugin stamps cache rows
+//!    with.
+//! 5. `clients/obsidian/test/settings.test.ts` — the pinned copy of that map,
+//!    which is the plugin's counterpart of `PINNED`.
+//!
+//! Nothing else needs a human. `clients/obsidian/test/settings.test.ts` also
+//! *re-derives* every identity from the mirrored material, and
+//! `rust/kwiry-obsidian-wasm/tests/typescript_mirror.rs` checks the mirrored
+//! version against [`extractor_version_for`] itself, so an edit that changes
+//! the number without the digest — or either without the other side — fails
+//! rather than ships. `rust/kwiry-obsidian-wasm/scripts/test-adapter.cjs` pins
+//! all seven identities on the installed artifact as the last line of defence.
+//! `esbuild.config.mjs`'s `RUST_WASM_SHA256` moves on its own, computed from
+//! the rebuilt artifact.
+//!
+//! Nothing in the *daemon's* persisted state needs re-pinning:
+//! `bench/portable-core-wasm/fixtures/cases.json` pins
+//! [`extraction_policy_fingerprint`], which is tier-only and does not move on a
+//! bump. `/v0/status` reports `format_identities` beside it precisely so a
+//! caller can still see one. That fixture also carries a `format_identities`
+//! map, because the field is required to deserialise a `DaemonStatus` — but
+//! its seven digests are deliberately synthetic (`0101…`, `0202…`, one per
+//! format). The fixture exists to prove the native and WASM engines serialise
+//! the same bytes, not to pin identities, and giving it the shipped ones would
+//! add an eighth place a bump has to touch while making this paragraph false.
+//!
+//! ## What a bump costs, per lane
+//!
+//! * **Daemon.** Narrow, and this is the feature: opening evicts only that
+//!   format's rows, publishes, and re-ingests only that format's sources. Every
+//!   other format's rows and vectors survive untouched. A *reader* (`kwiry
+//!   search`) holds no writer lock, so it refuses the whole index and prints
+//!   `run kwiry index`; restarting the daemon is the narrow remedy and a full
+//!   `kwiry index` is the blunt one.
+//! * **In-plugin.** Whole-vault, today. The plugin's cache image carries the
+//!   WASM artifact hash and the plugin version, and a bump necessarily rebuilds
+//!   the artifact, so `worker.ts` refuses the image as `cache_version_mismatch`
+//!   before the per-format restore projection ever runs. The projection is
+//!   correct and tested; it is simply unreachable for a shipped bump. The two
+//!   lanes therefore trust different things — the daemon trusts declared
+//!   identity, the plugin trusts the binary — and reconciling them changes what
+//!   a persisted artifact means, so it is an owner decision rather than a
+//!   refactor.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -247,7 +308,23 @@ pub fn active_format_identities() -> BTreeMap<SourceFormat, &'static str> {
         .collect()
 }
 
-fn derive_format_identity(format: SourceFormat) -> String {
+/// The identity digest of *stated* material, with nothing implicit.
+///
+/// This is the one derivation in the tree. [`derive_format_identity`] supplies
+/// the running build's material and is the only production caller; tests reach
+/// it through [`identity_under`] so they can name the digest that a *different*
+/// extractor version — or a different tier — would produce without
+/// re-implementing the material.
+///
+/// That re-implementation is exactly what made the extractor version unproven
+/// before: every test that spelled the material out did so in a local helper,
+/// so a helper and this function could have disagreed about whether the version
+/// participates at all and every assertion would still have passed.
+fn identity_for_material(
+    format: SourceFormat,
+    profile: ExtractionProfile,
+    extractor_version: u32,
+) -> String {
     let mut digest = Sha256::new();
     digest.update(b"kwiry-format-identity-v1\0");
     update_component(
@@ -260,13 +337,48 @@ fn derive_format_identity(format: SourceFormat) -> String {
     );
     update_component(
         &mut digest,
-        format!("profile={}", extraction_profile_for(format).as_str()).as_bytes(),
+        format!("profile={}", profile.as_str()).as_bytes(),
     );
     update_component(
         &mut digest,
-        format!("extractor={}", extractor_version_for(format)).as_bytes(),
+        format!("extractor={extractor_version}").as_bytes(),
     );
     format!("{:x}", digest.finalize())
+}
+
+/// The digest [`identity_for_material`] produces for material this build does
+/// not compile. Test-only, and deliberately so: a production caller able to
+/// name a foreign identity could stamp a row with one, and the whole eviction
+/// mechanism rests on a row's identity being the running build's by
+/// construction ([`crate::manifest::ManifestFile::from_outcome`]).
+#[cfg(test)]
+pub(crate) fn identity_under(
+    format: SourceFormat,
+    profile: ExtractionProfile,
+    extractor_version: u32,
+) -> String {
+    identity_for_material(format, profile, extractor_version)
+}
+
+/// The identity `format` would carry if its extractor version were `version`
+/// and nothing else about this build had changed.
+///
+/// `identity_at_extractor_version(f, extractor_version_for(f))` is the running
+/// identity by construction; every other argument names a build whose extractor
+/// for that format states different output. This is the material a bump test
+/// needs, and it is derived rather than forged, so a test written against it
+/// cannot keep passing once the version stops participating in the digest.
+#[cfg(test)]
+pub(crate) fn identity_at_extractor_version(format: SourceFormat, version: u32) -> String {
+    identity_for_material(format, extraction_profile_for(format), version)
+}
+
+fn derive_format_identity(format: SourceFormat) -> String {
+    identity_for_material(
+        format,
+        extraction_profile_for(format),
+        extractor_version_for(format),
+    )
 }
 
 fn update_component(digest: &mut Sha256, bytes: &[u8]) {
@@ -416,36 +528,134 @@ mod tests {
 
     /// Each of the three components must move the digest on its own; otherwise
     /// a change to that component would be invisible to the row predicate.
+    ///
+    /// Asserted on [`identity_under`] — the *production* derivation with its
+    /// material stated — rather than on a local re-implementation. The previous
+    /// version of this test digested its own helper and compared it against
+    /// itself, so it held whether or not `derive_format_identity` consulted the
+    /// same three facts; only its single closing equality touched production at
+    /// all. Every `assert_ne!` below now fails if the named component stops
+    /// participating.
     #[test]
     fn each_identity_component_moves_the_digest() {
-        fn identity_of(format: &str, profile: &str, extractor: u32) -> String {
-            let mut digest = Sha256::new();
-            digest.update(b"kwiry-format-identity-v1\0");
-            update_component(
-                &mut digest,
-                FORMAT_IDENTITY_SCHEMA_VERSION.to_string().as_bytes(),
-            );
-            update_component(&mut digest, format!("format={format}").as_bytes());
-            update_component(&mut digest, format!("profile={profile}").as_bytes());
-            update_component(&mut digest, format!("extractor={extractor}").as_bytes());
-            format!("{:x}", digest.finalize())
-        }
-
-        let base = identity_of("pdf", "portable", 1);
-        assert_ne!(base, identity_of("docx", "portable", 1));
-        assert_ne!(base, identity_of("pdf", "enhanced", 1));
-        assert_ne!(base, identity_of("pdf", "none", 1));
-        assert_ne!(base, identity_of("pdf", "portable", 2));
-        // And the derivation under test agrees with the material spelled out
-        // here, so this is not merely injective in the abstract.
+        let base = identity_under(SourceFormat::Pdf, ExtractionProfile::Portable, 1);
+        // Format.
+        assert_ne!(
+            base,
+            identity_under(SourceFormat::Docx, ExtractionProfile::Portable, 1)
+        );
+        // Profile.
+        assert_ne!(
+            base,
+            identity_under(SourceFormat::Pdf, ExtractionProfile::Enhanced, 1)
+        );
+        assert_ne!(
+            base,
+            identity_under(SourceFormat::Pdf, ExtractionProfile::None, 1)
+        );
+        // Extractor version.
+        assert_ne!(
+            base,
+            identity_under(SourceFormat::Pdf, ExtractionProfile::Portable, 2)
+        );
+        // And the derivation under test is reached by the shipped entry point
+        // with the running build's material, so this is not merely injective in
+        // the abstract.
         assert_eq!(
-            identity_of(
-                SourceFormat::Markdown.as_str(),
-                extraction_profile_for(SourceFormat::Markdown).as_str(),
+            identity_under(
+                SourceFormat::Markdown,
+                extraction_profile_for(SourceFormat::Markdown),
                 extractor_version_for(SourceFormat::Markdown),
             ),
             format_identity_fingerprint(SourceFormat::Markdown)
         );
+    }
+
+    /// The gap this wave closes: **the extractor version participates in every
+    /// format's identity**, and it is the only fact that moved.
+    ///
+    /// Nothing before asserted a consequence of a version change. The pins
+    /// caught a change to the digest *material*, and the eviction tests forged
+    /// unrelated literals (`"f" * 64`) that a build with a bumped version would
+    /// never actually write — so a derivation that quietly ignored
+    /// `extractor_version_for` would have kept every one of them passing.
+    ///
+    /// Mutation check: delete the `extractor=` component from
+    /// `identity_for_material` and every iteration of this loop fails, because
+    /// the neighbouring versions collapse onto the running identity.
+    #[test]
+    fn the_extractor_version_participates_in_every_formats_identity() {
+        for spec in format_specs() {
+            let running = format_identity_fingerprint(spec.format);
+            let version = extractor_version_for(spec.format);
+
+            // The running identity *is* the derivation at the declared version.
+            assert_eq!(
+                identity_at_extractor_version(spec.format, version),
+                running,
+                "{} identity must be its own material",
+                spec.name
+            );
+
+            // And no neighbouring version can claim it. `version - 1` matters
+            // as much as `version + 1`: the predicate is equality, not a
+            // ordering, so a build must refuse a row written by an *older*
+            // extractor exactly as firmly as one written by a newer one.
+            let mut seen = BTreeSet::from([running.to_owned()]);
+            for candidate in [
+                version.saturating_sub(1),
+                version + 1,
+                version + 2,
+                version + 97,
+            ] {
+                if candidate == version {
+                    continue;
+                }
+                let other = identity_at_extractor_version(spec.format, candidate);
+                assert_ne!(
+                    other, running,
+                    "{} at extractor version {candidate} must not claim the identity of version {version}",
+                    spec.name
+                );
+                assert!(
+                    seen.insert(other),
+                    "{} must have a distinct identity per extractor version",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    /// A bump must never make one format's rows claim another format's
+    /// identity. Nothing in the shipped set is close to colliding today, but
+    /// the property has to hold for versions no build has reached yet, or a
+    /// future bump would silently evict — or worse, silently *retain* — the
+    /// wrong format's rows.
+    ///
+    /// Mutation check: dropping either the `format=` or the `extractor=`
+    /// component collapses the product and the cardinality assertion fails.
+    #[test]
+    fn no_extractor_version_can_collide_with_another_formats_identity() {
+        const HORIZON: u32 = 12;
+        let mut identities = BTreeSet::new();
+        for spec in format_specs() {
+            for version in 0..=HORIZON {
+                assert!(
+                    identities.insert(identity_at_extractor_version(spec.format, version)),
+                    "{} at extractor version {version} collides with an identity already derived",
+                    spec.name
+                );
+            }
+        }
+        assert_eq!(
+            identities.len(),
+            format_specs().len() * (HORIZON as usize + 1)
+        );
+        // The running set is inside that product, so the property is asserted
+        // about the identities this build actually stamps.
+        for identity in active_format_identities().into_values() {
+            assert!(identities.contains(identity));
+        }
     }
 
     /// The pinned per-format digests of the shipped configuration.
@@ -509,17 +719,57 @@ mod tests {
         assert_eq!(PINNED.len(), format_specs().len());
     }
 
-    /// Every format is at 1 and nothing has been bumped yet. When the first
-    /// extractor behavior change lands, this assertion is the line that has to
-    /// be edited alongside it.
+    /// Every format's extractor version, pinned per format.
+    ///
+    /// A table rather than "every format is at 1", so the first bump is a
+    /// one-line edit here beside the one-line edit in `extractor_version_for`
+    /// and the one-line edit to that format's entry in `PINNED` — and so the
+    /// six formats that did *not* move stay asserted at their own numbers
+    /// instead of being carried by a blanket constant.
+    const EXTRACTOR_VERSIONS: &[(SourceFormat, u32)] = &[
+        (SourceFormat::Markdown, 1),
+        (SourceFormat::Text, 1),
+        (SourceFormat::Base, 1),
+        (SourceFormat::Canvas, 1),
+        (SourceFormat::Docx, 1),
+        (SourceFormat::Excalidraw, 1),
+        (SourceFormat::Pdf, 1),
+    ];
+
     #[test]
-    fn no_extractor_version_has_been_bumped_yet() {
-        for spec in format_specs() {
+    fn every_formats_extractor_version_is_pinned() {
+        for (format, expected) in EXTRACTOR_VERSIONS {
             assert_eq!(
-                extractor_version_for(spec.format),
-                1,
+                extractor_version_for(*format),
+                *expected,
                 "{} extractor version",
+                format.as_str()
+            );
+        }
+        assert_eq!(EXTRACTOR_VERSIONS.len(), format_specs().len());
+        let named: BTreeSet<SourceFormat> = EXTRACTOR_VERSIONS
+            .iter()
+            .map(|(format, _)| *format)
+            .collect();
+        assert_eq!(
+            named.len(),
+            EXTRACTOR_VERSIONS.len(),
+            "a format is listed twice"
+        );
+        for spec in format_specs() {
+            assert!(
+                named.contains(&spec.format),
+                "{} has no pinned extractor version",
                 spec.name
+            );
+        }
+        // A version is a claim about output, so it may only ever go up.
+        // Asserted so a "fix" that reverts a bump has to argue with a test.
+        for (format, expected) in EXTRACTOR_VERSIONS {
+            assert!(
+                *expected >= 1,
+                "{} extractor version underflows",
+                format.as_str()
             );
         }
     }

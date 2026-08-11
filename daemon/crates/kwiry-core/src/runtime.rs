@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
-#[cfg(test)]
 use tantivy::IndexWriter;
 use tantivy::collector::DocSetCollector;
+use tantivy::index::SegmentId;
 use tantivy::query::AllQuery;
 use tantivy::schema::{Field, Value};
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
@@ -809,6 +809,22 @@ impl DesktopIndexManager {
                 return Err(error);
             }
             active = data_root.publish(candidate)?;
+        } else if holds_resident_deletions(&active.index_dir)? {
+            // Inherited from a build that did not finish its removals. Repair
+            // before serving; see `repair_inherited_generation`.
+            manifest.mark_synced()?;
+            let candidate = data_root.create_candidate_from(&active)?;
+            let staging_dir = candidate.staging_dir.clone();
+            let repair_result = (|| -> Result<()> {
+                repair_inherited_generation(&candidate.index_dir)?;
+                manifest.save(&candidate.manifest_path())?;
+                Ok(())
+            })();
+            if let Err(error) = repair_result {
+                let _ = fs::remove_dir_all(staging_dir);
+                return Err(error);
+            }
+            active = data_root.publish(candidate)?;
         }
         let audit_cursor = manifest.state_revision as usize;
         let search = Arc::new(SearchIndex::open(active.id.clone(), &active.index_dir)?);
@@ -1158,6 +1174,35 @@ impl OpenClastIndexManager {
                 return Err(error);
             }
             active = data_root.publish(candidate)?;
+        } else {
+            // The same repair the desktop profile applies, per partition: this
+            // profile addresses deletions per resource, so an inherited
+            // generation can hold them in any subset of its partitions.
+            let mut inherited: Vec<ResourceKey> = Vec::new();
+            for partition in GenerationLayout::load(&active.layout_path)?.partitions {
+                let index_dir = partition_index_dir(&active.partitions_dir, &partition.resource);
+                if index_dir.join("meta.json").is_file() && holds_resident_deletions(&index_dir)? {
+                    inherited.push(partition.resource);
+                }
+            }
+            if !inherited.is_empty() {
+                manifest.mark_synced()?;
+                let candidate = data_root.create_candidate_from(&active)?;
+                let staging_dir = candidate.staging_dir.clone();
+                let repair_result = (|| -> Result<()> {
+                    for resource in &inherited {
+                        let index_dir = partition_index_dir(&candidate.partitions_dir, resource);
+                        repair_inherited_generation(&index_dir)?;
+                    }
+                    manifest.save(&candidate.manifest_path())?;
+                    Ok(())
+                })();
+                if let Err(error) = repair_result {
+                    let _ = fs::remove_dir_all(staging_dir);
+                    return Err(error);
+                }
+                active = data_root.publish(candidate)?;
+            }
         }
         let audit_cursor = manifest.state_revision as usize;
         let layout = GenerationLayout::load(&active.layout_path)?;
@@ -1588,7 +1633,143 @@ fn apply_index_updates(
     writer
         .wait_merging_threads()
         .map_err(|error| Error::Index(error.to_string()))?;
+    // A commit does not remove what this pass deleted; it only marks it dead.
+    // Publishing an index that still holds dead documents would make ranking a
+    // function of the index's history, so the removal is finished here.
+    expunge_resident_deletions(index)
+}
+
+/// Rewrites every segment still holding documents this generation deleted, so
+/// that a published index contains only what the vault currently holds.
+///
+/// `IndexWriter::delete_term` does not remove a document. It records an
+/// opstamp, and at commit the affected segments gain an alive-bitset entry;
+/// the document's postings, its term-dictionary entries and its token counts
+/// all stay resident until that segment is rewritten. Retrieval is filtered by
+/// the alive bitset, but the BM25 corpus statistics are not: `total_num_docs`
+/// sums each segment's `max_doc` (alive *and* dead), `doc_freq` reads the term
+/// dictionary, `total_num_tokens` is an inverted-index header written at index
+/// time, and the average fieldnorm is the ratio of the last two. An index that
+/// keeps its dead documents therefore scores live ones against a corpus that
+/// no longer exists.
+///
+/// That is not a cosmetic difference in magnitude. Kwiry's plans are boolean
+/// and disjunction-max structures over several terms across seven boosted
+/// fields, so competing candidates routinely draw their evidence from terms
+/// with unequal exposure to a deletion, and two candidates can swap places
+/// outright — see
+/// `tests::incremental_publication_orders_results_exactly_as_a_rebuild_does`,
+/// which inverts the top two results over byte-identical live content. A term
+/// surviving only in dead documents also remains streamable from the term
+/// dictionary, where it can consume the bounded prefix-expansion budget in
+/// `search::collect_prefix_expansions` and hide a live term behind it. A full
+/// rebuild writes only live documents into an empty directory and so has none
+/// of this by construction.
+///
+/// Removing the dead documents is necessary but **not** sufficient for the two
+/// build paths to agree, and an earlier revision of this comment claimed
+/// otherwise. Merging a segment that carries deletions is the one path on
+/// which tantivy cannot preserve a field's exact token total: `merger.rs`'s
+/// `estimate_total_num_tokens_in_single_segment` re-derives it by summing
+/// quantised fieldnorms over the alive documents, which round down above 40
+/// tokens. This function always takes that branch, by construction, so the
+/// segment it publishes carries a token total a few percent below the one a
+/// rebuild writes. The remaining half of the invariant is therefore enforced
+/// on the read side, by `search::live_collection_length`, which derives the
+/// collection length from live fieldnorms so that neither build path consults
+/// a segment header at all. Neither half alone makes an incremental index rank
+/// like a rebuild; `tests::an_incremental_index_and_a_rebuild_rank_a_vault_identically`
+/// holds both to it over documents long enough for the quantiser to be lossy.
+///
+/// Tantivy will not do this on its own. `LogMergePolicy`'s
+/// `del_docs_ratio_before_merge` defaults to 1.0 and the comparison is
+/// strictly greater-than, so no number of deletions makes a segment a merge
+/// candidate; the only remaining trigger is the eight-segments-per-level rule,
+/// which a delete-only publication — open-time format eviction, the largest
+/// single deletion this system issues — can never reach, because it creates no
+/// segment at all.
+///
+/// Cost is paid only when there is something to expunge: the segment metadata
+/// carries the deleted count, so the ordinary publication that deletes nothing
+/// reads a handful of integers and returns, and
+/// `tests::a_publication_that_deletes_nothing_does_not_rewrite_existing_segments`
+/// holds it to that. When deletions are present this rewrites exactly the
+/// segments carrying them, so an edit to one note rewrites the one segment
+/// that held it rather than the index. Measured on an index this build wrote
+/// over 10,000 notes — 60,000 chunks in 75 MiB across six segments, which
+/// `kwiry index` rebuilds from source in 11.4 s: expunging one edited note's
+/// chunks costs 342 ms and leaves the other five segments untouched, and the
+/// worst case, a deletion spread across every segment, costs 1.0–1.2 s. On a
+/// 12,000-chunk index the same two figures are 227 ms and 289 ms. Against the
+/// surrounding pass — a reconciliation of that vault takes 3.3 s before any of
+/// this — correctness costs roughly a tenth of a publication that deletes one
+/// note and under a third of one that deletes thousands.
+///
+/// It runs after `wait_merging_threads` has drained the policy's own merges
+/// and while the data-root writer lock is held on a candidate no reader can
+/// see, so no segment named here is already in a merge.
+fn expunge_resident_deletions(index: &Index) -> Result<()> {
+    let resident: Vec<SegmentId> = index
+        .searchable_segment_metas()
+        .map_err(|error| Error::Index(error.to_string()))?
+        .into_iter()
+        .filter(|meta| meta.num_deleted_docs() > 0)
+        .map(|meta| meta.id())
+        .collect();
+    if resident.is_empty() {
+        return Ok(());
+    }
+    let mut writer: IndexWriter = index
+        .writer(WRITER_MEMORY_BYTES)
+        .map_err(|error| Error::Index(error.to_string()))?;
+    writer
+        .merge(&resident)
+        .wait()
+        .map_err(|error| Error::Index(error.to_string()))?;
+    writer
+        .wait_merging_threads()
+        .map_err(|error| Error::Index(error.to_string()))?;
     Ok(())
+}
+
+/// Whether an index directory still holds documents a previous build deleted.
+///
+/// Reads the committed segment metadata only, which already carries each
+/// segment's deleted count, so an index that is clean costs a `meta.json`
+/// parse and no segment I/O at all.
+fn holds_resident_deletions(index_dir: &Path) -> Result<bool> {
+    let (index, _) = open_index_dir(index_dir)?;
+    Ok(index
+        .searchable_segment_metas()
+        .map_err(|error| Error::Index(error.to_string()))?
+        .iter()
+        .any(|meta| meta.num_deleted_docs() > 0))
+}
+
+/// Finishes a removal that an *earlier* build left half-done, before the
+/// inherited generation is served.
+///
+/// `apply_index_updates` guarantees the no-dead-documents invariant only for
+/// generations this build publishes, and it is not reached at all by a pass
+/// with nothing to add and nothing to delete. A generation written by a build
+/// that predates `expunge_resident_deletions` therefore survives an upgrade
+/// intact: opened, reconciled against an unchanged vault, and served — with
+/// its dead documents counted in every query's corpus size and their
+/// vocabulary still streamable from the term dictionary — for as long as the
+/// vault stays still. That is precisely the state
+/// `search::AuthorizedStatistics` and `search::collect_prefix_expansions`
+/// document themselves as relying on the invariant to exclude.
+///
+/// So the invariant is re-established where the index is adopted rather than
+/// only where it is written: an inherited generation is repaired into a fresh
+/// one before any reader can see it. The repair is a publication like any
+/// other — a candidate built from the active generation, expunged, then
+/// published — so a crash midway leaves the previous generation active and the
+/// next open repeats it. It costs one segment-metadata read on every open that
+/// finds nothing to do, which is every open after the first.
+fn repair_inherited_generation(index_dir: &Path) -> Result<()> {
+    let (index, _) = open_index_dir(index_dir)?;
+    expunge_resident_deletions(&index)
 }
 
 fn resources_by_vault(layout: &GenerationLayout) -> Result<BTreeMap<String, ResourceKey>> {
@@ -3799,17 +3980,20 @@ mod tests {
     // ------------------------------------------------- split-identity wave
 
     /// Rewrites one format's recorded identity in the active generation's
-    /// manifest, which is exactly what a build with a bumped
-    /// `extractor_version_for` would look like to the *next* open.
-    fn forge_foreign_identity(data_root: &Path, format: crate::format::SourceFormat) -> usize {
+    /// manifest and returns how many rows were rewritten.
+    fn stamp_identity(
+        data_root: &Path,
+        format: crate::format::SourceFormat,
+        identity: &str,
+    ) -> usize {
         let active = DataRoot::new(data_root).active().unwrap().unwrap();
         let mut document: serde_json::Value =
             serde_json::from_slice(&fs::read(&active.manifest_path).unwrap()).unwrap();
-        let mut forged = 0;
+        let mut stamped = 0;
         for (_, file) in document["files"].as_object_mut().unwrap() {
             if file["format"] == serde_json::json!(format.as_str()) {
-                file["format_identity"] = serde_json::json!("f".repeat(64));
-                forged += 1;
+                file["format_identity"] = serde_json::json!(identity);
+                stamped += 1;
             }
         }
         fs::write(
@@ -3817,7 +4001,48 @@ mod tests {
             serde_json::to_vec_pretty(&document).unwrap(),
         )
         .unwrap();
-        forged
+        stamped
+    }
+
+    /// Stamps an identity **no build compiles at all** — not a bumped version,
+    /// not another format's, not another tier's.
+    ///
+    /// The doc comment this replaces claimed `"f" * 64` was "exactly what a
+    /// build with a bumped `extractor_version_for` would look like". It was
+    /// not: a real bump moves the digest through
+    /// `policy::identity_for_material`, and a literal proves nothing about
+    /// whether the version reaches that derivation. The literal is still the
+    /// right fixture for the *pipeline* tests below — it cannot drift with the
+    /// predicate — but the claim belongs to
+    /// `stamp_next_extractor_version`, which derives its value.
+    fn forge_foreign_identity(data_root: &Path, format: crate::format::SourceFormat) -> usize {
+        stamp_identity(data_root, format, &"f".repeat(64))
+    }
+
+    /// Stamps the identity a build whose `extractor_version_for(format)` is one
+    /// higher would produce, deriving it from the shipped material.
+    ///
+    /// This is the fact the split-identity wave rests on and the one nothing
+    /// asserted end to end: that a *version* difference — same format, same
+    /// tier, same schema, same bytes on disk — is what drives eviction and
+    /// re-ingest through the real open path. A build compiles exactly one
+    /// version, so the second build is expressed as the digest it would stamp
+    /// rather than as a second binary; the predicate is string equality, so the
+    /// direction of the difference is immaterial.
+    fn stamp_next_extractor_version(
+        data_root: &Path,
+        format: crate::format::SourceFormat,
+    ) -> usize {
+        let bumped = crate::policy::identity_at_extractor_version(
+            format,
+            crate::policy::extractor_version_for(format) + 1,
+        );
+        assert_ne!(
+            bumped,
+            crate::policy::format_identity_fingerprint(format),
+            "a bumped extractor version must not claim this build's identity"
+        );
+        stamp_identity(data_root, format, &bumped)
     }
 
     fn two_format_vault() -> (tempfile::TempDir, PathBuf, PathBuf, Config) {
@@ -3842,6 +4067,73 @@ mod tests {
             ..Config::default()
         };
         (temporary, vault_path, data_root, config)
+    }
+
+    /// A real extractor version bump, end to end, on the real open path.
+    ///
+    /// The generation is written by this build, then one format's rows are
+    /// re-stamped with the identity the *next* version of that format's
+    /// extractor would produce — derived from `policy::identity_for_material`,
+    /// so the only difference between the recorded rows and what this build
+    /// would write is the number in `extractor_version_for`. Opening must
+    /// evict exactly that format, leave every other format searchable
+    /// throughout, and re-ingest exactly the bumped format's sources.
+    ///
+    /// This is the assertion the wave was missing. Every other test on this
+    /// path stamps `"f" * 64`, which proves the pipeline reacts to a foreign
+    /// identity but never that a version bump produces one.
+    ///
+    /// Mutation check: delete the `extractor=` component from
+    /// `policy::identity_for_material` and `stamp_next_extractor_version`'s own
+    /// `assert_ne!` fires before the fixture is even written.
+    #[test]
+    fn a_bumped_extractor_version_evicts_and_reingests_only_that_format() {
+        let (_temporary, _vault_path, data_root, config) = two_format_vault();
+        build_index(&config, &data_root).unwrap();
+        let before = DataRoot::new(&data_root).active().unwrap().unwrap().id;
+        assert_eq!(
+            stamp_next_extractor_version(&data_root, SourceFormat::Text),
+            1
+        );
+
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        // Narrow, and immediate: the bumped format is unsearchable from the
+        // first query after open, and the untouched format never blinks.
+        assert_eq!(
+            manager.open_evictions().by_format,
+            BTreeMap::from([(SourceFormat::Text, 1)])
+        );
+        assert!(runtime.search(&request("plainterm")).unwrap().is_empty());
+        assert_eq!(runtime.search(&request("markdownterm")).unwrap().len(), 1);
+        assert_ne!(
+            DataRoot::new(&data_root).active().unwrap().unwrap().id,
+            before,
+            "eviction publishes a new generation"
+        );
+
+        // Only the bumped format's bytes are read again.
+        let report = manager.reconcile(config).unwrap();
+        assert_eq!(
+            report.source_files_read, 1,
+            "a bump may re-read only the bumped format's sources"
+        );
+        assert_eq!(report.changed_sources, 1);
+        assert_eq!(report.documents, 2);
+        assert_eq!(runtime.search(&request("plainterm")).unwrap().len(), 1);
+        assert_eq!(runtime.search(&request("markdownterm")).unwrap().len(), 1);
+
+        // And every rebuilt row now carries this build's identity, which is
+        // what makes the next open free.
+        for file in report.manifest.files.values() {
+            assert!(file.identity_matches());
+            assert_eq!(
+                file.format_identity.as_deref(),
+                Some(crate::policy::format_identity_fingerprint(file.format))
+            );
+        }
+        manager.shutdown().unwrap();
     }
 
     /// The property this whole wave exists to preserve: an evicted row's
@@ -4266,5 +4558,672 @@ mod tests {
         assert_ne!(markdown, hash);
         assert_eq!(markdown.len(), 64);
         assert!(markdown.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ------------------------------------------ publication without history
+
+    /// Sum of documents deleted but still resident in the committed segments
+    /// of a generation's index.
+    fn resident_deleted_docs(index_dir: &Path) -> u32 {
+        let (index, _) = open_index_dir(index_dir).unwrap();
+        index
+            .searchable_segment_metas()
+            .unwrap()
+            .iter()
+            .map(|meta| meta.num_deleted_docs())
+            .sum()
+    }
+
+    fn committed_segment_ids(index_dir: &Path) -> BTreeSet<String> {
+        let (index, _) = open_index_dir(index_dir).unwrap();
+        index
+            .searchable_segment_metas()
+            .unwrap()
+            .iter()
+            .map(|meta| meta.id().uuid_string())
+            .collect()
+    }
+
+    /// Every term the content field's dictionaries still record.
+    fn resident_content_terms(index_dir: &Path) -> BTreeSet<String> {
+        let (index, fields) = open_index_dir(index_dir).unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let mut terms = BTreeSet::new();
+        for segment in searcher.segment_readers() {
+            let inverted = segment.inverted_index(fields.content).unwrap();
+            let mut stream = inverted.terms().range().into_stream().unwrap();
+            while stream.advance() {
+                terms.insert(String::from_utf8(stream.key().to_vec()).unwrap());
+            }
+        }
+        terms
+    }
+
+    /// Writes the corpus that separates a tombstone-carrying index from a
+    /// freshly built one.
+    ///
+    /// Both candidates carry both query terms, so every stage of the lexical
+    /// ladder retrieves both and the two builds can only disagree about their
+    /// *order*. `gamma` is common among the notes that get removed and rare
+    /// among the survivors, so a build that still counts the removed notes
+    /// treats a `gamma` match as weak evidence and prefers the `alpha`-heavy
+    /// candidate; a build that counts only what the vault holds treats it as
+    /// strong evidence and prefers the `gamma`-heavy one.
+    fn write_drift_corpus(vault_path: &Path) {
+        fs::create_dir_all(vault_path).unwrap();
+        for index in 0..40 {
+            fs::write(
+                vault_path.join(format!("noise-{index:02}.md")),
+                "gamma gamma gamma gamma\n",
+            )
+            .unwrap();
+        }
+        for index in 0..6 {
+            fs::write(
+                vault_path.join(format!("filler-{index:02}.md")),
+                "alpha alpha alpha alpha alpha alpha\n",
+            )
+            .unwrap();
+        }
+        fs::write(
+            vault_path.join("first-note.md"),
+            "gamma delta alpha alpha alpha alpha alpha alpha alpha alpha\n",
+        )
+        .unwrap();
+        fs::write(
+            vault_path.join("second-note.md"),
+            "alpha delta gamma gamma gamma gamma gamma gamma gamma gamma\n",
+        )
+        .unwrap();
+    }
+
+    fn remove_drift_noise(vault_path: &Path) {
+        for index in 0..40 {
+            fs::remove_file(vault_path.join(format!("noise-{index:02}.md"))).unwrap();
+        }
+    }
+
+    fn drift_ordering(data_root: &Path, config: &Config) -> Vec<String> {
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config.clone(), data_root, runtime.clone()).unwrap();
+        let ordering = runtime
+            .search(&request("alpha gamma"))
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        manager.shutdown().unwrap();
+        ordering
+    }
+
+    /// Ranking must be a function of the vault's current content, not of the
+    /// history that produced the index. Tantivy keeps a deleted document's
+    /// postings, term-dictionary entries and token counts resident in its
+    /// segment until that segment is rewritten, and every BM25 corpus
+    /// statistic — `total_num_docs`, `doc_freq`, `total_num_tokens` and the
+    /// average fieldnorm derived from them — is read straight off those
+    /// segments. Left alone, an incrementally maintained index therefore
+    /// scores the same live notes against a corpus that no longer exists,
+    /// and the resulting order can differ from a rebuild outright rather
+    /// than differing only in magnitude.
+    ///
+    /// Scope, deliberately narrow: `write_drift_corpus` writes nothing longer
+    /// than ten tokens, and `fieldnorm::code` is lossless below 41, so this
+    /// exercises only the dead-document half of the property. It passes
+    /// unchanged against a build whose collection length still comes from the
+    /// segment header — verified, not assumed — which is why the
+    /// quantiser-sensitive half has a corpus of its own in
+    /// `an_incremental_index_and_a_rebuild_rank_a_vault_identically`. Keep
+    /// this one short: a general claim asserted over one corpus shape is worth
+    /// less than two corpora that each falsify a different mechanism.
+    #[test]
+    fn incremental_publication_orders_results_exactly_as_a_rebuild_does() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let incremental_root = temporary.path().join("incremental");
+        let rebuilt_root = temporary.path().join("rebuilt");
+        write_drift_corpus(&vault_path);
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+
+        build_index(&config, &incremental_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager =
+            IndexManager::open(config.clone(), &incremental_root, runtime.clone()).unwrap();
+        remove_drift_noise(&vault_path);
+        manager.reconcile(config.clone()).unwrap();
+        manager.shutdown().unwrap();
+
+        // Same content, built from nothing.
+        build_index(&config, &rebuilt_root).unwrap();
+
+        let active = DataRoot::new(&incremental_root).active().unwrap().unwrap();
+        assert_eq!(
+            drift_ordering(&incremental_root, &config),
+            drift_ordering(&rebuilt_root, &config),
+            "the same vault must rank the same way however its index was built"
+        );
+        assert_eq!(
+            resident_deleted_docs(&active.index_dir),
+            0,
+            "a published generation must not carry documents the vault no longer has"
+        );
+    }
+
+    /// The eviction path publishes deletions with no accompanying additions,
+    /// so it creates no new segment and can never trip a segment-count merge
+    /// heuristic. It is also the largest single deletion the system issues —
+    /// a format-identity change evicts every row of that format at once.
+    #[test]
+    fn open_time_eviction_leaves_no_resident_deleted_documents() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        for index in 0..24 {
+            fs::write(
+                vault_path.join(format!("note-{index:02}.md")),
+                "alpha beta gamma\n",
+            )
+            .unwrap();
+        }
+        fs::write(vault_path.join("log.txt"), "alpha beta gamma\n").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let active = DataRoot::new(&data_root).active().unwrap().unwrap();
+
+        // Move the markdown format's identity so the next open evicts every
+        // markdown row before the index is made searchable.
+        assert_eq!(
+            forge_foreign_identity(&data_root, SourceFormat::Markdown),
+            24
+        );
+
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        let evicted = DataRoot::new(&data_root).active().unwrap().unwrap();
+        assert_ne!(evicted.id, active.id, "eviction must publish a generation");
+        assert_eq!(
+            resident_deleted_docs(&evicted.index_dir),
+            0,
+            "a delete-only publication must not leave its deletions resident"
+        );
+        assert_eq!(
+            runtime.search(&request("alpha")).unwrap().len(),
+            1,
+            "only the unevicted text source survives"
+        );
+        manager.shutdown().unwrap();
+    }
+
+    /// A removed note's vocabulary must leave the index with it. The prefix
+    /// ladder streams the term dictionary directly and spends a fixed budget
+    /// in dictionary order, so a term that outlived its only document does not
+    /// merely waste space: it can crowd a live term out of the expansion set
+    /// and make a note that exists unfindable by prefix.
+    #[test]
+    fn a_removed_notes_vocabulary_leaves_the_term_dictionary() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        // Five removed terms sort ahead of the surviving one, which is more
+        // than a single note needs to exhaust a bounded expansion budget.
+        fs::write(
+            vault_path.join("removed.md"),
+            "projalpha projbeta projdelta projepsilon projgamma\n",
+        )
+        .unwrap();
+        fs::write(vault_path.join("kept.md"), "projzeta\n").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+
+        fs::remove_file(vault_path.join("removed.md")).unwrap();
+        manager.reconcile(config).unwrap();
+        manager.shutdown().unwrap();
+
+        let active = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let terms = resident_content_terms(&active.index_dir);
+        assert!(
+            terms.contains("projzeta"),
+            "the surviving note's term must still be recorded"
+        );
+        for departed in [
+            "projalpha",
+            "projbeta",
+            "projdelta",
+            "projepsilon",
+            "projgamma",
+        ] {
+            assert!(
+                !terms.contains(departed),
+                "{departed} outlived the only note that contained it"
+            );
+        }
+    }
+
+    /// The removal is paid for only when there is something to remove. A pass
+    /// that adds a note and deletes nothing must leave the existing segments
+    /// exactly as they were, so ordinary editing does not start rewriting the
+    /// whole index.
+    #[test]
+    fn a_publication_that_deletes_nothing_does_not_rewrite_existing_segments() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        for index in 0..8 {
+            fs::write(
+                vault_path.join(format!("note-{index:02}.md")),
+                format!("alpha term{index:02}\n"),
+            )
+            .unwrap();
+        }
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let before = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let original_segments = committed_segment_ids(&before.index_dir);
+        assert!(!original_segments.is_empty());
+
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        fs::write(vault_path.join("added.md"), "alpha addedterm\n").unwrap();
+        let report = manager.reconcile(config).unwrap();
+        manager.shutdown().unwrap();
+        assert_eq!(report.changed_sources, 1);
+
+        let after = DataRoot::new(&data_root).active().unwrap().unwrap();
+        assert_ne!(after.id, before.id, "the addition must publish");
+        assert_eq!(
+            resident_deleted_docs(&after.index_dir),
+            0,
+            "an addition deletes nothing"
+        );
+        let current_segments = committed_segment_ids(&after.index_dir);
+        assert!(
+            original_segments.is_subset(&current_segments),
+            "a pass with nothing to remove must not rewrite the segments it inherited"
+        );
+        assert_eq!(runtime.search(&request("addedterm")).unwrap().len(), 1);
+    }
+
+    /// The OpenClast profile addresses deletions per partition, so the same
+    /// invariant has to hold for each partition index it publishes.
+    #[test]
+    fn openclast_eviction_leaves_no_resident_deleted_documents_in_its_partition() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        for index in 0..8 {
+            fs::write(
+                vault_path.join(format!("note-{index:02}.md")),
+                "markdownterm\n",
+            )
+            .unwrap();
+        }
+        fs::write(vault_path.join("log.txt"), "plainterm\n").unwrap();
+        let config = openclast_config(vec![VaultRegistration {
+            id: "fixture".into(),
+            path: vault_path,
+            room: Some("room-a".into()),
+        }]);
+        build_index(&config, &data_root).unwrap();
+        assert_eq!(
+            forge_foreign_identity(&data_root, SourceFormat::Markdown),
+            8
+        );
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config, &data_root, runtime.clone()).unwrap();
+        assert_eq!(manager.open_evictions().total(), 8);
+
+        let active = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let partition = partition_index_dir(&active.partitions_dir, &resource);
+        assert_eq!(
+            resident_deleted_docs(&partition),
+            0,
+            "a partition must not carry rows its manifest no longer names"
+        );
+        assert!(
+            !resident_content_terms(&partition).contains("markdownterm"),
+            "the evicted rows' vocabulary must leave the partition with them"
+        );
+        manager.shutdown().unwrap();
+    }
+
+    // ------------------------------------- publication without history: BM25
+
+    /// The `content` collection length as the two sources disagree about it:
+    /// the figure recorded in each segment's inverted-index header, and the
+    /// figure `search::live_collection_length` derives from the live documents'
+    /// fieldnorms.
+    ///
+    /// A freshly written segment records an exact token count. A segment
+    /// tantivy merged while it carried deletions records the sum of quantised
+    /// fieldnorms instead, because that is all
+    /// `merger.rs::estimate_total_num_tokens_in_single_segment` can recover.
+    /// The two are equal only when every document is short enough for
+    /// `fieldnorm::code` to be lossless, which is at most 40 tokens.
+    fn content_collection_lengths(index_dir: &Path) -> (u64, u64) {
+        let (index, fields) = open_index_dir(index_dir).unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let mut recorded = 0_u64;
+        let mut live = 0_u64;
+        for segment in searcher.segment_readers() {
+            recorded += segment
+                .inverted_index(fields.content)
+                .unwrap()
+                .total_num_tokens();
+            let fieldnorms = segment
+                .fieldnorms_readers()
+                .get_field(fields.content)
+                .unwrap()
+                .expect("content is indexed with fieldnorms");
+            for doc in segment.doc_ids_alive() {
+                live += u64::from(tantivy::fieldnorm::FieldNormReader::id_to_fieldnorm(
+                    fieldnorms.fieldnorm_id(doc),
+                ));
+            }
+        }
+        (recorded, live)
+    }
+
+    /// A deterministic note of `length` tokens drawn from a small vocabulary,
+    /// so that terms recur across the corpus with unequal frequencies and the
+    /// idf of a query term is a real number rather than a constant.
+    fn drift_note(seed: u64, length: usize) -> String {
+        const VOCABULARY: [&str; 24] = [
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+            "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "phi",
+            "chi", "psi", "omega",
+        ];
+        let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let mut words = Vec::with_capacity(length);
+        for _ in 0..length {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            words.push(VOCABULARY[((state >> 33) % 24) as usize]);
+        }
+        format!("{}\n", words.join(" "))
+    }
+
+    /// Writes the long-document corpus. Lengths run from 40 to 400 tokens, so
+    /// all but the shortest are past the point where the fieldnorm quantiser
+    /// starts rounding down — which is the whole reason this corpus exists.
+    fn write_long_document_corpus(vault_path: &Path, revision: u64, edited: &[u64]) {
+        fs::create_dir_all(vault_path).unwrap();
+        for index in 0..200_u64 {
+            let length = 40 + (index as usize % 7) * 60;
+            let seed = if edited.contains(&index) {
+                index + revision * 10_000
+            } else {
+                index
+            };
+            fs::write(
+                vault_path.join(format!("note-{index:03}.md")),
+                drift_note(seed, length),
+            )
+            .unwrap();
+        }
+    }
+
+    fn ranked_paths(data_root: &Path, config: &Config, query: &str) -> Vec<(String, f32)> {
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config.clone(), data_root, runtime.clone()).unwrap();
+        let mut probe = request(query);
+        probe.limit = 60;
+        let ranking = runtime
+            .search(&probe)
+            .unwrap()
+            .into_iter()
+            .map(|hit| (hit.path, hit.score))
+            .collect();
+        manager.shutdown().unwrap();
+        ranking
+    }
+
+    /// The whole invariant, over a corpus that can actually falsify it: a vault
+    /// edited into its current state and the same vault built from nothing must
+    /// return the same documents in the same order.
+    ///
+    /// `incremental_publication_orders_results_exactly_as_a_rebuild_does`
+    /// asserts this property too, but every document in its corpus is under 40
+    /// tokens, and that is exactly the region where `fieldnorm::code` is
+    /// lossless. It can therefore only see the dead-document half of the
+    /// defect. Removing the dead documents leaves a second, independent half
+    /// standing: `expunge_resident_deletions` merges segments that carry
+    /// deletions, which is the one path on which tantivy re-derives a field's
+    /// token total from quantised fieldnorms, so the published segment records
+    /// a total a few percent under what a rebuild writes. Measured on this
+    /// corpus, 41,720 against 43,640 — a 4.4% shift in `avgdl`, in the same
+    /// direction for every query. Because each stage of the evidence ladder is
+    /// a bounded top-k, that perturbs the answer *set* and not merely its
+    /// order.
+    ///
+    /// The first assertion is what keeps the rest honest. If this corpus ever
+    /// drifts back into the quantiser's exact region — shorter notes, fewer of
+    /// them, a different chunker — the recorded and live totals converge, the
+    /// ranking assertions hold vacuously, and the test silently stops testing
+    /// anything. So it fails loudly instead.
+    ///
+    /// Mutation checks, each confirmed to fail this test:
+    /// - drop `expunge_resident_deletions` from `apply_index_updates`;
+    /// - restore `search_reader`'s `&searcher` in place of
+    ///   `AuthorizedStatistics`, so the collection length comes from the
+    ///   segment header again.
+    ///
+    /// Scores are compared with a tolerance rather than bit-for-bit. Two
+    /// independent rebuilds of this corpus already differ by about one f32 ulp
+    /// on a three-term query — segment assignment is not deterministic across
+    /// builds — so bit equality is not a property this system has on any path,
+    /// and asserting it would make the test flaky rather than strict. Order and
+    /// membership are exact.
+    #[test]
+    fn an_incremental_index_and_a_rebuild_rank_a_vault_identically() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let incremental_root = temporary.path().join("incremental");
+        let rebuilt_root = temporary.path().join("rebuilt");
+        write_long_document_corpus(&vault_path, 0, &[]);
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+
+        build_index(&config, &incremental_root).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager =
+            IndexManager::open(config.clone(), &incremental_root, runtime.clone()).unwrap();
+        let edited: Vec<u64> = (0..20).map(|note| note * 7 % 200).collect();
+        write_long_document_corpus(&vault_path, 1, &edited);
+        let report = manager.reconcile(config.clone()).unwrap();
+        assert_eq!(report.changed_sources, edited.len());
+        manager.shutdown().unwrap();
+
+        // Byte-identical content, built from nothing.
+        build_index(&config, &rebuilt_root).unwrap();
+
+        let incremental = DataRoot::new(&incremental_root).active().unwrap().unwrap();
+        let rebuilt = DataRoot::new(&rebuilt_root).active().unwrap().unwrap();
+        let (incremental_recorded, incremental_live) =
+            content_collection_lengths(&incremental.index_dir);
+        let (rebuilt_recorded, rebuilt_live) = content_collection_lengths(&rebuilt.index_dir);
+
+        assert_ne!(
+            incremental_recorded, rebuilt_recorded,
+            "this corpus must reach the lossy region of the fieldnorm quantiser, or every \
+             assertion below holds for the wrong reason"
+        );
+        assert_eq!(
+            incremental_live, rebuilt_live,
+            "the collection length the scorer uses must depend on the live documents alone"
+        );
+        assert_eq!(resident_deleted_docs(&incremental.index_dir), 0);
+        assert_eq!(resident_deleted_docs(&rebuilt.index_dir), 0);
+
+        for query in ["alpha", "alpha beta", "gamma delta", "sigma tau upsilon"] {
+            let incremental_ranking = ranked_paths(&incremental_root, &config, query);
+            let rebuilt_ranking = ranked_paths(&rebuilt_root, &config, query);
+            assert!(!incremental_ranking.is_empty(), "{query} retrieved nothing");
+            assert_eq!(
+                incremental_ranking
+                    .iter()
+                    .map(|(path, _)| path)
+                    .collect::<Vec<_>>(),
+                rebuilt_ranking
+                    .iter()
+                    .map(|(path, _)| path)
+                    .collect::<Vec<_>>(),
+                "{query}: the same vault must rank the same way however its index was built"
+            );
+            for ((path, incremental_score), (_, rebuilt_score)) in
+                incremental_ranking.iter().zip(&rebuilt_ranking)
+            {
+                assert!(
+                    (incremental_score - rebuilt_score).abs() <= 1e-6,
+                    "{query}: {path} scored {incremental_score} incrementally and \
+                     {rebuilt_score} rebuilt"
+                );
+            }
+        }
+    }
+
+    /// The invariant has to hold for an index this build did not write.
+    ///
+    /// `apply_index_updates` establishes it only for generations this build
+    /// publishes, and it is not reached at all by a pass with nothing to add
+    /// and nothing to delete. Before `repair_inherited_generation`, a
+    /// generation written by an earlier build survived the upgrade intact: its
+    /// dead documents were counted in every query's corpus size, and their
+    /// vocabulary stayed streamable from the term dictionary, for as long as
+    /// the vault did not change. That is the exact state the doc comments on
+    /// `search::AuthorizedStatistics` and `search::collect_prefix_expansions`
+    /// declare they rely on being impossible.
+    ///
+    /// The fixture is the real thing rather than an approximation of it: the
+    /// active generation's manifest drops a source and its rows are deleted and
+    /// committed without being expunged, which is byte-for-byte what a build
+    /// without `expunge_resident_deletions` left on disk.
+    ///
+    /// Mutation check: delete the `holds_resident_deletions` branch from
+    /// `DesktopIndexManager::open` and this fails on both assertions.
+    #[test]
+    fn an_inherited_generation_is_repaired_before_it_is_served() {
+        let temporary = tempdir().unwrap();
+        let vault_path = temporary.path().join("vault");
+        let data_root = temporary.path().join("data");
+        fs::create_dir(&vault_path).unwrap();
+        for index in 0..12 {
+            fs::write(
+                vault_path.join(format!("note-{index:02}.md")),
+                format!("alpha inheritedterm{index:02}\n"),
+            )
+            .unwrap();
+        }
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault_path.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data_root).unwrap();
+        let active = DataRoot::new(&data_root).active().unwrap().unwrap();
+
+        let (mut manifest, _) = Manifest::load(&active.manifest_path).unwrap().adopt();
+        let departed = manifest
+            .files
+            .iter()
+            .find(|(_, file)| file.path.contains("note-00"))
+            .map(|(key, _)| key.clone())
+            .unwrap();
+        manifest.files.remove(&departed);
+        manifest.mark_synced().unwrap();
+        manifest.save(&active.manifest_path).unwrap();
+        fs::remove_file(vault_path.join("note-00.md")).unwrap();
+        {
+            let (index, fields) = open_index_dir(&active.index_dir).unwrap();
+            let mut writer: IndexWriter = index.writer(WRITER_MEMORY_BYTES).unwrap();
+            // Collapse to one segment before deleting. `build_index` spreads
+            // documents over as many segments as the writer has indexing
+            // threads, so on a busy machine the departed note can be the only
+            // occupant of its segment — and a segment with no live documents
+            // is dropped at commit rather than left carrying a tombstone,
+            // which is not the state this test is about.
+            let segments: Vec<SegmentId> = index
+                .searchable_segment_metas()
+                .unwrap()
+                .iter()
+                .map(|meta| meta.id())
+                .collect();
+            if segments.len() > 1 {
+                writer.merge(&segments).wait().unwrap();
+            }
+            writer.delete_term(Term::from_field_text(fields.source_key.unwrap(), &departed));
+            writer.commit().unwrap();
+            writer.wait_merging_threads().unwrap();
+        }
+        assert_eq!(
+            resident_deleted_docs(&active.index_dir),
+            1,
+            "the fixture must reproduce what the earlier build published"
+        );
+
+        // The vault is now consistent with the inherited manifest, so nothing
+        // in the reconciliation pass has any reason to publish.
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
+        let report = manager.reconcile(config).unwrap();
+        assert_eq!(report.changed_sources, 0);
+        assert_eq!(runtime.search(&request("alpha")).unwrap().len(), 11);
+        manager.shutdown().unwrap();
+
+        let served = DataRoot::new(&data_root).active().unwrap().unwrap();
+        assert_eq!(
+            resident_deleted_docs(&served.index_dir),
+            0,
+            "an inherited generation must be repaired before it is served"
+        );
+        assert!(
+            !resident_content_terms(&served.index_dir).contains("inheritedterm00"),
+            "the departed note's vocabulary must leave the term dictionary with it"
+        );
     }
 }

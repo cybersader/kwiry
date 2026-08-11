@@ -79,6 +79,8 @@ jobs:
       - name: Verify plugin and isolated package
         run: |
           npm run verify:d5c:licenses
+          npm run verify:docx:licenses
+          npm run verify:mit:notices
           npm run typecheck
           npm run test:d5c
           npm test

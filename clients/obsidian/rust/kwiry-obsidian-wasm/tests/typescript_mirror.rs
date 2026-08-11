@@ -154,6 +154,61 @@ fn the_mirrored_format_identities_match_the_adapter() {
     }
 }
 
+/// The **material** the identities are derived from, mirrored per format.
+///
+/// `FORMAT_IDENTITIES` is seven opaque digests, and the test above proves only
+/// that they equal the adapter's — which they would also do if both sides had
+/// silently stopped consulting the extractor version. These two maps are what
+/// make the mirror legible and a bump mechanical: `test/settings.test.ts`
+/// re-derives every identity from them, so if this test holds and that one
+/// holds, the mirrored digests are the running build's *for the stated
+/// reasons*, not by coincidence.
+///
+/// The versions are compared against `extractor_version_for` directly rather
+/// than against `abi_identity()`, which does not report them; adding them to
+/// the ABI would be an ABI change for a fact no host consumes at runtime.
+#[test]
+fn the_mirrored_identity_material_matches_the_core_constants() {
+    let text = source_formats_ts();
+    let versions = exported_object(&text, "EXTRACTOR_VERSIONS");
+    let profiles = exported_object(&text, "EXTRACTION_PROFILES");
+    let identity = identity();
+    let reported = identity["format_identities"]
+        .as_object()
+        .expect("the adapter reports a per-format identity map");
+
+    let reported_keys: Vec<&String> = reported.keys().collect();
+    assert_eq!(
+        versions.keys().collect::<Vec<&String>>(),
+        reported_keys,
+        "EXTRACTOR_VERSIONS must name exactly the formats the adapter compiles"
+    );
+    assert_eq!(
+        profiles.keys().collect::<Vec<&String>>(),
+        reported_keys,
+        "EXTRACTION_PROFILES must name exactly the formats the adapter compiles"
+    );
+
+    for format in reported.keys() {
+        let compiled = kwiry_core::format_specs()
+            .iter()
+            .find(|spec| spec.format.as_str() == format)
+            .unwrap_or_else(|| panic!("{format} has no registry entry"))
+            .format;
+        assert_eq!(
+            versions[format],
+            kwiry_core::extractor_version_for(compiled).to_string(),
+            "{format} extractor version must be mirrored exactly; a bump edits \
+             extractor_version_for and this map together"
+        );
+        assert_eq!(
+            profiles[format],
+            kwiry_core::extraction_profile_for(compiled).as_str(),
+            "{format} extraction profile must be mirrored exactly"
+        );
+    }
+}
+
 /// The identity *schema* version is core, so the host folds it into the core
 /// policy hash: a new component in the per-format digest has to invalidate
 /// every row of every format.

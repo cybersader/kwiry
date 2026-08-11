@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -66,6 +66,53 @@ async function readRustLicenseInventory(config) {
 
 async function validateRustLicenses(config) {
   const inventory = await readRustLicenseInventory(config);
+  const metadata = loadCargoMetadata(config);
+  const actual = collectReleaseDependencies(metadata, config);
+  if (JSON.stringify(actual) !== JSON.stringify(inventory.dependencies)) {
+    throw new Error(`${config.label} Rust dependency license inventory does not match Cargo.lock`);
+  }
+  if (config.assertGraph) {
+    const packagesById = new Map(metadata.packages.map((candidate) => [candidate.id, candidate]));
+    const nodesById = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
+    assertDocxDependencyFeatures(metadata, packagesById, nodesById);
+  }
+  return inventory;
+}
+
+// Regeneration is an explicit subcommand, never an environment variable. The
+// previous `KWIRY_WRITE_RUST_LICENSE_INVENTORY=1` branch wrote nothing despite
+// its name and returned before the graph comparison, so any CI environment that
+// happened to set it would have made the inventory check pass unconditionally.
+// It also cannot go through readRustLicenseInventory: that gate rejects a stale
+// notice-bundle digest, which is precisely what regeneration is fixing.
+export async function regenerateRustLicenseInventory(configName) {
+  const config = CONFIGS[configName];
+  if (config === undefined) throw new Error(`unknown Rust license inventory: ${configName}`);
+  const [noticeBundle, metadata] = [
+    await readFile(noticeBundlePath),
+    loadCargoMetadata(config),
+  ];
+  const regenerated = {
+    schema_version: 1,
+    target: TARGET,
+    features: [...config.features],
+    notice_bundle_sha256: createHash("sha256").update(noticeBundle).digest("hex"),
+    dependencies: collectReleaseDependencies(metadata, config),
+  };
+  validateInventoryShape(regenerated, config);
+  await writeFile(config.inventoryPath, `${JSON.stringify(regenerated, null, 2)}\n`, "utf8");
+  return regenerated;
+}
+
+// The notice bundle's header claims the production, D5C and DOCX builds resolve
+// to one identical package set. That was prose nothing derived, so a MIT crate
+// reaching only one of the three would have carried no notice in the others.
+export function collectRustReleaseGraph(features) {
+  const config = { label: "release", features };
+  return collectReleaseDependencies(loadCargoMetadata(config), config);
+}
+
+function loadCargoMetadata(config) {
   const result = spawnSync("cargo", [
     "metadata",
     "--locked",
@@ -73,8 +120,7 @@ async function validateRustLicenses(config) {
     manifestPath,
     "--format-version",
     "1",
-    "--features",
-    config.features.join(","),
+    ...(config.features.length > 0 ? ["--features", config.features.join(",")] : []),
     "--filter-platform",
     TARGET,
   ], {
@@ -85,8 +131,10 @@ async function validateRustLicenses(config) {
   if (result.status !== 0) {
     throw new Error(`Cargo metadata failed while validating ${config.label} Rust licenses`);
   }
+  return JSON.parse(result.stdout);
+}
 
-  const metadata = JSON.parse(result.stdout);
+function collectReleaseDependencies(metadata, config) {
   const rootPackage = metadata.packages.find(
     (candidate) => resolve(candidate.manifest_path) === manifestPath,
   );
@@ -109,7 +157,7 @@ async function validateRustLicenses(config) {
     pending.push(...node.dependencies);
   }
 
-  const actual = [...packageIds].map((packageId) => {
+  return [...packageIds].map((packageId) => {
     const candidate = packagesById.get(packageId);
     if (candidate === undefined) {
       throw new Error(`${config.label} Rust dependency metadata is incomplete`);
@@ -124,15 +172,6 @@ async function validateRustLicenses(config) {
       release_license: selectReleaseLicense(candidate),
     };
   }).sort(compareDependencies);
-
-  if (process.env.KWIRY_WRITE_RUST_LICENSE_INVENTORY === "1") {
-    return { ...inventory, dependencies: actual, regenerated: true };
-  }
-  if (JSON.stringify(actual) !== JSON.stringify(inventory.dependencies)) {
-    throw new Error(`${config.label} Rust dependency license inventory does not match Cargo.lock`);
-  }
-  if (config.assertGraph) assertDocxDependencyFeatures(metadata, packagesById, nodesById);
-  return inventory;
 }
 
 function assertDocxDependencyFeatures(metadata, packagesById, nodesById) {
@@ -299,13 +338,16 @@ function isBoundedString(value, maximum) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const configName = process.argv[2] === "docx" ? "docx" : "d5c";
-  const inventory = configName === "docx"
-    ? await validateDocxRustLicenses()
-    : await validateD5cRustLicenses();
+  const argv = process.argv.slice(2).filter((token) => token !== "--");
+  const regenerate = argv.includes("regenerate");
+  const configName = argv.includes("docx") ? "docx" : "d5c";
+  const inventory = regenerate
+    ? await regenerateRustLicenseInventory(configName)
+    : await (configName === "docx" ? validateDocxRustLicenses() : validateD5cRustLicenses());
   process.stdout.write(`${JSON.stringify({
     target: inventory.target,
     features: inventory.features,
     dependencies: inventory.dependencies.length,
+    ...(regenerate ? { regenerated: configName } : {}),
   })}\n`);
 }

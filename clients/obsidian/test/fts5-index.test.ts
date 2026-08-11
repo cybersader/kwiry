@@ -5,6 +5,7 @@ import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FORMAT_IDENTITIES } from "../src/source-formats";
+import { identityAfterBump } from "./format-identity-material";
 import { encodeExactIdentifierToken } from "../src/worker/exact-identifier-token";
 import {
   CacheImageInvalidError,
@@ -2135,11 +2136,25 @@ describe("Fts5GenerationIndex", () => {
     ], []);
     index.assertIntegrity();
 
-    // Exactly what a shipped `extractor_version_for(Text)` bump looks like from
-    // the cache's point of view: the plain-text extractor moved, nothing else.
+    // The identity a build with `extractor_version_for(Text)` one higher would
+    // stamp, *derived* from the shipped material rather than forged. The
+    // previous fixture was `"b".repeat(64)` with a comment claiming it was
+    // "exactly what a shipped bump looks like" — it was not: a literal proves
+    // the projection rejects a foreign identity, but nothing about whether a
+    // version bump produces one. `identityAfterBump` runs the real derivation,
+    // so the only fact separating these rows from what this build writes is the
+    // extractor version.
+    //
+    // What this test does *not* prove, and must not be read as proving: that a
+    // shipped bump reaches this projection at all. It does not. A bump rebuilds
+    // the WASM artifact, so `worker.ts` refuses the whole image as
+    // `cache_version_mismatch` on `rust_wasm_sha256` long before a row is
+    // examined, and the vault rebuilds whole. This asserts the projection is
+    // correct for the day that gate is loosened; today only `disabled_format`
+    // fires in production. See the module doc of `daemon/crates/kwiry-core/src/policy.rs`.
     const image = mutateExportedImage(index.exportImage(sqlite), (db) => {
       db.exec("UPDATE sources SET format_identity = ? WHERE source_format = 'text'", {
-        bind: ["b".repeat(64)],
+        bind: [identityAfterBump("text")],
       });
     });
 
