@@ -164,7 +164,7 @@ Name: **kwiry** ("Knowledge Workspace Information Retrieval Yoke", pronounced "q
 
 ## 10. Multi-format and resumable indexing (amendment, 2026-08-02)
 
-1. **Source formats.** The source model admits a closed, versioned set of formats: `markdown`, `text`, `base`, `canvas`, `docx`, `pdf`, `excalidraw`. Rust core owns all parsing and extraction; hosts only classify files and read bytes. Classification is last-extension-wins, so `*.excalidraw.md` remains `markdown`.
+1. **Source formats.** The source model admits a closed, versioned set of formats: `markdown`, `text`, `base`, `canvas`, `docx`, `pdf`, `excalidraw`, `excel`. Rust core owns all parsing and extraction; hosts only classify files and read bytes. Classification is last-extension-wins, so `*.excalidraw.md` remains `markdown`.
 2. **Extracted sections.** Non-Markdown formats produce ordered, deterministic extracted sections that feed the same chunker, property bag, and identifier pipeline as Markdown. Chunk IDs remain deterministic and path-derived.
 3. **Coverage honesty.** Source outcomes are: indexed-complete, indexed-partial, skipped-no-extractable-text, unreadable/omitted, and quarantined. A partially extracted source counts as indexed and as partial; counts are reported per format. No silent skips.
 4. **Locators.** Results may carry a non-ranking locator (for example PDF page, Base view, Canvas node) used only for navigation and display.
@@ -179,6 +179,15 @@ Name: **kwiry** ("Knowledge Workspace Information Retrieval Yoke", pronounced "q
 3. **No dereference.** No file reference is ever followed and no `files[*].dataURL` payload crosses the source ABI.
 4. **Bounded projection.** The retained property projection lives under the `excalidraw` property root and is bounded by declared entry and byte budgets charged during construction. Exceeding either budget drops the projection and declares it; extracted text is unaffected.
 5. **Compatibility.** Admitting the format advances the source-preparation schema, which forces one honest rebuild of every existing index under §10.6.
+
+## 10b. Excel source format (amendment, 2026-08-11)
+
+1. **Membership.** `excel` joins the closed source-format set of §10.1 and claims the path extensions `.xlsx` and `.xlsm`.
+2. **What is read.** An Excel source is an OOXML SpreadsheetML package read through the same bounded ZIP/XML stack as `docx`, under the same package budgets. Extraction reads sheet cell content, shared strings, sheet names, defined names, and cell comments. A macro-enabled package's macro payload (`vbaProject.bin` and any VBA part) is never opened, never parsed, and never executed; nothing is ever computed, evaluated, or dereferenced.
+3. **Formula semantics.** A formula cell contributes its stored cached value as primary content — what the file displays, exactly as the authoring application last saved it, with no recomputation. The formula text itself is extracted as a weaker (latent) content class: searchable, never boosted, and never a substitute for the cached value.
+4. **Hidden content.** Hidden sheets, hidden rows and columns, and cell comments are extracted as a weaker content class on the same terms: searchable, never boosted. Visible cell content is the primary class.
+5. **Structure.** Sections are emitted in sheet order, then row-major within a sheet, with the sheet name as the heading path root. Results may carry a non-ranking sheet/cell locator under §10.4. Numeric formatting is not reproduced; a cell contributes its stored string or cached textual value, not a re-rendered presentation.
+6. **Compatibility.** Admission participates in compatibility under §10.6 as narrowed by row-level format identity: admitting `excel` must not invalidate existing rows of other formats unless the shared preparation schema itself must move, in which case the rebuild is honest and announced.
 
 ## 11. Reserved later gates
 
