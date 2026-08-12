@@ -137,6 +137,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private settledProjection: SettledProjection | null = null;
   private resultView: ResultView = { kind: "sources" };
   private localProjectionRefresh = false;
+  private selectionTransactionActive = false;
   private restorationTimer: number | null = null;
 
   constructor(
@@ -340,7 +341,13 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       this.openResult(result, "tab");
       return;
     }
-    super.selectSuggestion(result, event);
+    this.selectionTransactionActive = true;
+    try {
+      super.selectSuggestion(result, event);
+    } finally {
+      this.selectionTransactionActive = false;
+      this.invalidateProjection();
+    }
   }
 
   onChooseSuggestion(result: ModalResult, event: MouseEvent | KeyboardEvent): void {
@@ -561,7 +568,12 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   onClose(): void {
     this.activeRequestEpoch = ++this.requestEpoch;
     this.progressEpoch += 1;
-    this.invalidateProjection();
+    if (this.selectionTransactionActive) {
+      this.clearRestorationTimer();
+      this.localProjectionRefresh = false;
+    } else {
+      this.invalidateProjection();
+    }
     this.clearQueryAnimationTimer();
     if (this.progressTimer !== null) {
       window.clearTimeout(this.progressTimer);

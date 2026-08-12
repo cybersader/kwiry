@@ -207,8 +207,13 @@ class FakeSuggestModal<T> {
   }
 
   selectSuggestion(result: T, event: MouseEvent | KeyboardEvent): void {
-    this.closed = true;
+    this.close();
     this.onChooseSuggestion(result, event);
+  }
+
+  close(): void {
+    this.closed = true;
+    this.onClose();
   }
 
   selectActiveSuggestion(event: MouseEvent | KeyboardEvent): void {
@@ -1264,21 +1269,18 @@ describe("KwirySearchModal grouped interactions", () => {
       "Kwiry: these search results are out of date. Wait for the refreshed results.",
     );
 
+    // Choosing a genuinely stale row closes the real SuggestModal. Its
+    // already-started refresh must therefore remain unable to repopulate it.
     backend.searches[1]!.resolve(executionWithHits(
       [hit("b1", "B.md", ["B1"])],
       "exhausted",
       { generation: "g2" },
     ));
     await modal.flushSuggestions();
-
-    expect(modal.suggestions).toHaveLength(1);
-    expect(renderedRows(modal)[0]?.classList.contains("kwiry-source-result")).toBe(true);
-    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
-      "B.md › B1",
-    );
+    expect(modal.suggestions).toEqual([]);
+    expect(renderedRows(modal)).toEqual([]);
     await vi.advanceTimersByTimeAsync(400);
     expect(backend.requests).toHaveLength(2);
-    modal.onClose();
   });
 
   it("invalidates local drill projection when the backend identity changes", async () => {
