@@ -382,12 +382,16 @@ function deferred<T>(): Deferred<T> {
 }
 
 class DeferredBackend implements SearchBackend {
-  readonly identity: BackendIdentity = {
+  readonly identity: BackendIdentity;
+
+  constructor(identity: BackendIdentity = {
     profile: "in_plugin",
     instanceId: "in-plugin-1",
     label: "In-plugin",
     boundVaultId: "active-vault",
-  };
+  }) {
+    this.identity = identity;
+  }
   readonly requests: SearchRequest[] = [];
   readonly searches: Deferred<SearchExecution>[] = [];
   readonly statuses: Deferred<BackendStatus>[] = [];
@@ -522,8 +526,11 @@ function plugin(options: {
    * always exercised.
    */
   leafViewType?: string;
+  openFileError?: unknown;
 } = {}) {
-  const openFile = vi.fn(async () => {});
+  const openFile = vi.fn(async () => {
+    if (options.openFileError !== undefined) throw options.openFileError;
+  });
   const leaf = options.leafViewType === undefined
     ? { openFile }
     : { openFile, view: { getViewType: () => options.leafViewType } };
@@ -1114,6 +1121,118 @@ describe("KwirySearchModal grouped interactions", () => {
     modal.onClose();
   });
 
+  it("opens results from a generation the search observes before the status poll", async () => {
+    const backend = new DeferredBackend();
+    const pluginHarness = plugin();
+    const modal = createModal(backend, status({ generation: "g1" }), pluginHarness);
+    await settleInputSearch(modal, backend, "macro boundary", executionWithHits([
+      hit("excel", "Spreadsheets/03-macro-boundary.xlsm", ["Budget"], {
+        format: "excel",
+        locator: { kind: "excel_cell", sheet: "Budget", cell: "A1" },
+      }),
+    ], "exhausted", { generation: "g2" }));
+
+    expect(modal.suggestions).toHaveLength(1);
+    modal.selectSuggestion(modal.suggestions[0]!, keyboard("Enter"));
+    await Promise.resolve();
+
+    expect(pluginHarness.openFile).toHaveBeenCalledOnce();
+    expect(notices).not.toContain(
+      "Kwiry: these search results are out of date. Wait for the refreshed results.",
+    );
+    modal.onClose();
+  });
+
+  it("reports a safe notice when Obsidian cannot open an Excel workbook", async () => {
+    const backend = new DeferredBackend();
+    const rawError = new Error("private workbook provider failure");
+    const pluginHarness = plugin({ openFileError: rawError });
+    const modal = createModal(backend, status(), pluginHarness);
+    await settleInputSearch(modal, backend, "macro boundary", executionWithHits([
+      hit("excel", "Spreadsheets/03-macro-boundary.xlsm", ["Budget"], {
+        format: "excel",
+        locator: { kind: "excel_cell", sheet: "Budget", cell: "A1" },
+      }),
+    ]));
+
+    modal.selectSuggestion(modal.suggestions[0]!, keyboard("Enter"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pluginHarness.openFile).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "Spreadsheets/03-macro-boundary.xlsm" }),
+      { eState: undefined },
+    );
+    expect(pluginHarness.instance.recordCaughtFailure).toHaveBeenCalledWith(
+      "ui",
+      "open",
+      rawError,
+      { profile: "in_plugin" },
+    );
+    expect(notices).toContain("Kwiry: Obsidian could not open this file.");
+    expect(notices.join("\n")).not.toContain("private workbook provider failure");
+    modal.onClose();
+  });
+
+  it("opens a newer in-plugin execution after an intermediate status generation", async () => {
+    const backend = new DeferredBackend();
+    const pluginHarness = plugin();
+    const modal = createModal(backend, status({ generation: "g1" }), pluginHarness);
+
+    modal.inputEl.value = "new generation";
+    modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    backend.statusValue = status({ generation: "g2" });
+    await vi.advanceTimersByTimeAsync(400);
+    backend.searches[0]!.resolve(executionWithHits([
+      hit("new", "New.md", ["New"]),
+    ], "exhausted", { generation: "g3" }));
+    await modal.flushSuggestions();
+
+    modal.selectSuggestion(modal.suggestions[0]!, keyboard("Enter"));
+    await Promise.resolve();
+    expect(pluginHarness.openFile).toHaveBeenCalledOnce();
+    expect(notices).not.toContain(
+      "Kwiry: these search results are out of date. Wait for the refreshed results.",
+    );
+    modal.onClose();
+  });
+
+  it("does not adopt a daemon execution generation over newer status", async () => {
+    const daemon: BackendIdentity = {
+      profile: "daemon",
+      instanceId: "daemon-1",
+      label: "Daemon",
+      boundVaultId: "active-vault",
+    };
+    const backend = new DeferredBackend(daemon);
+    const pluginHarness = plugin({ activeBackend: daemon });
+    pluginHarness.instance.settings.daemonCurrentVaultId = "active-vault";
+    const modal = createModal(backend, status({ identity: daemon, generation: "g1" }), pluginHarness);
+
+    modal.inputEl.value = "old generation";
+    modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    backend.statusValue = status({ identity: daemon, generation: "g3" });
+    await vi.advanceTimersByTimeAsync(400);
+    backend.searches[0]!.resolve(executionWithHits([
+      hit("old", "Old.md", ["Old"], {
+        origin: {
+          profile: "daemon",
+          backendInstanceId: "daemon-1",
+          vaultId: "active-vault",
+        },
+      }),
+    ], "unknown", { backend: daemon, generation: "g2" }));
+    await modal.flushSuggestions();
+
+    expect(modal.suggestions).toHaveLength(1);
+    modal.selectSuggestion(modal.suggestions[0]!, keyboard("Enter"));
+    expect(pluginHarness.openFile).not.toHaveBeenCalled();
+    expect(notices).toContain(
+      "Kwiry: these search results are out of date. Wait for the refreshed results.",
+    );
+    modal.onClose();
+  });
+
   it("invalidates drilled results and reruns once when status observes a new generation", async () => {
     const backend = new DeferredBackend();
     const pluginHarness = plugin();
@@ -1214,19 +1333,28 @@ describe("KwirySearchModal grouped interactions", () => {
     backend.searches[1]!.resolve(executionWithHits([
       hit("new-1", "New.md", ["New 1"]),
       hit("new-2", "New.md", ["New 2"]),
-    ]));
+    ], "exhausted", { generation: "g3" }));
     await modal.flushSuggestions();
     expect(modal.suggestions).toHaveLength(1);
     expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
       "New.md › New 1",
     );
 
-    backend.searches[0]!.resolve(executionWithHits([hit("old", "Old.md", ["Old"])]));
+    backend.searches[0]!.resolve(executionWithHits(
+      [hit("old", "Old.md", ["Old"])],
+      "exhausted",
+      { generation: "g9" },
+    ));
     await Promise.resolve();
     await Promise.resolve();
     expect(modal.suggestions).toHaveLength(1);
     expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
       "New.md › New 1",
+    );
+    modal.selectSuggestion(modal.suggestions[0]!, keyboard("Enter"));
+    await Promise.resolve();
+    expect(notices).not.toContain(
+      "Kwiry: these search results are out of date. Wait for the refreshed results.",
     );
     modal.onClose();
   });

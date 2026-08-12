@@ -139,8 +139,21 @@ describe("openTargetForHit", () => {
     ["canvas", "board.canvas"],
     ["docx", "report.docx"],
     ["excalidraw", "sketch.excalidraw"],
+    ["excel", "budget.xlsx"],
   ] as const)("opens %s results file-only", (format, path) => {
     expect(openTargetForHit(hit({ path, format, heading_path: ["Ignored"] }))).toEqual({ path });
+  });
+
+  it.each([
+    ["budget.xlsx", { kind: "excel_cell" as const, sheet: "Budget", cell: "B4" }],
+    ["macros.xlsm", { kind: "excel_cell" as const, sheet: "Inputs", cell: "C9" }],
+  ])("keeps Excel locator metadata out of the open target for %s", (path, locator) => {
+    expect(openTargetForHit(hit({
+      path,
+      format: "excel",
+      locator,
+      heading_path: [locator.sheet],
+    }))).toEqual({ path });
   });
 
   it("opens a PDF at the page its locator names", () => {
@@ -216,6 +229,20 @@ describe("openTargetForHit", () => {
       exact: { locator: null, heading_path: ["Exact"] },
       representativeTarget: { path: "board.canvas" },
       exactTarget: { path: "board.canvas" },
+    },
+    {
+      format: "excel",
+      path: "budget.xlsx",
+      representative: {
+        locator: { kind: "excel_cell" as const, sheet: "Budget", cell: "A1" },
+        heading_path: ["Budget"],
+      },
+      exact: {
+        locator: { kind: "excel_cell" as const, sheet: "Budget", cell: "B4" },
+        heading_path: ["Budget"],
+      },
+      representativeTarget: { path: "budget.xlsx" },
+      exactTarget: { path: "budget.xlsx" },
     },
     {
       // Grouped search opens a source row from its representative hit and a

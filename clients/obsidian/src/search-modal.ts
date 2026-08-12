@@ -231,6 +231,14 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
             return [];
           }
           this.lastErrorCode = null;
+          // An in-plugin search names the exact active generation that served
+          // it. The serialized Worker can publish and search that generation
+          // before this modal's 400 ms status poll observes it, so the current
+          // execution is authoritative at this seam. Daemon executions still
+          // carry a cached status generation and must not advance the modal.
+          if (this.backend.identity.profile === "in_plugin") {
+            this.latestStatusGeneration = outcome.execution.generation;
+          }
           this.settledProjection = {
             query,
             mode: this.mode,
@@ -492,6 +500,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       this.plugin.recordCaughtFailure("ui", "open", error, {
         profile: this.backend.identity.profile,
       });
+      new Notice("Kwiry: Obsidian could not open this file.");
     });
   }
 
