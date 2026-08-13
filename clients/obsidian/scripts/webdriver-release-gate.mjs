@@ -8,7 +8,7 @@ import { createConnection } from "node:net";
 import {
   chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
@@ -434,28 +434,18 @@ async function launchPinnedObsidian({ layout, manifest }) {
 export async function preparePinnedInstaller(layout) {
   const installerDirectory = dirname(layout.installerExecutable);
   const extraction = `${installerDirectory}.extract`;
-  const workingDirectory = dirname(layout.installerArchive);
+  const extractedTree = resolve(extraction, "squashfs-root");
   await rm(extraction, { recursive: true, force: true });
   await mkdir(extraction, { recursive: true });
   try {
-    const launcherSevenZip = resolve(
-      ROOT,
-      "node_modules/obsidian-launcher/dist/7z.js",
-    );
-    await runQuietProcess(process.execPath, [
-      launcherSevenZip,
-      "x",
-      "-y",
-      `-o${relative(workingDirectory, extraction)}`,
-      basename(layout.installerArchive),
-    ], workingDirectory);
-    const extractedExecutable = resolve(extraction, "obsidian");
+    await chmod(layout.installerArchive, 0o700);
+    await runQuietProcess(layout.installerArchive, ["--appimage-extract"], extraction);
+    const extractedExecutable = resolve(extractedTree, "obsidian");
     const executable = await stat(extractedExecutable);
     if (!executable.isFile() || executable.size === 0) throw new Error("installer executable empty");
-    await chmod(extractedExecutable, 0o700);
     await mkdir(dirname(installerDirectory), { recursive: true });
     await rm(installerDirectory, { recursive: true, force: true });
-    await rename(extraction, installerDirectory);
+    await rename(extractedTree, installerDirectory);
   } finally {
     await rm(extraction, { recursive: true, force: true });
   }
