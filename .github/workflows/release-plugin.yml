@@ -116,6 +116,10 @@ jobs:
           CANDIDATE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          stage=$(mktemp -d "${RUNNER_TEMP}/kwiry-webdriver-stage.XXXXXX")
+          chmod 700 "$stage"
+          cp -a "$PWD/." "$stage/obsidian"
+          cd "$stage/obsidian"
           xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' \
             npm run webdriver:release -- \
               --candidate "$PWD/.tmp/release-candidate" \
@@ -123,6 +127,9 @@ jobs:
               --manifest "$PWD/scripts/webdriver-release-gate-manifest.json" \
               --evidence "$PWD/.tmp/webdriver.evidence.json"
           npm run validate:webdriver:evidence -- .tmp/webdriver.evidence.json
+          cp "$PWD/.tmp/webdriver.evidence.json" "$GITHUB_WORKSPACE/clients/obsidian/.tmp/webdriver.evidence.json"
+          cd "$GITHUB_WORKSPACE/clients/obsidian"
+          rm -rf "$stage"
       - name: Prepare release notes as data
         env:
           CANDIDATE_TAG: ${{ inputs.tag }}
