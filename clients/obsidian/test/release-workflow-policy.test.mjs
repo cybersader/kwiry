@@ -39,7 +39,8 @@ describe("Obsidian release workflow policy", () => {
     expect(source).toContain('mkdir "$stage/repository"');
     expect(source).toContain('cp -a "$GITHUB_WORKSPACE/." "$stage/repository"');
     expect(source).not.toContain('stage=$(mktemp -d "${GITHUB_WORKSPACE}/');
-    expect(source).toContain('git show "${GITHUB_SHA}:clients/obsidian/scripts/webdriver-release-gate.mjs"');
+    expect(source).toContain('for gate_module in webdriver-release-gate.mjs webdriver-release-gate-schema.mjs');
+    expect(source).toContain('git show "${GITHUB_SHA}:clients/obsidian/scripts/${gate_module}"');
     expect(source).toContain('KWIRY_WEBDRIVER_RUNTIME_ASSETS="$stage/runtime-assets"');
     expect(source).toContain('KWIRY_WEBDRIVER_PRIVATE_ROOT="$stage/private"');
     expect(source).toContain('cd "$stage/repository/clients/obsidian"');
