@@ -85,8 +85,9 @@ export function validateWebdriverReleaseEvidence(value) {
 export function sanitizedGateFailure(code) {
   const allowed = new Set([
     "candidate_invalid", "runtime_manifest_invalid", "download_identity_mismatch",
-    "launch_failed", "webdriver_attach_failed", "result_not_rendered", "stale_notice_observed",
-    "open_not_invoked", "open_promise_rejected", "cleanup_incomplete", "unexpected_failure",
+    "runtime_prepare_failed", "vault_prepare_failed", "launch_failed", "webdriver_attach_failed",
+    "result_not_rendered", "stale_notice_observed", "open_not_invoked", "open_promise_rejected",
+    "cleanup_incomplete", "unexpected_failure",
   ]);
   return {
     schema_version: 1,

@@ -101,6 +101,8 @@ describe("WebDriver release evidence schema", () => {
       status: "failed",
       failure_stage: "open_not_invoked",
     });
+    expect(sanitizedGateFailure("runtime_prepare_failed").failure_stage).toBe("runtime_prepare_failed");
+    expect(sanitizedGateFailure("vault_prepare_failed").failure_stage).toBe("vault_prepare_failed");
     expect(sanitizedGateFailure("private details").failure_stage).toBe("unexpected_failure");
   });
 });
