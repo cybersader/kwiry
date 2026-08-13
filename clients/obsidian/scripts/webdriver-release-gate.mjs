@@ -2,14 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import { createConnection } from "node:net";
 import {
-  chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile,
+  chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile,
 } from "node:fs/promises";
-import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
@@ -251,14 +250,13 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
   const cleanup = {
     webdriver_quit: false,
     obsidian_reaped: false,
-    verified_download_server_closed: false,
+    verified_download_server_closed: true,
     ports_closed: false,
     private_state_removed: false,
   };
   const state = {
     driver: null,
     proc: null,
-    installerServer: null,
     ports: [],
     oldCwd: process.cwd(),
     oldEnv: { ...process.env },
@@ -273,8 +271,6 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
     await gateStage(() => deps.prepareVault(layout.vault, args.candidate), "vault_prepare_failed");
     const launched = await gateStage(() => deps.launch({ layout, manifest }), "launch_failed");
     state.proc = launched.proc;
-    state.installerServer = launched.installerServer;
-    if (launched.installerPort) state.ports.push(launched.installerPort);
     const cdpPort = await deps.waitForCdpPort(launched.configDir);
     if (!isLoopbackPort(cdpPort)) throw new WebdriverGateError("webdriver_attach_failed");
     state.ports.push(cdpPort);
@@ -292,10 +288,6 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
     try {
       if (state.driver) await state.driver.quit();
       cleanup.webdriver_quit = true;
-    } catch { cleanupFailed = true; }
-    try {
-      if (state.installerServer) await closeServer(state.installerServer);
-      cleanup.verified_download_server_closed = !state.installerServer?.listening;
     } catch { cleanupFailed = true; }
     try {
       if (state.proc) await deps.reap(state.proc);
@@ -333,13 +325,19 @@ async function main() {
   }
 }
 
+export async function createWebdriverPrivateRoot() {
+  const configuredRoot = process.env.KWIRY_WEBDRIVER_PRIVATE_ROOT;
+  const parent = configuredRoot ? resolve(configuredRoot) : resolve(ROOT, ".tmp", "webdriver-private");
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  await chmod(parent, 0o700);
+  const path = await mkdtemp(resolve(parent, "kwiry-webdriver-release-"));
+  await chmod(path, 0o700);
+  return path;
+}
+
 function defaultAdapters(overrides) {
   return {
-    createPrivateRoot: async () => {
-      const path = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-release-"));
-      await chmod(path, 0o700);
-      return path;
-    },
+    createPrivateRoot: createWebdriverPrivateRoot,
     download: downloadPinnedArtifact,
     prepareRuntime: prepareVerifiedRuntime,
     prepareVault,
@@ -401,6 +399,13 @@ export async function prepareVerifiedRuntime(layout, manifest, deps) {
   await chmod(layout.driver, 0o700);
   layout.appAsar = appAsar;
   layout.installerArchive = downloads.obsidian_installer;
+  layout.installerExecutable = resolve(
+    layout.cache,
+    "obsidian-installer",
+    "linux-x64",
+    `Obsidian-${manifest.runtime.obsidian_installer}`,
+    "obsidian",
+  );
 }
 
 async function launchPinnedObsidian({ layout, manifest }) {
@@ -411,10 +416,7 @@ async function launchPinnedObsidian({ layout, manifest }) {
     cacheDuration: Number.MAX_SAFE_INTEGER,
     interactive: false,
   });
-  const installerServer = await serveOneFile(layout.installerArchive);
-  const versions = JSON.parse(await readFile(layout.versions, "utf8"));
-  versions.versions[0].downloads.appImage = installerServer.url;
-  await writeFile(layout.versions, `${JSON.stringify(versions)}\n`);
+  await preparePinnedInstaller(layout);
   try {
     const launched = await launcher.launch({
       appVersion: manifest.runtime.obsidian_app,
@@ -423,16 +425,50 @@ async function launchPinnedObsidian({ layout, manifest }) {
       args: ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0"],
       spawnOptions: { detached: true, stdio: "ignore", env: process.env },
     });
-    await closeServer(installerServer.server);
-    return {
-      ...launched,
-      installerServer: installerServer.server,
-      installerPort: installerServer.port,
-    };
+    return launched;
   } catch (error) {
-    await closeServer(installerServer.server);
     throw error;
   }
+}
+
+export async function preparePinnedInstaller(layout) {
+  const installerDirectory = dirname(layout.installerExecutable);
+  const extraction = `${installerDirectory}.extract`;
+  const workingDirectory = dirname(layout.installerArchive);
+  await rm(extraction, { recursive: true, force: true });
+  await mkdir(extraction, { recursive: true });
+  try {
+    const launcherSevenZip = resolve(
+      ROOT,
+      "node_modules/obsidian-launcher/dist/7z.js",
+    );
+    await runQuietProcess(process.execPath, [
+      launcherSevenZip,
+      "x",
+      "-y",
+      `-o${relative(workingDirectory, extraction)}`,
+      basename(layout.installerArchive),
+    ], workingDirectory);
+    const extractedExecutable = resolve(extraction, "obsidian");
+    const executable = await stat(extractedExecutable);
+    if (!executable.isFile() || executable.size === 0) throw new Error("installer executable empty");
+    await chmod(extractedExecutable, 0o700);
+    await mkdir(dirname(installerDirectory), { recursive: true });
+    await rm(installerDirectory, { recursive: true, force: true });
+    await rename(extraction, installerDirectory);
+  } finally {
+    await rm(extraction, { recursive: true, force: true });
+  }
+}
+
+async function runQuietProcess(command, args, cwd) {
+  await new Promise((resolveProcess, rejectProcess) => {
+    const proc = spawn(command, args, { cwd, stdio: "ignore" });
+    proc.once("error", rejectProcess);
+    proc.once("close", (code) => code === 0
+      ? resolveProcess()
+      : rejectProcess(new Error("runtime extractor failed")));
+  });
 }
 
 async function attachWebdriver({ layout, manifest, cdpPort }) {
@@ -646,22 +682,6 @@ async function reapProcess(proc) {
     ]);
   }
   if (proc.exitCode === null) throw new WebdriverGateError("cleanup_incomplete");
-}
-
-async function serveOneFile(path) {
-  const server = createServer(async (request, response) => {
-    if (request.url !== "/artifact") { response.writeHead(404).end(); return; }
-    response.writeHead(200, { "content-length": (await stat(path)).size });
-    createReadStream(path).pipe(response);
-  });
-  await new Promise((resolve, reject) => server.listen(0, "127.0.0.1", resolve).once("error", reject));
-  const port = server.address().port;
-  return { server, port, url: `http://127.0.0.1:${port}/artifact` };
-}
-
-async function closeServer(server) {
-  if (!server?.listening) return;
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
 async function verifyPortsClosed(ports) {
