@@ -34,11 +34,14 @@ describe("Obsidian release workflow policy", () => {
     const upload = source.indexOf("name: Upload exact validated candidate handoff");
     expect(prepared).toBeGreaterThan(-1);
     expect(webdriver).toBeGreaterThan(prepared);
-    expect(source).toContain('stage=$(mktemp -d "${RUNNER_TEMP}/kwiry-webdriver-stage.XXXXXX")');
+    expect(source).toContain('stage=$(mktemp -d "${GITHUB_WORKSPACE}.kwiry-webdriver-stage.XXXXXX")');
+    expect(source).toContain('trap cleanup_stage EXIT');
     expect(source).toContain('mkdir "$stage/repository"');
     expect(source).toContain('cp -a "$GITHUB_WORKSPACE/." "$stage/repository"');
+    expect(source).not.toContain('stage=$(mktemp -d "${GITHUB_WORKSPACE}/');
     expect(source).toContain('git show "${GITHUB_SHA}:clients/obsidian/scripts/webdriver-release-gate.mjs"');
     expect(source).toContain('KWIRY_WEBDRIVER_RUNTIME_ASSETS="$stage/runtime-assets"');
+    expect(source).toContain('KWIRY_WEBDRIVER_PRIVATE_ROOT="$stage/private"');
     expect(source).toContain('cd "$stage/repository/clients/obsidian"');
     expect(source).toContain('cp "$PWD/.tmp/webdriver.evidence.json" "$GITHUB_WORKSPACE/clients/obsidian/.tmp/webdriver.evidence.json"');
     expect(source).toContain("xvfb-run --auto-servernum");
