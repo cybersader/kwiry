@@ -62,6 +62,8 @@ describe("Obsidian release workflow policy", () => {
   it("makes the protected publisher a data-only exact-artifact consumer", async () => {
     const source = await workflow("publish-plugin-release.yml");
     expect(source).toContain("environment: obsidian-release");
+    expect(source).toContain("test \"$GITHUB_REF\" = \"refs/heads/${default_branch}\"");
+    expect(source).toContain("test \"$GITHUB_SHA\" = \"$trusted_sha\"");
     expect(source).toContain("candidate_run_id:");
     expect(source).toContain("candidate_artifact_id:");
     expect(source).toContain("candidate_artifact_digest:");
