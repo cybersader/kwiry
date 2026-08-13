@@ -120,13 +120,50 @@ jobs:
           chmod 700 "$stage"
           mkdir "$stage/repository"
           cp -a "$GITHUB_WORKSPACE/." "$stage/repository"
+          git show "${GITHUB_SHA}:clients/obsidian/scripts/webdriver-release-gate.mjs" \
+            > "$stage/repository/clients/obsidian/scripts/webdriver-release-gate.mjs"
+          node --input-type=module - \
+            "$stage/repository/clients/obsidian/scripts/webdriver-release-gate.mjs" \
+            "$stage/repository/clients/obsidian/scripts/webdriver-release-gate-manifest.json" \
+            "$stage/runtime-assets" <<'NODE'
+          import { mkdir, readFile } from "node:fs/promises";
+          import { basename, resolve } from "node:path";
+          import { pathToFileURL } from "node:url";
+
+          const [scriptPath, manifestPath, outputRoot] = process.argv.slice(2);
+          const { downloadPinnedArtifact } = await import(pathToFileURL(scriptPath));
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          await mkdir(outputRoot, { mode: 0o700 });
+          for (const artifact of Object.values(manifest.artifacts)) {
+            await downloadPinnedArtifact(artifact, resolve(outputRoot, basename(new URL(artifact.url).pathname)));
+          }
+          NODE
+          python3 - "$stage/repository/clients/obsidian/scripts/webdriver-release-gate-manifest.json" "$stage/runtime-assets" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          import zipfile
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          output = pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(output / pathlib.PurePosixPath(manifest["artifacts"]["chromedriver"]["url"]).name) as archive:
+              members = [member for member in archive.infolist() if member.filename == "chromedriver"]
+              if len(members) != 1 or members[0].is_dir() or members[0].file_size != manifest["derived"]["chromedriver_binary"]["bytes"]:
+                  raise SystemExit("chromedriver archive identity mismatch")
+              driver = archive.read(members[0])
+          if hashlib.sha256(driver).hexdigest() != manifest["derived"]["chromedriver_binary"]["sha256"]:
+              raise SystemExit("chromedriver binary identity mismatch")
+          (output / "chromedriver").write_bytes(driver)
+          PY
           cd "$stage/repository/clients/obsidian"
-          xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' \
-            npm run webdriver:release -- \
-              --candidate "$PWD/.tmp/release-candidate" \
-              --tag "$CANDIDATE_TAG" \
-              --manifest "$PWD/scripts/webdriver-release-gate-manifest.json" \
-              --evidence "$PWD/.tmp/webdriver.evidence.json"
+          KWIRY_WEBDRIVER_RUNTIME_ASSETS="$stage/runtime-assets" \
+            xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' \
+              npm run webdriver:release -- \
+                --candidate "$PWD/.tmp/release-candidate" \
+                --tag "$CANDIDATE_TAG" \
+                --manifest "$PWD/scripts/webdriver-release-gate-manifest.json" \
+                --evidence "$PWD/.tmp/webdriver.evidence.json"
           npm run validate:webdriver:evidence -- .tmp/webdriver.evidence.json
           cp "$PWD/.tmp/webdriver.evidence.json" "$GITHUB_WORKSPACE/clients/obsidian/.tmp/webdriver.evidence.json"
           cd "$GITHUB_WORKSPACE/clients/obsidian"

@@ -31,7 +31,8 @@ const MAX_DOWNLOAD_BYTES = 160 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const UI_TIMEOUT_MS = 90_000;
 const SAFE_ENV_KEYS = new Set([
-  "CI", "DISPLAY", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "PATH", "WAYLAND_DISPLAY", "XAUTHORITY",
+  "CI", "DISPLAY", "KWIRY_WEBDRIVER_RUNTIME_ASSETS", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "PATH",
+  "WAYLAND_DISPLAY", "XAUTHORITY",
 ]);
 
 export class WebdriverGateError extends Error {
@@ -354,9 +355,17 @@ function defaultAdapters(overrides) {
 
 export async function prepareVerifiedRuntime(layout, manifest, deps) {
   const downloads = {};
+  const preparedRoot = process.env.KWIRY_WEBDRIVER_RUNTIME_ASSETS;
   for (const [name, artifact] of Object.entries(manifest.artifacts)) {
-    const path = resolve(layout.downloads, basename(new URL(artifact.url).pathname));
-    downloads[name] = await deps.download(artifact, path);
+    const filename = basename(new URL(artifact.url).pathname);
+    const path = resolve(layout.downloads, filename);
+    if (preparedRoot) {
+      await copyFile(resolve(preparedRoot, filename), path);
+      await requireFileIdentity(path, artifact);
+      downloads[name] = path;
+    } else {
+      downloads[name] = await deps.download(artifact, path);
+    }
   }
   const appAsar = resolve(layout.cache, "obsidian-app", `obsidian-${manifest.runtime.obsidian_app}.asar`);
   await mkdir(dirname(appAsar), { recursive: true });
@@ -383,7 +392,11 @@ export async function prepareVerifiedRuntime(layout, manifest, deps) {
     }],
   };
   await writeFile(layout.versions, `${JSON.stringify(versions)}\n`);
-  await extractChromedriver(downloads.chromedriver, layout.driver);
+  if (preparedRoot) {
+    await copyFile(resolve(preparedRoot, "chromedriver"), layout.driver);
+  } else {
+    await extractChromedriver(downloads.chromedriver, layout.driver);
+  }
   await requireFileIdentity(layout.driver, manifest.derived.chromedriver_binary);
   await chmod(layout.driver, 0o700);
   layout.appAsar = appAsar;
