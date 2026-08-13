@@ -8,7 +8,7 @@ Obsidian is an important client, not the product boundary. A registered source c
 
 - **Files are the source of truth.** Lexical indexes, vectors, caches, and future graph projections are disposable and rebuildable.
 - **Authorization precedes retrieval.** Enterprise authorization constrains candidate generation, statistics, traversal, fusion, hydration, and returned evidence.
-- **Presentation clients stay thin.** Portable Rust owns parsing, chunking, deterministic metadata, and query planning; declared hosts own engine lifecycle. The selected constrained-host feasibility path evaluates official SQLite FTS5-WASM behind that boundary.
+- **Presentation clients stay thin.** Portable Rust owns parsing, extraction, chunking, deterministic metadata, and query planning; declared hosts own engine lifecycle. The published in-plugin host owns a disposable official SQLite FTS5-WASM index behind that boundary.
 - **Profiles are explicit.** Daemon, in-plugin, and OpenClast hosts use declared capability/trust boundaries and never silently fall back into one another.
 - **Search modes fail explicitly.** An unavailable semantic model or unsupported governed mode never silently becomes lexical search.
 - **Algorithms are imported.** Kwiry composes maintained search, embedding, and vector engines rather than inventing replacements.
@@ -21,7 +21,8 @@ The binding version of these principles lives in [`CONTRACT.md`](../CONTRACT.md)
 ```text
 Files and connector materializations
     │
-    ├─ Markdown and text content
+    ├─ Markdown, text, and enabled supported document formats
+    ├─ Excel extraction supported but disabled by default
     ├─ headings, links, paths, and frontmatter
     └─ future provenance and ACL sidecars
     │
@@ -29,13 +30,13 @@ Files and connector materializations
 Kwiry core
     ├─ deterministic discovery and parsing
     ├─ section chunking
-    ├─ lexical projection: native Tantivy BM25; constrained-host FTS5-WASM feasibility
+    ├─ lexical projection: native Tantivy BM25; published in-plugin SQLite FTS5-WASM
     ├─ semantic projection: local embeddings / sqlite-vec
     ├─ hybrid projection: reciprocal-rank fusion
     └─ future authorized structural projections
     │
     ├─ desktop sidecar ── CLI, local HTTP, full Obsidian modes, future local MCP
-    ├─ in-plugin lite ── portable Rust preparation + FTS5-WASM (compatibility Gates 1–2 GO; host not delivered)
+    ├─ in-plugin lexical ── portable Rust preparation + FTS5-WASM, published in beta.15
     │
     └─ OpenClast sidecar ── governed enterprise search and future agent access
 ```
@@ -46,7 +47,7 @@ Kwiry core
 
 The desktop profile is the local `kwiry` daemon and CLI, not necessarily a separate graphical application. It uses a loopback HTTP listener and a local bearer-token file. It currently supports lexical search and optional local semantic/hybrid search.
 
-The [Kwiry Search Obsidian plugin](../clients/obsidian/README.md) is a desktop client. It reads the local token only when making a request and does not persist it, index notes, rank results, or make authorization decisions.
+The [Kwiry Search Obsidian plugin](../clients/obsidian/README.md) is a desktop client. In Daemon mode it reads the local token only when making a request and delegates indexing and ranking to the native daemon. In In-plugin · Lexical mode, portable Rust and an application-owned FTS5-WASM Worker maintain a disposable active-vault index; the presentation UI still does not invent parsing or ranking policy.
 
 ### OpenClast profile
 
@@ -66,9 +67,9 @@ Future connectors for systems such as document drives or collaboration platforms
 
 A connector credential permits synchronization; it does not define a user's search entitlement. Enterprise ACLs must be normalized into the governed resource model before retrieval.
 
-### In-plugin lite profile
+### In-plugin lexical profile
 
-Lexical-lite is a contractual constrained-environment profile for desktops where Obsidian may run but a native daemon may not. It is not delivered. The Tantivy normal-writer path reached a technical NO-GO; the official SQLite FTS5-WASM runtime gate then passed. The owner subsequently accepted the isolated one-file installed Obsidian/frozen-BRAT compatibility gate after repeated runs, update, restart, rollback, and reruns passed. Portable Rust and production integration remain later gates. Semantic-lite is not part of D5B.
+Beta.15 publishes the constrained desktop profile for environments where Obsidian may run but a native daemon may not. It uses portable Rust plus official SQLite FTS5-WASM, supports the published multi-format extractor set with Excel disabled by default, and never exposes semantic or hybrid modes. D5C property projection is published but excluded from lexical ranking; D5D grouped UX is published while daily-drive and distribution acceptance remain pending.
 
 See [`design/obsidian-lite.md`](design/obsidian-lite.md) and [`roadmap/desktop-obsidian.md`](roadmap/desktop-obsidian.md).
 
@@ -76,7 +77,7 @@ See [`design/obsidian-lite.md`](design/obsidian-lite.md) and [`roadmap/desktop-o
 
 ### Lexical
 
-Lexical search matches terms, phrases, headings, filenames, aliases, and technical identifiers. Native/OpenClast use Tantivy BM25. The selected in-plugin feasibility path evaluates FTS5 BM25 over the same prepared chunks and metadata; raw scores and exact total ordering are not expected to match across engines.
+Lexical search matches terms, phrases, headings, filenames, aliases, and technical identifiers. Native/OpenClast use Tantivy BM25. The published in-plugin profile uses FTS5 BM25 over project-owned prepared chunks and metadata; raw scores and exact total ordering are not expected to match across engines.
 
 ### Semantic
 
@@ -96,13 +97,13 @@ Desktop semantic and hybrid behavior is documented in [`vertical-3.md`](vertical
 | Semantic retrieval | Available when the local model is loaded | Planned governed gate |
 | Hybrid retrieval | Available when the local model is loaded | Planned governed gate |
 | Obsidian daemon-backed search | Available as a desktop beta | OpenClast uses its gateway instead |
-| Obsidian in-plugin lexical host | Contractual; not delivered; FTS5 runtime and installed Electron/frozen-BRAT compatibility Gates 1–2 are GO | Not an enterprise browser profile |
+| Obsidian in-plugin lexical host | Published in beta.15; supported multi-format extraction with Excel disabled by default; owner field acceptance pending | Not an enterprise browser profile |
 | Read-only MCP retrieval | Planned | Planned through governed OpenClast mediation |
 | Scoped chunk/evidence access | Planned | Planned with the same authorization context |
 | External connectors | File-tree registration today; materializers planned | Planned with ACL/resource normalization |
 | Structural graph retrieval | Research/later gate | Requires authorization parity before exposure |
 
-A capability existing in the desktop profile does not imply that its enterprise authorization proof is complete.
+A capability existing in the desktop profile does not imply that its enterprise authorization proof is complete. Published property projection does not imply accepted property ranking, and published grouped UX does not imply owner daily-drive or distribution acceptance.
 
 ## Canonical ownership
 

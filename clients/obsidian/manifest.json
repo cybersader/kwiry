@@ -3,7 +3,7 @@
   "name": "Kwiry Search",
   "version": "0.6.0-beta.15",
   "minAppVersion": "1.7.2",
-  "description": "Search your notes through a local kwiry daemon with lexical, semantic, and hybrid ranking.",
+  "description": "Search with in-plugin lexical or a local kwiry daemon; daemon mode also supports semantic and hybrid ranking.",
   "author": "cybersader",
   "authorUrl": "https://github.com/cybersader/kwiry",
   "isDesktopOnly": true

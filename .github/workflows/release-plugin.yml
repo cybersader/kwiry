@@ -7,39 +7,96 @@ on:
         description: Existing plain semantic-version tag to validate
         required: true
         type: string
+      ci_run_id:
+        description: Exact successful CI workflow run ID for the tag commit
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: obsidian-release-candidate-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   candidate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     defaults:
       run:
+        shell: bash
         working-directory: clients/obsidian
     steps:
-      - uses: actions/checkout@v4
+      - name: Require trusted default-branch workflow revision
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          default_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
+          test "$GITHUB_REF" = "refs/heads/${default_branch}"
+          trusted_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" --jq '.sha')
+          test "$GITHUB_SHA" = "$trusted_sha"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - name: Bind tag and selected CI run
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.tag }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CANDIDATE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            printf 'Candidate tag is not a plain semantic version.\n' >&2
+            exit 1
+          fi
+          if [[ ! "$CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'Selected CI run ID is invalid.\n' >&2
+            exit 1
+          fi
+          tag_commit=$(git rev-parse -q --verify "refs/tags/$CANDIDATE_TAG^{commit}")
+          test "$(git rev-parse HEAD)" = "$tag_commit"
+          git cat-file -e "${GITHUB_SHA}^{commit}"
+          git merge-base --is-ancestor "$tag_commit" "$GITHUB_SHA"
+          manifest=$(node -p "require('./clients/obsidian/manifest.json').version")
+          pkg=$(node -p "require('./clients/obsidian/package.json').version")
+          test "$CANDIDATE_TAG" = "$manifest"
+          test "$CANDIDATE_TAG" = "$pkg"
+          run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CI_RUN_ID}")
+          test "$(jq -r '.name' <<<"$run")" = "CI"
+          test "$(jq -r '.event' <<<"$run")" = "workflow_dispatch"
+          test "$(jq -r '.status' <<<"$run")" = "completed"
+          test "$(jq -r '.conclusion' <<<"$run")" = "success"
+          test "$(jq -r '.head_sha' <<<"$run")" = "$tag_commit"
+          printf 'TAG_COMMIT=%s\n' "$tag_commit" >> "$GITHUB_ENV"
+          printf 'CI_RUN_ATTEMPT=%s\n' "$(jq -r '.run_attempt' <<<"$run")" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22
+          node-version: 22.23.1
           cache: npm
           cache-dependency-path: clients/obsidian/package-lock.json
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
+          shared-key: obsidian-wasm
       - name: Install pinned wasm-bindgen CLI
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - name: Install
         run: npm ci
       - name: Verify production Rust adapter
         run: |
+          set -euo pipefail
           cargo fmt --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all -- --check
           cargo clippy --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml
@@ -47,24 +104,6 @@ jobs:
           npm test --prefix rust/kwiry-obsidian-wasm
       - name: Verify plugin and deterministic evidence
         run: npm run verify
-      - name: Verify tag identity and package versions
-        env:
-          CANDIDATE_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          tag=$CANDIDATE_TAG
-          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            printf 'Candidate tag is not a plain semantic version.\n' >&2
-            exit 1
-          fi
-          tag_commit=$(git rev-parse -q --verify "refs/tags/$tag^{commit}")
-          test "$(git rev-parse HEAD)" = "$tag_commit"
-          manifest=$(node -p "require('./manifest.json').version")
-          pkg=$(node -p "require('./package.json').version")
-          if [ "$tag" != "$manifest" ] || [ "$tag" != "$pkg" ]; then
-            printf 'Candidate tag does not match package versions.\n' >&2
-            exit 1
-          fi
       - name: Prepare exact candidate package
         run: |
           set -euo pipefail
@@ -72,10 +111,64 @@ jobs:
           npm run validate:evidence -- gate5.evidence.json
           npm run validate:privacy
           npm run package:release -- .tmp/release-candidate gate5.evidence.json
-      - name: Upload candidate for separate publication authorization
-        uses: actions/upload-artifact@v4
+      - name: Run pinned real Obsidian WebDriver gate
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' \
+            npm run webdriver:release -- \
+              --candidate "$PWD/.tmp/release-candidate" \
+              --tag "$CANDIDATE_TAG" \
+              --manifest "$PWD/scripts/webdriver-release-gate-manifest.json" \
+              --evidence "$PWD/.tmp/webdriver.evidence.json"
+          npm run validate:webdriver:evidence -- .tmp/webdriver.evidence.json
+      - name: Prepare release notes as data
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="../../docs/releases/${CANDIDATE_TAG}.md"
+          output=".tmp/release-notes.md"
+          : > "$output"
+          if [ -f "$notes" ]; then
+            cp "$notes" "$output"
+            printf '\n---\n\n' >> "$output"
+          else
+            printf 'No release notes were written for %s.\n\n' "$CANDIDATE_TAG" >> "$output"
+          fi
+          {
+            echo "Kwiry Search Obsidian plugin ${CANDIDATE_TAG} (GPL-3.0-only)."
+            echo
+            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or use \`kwiry-search.zip\` for a manual installation with licence and third-party notices."
+            echo
+            echo "Corresponding source: https://github.com/${GITHUB_REPOSITORY}/tree/${CANDIDATE_TAG}/clients/obsidian"
+            echo "The narrow real-host WebDriver gate and automated Gate 5 evidence do not constitute owner field acceptance or a final supported-profile declaration."
+          } >> "$output"
+      - name: Construct immutable tested-candidate handoff
+        env:
+          CANDIDATE_TAG: ${{ inputs.tag }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          npm run prepare:release:handoff -- \
+            "$PWD/.tmp/release-candidate" \
+            "$PWD/.tmp/webdriver.evidence.json" \
+            "$PWD/.tmp/release-notes.md" \
+            "$PWD/.tmp/release-handoff" \
+            "$CANDIDATE_TAG" \
+            "$TAG_COMMIT" \
+            "$CI_RUN_ID" \
+            "$CI_RUN_ATTEMPT" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT"
+          npm run validate:release:handoff -- .tmp/release-handoff
+      - name: Upload exact validated candidate handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: kwiry-obsidian-candidate-${{ inputs.tag }}
-          path: clients/obsidian/.tmp/release-candidate/
+          name: kwiry-obsidian-validated-candidate-${{ inputs.tag }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: clients/obsidian/.tmp/release-handoff/
           retention-days: 14
           if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0

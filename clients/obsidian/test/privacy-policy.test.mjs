@@ -14,6 +14,7 @@ import {
   embedWorkerPrivacyBoundary,
   scanSourcePrivacy,
 } from "../scripts/privacy-policy.mjs";
+import { buildStoredZip } from "../scripts/stored-zip.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const policyScript = resolve(repositoryRoot, "scripts/privacy-policy.mjs");
@@ -129,6 +130,7 @@ describe("privacy policy", () => {
     const result = runPolicy("source", sourceRoot);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("machine_path src/leak.ts:1");
+    expect(result.stderr).not.toContain(privateHome("build-owner", "vault"));
     await expect(assertSourcePrivacy(sourceRoot)).rejects.toThrow("source privacy policy rejected");
   });
 
@@ -155,6 +157,7 @@ describe("privacy policy", () => {
     const result = runPolicy("package", packageRoot);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("literal_bearer main.js:6");
+    expect(result.stderr).not.toContain(bearerCredential());
     await expect(assertPackagePrivacy(packageRoot)).rejects.toThrow("package privacy policy rejected");
   });
 
@@ -239,6 +242,21 @@ describe("privacy policy", () => {
     ]);
   });
 
+  it("rejects an unsafe runtime archive without reading an outside sibling", async () => {
+    const packageRoot = await createPackageFixture();
+    const outsideValue = ["not", "scanned", "outside"].join("-");
+    await writeFile(resolve(packageRoot, "outside.txt"), outsideValue);
+    const archive = buildStoredZip([{ name: "safe", bytes: Buffer.from(outsideValue) }]);
+    Buffer.from("../x").copy(archive, 30);
+    Buffer.from("../x").copy(archive, archive.indexOf(Buffer.from("safe"), 34));
+    await writeFile(resolve(packageRoot, "kwiry-search.zip"), archive);
+
+    const result = runPolicy("package", packageRoot);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("archive_entry_unsafe kwiry-search.zip:1");
+    expect(result.stderr).not.toContain(outsideValue);
+  });
+
   it.each([
     ["credential", bearerCredential],
     ["AI attribution", aiAttribution],
@@ -248,18 +266,22 @@ describe("privacy policy", () => {
     await expect(assertPackagePrivacy(packageRoot)).rejects.toThrow("package privacy policy rejected");
   });
 
-  it("routes CI and every release candidate surface through the validator", async () => {
+  it("validates privacy before handoff and keeps publication data-only", async () => {
     const workflowRoot = resolve(repositoryRoot, "../../.github/workflows");
     const expectations = [
       ["ci.yml", "npm run validate:privacy"],
       ["release-plugin.yml", "npm run validate:privacy"],
-      ["publish-plugin-release.yml", "npm run validate:privacy"],
       ["validate-d5c-brat.yml", 'npm run validate:privacy -- package "$package"'],
     ];
     for (const [name, command] of expectations) {
       const workflow = await readFile(resolve(workflowRoot, name), "utf8");
       expect(workflow).toContain(command);
     }
+
+    const publisher = await readFile(resolve(workflowRoot, "publish-plugin-release.yml"), "utf8");
+    expect(publisher).toContain("release-handoff.json");
+    expect(publisher).not.toContain("npm run validate:privacy");
+    expect(publisher).not.toContain("actions/checkout@");
 
     const ci = await readFile(resolve(workflowRoot, "ci.yml"), "utf8");
     expect(ci).not.toContain("src test esbuild.config.mjs main.js");

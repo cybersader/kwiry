@@ -7,6 +7,8 @@ import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 
+import { parseStoredZip } from "./stored-zip.mjs";
+
 const defaultSourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
@@ -14,6 +16,13 @@ const SOURCE_TARGETS = Object.freeze([
   Object.freeze({ path: "src", kind: "directory" }),
   Object.freeze({ path: "test", kind: "directory" }),
   Object.freeze({ path: "esbuild.config.mjs", kind: "file" }),
+]);
+const RELEASE_GATE_SOURCE_TARGETS = Object.freeze([
+  "scripts/stored-zip.mjs",
+  "scripts/webdriver-release-gate.mjs",
+  "scripts/webdriver-release-gate-schema.mjs",
+  "scripts/webdriver-release-gate-manifest.json",
+  "scripts/release-candidate-handoff.mjs",
 ]);
 const GENERATED_SOURCE_TARGET = "main.js";
 
@@ -172,6 +181,21 @@ export async function scanSourcePrivacy(sourceRoot = defaultSourceRoot, {
     if (metadata.isDirectory()) files.push(...await listFiles(targetPath));
     else files.push(targetPath);
   }
+  for (const target of RELEASE_GATE_SOURCE_TARGETS) {
+    const targetPath = resolve(sourceRoot, target);
+    try {
+      const metadata = await lstat(targetPath);
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new Error(`privacy scan target must be a file: ${target}`);
+      }
+      files.push(targetPath);
+    } catch (error) {
+      // Source targets are admitted as their implementation lands. Once present
+      // they are always scanned; test fixtures and intermediate branches need
+      // not create placeholder release-gate files to satisfy this policy.
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
 
   const mainPath = resolve(sourceRoot, GENERATED_SOURCE_TARGET);
   let mainAvailable = false;
@@ -209,33 +233,22 @@ const RUNTIME_ARCHIVE = "kwiry-search.zip";
 /// than something to skip: an archive whose contents cannot be shown to match
 /// already-scanned files has escaped the privacy boundary.
 async function verifyRuntimeArchiveMirrors(packageRoot, archivePath) {
-  const bytes = await readFile(archivePath);
   const relativePath = portableRelative(packageRoot, archivePath);
-  const findings = [];
-  let offset = 0;
-  let entries = 0;
-  while (offset + 30 <= bytes.length && bytes.readUInt32LE(offset) === 0x04034b50) {
-    const method = bytes.readUInt16LE(offset + 8);
-    const size = bytes.readUInt32LE(offset + 18);
-    const nameLength = bytes.readUInt16LE(offset + 26);
-    const extraLength = bytes.readUInt16LE(offset + 28);
-    const name = bytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8");
-    const start = offset + 30 + nameLength + extraLength;
-    const entryBytes = bytes.subarray(start, start + size);
-    if (method !== 0) {
-      findings.push({ file: relativePath, rule: "archive_entry_compressed", value: name });
-    } else {
-      const sibling = resolve(packageRoot, name);
-      const siblingBytes = await readFile(sibling).catch(() => null);
-      if (siblingBytes === null || !siblingBytes.equals(entryBytes)) {
-        findings.push({ file: relativePath, rule: "archive_entry_unscanned", value: name });
-      }
-    }
-    entries += 1;
-    offset = start + size;
+  let entries;
+  try {
+    entries = parseStoredZip(await readFile(archivePath), { flat: true });
+  } catch (error) {
+    return [privacyFinding(
+      error?.code === "zip_entry_name_invalid" ? "archive_entry_unsafe" : "archive_unreadable",
+      relativePath,
+    )];
   }
-  if (entries === 0) {
-    findings.push({ file: relativePath, rule: "archive_unreadable", value: RUNTIME_ARCHIVE });
+  const findings = [];
+  for (const { name, bytes } of entries) {
+    const siblingBytes = await readFile(resolve(packageRoot, name)).catch(() => null);
+    if (siblingBytes === null || !siblingBytes.equals(bytes)) {
+      findings.push(privacyFinding("archive_entry_unscanned", relativePath));
+    }
   }
   return findings;
 }
@@ -272,6 +285,7 @@ export async function assertSourcePrivacy(sourceRoot = defaultSourceRoot, option
     sourceRoot: resolve(sourceRoot),
     files: [
       ...SOURCE_TARGETS.map(({ path }) => path),
+      ...RELEASE_GATE_SOURCE_TARGETS,
       ...(options?.requireMainArtifact === false ? [] : [GENERATED_SOURCE_TARGET]),
     ],
   };
@@ -286,9 +300,7 @@ export async function assertPackagePrivacy(packageRoot) {
 export function formatPrivacyFindings(scope, findings) {
   return [
     `${scope} privacy policy rejected ${findings.length} finding(s):`,
-    ...findings.map(({ rule, path, line, match }) =>
-      `- ${rule} ${path}:${line}: ${JSON.stringify(match)}`
-    ),
+    ...findings.map(({ rule, path, line }) => `- ${rule} ${path}:${line}`),
   ].join("\n");
 }
 
@@ -370,6 +382,10 @@ function isApprovedSyntheticFixture(path, rule, match) {
   return APPROVED_SYNTHETIC_FIXTURES[path]?.[rule]?.has(match) === true;
 }
 
+function privacyFinding(rule, path, line = 1) {
+  return { rule, path, line, match: "" };
+}
+
 async function listFiles(root) {
   const files = [];
   const entries = await readdir(root, { withFileTypes: true });
@@ -421,7 +437,7 @@ function sortFindings(findings) {
     left.path.localeCompare(right.path)
       || left.line - right.line
       || left.rule.localeCompare(right.rule)
-      || left.match.localeCompare(right.match)
+      || (left.match ?? "").localeCompare(right.match ?? "")
   );
 }
 
