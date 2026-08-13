@@ -3,9 +3,9 @@
 
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -14,7 +14,9 @@ import {
   assertObserved,
   buildEvidence,
   buildSyntheticXlsm,
+  createWebdriverPrivateRoot,
   downloadPinnedArtifact,
+  preparePinnedInstaller,
   prepareVerifiedRuntime,
   runWebdriverReleaseGate,
   validateRuntimeManifest,
@@ -169,6 +171,62 @@ describe("WebDriver release gate", () => {
     });
     expect(await readFile(resolve(layout.cache, "obsidian-app", "obsidian-1.13.7.asar"))).toEqual(asar);
     expect(await readFile(layout.driver)).toEqual(driver);
+  });
+
+  it("pre-extracts the pinned installer into the launcher cache without serving it", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-installer-"));
+    temporaryRoots.push(root);
+    const source = resolve(root, "source");
+    const archive = resolve(root, "installer.7z");
+    const executable = resolve(
+      root,
+      "cache/obsidian-installer/linux-x64/Obsidian-1.13.4/obsidian",
+    );
+    await mkdir(resolve(source, "resources"), { recursive: true });
+    await writeFile(resolve(source, "obsidian"), "pinned-installer");
+    await writeFile(resolve(source, "resources", "electron.asar"), "runtime-resource");
+    await execFileAsync("7z", ["a", archive, "."], { cwd: source });
+
+    await preparePinnedInstaller({
+      installerArchive: archive,
+      installerExecutable: executable,
+    });
+
+    expect(await readFile(executable, "utf8")).toBe("pinned-installer");
+    expect(await readFile(resolve(dirname(executable), "resources", "electron.asar"), "utf8"))
+      .toBe("runtime-resource");
+  });
+
+  it("defaults private runtime state to the repository's disposable disk-backed area", async () => {
+    const previous = process.env.KWIRY_WEBDRIVER_PRIVATE_ROOT;
+    delete process.env.KWIRY_WEBDRIVER_PRIVATE_ROOT;
+    let privateRoot;
+    try {
+      privateRoot = await createWebdriverPrivateRoot();
+    } finally {
+      if (previous !== undefined) process.env.KWIRY_WEBDRIVER_PRIVATE_ROOT = previous;
+    }
+    expect(dirname(privateRoot)).toBe(resolve(repositoryRoot, ".tmp", "webdriver-private"));
+    expect((await stat(privateRoot)).isDirectory()).toBe(true);
+    await rm(privateRoot, { recursive: true, force: true });
+  });
+
+  it("creates private runtime state under the configured disk-backed root", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-private-parent-"));
+    temporaryRoots.push(root);
+    const privateParent = resolve(root, "disk-private");
+    const previous = process.env.KWIRY_WEBDRIVER_PRIVATE_ROOT;
+    process.env.KWIRY_WEBDRIVER_PRIVATE_ROOT = privateParent;
+    let privateRoot;
+    try {
+      privateRoot = await createWebdriverPrivateRoot();
+    } finally {
+      if (previous === undefined) delete process.env.KWIRY_WEBDRIVER_PRIVATE_ROOT;
+      else process.env.KWIRY_WEBDRIVER_PRIVATE_ROOT = previous;
+    }
+    expect(dirname(privateRoot)).toBe(privateParent);
+    expect((await stat(privateRoot)).isDirectory()).toBe(true);
+    await rm(privateRoot, { recursive: true, force: true });
   });
 
   it("uses only identity-verified prepared runtime assets when supplied", async () => {
