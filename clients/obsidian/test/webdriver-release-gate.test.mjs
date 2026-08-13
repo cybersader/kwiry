@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -173,19 +173,23 @@ describe("WebDriver release gate", () => {
     expect(await readFile(layout.driver)).toEqual(driver);
   });
 
-  it("pre-extracts the pinned installer into the launcher cache without serving it", async () => {
+  it("pre-extracts the pinned AppImage into the launcher cache without serving it", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-installer-"));
     temporaryRoots.push(root);
-    const source = resolve(root, "source");
-    const archive = resolve(root, "installer.7z");
+    const archive = resolve(root, "Obsidian.AppImage");
     const executable = resolve(
       root,
       "cache/obsidian-installer/linux-x64/Obsidian-1.13.4/obsidian",
     );
-    await mkdir(resolve(source, "resources"), { recursive: true });
-    await writeFile(resolve(source, "obsidian"), "pinned-installer");
-    await writeFile(resolve(source, "resources", "electron.asar"), "runtime-resource");
-    await execFileAsync("7z", ["a", archive, "."], { cwd: source });
+    await writeFile(archive, `#!/bin/sh
+set -eu
+test "$1" = "--appimage-extract"
+mkdir -p squashfs-root/resources
+printf pinned-installer > squashfs-root/obsidian
+printf runtime-resource > squashfs-root/resources/electron.asar
+chmod 700 squashfs-root/obsidian
+`);
+    await chmod(archive, 0o600);
 
     await preparePinnedInstaller({
       installerArchive: archive,
@@ -193,6 +197,7 @@ describe("WebDriver release gate", () => {
     });
 
     expect(await readFile(executable, "utf8")).toBe("pinned-installer");
+    expect((await stat(executable)).mode & 0o700).toBe(0o700);
     expect(await readFile(resolve(dirname(executable), "resources", "electron.asar"), "utf8"))
       .toBe("runtime-resource");
   });
