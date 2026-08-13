@@ -171,6 +171,57 @@ describe("WebDriver release gate", () => {
     expect(await readFile(layout.driver)).toEqual(driver);
   });
 
+  it("uses only identity-verified prepared runtime assets when supplied", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-prepared-"));
+    temporaryRoots.push(root);
+    const prepared = resolve(root, "prepared");
+    const layout = {
+      downloads: resolve(root, "downloads"),
+      cache: resolve(root, "cache"),
+      versions: resolve(root, "versions.json"),
+      driver: resolve(root, "driver", "chromedriver"),
+    };
+    await Promise.all([
+      mkdir(prepared, { recursive: true }),
+      mkdir(layout.downloads, { recursive: true }),
+      mkdir(layout.cache, { recursive: true }),
+      mkdir(resolve(root, "driver"), { recursive: true }),
+    ]);
+    const manifest = manifestFixture();
+    const installer = Buffer.from("installer");
+    const asar = Buffer.from("app-asar");
+    const driver = Buffer.from("driver");
+    const { gzipSync } = await import("node:zlib");
+    const appArchive = gzipSync(asar);
+    const driverArchive = Buffer.from("driver-archive");
+    const preparedAssets = new Map([
+      ["installer", installer],
+      ["app", appArchive],
+      ["driver", driverArchive],
+    ]);
+    for (const [name, artifact] of Object.entries(manifest.artifacts)) {
+      const bytes = preparedAssets.get(name === "obsidian_installer" ? "installer" : name === "obsidian_app" ? "app" : "driver");
+      artifact.bytes = bytes.byteLength;
+      artifact.sha256 = sha256(bytes);
+      await writeFile(resolve(prepared, new URL(artifact.url).pathname.split("/").at(-1)), bytes);
+    }
+    manifest.derived.obsidian_app_asar = { bytes: asar.byteLength, sha256: sha256(asar) };
+    manifest.derived.chromedriver_binary = { bytes: driver.byteLength, sha256: sha256(driver) };
+    await writeFile(resolve(prepared, "chromedriver"), driver);
+    const previous = process.env.KWIRY_WEBDRIVER_RUNTIME_ASSETS;
+    process.env.KWIRY_WEBDRIVER_RUNTIME_ASSETS = prepared;
+    try {
+      await prepareVerifiedRuntime(layout, manifest, {
+        download: async () => { throw new Error("network download was used"); },
+      });
+    } finally {
+      if (previous === undefined) delete process.env.KWIRY_WEBDRIVER_RUNTIME_ASSETS;
+      else process.env.KWIRY_WEBDRIVER_RUNTIME_ASSETS = previous;
+    }
+    expect(await readFile(resolve(layout.cache, "obsidian-app", "obsidian-1.13.7.asar"))).toEqual(asar);
+    expect(await readFile(layout.driver)).toEqual(driver);
+  });
+
   it("generates deterministic XLSM content while isolating VBA text", () => {
     const first = buildSyntheticXlsm();
     const second = buildSyntheticXlsm();
