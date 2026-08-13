@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -21,6 +23,7 @@ import { parseStoredZip } from "../scripts/stored-zip.mjs";
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const manifestPath = resolve(repositoryRoot, "scripts/webdriver-release-gate-manifest.json");
 const temporaryRoots = [];
+const execFileAsync = promisify(execFile);
 const HASH = "a".repeat(64);
 
 async function createCandidateFixture() {
@@ -91,6 +94,31 @@ describe("WebDriver release gate", () => {
     expect(validateRuntimeManifest(manifest, packageJson)).toEqual(manifest);
     expect(manifest.artifacts.obsidian_installer.url).not.toContain("latest");
     expect(manifest.artifacts.chromedriver.sha256).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it("runs the CLI entry point from a checkout path containing spaces", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "kwiry webdriver cli "));
+    temporaryRoots.push(root);
+    const scriptDir = resolve(root, "scripts");
+    await mkdir(scriptDir, { recursive: true });
+    const script = resolve(scriptDir, "webdriver-release-gate.mjs");
+    const modules = [
+      "webdriver-release-gate.mjs", "production-package.mjs", "stored-zip.mjs",
+      "webdriver-release-gate-schema.mjs", "gate5-evidence-schema.mjs", "privacy-policy.mjs",
+    ];
+    for (const name of modules) {
+      await writeFile(resolve(scriptDir, name), await readFile(resolve(repositoryRoot, "scripts", name)));
+    }
+    await writeFile(resolve(root, "package.json"), await readFile(resolve(repositoryRoot, "package.json")));
+    await expect(execFileAsync(process.execPath, [
+      script,
+      "--candidate", resolve(root, "candidate"),
+      "--tag", "0.6.0-beta.16",
+      "--manifest", resolve(root, "runtime.json"),
+      "--evidence", resolve(root, "evidence.json"),
+    ], { cwd: root })).rejects.toMatchObject({
+      stderr: expect.stringContaining('"failure_stage":"candidate_invalid"'),
+    });
   });
 
   it.each([
