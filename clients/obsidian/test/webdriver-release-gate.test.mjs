@@ -15,10 +15,11 @@ import {
   buildEvidence,
   buildSyntheticXlsm,
   downloadPinnedArtifact,
+  prepareVerifiedRuntime,
   runWebdriverReleaseGate,
   validateRuntimeManifest,
 } from "../scripts/webdriver-release-gate.mjs";
-import { parseStoredZip } from "../scripts/stored-zip.mjs";
+import { buildStoredZip, parseStoredZip } from "../scripts/stored-zip.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const manifestPath = resolve(repositoryRoot, "scripts/webdriver-release-gate-manifest.json");
@@ -133,6 +134,41 @@ describe("WebDriver release gate", () => {
     expect(() => validateRuntimeManifest(manifest, {
       devDependencies: { "obsidian-launcher": "3.1.1", "selenium-webdriver": "4.39.0" },
     })).toThrow("runtime_manifest_invalid");
+  });
+
+  it("prepares the pinned runtime with a fresh gzip transform", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-runtime-"));
+    temporaryRoots.push(root);
+    const layout = {
+      downloads: resolve(root, "downloads"),
+      cache: resolve(root, "cache"),
+      versions: resolve(root, "versions.json"),
+      driver: resolve(root, "driver", "chromedriver"),
+    };
+    await Promise.all([
+      mkdir(layout.downloads, { recursive: true }),
+      mkdir(layout.cache, { recursive: true }),
+      mkdir(resolve(root, "driver"), { recursive: true }),
+    ]);
+    const manifest = manifestFixture();
+    const asar = Buffer.from("app-asar");
+    const driver = Buffer.from("driver");
+    manifest.derived.obsidian_app_asar = { bytes: asar.byteLength, sha256: sha256(asar) };
+    manifest.derived.chromedriver_binary = { bytes: driver.byteLength, sha256: sha256(driver) };
+    const { gzipSync } = await import("node:zlib");
+    await prepareVerifiedRuntime(layout, manifest, {
+      download: async (artifact, destination) => {
+        const bytes = artifact === manifest.artifacts.obsidian_app
+          ? gzipSync(asar)
+          : artifact === manifest.artifacts.chromedriver
+            ? buildStoredZip([{ name: "chromedriver", bytes: driver }])
+            : Buffer.from("installer");
+        await writeFile(destination, bytes);
+        return destination;
+      },
+    });
+    expect(await readFile(resolve(layout.cache, "obsidian-app", "obsidian-1.13.7.asar"))).toEqual(asar);
+    expect(await readFile(layout.driver)).toEqual(driver);
   });
 
   it("generates deterministic XLSM content while isolating VBA text", () => {
