@@ -37,6 +37,15 @@ jobs:
       tag_commit: ${{ steps.bind.outputs.tag_commit }}
       artifact_name: ${{ steps.bind.outputs.artifact_name }}
     steps:
+      - name: Require trusted default-branch workflow revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          default_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
+          test "$GITHUB_REF" = "refs/heads/${default_branch}"
+          trusted_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" --jq '.sha')
+          test "$GITHUB_SHA" = "$trusted_sha"
       - id: bind
         name: Bind tag, candidate run, and exact artifact
         env:
