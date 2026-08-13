@@ -269,9 +269,9 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
     const layout = await preparePrivateLayout(privateRoot);
     process.chdir(privateRoot);
     replaceEnvironment(isolatedEnvironment(layout));
-    await deps.prepareRuntime(layout, manifest, deps);
-    await deps.prepareVault(layout.vault, args.candidate);
-    const launched = await deps.launch({ layout, manifest });
+    await gateStage(() => deps.prepareRuntime(layout, manifest, deps), "runtime_prepare_failed");
+    await gateStage(() => deps.prepareVault(layout.vault, args.candidate), "vault_prepare_failed");
+    const launched = await gateStage(() => deps.launch({ layout, manifest }), "launch_failed");
     state.proc = launched.proc;
     state.installerServer = launched.installerServer;
     if (launched.installerPort) state.ports.push(launched.installerPort);
@@ -703,6 +703,15 @@ function parseArgs(args) {
     values[key.slice(2)] = key === "--tag" ? value : resolve(value);
   }
   return validateOptions(values);
+}
+
+async function gateStage(operation, code) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof WebdriverGateError) throw error;
+    throw new WebdriverGateError(code);
+  }
 }
 
 function normalizeGateError(error) {
