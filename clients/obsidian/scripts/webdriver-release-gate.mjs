@@ -416,19 +416,14 @@ async function launchPinnedObsidian({ layout, manifest }) {
     cacheDuration: Number.MAX_SAFE_INTEGER,
     interactive: false,
   });
-  await preparePinnedInstaller(layout);
-  try {
-    const launched = await launcher.launch({
-      appVersion: manifest.runtime.obsidian_app,
-      installerVersion: manifest.runtime.obsidian_installer,
-      vault: layout.vault,
-      args: ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0"],
-      spawnOptions: { detached: true, stdio: "ignore", env: process.env },
-    });
-    return launched;
-  } catch (error) {
-    throw error;
-  }
+  await gateStage(() => preparePinnedInstaller(layout), "installer_prepare_failed");
+  return gateStage(() => launcher.launch({
+    appVersion: manifest.runtime.obsidian_app,
+    installerVersion: manifest.runtime.obsidian_installer,
+    vault: layout.vault,
+    args: ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0"],
+    spawnOptions: { detached: true, stdio: "ignore", env: process.env },
+  }), "launcher_start_failed");
 }
 
 export async function preparePinnedInstaller(layout) {
