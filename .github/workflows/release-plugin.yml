@@ -118,8 +118,9 @@ jobs:
           set -euo pipefail
           stage=$(mktemp -d "${RUNNER_TEMP}/kwiry-webdriver-stage.XXXXXX")
           chmod 700 "$stage"
-          cp -a "$PWD/." "$stage/obsidian"
-          cd "$stage/obsidian"
+          mkdir "$stage/repository"
+          cp -a "$GITHUB_WORKSPACE/." "$stage/repository"
+          cd "$stage/repository/clients/obsidian"
           xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' \
             npm run webdriver:release -- \
               --candidate "$PWD/.tmp/release-candidate" \
