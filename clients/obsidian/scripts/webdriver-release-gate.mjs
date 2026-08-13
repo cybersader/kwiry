@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { pipeline } from "node:stream/promises";
-import { gunzip } from "node:zlib";
+import { createGunzip } from "node:zlib";
 
 import { describeProductionPackage } from "./production-package.mjs";
 import { buildStoredZip, parseStoredZip } from "./stored-zip.mjs";
@@ -360,7 +360,7 @@ export async function prepareVerifiedRuntime(layout, manifest, deps) {
   }
   const appAsar = resolve(layout.cache, "obsidian-app", `obsidian-${manifest.runtime.obsidian_app}.asar`);
   await mkdir(dirname(appAsar), { recursive: true });
-  await pipeline(createReadStream(downloads.obsidian_app), gunzip(), createWriteStream(appAsar));
+  await pipeline(createReadStream(downloads.obsidian_app), createGunzip(), createWriteStream(appAsar));
   await requireFileIdentity(appAsar, manifest.derived.obsidian_app_asar);
 
   const versions = {
