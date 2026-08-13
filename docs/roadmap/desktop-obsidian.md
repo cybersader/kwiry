@@ -33,11 +33,11 @@ Guided setup plus native Windows/Linux per-user lifecycle. Native installers rem
 
 State: delivered beta.
 
-The current BRAT-installable plugin provides a query modal, result rendering, explicit mode controls, and local daemon status. Current review work implements no-match copy plus intentional current/tab/split/background open, note/section insertion, exact selected-text aliases, and physical <kbd>Ctrl</kbd>+<kbd>J</kbd>/<kbd>K</kbd> navigation. Daily-drive UX, explanations, field/release acceptance, and broader distribution remain open.
+Beta.15 publishes one BRAT-installable plugin with explicit **Daemon** and **In-plugin · Lexical** profiles. Daemon retains lexical, semantic, and hybrid modes plus local daemon status. The published grouped result UX includes intentional current/tab/split/background open, note/section insertion, exact selected-text aliases, and physical <kbd>Ctrl</kbd>+<kbd>J</kbd>/<kbd>K</kbd> navigation. Daily-drive quality, explanations, owner field acceptance, and broader distribution remain open.
 
 ## D5B — no-daemon in-plugin lexical host
 
-State: Gate 5 and the owner-authorized durable machine-local warm-start design have implemented and verified review checkpoints; Gates 1–4 are owner-accepted GO. The warm-start checkpoint includes preservation of the complete active generation when a replacement rebuild is incomplete. Neither Gate 5 nor the warm-start implementation is owner/field-accepted or delivered; generated/reference-hardware performance, installed packaging/update/rollback evidence, private aggregate-only evidence, and explicit owner review remain pending.
+State: beta.15 publishes the Gate 5 active-vault lifecycle and the owner-authorized durable machine-local warm start; Gates 1–4 are owner-accepted GO. The warm-start implementation preserves the complete active generation when a replacement rebuild is incomplete. Generated/reference-hardware performance, installed long-running quality, private aggregate-only evidence, and explicit owner field acceptance remain pending.
 
 ### Checkpoint B0 — Tantivy-WASM feasibility — Completed NO-GO for normal incremental writer
 
@@ -65,19 +65,19 @@ Automation reported `READY_FOR_FIELD_TEST`; the owner then accepted B2 after fro
 
 The Gate 4 production baseline has explicit daemon/in-plugin selection, hardened daemon credentials/responses, truthful capability/mode/status behavior, stale-result and result-origin enforcement, a strict portable Rust adapter, fixed parameterized FTS5 SQL, and a long-lived classic Worker with one complete plus at most one staging generation. The deterministic CommonJS artifact embeds exactly the portable Rust and official SQLite WASM payloads. The complete Rust/WASM/plugin matrix, corruption and denied-capability tests, Node 22/24 exact-Worker execution, deterministic artifact evidence, and installed disposable-vault Obsidian UI-foundation witness passed before the owner accepted B4 as GO. Active-vault enumeration/events and a delivered-profile claim remain excluded.
 
-### Checkpoint B5 — active-vault lifecycle, package, and field-test — Implemented, awaiting field acceptance
+### Checkpoint B5 — active-vault lifecycle and package — Published in beta.15; owner acceptance pending
 
-The candidate builds an atomic initial in-memory index and reconciles create, modify, delete, and rename events with bounded reads/queues and no partial-corpus publication. Its deterministic functional and 10,000-note/50-MiB corpora, strict aggregate evidence schemas, lifecycle suite, exact generated Worker, disposable-vault smoke, one-file build, and candidate/publication workflow separation are implemented and pass. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional 300 MiB added-memory target; installed startup/progress and declared-reference-hardware measurements remain unavailable. Exact installed Obsidian/BRAT evidence, upgrades/rollback, private aggregate-only measurement, and explicit owner acceptance remain before calling the profile delivered.
+Beta.15 publishes an atomic initial index and reconciles create, modify, delete, and rename events with bounded reads/queues and no partial-corpus publication. It supports the published multi-format extractor set, with Excel disabled by default. Deterministic corpora, strict aggregate evidence, lifecycle and exact-Worker tests, disposable-vault smoke, and separated candidate/publication workflows supported publication. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional 300 MiB added-memory target; declared-reference-hardware, private real-vault, and owner field acceptance remain separate.
 
-### Checkpoint B6 — durable differential warm start — Implemented and verified in current review work; acceptance pending
+### Checkpoint B6 — durable differential warm start — Published in beta.15; owner acceptance pending
 
 The implementation keeps the versioned disposable cache on machine-local storage outside the vault. It restores the previous complete generation as searchable but `stale`/`reconciling` and reconciles under an explicit freshness policy: `strict_hash` reads and hashes every discovered source, while opt-in `metadata_audit` may reuse settled metadata matches with racy-file checks and bounded rolling audits. `producer_manifest` remains unimplemented architecture. A new cache is persisted only after a complete clean generation exists. The Worker remains unable to access persistence APIs; a main-thread cache port owns bounded atomic storage. An incomplete replacement rebuild cannot displace the complete active generation or prove deletions.
 
-The feasibility gate ran before protocol integration and passed: the exact official SQLite WASM proved export/deserialize integrity, restore speed, event-loop behavior, and bounded memory on the generated corpus, and a comparison matrix measured the cache mechanism and schema variants now in use. See [`../../bench/fts5-export-restore/README.md`](../../bench/fts5-export-restore/README.md). The implementation checkpoint does not establish installed production-stack proof, owner/field acceptance, merge, release, publication, or delivery, and does not authorize OPFS, a helper Worker, an extra WASM payload, or vault-relative cache storage.
+The feasibility gate ran before protocol integration and passed: the exact official SQLite WASM proved export/deserialize integrity, restore speed, event-loop behavior, and bounded memory on the generated corpus, and a comparison matrix measured the cache mechanism and schema variants now in use. See [`../../bench/fts5-export-restore/README.md`](../../bench/fts5-export-restore/README.md). The cache implementation is published in beta.15. `producer_manifest` remains unimplemented, installed long-running field quality and owner acceptance remain pending, and publication does not authorize OPFS, a helper Worker, an extra WASM payload, or vault-relative cache storage.
 
 ## D5C — relevance signals and configuration
 
-State: the open-property projection foundation is implemented and verified in current review work; query/ranking behavior and owner acceptance remain pending.
+State: the open-property projection foundation is published in beta.15. Properties remain excluded from ordinary lexical eligibility, scoring, and ranking; ranking semantics and changed ordering remain separately owner-reviewed.
 
 ### C1 — recency
 
@@ -99,7 +99,7 @@ Query-assistance status is split: zero-result copy is implemented; field scopes 
 
 ## D5D — daily drive and distribution
 
-- no-match copy plus intentional current/tab/split/background open, note/section insertion, exact selected-text aliases, and physical <kbd>Ctrl</kbd>+<kbd>J</kbd>/<kbd>K</kbd> navigation are implemented in current review work;
+- beta.15 publishes grouped source rows, exact drill-down, format chips, no-match copy, intentional current/tab/split/background open, note/section insertion, exact selected-text aliases, and physical <kbd>Ctrl</kbd>+<kbd>J</kbd>/<kbd>K</kbd> navigation;
 - truthful per-result evidence and mode presentation remain owner-reviewed;
 - setup/discovery and recovery polish remain open;
 - release compatibility, community review, and supported distribution remain open;
@@ -110,8 +110,8 @@ Query-assistance status is split: zero-result copy is implemented; field scopes 
 - D5B can proceed independently of the OpenClast IG-1 acceptance gate.
 - The Tantivy-WASM NO-GO returned engine strategy to the owner; the resulting FTS5-WASM selection authorizes only the named staged gates.
 - Gate B1 GO proves runtime viability only; B2 packaging, B3 core extraction, and production integration remain separately gated.
-- Current branch review checkpoints are durable open-property projection (`79361a9`), complete-active-generation preservation during incomplete replacement rebuilds (`0b33e42`), and intentional search-result actions (`ca91078`); none establishes merge, delivery, field acceptance, or D5C acceptance.
+- Beta.15 publishes the Gate 5 lifecycle, durable warm start, D5C property projection, and D5D grouped UX.
 - D5C scoring, result-order, profile/default, rule-grammar, evidence, and degradation changes require judged evidence and separate owner review of public behavior.
-- Passing tests do not establish owner daily-drive or distribution acceptance.
+- Passing tests or a narrow real-host WebDriver regression proof do not establish owner field, daily-drive, ranking, or distribution acceptance.
 - The B6 cache remains disposable and machine-local; cache corruption/version mismatch must discard and rebuild within In-plugin · Lexical, never switch profiles.
 - Strong hashes remain authoritative. Metadata-audit fast paths require racy-file checks and bounded rolling verification; a complete producer manifest may be authoritative only for an already-approved materialized root.

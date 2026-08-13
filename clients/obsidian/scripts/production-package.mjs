@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { validateGate5Evidence } from "./gate5-evidence-schema.mjs";
 import { assertPackagePrivacy, assertSourcePrivacy } from "./privacy-policy.mjs";
+import { buildStoredZip, parseStoredZip } from "./stored-zip.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME_FILES = Object.freeze(["main.js", "manifest.json", "styles.css"]);
@@ -224,6 +225,37 @@ export async function validateProductionPackage({
   return { packageRoot, files: expectedFiles };
 }
 
+export async function describeProductionPackage({
+  sourceRoot = root,
+  packageRoot,
+  evidencePath = resolve(sourceRoot, "gate5.evidence.json"),
+} = {}) {
+  const validated = await validateProductionPackage({ sourceRoot, packageRoot, evidencePath });
+  const identities = [];
+  for (const name of validated.files) {
+    const bytes = await readFile(resolve(packageRoot, name));
+    identities.push({ name, bytes: bytes.byteLength, sha256: sha256(bytes) });
+  }
+  identities.sort((left, right) => left.name.localeCompare(right.name));
+  const hash = createHash("sha256");
+  hash.update("kwiry-production-candidate-set-v1\0");
+  for (const identity of identities) {
+    hash.update(identity.name);
+    hash.update("\0");
+    hash.update(String(identity.bytes));
+    hash.update("\0");
+    hash.update(identity.sha256);
+    hash.update("\0");
+  }
+  const manifest = await readJson(resolve(packageRoot, "manifest.json"));
+  return {
+    version: manifest.version,
+    file_count: identities.length,
+    files: identities,
+    candidate_set_sha256: hash.digest("hex"),
+  };
+}
+
 function assertSafeOutputRoot({ sourceRoot, outputRoot, evidencePath }) {
   if (containsPath(outputRoot, sourceRoot)) {
     throw new Error("production package output must not contain the production source");
@@ -316,27 +348,21 @@ function productionPackageFiles(noticeFiles) {
 /// still installs. Assert its exact entry list, so dropping the licence back out
 /// of the install-by-hand path fails the release rather than shipping.
 async function validateRuntimeArchive(packageRoot, noticeFiles) {
-  const bytes = await readFile(resolve(packageRoot, RUNTIME_ARCHIVE));
-  const names = [];
-  let offset = 0;
-  while (offset + 30 <= bytes.length && bytes.readUInt32LE(offset) === 0x04034b50) {
-    const method = bytes.readUInt16LE(offset + 8);
-    const size = bytes.readUInt32LE(offset + 18);
-    const nameLength = bytes.readUInt16LE(offset + 26);
-    const start = offset + 30 + nameLength + bytes.readUInt16LE(offset + 28);
-    const name = bytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8");
-    if (method !== 0) {
-      throw new Error("runtime archive entries must be stored, not compressed");
-    }
+  let entries;
+  try {
+    entries = parseStoredZip(await readFile(resolve(packageRoot, RUNTIME_ARCHIVE)), { flat: true });
+  } catch {
+    throw new Error("runtime archive structure is invalid");
+  }
+  const names = entries.map(({ name }) => name).sort();
+  if (JSON.stringify(names) !== JSON.stringify(runtimeArchiveFiles(noticeFiles))) {
+    throw new Error("runtime archive must contain exactly the runtime and license files");
+  }
+  for (const { name, bytes } of entries) {
     const sibling = await readFile(resolve(packageRoot, name)).catch(() => null);
-    if (sibling === null || !sibling.equals(bytes.subarray(start, start + size))) {
+    if (sibling === null || !sibling.equals(bytes)) {
       throw new Error(`runtime archive entry does not match the package file: ${name}`);
     }
-    names.push(name);
-    offset = start + size;
-  }
-  if (JSON.stringify(names.sort()) !== JSON.stringify(runtimeArchiveFiles(noticeFiles))) {
-    throw new Error("runtime archive must contain exactly the runtime and license files");
   }
 }
 
@@ -366,74 +392,6 @@ async function writeRuntimeArchive(packageRoot, noticeFiles) {
     entries.push({ name, bytes: await readFile(resolve(packageRoot, name)) });
   }
   await writeFile(resolve(packageRoot, RUNTIME_ARCHIVE), buildStoredZip(entries));
-}
-
-function buildStoredZip(entries) {
-  const locals = [];
-  const central = [];
-  let offset = 0;
-  for (const { name, bytes } of entries) {
-    const nameBytes = Buffer.from(name, "utf8");
-    const crc = crc32(bytes);
-    const local = Buffer.alloc(30 + nameBytes.length);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(0, 8);
-    local.writeUInt16LE(0, 10);
-    local.writeUInt16LE(33, 12);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(bytes.length, 18);
-    local.writeUInt32LE(bytes.length, 22);
-    local.writeUInt16LE(nameBytes.length, 26);
-    local.writeUInt16LE(0, 28);
-    nameBytes.copy(local, 30);
-    locals.push(local, bytes);
-
-    const header = Buffer.alloc(46 + nameBytes.length);
-    header.writeUInt32LE(0x02014b50, 0);
-    header.writeUInt16LE(20, 4);
-    header.writeUInt16LE(20, 6);
-    header.writeUInt16LE(0, 8);
-    header.writeUInt16LE(0, 10);
-    header.writeUInt16LE(0, 12);
-    header.writeUInt16LE(33, 14);
-    header.writeUInt32LE(crc, 16);
-    header.writeUInt32LE(bytes.length, 20);
-    header.writeUInt32LE(bytes.length, 24);
-    header.writeUInt16LE(nameBytes.length, 28);
-    header.writeUInt32LE(0, 38);
-    header.writeUInt32LE(offset, 42);
-    nameBytes.copy(header, 46);
-    central.push(header);
-    offset += local.length + bytes.length;
-  }
-  const centralBytes = Buffer.concat(central);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(centralBytes.length, 12);
-  end.writeUInt32LE(offset, 16);
-  return Buffer.concat([...locals, centralBytes, end]);
-}
-
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let index = 0; index < 256; index += 1) {
-    let value = index;
-    for (let bit = 0; bit < 8; bit += 1) {
-      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-    }
-    table[index] = value >>> 0;
-  }
-  return table;
-})();
-
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-  return (crc ^ 0xffffffff) >>> 0;
 }
 
 async function writeChecksums(packageRoot) {

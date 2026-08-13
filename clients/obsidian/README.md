@@ -1,29 +1,28 @@
 # Kwiry Search (Obsidian plugin)
 
-The delivered beta searches through a local [kwiry](https://github.com/cybersader/kwiry) daemon: lexical (BM25), semantic (local embeddings), and hybrid (RRF) ranking over any registered tree, including trees outside this vault.
+Beta.15 publishes two explicit profiles. **Daemon** provides lexical (BM25), semantic (local embeddings), and hybrid (RRF) retrieval over registered trees. **In-plugin · Lexical** performs active-vault lexical retrieval inside desktop Obsidian through portable Kwiry Rust plus official SQLite FTS5-WASM, without a daemon or token file. The profiles never silently fall back into one another.
 
-The presentation plugin does not own parsing, chunking, ranking, authorization, or index behavior. The released beta uses the native daemon. The current D5B candidate also implements a second explicit host for environments where Obsidian may run but a daemon may not: portable Kwiry Rust preprocessing/query planning plus official SQLite FTS5-WASM behind an application-owned worker. That candidate remains awaiting Gate 5 field acceptance and is not yet a delivered profile.
+The presentation plugin does not own parsing, chunking, ranking, authorization, or index behavior. Project-owned Rust and engine adapters retain those responsibilities in both profiles.
 
 ## Current requirements
 
 - **Daemon** profile: a running kwiry daemon (`kwiry serve`, add `--semantic` for semantic/hybrid modes).
-- **In-plugin · Lexical** candidate: desktop Obsidian; no daemon or token file.
+- **In-plugin · Lexical:** desktop Obsidian; no daemon or token file; supported multi-format extraction, with Excel disabled by default.
 
-## No-daemon profile status
+## In-plugin profile status
 
-The **In-plugin · Lexical** profile is contractual but not delivered in the current release. The Tantivy normal incremental writer reached a technical NO-GO, then the official SQLite FTS5-WASM runtime and one-file installed Obsidian/frozen-BRAT gates passed. Portable Rust Gate 3 and backend-neutral production integration Gate 4 are owner-accepted GO. The Gate 5 candidate implements active-vault snapshotting, atomic publication, live create/modify/delete/rename reconciliation, progress, manual rebuild, and bounded Worker recovery; its expanded automated matrix passes. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets, but misses the provisional added-memory target; installed startup/progress and declared-reference-hardware measurements remain unavailable. Installed Obsidian, BRAT upgrade/rollback, private aggregate-only evidence, and explicit owner acceptance remain required before a delivered claim.
+**In-plugin · Lexical** is published in beta.15 with active-vault indexing, atomic publication, live create/modify/delete/rename reconciliation, progress, manual rebuild, bounded Worker recovery, and a validated disposable machine-local warm-start cache. Generated evidence meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional added-memory target; declared-reference-hardware measurement, private aggregate-only evidence, installed long-running quality, and explicit owner field acceptance remain pending. Passing automation and the narrow real-Obsidian WebDriver result-click proof are not owner acceptance.
 
-A separately approved durability checkpoint evaluates a versioned machine-local startup cache. It must restore only a complete validated generation, label it stale/reconciling until vault reconciliation completes, and remain fully disposable. SQLite export/restore integrity and peak memory are a hard feasibility gate before that protocol is implemented.
+Published scope:
 
-Candidate and approved follow-on scope:
-
-- current open vault and Markdown files only;
-- one in-memory active FTS5 index, optionally accelerated by a validated disposable cache outside the vault on machine-local storage;
+- current open vault using the supported extractor set; Excel extraction is supported but disabled by default;
+- one active FTS5 generation, optionally accelerated by a validated disposable cache outside the vault on machine-local storage;
 - lexical mode only, with no semantic/hybrid fallback;
 - explicit backend selection rather than automatic daemon failover;
 - active-vault create/modify/delete/rename reconciliation;
 - explicit `strict_hash` or metadata-audit freshness behavior with stale/reconciling disclosure;
-- future, separately reviewed relevance phases for recency, properties, folder hierarchy, and configurable profiles.
+- published recursive typed property projection as disposable derived state, not used for lexical eligibility, scoring, or ranking;
+- separately reviewed future relevance phases for recency, property ranking, folder hierarchy, and named profiles.
 
 See [`../../docs/design/obsidian-lite.md`](../../docs/design/obsidian-lite.md), [`../../docs/roadmap/desktop-obsidian.md`](../../docs/roadmap/desktop-obsidian.md), the Gate 1 [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md) evidence, and the Gate 2 [`../../bench/fts5-wasm-obsidian-probe/README.md`](../../bench/fts5-wasm-obsidian-probe/README.md) automation and field record.
 
@@ -31,7 +30,7 @@ See [`../../docs/design/obsidian-lite.md`](../../docs/design/obsidian-lite.md), 
 
 - In **Daemon** mode, the plugin communicates only with a configured literal loopback HTTP origin, using Obsidian's `requestUrl` for `POST /v0/search`, `GET /v0/status`, and `GET /v0/health`.
 - In **In-plugin · Lexical** mode, the embedded Worker has no network, filesystem/OPFS persistence, helper-Worker, daemon URL, or daemon-token capability.
-- A future cache implementation, if its feasibility gate passes, is owned by a main-thread machine-local cache port outside the vault; the Worker receives/returns only bounded validated generation bytes.
+- A main-thread machine-local cache port outside the vault owns the published disposable warm-start cache; the Worker receives/returns only bounded validated generation bytes.
 - Daemon search queries are sent only to the selected local daemon. In-plugin queries remain inside the Worker and are never written to the cache.
 - The daemon bearer token is read from a bounded regular non-symlink file immediately before each authenticated request and is never stored in plugin data, sent to the Worker, logged, or displayed.
 - No telemetry of any kind.
@@ -42,16 +41,16 @@ See [`../../docs/design/obsidian-lite.md`](../../docs/design/obsidian-lite.md), 
 2. Run **BRAT: Plugins: Add a beta plugin for testing (with or without version)** and enter `cybersader/kwiry`.
 3. Select the intended released version; no GitHub token is required for this public repository.
 
-BRAT installs `main.js`, `manifest.json`, and `styles.css` from each versioned GitHub release. Current `cybersader/kwiry` releases contain the daemon-backed production plugin. D5B's Worker/SQLite compatibility was tested through the isolated public `cybersader/kwiry-fts5-wasm-probe` repository and does not make in-plugin search available in the production plugin yet.
+BRAT installs `main.js`, `manifest.json`, and `styles.css` from each versioned GitHub release. Beta.15 contains both explicit Daemon and In-plugin · Lexical profiles in the production plugin. The earlier isolated `cybersader/kwiry-fts5-wasm-probe` remains historical compatibility evidence; it is not the production host and was not itself owner acceptance of the published profile.
 
 ## Setup
 
-1. Start the daemon; it prints its bearer-token file path.
-2. In **Settings → Kwiry Search**, select **Daemon**, set the loopback URL and token file path, and map the current Obsidian vault to its daemon vault ID for local open actions.
-3. Run the **Kwiry Search: Search notes** command (or the ribbon icon).
-4. `Tab` cycles only modes supported by the selected backend; `Enter` opens, and `Ctrl+Enter` opens in a new tab.
+1. In **Settings → Kwiry Search**, choose **In-plugin · Lexical** or **Daemon** explicitly.
+2. For In-plugin · Lexical, configure any desired supported extractors; Excel is disabled by default. No daemon or token is required.
+3. For Daemon, start `kwiry serve`, configure the literal-loopback URL and token path, and map the current vault for local open actions.
+4. Run **Kwiry Search: Search notes**. `Tab` cycles only modes supported by the selected profile; `Enter` opens, and `Ctrl+Enter` opens in a new tab.
 
-Daemon results from a different registered tree remain searchable but show a factual notice instead of opening in this vault. Selecting **In-plugin · Lexical** is explicit and never reads the daemon token. In the current Gate 5 candidate it builds and reconciles the active Markdown vault in memory; the released profile status remains unchanged until field evidence and owner acceptance authorize delivery.
+In-plugin · Lexical builds, restores, and reconciles the current vault locally. Daemon results may include registered trees outside the current vault; those results remain searchable but show a factual notice instead of opening locally.
 
 ## Development
 

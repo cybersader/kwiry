@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "platform": "linux-x64-xvfb",
+  "dependencies": {
+    "node": "22.23.1",
+    "obsidian_launcher": "3.1.1",
+    "selenium_webdriver": "4.39.0"
+  },
+  "runtime": {
+    "obsidian_app": "1.13.7",
+    "obsidian_installer": "1.13.4",
+    "electron": "43.1.1",
+    "chromium": "150.0.7871.114",
+    "chromedriver": "150.0.7871.114"
+  },
+  "artifacts": {
+    "obsidian_installer": {
+      "url": "https://github.com/obsidianmd/obsidian-releases/releases/download/v1.13.4/Obsidian-1.13.4.AppImage",
+      "bytes": 136093654,
+      "sha256": "b66f01d2a6afbb6b7abd93e4b5c6602645f03c16ad2d6dd49fd5a90dddd87872"
+    },
+    "obsidian_app": {
+      "url": "https://github.com/obsidianmd/obsidian-releases/releases/download/v1.13.7/obsidian-1.13.7.asar.gz",
+      "bytes": 8773048,
+      "sha256": "69253e39aa0b980e3cf96e9e8a8a4bed6b6481ef7021cd762f67872662d8d25a"
+    },
+    "chromedriver": {
+      "url": "https://github.com/electron/electron/releases/download/v43.1.1/chromedriver-v43.1.1-linux-x64.zip",
+      "bytes": 39355013,
+      "sha256": "772167da064a7e723be3e5152342484365e92c08bb776f0397b4e7584fbba772"
+    }
+  },
+  "derived": {
+    "obsidian_app_asar": {
+      "bytes": 25787463,
+      "sha256": "a52a7daf1e2460bae03de80f2816604bd16a56cd374fbe5ce8d1a9ef5604059d"
+    },
+    "chromedriver_binary": {
+      "bytes": 20943312,
+      "sha256": "fe5605adde60fbc4a93a1058fcea4ab5f4bae9008b07cf0cb943b113fedf15ac"
+    }
+  }
+}

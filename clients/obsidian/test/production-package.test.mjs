@@ -18,10 +18,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GATE5_TARGETS } from "../scripts/gate5-evidence-schema.mjs";
 import { embedWorkerPrivacyBoundary } from "../scripts/privacy-policy.mjs";
 import {
+  describeProductionPackage,
   prepareProductionPackage,
   validateProductionIdentity,
   validateProductionPackage,
 } from "../scripts/production-package.mjs";
+import { buildStoredZip, parseStoredZip } from "../scripts/stored-zip.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const HASH = "a".repeat(64);
@@ -301,19 +303,8 @@ describe("production release package", () => {
     await prepareProductionPackage({ sourceRoot, outputRoot: packageRoot });
 
     const bytes = await readFile(resolve(packageRoot, "kwiry-search.zip"));
-    const entries = new Map();
-    let offset = 0;
-    while (offset + 30 <= bytes.length && bytes.readUInt32LE(offset) === 0x04034b50) {
-      const size = bytes.readUInt32LE(offset + 18);
-      const nameLength = bytes.readUInt16LE(offset + 26);
-      const start = offset + 30 + nameLength + bytes.readUInt16LE(offset + 28);
-      expect(bytes.readUInt16LE(offset + 8), "archive entries must be stored").toBe(0);
-      entries.set(
-        bytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8"),
-        bytes.subarray(start, start + size),
-      );
-      offset = start + size;
-    }
+    const entries = new Map(parseStoredZip(bytes, { flat: true })
+      .map((entry) => [entry.name, entry.bytes]));
 
     expect([...entries.keys()].sort()).toEqual([
       "Apache-2.0.txt",
@@ -333,6 +324,24 @@ describe("production release package", () => {
     // The archive must not carry the release's own description or checksums.
     expect(entries.has("gate5.evidence.json")).toBe(false);
     expect(entries.has("SHA256SUMS")).toBe(false);
+  });
+
+  it("describes one deterministic candidate identity including its checksum file", async () => {
+    const sourceRoot = await createSourceFixture();
+    const packageRoot = resolve(sourceRoot, ".tmp/release");
+    await prepareProductionPackage({ sourceRoot, outputRoot: packageRoot });
+
+    const first = await describeProductionPackage({ sourceRoot, packageRoot });
+    const second = await describeProductionPackage({ sourceRoot, packageRoot });
+    expect(second).toEqual(first);
+    expect(first.version).toBe(VERSION);
+    expect(first.file_count).toBe(first.files.length);
+    expect(first.files.some(({ name }) => name === "SHA256SUMS")).toBe(true);
+    expect(first.candidate_set_sha256).toMatch(/^[a-f0-9]{64}$/u);
+
+    await writeFile(resolve(packageRoot, "styles.css"), ".changed { display: none; }\n");
+    await expect(describeProductionPackage({ sourceRoot, packageRoot }))
+      .rejects.toThrow("production package file does not match the validated source: styles.css");
   });
 
   it.each([
@@ -405,23 +414,45 @@ describe("production release package", () => {
     })).rejects.toThrow("Gate 5 evidence main artifact does not match source main.js");
   });
 
-  it("routes CI, candidate validation, and publication through the same packager", async () => {
+  it("builds packages only on read-only validation surfaces and publishes their exact handoff", async () => {
+    const workflowRoot = resolve(repositoryRoot, "../../.github/workflows");
     for (const [name, command] of [
       ["ci.yml", "npm run package:release -- .tmp/gate5-field-package gate5.evidence.json"],
       ["release-plugin.yml", "npm run package:release -- .tmp/release-candidate gate5.evidence.json"],
-      ["publish-plugin-release.yml", "npm run package:release -- .tmp/release-assets gate5.evidence.json"],
     ]) {
-      const workflow = await readFile(
-        resolve(repositoryRoot, "../../.github/workflows", name),
-        "utf8",
-      );
+      const workflow = await readFile(resolve(workflowRoot, name), "utf8");
       expect(workflow).toContain(command);
-      if (name !== "ci.yml") {
+      if (name === "release-plugin.yml") {
         expect(workflow).not.toContain(
           "cp main.js manifest.json styles.css LICENSE THIRD_PARTY_NOTICES.md",
         );
       }
     }
+
+    const publisher = await readFile(resolve(workflowRoot, "publish-plugin-release.yml"), "utf8");
+    expect(publisher).toContain("release-handoff.json");
+    expect(publisher).toContain("candidate asset identity invalid");
+    expect(publisher).not.toContain("npm run package:release");
+    expect(publisher).not.toContain("actions/checkout@");
+  });
+
+  it.each([
+    ["parent traversal", "../x"],
+    ["absolute path", "/bad"],
+    ["backslash path", "\\bad"],
+    ["directory entry", "a/bb"],
+  ])("rejects an unsafe %s before archive sibling access", async (_kind, name) => {
+    const sourceRoot = await createSourceFixture();
+    const packageRoot = resolve(sourceRoot, ".tmp/release");
+    await prepareProductionPackage({ sourceRoot, outputRoot: packageRoot });
+    const archive = buildStoredZip([{ name: "safe", bytes: Buffer.from("outside") }]);
+    const nameBytes = Buffer.from(name);
+    if (nameBytes.length > 4) throw new Error("unsafe test entry name is too long");
+    nameBytes.copy(archive, 30);
+    nameBytes.copy(archive, archive.indexOf(Buffer.from("safe"), 34));
+    await writeFile(resolve(packageRoot, "kwiry-search.zip"), archive);
+    await expect(validateProductionPackage({ sourceRoot, packageRoot }))
+      .rejects.toThrow("runtime archive structure is invalid");
   });
 
   it("fails when a notice-referenced support file is missing", async () => {

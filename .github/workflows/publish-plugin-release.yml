@@ -7,146 +7,275 @@ on:
         description: Existing validated plain semantic-version tag to publish
         required: true
         type: string
+      candidate_run_id:
+        description: Exact successful release-candidate workflow run ID
+        required: true
+        type: string
+      candidate_artifact_id:
+        description: Exact validated-candidate artifact ID from that run
+        required: true
+        type: string
+      candidate_artifact_digest:
+        description: Exact sha256 artifact digest reported by GitHub Actions
+        required: true
+        type: string
 
-permissions:
-  contents: write
-  # Reading Actions runs is what lets publication verify CI is green at the tag.
-  actions: read
+permissions: {}
+
+concurrency:
+  group: obsidian-release-publish-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    environment: obsidian-release
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: clients/obsidian
+  authorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag_commit: ${{ steps.bind.outputs.tag_commit }}
+      artifact_name: ${{ steps.bind.outputs.artifact_name }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-      - name: Require a green full CI run at this exact commit
-        # 0.6.0-beta.6 was published with four red CI jobs because nothing
-        # linked publication to a passing run. A local verification cannot
-        # substitute: it never covers Windows, the portable-only build, or a
-        # clean checkout, which is precisely where that release failed.
-        working-directory: .
+      - id: bind
+        name: Bind tag, candidate run, and exact artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            printf 'Publication tag is not a plain semantic version.\n' >&2
+            exit 1
+          fi
+          if [[ ! "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || [[ ! "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'Candidate run or artifact ID is invalid.\n' >&2
+            exit 1
+          fi
+          if [[ ! "$CANDIDATE_ARTIFACT_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            printf 'Candidate artifact digest is invalid.\n' >&2
+            exit 1
+          fi
+          tag=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")
+          object_sha=$(jq -r '.object.sha' <<<"$tag")
+          object_type=$(jq -r '.object.type' <<<"$tag")
+          if [ "$object_type" = "tag" ]; then
+            tag_commit=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" --jq '.object.sha')
+          elif [ "$object_type" = "commit" ]; then
+            tag_commit=$object_sha
+          else
+            printf 'Tag object type is unsupported.\n' >&2
+            exit 1
+          fi
+          default_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
+          trusted_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" --jq '.sha')
+          workflow=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release-plugin.yml")
+          run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}")
+          test "$(jq -r '.workflow_id' <<<"$run")" = "$(jq -r '.id' <<<"$workflow")"
+          test "$(jq -r '.path' <<<"$workflow")" = ".github/workflows/release-plugin.yml"
+          test "$(jq -r '.state' <<<"$workflow")" = "active"
+          test "$(jq -r '.event' <<<"$run")" = "workflow_dispatch"
+          test "$(jq -r '.status' <<<"$run")" = "completed"
+          test "$(jq -r '.conclusion' <<<"$run")" = "success"
+          test "$(jq -r '.head_repository.full_name' <<<"$run")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r '.head_branch' <<<"$run")" = "$default_branch"
+          test "$(jq -r '.head_sha' <<<"$run")" = "$trusted_sha"
+          artifact=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}")
+          test "$(jq -r '.workflow_run.id' <<<"$artifact")" = "$CANDIDATE_RUN_ID"
+          test "$(jq -r '.expired' <<<"$artifact")" = "false"
+          test "$(jq -r '.digest' <<<"$artifact")" = "$CANDIDATE_ARTIFACT_DIGEST"
+          artifact_name=$(jq -r '.name' <<<"$artifact")
+          expected_name="kwiry-obsidian-validated-candidate-${RELEASE_TAG}-${CANDIDATE_RUN_ID}-$(jq -r '.run_attempt' <<<"$run")"
+          test "$artifact_name" = "$expected_name"
+          printf 'tag_commit=%s\n' "$tag_commit" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$artifact_name" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: authorize
+    environment: obsidian-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Re-resolve protected release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          AUTHORIZED_TAG_COMMIT: ${{ needs.authorize.outputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")
+          object_sha=$(jq -r '.object.sha' <<<"$tag")
+          object_type=$(jq -r '.object.type' <<<"$tag")
+          if [ "$object_type" = "tag" ]; then
+            current_commit=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" --jq '.object.sha')
+          elif [ "$object_type" = "commit" ]; then
+            current_commit=$object_sha
+          else
+            exit 1
+          fi
+          test "$current_commit" = "$AUTHORIZED_TAG_COMMIT"
+      - name: Download exact candidate artifact by ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 handoff
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip" > candidate.zip
+          printf '%s  candidate.zip\n' "${CANDIDATE_ARTIFACT_DIGEST#sha256:}" | sha256sum --check --strict
+          python3 - <<'PY'
+          import os
+          import stat
+          import zipfile
+
+          source = "candidate.zip"
+          destination = "handoff"
+          with zipfile.ZipFile(source) as archive:
+              seen = set()
+              for info in archive.infolist():
+                  name = info.filename
+                  if not name or name in seen or name.startswith("/") or "\\" in name:
+                      raise SystemExit("candidate artifact layout invalid")
+                  parts = name.split("/")
+                  if any(part in ("", ".", "..") for part in parts):
+                      raise SystemExit("candidate artifact layout invalid")
+                  mode = info.external_attr >> 16
+                  if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                      raise SystemExit("candidate artifact contains a special file")
+                  seen.add(name)
+              archive.extractall(destination)
+          PY
+      - name: Validate closed handoff without executing artifact code
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          TAG_COMMIT: ${{ needs.authorize.outputs.tag_commit }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+
+          root = pathlib.Path("handoff")
+          manifest_path = root / "release-handoff.json"
+          manifest = json.loads(manifest_path.read_bytes())
+          required_root = {"release-assets", "webdriver.evidence.json", "release-notes.md", "release-handoff.json", "release-handoff.sha256"}
+          if {path.name for path in root.iterdir()} != required_root:
+              raise SystemExit("candidate handoff root set invalid")
+          if any(path.is_symlink() for path in root.rglob("*")):
+              raise SystemExit("candidate handoff contains a symbolic link")
+          if manifest.get("schema_version") != 1 or manifest.get("kind") != "kwiry_obsidian_validated_candidate_handoff":
+              raise SystemExit("candidate handoff schema invalid")
+          if manifest.get("tag") != os.environ["RELEASE_TAG"] or manifest.get("tag_commit") != os.environ["TAG_COMMIT"]:
+              raise SystemExit("candidate tag binding invalid")
+          auth = manifest.get("authorization", {})
+          if str(auth.get("candidate_run_id")) != os.environ["CANDIDATE_RUN_ID"]:
+              raise SystemExit("candidate run binding invalid")
+          candidate = manifest.get("candidate", {})
+          files = candidate.get("files")
+          if not isinstance(files, list) or candidate.get("file_count") != len(files):
+              raise SystemExit("candidate file manifest invalid")
+          expected_assets = []
+          domain = hashlib.sha256(b"kwiry-production-candidate-set-v1\0")
+          for identity in files:
+              name = identity.get("name")
+              if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+                  raise SystemExit("candidate asset name invalid")
+              path = root / "release-assets" / name
+              data = path.read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              if len(data) != identity.get("bytes") or digest != identity.get("sha256"):
+                  raise SystemExit("candidate asset identity invalid")
+              expected_assets.append(name)
+              domain.update(name.encode()); domain.update(b"\0")
+              domain.update(str(len(data)).encode()); domain.update(b"\0")
+              domain.update(digest.encode()); domain.update(b"\0")
+          actual_assets = sorted(path.name for path in (root / "release-assets").iterdir() if path.is_file())
+          if actual_assets != sorted(expected_assets) or any(not path.is_file() for path in (root / "release-assets").iterdir()):
+              raise SystemExit("candidate asset set invalid")
+          if domain.hexdigest() != candidate.get("candidate_set_sha256"):
+              raise SystemExit("candidate set identity invalid")
+          checksums = []
+          for path in sorted([*(f"release-assets/{name}" for name in expected_assets), "webdriver.evidence.json", "release-handoff.json", "release-notes.md"]):
+              data = (root / path).read_bytes()
+              checksums.append(f"{hashlib.sha256(data).hexdigest()}  {path}")
+          if (root / "release-handoff.sha256").read_text() != "\n".join(checksums) + "\n":
+              raise SystemExit("candidate handoff checksums invalid")
+          evidence = (root / "webdriver.evidence.json").read_bytes()
+          notes = (root / "release-notes.md").read_bytes()
+          if hashlib.sha256(evidence).hexdigest() != manifest["webdriver_evidence"]["sha256"]:
+              raise SystemExit("WebDriver evidence identity invalid")
+          if manifest["webdriver_evidence"].get("verdict") != "SELENIUM_RELEASE_GATE_PASSED":
+              raise SystemExit("WebDriver verdict invalid")
+          if hashlib.sha256(notes).hexdigest() != manifest["release_notes"]["sha256"] or len(notes) != manifest["release_notes"]["bytes"]:
+              raise SystemExit("release notes identity invalid")
+          pathlib.Path("publish-assets.txt").write_text("\n".join(str(root / "release-assets" / name) for name in expected_assets) + "\n")
+          PY
+      - name: Create draft release from exact tested bytes
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          tag_commit=$(git rev-parse -q --verify "refs/tags/${RELEASE_TAG}^{commit}")
-          runs=$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${tag_commit}&per_page=100" \
-            --jq '.workflow_runs[] | select(.status == "completed") | .conclusion')
-          if [ -z "$runs" ]; then
-            printf 'No completed CI run exists for %s (%s). Dispatch ci.yml against the tag first.\n' \
-              "$RELEASE_TAG" "$tag_commit" >&2
-            exit 1
-          fi
-          if printf '%s\n' "$runs" | grep -qvx 'success'; then
-            printf 'CI at %s (%s) is not green. Conclusions seen:\n%s\n' \
-              "$RELEASE_TAG" "$tag_commit" "$runs" >&2
-            exit 1
-          fi
-          printf 'CI is green at %s (%s).\n' "$RELEASE_TAG" "$tag_commit"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: clients/obsidian/package-lock.json
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
-          # rust-cache keys embed the job name by default, so this job could
-          # never restore what CI's plugin jobs saved and — because a failed
-          # run saves nothing — could never warm itself either. The shared key
-          # (also set in ci.yml) lets a tag dispatch reuse main's warm cache.
-          shared-key: obsidian-wasm
-      - name: Install pinned wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      - name: Install and pre-warm the suite's builds outside the test runner
-        # The worker-runtime suite's setup performs three builds — production,
-        # guard, and a prototype variant with a different Rust feature graph —
-        # through a synchronous subprocess that blocks its vitest worker's
-        # event loop. Any one of them running cache-cold past vitest's fixed
-        # 60 s worker-RPC deadline fails the run as an unhandled "Timeout
-        # calling onTaskUpdate" with every test green; warming only the
-        # production build was measured insufficient because the prototype
-        # graph stayed cold (167 s in-suite vs CI's 76 s). This script runs
-        # the suite's exact three builds where no deadline exists.
-        run: |
-          npm ci
-          node scripts/prewarm-test-builds.mjs
-      - name: Independently verify candidate
-        run: npm run verify
-      - name: Verify tag identity and package versions
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          tag=$RELEASE_TAG
-          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            printf 'Publication tag is not a plain semantic version.\n' >&2
-            exit 1
-          fi
-          tag_commit=$(git rev-parse -q --verify "refs/tags/$tag^{commit}")
-          test "$(git rev-parse HEAD)" = "$tag_commit"
-          manifest=$(node -p "require('./manifest.json').version")
-          pkg=$(node -p "require('./package.json').version")
-          if [ "$tag" != "$manifest" ] || [ "$tag" != "$pkg" ]; then
-            printf 'Publication tag does not match package versions.\n' >&2
-            exit 1
-          fi
-      - name: Prepare exact release assets and checksums
-        run: |
-          set -euo pipefail
-          npm run --silent evidence > gate5.evidence.json
-          npm run validate:evidence -- gate5.evidence.json
-          npm run validate:privacy
-          npm run package:release -- .tmp/release-assets gate5.evidence.json
-      - name: Create explicitly authorized release
-        # The release body used to be generated entirely here, so nothing a
-        # release documented about itself — rebuild costs, licence corrections,
-        # known issues — ever reached the person installing it. When the tag has
-        # written notes, they lead the body; the standing block still follows so
-        # the licence and source pointers cannot go missing.
-        run: |
-          set -euo pipefail
-          notes="../../docs/releases/${RELEASE_TAG}.md"
-          : > /tmp/release-notes.md
-          if [ -f "$notes" ]; then
-            cat "$notes" >> /tmp/release-notes.md
-            printf '\n---\n\n' >> /tmp/release-notes.md
-          else
-            printf 'No release notes were written for %s.\n\n' "$RELEASE_TAG" >> /tmp/release-notes.md
-          fi
-          {
-            echo "Kwiry Search Obsidian plugin ${RELEASE_TAG} (GPL-3.0-only)."
-            echo
-            echo "Install via BRAT with repository \`${GITHUB_REPOSITORY}\`, or copy main.js, manifest.json, and styles.css into the plugin directory. \`kwiry-search.zip\` contains those three files together with the licence and third-party notices."
-            echo
-            echo "Corresponding source: https://github.com/${GITHUB_REPOSITORY}/tree/${RELEASE_TAG}/clients/obsidian"
-            echo
-            echo "Gate 5 automation evidence requires separate owner field acceptance and does not itself declare the in-plugin profile delivered."
-          } >> /tmp/release-notes.md
-          # A tag carrying a prerelease identifier must not be presented as
-          # "Latest". The publisher, not the release notes, decides that.
+          mapfile -t assets < publish-assets.txt
           prerelease=()
           case "$RELEASE_TAG" in
             *-*) prerelease=(--prerelease) ;;
           esac
           gh release create "$RELEASE_TAG" \
-            --repo "${GITHUB_REPOSITORY}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
             --title "kwiry-search $RELEASE_TAG" \
-            --notes-file /tmp/release-notes.md \
+            --notes-file handoff/release-notes.md \
             "${prerelease[@]}" \
-            .tmp/release-assets/*
+            "${assets[@]}"
+      - name: Verify uploaded release assets and publish
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          AUTHORIZED_TAG_COMMIT: ${{ needs.authorize.outputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")
+          object_sha=$(jq -r '.object.sha' <<<"$tag")
+          object_type=$(jq -r '.object.type' <<<"$tag")
+          if [ "$object_type" = "tag" ]; then
+            current_commit=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" --jq '.object.sha')
+          elif [ "$object_type" = "commit" ]; then
+            current_commit=$object_sha
+          else
+            exit 1
+          fi
+          test "$current_commit" = "$AUTHORIZED_TAG_COMMIT"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          manifest = json.loads(pathlib.Path("handoff/release-handoff.json").read_bytes())
+          for identity in manifest["candidate"]["files"]:
+              output = pathlib.Path("release-downloads") / identity["name"]
+              output.parent.mkdir(exist_ok=True)
+              subprocess.run([
+                  "gh", "release", "download", os.environ["RELEASE_TAG"],
+                  "--repo", os.environ["GITHUB_REPOSITORY"],
+                  "--pattern", identity["name"], "--output", str(output),
+              ], check=True)
+              data = output.read_bytes()
+              if len(data) != identity["bytes"] or hashlib.sha256(data).hexdigest() != identity["sha256"]:
+                  raise SystemExit("uploaded release asset identity invalid")
+          PY
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

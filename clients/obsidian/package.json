@@ -1,7 +1,7 @@
 {
   "name": "kwiry-search",
   "version": "0.6.0-beta.15",
-  "description": "Obsidian client for the kwiry search daemon",
+  "description": "Obsidian search client with explicit in-plugin lexical and daemon profiles",
   "license": "GPL-3.0-only",
   "main": "main.js",
   "scripts": {
@@ -9,6 +9,10 @@
     "dev:d5c": "node esbuild.config.mjs d5c",
     "build": "tsc --noEmit && node esbuild.config.mjs production",
     "package:release": "node scripts/production-package.mjs prepare",
+    "webdriver:release": "node scripts/webdriver-release-gate.mjs",
+    "validate:webdriver:evidence": "node scripts/webdriver-release-gate-schema.mjs",
+    "prepare:release:handoff": "node scripts/release-candidate-handoff.mjs prepare",
+    "validate:release:handoff": "node scripts/release-candidate-handoff.mjs validate",
     "validate:privacy": "node scripts/privacy-policy.mjs",
     "validate:release:source": "node scripts/production-package.mjs validate-source",
     "package:d5c:brat": "node scripts/package-d5c-brat.mjs",
@@ -37,9 +41,11 @@
     "builtin-modules": "^4.0.0",
     "esbuild": "^0.25.0",
     "obsidian": "^1.7.2",
+    "obsidian-launcher": "3.1.1",
+    "selenium-webdriver": "4.39.0",
     "tslib": "^2.8.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.2.7"
   },
   "dependencies": {
     "@sqlite.org/sqlite-wasm": "3.53.0-build1"
