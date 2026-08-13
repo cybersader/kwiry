@@ -35,7 +35,9 @@ describe("Obsidian release workflow policy", () => {
     expect(prepared).toBeGreaterThan(-1);
     expect(webdriver).toBeGreaterThan(prepared);
     expect(source).toContain('stage=$(mktemp -d "${RUNNER_TEMP}/kwiry-webdriver-stage.XXXXXX")');
-    expect(source).toContain('cp -a "$PWD/." "$stage/obsidian"');
+    expect(source).toContain('mkdir "$stage/repository"');
+    expect(source).toContain('cp -a "$GITHUB_WORKSPACE/." "$stage/repository"');
+    expect(source).toContain('cd "$stage/repository/clients/obsidian"');
     expect(source).toContain('cp "$PWD/.tmp/webdriver.evidence.json" "$GITHUB_WORKSPACE/clients/obsidian/.tmp/webdriver.evidence.json"');
     expect(source).toContain("xvfb-run --auto-servernum");
     expect(source).toContain("webdriver-release-gate-manifest.json");
