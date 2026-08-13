@@ -10,7 +10,7 @@ import {
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { pipeline } from "node:stream/promises";
 import { gunzip } from "node:zlib";
 
@@ -21,7 +21,7 @@ import {
   validateWebdriverReleaseEvidence,
 } from "./webdriver-release-gate-schema.mjs";
 
-const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "..");
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_MANIFEST = resolve(ROOT, "scripts/webdriver-release-gate-manifest.json");
 const QUERY = "macro boundary";
 const VBA_ORACLE = "kwiry-vba-payload-must-not-index";
@@ -233,11 +233,11 @@ export function buildEvidence({ candidate, manifest, manifestSha256, observed, c
 export async function runWebdriverReleaseGate(options, adapters = {}) {
   const deps = defaultAdapters(adapters);
   const args = validateOptions(options);
-  const packageJson = JSON.parse(await readFile(resolve(ROOT, "package.json"), "utf8"));
   let manifest;
   let candidate;
   let manifestBytes;
   try {
+    const packageJson = JSON.parse(await readFile(resolve(ROOT, "package.json"), "utf8"));
     manifestBytes = await readFile(args.manifest);
     manifest = validateRuntimeManifest(JSON.parse(manifestBytes), packageJson);
     candidate = await describeProductionPackage({ packageRoot: args.candidate });
@@ -673,7 +673,8 @@ async function canConnectLoopback(port) {
 }
 
 function validateOptions(options) {
-  if (!options || !isAbsolute(options.candidate) || !isAbsolute(options.manifest)
+  if (!options || typeof options.candidate !== "string" || typeof options.manifest !== "string"
+    || typeof options.evidence !== "string" || !isAbsolute(options.candidate) || !isAbsolute(options.manifest)
     || !isAbsolute(options.evidence) || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u.test(options.tag)) {
     throw new WebdriverGateError("candidate_invalid");
   }
@@ -724,4 +725,4 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-if (process.argv[1] === new URL(import.meta.url).pathname) await main();
+if (process.argv[1] === fileURLToPath(import.meta.url)) await main();
