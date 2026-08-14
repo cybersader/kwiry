@@ -575,6 +575,27 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     await expect(exerciseObsidian({ driver, manifest: manifestFixture() })).rejects.toThrow(stage);
   });
 
+  it("maps command-palette input timeouts to a fixed scenario stage", async () => {
+    let waitCalls = 0;
+    const actions = {
+      keyDown() { return this; },
+      sendKeys() { return this; },
+      keyUp() { return this; },
+      async perform() {},
+    };
+    const driver = {
+      wait: async () => {
+        waitCalls += 1;
+        if (waitCalls === 1) return true;
+        throw new Error("private webdriver detail");
+      },
+      executeScript: async () => {},
+      actions: () => actions,
+    };
+    await expect(exerciseObsidian({ driver, manifest: manifestFixture() }))
+      .rejects.toThrow("scenario_palette_input_failed");
+  });
+
   it("generates deterministic XLSM content while isolating VBA text", () => {
     const first = buildSyntheticXlsm();
     const second = buildSyntheticXlsm();

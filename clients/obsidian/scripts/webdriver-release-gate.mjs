@@ -812,15 +812,26 @@ export async function exerciseObsidian({ driver, manifest }) {
     })();
   `), "scenario_notice_observer_failed");
   await gateStage(
-    () => driver.actions().keyDown(Key.CONTROL).sendKeys("p").keyUp(Key.CONTROL).perform(),
-    "scenario_search_command_failed",
+    () => driver.executeScript("window.focus();"),
+    "scenario_window_focus_failed",
   );
-  await gateStage(async () => {
-    const commandInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
-    await commandInput.sendKeys("Kwiry Search: Search notes");
-    const command = await driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'Kwiry Search: Search notes')]")), UI_TIMEOUT_MS);
-    await command.click();
-  }, "scenario_search_command_failed");
+  await gateStage(
+    () => driver.actions().keyDown(Key.CONTROL).sendKeys("p").keyUp(Key.CONTROL).perform(),
+    "scenario_palette_shortcut_failed",
+  );
+  const commandInput = await gateStage(
+    () => driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS),
+    "scenario_palette_input_failed",
+  );
+  await gateStage(
+    () => commandInput.sendKeys("Kwiry Search: Search notes"),
+    "scenario_command_text_failed",
+  );
+  const command = await gateStage(
+    () => driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'Kwiry Search: Search notes')]")), UI_TIMEOUT_MS),
+    "scenario_command_lookup_failed",
+  );
+  await gateStage(() => command.click(), "scenario_command_click_failed");
   const row = await gateStage(async () => {
     const queryInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
     await queryInput.sendKeys(QUERY);
