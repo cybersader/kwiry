@@ -33,6 +33,8 @@ const SAFE_ENV_KEYS = new Set([
   "CI", "DISPLAY", "KWIRY_WEBDRIVER_RUNTIME_ASSETS", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "PATH",
   "WAYLAND_DISPLAY", "XAUTHORITY",
 ]);
+const RUNTIME_STDERR_TAIL_BYTES = 512;
+const runtimeExitDiagnostics = new WeakMap();
 
 export class WebdriverGateError extends Error {
   constructor(code) {
@@ -457,8 +459,14 @@ async function launchPinnedObsidian({ layout, manifest }) {
     "--no-sandbox",
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=0",
+    "--test-type=webdriver",
     "--tag=obsidian-launcher",
-  ], { detached: true, stdio: "ignore", env: process.env });
+  ], {
+    detached: true,
+    stdio: ["ignore", "ignore", "pipe"],
+    env: process.env,
+  });
+  trackRuntimeExitDiagnostics(proc);
   await gateStage(() => waitForSpawn(proc), "launcher_spawn_failed");
   return { proc, configDir, vault };
 }
@@ -498,6 +506,48 @@ async function waitForSpawn(proc) {
     proc.once("spawn", resolveSpawn);
     proc.once("error", rejectSpawn);
   });
+}
+
+function trackRuntimeExitDiagnostics(proc) {
+  const diagnostics = { stage: null, tail: "" };
+  runtimeExitDiagnostics.set(proc, diagnostics);
+  proc.stderr?.on("data", (chunk) => {
+    if (diagnostics.stage) return;
+    const decoded = chunk.toString("utf8");
+    const bounded = decoded.length <= 4_096
+      ? decoded
+      : `${decoded.slice(0, 2_048)}${decoded.slice(-2_048)}`;
+    const sample = `${diagnostics.tail}${bounded}`;
+    diagnostics.stage = classifyRuntimeStderr(sample);
+    diagnostics.tail = sample.slice(-RUNTIME_STDERR_TAIL_BYTES);
+  });
+}
+
+export function classifyRuntimeStderr(value) {
+  if (/error while loading shared libraries|cannot open shared object file/iu.test(value)) {
+    return "launch_dependency_missing";
+  }
+  if (/missing x server|failed to connect to the display|platform failed to initialize/iu.test(value)) {
+    return "launch_display_unavailable";
+  }
+  if (/no usable sandbox|suid sandbox|running as root without --no-sandbox|apparmor_restrict_unprivileged_userns/iu.test(value)) {
+    return "launch_sandbox_unavailable";
+  }
+  if (/gpu process (?:isn't usable|launch failed)|failed to launch gpu process/iu.test(value)) {
+    return "launch_gpu_unavailable";
+  }
+  if (/processsingleton|singleton lock|another instance is already running/iu.test(value)) {
+    return "launch_instance_conflict";
+  }
+  return null;
+}
+
+export function classifyRuntimeProcessExit(proc) {
+  const diagnostic = runtimeExitDiagnostics.get(proc)?.stage;
+  if (diagnostic) return diagnostic;
+  if (proc.signalCode !== null) return "launch_process_signaled";
+  if (proc.exitCode === 0) return "launch_process_clean_exit";
+  return "launch_process_error_exit";
 }
 
 async function attachWebdriver({ layout, manifest, cdpPort }) {
@@ -683,7 +733,7 @@ async function waitForCdpPort(configDir, proc) {
   const deadline = Date.now() + UI_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (proc.exitCode !== null || proc.signalCode !== null) {
-      throw new WebdriverGateError("launch_process_exited");
+      throw new WebdriverGateError(classifyRuntimeProcessExit(proc));
     }
     try {
       const [port] = (await readFile(path, "utf8")).trim().split("\n");

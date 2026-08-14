@@ -113,6 +113,14 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("launcher_start_failed").failure_stage).toBe("launcher_start_failed");
     expect(sanitizedGateFailure("launch_process_exited").failure_stage).toBe("launch_process_exited");
     expect(sanitizedGateFailure("cdp_ready_timeout").failure_stage).toBe("cdp_ready_timeout");
+    expect(sanitizedGateFailure("launch_dependency_missing").failure_stage).toBe("launch_dependency_missing");
+    expect(sanitizedGateFailure("launch_display_unavailable").failure_stage).toBe("launch_display_unavailable");
+    expect(sanitizedGateFailure("launch_sandbox_unavailable").failure_stage).toBe("launch_sandbox_unavailable");
+    expect(sanitizedGateFailure("launch_gpu_unavailable").failure_stage).toBe("launch_gpu_unavailable");
+    expect(sanitizedGateFailure("launch_instance_conflict").failure_stage).toBe("launch_instance_conflict");
+    expect(sanitizedGateFailure("launch_process_clean_exit").failure_stage).toBe("launch_process_clean_exit");
+    expect(sanitizedGateFailure("launch_process_error_exit").failure_stage).toBe("launch_process_error_exit");
+    expect(sanitizedGateFailure("launch_process_signaled").failure_stage).toBe("launch_process_signaled");
     expect(sanitizedGateFailure("private details").failure_stage).toBe("unexpected_failure");
   });
 });

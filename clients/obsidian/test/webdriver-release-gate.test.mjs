@@ -15,6 +15,8 @@ import {
   assertObserved,
   buildEvidence,
   buildSyntheticXlsm,
+  classifyRuntimeProcessExit,
+  classifyRuntimeStderr,
   createWebdriverPrivateRoot,
   downloadPinnedArtifact,
   preparePinnedInstaller,
@@ -295,6 +297,25 @@ chmod 700 squashfs-root/obsidian
     }
     expect(await readFile(resolve(layout.cache, "obsidian-app", "obsidian-1.13.7.asar"))).toEqual(asar);
     expect(await readFile(layout.driver)).toEqual(driver);
+  });
+
+  it.each([
+    ["loader dependency", "error while loading shared libraries: libfixture.so: cannot open shared object file", "launch_dependency_missing"],
+    ["display", "Missing X server or $DISPLAY", "launch_display_unavailable"],
+    ["sandbox", "No usable sandbox!", "launch_sandbox_unavailable"],
+    ["GPU", "GPU process isn't usable. Goodbye.", "launch_gpu_unavailable"],
+    ["single instance", "ProcessSingleton failed to create a singleton lock", "launch_instance_conflict"],
+  ])("classifies %s startup diagnostics without returning raw output", (_name, stderr, stage) => {
+    expect(classifyRuntimeStderr(stderr)).toBe(stage);
+    expect(stage).not.toContain(stderr);
+  });
+
+  it("keeps unknown process output private and classifies only process status", () => {
+    const privateDetail = ["private runtime detail under ", "/", "home", "/example"].join("");
+    expect(classifyRuntimeStderr(privateDetail)).toBeNull();
+    expect(classifyRuntimeProcessExit({ exitCode: 0, signalCode: null })).toBe("launch_process_clean_exit");
+    expect(classifyRuntimeProcessExit({ exitCode: 1, signalCode: null })).toBe("launch_process_error_exit");
+    expect(classifyRuntimeProcessExit({ exitCode: null, signalCode: "SIGTERM" })).toBe("launch_process_signaled");
   });
 
   it("generates deterministic XLSM content while isolating VBA text", () => {
