@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -153,6 +154,7 @@ describe("WebDriver release gate", () => {
       mkdir(resolve(root, "driver"), { recursive: true }),
     ]);
     const manifest = manifestFixture();
+    manifest.runtime.obsidian_installer = "1.13.4";
     const asar = Buffer.from("app-asar");
     const driver = Buffer.from("driver");
     manifest.derived.obsidian_app_asar = { bytes: asar.byteLength, sha256: sha256(asar) };
@@ -170,7 +172,16 @@ describe("WebDriver release gate", () => {
       },
     });
     expect(await readFile(resolve(layout.cache, "obsidian-app", "obsidian-1.13.7.asar"))).toEqual(asar);
-    expect(JSON.parse(await readFile(layout.versions, "utf8")).metadata.schemaVersion).toBe("2.0.0");
+    const versions = JSON.parse(await readFile(layout.versions, "utf8"));
+    expect(versions.metadata.schemaVersion).toBe("2.0.0");
+    const Launcher = (await import("obsidian-launcher")).default;
+    const launcher = new Launcher({
+      cacheDir: layout.cache,
+      versionsUrl: pathToFileURL(layout.versions).toString(),
+      cacheDuration: Number.MAX_SAFE_INTEGER,
+      interactive: false,
+    });
+    expect(await launcher.resolveVersion("1.13.7", "1.13.4")).toEqual(["1.13.7", "1.13.4"]);
     expect(await readFile(layout.driver)).toEqual(driver);
   });
 

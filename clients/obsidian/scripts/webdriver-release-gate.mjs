@@ -370,24 +370,39 @@ export async function prepareVerifiedRuntime(layout, manifest, deps) {
   await pipeline(createReadStream(downloads.obsidian_app), createGunzip(), createWriteStream(appAsar));
   await requireFileIdentity(appAsar, manifest.derived.obsidian_app_asar);
 
+  const installerRow = {
+    version: manifest.runtime.obsidian_installer,
+    minInstallerVersion: manifest.runtime.obsidian_installer,
+    maxInstallerVersion: manifest.runtime.obsidian_installer,
+    isBeta: false,
+    downloads: { appImage: manifest.artifacts.obsidian_installer.url },
+    installers: { appImage: {
+      digest: `sha256:${manifest.artifacts.obsidian_installer.sha256}`,
+      electron: manifest.runtime.electron,
+      chrome: manifest.runtime.chromium,
+      platforms: ["linux-x64"],
+    } },
+  };
+  const appRow = {
+    version: manifest.runtime.obsidian_app,
+    minInstallerVersion: manifest.runtime.obsidian_installer,
+    maxInstallerVersion: manifest.runtime.obsidian_installer,
+    isBeta: false,
+    downloads: { asar: manifest.artifacts.obsidian_app.url },
+    installers: {},
+  };
   const versions = {
     metadata: {
       schemaVersion: "2.0.0", commitDate: "1970-01-01T00:00:00Z",
       commitSha: "0000000000000000000000000000000000000000", timestamp: "1970-01-01T00:00:00Z",
     },
-    versions: [{
-      version: manifest.runtime.obsidian_app,
-      minInstallerVersion: manifest.runtime.obsidian_installer,
-      maxInstallerVersion: manifest.runtime.obsidian_installer,
-      isBeta: false,
-      downloads: { asar: manifest.artifacts.obsidian_app.url, appImage: manifest.artifacts.obsidian_installer.url },
-      installers: { appImage: {
-        digest: `sha256:${manifest.artifacts.obsidian_installer.sha256}`,
-        electron: manifest.runtime.electron,
-        chrome: manifest.runtime.chromium,
-        platforms: ["linux-x64"],
-      } },
-    }],
+    versions: manifest.runtime.obsidian_app === manifest.runtime.obsidian_installer
+      ? [{
+          ...appRow,
+          downloads: { ...appRow.downloads, ...installerRow.downloads },
+          installers: installerRow.installers,
+        }]
+      : [installerRow, appRow],
   };
   await writeFile(layout.versions, `${JSON.stringify(versions)}\n`);
   if (preparedRoot) {
