@@ -128,9 +128,9 @@ jobs:
           chmod 700 "$stage"
           mkdir "$stage/repository"
           cp -a "$GITHUB_WORKSPACE/." "$stage/repository"
-          for gate_module in webdriver-release-gate.mjs webdriver-release-gate-schema.mjs; do
-            git show "${GITHUB_SHA}:clients/obsidian/scripts/${gate_module}" \
-              > "$stage/repository/clients/obsidian/scripts/${gate_module}"
+          for gate_asset in webdriver-release-gate.mjs webdriver-release-gate-schema.mjs webdriver-release-gate-manifest.json; do
+            git show "${GITHUB_SHA}:clients/obsidian/scripts/${gate_asset}" \
+              > "$stage/repository/clients/obsidian/scripts/${gate_asset}"
           done
           node --input-type=module - \
             "$stage/repository/clients/obsidian/scripts/webdriver-release-gate.mjs" \
@@ -195,11 +195,11 @@ jobs:
           CANDIDATE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          notes="../../docs/releases/${CANDIDATE_TAG}.md"
+          notes_path="docs/releases/${CANDIDATE_TAG}.md"
           output=".tmp/release-notes.md"
           : > "$output"
-          if [ -f "$notes" ]; then
-            cp "$notes" "$output"
+          if git cat-file -e "${GITHUB_SHA}:${notes_path}"; then
+            git show "${GITHUB_SHA}:${notes_path}" > "$output"
             printf '\n---\n\n' >> "$output"
           else
             printf 'No release notes were written for %s.\n\n' "$CANDIDATE_TAG" >> "$output"

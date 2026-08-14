@@ -45,14 +45,15 @@ describe("Obsidian release workflow policy", () => {
     expect(source).toContain('mkdir "$stage/repository"');
     expect(source).toContain('cp -a "$GITHUB_WORKSPACE/." "$stage/repository"');
     expect(source).not.toContain('stage=$(mktemp -d "${GITHUB_WORKSPACE}/');
-    expect(source).toContain('for gate_module in webdriver-release-gate.mjs webdriver-release-gate-schema.mjs');
-    expect(source).toContain('git show "${GITHUB_SHA}:clients/obsidian/scripts/${gate_module}"');
+    expect(source).toContain('for gate_asset in webdriver-release-gate.mjs webdriver-release-gate-schema.mjs webdriver-release-gate-manifest.json');
+    expect(source).toContain('git show "${GITHUB_SHA}:clients/obsidian/scripts/${gate_asset}"');
     expect(source).toContain('KWIRY_WEBDRIVER_RUNTIME_ASSETS="$stage/runtime-assets"');
     expect(source).toContain('KWIRY_WEBDRIVER_PRIVATE_ROOT="$stage/private"');
     expect(source).toContain('cd "$stage/repository/clients/obsidian"');
     expect(source).toContain('cp "$PWD/.tmp/webdriver.evidence.json" "$GITHUB_WORKSPACE/clients/obsidian/.tmp/webdriver.evidence.json"');
     expect(source).toContain("xvfb-run --auto-servernum");
     expect(source).toContain("webdriver-release-gate-manifest.json");
+    expect(source).toContain('git show "${GITHUB_SHA}:${notes_path}" > "$output"');
     expect(validated).toBeGreaterThan(webdriver);
     expect(handoff).toBeGreaterThan(validated);
     expect(upload).toBeGreaterThan(handoff);

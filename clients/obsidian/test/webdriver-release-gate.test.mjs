@@ -101,6 +101,13 @@ describe("WebDriver release gate", () => {
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     const packageJson = JSON.parse(await readFile(resolve(repositoryRoot, "package.json"), "utf8"));
     expect(validateRuntimeManifest(manifest, packageJson)).toEqual(manifest);
+    expect(manifest.runtime).toEqual({
+      obsidian_app: "1.13.7",
+      obsidian_installer: "1.13.7",
+      electron: "43.3.0",
+      chromium: "150.0.7871.212",
+      chromedriver: "150.0.7871.212",
+    });
     expect(manifest.artifacts.obsidian_installer.url).not.toContain("latest");
     expect(manifest.artifacts.chromedriver.sha256).toMatch(/^[a-f0-9]{64}$/u);
   });
