@@ -22,6 +22,7 @@ import {
   classifyRuntimeProcessExit,
   classifyRuntimeOutput,
   createWebdriverPrivateRoot,
+  createWebdriverRuntimeTempRoot,
   downloadPinnedArtifact,
   pinnedInstallerLaunchPath,
   preparePinnedInstaller,
@@ -282,6 +283,51 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     await rm(privateRoot, { recursive: true, force: true });
   });
 
+  it("uses the private layout temp directory when no short runtime root is configured", async () => {
+    const previous = process.env.KWIRY_WEBDRIVER_TMP_ROOT;
+    delete process.env.KWIRY_WEBDRIVER_TMP_ROOT;
+    try {
+      expect(await createWebdriverRuntimeTempRoot({ tmp: "private-temp" })).toEqual({
+        path: "private-temp",
+        cleanupPath: null,
+      });
+    } finally {
+      if (previous !== undefined) process.env.KWIRY_WEBDRIVER_TMP_ROOT = previous;
+    }
+  });
+
+  it("creates a disposable runtime temp directory under the configured short disk-backed root", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-runtime-temp-"));
+    temporaryRoots.push(root);
+    const shortParent = resolve(root, "t");
+    const previous = process.env.KWIRY_WEBDRIVER_TMP_ROOT;
+    process.env.KWIRY_WEBDRIVER_TMP_ROOT = shortParent;
+    try {
+      const runtimeTemp = await createWebdriverRuntimeTempRoot({ tmp: "private-temp" });
+      expect(runtimeTemp.path).toBe(shortParent);
+      expect(runtimeTemp.cleanupPath).toBe(runtimeTemp.path);
+      expect((await stat(runtimeTemp.path)).isDirectory()).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.KWIRY_WEBDRIVER_TMP_ROOT;
+      else process.env.KWIRY_WEBDRIVER_TMP_ROOT = previous;
+    }
+  });
+
+  it("refuses to take ownership of a preexisting configured runtime temp directory", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-runtime-temp-existing-"));
+    temporaryRoots.push(root);
+    const shortRoot = resolve(root, "t");
+    await mkdir(shortRoot, { mode: 0o700 });
+    const previous = process.env.KWIRY_WEBDRIVER_TMP_ROOT;
+    process.env.KWIRY_WEBDRIVER_TMP_ROOT = shortRoot;
+    try {
+      await expect(createWebdriverRuntimeTempRoot({ tmp: "private-temp" })).rejects.toThrow();
+    } finally {
+      if (previous === undefined) delete process.env.KWIRY_WEBDRIVER_TMP_ROOT;
+      else process.env.KWIRY_WEBDRIVER_TMP_ROOT = previous;
+    }
+  });
+
   it("uses only identity-verified prepared runtime assets when supplied", async () => {
     const root = await mkdtemp(resolve(tmpdir(), "kwiry-webdriver-prepared-"));
     temporaryRoots.push(root);
@@ -344,6 +390,7 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     ["zygote", "FATAL: zygote_communication_linux.cc startup stopped", "launch_sandbox_unavailable"],
     ["GPU", "GPU process isn't usable. Goodbye.", "launch_gpu_unavailable"],
     ["single instance", "ProcessSingleton failed to create a singleton lock", "launch_instance_conflict"],
+    ["singleton socket path", "FATAL: process_singleton_posix.cc Socket path is too long", "launch_singleton_socket_path_failed"],
     ["crash reporter", "chrome_crashpad_handler: --database is required", "launch_crash_reporter_unavailable"],
     ["runtime resources", "Invalid file descriptor to ICU data received", "launch_runtime_resources_unavailable"],
     ["platform runtime", "GLib-GIO-ERROR: platform setup failed", "launch_platform_runtime_failed"],

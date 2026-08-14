@@ -261,6 +261,7 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
     driver: null,
     proc: null,
     ports: [],
+    runtimeTempRoot: null,
     oldCwd: process.cwd(),
     oldEnv: { ...process.env },
   };
@@ -268,8 +269,10 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
   let passed = null;
   try {
     const layout = await preparePrivateLayout(privateRoot);
+    const runtimeTemp = await createWebdriverRuntimeTempRoot(layout);
+    state.runtimeTempRoot = runtimeTemp.cleanupPath;
     process.chdir(privateRoot);
-    replaceEnvironment(isolatedEnvironment(layout));
+    replaceEnvironment(isolatedEnvironment(layout, runtimeTemp.path));
     await gateStage(() => deps.prepareRuntime(layout, manifest, deps), "runtime_prepare_failed");
     await gateStage(() => deps.prepareVault(layout.vault, args.candidate), "vault_prepare_failed");
     const launched = await gateStage(() => deps.launch({ layout, manifest }), "launch_failed");
@@ -302,10 +305,15 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
     } catch { cleanupFailed = true; }
     try { process.chdir(state.oldCwd); } catch { cleanupFailed = true; }
     try { replaceEnvironment(state.oldEnv); } catch { cleanupFailed = true; }
-    try {
-      await rm(privateRoot, { recursive: true, force: true });
-      cleanup.private_state_removed = true;
-    } catch { cleanupFailed = true; }
+    let privateStateRemovalFailed = false;
+    if (state.runtimeTempRoot) {
+      try { await rm(state.runtimeTempRoot, { recursive: true, force: true }); }
+      catch { privateStateRemovalFailed = true; }
+    }
+    try { await rm(privateRoot, { recursive: true, force: true }); }
+    catch { privateStateRemovalFailed = true; }
+    cleanup.private_state_removed = !privateStateRemovalFailed;
+    if (privateStateRemovalFailed) cleanupFailed = true;
     if ((cleanupFailed || !Object.values(cleanup).every(Boolean)) && !primaryError) {
       throw new WebdriverGateError("cleanup_incomplete");
     }
@@ -336,6 +344,15 @@ export async function createWebdriverPrivateRoot() {
   const path = await mkdtemp(resolve(parent, "kwiry-webdriver-release-"));
   await chmod(path, 0o700);
   return path;
+}
+
+export async function createWebdriverRuntimeTempRoot(layout) {
+  const configuredRoot = process.env.KWIRY_WEBDRIVER_TMP_ROOT;
+  if (!configuredRoot) return { path: layout.tmp, cleanupPath: null };
+  const path = resolve(configuredRoot);
+  await mkdir(path, { mode: 0o700 });
+  await chmod(path, 0o700);
+  return { path, cleanupPath: path };
 }
 
 function defaultAdapters(overrides) {
@@ -612,7 +629,8 @@ export function classifyRuntimeOutput(value) {
   if (/gpu process (?:isn't usable|launch failed)|failed to launch gpu process|gpu_|gl_surface|egl|angle/iu.test(value)) {
     return "launch_gpu_unavailable";
   }
-  if (/processsingleton|singleton lock|another instance is already running/iu.test(value)) {
+  if (/process_?singleton|singleton lock|another instance is already running/iu.test(value)) {
+    if (/socket path.*too long|path length/iu.test(value)) return "launch_singleton_socket_path_failed";
     return "launch_instance_conflict";
   }
   if (/crashpad|crash reporter.*failed/iu.test(value)) {
@@ -874,13 +892,13 @@ export async function prepareVault(vault, candidate) {
   await writeFile(resolve(vault, XLSM_PATH), buildSyntheticXlsm());
 }
 
-function isolatedEnvironment(layout) {
+function isolatedEnvironment(layout, runtimeTempRoot) {
   const env = {};
   for (const key of SAFE_ENV_KEYS) if (process.env[key]) env[key] = process.env[key];
   return {
     ...env,
     HOME: layout.home,
-    TMPDIR: layout.tmp,
+    TMPDIR: runtimeTempRoot,
     XDG_CONFIG_HOME: layout.config,
     XDG_CACHE_HOME: layout.cache,
     XDG_DATA_HOME: layout.data,
