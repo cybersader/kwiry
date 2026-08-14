@@ -157,6 +157,7 @@ interface ApplyCall {
 
 class FakeWorker implements IndexWorkerPort {
   readonly calls: string[] = [];
+  readonly addBatchSizes: number[] = [];
   readonly applyCalls: ApplyCall[] = [];
   readonly applyUpsertFormats: SourceFormat[][] = [];
   readonly appliedUpsertBytes = new Map<string, Uint8Array>();
@@ -187,6 +188,7 @@ class FakeWorker implements IndexWorkerPort {
 
   async addSourceBatch(generation: string, sources: SourceUpsert[]): Promise<IndexCounts> {
     this.calls.push(`add:${sources.map((source) => source.descriptor.path).join(",")}`);
+    this.addBatchSizes.push(sources.length);
     if (generation !== this.stagingGeneration) throw new Error("wrong staging generation");
     for (const source of sources) this.stagingPaths.add(source.descriptor.path);
     return this.counts(generation, this.stagingPaths);
@@ -1565,7 +1567,7 @@ describe("InPluginIndexController", () => {
     expect(JSON.stringify({ diagnostic, status: statuses.at(-1) })).not.toContain("Secret-");
   });
 
-  it("checkpoints every 25 acknowledged initial-build batches with a conservative path cursor", async () => {
+  it("does not export periodic checkpoints during a healthy initial build", async () => {
     const source = new FakeSource();
     for (let index = 0; index < 26; index += 1) {
       source.set(`${String(index).padStart(2, "0")}.md`, `source-${index}`, 1);
@@ -1585,14 +1587,80 @@ describe("InPluginIndexController", () => {
     controller.start();
     await controller.whenIdle();
 
-    expect(worker.checkpointExportCursors).toEqual([{
-      snapshot_source_count: 26,
-      acknowledged_add_batches: 25,
-      acknowledged_prefix_sources: 25,
-      last_acknowledged_path: "24.md",
-    }]);
-    expect(store.checkpointPuts).toHaveLength(1);
-    expect(store.checkpointDiscards).toContain("completed");
+    expect(worker.checkpointExportCursors).toEqual([]);
+    expect(store.checkpointPuts).toEqual([]);
+    expect(store.checkpointDiscards).toEqual([]);
+  });
+
+  it("builds 4,556 sources past the former checkpoint boundary with Excel on and PDF off", async () => {
+    const totalSources = 4_556;
+    const source = new FakeSource();
+    let excelSources = 0;
+    for (let index = 0; index < totalSources; index += 1) {
+      const excel = index % 32 === 0;
+      if (excel) excelSources += 1;
+      const extension = excel ? "xlsx" : "md";
+      source.set(`source-${String(index).padStart(4, "0")}.${extension}`, "x", 1);
+    }
+    const worker = new FakeCheckpointWorker();
+    const store = new FakeCheckpointStore(
+      { kind: "miss", reason: "absent" },
+      { kind: "miss", reason: "absent" },
+    );
+    const enabledSourceFormats = SOURCE_FORMATS.filter((format) => format !== "pdf");
+    let latestStatus: IndexControllerStatus | null = null;
+    let observedFormerBoundary = false;
+    let observedProgressBeyondBoundary = false;
+    const failures: unknown[] = [];
+    const controller = new InPluginIndexController({
+      source,
+      worker,
+      nextGeneration: () => "generation-1",
+      onStatus: (status) => {
+        latestStatus = status;
+        const completed = status.progress?.completed ?? 0;
+        if (completed === 400) observedFormerBoundary = true;
+        if (completed > 400) observedProgressBeyondBoundary = true;
+      },
+      onFailure: (error) => failures.push(error),
+      yieldControl: () => Promise.resolve(),
+      cache: {
+        openStore: async () => ({ kind: "available", store }),
+      },
+      enabledSourceFormats,
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(observedFormerBoundary).toBe(true);
+    expect(observedProgressBeyondBoundary).toBe(true);
+    expect(worker.enabledSourceFormats).toContain("excel");
+    expect(worker.enabledSourceFormats).not.toContain("pdf");
+    expect(worker.addBatchSizes).toHaveLength(285);
+    expect(worker.addBatchSizes.slice(0, -1).every((size) => size === 16)).toBe(true);
+    expect(worker.addBatchSizes.at(-1)).toBe(12);
+    expect(worker.checkpointExportCursors).toEqual([]);
+    expect(store.checkpointPuts).toEqual([]);
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+      "commit:generation-1",
+    ]);
+    expect(worker.activePaths.size).toBe(totalSources);
+    expect(failures).toEqual([]);
+    expect(latestStatus).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-1",
+      documents: totalSources,
+      chunks: totalSources,
+      sourceFormatCounts: {
+        excel: { "indexed-complete": excelSources },
+        pdf: emptySourceFormatCounts().pdf,
+      },
+      dirty: false,
+    });
+
+    await controller.dispose();
   });
 
   it("trusts store-side conditional cleanup and performs an explicit fresh initial build", async () => {
@@ -1809,7 +1877,7 @@ describe("InPluginIndexController", () => {
     expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "c.md"]));
   });
 
-  it("rebases checkpoint batch cadence after a resumed snapshot shrinks", async () => {
+  it("persists a rebased checkpoint on shutdown after a resumed snapshot shrinks", async () => {
     const source = new FakeSource();
     source.set("a.md", "a.md", 1);
     source.set("b.md", "b.md", 1);

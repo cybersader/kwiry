@@ -68,10 +68,23 @@ export class WorkerRpcError extends Error {
   }
 }
 
+export function isUncertainWorkerFailure(error: unknown): boolean {
+  if (error instanceof AggregateError) {
+    return error.errors.some((nested) => isUncertainWorkerFailure(nested));
+  }
+  return error instanceof WorkerRpcError && (
+    error.code === "timeout"
+    || error.code === "worker_crashed"
+    || error.code === "protocol_mismatch"
+    || (error.code === "invalid_request" && error.stage === "protocol")
+  );
+}
+
 export class WorkerRpcClient {
   private readonly pending = new Map<number, PendingRequest>();
   private nextId = 1;
   private stopped = false;
+  private terminalError: Error | null = null;
 
   private readonly onMessage = (event: MessageEvent<unknown>): void => {
     const responseId = positiveResponseId(event.data);
@@ -153,12 +166,20 @@ export class WorkerRpcClient {
     return this.pending.size;
   }
 
-  request(command: RpcCommand): Promise<unknown> {
+  request(command: RpcCommand, timeoutMs = this.timeoutMs): Promise<unknown> {
     if (this.stopped) {
-      return Promise.reject(new WorkerRpcError(fixedWorkerError(
+      return Promise.reject(this.terminalError ?? new WorkerRpcError(fixedWorkerError(
         "disposed",
         "lifecycle",
         "In-plugin search Worker is disposed.",
+        false,
+      )));
+    }
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+      return Promise.reject(new WorkerRpcError(fixedWorkerError(
+        "invalid_request",
+        "protocol",
+        "In-plugin search Worker request timeout is invalid.",
         false,
       )));
     }
@@ -203,7 +224,7 @@ export class WorkerRpcClient {
           "In-plugin search Worker timed out.",
           true,
         )));
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(id, {
         command,
         expectedGeneration: isExtension
@@ -240,6 +261,7 @@ export class WorkerRpcClient {
   private poison(error: Error): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.terminalError = error;
     this.worker.removeEventListener("message", this.onMessage);
     this.worker.removeEventListener("error", this.onWorkerFailure);
     this.worker.removeEventListener("messageerror", this.onWorkerFailure);

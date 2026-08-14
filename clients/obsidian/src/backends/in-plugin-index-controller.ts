@@ -27,6 +27,7 @@ import {
   emptySourceFormatCounts,
   evictedFormats,
 } from "../worker/protocol";
+import { isUncertainWorkerFailure } from "../worker/rpc-client";
 import type {
   BuildResult,
   ExportGenerationResult,
@@ -323,8 +324,6 @@ interface SourceReadWindowLease {
   rejectDeadline: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
-
-const INITIAL_BUILD_CHECKPOINT_BATCH_CADENCE = 25;
 
 export class InPluginIndexController {
   private readonly source: ActiveVaultSource;
@@ -1803,10 +1802,6 @@ export class InPluginIndexController {
       this.inFlight = 0;
       this.activity = "apply";
       if (this.stoppingForCheckpoint) throw new ShutdownRequestedError();
-      if (progress
-        && progress.acknowledgedAddBatches % INITIAL_BUILD_CHECKPOINT_BATCH_CADENCE === 0) {
-        await this.persistInitialBuildCheckpoint("cadence");
-      }
       if (!rebuilding) {
         this.initialColdPreviewRevision += 1;
         this.initialColdPreviewProcessed = progress?.acknowledgedPrefixSources ?? this.completed;
@@ -1932,7 +1927,7 @@ export class InPluginIndexController {
   }
 
   private async persistInitialBuildCheckpoint(
-    reason: "cadence" | "shutdown" | "failure",
+    reason: "shutdown" | "failure",
   ): Promise<void> {
     if (this.checkpointRunning) {
       const running = this.checkpointRunning;
@@ -2675,8 +2670,11 @@ export class InPluginIndexController {
     let exported: ExportGenerationResult;
     try {
       exported = await this.worker.exportGeneration(generation, store.vaultCacheIdentity);
-    } catch {
-      if (this.exportTupleIsCurrent(generation, epoch)) {
+    } catch (error) {
+      if (!this.exportTupleIsCurrent(generation, epoch)) return;
+      if (isUncertainWorkerFailure(error)) {
+        this.handleFailure(error);
+      } else {
         this.cacheIssue = "cache_save_failed";
         this.emit("ready");
       }

@@ -248,7 +248,8 @@ describe("WorkerRpcClient", () => {
     worker.emitMessage(statusResponse(2));
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
     await expect(client.request({ operation: "status" })).rejects.toMatchObject({
-      code: "disposed",
+      code: "invalid_request",
+      stage: "protocol",
     });
   });
 
@@ -331,7 +332,8 @@ describe("WorkerRpcClient", () => {
     });
     await expect(pending).rejects.toMatchObject({ code: "invalid_request" });
     await expect(client.request({ operation: "status" })).rejects.toMatchObject({
-      code: "disposed",
+      code: "invalid_request",
+      stage: "protocol",
     });
   });
 
@@ -618,7 +620,8 @@ describe("WorkerRpcClient", () => {
 
     await expect(comparison).rejects.toMatchObject({ code: "invalid_request" });
     await expect(client.request({ operation: "status" })).rejects.toMatchObject({
-      code: "disposed",
+      code: "invalid_request",
+      stage: "protocol",
     });
   });
 
@@ -647,14 +650,50 @@ describe("WorkerRpcClient", () => {
     await expect(comparison).rejects.toMatchObject({ code: "invalid_request" });
   });
 
-  it("rejects pending work on crashes and all later work", async () => {
+  it("uses a per-request timeout override without changing the ordinary deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 10);
+      let overrideSettled = false;
+      const overridden = client.request({ operation: "status" }, 50);
+      void overridden.finally(() => {
+        overrideSettled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(11);
+      expect(overrideSettled).toBe(false);
+      worker.emitMessage(statusResponse(1));
+      await expect(overridden).resolves.toMatchObject({ phase: "building" });
+
+      const ordinary = client.request({ operation: "status" });
+      const ordinaryRejected = expect(ordinary).rejects.toMatchObject({ code: "timeout" });
+      await vi.advanceTimersByTimeAsync(11);
+      await ordinaryRejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects later work as disposed after an explicit stop", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
+
+    client.stop();
+
+    await expect(client.request({ operation: "status" })).rejects.toMatchObject({
+      code: "disposed",
+    });
+  });
+
+  it("rejects pending work on crashes and preserves that cause for later work", async () => {
     const worker = new MockWorker();
     const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
     const pending = client.request({ operation: "status" });
     worker.emitError();
     await expect(pending).rejects.toMatchObject({ code: "worker_crashed" });
     await expect(client.request({ operation: "status" })).rejects.toMatchObject({
-      code: "disposed",
+      code: "worker_crashed",
     });
   });
 
@@ -671,7 +710,7 @@ describe("WorkerRpcClient", () => {
       await Promise.all([firstRejected, secondRejected]);
       expect(client.pendingCount).toBe(0);
       await expect(client.request({ operation: "status" })).rejects.toMatchObject({
-        code: "disposed",
+        code: "timeout",
       });
     } finally {
       vi.useRealTimers();

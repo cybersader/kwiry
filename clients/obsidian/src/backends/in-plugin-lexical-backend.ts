@@ -16,7 +16,10 @@ import {
   createExcerptHydrator,
   extractHighlightTerms,
 } from "../hydrate-excerpt";
-import { WorkerRpcError } from "../worker/rpc-client";
+import {
+  WorkerRpcError,
+  isUncertainWorkerFailure,
+} from "../worker/rpc-client";
 import {
   InPluginWorkerSession,
   createBrowserWorkerSession,
@@ -274,7 +277,9 @@ export class InPluginLexicalBackend implements SearchBackend {
           }
           if (status.stage === "ready" && !status.dirty) {
             this.recovering = false;
-            this.automaticRecoveries = 0;
+            if (!status.issue || !isCurrentCachePersistencePending(status.issue)) {
+              this.automaticRecoveries = 0;
+            }
           }
           this.publish(mapControllerStatus(this.identity, status, this.recovering));
         },
@@ -728,18 +733,6 @@ function disposedStatus(identity: BackendIdentity): BackendStatus {
       recoverable: false,
     },
   };
-}
-
-function isUncertainWorkerFailure(error: unknown): boolean {
-  if (error instanceof AggregateError) {
-    return error.errors.some((nested) => isUncertainWorkerFailure(nested));
-  }
-  return error instanceof WorkerRpcError && (
-    error.code === "timeout"
-    || error.code === "worker_crashed"
-    || error.code === "protocol_mismatch"
-    || (error.code === "invalid_request" && error.stage === "protocol")
-  );
 }
 
 function workerBackendError(error: unknown): KwiryBackendError {

@@ -961,6 +961,60 @@ describe("InPluginLexicalBackend", () => {
       await expect(inPlugin.search({ q: "query", mode: "lexical" })).resolves.toMatchObject({
         generation: "generation-1",
       });
+      expect(session.forceDispose).not.toHaveBeenCalled();
+      expect(source.subscriptions).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("replaces the Worker once for uncertain final export failure and stops after a repeat", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("note.md", "value", 1);
+      const exportFailure = () => Promise.reject(new WorkerRpcError({
+        code: "timeout",
+        stage: "lifecycle",
+        message: "private export detail",
+        retryable: true,
+      }));
+      const failed = fakeSession({ export: exportFailure });
+      const repeated = fakeSession({ export: exportFailure });
+      const store = new FakeCacheStore({ kind: "miss", reason: "absent" });
+      const inPlugin = backend(source, [failed, repeated], {
+        openStore: async () => ({ kind: "available", store }),
+        idleExportMs: 10_000,
+      });
+
+      await inPlugin.initialize();
+      await vi.waitFor(() => expect(failed.commitBuild).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() => {
+        expect(failed.forceDispose).toHaveBeenCalledTimes(1);
+        expect(repeated.commitBuild).toHaveBeenCalledTimes(1);
+      });
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "ready",
+        searchable: true,
+        generation: "generation-2",
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(async () => {
+        await expect(inPlugin.status()).resolves.toMatchObject({
+          phase: "unavailable",
+          liveness: "terminated",
+          searchable: false,
+          issue: {
+            code: "worker_failed",
+            safeMessage: "In-plugin search Worker failed.",
+          },
+        });
+      });
+      expect(repeated.forceDispose).toHaveBeenCalledTimes(1);
+      expect(source.subscriptions).toBe(2);
+      expect(source.unsubscriptions).toBe(2);
     } finally {
       vi.useRealTimers();
     }
