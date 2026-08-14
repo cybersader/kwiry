@@ -531,13 +531,13 @@ export function trackRuntimeExitDiagnostics(proc) {
       if (pending === 0) resolveComplete();
     };
     stream.on("data", (chunk) => {
-      if (diagnostics.stage) return;
+      if (diagnostics.stage && diagnostics.stage !== "launch_runtime_fatal") return;
       const decoded = chunk.toString("utf8");
       const bounded = decoded.length <= 4_096
         ? decoded
         : `${decoded.slice(0, 2_048)}${decoded.slice(-2_048)}`;
       const sample = `${diagnostics.tail}${bounded}`;
-      diagnostics.stage = classifyRuntimeOutput(sample);
+      diagnostics.stage = classifyRuntimeOutput(sample) ?? diagnostics.stage;
       diagnostics.tail = sample.slice(-RUNTIME_OUTPUT_TAIL_BYTES);
     });
     stream.once("end", finish);
@@ -550,22 +550,22 @@ export function classifyRuntimeOutput(value) {
   if (/error while loading shared libraries|cannot open shared object file/iu.test(value)) {
     return "launch_dependency_missing";
   }
-  if (/missing x server|failed to connect to the display|platform failed to initialize/iu.test(value)) {
+  if (/missing x server|failed to connect to the display|platform failed to initialize|ozone_platform_x11|x11_util/iu.test(value)) {
     return "launch_display_unavailable";
   }
-  if (/no usable sandbox|suid sandbox|running as root without --no-sandbox|apparmor_restrict_unprivileged_userns/iu.test(value)) {
+  if (/no usable sandbox|suid sandbox|setuid_sandbox_host|zygote_host_impl_linux|sandbox_linux|running as root without --no-sandbox|apparmor_restrict_unprivileged_userns/iu.test(value)) {
     return "launch_sandbox_unavailable";
   }
-  if (/gpu process (?:isn't usable|launch failed)|failed to launch gpu process/iu.test(value)) {
+  if (/gpu process (?:isn't usable|launch failed)|failed to launch gpu process|gpu_process_host|gpu_init/iu.test(value)) {
     return "launch_gpu_unavailable";
   }
   if (/processsingleton|singleton lock|another instance is already running/iu.test(value)) {
     return "launch_instance_conflict";
   }
-  if (/crashpad_handler: --database is required|failed to (?:initialize|start) crashpad|crash reporter.*failed/iu.test(value)) {
+  if (/crashpad|crash reporter.*failed/iu.test(value)) {
     return "launch_crash_reporter_unavailable";
   }
-  if (/invalid file descriptor to icu data|failed to load (?:icu data|resources\.pak)|unable to load locale/iu.test(value)) {
+  if (/invalid file descriptor to icu data|failed to load (?:icu data|resources\.pak)|unable to load locale|icu_util|resource_bundle/iu.test(value)) {
     return "launch_runtime_resources_unavailable";
   }
   if (/\bglib-(?:error|gio-error)\b|gdk-.*error/iu.test(value)) {
