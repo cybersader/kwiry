@@ -35,11 +35,6 @@ const SAFE_ENV_KEYS = new Set([
 ]);
 const RUNTIME_OUTPUT_TAIL_BYTES = 512;
 const RUNTIME_OUTPUT_DRAIN_MS = 1_000;
-const PROVISIONAL_RUNTIME_STAGES = new Set([
-  "launch_network_runtime_failed",
-  "launch_runtime_fatal",
-  "launch_socket_runtime_failed",
-]);
 const runtimeExitDiagnostics = new WeakMap();
 
 export class WebdriverGateError extends Error {
@@ -548,7 +543,7 @@ export function trackRuntimeExitDiagnostics(proc) {
   const complete = new Promise((resolveDiagnostics) => {
     resolveComplete = resolveDiagnostics;
   });
-  const diagnostics = { stage: null, tail: "", complete };
+  const diagnostics = { stage: null, fatalStage: null, tail: "", complete };
   runtimeExitDiagnostics.set(proc, diagnostics);
   const streams = [proc.stdout, proc.stderr].filter(Boolean);
   if (streams.length === 0) {
@@ -565,7 +560,6 @@ export function trackRuntimeExitDiagnostics(proc) {
       if (pending === 0) resolveComplete();
     };
     stream.on("data", (chunk) => {
-      if (diagnostics.stage && !PROVISIONAL_RUNTIME_STAGES.has(diagnostics.stage)) return;
       const decoded = chunk.toString("utf8");
       const bounded = decoded.length <= 4_096
         ? decoded
@@ -575,12 +569,24 @@ export function trackRuntimeExitDiagnostics(proc) {
       if (classified && runtimeStageSpecificity(classified) > runtimeStageSpecificity(diagnostics.stage)) {
         diagnostics.stage = classified;
       }
+      const fatalClassified = classifyFatalRuntimeOutput(sample);
+      if (fatalClassified
+        && runtimeStageSpecificity(fatalClassified) > runtimeStageSpecificity(diagnostics.fatalStage)) {
+        diagnostics.fatalStage = fatalClassified;
+      }
       diagnostics.tail = sample.slice(-RUNTIME_OUTPUT_TAIL_BYTES);
     });
     stream.once("end", finish);
     stream.once("close", finish);
     stream.once("error", finish);
   }
+}
+
+export function classifyFatalRuntimeOutput(value) {
+  for (const line of value.split(/\r?\n/u).reverse()) {
+    if (/\bfatal:/iu.test(line)) return classifyRuntimeOutput(line);
+  }
+  return null;
 }
 
 export function classifyRuntimeOutput(value) {
@@ -660,7 +666,8 @@ export function classifyRuntimeOutput(value) {
 }
 
 export function classifyRuntimeProcessExit(proc) {
-  const diagnostic = runtimeExitDiagnostics.get(proc)?.stage;
+  const diagnostics = runtimeExitDiagnostics.get(proc);
+  const diagnostic = diagnostics?.fatalStage ?? diagnostics?.stage;
   if (diagnostic) return diagnostic;
   const signalStages = new Map([
     ["SIGABRT", "launch_process_aborted"],
