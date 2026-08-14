@@ -28,12 +28,18 @@ describe("Obsidian release workflow policy", () => {
   it("runs real Xvfb Selenium only after preparing the exact candidate and validates evidence before upload", async () => {
     const source = await workflow("release-plugin.yml");
     const prepared = source.indexOf("name: Prepare exact candidate package");
+    const windowManager = source.indexOf("name: Install pinned X11 window manager");
     const webdriver = source.indexOf("name: Run pinned real Obsidian WebDriver gate");
     const validated = source.indexOf("npm run validate:webdriver:evidence");
     const handoff = source.indexOf("name: Construct immutable tested-candidate handoff");
     const upload = source.indexOf("name: Upload exact validated candidate handoff");
     expect(prepared).toBeGreaterThan(-1);
-    expect(webdriver).toBeGreaterThan(prepared);
+    expect(windowManager).toBeGreaterThan(prepared);
+    expect(webdriver).toBeGreaterThan(windowManager);
+    expect(source).toContain("herbstluftwm=0.9.5-3");
+    expect(source).toContain("herbstluftwm >/dev/null 2>&1 &");
+    expect(source).toContain("trap cleanup_wm EXIT");
+    expect(source).toContain("+extension GLX -noreset");
     expect(source).toContain('stage=$(mktemp -d "${GITHUB_WORKSPACE}.kwiry-webdriver-stage.XXXXXX")');
     expect(source).toContain('trap cleanup_stage EXIT');
     expect(source).toContain('mkdir "$stage/repository"');
