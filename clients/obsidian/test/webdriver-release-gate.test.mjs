@@ -24,6 +24,7 @@ import {
   createWebdriverPrivateRoot,
   createWebdriverRuntimeTempRoot,
   downloadPinnedArtifact,
+  exerciseObsidian,
   pinnedInstallerLaunchPath,
   preparePinnedInstaller,
   prepareVerifiedRuntime,
@@ -548,6 +549,14 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
       stderr.end();
     });
     await expect(stage).resolves.toBe("launch_runtime_fatal");
+  });
+
+  it("maps plugin readiness errors to a fixed scenario stage", async () => {
+    const driver = {
+      wait: async () => { throw new Error("private webdriver detail"); },
+    };
+    await expect(exerciseObsidian({ driver, manifest: manifestFixture() }))
+      .rejects.toThrow("scenario_plugin_ready_failed");
   });
 
   it("generates deterministic XLSM content while isolating VBA text", () => {
