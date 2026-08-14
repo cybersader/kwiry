@@ -185,6 +185,12 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("scenario_open_hook_failed").failure_stage).toBe("scenario_open_hook_failed");
     expect(sanitizedGateFailure("scenario_notice_observer_failed").failure_stage).toBe("scenario_notice_observer_failed");
     expect(sanitizedGateFailure("scenario_search_command_failed").failure_stage).toBe("scenario_search_command_failed");
+    expect(sanitizedGateFailure("scenario_window_focus_failed").failure_stage).toBe("scenario_window_focus_failed");
+    expect(sanitizedGateFailure("scenario_palette_shortcut_failed").failure_stage).toBe("scenario_palette_shortcut_failed");
+    expect(sanitizedGateFailure("scenario_palette_input_failed").failure_stage).toBe("scenario_palette_input_failed");
+    expect(sanitizedGateFailure("scenario_command_text_failed").failure_stage).toBe("scenario_command_text_failed");
+    expect(sanitizedGateFailure("scenario_command_lookup_failed").failure_stage).toBe("scenario_command_lookup_failed");
+    expect(sanitizedGateFailure("scenario_command_click_failed").failure_stage).toBe("scenario_command_click_failed");
     expect(sanitizedGateFailure("scenario_result_lookup_failed").failure_stage).toBe("scenario_result_lookup_failed");
     expect(sanitizedGateFailure("scenario_result_activation_failed").failure_stage).toBe("scenario_result_activation_failed");
     expect(sanitizedGateFailure("scenario_modal_close_failed").failure_stage).toBe("scenario_modal_close_failed");
