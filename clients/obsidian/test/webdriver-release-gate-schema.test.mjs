@@ -111,6 +111,8 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("launcher_config_setup_failed").failure_stage).toBe("launcher_config_setup_failed");
     expect(sanitizedGateFailure("launcher_spawn_failed").failure_stage).toBe("launcher_spawn_failed");
     expect(sanitizedGateFailure("launcher_start_failed").failure_stage).toBe("launcher_start_failed");
+    expect(sanitizedGateFailure("launch_process_exited").failure_stage).toBe("launch_process_exited");
+    expect(sanitizedGateFailure("cdp_ready_timeout").failure_stage).toBe("cdp_ready_timeout");
     expect(sanitizedGateFailure("private details").failure_stage).toBe("unexpected_failure");
   });
 });
