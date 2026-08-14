@@ -40,7 +40,7 @@ describe("Obsidian release workflow policy", () => {
     expect(source).toContain("herbstluftwm >/dev/null 2>&1 &");
     expect(source).toContain("trap cleanup_wm EXIT");
     expect(source).toContain("+extension GLX -noreset");
-    expect(source).toContain('stage=$(mktemp -d "${GITHUB_WORKSPACE}.kwiry-webdriver-stage.XXXXXX")');
+    expect(source).toContain('stage=$(mktemp -d "${GITHUB_WORKSPACE%/*}/.kw.XXXXXX")');
     expect(source).toContain('trap cleanup_stage EXIT');
     expect(source).toContain('mkdir "$stage/repository"');
     expect(source).toContain('cp -a "$GITHUB_WORKSPACE/." "$stage/repository"');
@@ -49,6 +49,7 @@ describe("Obsidian release workflow policy", () => {
     expect(source).toContain('git show "${GITHUB_SHA}:clients/obsidian/scripts/${gate_asset}"');
     expect(source).toContain('KWIRY_WEBDRIVER_RUNTIME_ASSETS="$stage/runtime-assets"');
     expect(source).toContain('KWIRY_WEBDRIVER_PRIVATE_ROOT="$stage/private"');
+    expect(source).toContain('KWIRY_WEBDRIVER_TMP_ROOT="$stage/t"');
     expect(source).toContain('cd "$stage/repository/clients/obsidian"');
     expect(source).toContain('cp "$PWD/.tmp/webdriver.evidence.json" "$GITHUB_WORKSPACE/clients/obsidian/.tmp/webdriver.evidence.json"');
     expect(source).toContain("xvfb-run --auto-servernum");
