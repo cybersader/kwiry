@@ -243,7 +243,6 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
       "--disable-gpu",
       "--disable-dev-shm-usage",
       "--ozone-platform=x11",
-      "--remote-debugging-address=127.0.0.1",
       "--remote-debugging-port=0",
       "--test-type=webdriver",
       "--tag=obsidian-launcher",
@@ -358,6 +357,10 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     ["proxy", "FATAL: proxy startup stopped", "launch_proxy_runtime_failed"],
     ["network monitor", "FATAL: network_change_notifier startup stopped", "launch_network_monitor_failed"],
     ["socket", "FATAL: socket_posix startup stopped", "launch_socket_runtime_failed"],
+    ["DevTools server", "FATAL: Cannot start http server for devtools", "launch_devtools_server_failed"],
+    ["socket collision", "FATAL: bind failed: Address already in use", "launch_socket_address_in_use"],
+    ["socket family", "FATAL: Address family not supported by protocol", "launch_socket_family_unavailable"],
+    ["socket creation", "FATAL: CreatePlatformSocket failed", "launch_socket_creation_failed"],
     ["DNS", "FATAL: host_resolver startup stopped", "launch_dns_runtime_failed"],
     ["network", "FATAL: network service startup stopped", "launch_network_runtime_failed"],
     ["security", "FATAL: NSS crypto startup stopped", "launch_security_runtime_failed"],
@@ -440,6 +443,20 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
       stderr.end();
     });
     await expect(stage).resolves.toBe("launch_socket_runtime_failed");
+  });
+
+  it("upgrades a broad socket stage when a later chunk identifies the bind failure", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = { exitCode: null, signalCode: "SIGTRAP", stdout, stderr };
+    trackRuntimeExitDiagnostics(proc);
+    stdout.write("FATAL: socket_posix.cc startup stopped");
+    const stage = awaitRuntimeProcessExitStage(proc);
+    queueMicrotask(() => {
+      stdout.end(" Address family not supported by protocol");
+      stderr.end();
+    });
+    await expect(stage).resolves.toBe("launch_socket_family_unavailable");
   });
 
   it("generates deterministic XLSM content while isolating VBA text", () => {
