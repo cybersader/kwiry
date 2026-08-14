@@ -51,7 +51,7 @@ function validEvidence() {
       open_failure_notices: 0,
       open_file_calls: 1,
       open_file_promise: "resolved",
-      expected_file_active: true,
+      expected_result_selected: true,
       vba_payload_search_results: 0,
     },
     cleanup: {

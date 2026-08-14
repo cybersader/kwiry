@@ -136,7 +136,7 @@ function webdriverEvidence(candidate, runtimeManifestSha256) {
       synthetic_xlsm: true, excel_explicitly_enabled: true, command_palette_used: true,
       webdriver_input_used: true, native_click_used: true, modal_closed: true,
       stale_notices: 0, open_failure_notices: 0, open_file_calls: 1,
-      open_file_promise: "resolved", expected_file_active: true,
+      open_file_promise: "resolved", expected_result_selected: true,
       vba_payload_search_results: 0,
     },
     cleanup: {
