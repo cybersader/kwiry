@@ -115,6 +115,7 @@ export function sanitizedGateFailure(code) {
     "launch_process_killed", "launch_process_segmentation_fault", "launch_process_terminated",
     "launch_process_trapped", "launch_failed", "webdriver_attach_failed",
     "scenario_execution_failed", "scenario_plugin_ready_failed", "scenario_instrumentation_failed",
+    "scenario_state_setup_failed", "scenario_open_hook_failed", "scenario_notice_observer_failed",
     "scenario_search_command_failed", "scenario_result_lookup_failed", "scenario_result_activation_failed",
     "scenario_modal_close_failed", "scenario_isolation_search_failed", "scenario_observation_failed",
     "result_not_rendered", "stale_notice_observed", "open_not_invoked", "open_promise_rejected",
