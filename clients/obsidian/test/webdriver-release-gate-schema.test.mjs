@@ -121,6 +121,14 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("launch_process_clean_exit").failure_stage).toBe("launch_process_clean_exit");
     expect(sanitizedGateFailure("launch_process_error_exit").failure_stage).toBe("launch_process_error_exit");
     expect(sanitizedGateFailure("launch_process_signaled").failure_stage).toBe("launch_process_signaled");
+    expect(sanitizedGateFailure("launch_process_aborted").failure_stage).toBe("launch_process_aborted");
+    expect(sanitizedGateFailure("launch_process_bus_error").failure_stage).toBe("launch_process_bus_error");
+    expect(sanitizedGateFailure("launch_process_arithmetic_fault").failure_stage).toBe("launch_process_arithmetic_fault");
+    expect(sanitizedGateFailure("launch_process_illegal_instruction").failure_stage).toBe("launch_process_illegal_instruction");
+    expect(sanitizedGateFailure("launch_process_killed").failure_stage).toBe("launch_process_killed");
+    expect(sanitizedGateFailure("launch_process_segmentation_fault").failure_stage).toBe("launch_process_segmentation_fault");
+    expect(sanitizedGateFailure("launch_process_terminated").failure_stage).toBe("launch_process_terminated");
+    expect(sanitizedGateFailure("launch_process_trapped").failure_stage).toBe("launch_process_trapped");
     expect(sanitizedGateFailure("private details").failure_stage).toBe("unexpected_failure");
   });
 });

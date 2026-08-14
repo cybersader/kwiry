@@ -557,7 +557,19 @@ export function classifyRuntimeStderr(value) {
 export function classifyRuntimeProcessExit(proc) {
   const diagnostic = runtimeExitDiagnostics.get(proc)?.stage;
   if (diagnostic) return diagnostic;
-  if (proc.signalCode !== null) return "launch_process_signaled";
+  const signalStages = new Map([
+    ["SIGABRT", "launch_process_aborted"],
+    ["SIGBUS", "launch_process_bus_error"],
+    ["SIGFPE", "launch_process_arithmetic_fault"],
+    ["SIGILL", "launch_process_illegal_instruction"],
+    ["SIGKILL", "launch_process_killed"],
+    ["SIGSEGV", "launch_process_segmentation_fault"],
+    ["SIGTERM", "launch_process_terminated"],
+    ["SIGTRAP", "launch_process_trapped"],
+  ]);
+  if (proc.signalCode !== null) {
+    return signalStages.get(proc.signalCode) ?? "launch_process_signaled";
+  }
   if (proc.exitCode === 0) return "launch_process_clean_exit";
   return "launch_process_error_exit";
 }
