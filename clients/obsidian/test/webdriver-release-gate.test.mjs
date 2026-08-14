@@ -18,6 +18,7 @@ import {
   buildEvidence,
   buildPinnedObsidianArgs,
   buildSyntheticXlsm,
+  classifyFatalRuntimeOutput,
   classifyRuntimeProcessExit,
   classifyRuntimeOutput,
   createWebdriverPrivateRoot,
@@ -373,6 +374,14 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     expect(stage).not.toContain(output);
   });
 
+  it("classifies only fatal lines when nonfatal output names another subsystem", () => {
+    expect(classifyFatalRuntimeOutput([
+      "ERROR: socket_posix.cc transient startup warning",
+      "FATAL: runtime initialization stopped",
+    ].join("\n"))).toBe("launch_runtime_fatal");
+    expect(classifyFatalRuntimeOutput("ERROR: socket_posix.cc transient startup warning")).toBeNull();
+  });
+
   it("keeps unknown process output private and classifies only process status", () => {
     const privateDetail = ["private runtime detail under ", "/", "home", "/example"].join("");
     expect(classifyRuntimeOutput(privateDetail)).toBeNull();
@@ -457,6 +466,20 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
       stderr.end();
     });
     await expect(stage).resolves.toBe("launch_socket_family_unavailable");
+  });
+
+  it("prioritizes a fatal line over an earlier nonfatal subsystem warning", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = { exitCode: null, signalCode: "SIGTRAP", stdout, stderr };
+    trackRuntimeExitDiagnostics(proc);
+    stdout.write("ERROR: socket_posix.cc transient startup warning\n");
+    const stage = awaitRuntimeProcessExitStage(proc);
+    queueMicrotask(() => {
+      stdout.end("FATAL: runtime initialization stopped\n");
+      stderr.end();
+    });
+    await expect(stage).resolves.toBe("launch_runtime_fatal");
   });
 
   it("generates deterministic XLSM content while isolating VBA text", () => {
