@@ -170,6 +170,7 @@ describe("WebDriver release gate", () => {
       },
     });
     expect(await readFile(resolve(layout.cache, "obsidian-app", "obsidian-1.13.7.asar"))).toEqual(asar);
+    expect(JSON.parse(await readFile(layout.versions, "utf8")).metadata.schemaVersion).toBe("2.0.0");
     expect(await readFile(layout.driver)).toEqual(driver);
   });
 

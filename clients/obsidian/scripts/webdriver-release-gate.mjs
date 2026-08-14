@@ -372,7 +372,7 @@ export async function prepareVerifiedRuntime(layout, manifest, deps) {
 
   const versions = {
     metadata: {
-      schemaVersion: "1", commitDate: "1970-01-01T00:00:00Z",
+      schemaVersion: "2.0.0", commitDate: "1970-01-01T00:00:00Z",
       commitSha: "0000000000000000000000000000000000000000", timestamp: "1970-01-01T00:00:00Z",
     },
     versions: [{
