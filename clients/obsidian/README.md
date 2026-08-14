@@ -59,7 +59,7 @@ Prerequisites include Rust 1.95.0, `wasm32-unknown-unknown`, `wasm-bindgen-cli` 
 ```bash
 npm install
 npm run dev        # development two-WASM build
-npm test           # unit, real-FTS5, and exact generated-Worker tests
+npm test           # ordinary tests in parallel; WASM-heavy files in bounded groups
 npm run build      # typecheck + deterministic production main.js
 npm run evidence          # strict aggregate Gate 5 automation evidence
 npm run corpus:smoke       # deterministic moderate generated-corpus smoke
@@ -68,6 +68,8 @@ npm run test-vault -- /absolute/path/to/empty-vault [--profile functional|perfor
 npm run test-vault:smoke    # functional package install/refusal/hash smoke
 npm run verify              # complete non-field plugin verification sequence
 ```
+
+`npm test` keeps ordinary test files at Vitest's normal parallelism, runs lexical conformance alone, and limits the six tests that build Rust adapters to two workers. This prevents independent test forks from launching enough concurrent `wasm-bindgen` processes to monopolize a development workstation while preserving fast execution for lightweight tests. `npm run test:d5c` uses the same two-worker ceiling for its build-heavy path.
 
 Copy or symlink `main.js`, `manifest.json`, and `styles.css` into `<vault>/.obsidian/plugins/kwiry-search/`, then enable the plugin. The [Hot-Reload plugin](https://github.com/pjeby/hot-reload) makes iteration painless.
 
