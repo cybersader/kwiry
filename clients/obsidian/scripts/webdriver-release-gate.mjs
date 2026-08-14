@@ -781,6 +781,10 @@ export async function exerciseObsidian({ driver, manifest }) {
     () => driver.wait(async () => driver.executeScript(`return Boolean(window.app?.commands?.commands?.[${JSON.stringify(`${PLUGIN_ID}:open-search`)}]);`), UI_TIMEOUT_MS),
     "scenario_command_registration_failed",
   );
+  await gateStage(
+    () => driver.wait(async () => driver.executeScript("return typeof window.app?.workspace?.getLeaf(false)?.openFile === 'function';"), UI_TIMEOUT_MS),
+    "scenario_leaf_ready_failed",
+  );
   await gateStage(() => driver.executeScript(`
     window.__kwiryWebdriverGate = { calls: 0, promise: "none", stale: 0, failure: 0 };
   `), "scenario_state_setup_failed");
