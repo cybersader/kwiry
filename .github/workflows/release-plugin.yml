@@ -122,8 +122,10 @@ jobs:
           chmod 700 "$stage"
           mkdir "$stage/repository"
           cp -a "$GITHUB_WORKSPACE/." "$stage/repository"
-          git show "${GITHUB_SHA}:clients/obsidian/scripts/webdriver-release-gate.mjs" \
-            > "$stage/repository/clients/obsidian/scripts/webdriver-release-gate.mjs"
+          for gate_module in webdriver-release-gate.mjs webdriver-release-gate-schema.mjs; do
+            git show "${GITHUB_SHA}:clients/obsidian/scripts/${gate_module}" \
+              > "$stage/repository/clients/obsidian/scripts/${gate_module}"
+          done
           node --input-type=module - \
             "$stage/repository/clients/obsidian/scripts/webdriver-release-gate.mjs" \
             "$stage/repository/clients/obsidian/scripts/webdriver-release-gate-manifest.json" \
