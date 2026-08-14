@@ -778,14 +778,17 @@ export async function exerciseObsidian({ driver, manifest }) {
     "scenario_plugin_ready_failed",
   );
   await gateStage(() => driver.executeScript(`
+    window.__kwiryWebdriverGate = { calls: 0, promise: "none", stale: 0, failure: 0 };
+  `), "scenario_state_setup_failed");
+  await gateStage(() => driver.executeScript(`
     (() => {
-      const state = { calls: 0, promise: "none", stale: 0, failure: 0 };
-      const leafProto = Object.getPrototypeOf(window.app.workspace.getLeaf(false));
-      const originalOpenFile = leafProto.openFile;
-      leafProto.openFile = function(file, options) {
+      const state = window.__kwiryWebdriverGate;
+      const leaf = window.app.workspace.getLeaf(false);
+      const originalOpenFile = leaf.openFile.bind(leaf);
+      leaf.openFile = function(file, options) {
         state.calls += 1;
         try {
-          const returned = originalOpenFile.call(this, file, options);
+          const returned = originalOpenFile(file, options);
           Promise.resolve(returned).then(() => { state.promise = "resolved"; }, () => { state.promise = "rejected"; });
           return returned;
         } catch (error) {
@@ -793,6 +796,11 @@ export async function exerciseObsidian({ driver, manifest }) {
           throw error;
         }
       };
+    })();
+  `), "scenario_open_hook_failed");
+  await gateStage(() => driver.executeScript(`
+    (() => {
+      const state = window.__kwiryWebdriverGate;
       const observer = new MutationObserver(() => {
         for (const node of document.querySelectorAll('.notice')) {
           const text = node.textContent ?? '';
@@ -801,9 +809,8 @@ export async function exerciseObsidian({ driver, manifest }) {
         }
       });
       observer.observe(document.body, { childList: true, subtree: true });
-      window.__kwiryWebdriverGate = state;
     })();
-  `), "scenario_instrumentation_failed");
+  `), "scenario_notice_observer_failed");
   await gateStage(
     () => driver.actions().keyDown(Key.CONTROL).sendKeys("p").keyUp(Key.CONTROL).perform(),
     "scenario_search_command_failed",

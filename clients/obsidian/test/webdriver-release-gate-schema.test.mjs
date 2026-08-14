@@ -181,6 +181,9 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("scenario_execution_failed").failure_stage).toBe("scenario_execution_failed");
     expect(sanitizedGateFailure("scenario_plugin_ready_failed").failure_stage).toBe("scenario_plugin_ready_failed");
     expect(sanitizedGateFailure("scenario_instrumentation_failed").failure_stage).toBe("scenario_instrumentation_failed");
+    expect(sanitizedGateFailure("scenario_state_setup_failed").failure_stage).toBe("scenario_state_setup_failed");
+    expect(sanitizedGateFailure("scenario_open_hook_failed").failure_stage).toBe("scenario_open_hook_failed");
+    expect(sanitizedGateFailure("scenario_notice_observer_failed").failure_stage).toBe("scenario_notice_observer_failed");
     expect(sanitizedGateFailure("scenario_search_command_failed").failure_stage).toBe("scenario_search_command_failed");
     expect(sanitizedGateFailure("scenario_result_lookup_failed").failure_stage).toBe("scenario_result_lookup_failed");
     expect(sanitizedGateFailure("scenario_result_activation_failed").failure_stage).toBe("scenario_result_activation_failed");

@@ -559,6 +559,22 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
       .rejects.toThrow("scenario_plugin_ready_failed");
   });
 
+  it.each([
+    ["state setup", 1, "scenario_state_setup_failed"],
+    ["open hook", 2, "scenario_open_hook_failed"],
+    ["notice observer", 3, "scenario_notice_observer_failed"],
+  ])("maps %s errors to a fixed scenario stage", async (_name, failingCall, stage) => {
+    let calls = 0;
+    const driver = {
+      wait: async () => true,
+      executeScript: async () => {
+        calls += 1;
+        if (calls === failingCall) throw new Error("private webdriver detail");
+      },
+    };
+    await expect(exerciseObsidian({ driver, manifest: manifestFixture() })).rejects.toThrow(stage);
+  });
+
   it("generates deterministic XLSM content while isolating VBA text", () => {
     const first = buildSyntheticXlsm();
     const second = buildSyntheticXlsm();
