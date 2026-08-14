@@ -121,6 +121,11 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("launch_crash_reporter_unavailable").failure_stage).toBe("launch_crash_reporter_unavailable");
     expect(sanitizedGateFailure("launch_runtime_resources_unavailable").failure_stage).toBe("launch_runtime_resources_unavailable");
     expect(sanitizedGateFailure("launch_platform_runtime_failed").failure_stage).toBe("launch_platform_runtime_failed");
+    expect(sanitizedGateFailure("launch_v8_bootstrap_failed").failure_stage).toBe("launch_v8_bootstrap_failed");
+    expect(sanitizedGateFailure("launch_electron_bootstrap_failed").failure_stage).toBe("launch_electron_bootstrap_failed");
+    expect(sanitizedGateFailure("launch_browser_bootstrap_failed").failure_stage).toBe("launch_browser_bootstrap_failed");
+    expect(sanitizedGateFailure("launch_permission_denied").failure_stage).toBe("launch_permission_denied");
+    expect(sanitizedGateFailure("launch_runtime_assertion_failed").failure_stage).toBe("launch_runtime_assertion_failed");
     expect(sanitizedGateFailure("launch_runtime_fatal").failure_stage).toBe("launch_runtime_fatal");
     expect(sanitizedGateFailure("launch_process_clean_exit").failure_stage).toBe("launch_process_clean_exit");
     expect(sanitizedGateFailure("launch_process_error_exit").failure_stage).toBe("launch_process_error_exit");

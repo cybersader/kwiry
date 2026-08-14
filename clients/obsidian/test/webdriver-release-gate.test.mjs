@@ -335,6 +335,11 @@ chmod 700 squashfs-root/obsidian
     ["crash reporter", "chrome_crashpad_handler: --database is required", "launch_crash_reporter_unavailable"],
     ["runtime resources", "Invalid file descriptor to ICU data received", "launch_runtime_resources_unavailable"],
     ["platform runtime", "GLib-GIO-ERROR: platform setup failed", "launch_platform_runtime_failed"],
+    ["V8 bootstrap", "FATAL: gin/v8_initializer.cc startup stopped", "launch_v8_bootstrap_failed"],
+    ["Electron bootstrap", "FATAL: electron_main_delegate.cc startup stopped", "launch_electron_bootstrap_failed"],
+    ["browser bootstrap", "FATAL: browser_main_loop.cc startup stopped", "launch_browser_bootstrap_failed"],
+    ["permission", "FATAL: operation not permitted", "launch_permission_denied"],
+    ["assertion", "FATAL: CHECK failed: ready", "launch_runtime_assertion_failed"],
     ["other fatal", "FATAL: runtime initialization stopped", "launch_runtime_fatal"],
   ])("classifies %s startup diagnostics without returning raw output", (_name, output, stage) => {
     expect(classifyRuntimeOutput(output)).toBe(stage);

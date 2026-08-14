@@ -558,13 +558,13 @@ export function classifyRuntimeOutput(value) {
   if (/error while loading shared libraries|cannot open shared object file/iu.test(value)) {
     return "launch_dependency_missing";
   }
-  if (/missing x server|failed to connect to the display|platform failed to initialize|ozone_platform_x11|x11_util/iu.test(value)) {
+  if (/missing x server|failed to connect to the display|platform failed to initialize|ozone|x11|xcb/iu.test(value)) {
     return "launch_display_unavailable";
   }
-  if (/no usable sandbox|suid sandbox|setuid_sandbox_host|zygote_host_impl_linux|sandbox_linux|running as root without --no-sandbox|apparmor_restrict_unprivileged_userns/iu.test(value)) {
+  if (/no usable sandbox|suid sandbox|setuid_sandbox_host|zygote_host_impl_linux|sandbox_linux|user namespace|userns|running as root without --no-sandbox|apparmor_restrict_unprivileged_userns/iu.test(value)) {
     return "launch_sandbox_unavailable";
   }
-  if (/gpu process (?:isn't usable|launch failed)|failed to launch gpu process|gpu_process_host|gpu_init/iu.test(value)) {
+  if (/gpu process (?:isn't usable|launch failed)|failed to launch gpu process|gpu_|gl_surface|egl|angle/iu.test(value)) {
     return "launch_gpu_unavailable";
   }
   if (/processsingleton|singleton lock|another instance is already running/iu.test(value)) {
@@ -578,6 +578,19 @@ export function classifyRuntimeOutput(value) {
   }
   if (/\bglib-(?:error|gio-error)\b|gdk-.*error/iu.test(value)) {
     return "launch_platform_runtime_failed";
+  }
+  if (/v8|gin\/|snapshot/iu.test(value)) return "launch_v8_bootstrap_failed";
+  if (/electron_main|electron\/shell|electron.*delegate/iu.test(value)) {
+    return "launch_electron_bootstrap_failed";
+  }
+  if (/content_main|browser_main|chrome_main|main_runner/iu.test(value)) {
+    return "launch_browser_bootstrap_failed";
+  }
+  if (/permission denied|operation not permitted|eacces|eperm/iu.test(value)) {
+    return "launch_permission_denied";
+  }
+  if (/check failed|assertion failed|notreached|unreachable code/iu.test(value)) {
+    return "launch_runtime_assertion_failed";
   }
   if (/\bfatal:/iu.test(value)) return "launch_runtime_fatal";
   return null;
