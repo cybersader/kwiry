@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   WebdriverGateError,
   assertObserved,
+  awaitRuntimeProcessExitStage,
   buildEvidence,
   buildSyntheticXlsm,
   classifyRuntimeProcessExit,
@@ -22,6 +24,7 @@ import {
   preparePinnedInstaller,
   prepareVerifiedRuntime,
   runWebdriverReleaseGate,
+  trackRuntimeExitDiagnostics,
   validateRuntimeManifest,
 } from "../scripts/webdriver-release-gate.mjs";
 import { buildStoredZip, parseStoredZip } from "../scripts/stored-zip.mjs";
@@ -316,6 +319,15 @@ chmod 700 squashfs-root/obsidian
     expect(classifyRuntimeProcessExit({ exitCode: 0, signalCode: null })).toBe("launch_process_clean_exit");
     expect(classifyRuntimeProcessExit({ exitCode: 1, signalCode: null })).toBe("launch_process_error_exit");
     expect(classifyRuntimeProcessExit({ exitCode: null, signalCode: "SIGTERM" })).toBe("launch_process_signaled");
+  });
+
+  it("drains buffered runtime diagnostics before reporting a process signal", async () => {
+    const stderr = new PassThrough();
+    const proc = { exitCode: null, signalCode: "SIGTRAP", stderr };
+    trackRuntimeExitDiagnostics(proc);
+    const stage = awaitRuntimeProcessExitStage(proc);
+    queueMicrotask(() => stderr.end("The SUID sandbox helper binary was found, but is not configured correctly"));
+    await expect(stage).resolves.toBe("launch_sandbox_unavailable");
   });
 
   it("generates deterministic XLSM content while isolating VBA text", () => {
