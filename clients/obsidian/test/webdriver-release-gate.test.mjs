@@ -236,6 +236,7 @@ chmod 700 squashfs-root/obsidian
       "--disable-setuid-sandbox",
       "--disable-crash-reporter",
       "--disable-gpu",
+      "--disable-dev-shm-usage",
       "--ozone-platform=x11",
       "--remote-debugging-address=127.0.0.1",
       "--remote-debugging-port=0",
@@ -329,6 +330,10 @@ chmod 700 squashfs-root/obsidian
 
   it.each([
     ["loader dependency", "error while loading shared libraries: libfixture.so: cannot open shared object file", "launch_dependency_missing"],
+    ["shared memory", "FATAL: platform_shared_memory_region_posix.cc startup stopped", "launch_shared_memory_unavailable"],
+    ["runtime file", "FATAL: No such file or directory", "launch_runtime_file_missing"],
+    ["session bus", "FATAL: dbus object_proxy startup stopped", "launch_session_bus_unavailable"],
+    ["subprocess", "FATAL: spawn_subprocess.cc startup stopped", "launch_subprocess_failed"],
     ["display", "Missing X server or $DISPLAY", "launch_display_unavailable"],
     ["sandbox", "No usable sandbox!", "launch_sandbox_unavailable"],
     ["zygote", "FATAL: zygote_communication_linux.cc startup stopped", "launch_sandbox_unavailable"],

@@ -114,6 +114,10 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("launch_process_exited").failure_stage).toBe("launch_process_exited");
     expect(sanitizedGateFailure("cdp_ready_timeout").failure_stage).toBe("cdp_ready_timeout");
     expect(sanitizedGateFailure("launch_dependency_missing").failure_stage).toBe("launch_dependency_missing");
+    expect(sanitizedGateFailure("launch_shared_memory_unavailable").failure_stage).toBe("launch_shared_memory_unavailable");
+    expect(sanitizedGateFailure("launch_runtime_file_missing").failure_stage).toBe("launch_runtime_file_missing");
+    expect(sanitizedGateFailure("launch_session_bus_unavailable").failure_stage).toBe("launch_session_bus_unavailable");
+    expect(sanitizedGateFailure("launch_subprocess_failed").failure_stage).toBe("launch_subprocess_failed");
     expect(sanitizedGateFailure("launch_display_unavailable").failure_stage).toBe("launch_display_unavailable");
     expect(sanitizedGateFailure("launch_sandbox_unavailable").failure_stage).toBe("launch_sandbox_unavailable");
     expect(sanitizedGateFailure("launch_gpu_unavailable").failure_stage).toBe("launch_gpu_unavailable");
