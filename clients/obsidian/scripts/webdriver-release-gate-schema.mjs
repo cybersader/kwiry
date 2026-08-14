@@ -120,8 +120,9 @@ export function sanitizedGateFailure(code) {
     "scenario_search_command_failed", "scenario_window_focus_failed", "scenario_palette_shortcut_failed",
     "scenario_palette_input_failed", "scenario_command_text_failed", "scenario_command_lookup_failed",
     "scenario_command_click_failed", "scenario_result_lookup_failed", "scenario_result_activation_failed",
-    "scenario_modal_close_failed", "scenario_isolation_search_failed", "scenario_observation_failed",
-    "result_not_rendered", "stale_notice_observed", "open_not_invoked", "open_promise_rejected",
+    "scenario_open_settlement_failed", "scenario_modal_close_failed", "scenario_isolation_search_failed",
+    "scenario_observation_failed", "result_not_rendered", "stale_notice_observed", "open_not_invoked",
+    "open_promise_rejected", "expected_file_inactive",
     "cleanup_incomplete", "unexpected_failure",
   ]);
   return {

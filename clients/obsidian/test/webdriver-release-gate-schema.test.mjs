@@ -194,9 +194,11 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("scenario_command_click_failed").failure_stage).toBe("scenario_command_click_failed");
     expect(sanitizedGateFailure("scenario_result_lookup_failed").failure_stage).toBe("scenario_result_lookup_failed");
     expect(sanitizedGateFailure("scenario_result_activation_failed").failure_stage).toBe("scenario_result_activation_failed");
+    expect(sanitizedGateFailure("scenario_open_settlement_failed").failure_stage).toBe("scenario_open_settlement_failed");
     expect(sanitizedGateFailure("scenario_modal_close_failed").failure_stage).toBe("scenario_modal_close_failed");
     expect(sanitizedGateFailure("scenario_isolation_search_failed").failure_stage).toBe("scenario_isolation_search_failed");
     expect(sanitizedGateFailure("scenario_observation_failed").failure_stage).toBe("scenario_observation_failed");
+    expect(sanitizedGateFailure("expected_file_inactive").failure_stage).toBe("expected_file_inactive");
     expect(sanitizedGateFailure("private details").failure_stage).toBe("unexpected_failure");
   });
 });

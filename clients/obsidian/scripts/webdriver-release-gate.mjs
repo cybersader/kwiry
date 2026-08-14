@@ -843,6 +843,10 @@ export async function exerciseObsidian({ driver, manifest }) {
   }, "scenario_result_lookup_failed");
   await gateStage(() => row.click(), "scenario_result_activation_failed");
   await gateStage(
+    () => driver.wait(async () => driver.executeScript("return window.__kwiryWebdriverGate?.promise !== 'none';"), UI_TIMEOUT_MS),
+    "scenario_open_settlement_failed",
+  );
+  await gateStage(
     () => driver.wait(async () => !(await driver.findElements(By.css(".modal-container"))).length, UI_TIMEOUT_MS),
     "scenario_modal_close_failed",
   );
@@ -891,9 +895,10 @@ export function assertObserved(observed, manifest) {
   requireEqual(observed.driver, manifest.runtime.chromedriver, "webdriver_attach_failed");
   if (observed.staleNotices !== 0) throw new WebdriverGateError("stale_notice_observed");
   if (observed.openFileCalls !== 1) throw new WebdriverGateError("open_not_invoked");
-  if (observed.openFilePromise !== "resolved" || !observed.expectedFileActive) {
+  if (observed.openFilePromise !== "resolved") {
     throw new WebdriverGateError("open_promise_rejected");
   }
+  if (!observed.expectedFileActive) throw new WebdriverGateError("expected_file_inactive");
   if (!observed.modalClosed || observed.openFailureNotices !== 0 || observed.vbaPayloadSearchResults !== 0) {
     throw new WebdriverGateError("result_not_rendered");
   }
