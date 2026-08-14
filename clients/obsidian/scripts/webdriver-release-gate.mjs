@@ -583,8 +583,10 @@ export function trackRuntimeExitDiagnostics(proc) {
 }
 
 export function classifyFatalRuntimeOutput(value) {
-  const index = value.toLowerCase().lastIndexOf("fatal:");
-  return index === -1 ? null : classifyRuntimeOutput(value.slice(index));
+  for (const line of value.split(/\r?\n/u).reverse()) {
+    if (/\bfatal:/iu.test(line)) return classifyRuntimeOutput(line);
+  }
+  return null;
 }
 
 export function classifyRuntimeOutput(value) {
@@ -630,11 +632,20 @@ export function classifyRuntimeOutput(value) {
     return "launch_browser_bootstrap_failed";
   }
   if (/node_|node\/|libuv|uv_/iu.test(value)) return "launch_node_bootstrap_failed";
+  if (/process_|process\.cc|thread|sequence|task_|run_loop|scoped_blocking/iu.test(value)) {
+    return "launch_process_model_failed";
+  }
+  if (/message_pump|event_|event\.cc|epoll|poll_|fd_watch/iu.test(value)) {
+    return "launch_event_loop_failed";
+  }
+  if (/feature_list|field_trial|metrics|variations/iu.test(value)) {
+    return "launch_feature_initialization_failed";
+  }
   if (/file_|file\.cc|path_|directory|filesystem|xdg_/iu.test(value)) {
     return "launch_filesystem_unavailable";
   }
   if (/memory|alloc|\boom\b|out of memory/iu.test(value)) return "launch_memory_unavailable";
-  if (/\bipc\b|mojo|channel/iu.test(value)) return "launch_ipc_unavailable";
+  if (/\bipc\b|ipc_|mojo|channel/iu.test(value)) return "launch_ipc_unavailable";
   if (/command_line|unknown option|invalid (?:flag|switch)|switches\.cc/iu.test(value)) {
     return "launch_argument_invalid";
   }

@@ -129,6 +129,9 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("launch_electron_bootstrap_failed").failure_stage).toBe("launch_electron_bootstrap_failed");
     expect(sanitizedGateFailure("launch_browser_bootstrap_failed").failure_stage).toBe("launch_browser_bootstrap_failed");
     expect(sanitizedGateFailure("launch_node_bootstrap_failed").failure_stage).toBe("launch_node_bootstrap_failed");
+    expect(sanitizedGateFailure("launch_process_model_failed").failure_stage).toBe("launch_process_model_failed");
+    expect(sanitizedGateFailure("launch_event_loop_failed").failure_stage).toBe("launch_event_loop_failed");
+    expect(sanitizedGateFailure("launch_feature_initialization_failed").failure_stage).toBe("launch_feature_initialization_failed");
     expect(sanitizedGateFailure("launch_filesystem_unavailable").failure_stage).toBe("launch_filesystem_unavailable");
     expect(sanitizedGateFailure("launch_memory_unavailable").failure_stage).toBe("launch_memory_unavailable");
     expect(sanitizedGateFailure("launch_ipc_unavailable").failure_stage).toBe("launch_ipc_unavailable");
