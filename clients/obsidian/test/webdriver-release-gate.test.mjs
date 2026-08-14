@@ -232,6 +232,7 @@ chmod 700 squashfs-root/obsidian
     expect(buildPinnedObsidianArgs(configDir)).toEqual([
       `--user-data-dir=${configDir}`,
       "--no-sandbox",
+      "--no-zygote",
       "--disable-setuid-sandbox",
       "--disable-crash-reporter",
       "--disable-gpu",
@@ -330,6 +331,7 @@ chmod 700 squashfs-root/obsidian
     ["loader dependency", "error while loading shared libraries: libfixture.so: cannot open shared object file", "launch_dependency_missing"],
     ["display", "Missing X server or $DISPLAY", "launch_display_unavailable"],
     ["sandbox", "No usable sandbox!", "launch_sandbox_unavailable"],
+    ["zygote", "FATAL: zygote_communication_linux.cc startup stopped", "launch_sandbox_unavailable"],
     ["GPU", "GPU process isn't usable. Goodbye.", "launch_gpu_unavailable"],
     ["single instance", "ProcessSingleton failed to create a singleton lock", "launch_instance_conflict"],
     ["crash reporter", "chrome_crashpad_handler: --database is required", "launch_crash_reporter_unavailable"],
