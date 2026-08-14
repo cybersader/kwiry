@@ -271,7 +271,7 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
     await gateStage(() => deps.prepareVault(layout.vault, args.candidate), "vault_prepare_failed");
     const launched = await gateStage(() => deps.launch({ layout, manifest }), "launch_failed");
     state.proc = launched.proc;
-    const cdpPort = await deps.waitForCdpPort(launched.configDir);
+    const cdpPort = await deps.waitForCdpPort(launched.configDir, launched.proc);
     if (!isLoopbackPort(cdpPort)) throw new WebdriverGateError("webdriver_attach_failed");
     state.ports.push(cdpPort);
     const attached = await deps.attach({ layout, manifest, cdpPort });
@@ -678,10 +678,13 @@ async function extractChromedriver(archivePath, output) {
   await writeFile(output, drivers[0].bytes, { flag: "wx", mode: 0o700 });
 }
 
-async function waitForCdpPort(configDir) {
+async function waitForCdpPort(configDir, proc) {
   const path = resolve(configDir, "DevToolsActivePort");
   const deadline = Date.now() + UI_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      throw new WebdriverGateError("launch_process_exited");
+    }
     try {
       const [port] = (await readFile(path, "utf8")).trim().split("\n");
       const parsed = Number(port);
@@ -689,7 +692,7 @@ async function waitForCdpPort(configDir) {
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new WebdriverGateError("launch_failed");
+  throw new WebdriverGateError("cdp_ready_timeout");
 }
 
 function isLoopbackPort(port) {
