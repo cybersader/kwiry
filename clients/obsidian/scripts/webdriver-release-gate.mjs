@@ -38,6 +38,7 @@ const RUNTIME_OUTPUT_DRAIN_MS = 1_000;
 const PROVISIONAL_RUNTIME_STAGES = new Set([
   "launch_network_runtime_failed",
   "launch_runtime_fatal",
+  "launch_socket_runtime_failed",
 ]);
 const runtimeExitDiagnostics = new WeakMap();
 
@@ -444,7 +445,6 @@ export function buildPinnedObsidianArgs(configDir) {
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--ozone-platform=x11",
-    "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=0",
     "--test-type=webdriver",
     "--tag=obsidian-launcher",
@@ -535,6 +535,14 @@ async function waitForSpawn(proc) {
   });
 }
 
+function runtimeStageSpecificity(stage) {
+  if (stage === null) return -1;
+  if (stage === "launch_runtime_fatal") return 0;
+  if (stage === "launch_network_runtime_failed") return 1;
+  if (stage === "launch_socket_runtime_failed") return 2;
+  return 3;
+}
+
 export function trackRuntimeExitDiagnostics(proc) {
   let resolveComplete;
   const complete = new Promise((resolveDiagnostics) => {
@@ -564,9 +572,7 @@ export function trackRuntimeExitDiagnostics(proc) {
         : `${decoded.slice(0, 2_048)}${decoded.slice(-2_048)}`;
       const sample = `${diagnostics.tail}${bounded}`;
       const classified = classifyRuntimeOutput(sample);
-      if (classified && (diagnostics.stage === null
-        || diagnostics.stage === "launch_runtime_fatal"
-        || (diagnostics.stage === "launch_network_runtime_failed" && classified !== "launch_runtime_fatal"))) {
+      if (classified && runtimeStageSpecificity(classified) > runtimeStageSpecificity(diagnostics.stage)) {
         diagnostics.stage = classified;
       }
       diagnostics.tail = sample.slice(-RUNTIME_OUTPUT_TAIL_BYTES);
@@ -630,6 +636,14 @@ export function classifyRuntimeOutput(value) {
   }
   if (/proxy/iu.test(value)) return "launch_proxy_runtime_failed";
   if (/netlink|network_change/iu.test(value)) return "launch_network_monitor_failed";
+  if (/cannot start http server for devtools|devtools http server/iu.test(value)) {
+    return "launch_devtools_server_failed";
+  }
+  if (/address already in use|eaddrinuse/iu.test(value)) return "launch_socket_address_in_use";
+  if (/address family not supported|eafnosupport/iu.test(value)) {
+    return "launch_socket_family_unavailable";
+  }
+  if (/createplatformsocket|create socket failed/iu.test(value)) return "launch_socket_creation_failed";
   if (/socket/iu.test(value)) return "launch_socket_runtime_failed";
   if (/\bdns\b|host_resolver/iu.test(value)) return "launch_dns_runtime_failed";
   if (/network/iu.test(value)) return "launch_network_runtime_failed";

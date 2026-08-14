@@ -137,6 +137,10 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("launch_proxy_runtime_failed").failure_stage).toBe("launch_proxy_runtime_failed");
     expect(sanitizedGateFailure("launch_network_monitor_failed").failure_stage).toBe("launch_network_monitor_failed");
     expect(sanitizedGateFailure("launch_socket_runtime_failed").failure_stage).toBe("launch_socket_runtime_failed");
+    expect(sanitizedGateFailure("launch_devtools_server_failed").failure_stage).toBe("launch_devtools_server_failed");
+    expect(sanitizedGateFailure("launch_socket_address_in_use").failure_stage).toBe("launch_socket_address_in_use");
+    expect(sanitizedGateFailure("launch_socket_family_unavailable").failure_stage).toBe("launch_socket_family_unavailable");
+    expect(sanitizedGateFailure("launch_socket_creation_failed").failure_stage).toBe("launch_socket_creation_failed");
     expect(sanitizedGateFailure("launch_dns_runtime_failed").failure_stage).toBe("launch_dns_runtime_failed");
     expect(sanitizedGateFailure("launch_security_runtime_failed").failure_stage).toBe("launch_security_runtime_failed");
     expect(sanitizedGateFailure("launch_ui_runtime_failed").failure_stage).toBe("launch_ui_runtime_failed");
