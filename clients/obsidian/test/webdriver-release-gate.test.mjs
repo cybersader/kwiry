@@ -16,6 +16,7 @@ import {
   assertObserved,
   awaitRuntimeProcessExitStage,
   buildEvidence,
+  buildPinnedObsidianArgs,
   buildSyntheticXlsm,
   classifyRuntimeProcessExit,
   classifyRuntimeOutput,
@@ -224,6 +225,22 @@ chmod 700 squashfs-root/obsidian
     expect((await stat(executable)).mode & 0o700).toBe(0o700);
     expect(await readFile(resolve(dirname(executable), "resources", "electron.asar"), "utf8"))
       .toBe("runtime-resource");
+  });
+
+  it("launches the pinned Electron runtime with explicit CI-safe Linux flags", () => {
+    const configDir = resolve("private", "config");
+    expect(buildPinnedObsidianArgs(configDir)).toEqual([
+      `--user-data-dir=${configDir}`,
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-crash-reporter",
+      "--disable-gpu",
+      "--ozone-platform=x11",
+      "--remote-debugging-address=127.0.0.1",
+      "--remote-debugging-port=0",
+      "--test-type=webdriver",
+      "--tag=obsidian-launcher",
+    ]);
   });
 
   it("defaults private runtime state to the repository's disposable disk-backed area", async () => {
