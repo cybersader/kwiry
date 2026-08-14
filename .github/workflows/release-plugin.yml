@@ -192,6 +192,8 @@ jobs:
           cp "$PWD/.tmp/webdriver.evidence.json" "$GITHUB_WORKSPACE/clients/obsidian/.tmp/webdriver.evidence.json"
           git show "${GITHUB_SHA}:clients/obsidian/scripts/webdriver-release-gate-schema.mjs" \
             > "$GITHUB_WORKSPACE/clients/obsidian/scripts/webdriver-release-gate-schema.mjs"
+          git show "${GITHUB_SHA}:clients/obsidian/scripts/webdriver-release-gate-manifest.json" \
+            > "$GITHUB_WORKSPACE/clients/obsidian/scripts/webdriver-release-gate-manifest.json"
           cd "$GITHUB_WORKSPACE/clients/obsidian"
       - name: Prepare release notes as data
         env:
