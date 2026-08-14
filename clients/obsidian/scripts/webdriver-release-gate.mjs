@@ -610,6 +610,18 @@ export function classifyRuntimeOutput(value) {
   if (/content_main|browser_main|chrome_main|main_runner/iu.test(value)) {
     return "launch_browser_bootstrap_failed";
   }
+  if (/node_|node\/|libuv|uv_/iu.test(value)) return "launch_node_bootstrap_failed";
+  if (/file_|file\.cc|path_|directory|filesystem|xdg_/iu.test(value)) {
+    return "launch_filesystem_unavailable";
+  }
+  if (/memory|alloc|\boom\b|out of memory/iu.test(value)) return "launch_memory_unavailable";
+  if (/\bipc\b|mojo|channel/iu.test(value)) return "launch_ipc_unavailable";
+  if (/command_line|unknown option|invalid (?:flag|switch)|switches\.cc/iu.test(value)) {
+    return "launch_argument_invalid";
+  }
+  if (/network|socket|proxy/iu.test(value)) return "launch_network_runtime_failed";
+  if (/\bnss\b|certificate|crypto/iu.test(value)) return "launch_security_runtime_failed";
+  if (/ui_|aura|views|font|theme/iu.test(value)) return "launch_ui_runtime_failed";
   if (/permission denied|operation not permitted|eacces|eperm/iu.test(value)) {
     return "launch_permission_denied";
   }
