@@ -426,6 +426,10 @@ export async function prepareVerifiedRuntime(layout, manifest, deps) {
   );
 }
 
+export function pinnedInstallerLaunchPath(installerExecutable) {
+  return resolve(dirname(installerExecutable), "AppRun");
+}
+
 export function buildPinnedObsidianArgs(configDir) {
   return [
     `--user-data-dir=${configDir}`,
@@ -460,10 +464,11 @@ async function launchPinnedObsidian({ layout, manifest }) {
     () => launcher.downloadApp(appVersion),
     "launcher_app_cache_failed",
   );
-  const installerPath = await gateStage(
+  const installerExecutable = await gateStage(
     () => launcher.downloadInstaller(installerVersion),
     "launcher_installer_cache_failed",
   );
+  const installerPath = pinnedInstallerLaunchPath(installerExecutable);
   const vault = await gateStage(
     () => launcher.setupVault({ vault: layout.vault, copy: false }),
     "launcher_vault_setup_failed",
@@ -492,8 +497,15 @@ export async function preparePinnedInstaller(layout) {
     await chmod(layout.installerArchive, 0o700);
     await runQuietProcess(layout.installerArchive, ["--appimage-extract"], extraction);
     const extractedExecutable = resolve(extractedTree, "obsidian");
-    const executable = await stat(extractedExecutable);
-    if (!executable.isFile() || executable.size === 0) throw new Error("installer executable empty");
+    const extractedLauncher = resolve(extractedTree, "AppRun");
+    const [executable, launcher] = await Promise.all([
+      stat(extractedExecutable),
+      stat(extractedLauncher),
+    ]);
+    if (!executable.isFile() || executable.size === 0
+      || !launcher.isFile() || launcher.size === 0 || (launcher.mode & 0o100) === 0) {
+      throw new Error("installer executable empty");
+    }
     await mkdir(dirname(installerDirectory), { recursive: true });
     await rm(installerDirectory, { recursive: true, force: true });
     await rename(extractedTree, installerDirectory);

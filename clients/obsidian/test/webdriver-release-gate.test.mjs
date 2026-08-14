@@ -22,6 +22,7 @@ import {
   classifyRuntimeOutput,
   createWebdriverPrivateRoot,
   downloadPinnedArtifact,
+  pinnedInstallerLaunchPath,
   preparePinnedInstaller,
   prepareVerifiedRuntime,
   runWebdriverReleaseGate,
@@ -211,8 +212,9 @@ set -eu
 test "$1" = "--appimage-extract"
 mkdir -p squashfs-root/resources
 printf pinned-installer > squashfs-root/obsidian
+printf '#!/bin/sh\nexit 0\n' > squashfs-root/AppRun
 printf runtime-resource > squashfs-root/resources/electron.asar
-chmod 700 squashfs-root/obsidian
+chmod 700 squashfs-root/obsidian squashfs-root/AppRun
 `);
     await chmod(archive, 0o600);
 
@@ -223,6 +225,9 @@ chmod 700 squashfs-root/obsidian
 
     expect(await readFile(executable, "utf8")).toBe("pinned-installer");
     expect((await stat(executable)).mode & 0o700).toBe(0o700);
+    const launcher = pinnedInstallerLaunchPath(executable);
+    expect(await readFile(launcher, "utf8")).toBe("#!/bin/sh\nexit 0\n");
+    expect((await stat(launcher)).mode & 0o700).toBe(0o700);
     expect(await readFile(resolve(dirname(executable), "resources", "electron.asar"), "utf8"))
       .toBe("runtime-resource");
   });
