@@ -583,10 +583,8 @@ export function trackRuntimeExitDiagnostics(proc) {
 }
 
 export function classifyFatalRuntimeOutput(value) {
-  for (const line of value.split(/\r?\n/u).reverse()) {
-    if (/\bfatal:/iu.test(line)) return classifyRuntimeOutput(line);
-  }
-  return null;
+  const index = value.toLowerCase().lastIndexOf("fatal:");
+  return index === -1 ? null : classifyRuntimeOutput(value.slice(index));
 }
 
 export function classifyRuntimeOutput(value) {
