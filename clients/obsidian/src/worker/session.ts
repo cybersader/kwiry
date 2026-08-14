@@ -26,15 +26,18 @@ import type {
 import { SOURCE_FORMATS } from "./protocol";
 import {
   WorkerRpcClient,
+  type RpcCommand,
   type WorkerLike,
 } from "./rpc-client";
 import { PRODUCTION_RPC_PROTOCOL } from "./production-rpc-protocol";
 
 const DEFAULT_SOURCE_POLICY_HASH = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860";
+const FULL_CORPUS_REQUEST_TIMEOUT_MS = 300_000;
 
 export class InPluginWorkerSession {
   protected readonly client: WorkerRpcClient;
   private cleaned = false;
+  private longOperationBarrier: Promise<void> | null = null;
 
   constructor(
     private readonly worker: WorkerLike,
@@ -54,7 +57,7 @@ export class InPluginWorkerSession {
     sourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH,
     enabledSourceFormats: readonly SourceFormat[] = SOURCE_FORMATS,
   ): Promise<InitializeResult> {
-    return this.client.request({
+    return this.request({
       operation: "initialize",
       vault_id: vaultId,
       source_policy_hash: sourcePolicyHash,
@@ -65,11 +68,11 @@ export class InPluginWorkerSession {
   }
 
   beginBuild(generation: string): Promise<BuildResult> {
-    return this.client.request({ operation: "begin_build", generation }) as Promise<BuildResult>;
+    return this.request({ operation: "begin_build", generation }) as Promise<BuildResult>;
   }
 
   addSourceBatch(generation: string, sources: SourceUpsert[]): Promise<BuildResult> {
-    return this.client.request({
+    return this.request({
       operation: "add_source_batch",
       generation,
       sources,
@@ -82,7 +85,7 @@ export class InPluginWorkerSession {
     upserts: SourceUpsert[],
     removals: SourceRemoval[],
   ): Promise<BuildResult> {
-    return this.client.request({
+    return this.request({
       operation: "apply_source_changes",
       generation,
       next_generation: nextGeneration,
@@ -92,11 +95,11 @@ export class InPluginWorkerSession {
   }
 
   commitBuild(generation: string): Promise<BuildResult> {
-    return this.client.request({ operation: "commit_build", generation }) as Promise<BuildResult>;
+    return this.requestLong({ operation: "commit_build", generation }) as Promise<BuildResult>;
   }
 
   abortBuild(generation: string): Promise<BuildResult> {
-    return this.client.request({ operation: "abort_build", generation }) as Promise<BuildResult>;
+    return this.request({ operation: "abort_build", generation }) as Promise<BuildResult>;
   }
 
   /**
@@ -105,7 +108,7 @@ export class InPluginWorkerSession {
    * contract, and adding it there would pull indexing into cache concerns.
    */
   exportGeneration(generation: string, cacheIdentity: string): Promise<ExportGenerationResult> {
-    return this.client.request({
+    return this.requestLong({
       operation: "export_generation",
       generation,
       cache_identity: cacheIdentity,
@@ -122,7 +125,7 @@ export class InPluginWorkerSession {
     cacheIdentity: string,
     cursor: InitialBuildCheckpointCursor,
   ): Promise<InitialBuildCheckpointExportResult> {
-    return this.client.request({
+    return this.request({
       operation: "export_initial_build_checkpoint",
       generation,
       cache_identity: cacheIdentity,
@@ -136,7 +139,7 @@ export class InPluginWorkerSession {
     expectedSourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH,
   ): Promise<RestoreGenerationResult> {
     const { record } = hit;
-    return this.client.request({
+    return this.requestLong({
       operation: "restore_generation",
       generation: record.generationId,
       bytes: hit.bytes,
@@ -155,7 +158,7 @@ export class InPluginWorkerSession {
     expectedSourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH,
   ): Promise<RestoreInitialBuildCheckpointResult> {
     const { record } = hit;
-    return this.client.request({
+    return this.requestLong({
       operation: "restore_initial_build_checkpoint",
       record_kind: record.recordKind,
       checkpoint_record_version: record.recordVersion,
@@ -177,7 +180,7 @@ export class InPluginWorkerSession {
     vaultId: string,
     currentSources: ReconciliationSourceMetadata[],
   ): Promise<ReconciliationPlanResult> {
-    return this.client.request({
+    return this.requestLong({
       operation: "plan_reconciliation",
       generation,
       vault_id: vaultId,
@@ -190,7 +193,7 @@ export class InPluginWorkerSession {
     vaultId: string,
     currentSources: ReconciliationSourceMetadata[],
   ): Promise<InitialBuildCheckpointReconciliationPlanResult> {
-    return this.client.request({
+    return this.requestLong({
       operation: "plan_initial_build_checkpoint_reconciliation",
       generation,
       vault_id: vaultId,
@@ -199,17 +202,42 @@ export class InPluginWorkerSession {
   }
 
   search(query: string, limit: number): Promise<SearchResult> {
-    return this.client.request({ operation: "search", query, limit }) as Promise<SearchResult>;
+    return this.request({ operation: "search", query, limit }) as Promise<SearchResult>;
   }
 
   status(): Promise<StatusResult> {
-    return this.client.request({ operation: "status" }) as Promise<StatusResult>;
+    return this.request({ operation: "status" }) as Promise<StatusResult>;
+  }
+
+  private request(command: RpcCommand): Promise<unknown> {
+    const barrier = this.longOperationBarrier;
+    if (barrier === null) return this.client.request(command);
+    return barrier.then(() => this.client.request(command));
+  }
+
+  private requestLong(command: RpcCommand): Promise<unknown> {
+    const precedingBarrier = this.longOperationBarrier ?? Promise.resolve();
+    let releaseBarrier!: () => void;
+    const ownBarrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const combinedBarrier = precedingBarrier.then(() => ownBarrier);
+    this.longOperationBarrier = combinedBarrier;
+
+    return precedingBarrier
+      .then(() => this.client.request(command, FULL_CORPUS_REQUEST_TIMEOUT_MS))
+      .finally(() => {
+        releaseBarrier();
+        if (this.longOperationBarrier === combinedBarrier) {
+          this.longOperationBarrier = null;
+        }
+      });
   }
 
   async dispose(): Promise<DisposeResult> {
     if (this.cleaned) return { closed: true };
     try {
-      return await this.client.request({ operation: "dispose" }) as DisposeResult;
+      return await this.request({ operation: "dispose" }) as DisposeResult;
     } finally {
       this.forceDispose();
     }

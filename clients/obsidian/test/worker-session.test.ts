@@ -23,24 +23,28 @@ const SOURCE_POLICY_HASH = "d".repeat(64);
 class MockWorker implements WorkerLike {
   terminate = vi.fn();
   readonly posted: WorkerRequest[] = [];
+  readonly heldOperations = new Set<WorkerRequest["operation"]>();
   private readonly listeners = new Map<string, Set<(event: never) => void>>();
 
   postMessage(message: WorkerRequest): void {
     this.posted.push(message);
-    queueMicrotask(() => {
-      const result = resultFor(message);
-      for (const listener of this.listeners.get("message") ?? []) {
-        listener({
-          data: {
-            version: WORKER_PROTOCOL_VERSION,
-            id: message.id,
-            operation: message.operation,
-            ok: true,
-            result,
-          },
-        } as never);
-      }
-    });
+    if (this.heldOperations.has(message.operation)) return;
+    queueMicrotask(() => this.respond(message));
+  }
+
+  respond(message: WorkerRequest): void {
+    const result = resultFor(message);
+    for (const listener of this.listeners.get("message") ?? []) {
+      listener({
+        data: {
+          version: WORKER_PROTOCOL_VERSION,
+          id: message.id,
+          operation: message.operation,
+          ok: true,
+          result,
+        },
+      } as never);
+    }
   }
 
   addEventListener(type: "message" | "error" | "messageerror", listener: (event: never) => void): void {
@@ -462,6 +466,89 @@ describe("InPluginWorkerSession", () => {
         current_sources: current,
       },
     ]);
+  });
+
+  it("keeps ordinary requests on the configured deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      worker.heldOperations.add("initialize");
+      const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 10);
+      const pending = session.initialize("active-vault");
+      const rejected = expect(pending).rejects.toMatchObject({ code: "timeout" });
+
+      await vi.advanceTimersByTimeAsync(11);
+
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives full-corpus operations the bounded five-minute deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      worker.heldOperations.add("commit_build");
+      const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 10);
+      let settled = false;
+      const pending = session.commitBuild("g1");
+      void pending.then(
+        () => { settled = true; },
+        () => { settled = true; },
+      );
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(299_999);
+      expect(settled).toBe(false);
+      const rejected = expect(pending).rejects.toMatchObject({ code: "timeout" });
+      await vi.advanceTimersByTimeAsync(2);
+
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts an ordinary timeout only after the preceding long operation finishes", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      worker.heldOperations.add("commit_build");
+      const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 10);
+      const commit = session.commitBuild("g1");
+      await Promise.resolve();
+      const search = session.search("query", 20);
+
+      await vi.advanceTimersByTimeAsync(50);
+      expect(worker.posted.map((request) => request.operation)).toEqual(["commit_build"]);
+
+      worker.respond(worker.posted[0]!);
+      await expect(commit).resolves.toMatchObject({ generation: "g1" });
+      await expect(search).resolves.toMatchObject({ generation: "g1" });
+      expect(worker.posted.map((request) => request.operation)).toEqual([
+        "commit_build",
+        "search",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("force disposal rejects active and barrier-waiting work without posting the queued request", async () => {
+    const worker = new MockWorker();
+    worker.heldOperations.add("commit_build");
+    const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 1_000);
+    const commit = session.commitBuild("g1");
+    await Promise.resolve();
+    const search = session.search("query", 20);
+    const commitRejected = expect(commit).rejects.toMatchObject({ code: "disposed" });
+    const searchRejected = expect(search).rejects.toMatchObject({ code: "disposed" });
+
+    session.forceDispose();
+
+    await Promise.all([commitRejected, searchRejected]);
+    expect(worker.posted.map((request) => request.operation)).toEqual(["commit_build"]);
   });
 
   it("terminates its Worker and revokes the Blob URL exactly once", async () => {
