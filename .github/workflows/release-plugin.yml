@@ -111,6 +111,12 @@ jobs:
           npm run validate:evidence -- gate5.evidence.json
           npm run validate:privacy
           npm run package:release -- .tmp/release-candidate gate5.evidence.json
+      - name: Install pinned X11 window manager
+        working-directory: .
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes herbstluftwm=0.9.5-3
       - name: Run pinned real Obsidian WebDriver gate
         env:
           CANDIDATE_TAG: ${{ inputs.tag }}
@@ -163,12 +169,24 @@ jobs:
           cd "$stage/repository/clients/obsidian"
           KWIRY_WEBDRIVER_RUNTIME_ASSETS="$stage/runtime-assets" \
           KWIRY_WEBDRIVER_PRIVATE_ROOT="$stage/private" \
-            xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' \
-              npm run webdriver:release -- \
-                --candidate "$PWD/.tmp/release-candidate" \
-                --tag "$CANDIDATE_TAG" \
-                --manifest "$PWD/scripts/webdriver-release-gate-manifest.json" \
-                --evidence "$PWD/.tmp/webdriver.evidence.json"
+            xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24 +extension GLX -noreset' \
+              bash -c '
+                set -euo pipefail
+                herbstluftwm >/dev/null 2>&1 &
+                wm_pid=$!
+                cleanup_wm() {
+                  kill "$wm_pid" 2>/dev/null || true
+                  wait "$wm_pid" 2>/dev/null || true
+                }
+                trap cleanup_wm EXIT
+                sleep 1
+                kill -0 "$wm_pid" 2>/dev/null
+                npm run webdriver:release -- \
+                  --candidate "$PWD/.tmp/release-candidate" \
+                  --tag "$CANDIDATE_TAG" \
+                  --manifest "$PWD/scripts/webdriver-release-gate-manifest.json" \
+                  --evidence "$PWD/.tmp/webdriver.evidence.json"
+              '
           npm run validate:webdriver:evidence -- .tmp/webdriver.evidence.json
           cp "$PWD/.tmp/webdriver.evidence.json" "$GITHUB_WORKSPACE/clients/obsidian/.tmp/webdriver.evidence.json"
           cd "$GITHUB_WORKSPACE/clients/obsidian"
