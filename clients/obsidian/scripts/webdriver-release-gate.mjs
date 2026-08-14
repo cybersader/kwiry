@@ -430,6 +430,7 @@ export function buildPinnedObsidianArgs(configDir) {
   return [
     `--user-data-dir=${configDir}`,
     "--no-sandbox",
+    "--no-zygote",
     "--disable-setuid-sandbox",
     "--disable-crash-reporter",
     "--disable-gpu",
@@ -561,7 +562,7 @@ export function classifyRuntimeOutput(value) {
   if (/missing x server|failed to connect to the display|platform failed to initialize|ozone|x11|xcb/iu.test(value)) {
     return "launch_display_unavailable";
   }
-  if (/no usable sandbox|suid sandbox|setuid_sandbox_host|zygote_host_impl_linux|sandbox_linux|user namespace|userns|running as root without --no-sandbox|apparmor_restrict_unprivileged_userns/iu.test(value)) {
+  if (/no usable sandbox|suid sandbox|setuid_sandbox_host|zygote|sandbox_linux|user namespace|userns|running as root without --no-sandbox|apparmor_restrict_unprivileged_userns/iu.test(value)) {
     return "launch_sandbox_unavailable";
   }
   if (/gpu process (?:isn't usable|launch failed)|failed to launch gpu process|gpu_|gl_surface|egl|angle/iu.test(value)) {
