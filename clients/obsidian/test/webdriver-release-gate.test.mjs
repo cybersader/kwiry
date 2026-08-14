@@ -380,6 +380,10 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
       "FATAL: runtime initialization stopped",
     ].join("\n"))).toBe("launch_runtime_fatal");
     expect(classifyFatalRuntimeOutput("ERROR: socket_posix.cc transient startup warning")).toBeNull();
+    expect(classifyFatalRuntimeOutput([
+      "FATAL: socket_posix.cc startup stopped",
+      "Address family not supported by protocol",
+    ].join("\n"))).toBe("launch_socket_family_unavailable");
   });
 
   it("keeps unknown process output private and classifies only process status", () => {
