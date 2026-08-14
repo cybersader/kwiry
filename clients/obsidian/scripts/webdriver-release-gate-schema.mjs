@@ -91,7 +91,10 @@ export function sanitizedGateFailure(code) {
     "launcher_start_failed", "launch_process_exited", "cdp_ready_timeout",
     "launch_dependency_missing", "launch_display_unavailable", "launch_sandbox_unavailable",
     "launch_gpu_unavailable", "launch_instance_conflict", "launch_process_clean_exit",
-    "launch_process_error_exit", "launch_process_signaled", "launch_failed", "webdriver_attach_failed",
+    "launch_process_error_exit", "launch_process_signaled", "launch_process_aborted",
+    "launch_process_bus_error", "launch_process_arithmetic_fault", "launch_process_illegal_instruction",
+    "launch_process_killed", "launch_process_segmentation_fault", "launch_process_terminated",
+    "launch_process_trapped", "launch_failed", "webdriver_attach_failed",
     "result_not_rendered", "stale_notice_observed", "open_not_invoked", "open_promise_rejected",
     "cleanup_incomplete", "unexpected_failure",
   ]);

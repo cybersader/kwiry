@@ -318,7 +318,21 @@ chmod 700 squashfs-root/obsidian
     expect(classifyRuntimeStderr(privateDetail)).toBeNull();
     expect(classifyRuntimeProcessExit({ exitCode: 0, signalCode: null })).toBe("launch_process_clean_exit");
     expect(classifyRuntimeProcessExit({ exitCode: 1, signalCode: null })).toBe("launch_process_error_exit");
-    expect(classifyRuntimeProcessExit({ exitCode: null, signalCode: "SIGTERM" })).toBe("launch_process_signaled");
+    expect(classifyRuntimeProcessExit({ exitCode: null, signalCode: "SIGTERM" })).toBe("launch_process_terminated");
+    expect(classifyRuntimeProcessExit({ exitCode: null, signalCode: "SIGUSR1" })).toBe("launch_process_signaled");
+  });
+
+  it.each([
+    ["SIGABRT", "launch_process_aborted"],
+    ["SIGBUS", "launch_process_bus_error"],
+    ["SIGFPE", "launch_process_arithmetic_fault"],
+    ["SIGILL", "launch_process_illegal_instruction"],
+    ["SIGKILL", "launch_process_killed"],
+    ["SIGSEGV", "launch_process_segmentation_fault"],
+    ["SIGTERM", "launch_process_terminated"],
+    ["SIGTRAP", "launch_process_trapped"],
+  ])("maps %s to a fixed private-safe stage", (signalCode, stage) => {
+    expect(classifyRuntimeProcessExit({ exitCode: null, signalCode })).toBe(stage);
   });
 
   it("drains buffered runtime diagnostics before reporting a process signal", async () => {
