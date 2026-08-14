@@ -361,6 +361,20 @@ chmod 700 squashfs-root/obsidian
     await expect(stage).resolves.toBe("launch_crash_reporter_unavailable");
   });
 
+  it("upgrades a generic fatal stage when a later chunk identifies the subsystem", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = { exitCode: null, signalCode: "SIGTRAP", stdout, stderr };
+    trackRuntimeExitDiagnostics(proc);
+    stdout.write("FATAL: startup stopped");
+    const stage = awaitRuntimeProcessExitStage(proc);
+    queueMicrotask(() => {
+      stdout.end(" setuid_sandbox_host.cc");
+      stderr.end();
+    });
+    await expect(stage).resolves.toBe("launch_sandbox_unavailable");
+  });
+
   it("generates deterministic XLSM content while isolating VBA text", () => {
     const first = buildSyntheticXlsm();
     const second = buildSyntheticXlsm();
