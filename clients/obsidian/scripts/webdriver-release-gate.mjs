@@ -434,6 +434,7 @@ export function buildPinnedObsidianArgs(configDir) {
     "--disable-setuid-sandbox",
     "--disable-crash-reporter",
     "--disable-gpu",
+    "--disable-dev-shm-usage",
     "--ozone-platform=x11",
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=0",
@@ -559,6 +560,16 @@ export function classifyRuntimeOutput(value) {
   if (/error while loading shared libraries|cannot open shared object file/iu.test(value)) {
     return "launch_dependency_missing";
   }
+  if (/shared memory|dev\/shm|platform_shared_memory/iu.test(value)) {
+    return "launch_shared_memory_unavailable";
+  }
+  if (/no such file or directory|\benoent\b|failed to open|could not open/iu.test(value)) {
+    return "launch_runtime_file_missing";
+  }
+  if (/dbus|d-bus|object_proxy|bus\.cc/iu.test(value)) {
+    return "launch_session_bus_unavailable";
+  }
+  if (/spawn|fork|subprocess/iu.test(value)) return "launch_subprocess_failed";
   if (/missing x server|failed to connect to the display|platform failed to initialize|ozone|x11|xcb/iu.test(value)) {
     return "launch_display_unavailable";
   }
@@ -577,7 +588,7 @@ export function classifyRuntimeOutput(value) {
   if (/invalid file descriptor to icu data|failed to load (?:icu data|resources\.pak)|unable to load locale|icu_util|resource_bundle/iu.test(value)) {
     return "launch_runtime_resources_unavailable";
   }
-  if (/\bglib-(?:error|gio-error)\b|gdk-.*error/iu.test(value)) {
+  if (/glib|gdk/iu.test(value)) {
     return "launch_platform_runtime_failed";
   }
   if (/v8|gin\/|snapshot/iu.test(value)) return "launch_v8_bootstrap_failed";
