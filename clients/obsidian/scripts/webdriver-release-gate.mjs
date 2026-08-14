@@ -632,9 +632,12 @@ export function classifyRuntimeOutput(value) {
     return "launch_browser_bootstrap_failed";
   }
   if (/node_|node\/|libuv|uv_/iu.test(value)) return "launch_node_bootstrap_failed";
-  if (/process_|process\.cc|thread|sequence|task_|run_loop|scoped_blocking/iu.test(value)) {
-    return "launch_process_model_failed";
-  }
+  if (/thread/iu.test(value)) return "launch_thread_runtime_failed";
+  if (/sequence/iu.test(value)) return "launch_sequence_runtime_failed";
+  if (/task_|task\.cc/iu.test(value)) return "launch_task_runtime_failed";
+  if (/run_loop/iu.test(value)) return "launch_run_loop_failed";
+  if (/scoped_blocking/iu.test(value)) return "launch_blocking_runtime_failed";
+  if (/process_|process\.cc/iu.test(value)) return "launch_process_model_failed";
   if (/message_pump|event_|event\.cc|epoll|poll_|fd_watch/iu.test(value)) {
     return "launch_event_loop_failed";
   }
