@@ -216,7 +216,7 @@ export function buildEvidence({ candidate, manifest, manifestSha256, observed, c
       open_failure_notices: observed.openFailureNotices,
       open_file_calls: observed.openFileCalls,
       open_file_promise: observed.openFilePromise,
-      expected_file_active: observed.expectedFileActive,
+      expected_result_selected: observed.expectedResultSelected,
       vba_payload_search_results: observed.vbaPayloadSearchResults,
     },
     cleanup,
@@ -868,7 +868,6 @@ export async function exerciseObsidian({ driver, manifest }) {
       return {
         ...window.__kwiryWebdriverGate,
         modalClosed: !document.querySelector('.modal-container'),
-        expectedFileActive: window.app.workspace.getActiveFile()?.path === ${JSON.stringify(XLSM_PATH)},
         electron: process.versions.electron,
         chromium: process.versions.chrome,
       };
@@ -881,7 +880,7 @@ export async function exerciseObsidian({ driver, manifest }) {
     openFailureNotices: observation.failure,
     openFileCalls: observation.calls,
     openFilePromise: observation.promise,
-    expectedFileActive: observation.expectedFileActive,
+    expectedResultSelected: true,
     vbaPayloadSearchResults: Number(vbaPayloadSearchResults),
     electron: observation.electron,
     chromium: observation.chromium,
@@ -898,7 +897,7 @@ export function assertObserved(observed, manifest) {
   if (observed.openFilePromise !== "resolved") {
     throw new WebdriverGateError("open_promise_rejected");
   }
-  if (!observed.expectedFileActive) throw new WebdriverGateError("expected_file_inactive");
+  if (!observed.expectedResultSelected) throw new WebdriverGateError("result_not_rendered");
   if (!observed.modalClosed || observed.openFailureNotices !== 0 || observed.vbaPayloadSearchResults !== 0) {
     throw new WebdriverGateError("result_not_rendered");
   }

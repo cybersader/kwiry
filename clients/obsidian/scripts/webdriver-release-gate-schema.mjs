@@ -51,12 +51,12 @@ export function validateWebdriverReleaseEvidence(value) {
   const scenario = object(root.scenario, [
     "synthetic_xlsm", "excel_explicitly_enabled", "command_palette_used",
     "webdriver_input_used", "native_click_used", "modal_closed", "stale_notices",
-    "open_failure_notices", "open_file_calls", "open_file_promise", "expected_file_active",
+    "open_failure_notices", "open_file_calls", "open_file_promise", "expected_result_selected",
     "vba_payload_search_results",
   ]);
   for (const key of [
     "synthetic_xlsm", "excel_explicitly_enabled", "command_palette_used",
-    "webdriver_input_used", "native_click_used", "modal_closed", "expected_file_active",
+    "webdriver_input_used", "native_click_used", "modal_closed", "expected_result_selected",
   ]) requiredTrue(scenario[key], `scenario.${key}`);
   for (const key of ["stale_notices", "open_failure_notices", "vba_payload_search_results"]) {
     equal(scenario[key], 0, `scenario.${key}`);

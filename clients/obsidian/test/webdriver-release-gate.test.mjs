@@ -89,7 +89,7 @@ function observed() {
     openFailureNotices: 0,
     openFileCalls: 1,
     openFilePromise: "resolved",
-    expectedFileActive: true,
+    expectedResultSelected: true,
     vbaPayloadSearchResults: 0,
     electron: "43.3.0",
     chromium: "150.0.7871.212",
@@ -663,7 +663,7 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     ["stale notice", { ...observed(), staleNotices: 1 }, "stale_notice_observed"],
     ["missing open", { ...observed(), openFileCalls: 0 }, "open_not_invoked"],
     ["rejected open", { ...observed(), openFilePromise: "rejected" }, "open_promise_rejected"],
-    ["inactive expected file", { ...observed(), expectedFileActive: false }, "expected_file_inactive"],
+    ["unselected expected result", { ...observed(), expectedResultSelected: false }, "result_not_rendered"],
     ["runtime drift", { ...observed(), electron: "43.2.0" }, "launch_failed"],
   ])("does not accept %s from the real scenario", (_name, changed, code) => {
     expect(() => assertObserved(changed, manifestFixture())).toThrow(code);
