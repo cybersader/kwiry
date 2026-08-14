@@ -35,6 +35,10 @@ const SAFE_ENV_KEYS = new Set([
 ]);
 const RUNTIME_OUTPUT_TAIL_BYTES = 512;
 const RUNTIME_OUTPUT_DRAIN_MS = 1_000;
+const PROVISIONAL_RUNTIME_STAGES = new Set([
+  "launch_network_runtime_failed",
+  "launch_runtime_fatal",
+]);
 const runtimeExitDiagnostics = new WeakMap();
 
 export class WebdriverGateError extends Error {
@@ -553,13 +557,18 @@ export function trackRuntimeExitDiagnostics(proc) {
       if (pending === 0) resolveComplete();
     };
     stream.on("data", (chunk) => {
-      if (diagnostics.stage && diagnostics.stage !== "launch_runtime_fatal") return;
+      if (diagnostics.stage && !PROVISIONAL_RUNTIME_STAGES.has(diagnostics.stage)) return;
       const decoded = chunk.toString("utf8");
       const bounded = decoded.length <= 4_096
         ? decoded
         : `${decoded.slice(0, 2_048)}${decoded.slice(-2_048)}`;
       const sample = `${diagnostics.tail}${bounded}`;
-      diagnostics.stage = classifyRuntimeOutput(sample) ?? diagnostics.stage;
+      const classified = classifyRuntimeOutput(sample);
+      if (classified && (diagnostics.stage === null
+        || diagnostics.stage === "launch_runtime_fatal"
+        || (diagnostics.stage === "launch_network_runtime_failed" && classified !== "launch_runtime_fatal"))) {
+        diagnostics.stage = classified;
+      }
       diagnostics.tail = sample.slice(-RUNTIME_OUTPUT_TAIL_BYTES);
     });
     stream.once("end", finish);
@@ -619,7 +628,11 @@ export function classifyRuntimeOutput(value) {
   if (/command_line|unknown option|invalid (?:flag|switch)|switches\.cc/iu.test(value)) {
     return "launch_argument_invalid";
   }
-  if (/network|socket|proxy/iu.test(value)) return "launch_network_runtime_failed";
+  if (/proxy/iu.test(value)) return "launch_proxy_runtime_failed";
+  if (/netlink|network_change/iu.test(value)) return "launch_network_monitor_failed";
+  if (/socket/iu.test(value)) return "launch_socket_runtime_failed";
+  if (/\bdns\b|host_resolver/iu.test(value)) return "launch_dns_runtime_failed";
+  if (/network/iu.test(value)) return "launch_network_runtime_failed";
   if (/\bnss\b|certificate|crypto/iu.test(value)) return "launch_security_runtime_failed";
   if (/ui_|aura|views|font|theme/iu.test(value)) return "launch_ui_runtime_failed";
   if (/permission denied|operation not permitted|eacces|eperm/iu.test(value)) {

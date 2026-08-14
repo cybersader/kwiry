@@ -355,7 +355,11 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     ["memory", "FATAL: partition_alloc_support.cc startup stopped", "launch_memory_unavailable"],
     ["IPC", "FATAL: mojo channel startup stopped", "launch_ipc_unavailable"],
     ["argument", "FATAL: command_line invalid flag", "launch_argument_invalid"],
-    ["network", "FATAL: proxy socket startup stopped", "launch_network_runtime_failed"],
+    ["proxy", "FATAL: proxy startup stopped", "launch_proxy_runtime_failed"],
+    ["network monitor", "FATAL: network_change_notifier startup stopped", "launch_network_monitor_failed"],
+    ["socket", "FATAL: socket_posix startup stopped", "launch_socket_runtime_failed"],
+    ["DNS", "FATAL: host_resolver startup stopped", "launch_dns_runtime_failed"],
+    ["network", "FATAL: network service startup stopped", "launch_network_runtime_failed"],
     ["security", "FATAL: NSS crypto startup stopped", "launch_security_runtime_failed"],
     ["UI", "FATAL: aura ui_base startup stopped", "launch_ui_runtime_failed"],
     ["permission", "FATAL: operation not permitted", "launch_permission_denied"],
@@ -422,6 +426,20 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
       stderr.end();
     });
     await expect(stage).resolves.toBe("launch_sandbox_unavailable");
+  });
+
+  it("upgrades a broad network stage when a later chunk identifies the subsystem", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = { exitCode: null, signalCode: "SIGTRAP", stdout, stderr };
+    trackRuntimeExitDiagnostics(proc);
+    stdout.write("FATAL: network startup stopped");
+    const stage = awaitRuntimeProcessExitStage(proc);
+    queueMicrotask(() => {
+      stdout.end(" socket_posix.cc");
+      stderr.end();
+    });
+    await expect(stage).resolves.toBe("launch_socket_runtime_failed");
   });
 
   it("generates deterministic XLSM content while isolating VBA text", () => {
