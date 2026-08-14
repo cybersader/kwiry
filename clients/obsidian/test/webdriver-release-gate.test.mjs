@@ -351,6 +351,9 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     ["Electron bootstrap", "FATAL: electron_main_delegate.cc startup stopped", "launch_electron_bootstrap_failed"],
     ["browser bootstrap", "FATAL: browser_main_loop.cc startup stopped", "launch_browser_bootstrap_failed"],
     ["Node bootstrap", "FATAL: node_bindings.cc startup stopped", "launch_node_bootstrap_failed"],
+    ["process model", "FATAL: process_metrics_posix.cc startup stopped", "launch_process_model_failed"],
+    ["event loop", "FATAL: message_pump_epoll.cc startup stopped", "launch_event_loop_failed"],
+    ["feature initialization", "FATAL: feature_list.cc startup stopped", "launch_feature_initialization_failed"],
     ["filesystem", "FATAL: file_util_posix.cc startup stopped", "launch_filesystem_unavailable"],
     ["memory", "FATAL: partition_alloc_support.cc startup stopped", "launch_memory_unavailable"],
     ["IPC", "FATAL: mojo channel startup stopped", "launch_ipc_unavailable"],
@@ -383,7 +386,7 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     expect(classifyFatalRuntimeOutput([
       "FATAL: socket_posix.cc startup stopped",
       "Address family not supported by protocol",
-    ].join("\n"))).toBe("launch_socket_family_unavailable");
+    ].join("\n"))).toBe("launch_socket_runtime_failed");
   });
 
   it("keeps unknown process output private and classifies only process status", () => {
