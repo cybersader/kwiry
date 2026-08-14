@@ -269,7 +269,10 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
   let passed = null;
   try {
     const layout = await preparePrivateLayout(privateRoot);
-    const runtimeTemp = await createWebdriverRuntimeTempRoot(layout);
+    const runtimeTemp = await gateStage(
+      () => createWebdriverRuntimeTempRoot(layout),
+      "runtime_temp_prepare_failed",
+    );
     state.runtimeTempRoot = runtimeTemp.cleanupPath;
     process.chdir(privateRoot);
     replaceEnvironment(isolatedEnvironment(layout, runtimeTemp.path));
@@ -280,10 +283,16 @@ export async function runWebdriverReleaseGate(options, adapters = {}) {
     const cdpPort = await deps.waitForCdpPort(launched.configDir, launched.proc);
     if (!isLoopbackPort(cdpPort)) throw new WebdriverGateError("webdriver_attach_failed");
     state.ports.push(cdpPort);
-    const attached = await deps.attach({ layout, manifest, cdpPort });
+    const attached = await gateStage(
+      () => deps.attach({ layout, manifest, cdpPort }),
+      "webdriver_attach_failed",
+    );
     state.driver = attached.driver ?? attached;
     if (attached.webdriverPort) state.ports.push(attached.webdriverPort);
-    const observed = await deps.exercise({ driver: state.driver, manifest });
+    const observed = await gateStage(
+      () => deps.exercise({ driver: state.driver, manifest }),
+      "scenario_execution_failed",
+    );
     assertObserved(observed, manifest);
     passed = { candidate, manifest, manifestSha256: sha256(manifestBytes), observed, cleanup };
   } catch (error) {
@@ -761,11 +770,14 @@ async function attachWebdriver({ layout, manifest, cdpPort }) {
   return { driver, webdriverPort: Number(webdriverUrl.port) };
 }
 
-async function exerciseObsidian({ driver, manifest }) {
+export async function exerciseObsidian({ driver, manifest }) {
   const selenium = await import("selenium-webdriver");
   const { By, Key, until } = selenium;
-  await driver.wait(async () => driver.executeScript(`return Boolean(window.app?.plugins?.enabledPlugins?.has(${JSON.stringify(PLUGIN_ID)}));`), UI_TIMEOUT_MS);
-  await driver.executeScript(`
+  await gateStage(
+    () => driver.wait(async () => driver.executeScript(`return Boolean(window.app?.plugins?.enabledPlugins?.has(${JSON.stringify(PLUGIN_ID)}));`), UI_TIMEOUT_MS),
+    "scenario_plugin_ready_failed",
+  );
+  await gateStage(() => driver.executeScript(`
     (() => {
       const state = { calls: 0, promise: "none", stale: 0, failure: 0 };
       const leafProto = Object.getPrototypeOf(window.app.workspace.getLeaf(false));
@@ -791,37 +803,52 @@ async function exerciseObsidian({ driver, manifest }) {
       observer.observe(document.body, { childList: true, subtree: true });
       window.__kwiryWebdriverGate = state;
     })();
-  `);
-  await driver.actions().keyDown(Key.CONTROL).sendKeys("p").keyUp(Key.CONTROL).perform();
-  const commandInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
-  await commandInput.sendKeys("Kwiry Search: Search notes");
-  const command = await driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'Kwiry Search: Search notes')]")), UI_TIMEOUT_MS);
-  await command.click();
-  const queryInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
-  await queryInput.sendKeys(QUERY);
-  const row = await driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'03-macro-boundary.xlsm')]")), UI_TIMEOUT_MS);
-  await row.click();
-  await driver.wait(async () => !(await driver.findElements(By.css(".modal-container"))).length, UI_TIMEOUT_MS);
-  await driver.actions().keyDown(Key.CONTROL).sendKeys("p").keyUp(Key.CONTROL).perform();
-  const secondCommandInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
-  await secondCommandInput.sendKeys("Kwiry Search: Search notes");
-  const secondCommand = await driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'Kwiry Search: Search notes')]")), UI_TIMEOUT_MS);
-  await secondCommand.click();
-  const vbaInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
-  await vbaInput.sendKeys(VBA_ORACLE);
-  await driver.sleep(1_000);
-  const vbaPayloadSearchResults = (await driver.findElements(By.css(".suggestion-item"))).length;
-  await driver.actions().sendKeys(Key.ESCAPE).perform();
-  const observation = await driver.executeScript(`
-    return {
-      ...window.__kwiryWebdriverGate,
-      modalClosed: !document.querySelector('.modal-container'),
-      expectedFileActive: window.app.workspace.getActiveFile()?.path === ${JSON.stringify(XLSM_PATH)},
-      electron: process.versions.electron,
-      chromium: process.versions.chrome,
-    };
-  `);
-  const capabilities = await driver.getCapabilities();
+  `), "scenario_instrumentation_failed");
+  await gateStage(
+    () => driver.actions().keyDown(Key.CONTROL).sendKeys("p").keyUp(Key.CONTROL).perform(),
+    "scenario_search_command_failed",
+  );
+  await gateStage(async () => {
+    const commandInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
+    await commandInput.sendKeys("Kwiry Search: Search notes");
+    const command = await driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'Kwiry Search: Search notes')]")), UI_TIMEOUT_MS);
+    await command.click();
+  }, "scenario_search_command_failed");
+  const row = await gateStage(async () => {
+    const queryInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
+    await queryInput.sendKeys(QUERY);
+    return driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'03-macro-boundary.xlsm')]")), UI_TIMEOUT_MS);
+  }, "scenario_result_lookup_failed");
+  await gateStage(() => row.click(), "scenario_result_activation_failed");
+  await gateStage(
+    () => driver.wait(async () => !(await driver.findElements(By.css(".modal-container"))).length, UI_TIMEOUT_MS),
+    "scenario_modal_close_failed",
+  );
+  const vbaPayloadSearchResults = await gateStage(async () => {
+    await driver.actions().keyDown(Key.CONTROL).sendKeys("p").keyUp(Key.CONTROL).perform();
+    const secondCommandInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
+    await secondCommandInput.sendKeys("Kwiry Search: Search notes");
+    const secondCommand = await driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'Kwiry Search: Search notes')]")), UI_TIMEOUT_MS);
+    await secondCommand.click();
+    const vbaInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
+    await vbaInput.sendKeys(VBA_ORACLE);
+    await driver.sleep(1_000);
+    const resultCount = (await driver.findElements(By.css(".suggestion-item"))).length;
+    await driver.actions().sendKeys(Key.ESCAPE).perform();
+    return resultCount;
+  }, "scenario_isolation_search_failed");
+  const { observation, capabilities } = await gateStage(async () => ({
+    observation: await driver.executeScript(`
+      return {
+        ...window.__kwiryWebdriverGate,
+        modalClosed: !document.querySelector('.modal-container'),
+        expectedFileActive: window.app.workspace.getActiveFile()?.path === ${JSON.stringify(XLSM_PATH)},
+        electron: process.versions.electron,
+        chromium: process.versions.chrome,
+      };
+    `),
+    capabilities: await driver.getCapabilities(),
+  }), "scenario_observation_failed");
   return {
     modalClosed: observation.modalClosed,
     staleNotices: observation.stale,

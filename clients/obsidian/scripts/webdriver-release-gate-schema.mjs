@@ -85,7 +85,7 @@ export function validateWebdriverReleaseEvidence(value) {
 export function sanitizedGateFailure(code) {
   const allowed = new Set([
     "candidate_invalid", "runtime_manifest_invalid", "download_identity_mismatch",
-    "runtime_prepare_failed", "vault_prepare_failed", "installer_prepare_failed",
+    "runtime_prepare_failed", "runtime_temp_prepare_failed", "vault_prepare_failed", "installer_prepare_failed",
     "launcher_resolve_failed", "launcher_app_cache_failed", "launcher_installer_cache_failed",
     "launcher_vault_setup_failed", "launcher_config_setup_failed", "launcher_spawn_failed",
     "launcher_start_failed", "launch_process_exited", "cdp_ready_timeout",
@@ -114,6 +114,9 @@ export function sanitizedGateFailure(code) {
     "launch_process_bus_error", "launch_process_arithmetic_fault", "launch_process_illegal_instruction",
     "launch_process_killed", "launch_process_segmentation_fault", "launch_process_terminated",
     "launch_process_trapped", "launch_failed", "webdriver_attach_failed",
+    "scenario_execution_failed", "scenario_plugin_ready_failed", "scenario_instrumentation_failed",
+    "scenario_search_command_failed", "scenario_result_lookup_failed", "scenario_result_activation_failed",
+    "scenario_modal_close_failed", "scenario_isolation_search_failed", "scenario_observation_failed",
     "result_not_rendered", "stale_notice_observed", "open_not_invoked", "open_promise_rejected",
     "cleanup_incomplete", "unexpected_failure",
   ]);

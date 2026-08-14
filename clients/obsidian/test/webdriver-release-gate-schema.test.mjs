@@ -102,6 +102,7 @@ describe("WebDriver release evidence schema", () => {
       failure_stage: "open_not_invoked",
     });
     expect(sanitizedGateFailure("runtime_prepare_failed").failure_stage).toBe("runtime_prepare_failed");
+    expect(sanitizedGateFailure("runtime_temp_prepare_failed").failure_stage).toBe("runtime_temp_prepare_failed");
     expect(sanitizedGateFailure("vault_prepare_failed").failure_stage).toBe("vault_prepare_failed");
     expect(sanitizedGateFailure("installer_prepare_failed").failure_stage).toBe("installer_prepare_failed");
     expect(sanitizedGateFailure("launcher_resolve_failed").failure_stage).toBe("launcher_resolve_failed");
@@ -176,6 +177,16 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("launch_process_segmentation_fault").failure_stage).toBe("launch_process_segmentation_fault");
     expect(sanitizedGateFailure("launch_process_terminated").failure_stage).toBe("launch_process_terminated");
     expect(sanitizedGateFailure("launch_process_trapped").failure_stage).toBe("launch_process_trapped");
+    expect(sanitizedGateFailure("webdriver_attach_failed").failure_stage).toBe("webdriver_attach_failed");
+    expect(sanitizedGateFailure("scenario_execution_failed").failure_stage).toBe("scenario_execution_failed");
+    expect(sanitizedGateFailure("scenario_plugin_ready_failed").failure_stage).toBe("scenario_plugin_ready_failed");
+    expect(sanitizedGateFailure("scenario_instrumentation_failed").failure_stage).toBe("scenario_instrumentation_failed");
+    expect(sanitizedGateFailure("scenario_search_command_failed").failure_stage).toBe("scenario_search_command_failed");
+    expect(sanitizedGateFailure("scenario_result_lookup_failed").failure_stage).toBe("scenario_result_lookup_failed");
+    expect(sanitizedGateFailure("scenario_result_activation_failed").failure_stage).toBe("scenario_result_activation_failed");
+    expect(sanitizedGateFailure("scenario_modal_close_failed").failure_stage).toBe("scenario_modal_close_failed");
+    expect(sanitizedGateFailure("scenario_isolation_search_failed").failure_stage).toBe("scenario_isolation_search_failed");
+    expect(sanitizedGateFailure("scenario_observation_failed").failure_stage).toBe("scenario_observation_failed");
     expect(sanitizedGateFailure("private details").failure_stage).toBe("unexpected_failure");
   });
 });
