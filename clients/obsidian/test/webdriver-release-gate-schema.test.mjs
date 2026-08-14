@@ -104,6 +104,12 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("runtime_prepare_failed").failure_stage).toBe("runtime_prepare_failed");
     expect(sanitizedGateFailure("vault_prepare_failed").failure_stage).toBe("vault_prepare_failed");
     expect(sanitizedGateFailure("installer_prepare_failed").failure_stage).toBe("installer_prepare_failed");
+    expect(sanitizedGateFailure("launcher_resolve_failed").failure_stage).toBe("launcher_resolve_failed");
+    expect(sanitizedGateFailure("launcher_app_cache_failed").failure_stage).toBe("launcher_app_cache_failed");
+    expect(sanitizedGateFailure("launcher_installer_cache_failed").failure_stage).toBe("launcher_installer_cache_failed");
+    expect(sanitizedGateFailure("launcher_vault_setup_failed").failure_stage).toBe("launcher_vault_setup_failed");
+    expect(sanitizedGateFailure("launcher_config_setup_failed").failure_stage).toBe("launcher_config_setup_failed");
+    expect(sanitizedGateFailure("launcher_spawn_failed").failure_stage).toBe("launcher_spawn_failed");
     expect(sanitizedGateFailure("launcher_start_failed").failure_stage).toBe("launcher_start_failed");
     expect(sanitizedGateFailure("private details").failure_stage).toBe("unexpected_failure");
   });

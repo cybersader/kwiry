@@ -417,13 +417,35 @@ async function launchPinnedObsidian({ layout, manifest }) {
     interactive: false,
   });
   await gateStage(() => preparePinnedInstaller(layout), "installer_prepare_failed");
-  return gateStage(() => launcher.launch({
-    appVersion: manifest.runtime.obsidian_app,
-    installerVersion: manifest.runtime.obsidian_installer,
-    vault: layout.vault,
-    args: ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0"],
-    spawnOptions: { detached: true, stdio: "ignore", env: process.env },
-  }), "launcher_start_failed");
+  const [appVersion, installerVersion] = await gateStage(
+    () => launcher.resolveVersion(manifest.runtime.obsidian_app, manifest.runtime.obsidian_installer),
+    "launcher_resolve_failed",
+  );
+  const appPath = await gateStage(
+    () => launcher.downloadApp(appVersion),
+    "launcher_app_cache_failed",
+  );
+  const installerPath = await gateStage(
+    () => launcher.downloadInstaller(installerVersion),
+    "launcher_installer_cache_failed",
+  );
+  const vault = await gateStage(
+    () => launcher.setupVault({ vault: layout.vault, copy: false }),
+    "launcher_vault_setup_failed",
+  );
+  const configDir = await gateStage(
+    () => launcher.setupConfigDir({ appVersion, installerVersion, appPath, vault }),
+    "launcher_config_setup_failed",
+  );
+  const proc = spawn(installerPath, [
+    `--user-data-dir=${configDir}`,
+    "--no-sandbox",
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port=0",
+    "--tag=obsidian-launcher",
+  ], { detached: true, stdio: "ignore", env: process.env });
+  await gateStage(() => waitForSpawn(proc), "launcher_spawn_failed");
+  return { proc, configDir, vault };
 }
 
 export async function preparePinnedInstaller(layout) {
@@ -453,6 +475,13 @@ async function runQuietProcess(command, args, cwd) {
     proc.once("close", (code) => code === 0
       ? resolveProcess()
       : rejectProcess(new Error("runtime extractor failed")));
+  });
+}
+
+async function waitForSpawn(proc) {
+  await new Promise((resolveSpawn, rejectSpawn) => {
+    proc.once("spawn", resolveSpawn);
+    proc.once("error", rejectSpawn);
   });
 }
 
