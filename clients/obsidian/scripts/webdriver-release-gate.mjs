@@ -33,8 +33,8 @@ const SAFE_ENV_KEYS = new Set([
   "CI", "DISPLAY", "KWIRY_WEBDRIVER_RUNTIME_ASSETS", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "PATH",
   "WAYLAND_DISPLAY", "XAUTHORITY",
 ]);
-const RUNTIME_STDERR_TAIL_BYTES = 512;
-const RUNTIME_STDERR_DRAIN_MS = 1_000;
+const RUNTIME_OUTPUT_TAIL_BYTES = 512;
+const RUNTIME_OUTPUT_DRAIN_MS = 1_000;
 const runtimeExitDiagnostics = new WeakMap();
 
 export class WebdriverGateError extends Error {
@@ -464,7 +464,7 @@ async function launchPinnedObsidian({ layout, manifest }) {
     "--tag=obsidian-launcher",
   ], {
     detached: true,
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
   });
   trackRuntimeExitDiagnostics(proc);
@@ -516,26 +516,37 @@ export function trackRuntimeExitDiagnostics(proc) {
   });
   const diagnostics = { stage: null, tail: "", complete };
   runtimeExitDiagnostics.set(proc, diagnostics);
-  if (!proc.stderr) {
+  const streams = [proc.stdout, proc.stderr].filter(Boolean);
+  if (streams.length === 0) {
     resolveComplete();
     return;
   }
-  proc.stderr.on("data", (chunk) => {
-    if (diagnostics.stage) return;
-    const decoded = chunk.toString("utf8");
-    const bounded = decoded.length <= 4_096
-      ? decoded
-      : `${decoded.slice(0, 2_048)}${decoded.slice(-2_048)}`;
-    const sample = `${diagnostics.tail}${bounded}`;
-    diagnostics.stage = classifyRuntimeStderr(sample);
-    diagnostics.tail = sample.slice(-RUNTIME_STDERR_TAIL_BYTES);
-  });
-  proc.stderr.once("end", resolveComplete);
-  proc.stderr.once("close", resolveComplete);
-  proc.stderr.once("error", resolveComplete);
+  let pending = streams.length;
+  for (const stream of streams) {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      pending -= 1;
+      if (pending === 0) resolveComplete();
+    };
+    stream.on("data", (chunk) => {
+      if (diagnostics.stage) return;
+      const decoded = chunk.toString("utf8");
+      const bounded = decoded.length <= 4_096
+        ? decoded
+        : `${decoded.slice(0, 2_048)}${decoded.slice(-2_048)}`;
+      const sample = `${diagnostics.tail}${bounded}`;
+      diagnostics.stage = classifyRuntimeOutput(sample);
+      diagnostics.tail = sample.slice(-RUNTIME_OUTPUT_TAIL_BYTES);
+    });
+    stream.once("end", finish);
+    stream.once("close", finish);
+    stream.once("error", finish);
+  }
 }
 
-export function classifyRuntimeStderr(value) {
+export function classifyRuntimeOutput(value) {
   if (/error while loading shared libraries|cannot open shared object file/iu.test(value)) {
     return "launch_dependency_missing";
   }
@@ -551,6 +562,16 @@ export function classifyRuntimeStderr(value) {
   if (/processsingleton|singleton lock|another instance is already running/iu.test(value)) {
     return "launch_instance_conflict";
   }
+  if (/crashpad_handler: --database is required|failed to (?:initialize|start) crashpad|crash reporter.*failed/iu.test(value)) {
+    return "launch_crash_reporter_unavailable";
+  }
+  if (/invalid file descriptor to icu data|failed to load (?:icu data|resources\.pak)|unable to load locale/iu.test(value)) {
+    return "launch_runtime_resources_unavailable";
+  }
+  if (/\bglib-(?:error|gio-error)\b|gdk-.*error/iu.test(value)) {
+    return "launch_platform_runtime_failed";
+  }
+  if (/\bfatal:/iu.test(value)) return "launch_runtime_fatal";
   return null;
 }
 
@@ -579,7 +600,7 @@ export async function awaitRuntimeProcessExitStage(proc) {
   if (complete) {
     await Promise.race([
       complete,
-      new Promise((resolveDrain) => setTimeout(resolveDrain, RUNTIME_STDERR_DRAIN_MS)),
+      new Promise((resolveDrain) => setTimeout(resolveDrain, RUNTIME_OUTPUT_DRAIN_MS)),
     ]);
   }
   return classifyRuntimeProcessExit(proc);

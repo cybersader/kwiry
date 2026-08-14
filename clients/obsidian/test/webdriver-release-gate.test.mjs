@@ -18,7 +18,7 @@ import {
   buildEvidence,
   buildSyntheticXlsm,
   classifyRuntimeProcessExit,
-  classifyRuntimeStderr,
+  classifyRuntimeOutput,
   createWebdriverPrivateRoot,
   downloadPinnedArtifact,
   preparePinnedInstaller,
@@ -308,14 +308,18 @@ chmod 700 squashfs-root/obsidian
     ["sandbox", "No usable sandbox!", "launch_sandbox_unavailable"],
     ["GPU", "GPU process isn't usable. Goodbye.", "launch_gpu_unavailable"],
     ["single instance", "ProcessSingleton failed to create a singleton lock", "launch_instance_conflict"],
-  ])("classifies %s startup diagnostics without returning raw output", (_name, stderr, stage) => {
-    expect(classifyRuntimeStderr(stderr)).toBe(stage);
-    expect(stage).not.toContain(stderr);
+    ["crash reporter", "chrome_crashpad_handler: --database is required", "launch_crash_reporter_unavailable"],
+    ["runtime resources", "Invalid file descriptor to ICU data received", "launch_runtime_resources_unavailable"],
+    ["platform runtime", "GLib-GIO-ERROR: platform setup failed", "launch_platform_runtime_failed"],
+    ["other fatal", "FATAL: runtime initialization stopped", "launch_runtime_fatal"],
+  ])("classifies %s startup diagnostics without returning raw output", (_name, output, stage) => {
+    expect(classifyRuntimeOutput(output)).toBe(stage);
+    expect(stage).not.toContain(output);
   });
 
   it("keeps unknown process output private and classifies only process status", () => {
     const privateDetail = ["private runtime detail under ", "/", "home", "/example"].join("");
-    expect(classifyRuntimeStderr(privateDetail)).toBeNull();
+    expect(classifyRuntimeOutput(privateDetail)).toBeNull();
     expect(classifyRuntimeProcessExit({ exitCode: 0, signalCode: null })).toBe("launch_process_clean_exit");
     expect(classifyRuntimeProcessExit({ exitCode: 1, signalCode: null })).toBe("launch_process_error_exit");
     expect(classifyRuntimeProcessExit({ exitCode: null, signalCode: "SIGTERM" })).toBe("launch_process_terminated");
@@ -342,6 +346,19 @@ chmod 700 squashfs-root/obsidian
     const stage = awaitRuntimeProcessExitStage(proc);
     queueMicrotask(() => stderr.end("The SUID sandbox helper binary was found, but is not configured correctly"));
     await expect(stage).resolves.toBe("launch_sandbox_unavailable");
+  });
+
+  it("classifies stdout while waiting for both runtime output pipes to drain", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = { exitCode: null, signalCode: "SIGTRAP", stdout, stderr };
+    trackRuntimeExitDiagnostics(proc);
+    const stage = awaitRuntimeProcessExitStage(proc);
+    queueMicrotask(() => {
+      stdout.end("chrome_crashpad_handler: --database is required");
+      stderr.end();
+    });
+    await expect(stage).resolves.toBe("launch_crash_reporter_unavailable");
   });
 
   it("generates deterministic XLSM content while isolating VBA text", () => {
