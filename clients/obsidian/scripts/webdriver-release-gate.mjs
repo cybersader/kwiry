@@ -426,6 +426,21 @@ export async function prepareVerifiedRuntime(layout, manifest, deps) {
   );
 }
 
+export function buildPinnedObsidianArgs(configDir) {
+  return [
+    `--user-data-dir=${configDir}`,
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-crash-reporter",
+    "--disable-gpu",
+    "--ozone-platform=x11",
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port=0",
+    "--test-type=webdriver",
+    "--tag=obsidian-launcher",
+  ];
+}
+
 async function launchPinnedObsidian({ layout, manifest }) {
   const Launcher = (await import("obsidian-launcher")).default;
   const launcher = new Launcher({
@@ -455,14 +470,7 @@ async function launchPinnedObsidian({ layout, manifest }) {
     () => launcher.setupConfigDir({ appVersion, installerVersion, appPath, vault }),
     "launcher_config_setup_failed",
   );
-  const proc = spawn(installerPath, [
-    `--user-data-dir=${configDir}`,
-    "--no-sandbox",
-    "--remote-debugging-address=127.0.0.1",
-    "--remote-debugging-port=0",
-    "--test-type=webdriver",
-    "--tag=obsidian-launcher",
-  ], {
+  const proc = spawn(installerPath, buildPinnedObsidianArgs(configDir), {
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
