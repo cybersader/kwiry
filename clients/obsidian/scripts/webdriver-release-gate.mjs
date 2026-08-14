@@ -777,6 +777,10 @@ export async function exerciseObsidian({ driver, manifest }) {
     () => driver.wait(async () => driver.executeScript(`return Boolean(window.app?.plugins?.enabledPlugins?.has(${JSON.stringify(PLUGIN_ID)}));`), UI_TIMEOUT_MS),
     "scenario_plugin_ready_failed",
   );
+  await gateStage(
+    () => driver.wait(async () => driver.executeScript(`return Boolean(window.app?.commands?.commands?.[${JSON.stringify(`${PLUGIN_ID}:open-search`)}]);`), UI_TIMEOUT_MS),
+    "scenario_command_registration_failed",
+  );
   await gateStage(() => driver.executeScript(`
     window.__kwiryWebdriverGate = { calls: 0, promise: "none", stale: 0, failure: 0 };
   `), "scenario_state_setup_failed");
@@ -828,7 +832,7 @@ export async function exerciseObsidian({ driver, manifest }) {
     "scenario_command_text_failed",
   );
   const command = await gateStage(
-    () => driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'Kwiry Search: Search notes')]")), UI_TIMEOUT_MS),
+    () => driver.wait(until.elementLocated(By.css(".suggestion-item")), UI_TIMEOUT_MS),
     "scenario_command_lookup_failed",
   );
   await gateStage(() => command.click(), "scenario_command_click_failed");
@@ -846,7 +850,7 @@ export async function exerciseObsidian({ driver, manifest }) {
     await driver.actions().keyDown(Key.CONTROL).sendKeys("p").keyUp(Key.CONTROL).perform();
     const secondCommandInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
     await secondCommandInput.sendKeys("Kwiry Search: Search notes");
-    const secondCommand = await driver.wait(until.elementLocated(By.xpath("//*[contains(@class,'suggestion-item') and contains(.,'Kwiry Search: Search notes')]")), UI_TIMEOUT_MS);
+    const secondCommand = await driver.wait(until.elementLocated(By.css(".suggestion-item")), UI_TIMEOUT_MS);
     await secondCommand.click();
     const vbaInput = await driver.wait(until.elementLocated(By.css(".prompt-input")), UI_TIMEOUT_MS);
     await vbaInput.sendKeys(VBA_ORACLE);

@@ -575,6 +575,19 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     await expect(exerciseObsidian({ driver, manifest: manifestFixture() })).rejects.toThrow(stage);
   });
 
+  it("maps command registration timeouts to a fixed scenario stage", async () => {
+    let waitCalls = 0;
+    const driver = {
+      wait: async () => {
+        waitCalls += 1;
+        if (waitCalls === 1) return true;
+        throw new Error("private webdriver detail");
+      },
+    };
+    await expect(exerciseObsidian({ driver, manifest: manifestFixture() }))
+      .rejects.toThrow("scenario_command_registration_failed");
+  });
+
   it("maps command-palette input timeouts to a fixed scenario stage", async () => {
     let waitCalls = 0;
     const actions = {
@@ -586,7 +599,7 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     const driver = {
       wait: async () => {
         waitCalls += 1;
-        if (waitCalls === 1) return true;
+        if (waitCalls <= 2) return true;
         throw new Error("private webdriver detail");
       },
       executeScript: async () => {},
