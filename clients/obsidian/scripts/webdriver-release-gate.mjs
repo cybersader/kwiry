@@ -34,6 +34,7 @@ const SAFE_ENV_KEYS = new Set([
   "WAYLAND_DISPLAY", "XAUTHORITY",
 ]);
 const RUNTIME_STDERR_TAIL_BYTES = 512;
+const RUNTIME_STDERR_DRAIN_MS = 1_000;
 const runtimeExitDiagnostics = new WeakMap();
 
 export class WebdriverGateError extends Error {
@@ -508,10 +509,18 @@ async function waitForSpawn(proc) {
   });
 }
 
-function trackRuntimeExitDiagnostics(proc) {
-  const diagnostics = { stage: null, tail: "" };
+export function trackRuntimeExitDiagnostics(proc) {
+  let resolveComplete;
+  const complete = new Promise((resolveDiagnostics) => {
+    resolveComplete = resolveDiagnostics;
+  });
+  const diagnostics = { stage: null, tail: "", complete };
   runtimeExitDiagnostics.set(proc, diagnostics);
-  proc.stderr?.on("data", (chunk) => {
+  if (!proc.stderr) {
+    resolveComplete();
+    return;
+  }
+  proc.stderr.on("data", (chunk) => {
     if (diagnostics.stage) return;
     const decoded = chunk.toString("utf8");
     const bounded = decoded.length <= 4_096
@@ -521,6 +530,9 @@ function trackRuntimeExitDiagnostics(proc) {
     diagnostics.stage = classifyRuntimeStderr(sample);
     diagnostics.tail = sample.slice(-RUNTIME_STDERR_TAIL_BYTES);
   });
+  proc.stderr.once("end", resolveComplete);
+  proc.stderr.once("close", resolveComplete);
+  proc.stderr.once("error", resolveComplete);
 }
 
 export function classifyRuntimeStderr(value) {
@@ -548,6 +560,17 @@ export function classifyRuntimeProcessExit(proc) {
   if (proc.signalCode !== null) return "launch_process_signaled";
   if (proc.exitCode === 0) return "launch_process_clean_exit";
   return "launch_process_error_exit";
+}
+
+export async function awaitRuntimeProcessExitStage(proc) {
+  const complete = runtimeExitDiagnostics.get(proc)?.complete;
+  if (complete) {
+    await Promise.race([
+      complete,
+      new Promise((resolveDrain) => setTimeout(resolveDrain, RUNTIME_STDERR_DRAIN_MS)),
+    ]);
+  }
+  return classifyRuntimeProcessExit(proc);
 }
 
 async function attachWebdriver({ layout, manifest, cdpPort }) {
@@ -733,7 +756,7 @@ async function waitForCdpPort(configDir, proc) {
   const deadline = Date.now() + UI_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (proc.exitCode !== null || proc.signalCode !== null) {
-      throw new WebdriverGateError(classifyRuntimeProcessExit(proc));
+      throw new WebdriverGateError(await awaitRuntimeProcessExitStage(proc));
     }
     try {
       const [port] = (await readFile(path, "utf8")).trim().split("\n");
