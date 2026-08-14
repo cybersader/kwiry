@@ -637,7 +637,20 @@ export function classifyRuntimeOutput(value) {
   if (/task_|task\.cc/iu.test(value)) return "launch_task_runtime_failed";
   if (/run_loop/iu.test(value)) return "launch_run_loop_failed";
   if (/scoped_blocking/iu.test(value)) return "launch_blocking_runtime_failed";
-  if (/process_|process\.cc/iu.test(value)) return "launch_process_model_failed";
+  if (/process_metrics/iu.test(value)) {
+    if (/cpu_time|clock_ticks/iu.test(value)) return "launch_process_cpu_metrics_failed";
+    if (/split_value_str|stringtosizet|values\.size|resident_pages|shared_pages|statm/iu.test(value)) {
+      return "launch_process_memory_metrics_failed";
+    }
+    return "launch_process_metrics_failed";
+  }
+  if (/launch_process|process_launcher|process_launch/iu.test(value)) return "launch_process_spawn_runtime_failed";
+  if (/process_handle/iu.test(value)) return "launch_process_handle_runtime_failed";
+  if (/process_iterator|named_process_iterator/iu.test(value)) return "launch_process_enumeration_failed";
+  if (/process_priority|process_affinity/iu.test(value)) return "launch_process_scheduling_failed";
+  if (/current_process|process_identity|process_id/iu.test(value)) return "launch_process_identity_failed";
+  if (/process_(?:posix|linux)|process\.cc/iu.test(value)) return "launch_process_platform_failed";
+  if (/process_/iu.test(value)) return "launch_process_model_failed";
   if (/message_pump|event_|event\.cc|epoll|poll_|fd_watch/iu.test(value)) {
     return "launch_event_loop_failed";
   }
