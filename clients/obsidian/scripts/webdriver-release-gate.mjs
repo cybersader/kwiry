@@ -782,7 +782,20 @@ export async function exerciseObsidian({ driver, manifest }) {
     "scenario_command_registration_failed",
   );
   await gateStage(
-    () => driver.wait(async () => driver.executeScript("return typeof window.app?.workspace?.getLeaf(false)?.openFile === 'function';"), UI_TIMEOUT_MS),
+    () => driver.wait(async () => {
+      try {
+        return Boolean(await driver.executeScript(`
+          try {
+            return typeof window.app?.workspace?.getLeaf === "function"
+              && typeof window.app.workspace.getLeaf(false)?.openFile === "function";
+          } catch {
+            return false;
+          }
+        `));
+      } catch {
+        return false;
+      }
+    }, UI_TIMEOUT_MS),
     "scenario_leaf_ready_failed",
   );
   await gateStage(() => driver.executeScript(`
