@@ -601,6 +601,33 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
       .rejects.toThrow("scenario_leaf_ready_failed");
   });
 
+  it("retries transient workspace leaf lookup failures", async () => {
+    let waitCalls = 0;
+    let scriptCalls = 0;
+    const driver = {
+      wait: async (condition) => {
+        waitCalls += 1;
+        if (waitCalls <= 2) return true;
+        if (waitCalls === 3) {
+          expect(await condition()).toBe(false);
+          expect(await condition()).toBe(true);
+          return true;
+        }
+        throw new Error("stop after leaf readiness");
+      },
+      executeScript: async () => {
+        scriptCalls += 1;
+        if (scriptCalls === 1) throw new Error("private transient leaf detail");
+        if (scriptCalls === 2) return true;
+        throw new Error("private state setup detail");
+      },
+    };
+
+    await expect(exerciseObsidian({ driver, manifest: manifestFixture() }))
+      .rejects.toThrow("scenario_state_setup_failed");
+    expect(scriptCalls).toBe(3);
+  });
+
   it("maps command-palette input timeouts to a fixed scenario stage", async () => {
     let waitCalls = 0;
     const actions = {
