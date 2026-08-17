@@ -8,7 +8,6 @@ import type { SearchMode } from "./api";
 import {
   SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
   SOURCE_ROW_LIMIT_SETTING_NAME,
-  type DiagnosticsReportDetail,
   type DiagnosticsReportLevel,
   type DiagnosticsReportScope,
 } from "./settings";
@@ -146,7 +145,7 @@ export class KwirySettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Report level")
       .setDesc(
-        "Which events a copied report contains. It can narrow the log level but never include events the log level above did not record.",
+        "Which events the copied summary and exported report contain. This can narrow the log but never recreate events that were not recorded.",
       )
       .addDropdown((dropdown) =>
         dropdown
@@ -165,7 +164,7 @@ export class KwirySettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Report scope")
-      .setDesc("Restrict a copied report to one area so it stays small enough to send.")
+      .setDesc("Restrict both diagnostics actions to one area.")
       .addDropdown((dropdown) =>
         dropdown
           .addOptions({
@@ -183,30 +182,19 @@ export class KwirySettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Report detail")
-      .setDesc(
-        "The full report appends every event again as JSON, which dominates its size. Compact keeps the readable summary only.",
-      )
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOptions({
-            compact: "Compact summary",
-            full: "Full, with JSON records",
-          })
-          .setValue(this.plugin.settings.diagnosticsReportDetail)
-          .onChange(async (value) => {
-            this.plugin.settings.diagnosticsReportDetail = value as DiagnosticsReportDetail;
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
       .setName("Diagnostic report")
-      .setDesc("Copy the current in-memory report for a support conversation, or clear it now.")
+      .setDesc(
+        "Copy a sanitized summary capped at 64 KiB, export the full sanitized report through a system dialog outside the vault, or clear the in-memory log.",
+      )
       .addButton((button) =>
         button
-          .setButtonText("Copy diagnostics")
+          .setButtonText("Copy summary")
           .onClick(() => void this.plugin.copyDiagnostics()),
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Export full report…")
+          .onClick(() => void this.plugin.exportDiagnosticsFile()),
       )
       .addButton((button) =>
         button

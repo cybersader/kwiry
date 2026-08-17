@@ -582,16 +582,48 @@ export class DiagnosticLog {
   }
 }
 
-/// Export shaping. A field report is only useful if it can actually be sent:
-/// a full report is dominated by its structured records, which makes it
-/// impractical to copy from a phone. Narrowing by level or category, or
-/// dropping the records block, keeps the same evidence at a fraction of the
-/// size. Filtering never changes what was captured, only what is exported.
+/// Export shaping. Filtering never changes what was captured, only which
+/// frozen retained entries are selected for this point-in-time report.
 export interface DiagnosticReportOptions {
   readonly minimumLevel?: DiagnosticLevel;
   readonly categories?: readonly DiagnosticEventCode[];
   readonly includeStructuredRecords?: boolean;
 }
+
+export interface DiagnosticExportPlan {
+  readonly schemaVersion: 1;
+  readonly reportUnavailable: boolean;
+  readonly context: Readonly<DiagnosticExportContext>;
+  readonly capacity: number;
+  readonly retainedEntries: number;
+  readonly selectedEntries: number;
+  readonly droppedEntries: number;
+  readonly filteredOutEntries: number;
+  readonly minimumLevel: DiagnosticLevel;
+  readonly categories: readonly DiagnosticEventCode[] | null;
+  readonly entries: readonly DiagnosticEntry[];
+}
+
+export interface DiagnosticExportSerializationOptions {
+  readonly includeStructuredRecords?: boolean;
+  readonly maxChunkBytes?: number;
+}
+
+export interface BoundedDiagnosticSummary {
+  readonly text: string;
+  readonly byteLength: number;
+  readonly retainedEntries: number;
+  readonly selectedEntries: number;
+  readonly droppedEntries: number;
+  readonly filteredOutEntries: number;
+  readonly emittedEntries: number;
+  readonly omittedEntries: number;
+}
+
+export const DIAGNOSTIC_EXPORT_CHUNK_BYTES = 16 * 1_024;
+export const DIAGNOSTIC_CLIPBOARD_MAX_BYTES = 64 * 1_024;
+
+const MIN_DIAGNOSTIC_SUMMARY_BYTES = 1_024;
 
 export const DIAGNOSTIC_CATEGORY_GROUPS = {
   all: null,
@@ -615,6 +647,130 @@ export function diagnosticCategoryGroup(
   return DIAGNOSTIC_CATEGORY_GROUPS[group] ?? undefined;
 }
 
+export function createDiagnosticExportPlan(
+  log: DiagnosticLog,
+  context: DiagnosticExportContext,
+  options: DiagnosticReportOptions = {},
+): DiagnosticExportPlan {
+  const minimumLevel = options.minimumLevel ?? "debug";
+  if (!LEVEL_SET.has(minimumLevel)) throw new TypeError("Invalid diagnostic level");
+  const categories = validateCategoryFilter(options.categories);
+  const safeContext = validateExportContext(context);
+
+  // Always take one complete retained snapshot. Level and category filtering is
+  // derived from this frozen view so counts and records cannot come from
+  // different moments in a busy indexing session.
+  const snapshot = log.snapshot("debug");
+  const minimum = LEVELS.indexOf(minimumLevel);
+  const selected = snapshot.entries.filter((entry) =>
+    LEVELS.indexOf(entry.level) >= minimum
+      && (categories === null || categories.includes(entry.code)));
+  const entries = Object.freeze(selected);
+  return Object.freeze({
+    schemaVersion: 1,
+    reportUnavailable: false,
+    context: safeContext,
+    capacity: snapshot.capacity,
+    retainedEntries: snapshot.entries.length,
+    selectedEntries: entries.length,
+    droppedEntries: snapshot.dropped,
+    filteredOutEntries: snapshot.entries.length - entries.length,
+    minimumLevel,
+    categories,
+    entries,
+  });
+}
+
+export function createUnavailableDiagnosticExportPlan(): DiagnosticExportPlan {
+  return Object.freeze({
+    schemaVersion: 1,
+    reportUnavailable: true,
+    context: Object.freeze({
+      pluginVersion: "unknown",
+      obsidianVersion: "unknown",
+      platform: "unknown",
+      backendProfile: "in_plugin",
+    }),
+    capacity: 0,
+    retainedEntries: 0,
+    selectedEntries: 0,
+    droppedEntries: 0,
+    filteredOutEntries: 0,
+    minimumLevel: "error",
+    categories: null,
+    entries: Object.freeze([]),
+  });
+}
+
+export function* serializeDiagnosticExport(
+  plan: DiagnosticExportPlan,
+  options: DiagnosticExportSerializationOptions = {},
+): Iterable<Uint8Array> {
+  const maxChunkBytes = options.maxChunkBytes ?? DIAGNOSTIC_EXPORT_CHUNK_BYTES;
+  if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes <= 0
+    || maxChunkBytes > DIAGNOSTIC_EXPORT_CHUNK_BYTES) {
+    throw new RangeError("Diagnostic export chunk size is out of bounds");
+  }
+  const encoder = new TextEncoder();
+  for (const text of diagnosticTextSegments(
+    plan,
+    options.includeStructuredRecords ?? true,
+  )) {
+    const encoded = encoder.encode(text);
+    for (let offset = 0; offset < encoded.byteLength; offset += maxChunkBytes) {
+      yield encoded.subarray(offset, Math.min(encoded.byteLength, offset + maxChunkBytes));
+    }
+  }
+}
+
+export function collectBoundedDiagnosticSummary(
+  plan: DiagnosticExportPlan,
+  maxBytes = DIAGNOSTIC_CLIPBOARD_MAX_BYTES,
+): BoundedDiagnosticSummary {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < MIN_DIAGNOSTIC_SUMMARY_BYTES
+    || maxBytes > DIAGNOSTIC_CLIPBOARD_MAX_BYTES) {
+    throw new RangeError("Diagnostic summary byte limit is out of bounds");
+  }
+  const encoder = new TextEncoder();
+  const header = `${diagnosticHeaderLines(plan).join("\n")}\n`;
+  const eventLines: string[] = [];
+  let emittedEntries = 0;
+  let byteLengthWithoutFooter = encoder.encode(header).byteLength;
+
+  for (const entry of plan.entries) {
+    const candidate = `${formatDiagnosticEntry(entry)}\n`;
+    const candidateBytes = encoder.encode(candidate).byteLength;
+    const candidateFooterBytes = encoder.encode(clipboardFooter(
+      emittedEntries + 1,
+      plan.selectedEntries - emittedEntries - 1,
+    )).byteLength;
+    if (byteLengthWithoutFooter + candidateBytes + candidateFooterBytes > maxBytes) break;
+    eventLines.push(candidate);
+    emittedEntries += 1;
+    byteLengthWithoutFooter += candidateBytes;
+  }
+
+  if (plan.selectedEntries === 0) {
+    const emptyLine = "(no retained events at this level)\n";
+    eventLines.push(emptyLine);
+    byteLengthWithoutFooter += encoder.encode(emptyLine).byteLength;
+  }
+  const omittedEntries = plan.selectedEntries - emittedEntries;
+  const text = `${header}${eventLines.join("")}${clipboardFooter(emittedEntries, omittedEntries)}`;
+  const byteLength = encoder.encode(text).byteLength;
+  if (byteLength > maxBytes) throw new RangeError("Diagnostic summary header exceeds byte limit");
+  return Object.freeze({
+    text,
+    byteLength,
+    retainedEntries: plan.retainedEntries,
+    selectedEntries: plan.selectedEntries,
+    droppedEntries: plan.droppedEntries,
+    filteredOutEntries: plan.filteredOutEntries,
+    emittedEntries,
+    omittedEntries,
+  });
+}
+
 export function formatDiagnosticLog(
   log: DiagnosticLog,
   context: DiagnosticExportContext,
@@ -623,92 +779,117 @@ export function formatDiagnosticLog(
   const options: DiagnosticReportOptions = typeof minimumLevelOrOptions === "string"
     ? { minimumLevel: minimumLevelOrOptions }
     : minimumLevelOrOptions;
-  const minimumLevel = options.minimumLevel ?? "debug";
-  const categories = options.categories;
-  if (categories !== undefined) {
-    if (categories.length === 0) throw new TypeError("Invalid diagnostic category filter");
-    for (const category of categories) {
-      if (!EVENT_CODE_SET.has(category)) {
-        throw new TypeError("Invalid diagnostic category filter");
-      }
-    }
-  }
-  const includeStructuredRecords = options.includeStructuredRecords ?? true;
-  return formatFilteredLog(
-    log,
-    context,
-    minimumLevel,
-    categories,
-    includeStructuredRecords,
-  );
+  return formatDiagnosticExportPlan(createDiagnosticExportPlan(log, context, options), {
+    includeStructuredRecords: options.includeStructuredRecords ?? true,
+  });
 }
 
-function formatFilteredLog(
-  log: DiagnosticLog,
-  context: DiagnosticExportContext,
-  minimumLevel: DiagnosticLevel,
-  categories: readonly DiagnosticEventCode[] | undefined,
-  includeStructuredRecords: boolean,
+export function formatDiagnosticExportPlan(
+  plan: DiagnosticExportPlan,
+  options: DiagnosticExportSerializationOptions = {},
 ): string {
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  for (const chunk of serializeDiagnosticExport(plan, options)) {
+    parts.push(decoder.decode(chunk, { stream: true }));
+  }
+  parts.push(decoder.decode());
+  return parts.join("");
+}
+
+function* diagnosticTextSegments(
+  plan: DiagnosticExportPlan,
+  includeStructuredRecords: boolean,
+): Iterable<string> {
+  yield `${diagnosticHeaderLines(plan).join("\n")}\n`;
+  if (plan.entries.length === 0) {
+    yield "(no retained events at this level)\n";
+  } else {
+    for (const entry of plan.entries) yield `${formatDiagnosticEntry(entry)}\n`;
+  }
+  if (!includeStructuredRecords) {
+    yield "\nstructured_records: omitted\n";
+    return;
+  }
+
+  yield "\nStructured records (JSON):\n";
+  const prefix = JSON.stringify({
+    schemaVersion: 1,
+    context: plan.context,
+    capacity: plan.capacity,
+    storedEntries: plan.selectedEntries,
+    droppedEntries: plan.droppedEntries,
+    minimumLevel: plan.minimumLevel,
+  }, null, 2);
+  yield `${prefix.slice(0, -2)},\n  "records": [`;
+  for (let index = 0; index < plan.entries.length; index += 1) {
+    const record = JSON.stringify(plan.entries[index], null, 2)
+      .split("\n")
+      .map((line) => `    ${line}`)
+      .join("\n");
+    yield `${index === 0 ? "\n" : ",\n"}${record}`;
+  }
+  yield `${plan.entries.length === 0 ? "" : "\n"}  ]\n}\n`;
+}
+
+function diagnosticHeaderLines(plan: DiagnosticExportPlan): string[] {
+  return [
+    "Kwiry diagnostics log",
+    ...(plan.reportUnavailable ? ["report_unavailable: true"] : []),
+    `plugin_version: ${plan.context.pluginVersion}`,
+    `obsidian_version: ${plan.context.obsidianVersion}`,
+    `platform: ${plan.context.platform}`,
+    `backend_profile: ${plan.context.backendProfile}`,
+    `capacity: ${plan.capacity}`,
+    `stored_entries: ${plan.selectedEntries}`,
+    `dropped_entries: ${plan.droppedEntries}`,
+    `minimum_level: ${plan.minimumLevel}`,
+    `categories: ${plan.categories === null ? "all" : plan.categories.join(",")}`,
+    `retained_entries: ${plan.retainedEntries}`,
+    `filtered_out_entries: ${plan.filteredOutEntries}`,
+    "",
+    "Summary:",
+  ];
+}
+
+function formatDiagnosticEntry(entry: DiagnosticEntry): string {
+  const detail = DETAIL_KEYS.flatMap((key) => {
+    const value = entry.details[key];
+    return value === undefined ? [] : [`${key}=${String(value)}`];
+  }).join(" ");
+  const prefix = `${entry.sequence} ${new Date(entry.startedAtMs).toISOString()} +${entry.durationMs}ms ${entry.level.toUpperCase()} ${entry.code}`;
+  return detail.length === 0 ? prefix : `${prefix} ${detail}`;
+}
+
+function clipboardFooter(emittedEntries: number, omittedEntries: number): string {
+  return "\nstructured_records: omitted\n"
+    + `clipboard_emitted_entries: ${emittedEntries}\n`
+    + `clipboard_omitted_entries: ${omittedEntries}\n`;
+}
+
+function validateCategoryFilter(
+  value: readonly DiagnosticEventCode[] | undefined,
+): readonly DiagnosticEventCode[] | null {
+  if (value === undefined) return null;
+  if (value.length === 0) throw new TypeError("Invalid diagnostic category filter");
+  for (const category of value) {
+    if (!EVENT_CODE_SET.has(category)) throw new TypeError("Invalid diagnostic category filter");
+  }
+  return Object.freeze([...value]);
+}
+
+function validateExportContext(
+  context: DiagnosticExportContext,
+): Readonly<DiagnosticExportContext> {
   if (!PLATFORM_SET.has(context.platform) || !PROFILE_SET.has(context.backendProfile)) {
     throw new TypeError("Invalid diagnostic header");
   }
-  const fullSnapshot = log.snapshot(minimumLevel);
-  const selected = categories === undefined
-    ? fullSnapshot.entries
-    : fullSnapshot.entries.filter((entry) => categories.includes(entry.code));
-  const snapshot = {
-    capacity: fullSnapshot.capacity,
-    dropped: fullSnapshot.dropped,
-    entries: selected,
-  };
-  const safeContext = {
+  return Object.freeze({
     pluginVersion: headerToken(context.pluginVersion),
     obsidianVersion: headerToken(context.obsidianVersion),
     platform: context.platform,
     backendProfile: context.backendProfile,
-  };
-  const lines = [
-    "Kwiry diagnostics log",
-    `plugin_version: ${safeContext.pluginVersion}`,
-    `obsidian_version: ${safeContext.obsidianVersion}`,
-    `platform: ${safeContext.platform}`,
-    `backend_profile: ${safeContext.backendProfile}`,
-    `capacity: ${snapshot.capacity}`,
-    `stored_entries: ${snapshot.entries.length}`,
-    `dropped_entries: ${snapshot.dropped}`,
-    `minimum_level: ${minimumLevel}`,
-    `categories: ${categories === undefined ? "all" : categories.join(",")}`,
-    ...(fullSnapshot.entries.length === snapshot.entries.length
-      ? []
-      : [`filtered_out_entries: ${fullSnapshot.entries.length - snapshot.entries.length}`]),
-    "",
-    "Summary:",
-  ];
-  for (const entry of snapshot.entries) {
-    const detail = DETAIL_KEYS.flatMap((key) => {
-      const value = entry.details[key];
-      return value === undefined ? [] : [`${key}=${String(value)}`];
-    }).join(" ");
-    const prefix = `${entry.sequence} ${new Date(entry.startedAtMs).toISOString()} +${entry.durationMs}ms ${entry.level.toUpperCase()} ${entry.code}`;
-    lines.push(detail.length === 0 ? prefix : `${prefix} ${detail}`);
-  }
-  if (snapshot.entries.length === 0) lines.push("(no retained events at this level)");
-  if (!includeStructuredRecords) {
-    lines.push("", "structured_records: omitted");
-    return `${lines.join("\n")}\n`;
-  }
-  lines.push("", "Structured records (JSON):");
-  lines.push(JSON.stringify({
-    schemaVersion: 1,
-    context: safeContext,
-    capacity: snapshot.capacity,
-    storedEntries: snapshot.entries.length,
-    droppedEntries: snapshot.dropped,
-    minimumLevel,
-    records: snapshot.entries,
-  }, null, 2));
-  return `${lines.join("\n")}\n`;
+  });
 }
 
 class MutableDiagnosticEvent implements DiagnosticEventBuilder {

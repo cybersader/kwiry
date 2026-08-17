@@ -941,7 +941,7 @@ export async function prepareVault(vault, candidate) {
       pdf: false, excalidraw: true, excel: true,
     },
     diagnosticsLogLevel: "off", diagnosticsReportLevel: "error",
-    diagnosticsReportScope: "failures", diagnosticsReportDetail: "compact",
+    diagnosticsReportScope: "failures",
   }, null, 2)}\n`);
   await mkdir(resolve(vault, ".obsidian"), { recursive: true });
   await writeFile(resolve(vault, ".obsidian/community-plugins.json"), `${JSON.stringify([PLUGIN_ID])}\n`);

@@ -8,6 +8,7 @@ import { Worker } from "node:worker_threads";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { buildPlugin } from "../esbuild.config.mjs";
+import { buildSyntheticXlsm } from "../scripts/webdriver-release-gate.mjs";
 import {
   CACHE_SCHEMA_VERSION,
   SOURCE_FORMATS,
@@ -2383,6 +2384,80 @@ describe("exact generated production Worker", () => {
         id: 14, operation: "search", query: "quasar guide", limit: 20,
       });
       expect(second.result.hits).toEqual(first.result.hits);
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("accepts required analyzed anchors before and after filename metadata promotion", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "analyzed-anchors" });
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "analyzed-anchors",
+        sources: [
+          source("anchor.md", "---\ntitle: IIA 2 authority\n---\n# Anchor\nreference body"),
+          sourceBytesWithFormat(
+            "fy 26 workbook.xlsx",
+            "excel",
+            buildSyntheticXlsm(),
+          ),
+        ],
+      })).resolves.toMatchObject({ ok: true, result: { documents: 2 } });
+      await expect(request(worker, {
+        id: 4,
+        operation: "commit_build",
+        generation: "analyzed-anchors",
+      })).resolves.toMatchObject({ ok: true });
+
+      const preparedAnchorSearch = await request(worker, {
+        id: 5,
+        operation: "search",
+        query: "IIA 2 optionalmissing",
+        limit: 20,
+      });
+      expect(preparedAnchorSearch).toMatchObject({
+        ok: true,
+        result: { hits: expect.arrayContaining([expect.objectContaining({ path: "anchor.md" })]) },
+      });
+      await expect(request(worker, {
+        id: 6,
+        operation: "search",
+        query: "fy 26 workbook",
+        limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          hits: expect.arrayContaining([
+            expect.objectContaining({ path: "fy 26 workbook.xlsx" }),
+          ]),
+        },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("refuses an optional exact-identifier projection at the prepared-plan boundary", async () => {
+    const needle = "function isPreparedQuery(value) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  if (value?.plan?.query === "optionalexactprobe") value.plan.term_intents[0].projection = "exact_identifier";`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "optional-exact-validator",
+        path: "validator.md",
+        text: "optionalexactprobe",
+      });
+      await expect(request(worker, {
+        id: 5, operation: "search", query: "optionalexactprobe", limit: 20,
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
     } finally {
       await worker.terminate();
     }

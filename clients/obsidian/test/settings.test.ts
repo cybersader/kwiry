@@ -108,6 +108,20 @@ describe("loadSettings", () => {
     expect(loadSettings({ diagnosticsLogLevel: "verbose" }).diagnosticsLogLevel).toBe("info");
   });
 
+  it("ignores the legacy report-detail setting so full clipboard reports cannot return", () => {
+    for (const legacy of ["compact", "full"]) {
+      const loaded = loadSettings({
+        diagnosticsReportDetail: legacy,
+        diagnosticsReportLevel: "warn",
+        diagnosticsReportScope: "failures",
+      });
+      expect(loaded.diagnosticsReportLevel).toBe("warn");
+      expect(loaded.diagnosticsReportScope).toBe("failures");
+      expect(loaded).not.toHaveProperty("diagnosticsReportDetail");
+    }
+    expect(DEFAULT_SETTINGS).not.toHaveProperty("diagnosticsReportDetail");
+  });
+
   it("defaults only extractable formats on and migrates stored toggles honestly", () => {
     expect(DEFAULT_SETTINGS.enabledSourceFormats).toEqual(DEFAULT_ENABLED_SOURCE_FORMATS);
     expect(DEFAULT_ENABLED_SOURCE_FORMATS).toEqual({

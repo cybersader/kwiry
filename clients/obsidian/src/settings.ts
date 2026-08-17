@@ -13,11 +13,9 @@ import {
 export type DiagnosticsLogLevel = "off" | "error" | "info";
 
 /// Report shaping is separate from capture. Capture decides what is recorded;
-/// these decide what a copied report contains, so a field report stays small
-/// enough to actually send from a phone.
+/// these filters apply to both the bounded clipboard summary and full file export.
 export type DiagnosticsReportLevel = "debug" | "info" | "warn" | "error";
 export type DiagnosticsReportScope = "all" | "indexing" | "search" | "startup" | "failures";
-export type DiagnosticsReportDetail = "compact" | "full";
 
 export const SOURCE_ROW_LIMIT_SETTING_NAME = "Source row limit";
 export const SOURCE_ROW_LIMIT_SETTING_DESCRIPTION =
@@ -40,7 +38,6 @@ export interface KwiryPluginSettings {
   diagnosticsLogLevel: DiagnosticsLogLevel;
   diagnosticsReportLevel: DiagnosticsReportLevel;
   diagnosticsReportScope: DiagnosticsReportScope;
-  diagnosticsReportDetail: DiagnosticsReportDetail;
 }
 
 export const DEFAULT_SETTINGS: KwiryPluginSettings = {
@@ -56,7 +53,6 @@ export const DEFAULT_SETTINGS: KwiryPluginSettings = {
   diagnosticsLogLevel: "info",
   diagnosticsReportLevel: "info",
   diagnosticsReportScope: "all",
-  diagnosticsReportDetail: "compact",
 };
 
 /** Merges stored data over defaults, discarding unknown keys. */
@@ -121,12 +117,6 @@ export function loadSettings(stored: unknown): KwiryPluginSettings {
     || source.diagnosticsReportScope === "failures"
   ) {
     settings.diagnosticsReportScope = source.diagnosticsReportScope;
-  }
-  if (
-    source.diagnosticsReportDetail === "compact"
-    || source.diagnosticsReportDetail === "full"
-  ) {
-    settings.diagnosticsReportDetail = source.diagnosticsReportDetail;
   }
   return settings;
 }

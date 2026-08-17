@@ -6,11 +6,14 @@
 
 import {
   DiagnosticLog,
-  formatDiagnosticLog,
+  createDiagnosticExportPlan,
+  createUnavailableDiagnosticExportPlan,
+  formatDiagnosticExportPlan,
   type DiagnosticDetails,
   type DiagnosticEventBuilder,
   type DiagnosticEventCode,
   type DiagnosticExportContext,
+  type DiagnosticExportPlan,
   type DiagnosticLevel,
   type DiagnosticReportOptions,
 } from "./log";
@@ -84,16 +87,26 @@ export class PluginDiagnostics {
     }
   }
 
-  format(context: DiagnosticExportContext, options: DiagnosticReportOptions = {}): string {
+  createExportPlan(
+    context: DiagnosticExportContext,
+    options: DiagnosticReportOptions = {},
+  ): DiagnosticExportPlan {
     try {
-      return formatDiagnosticLog(this.log, context, {
+      return createDiagnosticExportPlan(this.log, context, {
         // Capture level is still the floor: a report can narrow what was
         // recorded but can never widen it into events that were never kept.
         minimumLevel: widerOf(minimumLevel(this.level), options.minimumLevel),
         ...(options.categories === undefined ? {} : { categories: options.categories }),
-        ...(options.includeStructuredRecords === undefined
-          ? {}
-          : { includeStructuredRecords: options.includeStructuredRecords }),
+      });
+    } catch {
+      return createUnavailableDiagnosticExportPlan();
+    }
+  }
+
+  format(context: DiagnosticExportContext, options: DiagnosticReportOptions = {}): string {
+    try {
+      return formatDiagnosticExportPlan(this.createExportPlan(context, options), {
+        includeStructuredRecords: options.includeStructuredRecords ?? true,
       });
     } catch {
       return "Kwiry diagnostics log\nreport_unavailable: true\n";

@@ -103,6 +103,55 @@ describe("PluginDiagnostics", () => {
     expect(diagnostics.format(CONTEXT)).toContain("stored_entries: 0");
   });
 
+  it("keeps the capture floor and report narrowing in the frozen plan", async () => {
+    const diagnostics = new PluginDiagnostics("error");
+    await diagnostics.capture("info", "search.lifecycle", {
+      operation: "search",
+      mode: "lexical",
+    }, () => undefined);
+    await expect(diagnostics.capture("info", "backend.activate", {
+      operation: "activate",
+    }, () => {
+      throw new Error("private failure");
+    })).rejects.toThrow("private failure");
+
+    const plan = diagnostics.createExportPlan(CONTEXT, { minimumLevel: "debug" });
+    expect(plan).toMatchObject({
+      retainedEntries: 2,
+      selectedEntries: 1,
+      filteredOutEntries: 1,
+      minimumLevel: "error",
+    });
+    expect(plan.entries.map((entry) => entry.code)).toEqual(["backend.activate"]);
+  });
+
+  it("returns a fixed unavailable plan when export planning fails", () => {
+    const diagnostics = new PluginDiagnostics("info");
+    const privateValue = "private/path/to/vault";
+    const plan = diagnostics.createExportPlan({
+      ...CONTEXT,
+      pluginVersion: privateValue,
+    });
+
+    expect(plan.reportUnavailable).toBe(true);
+    expect(plan).toMatchObject({ retainedEntries: 0, selectedEntries: 0, droppedEntries: 0 });
+    const report = diagnostics.format({ ...CONTEXT, pluginVersion: privateValue });
+    expect(report).toContain("report_unavailable: true");
+    expect(report).not.toContain(privateValue);
+    expect(JSON.stringify(plan)).not.toContain(privateValue);
+  });
+
+  it("excludes captures completed after export planning", async () => {
+    const diagnostics = new PluginDiagnostics("info");
+    await diagnostics.capture("info", "plugin.load", {}, () => undefined);
+    const plan = diagnostics.createExportPlan(CONTEXT);
+    await diagnostics.capture("error", "failure.caught", { code: "timeout" }, () => undefined);
+
+    expect(plan.selectedEntries).toBe(1);
+    expect(plan.entries.map((entry) => entry.code)).toEqual(["plugin.load"]);
+    expect(diagnostics.createExportPlan(CONTEXT).selectedEntries).toBe(2);
+  });
+
   it("keeps late operations from repopulating a cleared buffer", async () => {
     const diagnostics = new PluginDiagnostics("info");
     let release!: () => void;
