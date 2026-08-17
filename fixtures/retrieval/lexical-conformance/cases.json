@@ -151,6 +151,11 @@
       "scope": "allowed",
       "path": "long-exact-other.md",
       "markdown": "---\ntitle: marker aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaay\n---\n\nbody"
+    },
+    {
+      "scope": "allowed",
+      "path": "orchard-adoption.md",
+      "markdown": "---\ntitle: Orchard Adoption\n---\n\nSynthetic prefix target."
     }
   ],
   "generated_documents": [
@@ -160,6 +165,13 @@
       "count": 12,
       "width": 2,
       "markdown": "# Stable tie\nstabletie"
+    },
+    {
+      "scope": "allowed",
+      "path_prefix": "orchard-decoy-",
+      "count": 24,
+      "width": 2,
+      "markdown": "---\ntitle: Orchard\n---\n\nSynthetic partial decoy."
     }
   ],
   "cases": [
@@ -332,6 +344,29 @@
       "excluded_paths": [
         "alpha-only.md",
         "beta-only.md"
+      ]
+    },
+    {
+      "id": "prefix-before-partial-window",
+      "query": "orchard adop",
+      "scope": "allowed",
+      "limit": 8,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "prefix",
+        "partial_coverage"
+      ],
+      "anchors": [],
+      "prefix_expansions": 1,
+      "expected_paths": [
+        {
+          "path": "orchard-adoption.md",
+          "tier": "prefix"
+        }
       ]
     },
     {

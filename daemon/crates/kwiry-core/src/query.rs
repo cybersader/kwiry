@@ -225,8 +225,8 @@ pub enum QueryEvidenceStageKind {
     ExactMetadata,
     ExactPhrase,
     AllTerms,
-    PartialCoverage,
     Prefix,
+    PartialCoverage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -446,24 +446,24 @@ impl LexicalQueryPlan {
             .take(self.bounds.max_partial_coverage_terms)
             .map(|intent| intent.index)
             .collect();
+        if !prefix_indexes.is_empty() {
+            push_stage(
+                &mut self.evidence_stages,
+                QueryEvidenceStageKind::Prefix,
+                QueryFieldGroup::Prefix,
+                partial_indexes.clone(),
+                prefix_indexes,
+                self.bounds.max_candidates_per_stage,
+            );
+        }
         if has_unsupported_context && !partial_indexes.is_empty() && partial_indexes != all_indexes
         {
             push_stage(
                 &mut self.evidence_stages,
                 QueryEvidenceStageKind::PartialCoverage,
                 QueryFieldGroup::SearchableText,
-                partial_indexes.clone(),
-                Vec::new(),
-                self.bounds.max_candidates_per_stage,
-            );
-        }
-        if !prefix_indexes.is_empty() {
-            push_stage(
-                &mut self.evidence_stages,
-                QueryEvidenceStageKind::Prefix,
-                QueryFieldGroup::Prefix,
                 partial_indexes,
-                prefix_indexes,
+                Vec::new(),
                 self.bounds.max_candidates_per_stage,
             );
         }
@@ -789,24 +789,30 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
         intent.role == QueryTermRole::OptionalContext
             && intent.support == QueryTermSupport::Unsupported
     });
-    let mut expected_non_prefix_kinds = Vec::new();
-    if plan.exact_intent.is_some() {
-        expected_non_prefix_kinds.push(QueryEvidenceStageKind::ExactMetadata);
-    }
-    if plan.phrase_intent.is_some() {
-        expected_non_prefix_kinds.push(QueryEvidenceStageKind::ExactPhrase);
-    }
-    expected_non_prefix_kinds.push(QueryEvidenceStageKind::AllTerms);
-    if has_unsupported_context && !relaxed_indexes.is_empty() && relaxed_indexes != all_indexes {
-        expected_non_prefix_kinds.push(QueryEvidenceStageKind::PartialCoverage);
-    }
-    let actual_non_prefix_kinds: Vec<_> = plan
+    let has_prefix = plan
         .evidence_stages
         .iter()
-        .filter(|stage| stage.kind != QueryEvidenceStageKind::Prefix)
+        .any(|stage| stage.kind == QueryEvidenceStageKind::Prefix);
+    let mut expected_kinds = Vec::new();
+    if plan.exact_intent.is_some() {
+        expected_kinds.push(QueryEvidenceStageKind::ExactMetadata);
+    }
+    if plan.phrase_intent.is_some() {
+        expected_kinds.push(QueryEvidenceStageKind::ExactPhrase);
+    }
+    expected_kinds.push(QueryEvidenceStageKind::AllTerms);
+    if has_prefix {
+        expected_kinds.push(QueryEvidenceStageKind::Prefix);
+    }
+    if has_unsupported_context && !relaxed_indexes.is_empty() && relaxed_indexes != all_indexes {
+        expected_kinds.push(QueryEvidenceStageKind::PartialCoverage);
+    }
+    let actual_kinds: Vec<_> = plan
+        .evidence_stages
+        .iter()
         .map(|stage| stage.kind)
         .collect();
-    if actual_non_prefix_kinds != expected_non_prefix_kinds {
+    if actual_kinds != expected_kinds {
         return Err(invalid_plan(
             "query evidence stages do not preserve the required evidence ladder",
         ));
@@ -1410,22 +1416,29 @@ mod tests {
     }
 
     #[test]
-    fn bounded_prefix_is_last_and_never_relaxes_identifier_anchors() {
+    fn bounded_prefix_precedes_partial_coverage_and_never_relaxes_identifier_anchors() {
         let prepared = prepare_lexical_query("cache unfindable").unwrap();
         let report = evidence_report(&prepared, None, &[(5, 0), (0, 2)]);
         let finalized = prepared.finalize_evidence(report).unwrap();
         assert_eq!(
-            stage_kinds(&finalized).last(),
-            Some(&QueryEvidenceStageKind::Prefix)
+            stage_kinds(&finalized),
+            [
+                QueryEvidenceStageKind::ExactMetadata,
+                QueryEvidenceStageKind::ExactPhrase,
+                QueryEvidenceStageKind::AllTerms,
+                QueryEvidenceStageKind::Prefix,
+                QueryEvidenceStageKind::PartialCoverage,
+            ]
         );
-        assert_eq!(
-            finalized
-                .evidence_stages
-                .last()
-                .unwrap()
-                .prefix_term_indexes,
-            [1]
-        );
+        assert_eq!(finalized.evidence_stages[3].prefix_term_indexes, [1]);
+        assert_eq!(finalized.evidence_stages[4].required_term_indexes, [0]);
+
+        let mut old_order = finalized.clone();
+        old_order.evidence_stages.swap(3, 4);
+        for (ordinal, stage) in old_order.evidence_stages.iter_mut().enumerate() {
+            stage.ordinal = ordinal as u8;
+        }
+        assert!(old_order.validate().is_err());
 
         let prepared = prepare_lexical_query("CVE-2026-1234 context").unwrap();
         let report = evidence_report(&prepared, None, &[(0, 2), (4, 0)]);

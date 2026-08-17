@@ -768,7 +768,7 @@ function isEvidenceStages(
   if (!Array.isArray(value) || value.length > 5) return false;
   if (execution !== "ready") return value.length === 0;
   const termCount = termIntents.length;
-  const kinds = ["exact_metadata", "exact_phrase", "all_terms", "partial_coverage", "prefix"];
+  const kinds = ["exact_metadata", "exact_phrase", "all_terms", "prefix", "partial_coverage"];
   const allIndexes = termIntents.map((intent) => intent.index);
   const relaxedIndexes = termIntents
     .filter((intent) => intent.role === "required_identifier_anchor" || intent.support === "useful")
@@ -776,17 +776,19 @@ function isEvidenceStages(
     .slice(0, 128);
   const hasUnsupportedContext = termIntents.some((intent) =>
     intent.role === "optional_context" && intent.support === "unsupported");
-  const expectedNonPrefixKinds = [
+  const hasPrefix = value.some((stage) => isRecord(stage) && stage.kind === "prefix");
+  const expectedKinds = [
     ...(hasExactIntent ? ["exact_metadata"] : []),
     ...(hasPhraseIntent ? ["exact_phrase"] : []),
     "all_terms",
+    ...(hasPrefix ? ["prefix"] : []),
     ...(hasUnsupportedContext
       && relaxedIndexes.length > 0
       && JSON.stringify(relaxedIndexes) !== JSON.stringify(allIndexes)
       ? ["partial_coverage"]
       : []),
   ];
-  const actualNonPrefixKinds: string[] = [];
+  const actualKinds: string[] = [];
   let previousKind = -1;
   for (let ordinal = 0; ordinal < value.length; ordinal += 1) {
     const stage = value[ordinal];
@@ -805,7 +807,7 @@ function isEvidenceStages(
       return false;
     }
     previousKind = kinds.indexOf(String(stage.kind));
-    if (stage.kind !== "prefix") actualNonPrefixKinds.push(String(stage.kind));
+    actualKinds.push(String(stage.kind));
     const required = stage.required_term_indexes as number[];
     const prefixes = stage.prefix_term_indexes as number[];
     if (stage.kind === "exact_metadata"
@@ -845,7 +847,7 @@ function isEvidenceStages(
       return false;
     }
   }
-  return JSON.stringify(actualNonPrefixKinds) === JSON.stringify(expectedNonPrefixKinds);
+  return JSON.stringify(actualKinds) === JSON.stringify(expectedKinds);
 }
 
 function isTermIndexes(value: unknown, termCount: number, maximum: number): boolean {

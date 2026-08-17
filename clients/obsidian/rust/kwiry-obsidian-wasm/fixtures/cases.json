@@ -314,6 +314,47 @@
     }
   },
   {
+    "operation": "finalize_query",
+    "name": "prefix-before-partial",
+    "request": {
+      "abi_version": 3,
+      "operation": "finalize_query",
+      "query": "orchard adop",
+      "evidence_report": {
+        "schema_version": 4,
+        "identifier_probe_matched": null,
+        "term_support": [
+          {
+            "probe_id": 0,
+            "term_index": 0,
+            "document_frequency": 24,
+            "prefix_expansions": 0
+          },
+          {
+            "probe_id": 1,
+            "term_index": 1,
+            "document_frequency": 0,
+            "prefix_expansions": 1
+          }
+        ]
+      },
+      "prefix_expansions": [
+        {
+          "probe_id": 0,
+          "term_index": 0,
+          "terms": []
+        },
+        {
+          "probe_id": 1,
+          "term_index": 1,
+          "terms": [
+            "adoption"
+          ]
+        }
+      ]
+    }
+  },
+  {
     "operation": "prepare_query",
     "name": "wrong-abi",
     "request": {

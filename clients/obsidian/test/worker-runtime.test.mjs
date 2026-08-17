@@ -2389,6 +2389,61 @@ describe("exact generated production Worker", () => {
     }
   }, 120_000);
 
+  it("keeps a prefix title ahead of a partial result window and preserves format-neutral terms", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    const decoys = Array.from({ length: 24 }, (_, index) => source(
+      `orchard-decoy-${String(index).padStart(2, "0")}.md`,
+      "---\ntitle: Orchard\n---\n# Decoy\nSynthetic partial evidence.",
+    ));
+    try {
+      await request(worker, {
+        id: 1,
+        operation: "initialize",
+        vault_id: "active-vault",
+        enabled_source_formats: ["markdown"],
+      });
+      await request(worker, { id: 2, operation: "begin_build", generation: "prefix-window" });
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "prefix-window",
+        sources: [
+          source(
+            "orchard-adoption.md",
+            "---\ntitle: Orchard Adoption\n---\n# Target\nSynthetic prefix evidence.",
+          ),
+          source("format-neutral.md", "# Format-neutral token\nQDX"),
+          ...decoys.slice(0, 14),
+        ],
+      })).resolves.toMatchObject({ ok: true, result: { documents: 16 } });
+      await expect(request(worker, {
+        id: 4,
+        operation: "add_source_batch",
+        generation: "prefix-window",
+        sources: decoys.slice(14),
+      })).resolves.toMatchObject({ ok: true, result: { documents: 26 } });
+      await request(worker, { id: 5, operation: "commit_build", generation: "prefix-window" });
+
+      const prefix = await request(worker, {
+        id: 6, operation: "search", query: "orchard adop", limit: 8,
+      });
+      expect(prefix).toMatchObject({ ok: true, result: { hits: expect.any(Array) } });
+      expect(prefix.result.hits).toHaveLength(8);
+      expect(prefix.result.hits[0]?.path).toBe("orchard-adoption.md");
+      expect(prefix.result.hits.slice(1).every((hit) => hit.path.startsWith("orchard-decoy-")))
+        .toBe(true);
+
+      await expect(request(worker, {
+        id: 7, operation: "search", query: "QDX", limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: { hits: [expect.objectContaining({ path: "format-neutral.md" })] },
+      });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
   it("accepts required analyzed anchors before and after filename metadata promotion", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
@@ -2483,6 +2538,35 @@ describe("exact generated production Worker", () => {
       await request(worker, { id: 4, operation: "commit_build", generation: "validator" });
       await expect(request(worker, {
         id: 5, operation: "search", query: "validatorprobe", limit: 20,
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("refuses the retired partial-before-prefix stage order", async () => {
+    const needle = "function isFinalizedQuery(value) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  if (value?.plan?.query === "orchard adop") { const stages = value.plan.evidence_stages; const prefix = stages.findIndex((stage) => stage.kind === "prefix"); const partial = stages.findIndex((stage) => stage.kind === "partial_coverage"); if (prefix >= 0 && partial >= 0) { [stages[prefix], stages[partial]] = [stages[partial], stages[prefix]]; stages.forEach((stage, index) => { stage.ordinal = index; }); } }`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "stage-order" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "stage-order",
+        sources: [
+          source("orchard-adoption.md", "---\ntitle: Orchard Adoption\n---\nTarget"),
+          source("orchard-decoy.md", "---\ntitle: Orchard\n---\nDecoy"),
+        ],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "stage-order" });
+      await expect(request(worker, {
+        id: 5, operation: "search", query: "orchard adop", limit: 8,
       })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
     } finally {
       await worker.terminate();
