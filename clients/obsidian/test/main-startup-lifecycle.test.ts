@@ -16,7 +16,13 @@ interface LifecycleHarness {
   cachePolicyHashes: string[];
   sourcePolicies: Array<Record<string, boolean>>;
   clipboardWrites: string[];
+  exportReports: string[];
+  exportVaultRoots: string[];
+  exportChunkIterations: number;
+  exportResult: "saved" | "cancelled" | "inside_vault" | "unsafe_destination" | "unavailable" | "write_failed";
   notices: string[];
+  savedData: unknown[];
+  storedData: Record<string, unknown>;
   rebuildResult: "scheduled" | "already_building";
 }
 
@@ -29,7 +35,13 @@ const harness: LifecycleHarness = {
   cachePolicyHashes: [],
   sourcePolicies: [],
   clipboardWrites: [],
+  exportReports: [],
+  exportVaultRoots: [],
+  exportChunkIterations: 0,
+  exportResult: "saved",
   notices: [],
+  savedData: [],
+  storedData: {},
   rebuildResult: "scheduled",
 };
 
@@ -39,12 +51,21 @@ const require = createRequire(import.meta.url);
 async function loadProductionPlugin(): Promise<new () => {
   settings: {
     enabledSourceFormats: Record<string, boolean>;
-    diagnosticsReportDetail: "compact" | "full";
+    diagnosticsReportLevel: "debug" | "info" | "warn" | "error";
+    diagnosticsReportScope: "all" | "indexing" | "search" | "startup" | "failures";
   };
   onload(): Promise<void>;
+  saveSettings(): Promise<void>;
   onSourcePolicyChanged(): Promise<void>;
   rebuildInPluginIndex(): Promise<void>;
   copyDiagnostics(): Promise<void>;
+  exportDiagnosticsFile(): Promise<void>;
+  captureDiagnostic(
+    level: "debug" | "info" | "warn" | "error",
+    code: string,
+    details: Record<string, unknown>,
+    operation: () => unknown,
+  ): Promise<unknown>;
 }> {
   const bundle = await build({
     entryPoints: [MAIN_PATH],
@@ -64,16 +85,7 @@ async function loadProductionPlugin(): Promise<new () => {
   evaluate(module, module.exports, require);
   const plugin = module.exports.default;
   if (typeof plugin !== "function") throw new Error("main.ts test bundle has no default plugin");
-  return plugin as new () => {
-    settings: {
-    enabledSourceFormats: Record<string, boolean>;
-    diagnosticsReportDetail: "compact" | "full";
-  };
-    onload(): Promise<void>;
-    onSourcePolicyChanged(): Promise<void>;
-    rebuildInPluginIndex(): Promise<void>;
-    copyDiagnostics(): Promise<void>;
-  };
+  return plugin as Awaited<ReturnType<typeof loadProductionPlugin>>;
 }
 
 function lifecycleHarnessPlugin(): EsbuildPlugin {
@@ -85,6 +97,7 @@ function lifecycleHarnessPlugin(): EsbuildPlugin {
     ["./backends/in-plugin-lexical-backend", "in-plugin-backend"],
     ["./cache/build-cache-options", "cache-options"],
     ["./credentials", "credentials"],
+    ["./diagnostics/desktop-export-host", "desktop-export-host"],
     ["./internal/private-tools", "private-tools"],
     ["./search-modal", "search-modal"],
     ["./settings-tab", "settings-tab"],
@@ -114,7 +127,9 @@ function stubSource(path: string): string {
         const harness = globalThis.__kwiryStartupLifecycleHarness;
         export class Plugin {
           app = {
-            vault: {},
+            vault: {
+              adapter: { getBasePath() { return "/synthetic-vault"; } },
+            },
             workspace: {
               onLayoutReady(callback) { harness.layoutReady = callback; },
             },
@@ -125,9 +140,10 @@ function stubSource(path: string): string {
               backendProfile: "in_plugin",
               diagnosticsLogLevel: "info",
               showRibbonIcon: false,
+              ...harness.storedData,
             };
           }
-          async saveData() {}
+          async saveData(value) { harness.savedData.push(value); }
           addSettingTab() {}
           addCommand() {}
           addRibbonIcon() {}
@@ -220,6 +236,28 @@ function stubSource(path: string): string {
       `;
     case "credentials":
       return `export async function readDaemonToken() { throw new Error("unexpected token read"); }`;
+    case "desktop-export-host":
+      return `
+        const harness = globalThis.__kwiryStartupLifecycleHarness;
+        export function createProductionDesktopDiagnosticsExportHost() {
+          return {
+            async save({ vaultRoot, chunks }) {
+              harness.exportVaultRoots.push(vaultRoot);
+              if (harness.exportResult === "saved") {
+                const decoder = new TextDecoder();
+                const parts = [];
+                for await (const chunk of chunks) {
+                  harness.exportChunkIterations += 1;
+                  parts.push(decoder.decode(chunk, { stream: true }));
+                }
+                parts.push(decoder.decode());
+                harness.exportReports.push(parts.join(""));
+              }
+              return { kind: harness.exportResult };
+            },
+          };
+        }
+      `;
     case "private-tools":
       return `
         export function createPrivateTools() {
@@ -250,7 +288,13 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.cachePolicyHashes.length = 0;
     harness.sourcePolicies.length = 0;
     harness.clipboardWrites.length = 0;
+    harness.exportReports.length = 0;
+    harness.exportVaultRoots.length = 0;
+    harness.exportChunkIterations = 0;
+    harness.exportResult = "saved";
     harness.notices.length = 0;
+    harness.savedData.length = 0;
+    harness.storedData = {};
     harness.rebuildResult = "scheduled";
     vi.stubGlobal("__kwiryStartupLifecycleHarness", harness);
     vi.stubGlobal("window", { setInterval: () => 1 });
@@ -380,19 +424,17 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    // The structured records are what this assertion inspects, so ask for the
-    // full report explicitly; the shipped default is compact so a field report
-    // stays small enough to send.
-    plugin.settings.diagnosticsReportDetail = "full";
-    await plugin.copyDiagnostics();
-    const report = harness.clipboardWrites.at(-1) ?? "";
+    await plugin.exportDiagnosticsFile();
+    const report = harness.exportReports.at(-1) ?? "";
     const jsonText = report.split("Structured records (JSON):\n")[1];
     expect(jsonText).toBeDefined();
+    expect(harness.exportVaultRoots).toEqual(["/synthetic-vault"]);
 
-    plugin.settings.diagnosticsReportDetail = "compact";
     await plugin.copyDiagnostics();
     const compact = harness.clipboardWrites.at(-1) ?? "";
     expect(compact).toContain("structured_records: omitted");
+    expect(compact).not.toContain("Structured records (JSON)");
+    expect(new TextEncoder().encode(compact).byteLength).toBeLessThanOrEqual(65_536);
     expect(compact.length).toBeLessThan(report.length);
     const structured = JSON.parse(jsonText!);
     const progressRecords = structured.records.filter((record: {
@@ -407,6 +449,93 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(report).not.toContain(privateText);
     expect(progressRecords.every((record: { details: Record<string, unknown> }) =>
       !("path" in record.details))).toBe(true);
+  });
+
+  it("never copies more than 64 KiB and reports retained events omitted by the clipboard cap", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+
+    for (let index = 0; index < 512; index += 1) {
+      await plugin.captureDiagnostic("error", "failure.caught", {
+        profile: "in_plugin",
+        phase: "building",
+        stage: "snapshot",
+        activity: "read",
+        stallCategory: "worker_timeout",
+        liveness: "alive",
+        mode: "lexical",
+        outcome: "failed",
+        code: "worker_timeout",
+        errorName: "A".repeat(64),
+        operation: "build",
+        subsystem: "worker",
+        generationId: "in_plugin-1-generation-1",
+        pathHash: `sha256:${"a".repeat(64)}`,
+        completed: index,
+        total: 512,
+        inFlight: 4,
+        bytesRead: index * 1_024,
+        retryable: false,
+        recoverable: true,
+        searchable: true,
+        dirty: false,
+        rebuilding: false,
+        cacheHit: true,
+        recovery: false,
+      }, () => undefined);
+    }
+
+    await plugin.copyDiagnostics();
+    const summary = harness.clipboardWrites.at(-1) ?? "";
+    expect(new TextEncoder().encode(summary).byteLength).toBeLessThanOrEqual(65_536);
+    const omitted = /clipboard_omitted_entries: (\d+)/u.exec(summary);
+    expect(omitted).not.toBeNull();
+    expect(Number(omitted?.[1])).toBeGreaterThan(0);
+    expect(summary).not.toContain("Structured records (JSON)");
+    expect(harness.notices.at(-1)).toMatch(/retained events omitted/u);
+  });
+
+  it("keeps cancellation silent and all export notices path-free", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+
+    harness.exportResult = "cancelled";
+    const beforeCancellation = harness.notices.length;
+    await plugin.exportDiagnosticsFile();
+    expect(harness.notices).toHaveLength(beforeCancellation);
+    expect(harness.exportChunkIterations).toBe(0);
+    expect(harness.exportReports).toEqual([]);
+
+    harness.exportResult = "inside_vault";
+    await plugin.exportDiagnosticsFile();
+    expect(harness.notices.at(-1)).toBe(
+      "Kwiry: choose a diagnostics export location outside the active vault.",
+    );
+    expect(harness.notices.join("\n")).not.toContain("/synthetic-vault");
+    expect(harness.exportChunkIterations).toBe(0);
+
+    harness.exportResult = "saved";
+    await plugin.exportDiagnosticsFile();
+    expect(harness.exportReports).toHaveLength(1);
+    expect(harness.exportChunkIterations).toBeGreaterThan(0);
+    expect(harness.notices.at(-1)).toBe("Kwiry: full diagnostics report exported.");
+    expect(harness.notices.join("\n")).not.toContain("/synthetic-vault");
+  });
+
+  it("ignores legacy report-detail values and omits them on the next save", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    for (const legacy of ["compact", "full"] as const) {
+      harness.storedData = { diagnosticsReportDetail: legacy };
+      harness.savedData.length = 0;
+      const plugin = new KwiryPlugin();
+      await plugin.onload();
+
+      expect(plugin.settings).not.toHaveProperty("diagnosticsReportDetail");
+      await plugin.saveSettings();
+      expect(harness.savedData.at(-1)).not.toHaveProperty("diagnosticsReportDetail");
+    }
   });
 
   it("keeps the core policy hash across a format toggle and re-snapshots the enabled set", async () => {

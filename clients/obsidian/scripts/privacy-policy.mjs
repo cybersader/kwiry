@@ -101,6 +101,12 @@ const APPROVED_SYNTHETIC_FIXTURES = Object.freeze({
       "C:\\\\USERS\\\\U\\\\VAULT",
     ]),
   }),
+  "test/desktop-export-host.test.ts": Object.freeze({
+    machine_path: new Set([
+      "c:\\\\users\\\\owner\\\\vault\\\\Reports\\\\diagnostics.txt",
+      "C:\\\\Users\\\\Owner\\\\Vault",
+    ]),
+  }),
   "test/cache-store.test.ts": Object.freeze({
     machine_path: new Set([
       "C:\\\\Users\\\\u\\\\Vault\\\\.obsidian\\\\kwiry-cache",

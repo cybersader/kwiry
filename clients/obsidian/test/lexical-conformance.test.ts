@@ -348,6 +348,67 @@ describe("shared lexical-v1 conformance corpus", () => {
     }
   }, 120_000);
 
+  it("declares analyzed identifier anchors before and after filename metadata promotion", () => {
+    const prepared = prepareQueryWithRust("IIA 2 optionalmissing");
+    expect(prepared.plan.term_intents).toEqual([
+      expect.objectContaining({
+        text: "iia",
+        role: "required_identifier_anchor",
+        projection: "analyzed_text",
+      }),
+      expect.objectContaining({
+        text: "2",
+        role: "required_identifier_anchor",
+        projection: "analyzed_text",
+      }),
+      expect.objectContaining({
+        text: "optionalmissing",
+        role: "optional_context",
+        projection: "analyzed_text",
+      }),
+    ]);
+
+    const index = openFts5Generation(sqlite, undefined, "active-vault");
+    try {
+      index.replaceSource(prepareDocument({
+        scope: "identifier-filename",
+        path: "iia 2 line xlsx.md",
+        markdown: "# Workbook\nquarterly figures",
+      }));
+      const result = execute(index, "iia 2 line xlsx");
+      expect(result.observation.identifier_probe_matched).toBe(true);
+      expect(result.finalized.plan.term_intents).toEqual([
+        expect.objectContaining({
+          text: "iia",
+          role: "required_identifier_anchor",
+          projection: "analyzed_text",
+        }),
+        expect.objectContaining({
+          text: "2",
+          role: "required_identifier_anchor",
+          projection: "analyzed_text",
+        }),
+        expect.objectContaining({
+          text: "line",
+          role: "optional_context",
+          projection: "analyzed_text",
+        }),
+        expect.objectContaining({
+          text: "xlsx",
+          role: "optional_context",
+          projection: "analyzed_text",
+        }),
+      ]);
+      expect(result.finalized.execution_plan.stages.flatMap(
+        (stage) => stage.required_identifiers ?? [],
+      )).toEqual([]);
+      expect(index.search(result.finalized.execution_plan, 20).map((hit) => hit.path))
+        .toContain("iia 2 line xlsx.md");
+    } finally {
+      index.close();
+    }
+  });
+
   it("enforces the shared byte, term, prefix, stage, and candidate bounds", () => {
     expect(corpus.bounds).toEqual({
       maximum_terms: 128,

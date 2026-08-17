@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  DIAGNOSTIC_CLIPBOARD_MAX_BYTES,
   DiagnosticLog,
+  collectBoundedDiagnosticSummary,
+  createDiagnosticExportPlan,
   diagnosticGenerationId,
   diagnosticHash,
   formatDiagnosticLog,
+  serializeDiagnosticExport,
   type DiagnosticDetails,
   type DiagnosticEventCode,
   type DiagnosticLevel,
@@ -25,6 +29,44 @@ async function capture(
   details: Readonly<DiagnosticDetails> = {},
 ): Promise<void> {
   await log.capture(level, code, details, () => undefined);
+}
+
+function populatedDiagnosticLog(count: number): DiagnosticLog {
+  const log = new DiagnosticLog(count);
+  for (let index = 0; index < count; index += 1) {
+    log.record("error", "failure.caught", 1_700_000_000_000 + index, 123, {
+      profile: "in_plugin",
+      phase: "building",
+      stage: "snapshot",
+      activity: "read",
+      stallCategory: "worker_timeout",
+      liveness: "alive",
+      mode: "lexical",
+      outcome: "failed",
+      code: "worker_timeout",
+      errorName: "A".repeat(64),
+      operation: "build",
+      subsystem: "worker",
+      generationId: diagnosticGenerationId("in_plugin-1-generation-1"),
+      pathHash: diagnosticHash(`sha256:${"a".repeat(64)}`),
+      pluginEpoch: 1,
+      activationEpoch: 2,
+      mutationEpoch: 3,
+      completed: index,
+      total: count,
+      inFlight: 4,
+      sourcesRead: index,
+      bytesRead: index * 1_024,
+      retryable: false,
+      recoverable: true,
+      searchable: true,
+      dirty: false,
+      rebuilding: false,
+      cacheHit: true,
+      recovery: false,
+    });
+  }
+  return log;
 }
 
 describe("DiagnosticLog", () => {
@@ -246,7 +288,9 @@ describe("DiagnosticLog", () => {
     });
 
     expect(output).toContain("Kwiry diagnostics log\nplugin_version: 0.2.2");
-    expect(output).toContain("dropped_entries: 0\nminimum_level: debug\ncategories: all\n\nSummary:");
+    expect(output).toContain(
+      "dropped_entries: 0\nminimum_level: debug\ncategories: all\nretained_entries: 1\nfiltered_out_entries: 0\n\nSummary:",
+    );
     expect(output).toContain(
       "1 1970-01-01T00:00:00.000Z +1000ms ERROR failure.caught profile=in_plugin outcome=succeeded",
     );
@@ -273,6 +317,98 @@ describe("DiagnosticLog", () => {
       durationMs: 1_000,
       code: "failure.caught",
     });
+  });
+
+  it("creates one frozen point-in-time plan with deterministic filter counts", async () => {
+    const log = new DiagnosticLog(
+      3,
+      clock(1, 2, 3, 4, 5),
+      clock(10, 11, 20, 21, 30, 31, 40, 41, 50, 51),
+    );
+    await capture(log, "debug", "plugin.load");
+    await capture(log, "info", "backend.activate");
+    await capture(log, "warn", "failure.caught", { code: "worker_failed" });
+    await capture(log, "error", "promise.rejected", { subsystem: "worker" });
+    const snapshot = vi.spyOn(log, "snapshot");
+
+    const plan = createDiagnosticExportPlan(log, {
+      pluginVersion: "0.2.2",
+      obsidianVersion: "1.8.10",
+      platform: "linux",
+      backendProfile: "in_plugin",
+    }, {
+      minimumLevel: "warn",
+      categories: ["failure.caught"],
+    });
+
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect(snapshot).toHaveBeenCalledWith("debug");
+    expect(plan).toMatchObject({
+      capacity: 3,
+      retainedEntries: 3,
+      selectedEntries: 1,
+      droppedEntries: 1,
+      filteredOutEntries: 2,
+      minimumLevel: "warn",
+    });
+    expect(plan.entries.map((entry) => entry.code)).toEqual(["failure.caught"]);
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(Object.isFrozen(plan.context)).toBe(true);
+    expect(Object.isFrozen(plan.entries)).toBe(true);
+
+    await capture(log, "error", "failure.caught", { code: "timeout" });
+    expect(plan.selectedEntries).toBe(1);
+    expect(plan.entries.map((entry) => entry.details.code)).toEqual(["worker_failed"]);
+  });
+
+  it("caps clipboard summaries by encoded bytes and reports whole-line omissions", () => {
+    const log = populatedDiagnosticLog(512);
+    const plan = createDiagnosticExportPlan(log, {
+      pluginVersion: "0.2.2",
+      obsidianVersion: "1.8.10",
+      platform: "windows",
+      backendProfile: "in_plugin",
+    });
+    const summary = collectBoundedDiagnosticSummary(plan);
+
+    expect(summary.byteLength).toBeLessThanOrEqual(DIAGNOSTIC_CLIPBOARD_MAX_BYTES);
+    expect(new TextEncoder().encode(summary.text).byteLength).toBe(summary.byteLength);
+    expect(summary.retainedEntries).toBe(512);
+    expect(summary.selectedEntries).toBe(512);
+    expect(summary.emittedEntries + summary.omittedEntries).toBe(512);
+    expect(summary.emittedEntries).toBeGreaterThan(0);
+    expect(summary.omittedEntries).toBeGreaterThan(0);
+    expect(summary.text).toContain(
+      `clipboard_emitted_entries: ${summary.emittedEntries}\nclipboard_omitted_entries: ${summary.omittedEntries}\n`,
+    );
+    expect(summary.text).not.toContain("Structured records (JSON)");
+    const summaryLines = summary.text.split("\n");
+    expect(summaryLines.some((line) => /^\d+ /u.test(line))).toBe(true);
+    expect(summaryLines.at(-1)).toBe("");
+  });
+
+  it("streams schema-v1 structured records in bounded UTF-8 chunks", () => {
+    const log = populatedDiagnosticLog(32);
+    const plan = createDiagnosticExportPlan(log, {
+      pluginVersion: "0.2.2",
+      obsidianVersion: "1.8.10",
+      platform: "linux",
+      backendProfile: "in_plugin",
+    });
+    const chunks = [...serializeDiagnosticExport(plan, { maxChunkBytes: 127 })];
+
+    expect(chunks.length).toBeGreaterThan(plan.entries.length);
+    expect(chunks.every((chunk) => chunk.byteLength > 0 && chunk.byteLength <= 127)).toBe(true);
+    const output = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+    const structured = JSON.parse(output.split("Structured records (JSON):\n")[1]!);
+    expect(structured).toMatchObject({
+      schemaVersion: 1,
+      capacity: 32,
+      storedEntries: 32,
+      droppedEntries: 0,
+      minimumLevel: "debug",
+    });
+    expect(structured.records).toEqual(plan.entries);
   });
 
   it("rejects unstructured text at both the type and runtime boundaries", async () => {

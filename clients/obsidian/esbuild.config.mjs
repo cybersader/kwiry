@@ -285,6 +285,18 @@ function assertD5cOwnerWorkerGraph(metafile) {
   }
 }
 
+function assertDiagnosticsExportGraph(mainMetafile, workerMetafile) {
+  const desktopHost = "src/diagnostics/desktop-export-host.ts";
+  const mainInputs = Object.keys(mainMetafile.inputs).map((input) => input.replaceAll("\\", "/"));
+  const workerInputs = Object.keys(workerMetafile.inputs).map((input) => input.replaceAll("\\", "/"));
+  if (!mainInputs.some((input) => input.endsWith(desktopHost))) {
+    throw new Error("Main build omitted the desktop diagnostics export host");
+  }
+  if (workerInputs.some((input) => input.endsWith(desktopHost))) {
+    throw new Error("Worker build selected the desktop diagnostics export host");
+  }
+}
+
 function assertD5cOwnerMainGraph(metafile) {
   const inputs = Object.keys(metafile.inputs).map((input) => input.replaceAll("\\", "/"));
   if (!inputs.some((input) => input.endsWith("src/internal/d5c-playground/live-main.ts"))) {
@@ -605,7 +617,7 @@ export async function buildPlugin({
       : "src/main.ts"],
     bundle: true,
     platform: "browser",
-    external: ["obsidian", "electron", ...builtins],
+    external: ["obsidian", "electron", "@electron/remote", ...builtins],
     format: "cjs",
     target: "es2022",
     write,
@@ -623,7 +635,11 @@ export async function buildPlugin({
       privateToolsPlugin(Boolean(internalD5cPlayground), playgroundSource),
     ],
   });
-  if (internalD5cOwnerHost) assertD5cOwnerMainGraph(mainBuild.metafile);
+  if (internalD5cOwnerHost) {
+    assertD5cOwnerMainGraph(mainBuild.metafile);
+  } else {
+    assertDiagnosticsExportGraph(mainBuild.metafile, workerBuild.metafile);
+  }
   const mainText = write
     ? readFileSync(resolve(root, "main.js"), "utf8")
     : mainBuild.outputFiles[0].text;

@@ -24,9 +24,16 @@ import {
 } from "./backends/in-plugin-lexical-backend";
 import { createInPluginCacheOptions } from "./cache/build-cache-options";
 import { readDaemonToken } from "./credentials";
+import {
+  createProductionDesktopDiagnosticsExportHost,
+} from "./diagnostics/desktop-export-host";
 import { PluginDiagnostics } from "./diagnostics/plugin-diagnostics";
 import { StartupTimeline } from "./diagnostics/startup-timeline";
-import { diagnosticCategoryGroup } from "./diagnostics/log";
+import {
+  collectBoundedDiagnosticSummary,
+  diagnosticCategoryGroup,
+  serializeDiagnosticExport,
+} from "./diagnostics/log";
 import type { VaultActivityReport } from "./backends/in-plugin-index-controller";
 import type {
   DiagnosticDetails,
@@ -68,6 +75,7 @@ export default class KwiryPlugin extends Plugin {
   private lastDiagnosticStatus = "";
   private readonly statusRefresh = new LatestRequestEpoch();
   private readonly diagnostics = new PluginDiagnostics(DEFAULT_SETTINGS.diagnosticsLogLevel);
+  private readonly diagnosticsExportHost = createProductionDesktopDiagnosticsExportHost();
   private startupTimeline: StartupTimeline | null = null;
   private privateTools: PrivateTools = createPrivateTools(this, undefined);
   private sourcePolicyHash: string | null = null;
@@ -255,23 +263,80 @@ export default class KwiryPlugin extends Plugin {
 
   async copyDiagnostics(): Promise<void> {
     try {
-      const categories = diagnosticCategoryGroup(this.settings.diagnosticsReportScope);
-      const report = this.diagnostics.format({
-        pluginVersion: this.manifest.version,
-        obsidianVersion: apiVersion,
-        platform: diagnosticPlatform(),
-        backendProfile: this.settings.backendProfile,
-      }, {
-        minimumLevel: this.settings.diagnosticsReportLevel,
-        ...(categories === undefined ? {} : { categories }),
-        includeStructuredRecords: this.settings.diagnosticsReportDetail === "full",
-      });
-      await navigator.clipboard.writeText(report);
-      new Notice(`Kwiry: diagnostics copied (${Math.ceil(report.length / 1024)} KB).`);
+      const summary = collectBoundedDiagnosticSummary(this.createDiagnosticsExportPlan());
+      await navigator.clipboard.writeText(summary.text);
+      const omitted = summary.omittedEntries === 0
+        ? ""
+        : `; ${summary.omittedEntries} retained events omitted`;
+      new Notice(
+        `Kwiry: diagnostics summary copied (${Math.ceil(summary.byteLength / 1_024)} KiB${omitted}).`,
+      );
     } catch (error) {
       this.recordCaughtFailure("ui", "copy", error);
-      new Notice("Kwiry: diagnostics could not be copied.");
+      new Notice("Kwiry: diagnostics summary could not be copied.");
     }
+  }
+
+  async exportDiagnosticsFile(): Promise<void> {
+    const vaultRoot = desktopVaultRoot(this.app.vault.adapter);
+    if (vaultRoot === null) {
+      this.recordDiagnosticsExportFailure("unsupported_platform");
+      new Notice("Kwiry: full diagnostics export is unavailable on this device.");
+      return;
+    }
+
+    const plan = this.createDiagnosticsExportPlan();
+    const result = await this.diagnosticsExportHost.save({
+      vaultRoot,
+      chunks: serializeDiagnosticExport(plan),
+    });
+    switch (result.kind) {
+      case "saved":
+        new Notice("Kwiry: full diagnostics report exported.");
+        return;
+      case "cancelled":
+        return;
+      case "inside_vault":
+        this.recordDiagnosticsExportFailure("root_inside_vault");
+        new Notice("Kwiry: choose a diagnostics export location outside the active vault.");
+        return;
+      case "unsafe_destination":
+        this.recordDiagnosticsExportFailure("unsafe_path");
+        new Notice("Kwiry: the diagnostics export destination was refused.");
+        return;
+      case "unavailable":
+        this.recordDiagnosticsExportFailure("unsupported_platform");
+        new Notice("Kwiry: full diagnostics export is unavailable on this device.");
+        return;
+      case "write_failed":
+        this.recordDiagnosticsExportFailure("write_failed");
+        new Notice("Kwiry: diagnostics could not be exported.");
+        return;
+    }
+  }
+
+  private createDiagnosticsExportPlan() {
+    const categories = diagnosticCategoryGroup(this.settings.diagnosticsReportScope);
+    return this.diagnostics.createExportPlan({
+      pluginVersion: this.manifest.version,
+      obsidianVersion: apiVersion,
+      platform: diagnosticPlatform(),
+      backendProfile: this.settings.backendProfile,
+    }, {
+      minimumLevel: this.settings.diagnosticsReportLevel,
+      ...(categories === undefined ? {} : { categories }),
+    });
+  }
+
+  private recordDiagnosticsExportFailure(
+    code: "root_inside_vault" | "unsafe_path" | "unsupported_platform" | "write_failed",
+  ): void {
+    void this.diagnostics.capture("error", "failure.caught", {
+      subsystem: "ui",
+      operation: "export",
+      outcome: "failed",
+      code,
+    }, () => undefined);
   }
 
   clearDiagnostics(confirm = false): void {
@@ -636,6 +701,18 @@ function diagnosticProgressMilestone(progress: BackendStatus["progress"]): strin
 function optionalString(value: string): string | null {
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function desktopVaultRoot(adapter: unknown): string | null {
+  if (typeof adapter !== "object" || adapter === null || !("getBasePath" in adapter)) return null;
+  const getBasePath = (adapter as { getBasePath?: unknown }).getBasePath;
+  if (typeof getBasePath !== "function") return null;
+  try {
+    const value = getBasePath.call(adapter);
+    return typeof value === "string" && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 function diagnosticPlatform(): "android" | "ios" | "linux" | "macos" | "windows" | "unknown" {

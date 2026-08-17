@@ -21,7 +21,11 @@ const WASM_HEAVY_FILES = [LEXICAL_WASM_FILE, ...WASM_BUILD_FILES];
 
 const forwardedArgs = process.argv.slice(2);
 if (forwardedArgs.length > 0) {
-  runGroup("focused tests (one worker)", ["run", "--maxWorkers=1", ...forwardedArgs]);
+  runGroup("focused tests (one worker)", [
+    "run",
+    "--maxWorkers=1",
+    ...withoutWorkerOverrides(forwardedArgs),
+  ]);
   process.exit(0);
 }
 
@@ -44,6 +48,20 @@ const groups = [
 ];
 
 for (const group of groups) runGroup(group.name, group.args);
+
+function withoutWorkerOverrides(args) {
+  const sanitized = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === "--maxWorkers") {
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--maxWorkers=")) continue;
+    sanitized.push(value);
+  }
+  return sanitized;
+}
 
 function runGroup(name, args) {
   console.log(`\n=== ${name} ===`);

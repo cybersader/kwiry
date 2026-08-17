@@ -716,7 +716,6 @@ function isTermIntent(value: unknown, index: number, term: string | undefined): 
     && value.text === term
     && (value.role === "required_identifier_anchor" || value.role === "optional_context")
     && (value.projection === "analyzed_text" || value.projection === "exact_identifier")
-    && (value.role !== "required_identifier_anchor" || value.projection === "exact_identifier")
     && (value.projection !== "exact_identifier" || value.role === "required_identifier_anchor")
     && (value.support === "unknown" || value.support === "useful" || value.support === "unsupported");
 }
