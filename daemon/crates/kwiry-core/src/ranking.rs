@@ -297,8 +297,8 @@ pub enum LexicalEvidenceTier {
     ExactMetadata,
     ExactPhrase,
     AllTerms,
-    PartialCoverage,
     Prefix,
+    PartialCoverage,
 }
 
 impl From<QueryEvidenceStageKind> for LexicalEvidenceTier {
@@ -307,8 +307,8 @@ impl From<QueryEvidenceStageKind> for LexicalEvidenceTier {
             QueryEvidenceStageKind::ExactMetadata => Self::ExactMetadata,
             QueryEvidenceStageKind::ExactPhrase => Self::ExactPhrase,
             QueryEvidenceStageKind::AllTerms => Self::AllTerms,
-            QueryEvidenceStageKind::PartialCoverage => Self::PartialCoverage,
             QueryEvidenceStageKind::Prefix => Self::Prefix,
+            QueryEvidenceStageKind::PartialCoverage => Self::PartialCoverage,
         }
     }
 }
@@ -1523,6 +1523,37 @@ mod tests {
             rerank_candidates(&RelevanceProfile::LexicalV1, &non_finite)
                 .unwrap_err()
                 .code,
+            "invalid_rerank_input"
+        );
+    }
+
+    #[test]
+    fn prefix_evidence_precedes_partial_coverage_in_d5c_reranking() {
+        let profile = RelevanceProfile::D5cPreviewV1(D5cRelevanceProfile::preview());
+        let prefix = candidate(
+            "allowed",
+            "prefix",
+            "prefix",
+            "prefix.md",
+            LexicalEvidenceTier::Prefix,
+            1.0,
+        );
+        let partial = candidate(
+            "allowed",
+            "partial",
+            "partial",
+            "partial.md",
+            LexicalEvidenceTier::PartialCoverage,
+            100.0,
+        );
+        let ordered = input(vec![prefix.clone(), partial.clone()]);
+
+        let result = rerank_candidates(&profile, &ordered).unwrap();
+        assert_eq!(paths(&result), ["prefix.md", "partial.md"]);
+
+        let reversed = input(vec![partial, prefix]);
+        assert_eq!(
+            rerank_candidates(&profile, &reversed).unwrap_err().code,
             "invalid_rerank_input"
         );
     }

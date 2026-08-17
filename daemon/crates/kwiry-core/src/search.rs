@@ -3017,6 +3017,73 @@ mod tests {
     }
 
     #[test]
+    fn prefix_specific_hit_precedes_a_partial_coverage_result_window() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("orchard-adoption.md"),
+            "---\ntitle: Orchard Adoption\n---\nSynthetic target.",
+        )
+        .unwrap();
+        for index in 0..24 {
+            fs::write(
+                vault.join(format!("orchard-decoy-{index:02}.md")),
+                format!("---\ntitle: Orchard\n---\nSynthetic decoy {index:02}."),
+            )
+            .unwrap();
+        }
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved = resolve_query_plan(std::slice::from_ref(&context), "orchard adop").unwrap();
+        assert_eq!(
+            resolved
+                .plan
+                .evidence_stages
+                .iter()
+                .map(|stage| stage.kind)
+                .collect::<Vec<_>>(),
+            [
+                QueryEvidenceStageKind::ExactMetadata,
+                QueryEvidenceStageKind::ExactPhrase,
+                QueryEvidenceStageKind::AllTerms,
+                QueryEvidenceStageKind::Prefix,
+                QueryEvidenceStageKind::PartialCoverage,
+            ]
+        );
+
+        let hits = search(&data, "orchard adop", 8);
+        assert_eq!(hits.len(), 8);
+        assert_eq!(hits[0].path, "orchard-adoption.md");
+        assert!(
+            hits[1..]
+                .iter()
+                .all(|hit| hit.path.starts_with("orchard-decoy-"))
+        );
+    }
+
+    #[test]
     fn high_frequency_prefix_dictionary_walk_stops_at_the_declared_cap() {
         let temporary = tempdir().unwrap();
         let vault = temporary.path().join("vault");

@@ -131,6 +131,14 @@ if (byName["abi-identity"].abi_version !== 3
     !== "lexical_explicit_v3"
   || byName["no-evidence-empty"].result.execution_plan.disposition !== "empty_no_evidence"
   || byName["bounded-prefix"].result.execution_plan.stages.at(-1).plan_id !== "lexical_prefix_v3"
+  || JSON.stringify(byName["prefix-before-partial"].result.execution_plan.stages
+    .map((stage) => stage.plan_id)) !== JSON.stringify([
+    "lexical_exact_metadata_v3",
+    "lexical_exact_phrase_v3",
+    "lexical_all_terms_v3",
+    "lexical_prefix_v3",
+    "lexical_partial_coverage_v3",
+  ])
   || byName["numeric-field-explicit"].result.plan.kind !== "explicit"
   || byName["natural-question"].result.plan.kind !== "ordinary"
   || byName["natural-parenthetical"].result.plan.kind !== "ordinary"

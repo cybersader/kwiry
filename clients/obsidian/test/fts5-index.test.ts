@@ -800,6 +800,62 @@ describe("Fts5GenerationIndex", () => {
     expect(hits.map((hit) => hit.chunk_id)).toEqual(["chunk-needle-exact"]);
   });
 
+  it("executes prefix before partial coverage without hiding the prefix-specific hit", () => {
+    index.replaceSource(sourceAt(
+      "orchard-adoption",
+      "orchard-adoption.md",
+      "chunk-orchard-adoption",
+      "Synthetic target",
+      "Orchard Adoption",
+    ));
+    for (let value = 0; value < 24; value += 1) {
+      const suffix = String(value).padStart(2, "0");
+      index.replaceSource(sourceAt(
+        `orchard-decoy-${suffix}`,
+        `orchard-decoy-${suffix}.md`,
+        `chunk-orchard-decoy-${suffix}`,
+        "Synthetic partial decoy",
+        "Orchard",
+      ));
+    }
+
+    const plan = {
+      schema_version: 3 as const,
+      profile_id: "lexical-v1" as const,
+      disposition: "ready" as const,
+      max_total_candidates: 512 as const,
+      stages: [{
+        ordinal: 0,
+        plan_id: "lexical_prefix_v3" as const,
+        match_value: "\"orchard\" AND \"adoption\"",
+        max_candidates: 256,
+      }, {
+        ordinal: 1,
+        plan_id: "lexical_partial_coverage_v3" as const,
+        match_value: "\"orchard\"",
+        max_candidates: 256,
+      }],
+    };
+    const trace = index.beginInternalLexicalTrace(() => 0);
+    const result = index.searchWithCandidateWindow(plan, 8, trace);
+    const summary = index.finishInternalLexicalTrace(trace);
+
+    expect(result.hits).toHaveLength(8);
+    expect(result.hits[0]?.chunk_id).toBe("chunk-orchard-adoption");
+    expect(result.hits.slice(1).every((hit) => hit.chunk_id.startsWith("chunk-orchard-decoy-")))
+      .toBe(true);
+    expect(result.candidate_window).toEqual({
+      state: "more_available",
+      candidate_count: 26,
+      candidate_limit: 512,
+    });
+    expect(summary.stages.map((stage) => stage.kind)).toEqual([
+      "lexical_prefix_v3",
+      "lexical_partial_coverage_v3",
+    ]);
+    expect(summary.stages.map((stage) => stage.candidate_count)).toEqual([1, 25]);
+  });
+
   it("proves an exact result limit exhausted only when the searched stage itself exhausted", () => {
     for (let value = 0; value < 20; value += 1) {
       const suffix = String(value).padStart(2, "0");

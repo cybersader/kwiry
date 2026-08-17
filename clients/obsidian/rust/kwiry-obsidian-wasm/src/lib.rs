@@ -2024,6 +2024,36 @@ mod tests {
             "{filename stem aliases title heading_text tags content} : (\"dungeons\" AND \"and\" AND \"dragons\")"
         );
 
+        let mixed = response(finalize_query(&finalize_request(
+            "orchard adop",
+            None,
+            &[1, 0],
+            &[vec![], vec!["adoption"]],
+        )));
+        assert_eq!(
+            mixed["result"]["plan"]["evidence_stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|stage| stage["kind"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "exact_metadata",
+                "exact_phrase",
+                "all_terms",
+                "prefix",
+                "partial_coverage",
+            ]
+        );
+        assert_eq!(
+            mixed["result"]["execution_plan"]["stages"][3]["plan_id"],
+            "lexical_prefix_v3"
+        );
+        assert_eq!(
+            mixed["result"]["execution_plan"]["stages"][4]["plan_id"],
+            "lexical_partial_coverage_v3"
+        );
+
         let identifier = response(finalize_query(&finalize_request(
             "IIA 2 line",
             None,
