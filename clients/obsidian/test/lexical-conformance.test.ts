@@ -144,7 +144,7 @@ function finalizeQueryWithRust(
     operation: "finalize_query",
     query,
     evidence_report: {
-      schema_version: 5,
+      schema_version: 6,
       identifier_probe_matched: evidence.identifier_probe_matched,
       term_support: evidence.term_support,
     },
@@ -240,7 +240,7 @@ function stageKind(stage: StagePlan): QueryEvidenceStageKind | "explicit" {
 
 function singleStagePlan(stage: StagePlan): ExecutionPlan {
   return {
-    schema_version: 4,
+    schema_version: 5,
     profile_id: "lexical-v1",
     disposition: stage.plan_id === "lexical_explicit_v3" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,

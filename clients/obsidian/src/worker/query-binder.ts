@@ -230,7 +230,7 @@ export interface BoundEvidenceProbe {
 }
 
 export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
-  if (plan.schema_version !== 4
+  if (plan.schema_version !== 5
     || plan.profile_id !== FTS5_PROFILE_ID
     || plan.max_total_candidates !== 512
     || plan.stages.length > 6
@@ -302,7 +302,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
 }
 
 export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
-  if (plan.schema_version !== 4) {
+  if (plan.schema_version !== 5) {
     throw new Error("unsupported Rust FTS5 evidence probe");
   }
   if (plan.plan_id === "identifier_metadata_v3") {

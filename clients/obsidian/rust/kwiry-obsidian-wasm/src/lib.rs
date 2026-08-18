@@ -16,9 +16,10 @@ use kwiry_core::{
     CHUNKING_VERSION, FORMAT_IDENTITY_SCHEMA_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
     LexicalQueryPlan, MAX_FILE_BYTES, QueryAssistanceEligibility, QueryEvidenceReport,
     QueryEvidenceStageKind, QueryExecutionDisposition, QueryField, QueryFieldGroup,
-    QueryMatchOperator, QueryPlanKind, QueryTermProjection, SOURCE_PREPARATION_SCHEMA_VERSION,
-    SourceDescriptor, SourcePreparation, active_extraction_policy, active_format_identities,
-    extraction_policy_fingerprint, normalize_lexical_value, prepare_lexical_query,
+    QueryMatchOperator, QueryPlanKind, QueryTermProjection, QueryTermRole,
+    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
+    active_extraction_policy, active_format_identities, extraction_policy_fingerprint,
+    normalize_lexical_value, prepare_lexical_query,
     prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
 };
 #[cfg(feature = "internal-docx-extractor")]
@@ -34,7 +35,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub const ADAPTER_ABI_VERSION: u32 = 3;
-pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 4;
+pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 5;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 #[cfg(feature = "internal-d5c-preview")]
 pub const MAX_D5C_PREVIEW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -134,6 +135,10 @@ pub enum Fts5EvidenceProbePlan {
         #[serde(skip_serializing_if = "Option::is_none")]
         exact_identifier: Option<String>,
         prefix_pattern: Option<String>,
+        /// The analyzed stem the pattern expands, sent verbatim so the host
+        /// can tell a genuine completion from the stem repeating itself
+        /// without having to unescape the LIKE pattern.
+        prefix_stem: Option<String>,
         max_prefix_expansions: usize,
         max_prefix_expansion_scan: usize,
         max_prefix_term_bytes: usize,
@@ -981,7 +986,11 @@ fn evidence_probe_plans(
                 )
             })
             .transpose()?;
+        // Eligibility must match the native resolver exactly, or the two
+        // engines report different expansion counts for the same corpus. An
+        // identifier anchor is never expanded, even when it is analyzed.
         let prefix_pattern = (intent.projection == QueryTermProjection::AnalyzedText
+            && intent.role == QueryTermRole::OptionalContext
             && probe_index < plan.bounds.max_prefix_terms)
             .then(|| prefix_pattern(&probe.term, plan.bounds.min_prefix_chars))
             .flatten();
@@ -991,6 +1000,7 @@ fn evidence_probe_plans(
             term_index: probe.term_index,
             match_value,
             exact_identifier,
+            prefix_stem: prefix_pattern.as_ref().map(|_| probe.term.clone()),
             prefix_pattern,
             max_prefix_expansions: plan.bounds.max_prefix_expansions_per_term,
             max_prefix_expansion_scan: plan.bounds.max_prefix_expansion_scan,

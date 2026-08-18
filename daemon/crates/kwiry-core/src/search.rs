@@ -37,7 +37,8 @@ use crate::query::{
     LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, QueryAssistanceEligibility,
     QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageKind, QueryExecutionDisposition,
     QueryField, QueryFieldGroup, QueryMatchOperator, QueryMetadataField, QueryMetadataProbe,
-    QueryPlanKind, QueryTermProjection, QueryTermSupportObservation, prepare_lexical_query,
+    QueryPlanKind, QueryTermProjection, QueryTermRole, QueryTermSupportObservation,
+    prepare_lexical_query,
 };
 #[cfg(feature = "internal-d5c-preview")]
 use crate::ranking::{
@@ -405,7 +406,23 @@ fn resolve_query_plan(
 
     for probe in &plan.support_probes {
         let document_frequency = support_document_frequency(contexts, &plan, probe)?;
-        let expansions = if document_frequency == 0
+        // Prefix assistance used to require `document_frequency == 0`. That
+        // asked whether the typed stem exists *anywhere* in the vault, not
+        // whether it is useful for this query: one unrelated note holding a
+        // bare `vuln` made `vuln` "supported", so no `vuln…` expansions were
+        // collected and a note titled `Vulnerability-Meetings` became
+        // unreachable. Eligibility is a property of the term's role and
+        // length, not of some other document. The stem's own token is itself
+        // an expansion of the stem, so an exact match stays available as one
+        // alternative rather than as a precondition.
+        let eligible = plan
+            .term_intents
+            .get(probe.term_index as usize)
+            .is_some_and(|intent| {
+                intent.role == QueryTermRole::OptionalContext
+                    && intent.projection == QueryTermProjection::AnalyzedText
+            });
+        let expansions = if eligible
             && probe.term.chars().count() >= plan.bounds.min_prefix_chars
             && prefix_terms_examined < plan.bounds.max_prefix_terms
         {
@@ -615,6 +632,18 @@ fn collect_prefix_expansions(
                 }
             }
         }
+    }
+
+    // A term that extends to nothing but itself needs no assistance: the
+    // all-terms stage already requires it exactly, and expanding it would add
+    // two stages that can only restate a match the ladder has already made.
+    // Assistance is warranted only when some genuinely longer completion
+    // exists.
+    if !window
+        .keys()
+        .any(|expansion| expansion.as_bytes() != prefix)
+    {
+        return Ok(Vec::new());
     }
 
     let mut selected: Vec<_> = window.into_iter().take(scan).collect();
@@ -3126,6 +3155,113 @@ mod tests {
         );
     }
 
+    /// An abbreviation stays expandable even once its exact form exists.
+    ///
+    /// One unrelated note holding a bare `zorb` used to make the stem
+    /// "supported", which suppressed prefix assistance for the whole query and
+    /// left a note whose title is the long form unreachable. The stem existing
+    /// somewhere else says nothing about what the reader meant here.
+    #[test]
+    fn an_abbreviation_stays_expandable_after_its_exact_form_appears_elsewhere() {
+        fn resolve(
+            vault: &std::path::Path,
+            data: &std::path::Path,
+            query: &str,
+        ) -> ResolvedLexicalPlan {
+            let (index, fields) = open_index(data).unwrap();
+            let reader = index.reader().unwrap();
+            let searcher = reader.searcher();
+            let context = NativeSearchContext {
+                index: &index,
+                fields: &fields,
+                searcher: &searcher,
+                resource: None,
+            };
+            let _ = vault;
+            resolve_query_plan(std::slice::from_ref(&context), query).unwrap()
+        }
+
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("quarry-target.md"),
+            "---\ntitle: Zorbification Meetings\n---\nSynthetic abbreviation target.",
+        )
+        .unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data).unwrap();
+
+        let alone = resolve(&vault, &data, "zorb meetings");
+        assert_eq!(
+            alone
+                .plan
+                .evidence_stages
+                .iter()
+                .map(|stage| stage.kind)
+                .collect::<Vec<_>>(),
+            [
+                QueryEvidenceStageKind::ExactMetadata,
+                QueryEvidenceStageKind::ExactPhrase,
+                QueryEvidenceStageKind::AllTerms,
+                QueryEvidenceStageKind::PrefixMetadata,
+                QueryEvidenceStageKind::Prefix,
+                QueryEvidenceStageKind::PartialCoverage,
+            ]
+        );
+        assert_eq!(
+            search(&data, "zorb meetings", 8)[0].path,
+            "quarry-target.md"
+        );
+
+        // One unrelated note now carries the bare stem as ordinary prose.
+        fs::write(
+            vault.join("quarry-unrelated.md"),
+            "---\ntitle: Quarry Notes\n---\nzorb appears here as shorthand.",
+        )
+        .unwrap();
+        let restated = temporary.path().join("data-restated");
+        build_index(&config, &restated).unwrap();
+
+        let together = resolve(&vault, &restated, "zorb meetings");
+        let stem = together
+            .plan
+            .term_intents
+            .iter()
+            .find(|intent| intent.text == "zorb")
+            .expect("the stem is a planned term");
+        // The stem is genuinely supported now, and that must not matter.
+        assert_eq!(stem.support, crate::query::QueryTermSupport::Useful);
+        assert!(
+            together
+                .plan
+                .evidence_stages
+                .iter()
+                .any(|stage| stage.kind == QueryEvidenceStageKind::PrefixMetadata),
+            "prefix assistance must survive the stem existing elsewhere"
+        );
+        let expansions = together
+            .prefix_expansions
+            .values()
+            .flatten()
+            .collect::<Vec<_>>();
+        // The stem expands to itself as well as to the long form, so an exact
+        // match stays reachable rather than becoming a precondition.
+        assert!(expansions.iter().any(|term| *term == "zorb"));
+        assert!(expansions.iter().any(|term| *term == "zorbification"));
+
+        let hits = search(&restated, "zorb meetings", 8);
+        assert_eq!(hits[0].path, "quarry-target.md");
+    }
+
     /// A typed stem whose useful expansion sorts alphabetically behind more
     /// than a full expansion budget of body-only neighbours. Selecting the
     /// budget lexicographically drops the title term before any stage runs, so
@@ -3201,7 +3337,16 @@ mod tests {
             resource: None,
         };
         let resolved = resolve_query_plan(std::slice::from_ref(&context), "quarry zorb").unwrap();
-        let expansions = resolved.prefix_expansions.values().next().unwrap();
+        // Every eligible term is expanded now, so select the stem's own set
+        // rather than whichever entry happens to sort first.
+        let stem_index = resolved
+            .plan
+            .term_intents
+            .iter()
+            .find(|intent| intent.text == "zorb")
+            .expect("the stem is a planned term")
+            .index;
+        let expansions = resolved.prefix_expansions.get(&stem_index).unwrap();
         assert!(expansions.len() <= crate::MAX_PREFIX_EXPANSIONS_PER_TERM);
         assert!(expansions.iter().any(|term| term == "zorbification"));
 

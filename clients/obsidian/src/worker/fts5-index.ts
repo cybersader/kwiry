@@ -1218,7 +1218,11 @@ export class Fts5GenerationIndex {
     let prefixOutputCount = 0;
     for (const { probe, bound, matched } of observedTerms) {
       let terms: string[] = [];
-      if (bound.prefix !== null && !matched) {
+      // Assistance no longer depends on the stem being absent from the vault.
+      // A stem that exists somewhere else can still be an abbreviation of what
+      // the reader meant here, and the binder only emits a prefix probe for
+      // terms the planner considers eligible.
+      if (bound.prefix !== null) {
         prefixProbeCount += 1;
         const started = trace === undefined ? 0 : checkedClock(trace.clock);
         terms = this.db.selectObjects(bound.prefix.sql, bound.prefix.bind).map((row) => {
@@ -1234,6 +1238,10 @@ export class Fts5GenerationIndex {
         }
       }
       if (terms.length > probe.max_prefix_expansions) terms.length = probe.max_prefix_expansions;
+      // A stem that extends to nothing but itself needs no assistance: the
+      // all-terms stage already requires it exactly. This mirrors the native
+      // resolver so both engines plan the same stages for the same corpus.
+      if (!terms.some((term) => term !== probe.prefix_stem)) terms = [];
       prefixOutputCount += terms.length;
       termSupport.push({
         probe_id: probe.probe_id,

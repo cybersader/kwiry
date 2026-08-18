@@ -54,9 +54,9 @@ describe("progressLine", () => {
     expect(progressLine(status(progress("inventory"))))
       .toBe("Inventory 250/1000 (25%)");
     expect(progressLine(status(progress("read", { inFlight: 4 }))))
-      .toBe("Reading 250/1000 (25%) · 4 in flight");
+      .toBe("Reading 250/1000 (25%) ·  4 in flight");
     expect(progressLine(status(progress("prepare", { inFlight: 1 }))))
-      .toBe("Preparing 250/1000 (25%) · 1 in flight");
+      .toBe("Preparing 250/1000 (25%) ·  1 in flight");
     expect(progressLine(status(progress("apply"))))
       .toBe("Applying 250/1000 (25%)");
   });
@@ -65,7 +65,7 @@ describe("progressLine", () => {
     expect(progressLine(status(progress("inventory", { total: null }))))
       .toBe("Inventorying sources…");
     expect(progressLine(status(progress("read", { total: null, inFlight: 2 }))))
-      .toBe("Reading sources… · 2 in flight");
+      .toBe("Reading sources… ·  2 in flight");
     expect(progressLine(status(progress("prepare", { total: null }))))
       .toBe("Preparing index batches…");
     expect(progressLine(status(progress("apply", { total: null }))))
@@ -136,7 +136,7 @@ describe("progressLine", () => {
       unreadableSources: 0,
       quarantineValidatorFields: ["mtime_nanos"],
     })).toBe(
-      "Reading 7/10 (70%) · 2 in flight · 1 note may be missing from search (1 quarantined)",
+      "Reading 7/10 (70%) ·  2 in flight · 1 note may be missing from search (1 quarantined)",
     );
   });
 });
