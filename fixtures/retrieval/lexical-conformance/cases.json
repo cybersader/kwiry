@@ -938,7 +938,9 @@
       "stages": [
         "exact_metadata",
         "exact_phrase",
-        "all_terms"
+        "all_terms",
+        "prefix_metadata",
+        "prefix"
       ],
       "anchors": [],
       "expected_paths": [

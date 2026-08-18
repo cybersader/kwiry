@@ -31,8 +31,8 @@ import type {
 
 const ABI_VERSION = 3;
 const SOURCE_SCHEMA_VERSION = 9;
-const QUERY_SCHEMA_VERSION = 5;
-const MATCH_PLAN_SCHEMA_VERSION = 4;
+const QUERY_SCHEMA_VERSION = 6;
+const MATCH_PLAN_SCHEMA_VERSION = 5;
 
 export interface RustIdentity {
   abi_version: 3;
@@ -63,8 +63,8 @@ export interface RustIdentity {
    * admitted after it was written.
    */
   section_link_formats: Record<string, boolean>;
-  lexical_query_plan_schema_version: 5;
-  fts5_match_plan_schema_version: 4;
+  lexical_query_plan_schema_version: 6;
+  fts5_match_plan_schema_version: 5;
   /**
    * The chunking contract the adapter applies. Chunk rows carry it per chunk,
    * but a generation with no chunks still has to name the contract its cached
@@ -153,7 +153,7 @@ export type QueryEvidenceStageKind =
   | "prefix_metadata" | "prefix";
 
 export interface LexicalQueryPlan {
-  schema_version: 5;
+  schema_version: 6;
   query: string;
   kind: "explicit" | "ordinary" | "identifier";
   match_operator: "explicit" | "any" | "all";
@@ -216,18 +216,20 @@ export interface LexicalQueryPlan {
 
 export type EvidenceProbePlan =
   | {
-      schema_version: 4;
+      schema_version: 5;
       plan_id: "identifier_metadata_v3";
       match_value: string;
     }
   | {
-      schema_version: 4;
+      schema_version: 5;
       plan_id: "term_support_v3";
       probe_id: number;
       term_index: number;
       match_value?: string;
       exact_identifier?: string;
       prefix_pattern: string | null;
+      /** The analyzed stem `prefix_pattern` expands, or null when it does not. */
+      prefix_stem: string | null;
       max_prefix_expansions: 16;
       max_prefix_expansion_scan: 256;
       max_prefix_term_bytes: 96;
@@ -267,7 +269,7 @@ export interface StagePlan {
 }
 
 export interface ExecutionPlan {
-  schema_version: 4;
+  schema_version: 5;
   profile_id: "lexical-v1";
   disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
   max_total_candidates: 512;
@@ -875,18 +877,21 @@ function isEvidenceStages(
         || JSON.stringify(required) !== JSON.stringify(relaxedIndexes))) {
       return false;
     }
-    if ((stage.kind === "prefix" || stage.kind === "prefix_metadata")
-      && (stage.field_group !== (stage.kind === "prefix" ? "prefix" : "prefix_metadata")
+    if (stage.kind === "prefix" || stage.kind === "prefix_metadata") {
+      // An expanded term is never also required exactly: the expansion set
+      // contains the term itself, so requiring it would defeat the expansion.
+      const expectedRequired = relaxedIndexes.filter((index) => !prefixes.includes(index));
+      if (stage.field_group !== (stage.kind === "prefix" ? "prefix" : "prefix_metadata")
         || prefixes.length === 0
-        || JSON.stringify(required) !== JSON.stringify(relaxedIndexes)
+        || JSON.stringify(required) !== JSON.stringify(expectedRequired)
         || prefixes.some((index) => {
           const intent = termIntents[index];
           return intent === undefined
             || intent.role !== "optional_context"
-            || intent.support !== "unsupported"
             || required.includes(index);
-        }))) {
-      return false;
+        })) {
+        return false;
+      }
     }
   }
   return JSON.stringify(actualKinds) === JSON.stringify(expectedKinds);
@@ -916,13 +921,17 @@ function isEvidenceProbePlan(value: unknown): value is EvidenceProbePlan {
   if (value.plan_id !== "term_support_v3"
     || !hasRequiredAndOptionalKeys(value, [
       "plan_id", "schema_version", "probe_id", "term_index", "prefix_pattern",
-      "max_prefix_expansions", "max_prefix_expansion_scan", "max_prefix_term_bytes",
+      "prefix_stem", "max_prefix_expansions", "max_prefix_expansion_scan",
+      "max_prefix_term_bytes",
     ], ["match_value", "exact_identifier"])
     || isNonNegativeSafeInteger(value.probe_id) === false
     || value.probe_id >= 128
     || isNonNegativeSafeInteger(value.term_index) === false
     || value.term_index >= 128
     || (value.prefix_pattern !== null && !isBoundedString(value.prefix_pattern, 4_096))
+    // The stem travels with the pattern and only with the pattern.
+    || (value.prefix_pattern === null) !== (value.prefix_stem === null)
+    || (value.prefix_stem !== null && !isBoundedString(value.prefix_stem, 4_096))
     || value.max_prefix_expansions !== 16
     || value.max_prefix_expansion_scan !== 256
     || value.max_prefix_term_bytes !== 96) {

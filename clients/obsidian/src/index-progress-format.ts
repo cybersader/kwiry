@@ -22,12 +22,27 @@ export function formatIndexProgress(progress: IndexProgressLike): string {
     ? unknownTotalLine(progress)
     : knownTotalLine(progress, total);
   const inFlight = progress.inFlight > 0
-    ? ` · ${progress.inFlight} in flight`
+    ? ` · ${padCount(progress.inFlight)} in flight`
     : "";
   const stall = progress.stallCategory === undefined
     ? ""
     : ` · ${stallLabel(progress.stallCategory)}`;
   return `${base}${inFlight}${stall}`;
+}
+
+/**
+ * A figure space (U+2007) occupies exactly one tabular digit without drawing a
+ * glyph, so a count keeps the same rendered width as it crosses 9 → 10 and the
+ * status bar item stops resizing under its neighbours.
+ *
+ * This belongs here rather than in a presenter: the count is written in one
+ * place and read by both the Obsidian status bar and the modal status rail, and
+ * padding it in only one of those is how the status bar kept jittering after
+ * the modal was fixed.
+ */
+function padCount(value: number): string {
+  const digits = String(value);
+  return digits.length >= 2 ? digits : ` ${digits}`;
 }
 
 function unknownTotalLine(progress: IndexProgressLike): string {

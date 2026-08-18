@@ -2000,8 +2000,8 @@ describe("exact generated production Worker", () => {
         result: {
           rustAbiVersion: 3,
           sourceSchemaVersion: 9,
-          querySchemaVersion: 5,
-          matchPlanSchemaVersion: 4,
+          querySchemaVersion: 6,
+          matchPlanSchemaVersion: 5,
           sqliteVersion: "3.53.0",
           fts5Enabled: 1,
         },
@@ -2509,6 +2509,52 @@ describe("exact generated production Worker", () => {
       });
       expect(selected).toMatchObject({ ok: true, result: { hits: expect.any(Array) } });
       expect(selected.result.hits[0]?.path).toBe("pinnacle-target.md");
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("expands an abbreviation whose exact form exists elsewhere in the vault", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, {
+        id: 1,
+        operation: "initialize",
+        vault_id: "active-vault",
+        enabled_source_formats: ["markdown"],
+      });
+      await request(worker, { id: 2, operation: "begin_build", generation: "abbreviation" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "abbreviation",
+        sources: [
+          source(
+            "quarry-target.md",
+            "---\ntitle: Zorbification Meetings\n---\n# Target\nSynthetic abbreviation target.",
+          ),
+          // One unrelated note carries the bare stem as ordinary prose. This
+          // used to suppress prefix assistance for the whole query.
+          source(
+            "quarry-unrelated.md",
+            "---\ntitle: Quarry Notes\n---\nzorb appears here as shorthand.",
+          ),
+        ],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "abbreviation" });
+
+      const abbreviated = await request(worker, {
+        id: 5, operation: "search", query: "zorb meetings", limit: 8,
+      });
+      expect(abbreviated).toMatchObject({ ok: true, result: { hits: expect.any(Array) } });
+      expect(abbreviated.result.hits[0]?.path).toBe("quarry-target.md");
+
+      // The exact form stays reachable: it is one alternative in the
+      // expansion, not a precondition that was traded away.
+      const exact = await request(worker, {
+        id: 6, operation: "search", query: "zorb", limit: 8,
+      });
+      expect(exact.result.hits.map((hit) => hit.path)).toContain("quarry-unrelated.md");
     } finally {
       await worker.terminate();
     }

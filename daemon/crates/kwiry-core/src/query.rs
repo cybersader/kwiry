@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lexical::{normalize_raw, technical_identifier_spans, technical_identifiers};
 
-pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 5;
+pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 6;
 pub const MAX_QUERY_BYTES: usize = 4_096;
 pub const MAX_QUERY_TERMS: usize = 128;
 pub const MAX_TERM_SUPPORT_PROBES: usize = 128;
@@ -396,7 +396,12 @@ impl LexicalQueryPlan {
             .iter()
             .zip(&report.term_support)
             .filter(|(intent, observation)| {
-                intent.support == QueryTermSupport::Unsupported
+                // Support is deliberately not consulted. A term whose exact
+                // form exists somewhere in the vault can still be an
+                // abbreviation of what the reader meant, and the stem's own
+                // token is one of its expansions, so nothing is lost by
+                // offering the wider disjunction.
+                intent.role == QueryTermRole::OptionalContext
                     && intent.text.chars().count() >= self.bounds.min_prefix_chars
                     && observation.prefix_expansions > 0
             })
@@ -459,6 +464,12 @@ impl LexicalQueryPlan {
             .map(|intent| intent.index)
             .collect();
         if !prefix_indexes.is_empty() {
+            // A prefix term now may also be independently supported, and a
+            // stage may not both require a term exactly and expand it. The
+            // expansion carries the term, so the exact form is dropped from
+            // the requirement rather than the other way round: requiring it
+            // would defeat the whole point of expanding it.
+            let prefix_required = prefix_stage_required_indexes(&partial_indexes, &prefix_indexes);
             // A title or filename whose trailing token matches the typed stem
             // is more specific evidence than the same expansion appearing in
             // body text, and both executors stop once the visible window is
@@ -469,7 +480,7 @@ impl LexicalQueryPlan {
                 &mut self.evidence_stages,
                 QueryEvidenceStageKind::PrefixMetadata,
                 QueryFieldGroup::PrefixMetadata,
-                partial_indexes.clone(),
+                prefix_required.clone(),
                 prefix_indexes.clone(),
                 self.bounds.max_candidates_per_stage,
             );
@@ -477,7 +488,7 @@ impl LexicalQueryPlan {
                 &mut self.evidence_stages,
                 QueryEvidenceStageKind::Prefix,
                 QueryFieldGroup::Prefix,
-                partial_indexes.clone(),
+                prefix_required,
                 prefix_indexes,
                 self.bounds.max_candidates_per_stage,
             );
@@ -933,18 +944,23 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
                 } else {
                     QueryFieldGroup::Prefix
                 };
+                // An expanded term is never also required exactly, so the
+                // requirement is the relaxed set minus this stage's own prefix
+                // terms. Identifier anchors are never expanded, so they always
+                // survive that subtraction and are asserted below.
+                let expected_required =
+                    prefix_stage_required_indexes(&relaxed_indexes, &stage.prefix_term_indexes);
                 if stage.field_group != expected_group
-                    || stage.required_term_indexes != relaxed_indexes
+                    || stage.required_term_indexes != expected_required
                     || stage.prefix_term_indexes.is_empty()
                     || stage.prefix_term_indexes.len() > plan.bounds.max_prefix_terms
                     || !anchor_indexes
                         .iter()
                         .all(|anchor| stage.required_term_indexes.contains(anchor))
                     || stage.prefix_term_indexes.iter().any(|index| {
-                        plan.term_intents.get(*index as usize).is_none_or(|intent| {
-                            intent.role != QueryTermRole::OptionalContext
-                                || intent.support != QueryTermSupport::Unsupported
-                        })
+                        plan.term_intents
+                            .get(*index as usize)
+                            .is_none_or(|intent| intent.role != QueryTermRole::OptionalContext)
                     })
                 {
                     return Err(invalid_plan("prefix stage is inconsistent"));
@@ -953,6 +969,19 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
         }
     }
     Ok(())
+}
+
+/// The relaxed requirement of a prefix stage: every term the stage would
+/// otherwise require, minus the ones it expands.
+///
+/// Shared by construction and validation so the two cannot disagree about a
+/// plan's canonical shape.
+fn prefix_stage_required_indexes(relaxed: &[u16], prefix: &[u16]) -> Vec<u16> {
+    relaxed
+        .iter()
+        .copied()
+        .filter(|index| !prefix.contains(index))
+        .collect()
 }
 
 fn push_stage(
@@ -1450,6 +1479,47 @@ mod tests {
         assert!(finalized.evidence_stages.is_empty());
     }
 
+    /// A supported term may also be expanded, and then it is required by the
+    /// expansion rather than exactly. Requiring both would defeat the point.
+    #[test]
+    fn a_supported_term_that_is_also_expanded_leaves_the_exact_requirement_behind() {
+        let prepared = prepare_lexical_query("cache filler").unwrap();
+        // Both terms are supported, and the second also has expansions.
+        let report = evidence_report(&prepared, None, &[(5, 0), (3, 2)]);
+        let finalized = prepared.finalize_evidence(report).unwrap();
+
+        assert_eq!(
+            stage_kinds(&finalized),
+            [
+                QueryEvidenceStageKind::ExactMetadata,
+                QueryEvidenceStageKind::ExactPhrase,
+                QueryEvidenceStageKind::AllTerms,
+                QueryEvidenceStageKind::PrefixMetadata,
+                QueryEvidenceStageKind::Prefix,
+            ]
+        );
+        for ordinal in [3, 4] {
+            let stage = &finalized.evidence_stages[ordinal];
+            assert_eq!(stage.prefix_term_indexes, [1]);
+            // Index 1 is expanded, so it is absent from the requirement even
+            // though it is Useful and would otherwise be relaxed into it.
+            assert_eq!(stage.required_term_indexes, [0]);
+            assert!(
+                !stage
+                    .required_term_indexes
+                    .iter()
+                    .any(|index| stage.prefix_term_indexes.contains(index))
+            );
+        }
+        // The all-terms tier still demands both exact tokens.
+        assert_eq!(finalized.evidence_stages[2].required_term_indexes, [0, 1]);
+
+        // Putting the expanded term back into the requirement is refused.
+        let mut restated = finalized.clone();
+        restated.evidence_stages[3].required_term_indexes = vec![0, 1];
+        assert!(restated.validate().is_err());
+    }
+
     #[test]
     fn bounded_prefix_precedes_partial_coverage_and_never_relaxes_identifier_anchors() {
         let prepared = prepare_lexical_query("cache unfindable").unwrap();
@@ -1606,7 +1676,7 @@ mod tests {
         let first = serde_json::to_string(&plan).unwrap();
         let second = serde_json::to_string(&plan.clone()).unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("{\"schema_version\":5,\"query\":\"RFC 9110 caching\""));
+        assert!(first.starts_with("{\"schema_version\":6,\"query\":\"RFC 9110 caching\""));
         let decoded: LexicalQueryPlan = serde_json::from_str(&first).unwrap();
         assert_eq!(serde_json::to_string(&decoded).unwrap(), first);
 

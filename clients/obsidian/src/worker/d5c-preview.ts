@@ -328,7 +328,7 @@ function singleStagePlan(
   limit: number,
 ): ExecutionPlan {
   return {
-    schema_version: 4,
+    schema_version: 5,
     profile_id: "lexical-v1",
     disposition: plan.disposition === "explicit_bypass" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,

@@ -118,8 +118,8 @@ if (byName["abi-identity"].abi_version !== 3
   // `enhanced` here, and one that had lost the reader would report `none`.
   || byName["abi-identity"].extraction_policy.pdf !== "portable"
   || byName["abi-identity"].format_identity_schema_version !== 1
-  || byName["abi-identity"].lexical_query_plan_schema_version !== 5
-  || byName["abi-identity"].fts5_match_plan_schema_version !== 4
+  || byName["abi-identity"].lexical_query_plan_schema_version !== 6
+  || byName["abi-identity"].fts5_match_plan_schema_version !== 5
   // Link behaviour is declared by the backend registry, so the shipped
   // artifact must carry it: a client that decides for itself silently refuses
   // every format admitted later.
