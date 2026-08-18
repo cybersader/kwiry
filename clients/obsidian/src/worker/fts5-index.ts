@@ -57,6 +57,7 @@ export type InternalLexicalTraceStageKind =
   | "lexical_exact_phrase_v3"
   | "lexical_all_terms_v3"
   | "lexical_partial_coverage_v3"
+  | "lexical_prefix_metadata_v3"
   | "lexical_prefix_v3";
 
 export interface InternalLexicalTraceStage {
@@ -1315,6 +1316,7 @@ export class Fts5GenerationIndex {
         break;
       }
       const mandatory = stage.plan_id !== "lexical_partial_coverage_v3"
+        && stage.plan_id !== "lexical_prefix_metadata_v3"
         && stage.plan_id !== "lexical_prefix_v3";
       const started = trace === undefined ? 0 : checkedClock(trace.clock);
       const bound = bindSearchStage(stage, stageLimit);
@@ -3287,7 +3289,7 @@ function isInternalLexicalTraceStage(value: unknown): value is InternalLexicalTr
   const kinds: readonly InternalLexicalTraceStageKind[] = [
     "evidence_support", "evidence_prefix", "lexical_explicit_v3",
     "lexical_exact_metadata_v3", "lexical_exact_phrase_v3", "lexical_all_terms_v3",
-    "lexical_partial_coverage_v3", "lexical_prefix_v3",
+    "lexical_partial_coverage_v3", "lexical_prefix_metadata_v3", "lexical_prefix_v3",
   ];
   return Object.keys(stage).sort().join("\0") === [...keys].sort().join("\0")
     && kinds.includes(stage.kind as InternalLexicalTraceStageKind)

@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub const ADAPTER_ABI_VERSION: u32 = 3;
-pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 3;
+pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 4;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 #[cfg(feature = "internal-d5c-preview")]
 pub const MAX_D5C_PREVIEW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -92,6 +92,10 @@ pub struct AbiIdentity {
     /// because it must decide about a restore before the adapter exists, and
     /// `tests/typescript_mirror.rs` compares both the values and the key set.
     pub format_identities: std::collections::BTreeMap<kwiry_core::SourceFormat, &'static str>,
+    /// Which formats can be linked to at a matched heading. A client must not
+    /// decide this by testing for one format name: note links work for every
+    /// admitted file, and only these formats have headings a `#` link reaches.
+    pub section_link_formats: std::collections::BTreeMap<kwiry_core::SourceFormat, bool>,
     pub lexical_query_plan_schema_version: u32,
     pub fts5_match_plan_schema_version: u32,
     /// The chunker the adapter will actually apply. Chunk rows carry it too,
@@ -131,6 +135,7 @@ pub enum Fts5EvidenceProbePlan {
         exact_identifier: Option<String>,
         prefix_pattern: Option<String>,
         max_prefix_expansions: usize,
+        max_prefix_expansion_scan: usize,
         max_prefix_term_bytes: usize,
     },
 }
@@ -159,6 +164,7 @@ pub enum Fts5StagePlanId {
     LexicalExactPhraseV3,
     LexicalAllTermsV3,
     LexicalPartialCoverageV3,
+    LexicalPrefixMetadataV3,
     LexicalPrefixV3,
 }
 
@@ -446,6 +452,10 @@ pub fn abi_identity() -> String {
         extraction_policy: active_extraction_policy(),
         format_identity_schema_version: FORMAT_IDENTITY_SCHEMA_VERSION,
         format_identities: active_format_identities(),
+        section_link_formats: active_format_identities()
+            .into_keys()
+            .map(|format| (format, format.supports_section_links()))
+            .collect(),
         lexical_query_plan_schema_version: LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
         fts5_match_plan_schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
         chunking_version: CHUNKING_VERSION,
@@ -983,6 +993,7 @@ fn evidence_probe_plans(
             exact_identifier,
             prefix_pattern,
             max_prefix_expansions: plan.bounds.max_prefix_expansions_per_term,
+            max_prefix_expansion_scan: plan.bounds.max_prefix_expansion_scan,
             max_prefix_term_bytes: MAX_PREFIX_TERM_BYTES,
         });
     }
@@ -1127,6 +1138,13 @@ fn fts5_execution_plan(
                             stage.field_group,
                             &stage.required_term_indexes,
                         )?,
+                        None,
+                    ),
+                    // Both halves of the prefix block share one expansion set
+                    // and differ only in the fields they may match.
+                    QueryEvidenceStageKind::PrefixMetadata => (
+                        Fts5StagePlanId::LexicalPrefixMetadataV3,
+                        Some(scoped_prefix_terms(plan, stage, prefix_expansions)?),
                         None,
                     ),
                     QueryEvidenceStageKind::Prefix => (
@@ -1323,6 +1341,7 @@ fn fts5_fields(plan: &LexicalQueryPlan, group: QueryFieldGroup) -> Result<String
         QueryFieldGroup::Exact => &plan.field_groups.exact,
         QueryFieldGroup::Phrase => &plan.field_groups.phrase,
         QueryFieldGroup::Prefix => &plan.field_groups.prefix,
+        QueryFieldGroup::PrefixMetadata => &plan.field_groups.prefix_metadata,
     };
     let rendered = fields
         .iter()
@@ -2041,16 +2060,31 @@ mod tests {
                 "exact_metadata",
                 "exact_phrase",
                 "all_terms",
+                "prefix_metadata",
                 "prefix",
                 "partial_coverage",
             ]
         );
         assert_eq!(
             mixed["result"]["execution_plan"]["stages"][3]["plan_id"],
-            "lexical_prefix_v3"
+            "lexical_prefix_metadata_v3"
+        );
+        // The metadata half is scoped to the fields a person names a note by;
+        // the text half carries the identical expansion set over everything.
+        assert_eq!(
+            mixed["result"]["execution_plan"]["stages"][3]["match_value"],
+            "{filename stem aliases title} : (\"orchard\" AND (\"adoption\"))"
         );
         assert_eq!(
             mixed["result"]["execution_plan"]["stages"][4]["plan_id"],
+            "lexical_prefix_v3"
+        );
+        assert_eq!(
+            mixed["result"]["execution_plan"]["stages"][4]["match_value"],
+            "{filename stem aliases title heading_text tags content} : (\"orchard\" AND (\"adoption\"))"
+        );
+        assert_eq!(
+            mixed["result"]["execution_plan"]["stages"][5]["plan_id"],
             "lexical_partial_coverage_v3"
         );
 
@@ -2120,11 +2154,20 @@ mod tests {
             .as_array()
             .expect("stages");
         assert_eq!(stages.last().unwrap()["plan_id"], "lexical_prefix_v3");
+        assert_eq!(
+            stages[stages.len() - 2]["plan_id"],
+            "lexical_prefix_metadata_v3"
+        );
 
         let prepared = response(prepare_query(&query_request(
             "aaa bbb ccc ddd eee fff ggg hhh iii",
         )));
         assert_eq!(prepared["result"]["probes"][7]["max_prefix_term_bytes"], 96);
+        assert_eq!(prepared["result"]["probes"][7]["max_prefix_expansions"], 16);
+        assert_eq!(
+            prepared["result"]["probes"][7]["max_prefix_expansion_scan"],
+            256
+        );
         assert!(prepared["result"]["probes"][7]["prefix_pattern"].is_string());
         assert!(prepared["result"]["probes"][8]["prefix_pattern"].is_null());
 

@@ -8,11 +8,17 @@ import {
   captureLinkInsertionTarget,
   deepestMatchedHeading,
   insertMarkdownLink,
+  linkInsertionEnd,
   MISSING_SECTION_HEADING_MESSAGE,
   selectedTextAlias,
   type LinkInsertionKind,
   type LinkInsertionTarget,
 } from "../src/link-insertion";
+import {
+  SECTION_LINK_FORMATS,
+  SOURCE_FORMATS,
+  supportsSectionLinks,
+} from "../src/source-formats";
 
 const file = { path: "Folder/Target.md" } as TFile;
 const from = { line: 3, ch: 4 };
@@ -22,16 +28,19 @@ function setup(alias: string | undefined = undefined): {
   fileManager: Pick<FileManager, "generateMarkdownLink">;
   generateMarkdownLink: ReturnType<typeof vi.fn>;
   replaceRange: ReturnType<typeof vi.fn>;
+  setCursor: ReturnType<typeof vi.fn>;
   target: LinkInsertionTarget;
 } {
   const generateMarkdownLink = vi.fn(() => "generated link");
   const replaceRange = vi.fn();
+  const setCursor = vi.fn();
   return {
     fileManager: { generateMarkdownLink },
     generateMarkdownLink,
     replaceRange,
+    setCursor,
     target: {
-      editor: { replaceRange },
+      editor: { replaceRange, setCursor },
       sourcePath: "Folder/Source.md",
       from,
       to,
@@ -46,10 +55,12 @@ describe("captureLinkInsertionTarget", () => {
     let currentTo = { line: 1, ch: 9 };
     let currentSelection = " original\tselection ";
     const replaceRange = vi.fn();
+    const setCursor = vi.fn();
     const editor = {
       getCursor: vi.fn((side: "from" | "to") => side === "from" ? currentFrom : currentTo),
       getRange: vi.fn(() => currentSelection),
       replaceRange,
+      setCursor,
     };
 
     const target = captureLinkInsertionTarget(editor, "Original/Source.md");
@@ -73,6 +84,36 @@ describe("captureLinkInsertionTarget", () => {
       { line: 1, ch: 2 },
       { line: 1, ch: 9 },
     );
+    expect(setCursor).toHaveBeenCalledWith({ line: 1, ch: 2 + "captured link".length });
+  });
+});
+
+describe("linkInsertionEnd", () => {
+  it("advances along the inserted line", () => {
+    expect(linkInsertionEnd({ line: 3, ch: 4 }, "[[Target]]"))
+      .toEqual({ line: 3, ch: 4 + "[[Target]]".length });
+  });
+
+  it("measures the final line of a multi-line insertion", () => {
+    expect(linkInsertionEnd({ line: 3, ch: 4 }, "[[Target|first\nsecond]]"))
+      .toEqual({ line: 4, ch: "second]]".length });
+  });
+
+  it("stays put for an empty insertion", () => {
+    expect(linkInsertionEnd({ line: 3, ch: 4 }, "")).toEqual({ line: 3, ch: 4 });
+  });
+});
+
+describe("supportsSectionLinks", () => {
+  it("allows section links only where headings are real link anchors", () => {
+    expect(supportsSectionLinks("markdown")).toBe(true);
+    for (const format of SOURCE_FORMATS.filter((value) => value !== "markdown")) {
+      expect(supportsSectionLinks(format)).toBe(false);
+    }
+  });
+
+  it("declares every compiled format, so admitting one cannot skip the decision", () => {
+    expect(Object.keys(SECTION_LINK_FORMATS).sort()).toEqual([...SOURCE_FORMATS].sort());
   });
 });
 
@@ -110,7 +151,7 @@ describe("selectedTextAlias", () => {
 describe("insertMarkdownLink", () => {
   it("inserts a note-level link without a heading subpath", () => {
     const alias = " original selection ";
-    const { fileManager, generateMarkdownLink, replaceRange, target } = setup(alias);
+    const { fileManager, generateMarkdownLink, replaceRange, setCursor, target } = setup(alias);
 
     expect(insertMarkdownLink(fileManager, file, target, "Deepest", "note")).toEqual({ ok: true });
     expect(generateMarkdownLink).toHaveBeenCalledOnce();
@@ -123,11 +164,18 @@ describe("insertMarkdownLink", () => {
     expect(generateMarkdownLink.mock.calls[0]).not.toContain("#Deepest");
     expect(replaceRange).toHaveBeenCalledOnce();
     expect(replaceRange).toHaveBeenCalledWith("generated link", from, to);
+    // The caret belongs after the link so the next keystroke continues the
+    // sentence instead of typing in front of it.
+    expect(setCursor).toHaveBeenCalledOnce();
+    expect(setCursor).toHaveBeenCalledWith({
+      line: from.line,
+      ch: from.ch + "generated link".length,
+    });
   });
 
   it("inserts a matched-section link using the deepest heading", () => {
     const alias = "\tMiXeD é é\r\n";
-    const { fileManager, generateMarkdownLink, replaceRange, target } = setup(alias);
+    const { fileManager, generateMarkdownLink, replaceRange, setCursor, target } = setup(alias);
     const heading = deepestMatchedHeading(["Top", "Middle", "Deepest"]);
 
     expect(insertMarkdownLink(fileManager, file, target, heading, "section")).toEqual({ ok: true });
@@ -138,6 +186,10 @@ describe("insertMarkdownLink", () => {
       alias,
     );
     expect(replaceRange).toHaveBeenCalledWith("generated link", from, to);
+    expect(setCursor).toHaveBeenCalledWith({
+      line: from.line,
+      ch: from.ch + "generated link".length,
+    });
   });
 
   it.each(["note", "section"] as const)(
@@ -164,13 +216,15 @@ describe("insertMarkdownLink", () => {
     "refuses section insertion without a non-empty matched heading",
     (heading) => {
       const privateSentinels = ["Folder/Target.md", "private query", "secret alias", "heading text"];
-      const { fileManager, generateMarkdownLink, replaceRange, target } = setup("secret alias");
+      const { fileManager, generateMarkdownLink, replaceRange, setCursor, target } =
+        setup("secret alias");
 
       const outcome = insertMarkdownLink(fileManager, file, target, heading, "section");
 
       expect(outcome).toEqual({ ok: false, safeMessage: MISSING_SECTION_HEADING_MESSAGE });
       expect(generateMarkdownLink).not.toHaveBeenCalled();
       expect(replaceRange).not.toHaveBeenCalled();
+      expect(setCursor).not.toHaveBeenCalled();
       for (const sentinel of privateSentinels) {
         expect(MISSING_SECTION_HEADING_MESSAGE).not.toContain(sentinel);
       }

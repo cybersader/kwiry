@@ -249,3 +249,36 @@ fn the_core_policy_hash_carries_only_core_material() {
         "enablement is configuration, never identity material"
     );
 }
+
+/// Link behaviour is a backend capability, not a client guess: a client that
+/// tests for one format name silently refuses every format admitted later.
+#[test]
+fn the_mirrored_section_link_formats_match_the_adapter() {
+    let mirrored = exported_object(&source_formats_ts(), "SECTION_LINK_FORMATS");
+    let identity = identity();
+    let reported = identity["section_link_formats"]
+        .as_object()
+        .expect("the adapter reports a per-format section link map");
+
+    let mirrored_keys: Vec<&String> = mirrored.keys().collect();
+    let reported_keys: Vec<&String> = reported.keys().collect();
+    assert_eq!(
+        mirrored_keys, reported_keys,
+        "source-formats.ts must declare link behaviour for exactly the compiled formats"
+    );
+    for (format, expected) in reported {
+        let expected = expected.as_bool().expect("a link capability is a boolean");
+        assert_eq!(
+            mirrored.get(format).map(String::as_str),
+            Some(if expected { "true" } else { "false" }),
+            "source-formats.ts must mirror the {format} section link capability"
+        );
+    }
+    assert_eq!(
+        reported
+            .get("markdown")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "Markdown headings are Obsidian link anchors"
+    );
+}

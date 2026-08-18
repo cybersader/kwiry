@@ -90,7 +90,7 @@
     {
       "scope": "allowed",
       "path": "unicode.md",
-      "markdown": "---\ntitle: Résumé Cache\n---\n\n# Unicode\nnaïve café 東京"
+      "markdown": "---\ntitle: R\u00e9sum\u00e9 Cache\n---\n\n# Unicode\nna\u00efve caf\u00e9 \u6771\u4eac"
     },
     {
       "scope": "allowed",
@@ -125,7 +125,7 @@
     {
       "scope": "allowed",
       "path": "unicode-decomposed.md",
-      "markdown": "---\ntitle: Cöoperate Archive\n---\n\n# Decomposed Unicode\nnaïveté reference"
+      "markdown": "---\ntitle: Co\u0308operate Archive\n---\n\n# Decomposed Unicode\nnai\u0308vete\u0301 reference"
     },
     {
       "scope": "allowed",
@@ -156,6 +156,111 @@
       "scope": "allowed",
       "path": "orchard-adoption.md",
       "markdown": "---\ntitle: Orchard Adoption\n---\n\nSynthetic prefix target."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-target.md",
+      "markdown": "---\ntitle: Quarry Zorbification\n---\n\nSynthetic selection target."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-00.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorba."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-01.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbable."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-02.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbaceous."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-03.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbadic."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-04.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbage."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-05.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbal."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-06.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbamic."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-07.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbane."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-08.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbant."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-09.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbara."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-10.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbate."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-11.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbatic."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-12.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbature."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-13.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbec."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-14.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbedly."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-15.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbelic."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-16.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbenic."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-17.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbeous."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-18.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorberly."
+    },
+    {
+      "scope": "allowed",
+      "path": "pinnacle-decoy-19.md",
+      "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbetic."
     }
   ],
   "generated_documents": [
@@ -357,6 +462,7 @@
         "exact_metadata",
         "exact_phrase",
         "all_terms",
+        "prefix_metadata",
         "prefix",
         "partial_coverage"
       ],
@@ -365,7 +471,7 @@
       "expected_paths": [
         {
           "path": "orchard-adoption.md",
-          "tier": "prefix"
+          "tier": "prefix_metadata"
         }
       ]
     },
@@ -380,6 +486,7 @@
         "exact_metadata",
         "exact_phrase",
         "all_terms",
+        "prefix_metadata",
         "prefix"
       ],
       "anchors": [],
@@ -401,6 +508,7 @@
       "stages": [
         "exact_metadata",
         "all_terms",
+        "prefix_metadata",
         "prefix"
       ],
       "anchors": [],
@@ -638,7 +746,7 @@
     },
     {
       "id": "unicode-exact",
-      "query": "Résumé Cache",
+      "query": "R\u00e9sum\u00e9 Cache",
       "scope": "allowed",
       "limit": 20,
       "assistance": "eligible",
@@ -802,7 +910,7 @@
     },
     {
       "id": "unicode-decomposed-exact-query",
-      "query": "Résumé Cache",
+      "query": "Re\u0301sume\u0301 Cache",
       "scope": "allowed",
       "limit": 20,
       "assistance": "eligible",
@@ -881,7 +989,7 @@
     },
     {
       "id": "unicode-accented-explicit-prefix",
-      "query": "résu*",
+      "query": "re\u0301su*",
       "scope": "allowed",
       "limit": 20,
       "assistance": "explicit_syntax_bypass",
@@ -897,7 +1005,7 @@
     },
     {
       "id": "unicode-accented-explicit-prefix-negative",
-      "query": "résx*",
+      "query": "re\u0301sx*",
       "scope": "allowed",
       "limit": 20,
       "assistance": "explicit_syntax_bypass",
@@ -919,6 +1027,7 @@
       "stages": [
         "exact_metadata",
         "all_terms",
+        "prefix_metadata",
         "prefix"
       ],
       "anchors": [],
@@ -926,7 +1035,7 @@
       "expected_paths": [
         {
           "path": "unicode.md",
-          "tier": "prefix"
+          "tier": "prefix_metadata"
         }
       ]
     },
@@ -1020,16 +1129,41 @@
           "tier": "exact_metadata"
         }
       ]
+    },
+    {
+      "id": "prefix-selection-keeps-a-titled-expansion",
+      "query": "quarry zorb",
+      "scope": "allowed",
+      "limit": 8,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "prefix_metadata",
+        "prefix",
+        "partial_coverage"
+      ],
+      "anchors": [],
+      "prefix_expansions": 16,
+      "expected_paths": [
+        {
+          "path": "pinnacle-target.md",
+          "tier": "prefix_metadata"
+        }
+      ]
     }
   ],
   "bounds": {
     "maximum_terms": 128,
     "over_limit_terms": 129,
     "maximum_query_bytes": 4096,
-    "over_limit_unicode": "é",
+    "over_limit_unicode": "\u00e9",
     "maximum_prefix_terms": 8,
     "maximum_prefix_expansions_per_term": 16,
     "maximum_candidates_per_stage": 256,
-    "maximum_total_candidates": 512
+    "maximum_total_candidates": 512,
+    "maximum_prefix_expansion_scan": 256
   }
 }

@@ -394,8 +394,8 @@ export type WorkerRequest =
 export interface InitializeResult {
   rustAbiVersion: 3;
   sourceSchemaVersion: 9;
-  querySchemaVersion: 4;
-  matchPlanSchemaVersion: 3;
+  querySchemaVersion: 5;
+  matchPlanSchemaVersion: 4;
   sqliteVersion: "3.53.0";
   fts5Enabled: 1;
 }
@@ -1026,8 +1026,8 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
     ])
     && value.rustAbiVersion === 3
     && value.sourceSchemaVersion === 9
-    && value.querySchemaVersion === 4
-    && value.matchPlanSchemaVersion === 3
+    && value.querySchemaVersion === 5
+    && value.matchPlanSchemaVersion === 4
     && value.sqliteVersion === "3.53.0"
     && value.fts5Enabled === 1;
 }

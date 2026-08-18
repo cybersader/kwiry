@@ -82,7 +82,7 @@
       "operation": "finalize_query",
       "query": "dungeons and dragons",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -132,7 +132,7 @@
       "operation": "finalize_query",
       "query": "IIA 2 line",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -182,7 +182,7 @@
       "operation": "finalize_query",
       "query": "iia 2 line",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": true,
         "term_support": [
           {
@@ -232,7 +232,7 @@
       "operation": "finalize_query",
       "query": "title:\"IIA guide\" OR content:cache*",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": []
       },
@@ -247,7 +247,7 @@
       "operation": "finalize_query",
       "query": "title:notes OR '); DROP TABLE chunks; --",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": []
       },
@@ -262,7 +262,7 @@
       "operation": "finalize_query",
       "query": "quasar",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -290,7 +290,7 @@
       "operation": "finalize_query",
       "query": "quasar",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -321,7 +321,7 @@
       "operation": "finalize_query",
       "query": "orchard adop",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -396,7 +396,7 @@
     "request": {
       "abi_version": 3,
       "operation": "prepare_query",
-      "query": "Résumé Cache"
+      "query": "Re\u0301sume\u0301 Cache"
     }
   },
   {
@@ -414,9 +414,9 @@
     "request": {
       "abi_version": 3,
       "operation": "finalize_query",
-      "query": "résu*",
+      "query": "re\u0301su*",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": []
       },
@@ -431,7 +431,7 @@
       "operation": "finalize_query",
       "query": "RFC 9110",
       "evidence_report": {
-        "schema_version": 4,
+        "schema_version": 5,
         "identifier_probe_matched": null,
         "term_support": [
           {

@@ -108,7 +108,7 @@ assert.equal(get("invalid-relative-path").status, "error");
 assert.equal(get("oversized-source").preparation.kind, "skipped");
 assert.equal(get("underreported-source-length").status, "error");
 assert.equal(get("overreported-source-length").status, "error");
-assert.equal(get("ordinary-query").plan.schema_version, 4);
+assert.equal(get("ordinary-query").plan.schema_version, 5);
 assert.equal(get("metadata-probe-unmatched").plan.kind, "ordinary");
 assert.equal(get("metadata-probe-unmatched").plan.match_operator, "any");
 assert.equal(get("metadata-probe-matched").plan.kind, "identifier");

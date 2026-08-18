@@ -23,6 +23,14 @@ pub struct FormatSpec {
     pub name: &'static str,
     pub extensions: &'static [&'static str],
     pub extraction_supported: bool,
+    /// Whether a matched heading of this format resolves as an Obsidian link
+    /// subpath. Every vault file can be linked to by name, but only Markdown
+    /// headings are real anchors: a heading extracted from a PDF page, a DOCX
+    /// outline, or a workbook sheet names a region of the extraction, not a
+    /// destination a `#` link can reach. Clients must read this rather than
+    /// testing for one format name, so admitting a format decides its own
+    /// link behaviour here instead of in every caller.
+    pub section_link_supported: bool,
 }
 
 const FORMAT_SPECS: &[FormatSpec] = &[
@@ -31,48 +39,56 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "markdown",
         extensions: &["md", "markdown", "mdx"],
         extraction_supported: true,
+        section_link_supported: true,
     },
     FormatSpec {
         format: SourceFormat::Text,
         name: "text",
         extensions: &["txt"],
         extraction_supported: true,
+        section_link_supported: false,
     },
     FormatSpec {
         format: SourceFormat::Base,
         name: "base",
         extensions: &["base"],
         extraction_supported: true,
+        section_link_supported: false,
     },
     FormatSpec {
         format: SourceFormat::Canvas,
         name: "canvas",
         extensions: &["canvas"],
         extraction_supported: true,
+        section_link_supported: false,
     },
     FormatSpec {
         format: SourceFormat::Excalidraw,
         name: "excalidraw",
         extensions: &["excalidraw"],
         extraction_supported: true,
+        section_link_supported: false,
     },
     FormatSpec {
         format: SourceFormat::Docx,
         name: "docx",
         extensions: &["docx"],
         extraction_supported: true,
+        section_link_supported: false,
     },
     FormatSpec {
         format: SourceFormat::Pdf,
         name: "pdf",
         extensions: &["pdf"],
         extraction_supported: true,
+        section_link_supported: false,
     },
     FormatSpec {
         format: SourceFormat::Excel,
         name: "excel",
         extensions: &["xlsx", "xlsm"],
         extraction_supported: true,
+        section_link_supported: false,
     },
 ];
 
@@ -102,6 +118,14 @@ impl SourceFormat {
 
     pub fn is_extractable(self) -> bool {
         self.spec().extraction_supported
+    }
+
+    /// Whether a matched heading of this format can be linked to directly.
+    ///
+    /// Note-level linking is not gated: every file admitted to an index lives
+    /// in the vault and can be linked by name regardless of format.
+    pub fn supports_section_links(self) -> bool {
+        self.spec().section_link_supported
     }
 
     pub fn from_extractable_path(path: impl AsRef<Path>) -> Option<Self> {

@@ -180,13 +180,24 @@ SELECT EXISTS(
 
 const PREFIX_EXPANSIONS_SQL = `
 SELECT term
-FROM chunks_fts_vocab
-WHERE col IN ('filename', 'stem', 'aliases', 'title', 'heading_text', 'content')
-  AND term LIKE ? ESCAPE '\\'
-  AND length(CAST(term AS blob)) <= ?
-GROUP BY term
+FROM (
+  SELECT term
+  FROM (
+    SELECT
+      term,
+      max(col IN ('filename', 'stem', 'aliases', 'title')) AS in_metadata
+    FROM chunks_fts_vocab
+    WHERE col IN ('filename', 'stem', 'aliases', 'title', 'heading_text', 'tags', 'content')
+      AND term LIKE ? ESCAPE '\\'
+      AND length(CAST(term AS blob)) <= ?
+    GROUP BY term
+    ORDER BY term ASC
+    LIMIT ?
+  )
+  ORDER BY in_metadata DESC, length(CAST(term AS blob)) ASC, term ASC
+  LIMIT ?
+)
 ORDER BY term ASC
-LIMIT ?
 `;
 
 const MATCH_STAGE_IDS = new Set<StagePlan["plan_id"]>([
@@ -194,6 +205,7 @@ const MATCH_STAGE_IDS = new Set<StagePlan["plan_id"]>([
   "lexical_exact_phrase_v3",
   "lexical_all_terms_v3",
   "lexical_partial_coverage_v3",
+  "lexical_prefix_metadata_v3",
   "lexical_prefix_v3",
 ]);
 
@@ -209,7 +221,7 @@ export interface BoundExistsProbe {
 
 export interface BoundPrefixProbe {
   sql: string;
-  bind: readonly [string, number, number];
+  bind: readonly [string, number, number, number];
 }
 
 export interface BoundEvidenceProbe {
@@ -218,10 +230,10 @@ export interface BoundEvidenceProbe {
 }
 
 export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
-  if (plan.schema_version !== 3
+  if (plan.schema_version !== 4
     || plan.profile_id !== FTS5_PROFILE_ID
     || plan.max_total_candidates !== 512
-    || plan.stages.length > 5
+    || plan.stages.length > 6
     || plan.stages.some((stage, index) => stage.ordinal !== index)) {
     throw new Error("unsupported Rust FTS5 execution plan");
   }
@@ -290,7 +302,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
 }
 
 export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
-  if (plan.schema_version !== 3) {
+  if (plan.schema_version !== 4) {
     throw new Error("unsupported Rust FTS5 evidence probe");
   }
   if (plan.plan_id === "identifier_metadata_v3") {
@@ -301,6 +313,7 @@ export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
   }
   if (plan.plan_id !== "term_support_v3"
     || plan.max_prefix_expansions !== 16
+    || plan.max_prefix_expansion_scan !== 256
     || plan.max_prefix_term_bytes !== 96
     || !Number.isSafeInteger(plan.probe_id)
     || !Number.isSafeInteger(plan.term_index)) {
@@ -317,7 +330,8 @@ export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
           bind: [
             plan.prefix_pattern,
             plan.max_prefix_term_bytes,
-            plan.max_prefix_expansions + 1,
+            plan.max_prefix_expansion_scan,
+            plan.max_prefix_expansions,
           ] as const,
         }
       : null;

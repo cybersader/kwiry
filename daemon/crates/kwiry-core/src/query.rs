@@ -4,15 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::lexical::{normalize_raw, technical_identifier_spans, technical_identifiers};
 
-pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 4;
+pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 5;
 pub const MAX_QUERY_BYTES: usize = 4_096;
 pub const MAX_QUERY_TERMS: usize = 128;
 pub const MAX_TERM_SUPPORT_PROBES: usize = 128;
-pub const MAX_EVIDENCE_STAGES: usize = 5;
+pub const MAX_EVIDENCE_STAGES: usize = 6;
 pub const MAX_PARTIAL_COVERAGE_TERMS: usize = 128;
 pub const MIN_PREFIX_CHARS: usize = 3;
 pub const MAX_PREFIX_TERMS: usize = 8;
 pub const MAX_PREFIX_EXPANSIONS_PER_TERM: usize = 16;
+/// Alphabetical vocabulary entries examined per prefix term before the kept
+/// expansions are selected. The budget that reaches a stage stays
+/// `MAX_PREFIX_EXPANSIONS_PER_TERM`; this only widens what that budget may be
+/// chosen from, so a title-bearing expansion is not lost to an arbitrary
+/// alphabetical cut.
+pub const MAX_PREFIX_EXPANSION_SCAN: usize = 256;
 pub const MAX_CANDIDATES_PER_STAGE: usize = 256;
 pub const MAX_TOTAL_CANDIDATES: usize = 512;
 
@@ -91,6 +97,7 @@ pub enum QueryFieldGroup {
     Exact,
     Phrase,
     Prefix,
+    PrefixMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +108,7 @@ pub struct QueryFieldGroups {
     pub exact: Vec<QueryField>,
     pub phrase: Vec<QueryField>,
     pub prefix: Vec<QueryField>,
+    pub prefix_metadata: Vec<QueryField>,
 }
 
 impl QueryFieldGroups {
@@ -126,6 +134,7 @@ impl QueryFieldGroups {
             ],
             phrase: searchable_text.clone(),
             prefix: searchable_text.clone(),
+            prefix_metadata: searchable_text[..4].to_vec(),
             searchable_text,
         }
     }
@@ -148,6 +157,7 @@ pub struct QueryBounds {
     pub min_prefix_chars: usize,
     pub max_prefix_terms: usize,
     pub max_prefix_expansions_per_term: usize,
+    pub max_prefix_expansion_scan: usize,
     pub max_candidates_per_stage: usize,
     pub max_total_candidates: usize,
 }
@@ -163,6 +173,7 @@ impl QueryBounds {
             min_prefix_chars: MIN_PREFIX_CHARS,
             max_prefix_terms: MAX_PREFIX_TERMS,
             max_prefix_expansions_per_term: MAX_PREFIX_EXPANSIONS_PER_TERM,
+            max_prefix_expansion_scan: MAX_PREFIX_EXPANSION_SCAN,
             max_candidates_per_stage: MAX_CANDIDATES_PER_STAGE,
             max_total_candidates: MAX_TOTAL_CANDIDATES,
         }
@@ -225,6 +236,7 @@ pub enum QueryEvidenceStageKind {
     ExactMetadata,
     ExactPhrase,
     AllTerms,
+    PrefixMetadata,
     Prefix,
     PartialCoverage,
 }
@@ -447,6 +459,20 @@ impl LexicalQueryPlan {
             .map(|intent| intent.index)
             .collect();
         if !prefix_indexes.is_empty() {
+            // A title or filename whose trailing token matches the typed stem
+            // is more specific evidence than the same expansion appearing in
+            // body text, and both executors stop once the visible window is
+            // full. Scoping the metadata fields into their own earlier stage
+            // makes that precedence categorical instead of leaving it to a
+            // BM25 field-weight blend that a rare body term can win.
+            push_stage(
+                &mut self.evidence_stages,
+                QueryEvidenceStageKind::PrefixMetadata,
+                QueryFieldGroup::PrefixMetadata,
+                partial_indexes.clone(),
+                prefix_indexes.clone(),
+                self.bounds.max_candidates_per_stage,
+            );
             push_stage(
                 &mut self.evidence_stages,
                 QueryEvidenceStageKind::Prefix,
@@ -802,6 +828,10 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
     }
     expected_kinds.push(QueryEvidenceStageKind::AllTerms);
     if has_prefix {
+        // Bounded prefix evidence is always emitted as an ordered pair, so a
+        // plan carrying only one half is rejected by the sequence comparison
+        // below rather than silently losing metadata precedence.
+        expected_kinds.push(QueryEvidenceStageKind::PrefixMetadata);
         expected_kinds.push(QueryEvidenceStageKind::Prefix);
     }
     if has_unsupported_context && !relaxed_indexes.is_empty() && relaxed_indexes != all_indexes {
@@ -897,8 +927,13 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
                     return Err(invalid_plan("partial-coverage stage is inconsistent"));
                 }
             }
-            QueryEvidenceStageKind::Prefix => {
-                if stage.field_group != QueryFieldGroup::Prefix
+            QueryEvidenceStageKind::PrefixMetadata | QueryEvidenceStageKind::Prefix => {
+                let expected_group = if stage.kind == QueryEvidenceStageKind::PrefixMetadata {
+                    QueryFieldGroup::PrefixMetadata
+                } else {
+                    QueryFieldGroup::Prefix
+                };
+                if stage.field_group != expected_group
                     || stage.required_term_indexes != relaxed_indexes
                     || stage.prefix_term_indexes.is_empty()
                     || stage.prefix_term_indexes.len() > plan.bounds.max_prefix_terms
@@ -1426,19 +1461,59 @@ mod tests {
                 QueryEvidenceStageKind::ExactMetadata,
                 QueryEvidenceStageKind::ExactPhrase,
                 QueryEvidenceStageKind::AllTerms,
+                QueryEvidenceStageKind::PrefixMetadata,
                 QueryEvidenceStageKind::Prefix,
                 QueryEvidenceStageKind::PartialCoverage,
             ]
         );
+        assert_eq!(
+            finalized.evidence_stages[3].field_group,
+            QueryFieldGroup::PrefixMetadata
+        );
+        assert_eq!(
+            finalized.evidence_stages[4].field_group,
+            QueryFieldGroup::Prefix
+        );
+        // Both halves carry the same relaxed requirement and the same bounded
+        // expansion terms; only the fields they may match differ.
         assert_eq!(finalized.evidence_stages[3].prefix_term_indexes, [1]);
-        assert_eq!(finalized.evidence_stages[4].required_term_indexes, [0]);
+        assert_eq!(finalized.evidence_stages[4].prefix_term_indexes, [1]);
+        assert_eq!(finalized.evidence_stages[3].required_term_indexes, [0]);
+        assert_eq!(finalized.evidence_stages[5].required_term_indexes, [0]);
 
         let mut old_order = finalized.clone();
-        old_order.evidence_stages.swap(3, 4);
+        old_order.evidence_stages.swap(4, 5);
         for (ordinal, stage) in old_order.evidence_stages.iter_mut().enumerate() {
             stage.ordinal = ordinal as u8;
         }
         assert!(old_order.validate().is_err());
+
+        let mut swapped_prefixes = finalized.clone();
+        swapped_prefixes.evidence_stages.swap(3, 4);
+        for (ordinal, stage) in swapped_prefixes.evidence_stages.iter_mut().enumerate() {
+            stage.ordinal = ordinal as u8;
+        }
+        assert!(swapped_prefixes.validate().is_err());
+
+        // A plan that drops the metadata half keeps a valid-looking ladder but
+        // loses categorical title precedence, so it must fail closed.
+        let mut metadata_removed = finalized.clone();
+        metadata_removed.evidence_stages.remove(3);
+        for (ordinal, stage) in metadata_removed.evidence_stages.iter_mut().enumerate() {
+            stage.ordinal = ordinal as u8;
+        }
+        assert!(metadata_removed.validate().is_err());
+
+        let mut text_removed = finalized.clone();
+        text_removed.evidence_stages.remove(4);
+        for (ordinal, stage) in text_removed.evidence_stages.iter_mut().enumerate() {
+            stage.ordinal = ordinal as u8;
+        }
+        assert!(text_removed.validate().is_err());
+
+        let mut regrouped = finalized.clone();
+        regrouped.evidence_stages[3].field_group = QueryFieldGroup::Prefix;
+        assert!(regrouped.validate().is_err());
 
         let prepared = prepare_lexical_query("CVE-2026-1234 context").unwrap();
         let report = evidence_report(&prepared, None, &[(0, 2), (4, 0)]);
@@ -1531,7 +1606,7 @@ mod tests {
         let first = serde_json::to_string(&plan).unwrap();
         let second = serde_json::to_string(&plan.clone()).unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("{\"schema_version\":4,\"query\":\"RFC 9110 caching\""));
+        assert!(first.starts_with("{\"schema_version\":5,\"query\":\"RFC 9110 caching\""));
         let decoded: LexicalQueryPlan = serde_json::from_str(&first).unwrap();
         assert_eq!(serde_json::to_string(&decoded).unwrap(), first);
 
