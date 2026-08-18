@@ -2164,7 +2164,10 @@ mod tests {
         )));
         assert_eq!(prepared["result"]["probes"][7]["max_prefix_term_bytes"], 96);
         assert_eq!(prepared["result"]["probes"][7]["max_prefix_expansions"], 16);
-        assert_eq!(prepared["result"]["probes"][7]["max_prefix_expansion_scan"], 256);
+        assert_eq!(
+            prepared["result"]["probes"][7]["max_prefix_expansion_scan"],
+            256
+        );
         assert!(prepared["result"]["probes"][7]["prefix_pattern"].is_string());
         assert!(prepared["result"]["probes"][8]["prefix_pattern"].is_null());
 

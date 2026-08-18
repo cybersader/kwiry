@@ -275,7 +275,9 @@ fn the_mirrored_section_link_formats_match_the_adapter() {
         );
     }
     assert_eq!(
-        reported.get("markdown").and_then(serde_json::Value::as_bool),
+        reported
+            .get("markdown")
+            .and_then(serde_json::Value::as_bool),
         Some(true),
         "Markdown headings are Obsidian link anchors"
     );
