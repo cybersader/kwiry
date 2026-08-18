@@ -1596,6 +1596,7 @@ describe("KwirySearchModal grouped interactions", () => {
   }) => {
     for (const view of ["source", "section"] as const) {
       const replaceRange = vi.fn();
+      const setCursor = vi.fn();
       const pluginHarness = plugin({
         activeEditor: {
           file: { path: "Source.md" },
@@ -1603,6 +1604,7 @@ describe("KwirySearchModal grouped interactions", () => {
             getCursor: () => ({ line: 0, ch: 0 }),
             getRange: () => "",
             replaceRange,
+            setCursor,
           },
         },
       });
@@ -1633,8 +1635,51 @@ describe("KwirySearchModal grouped interactions", () => {
         undefined,
       );
       expect(replaceRange).toHaveBeenCalledOnce();
+      // The caret lands after the inserted link, not in front of it.
+      expect(setCursor).toHaveBeenCalledOnce();
       modal.onClose();
     }
+  });
+
+  it("note-links any format and refuses a section link only where headings are not anchors", async () => {
+    const replaceRange = vi.fn();
+    const setCursor = vi.fn();
+    const pluginHarness = plugin({
+      activeEditor: {
+        file: { path: "Source.md" },
+        editor: {
+          getCursor: () => ({ line: 0, ch: 0 }),
+          getRange: () => "",
+          replaceRange,
+          setCursor,
+        },
+      },
+    });
+    const backend = new DeferredBackend();
+    const modal = createModal(backend, status(), pluginHarness);
+    await settleInputSearch(modal, backend, "insert", executionWithHits([
+      hit("workbook", "Book.xlsx", ["Sheet1"], { format: "excel" }),
+    ]));
+
+    // A note link reaches any file in the vault, whatever its format.
+    modal.triggerScope(["Alt"], "Enter", keyboard("Enter", { altKey: true }));
+    expect(pluginHarness.generateMarkdownLink).toHaveBeenCalledWith(
+      expect.any(FakeTFile),
+      "Source.md",
+      undefined,
+      undefined,
+    );
+    expect(replaceRange).toHaveBeenCalledOnce();
+
+    // A workbook sheet is a region of the extraction, not a link anchor.
+    pluginHarness.generateMarkdownLink.mockClear();
+    modal.triggerScope(["Alt", "Shift"], "Enter", keyboard("Enter", {
+      altKey: true,
+      shiftKey: true,
+    }));
+    expect(pluginHarness.generateMarkdownLink).not.toHaveBeenCalled();
+    expect(replaceRange).toHaveBeenCalledOnce();
+    modal.onClose();
   });
 
   it("keeps background-open selection and resolves mouse source/drill rows consistently", async () => {

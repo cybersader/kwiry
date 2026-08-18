@@ -14,6 +14,7 @@ import {
 import {
   FORMAT_IDENTITIES,
   FORMAT_IDENTITY_SCHEMA_VERSION,
+  SECTION_LINK_FORMATS,
 } from "../source-formats";
 import {
   EXTRACTION_PROFILES,
@@ -30,8 +31,8 @@ import type {
 
 const ABI_VERSION = 3;
 const SOURCE_SCHEMA_VERSION = 9;
-const QUERY_SCHEMA_VERSION = 4;
-const MATCH_PLAN_SCHEMA_VERSION = 3;
+const QUERY_SCHEMA_VERSION = 5;
+const MATCH_PLAN_SCHEMA_VERSION = 4;
 
 export interface RustIdentity {
   abi_version: 3;
@@ -55,8 +56,15 @@ export interface RustIdentity {
    * enough.
    */
   format_identities: Record<string, string>;
-  lexical_query_plan_schema_version: 4;
-  fts5_match_plan_schema_version: 3;
+  /**
+   * Which formats have headings a link subpath can reach. Compared by exact
+   * equality against the host mirror for the same reason as the identities: a
+   * client that decides link behaviour itself silently refuses every format
+   * admitted after it was written.
+   */
+  section_link_formats: Record<string, boolean>;
+  lexical_query_plan_schema_version: 5;
+  fts5_match_plan_schema_version: 4;
   /**
    * The chunking contract the adapter applies. Chunk rows carry it per chunk,
    * but a generation with no chunks still has to name the contract its cached
@@ -138,12 +146,14 @@ export interface SourcePreparation {
 export type QueryField =
   | "filename" | "stem" | "aliases" | "title" | "heading" | "tags" | "content"
   | "content_identifiers";
-export type QueryFieldGroup = "searchable_text" | "metadata" | "exact" | "phrase" | "prefix";
+export type QueryFieldGroup =
+  | "searchable_text" | "metadata" | "exact" | "phrase" | "prefix" | "prefix_metadata";
 export type QueryEvidenceStageKind =
-  | "exact_metadata" | "exact_phrase" | "all_terms" | "partial_coverage" | "prefix";
+  | "exact_metadata" | "exact_phrase" | "all_terms" | "partial_coverage"
+  | "prefix_metadata" | "prefix";
 
 export interface LexicalQueryPlan {
-  schema_version: 4;
+  schema_version: 5;
   query: string;
   kind: "explicit" | "ordinary" | "identifier";
   match_operator: "explicit" | "any" | "all";
@@ -167,16 +177,18 @@ export interface LexicalQueryPlan {
     exact: QueryField[];
     phrase: QueryField[];
     prefix: QueryField[];
+    prefix_metadata: QueryField[];
   };
   bounds: {
     max_query_bytes: 4096;
     max_query_terms: 128;
     max_term_support_probes: 128;
-    max_evidence_stages: 5;
+    max_evidence_stages: 6;
     max_partial_coverage_terms: 128;
     min_prefix_chars: 3;
     max_prefix_terms: 8;
     max_prefix_expansions_per_term: 16;
+    max_prefix_expansion_scan: 256;
     max_candidates_per_stage: 256;
     max_total_candidates: 512;
   };
@@ -204,12 +216,12 @@ export interface LexicalQueryPlan {
 
 export type EvidenceProbePlan =
   | {
-      schema_version: 3;
+      schema_version: 4;
       plan_id: "identifier_metadata_v3";
       match_value: string;
     }
   | {
-      schema_version: 3;
+      schema_version: 4;
       plan_id: "term_support_v3";
       probe_id: number;
       term_index: number;
@@ -217,6 +229,7 @@ export type EvidenceProbePlan =
       exact_identifier?: string;
       prefix_pattern: string | null;
       max_prefix_expansions: 16;
+      max_prefix_expansion_scan: 256;
       max_prefix_term_bytes: 96;
     };
 
@@ -241,6 +254,7 @@ export type StagePlanId =
   | "lexical_exact_phrase_v3"
   | "lexical_all_terms_v3"
   | "lexical_partial_coverage_v3"
+  | "lexical_prefix_metadata_v3"
   | "lexical_prefix_v3";
 
 export interface StagePlan {
@@ -253,7 +267,7 @@ export interface StagePlan {
 }
 
 export interface ExecutionPlan {
-  schema_version: 3;
+  schema_version: 4;
   profile_id: "lexical-v1";
   disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
   max_total_candidates: 512;
@@ -529,6 +543,16 @@ function mirrorsCompiledFormatIdentities(value: unknown): boolean {
     && mirrored.every((format) => value[format] === FORMAT_IDENTITIES[format as SourceFormat]);
 }
 
+function mirrorsCompiledSectionLinkFormats(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const reported = Object.keys(value).sort();
+  const mirrored = Object.keys(SECTION_LINK_FORMATS).sort();
+  return reported.length === mirrored.length
+    && reported.every((format, index) => format === mirrored[index])
+    && mirrored.every((format) =>
+      value[format] === SECTION_LINK_FORMATS[format as SourceFormat]);
+}
+
 function isRustIdentity(value: unknown): value is RustIdentity {
   return isRecord(value)
     && hasExactKeys(value, [
@@ -540,6 +564,7 @@ function isRustIdentity(value: unknown): value is RustIdentity {
       "extraction_policy",
       "format_identity_schema_version",
       "format_identities",
+      "section_link_formats",
       "lexical_query_plan_schema_version",
       "fts5_match_plan_schema_version",
       "chunking_version",
@@ -558,6 +583,7 @@ function isRustIdentity(value: unknown): value is RustIdentity {
     && isExtractionPolicy(value.extraction_policy)
     && value.format_identity_schema_version === FORMAT_IDENTITY_SCHEMA_VERSION
     && mirrorsCompiledFormatIdentities(value.format_identities)
+    && mirrorsCompiledSectionLinkFormats(value.section_link_formats)
     && value.lexical_query_plan_schema_version === QUERY_SCHEMA_VERSION
     && value.fts5_match_plan_schema_version === MATCH_PLAN_SCHEMA_VERSION
     && isNonNegativeSafeInteger(value.chunking_version)
@@ -576,6 +602,9 @@ const SEARCHABLE_FIELDS = [
   "filename", "stem", "aliases", "title", "heading", "tags", "content",
 ] as const;
 const METADATA_FIELDS = ["filename", "stem", "aliases", "title", "heading", "tags"] as const;
+// The fields a person names a note by, and the only ones the metadata-scoped
+// half of the prefix block may match.
+const PREFIX_METADATA_FIELDS = ["filename", "stem", "aliases", "title"] as const;
 const EXACT_FIELDS = [
   "filename", "stem", "aliases", "title", "heading", "content_identifiers",
 ] as const;
@@ -583,11 +612,12 @@ const QUERY_BOUNDS = Object.freeze({
   max_query_bytes: 4_096,
   max_query_terms: 128,
   max_term_support_probes: 128,
-  max_evidence_stages: 5,
+  max_evidence_stages: 6,
   max_partial_coverage_terms: 128,
   min_prefix_chars: 3,
   max_prefix_terms: 8,
   max_prefix_expansions_per_term: 16,
+  max_prefix_expansion_scan: 256,
   max_candidates_per_stage: 256,
   max_total_candidates: 512,
 });
@@ -741,12 +771,15 @@ function isPhraseIntent(value: unknown, terms: unknown, boost: boolean): boolean
 
 function isFieldGroups(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ["searchable_text", "metadata", "exact", "phrase", "prefix"])
+    && hasExactKeys(value, [
+      "searchable_text", "metadata", "exact", "phrase", "prefix", "prefix_metadata",
+    ])
     && JSON.stringify(value.searchable_text) === JSON.stringify(SEARCHABLE_FIELDS)
     && JSON.stringify(value.metadata) === JSON.stringify(METADATA_FIELDS)
     && JSON.stringify(value.exact) === JSON.stringify(EXACT_FIELDS)
     && JSON.stringify(value.phrase) === JSON.stringify(SEARCHABLE_FIELDS)
-    && JSON.stringify(value.prefix) === JSON.stringify(SEARCHABLE_FIELDS);
+    && JSON.stringify(value.prefix) === JSON.stringify(SEARCHABLE_FIELDS)
+    && JSON.stringify(value.prefix_metadata) === JSON.stringify(PREFIX_METADATA_FIELDS);
 }
 
 function isSupportProbe(value: unknown, index: number, term: string | undefined): boolean {
@@ -765,10 +798,17 @@ function isEvidenceStages(
   hasPhraseIntent: boolean,
   execution: LexicalQueryPlan["execution"],
 ): boolean {
-  if (!Array.isArray(value) || value.length > 5) return false;
+  if (!Array.isArray(value) || value.length > 6) return false;
   if (execution !== "ready") return value.length === 0;
   const termCount = termIntents.length;
-  const kinds = ["exact_metadata", "exact_phrase", "all_terms", "prefix", "partial_coverage"];
+  const kinds = [
+    "exact_metadata",
+    "exact_phrase",
+    "all_terms",
+    "prefix_metadata",
+    "prefix",
+    "partial_coverage",
+  ];
   const allIndexes = termIntents.map((intent) => intent.index);
   const relaxedIndexes = termIntents
     .filter((intent) => intent.role === "required_identifier_anchor" || intent.support === "useful")
@@ -781,7 +821,9 @@ function isEvidenceStages(
     ...(hasExactIntent ? ["exact_metadata"] : []),
     ...(hasPhraseIntent ? ["exact_phrase"] : []),
     "all_terms",
-    ...(hasPrefix ? ["prefix"] : []),
+    // Bounded prefix evidence is always an ordered pair, so a plan carrying
+    // only one half fails the sequence comparison below.
+    ...(hasPrefix ? ["prefix_metadata", "prefix"] : []),
     ...(hasUnsupportedContext
       && relaxedIndexes.length > 0
       && JSON.stringify(relaxedIndexes) !== JSON.stringify(allIndexes)
@@ -833,8 +875,8 @@ function isEvidenceStages(
         || JSON.stringify(required) !== JSON.stringify(relaxedIndexes))) {
       return false;
     }
-    if (stage.kind === "prefix"
-      && (stage.field_group !== "prefix"
+    if ((stage.kind === "prefix" || stage.kind === "prefix_metadata")
+      && (stage.field_group !== (stage.kind === "prefix" ? "prefix" : "prefix_metadata")
         || prefixes.length === 0
         || JSON.stringify(required) !== JSON.stringify(relaxedIndexes)
         || prefixes.some((index) => {
@@ -874,7 +916,7 @@ function isEvidenceProbePlan(value: unknown): value is EvidenceProbePlan {
   if (value.plan_id !== "term_support_v3"
     || !hasRequiredAndOptionalKeys(value, [
       "plan_id", "schema_version", "probe_id", "term_index", "prefix_pattern",
-      "max_prefix_expansions", "max_prefix_term_bytes",
+      "max_prefix_expansions", "max_prefix_expansion_scan", "max_prefix_term_bytes",
     ], ["match_value", "exact_identifier"])
     || isNonNegativeSafeInteger(value.probe_id) === false
     || value.probe_id >= 128
@@ -882,6 +924,7 @@ function isEvidenceProbePlan(value: unknown): value is EvidenceProbePlan {
     || value.term_index >= 128
     || (value.prefix_pattern !== null && !isBoundedString(value.prefix_pattern, 4_096))
     || value.max_prefix_expansions !== 16
+    || value.max_prefix_expansion_scan !== 256
     || value.max_prefix_term_bytes !== 96) {
     return false;
   }
@@ -903,7 +946,7 @@ function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is 
       && value.disposition !== "empty_no_evidence")
     || value.max_total_candidates !== 512
     || !Array.isArray(value.stages)
-    || value.stages.length > 5
+    || value.stages.length > 6
     || !value.stages.every((stage, index) => isStagePlan(stage, index))) {
     return false;
   }
@@ -920,6 +963,7 @@ function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is 
     exact_phrase: "lexical_exact_phrase_v3",
     all_terms: "lexical_all_terms_v3",
     partial_coverage: "lexical_partial_coverage_v3",
+    prefix_metadata: "lexical_prefix_metadata_v3",
     prefix: "lexical_prefix_v3",
   };
   return queryPlan.execution === "ready"
@@ -957,7 +1001,7 @@ function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
   }
   const matchIds = [
     "lexical_explicit_v3", "lexical_exact_phrase_v3", "lexical_all_terms_v3",
-    "lexical_partial_coverage_v3", "lexical_prefix_v3",
+    "lexical_partial_coverage_v3", "lexical_prefix_metadata_v3", "lexical_prefix_v3",
   ];
   if (value.plan_id === "lexical_exact_metadata_v3") {
     return value.match_value === undefined

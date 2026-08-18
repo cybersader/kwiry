@@ -67,6 +67,7 @@ interface CorpusBounds {
   over_limit_unicode: string;
   maximum_prefix_terms: number;
   maximum_prefix_expansions_per_term: number;
+  maximum_prefix_expansion_scan: number;
   maximum_candidates_per_stage: number;
   maximum_total_candidates: number;
 }
@@ -143,7 +144,7 @@ function finalizeQueryWithRust(
     operation: "finalize_query",
     query,
     evidence_report: {
-      schema_version: 4,
+      schema_version: 5,
       identifier_probe_matched: evidence.identifier_probe_matched,
       term_support: evidence.term_support,
     },
@@ -231,6 +232,7 @@ function stageKind(stage: StagePlan): QueryEvidenceStageKind | "explicit" {
     case "lexical_exact_phrase_v3": return "exact_phrase";
     case "lexical_all_terms_v3": return "all_terms";
     case "lexical_partial_coverage_v3": return "partial_coverage";
+    case "lexical_prefix_metadata_v3": return "prefix_metadata";
     case "lexical_prefix_v3": return "prefix";
     case "lexical_explicit_v3": return "explicit";
   }
@@ -238,7 +240,7 @@ function stageKind(stage: StagePlan): QueryEvidenceStageKind | "explicit" {
 
 function singleStagePlan(stage: StagePlan): ExecutionPlan {
   return {
-    schema_version: 3,
+    schema_version: 4,
     profile_id: "lexical-v1",
     disposition: stage.plan_id === "lexical_explicit_v3" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
@@ -417,6 +419,7 @@ describe("shared lexical-v1 conformance corpus", () => {
       over_limit_unicode: "é",
       maximum_prefix_terms: 8,
       maximum_prefix_expansions_per_term: 16,
+      maximum_prefix_expansion_scan: 256,
       maximum_candidates_per_stage: 256,
       maximum_total_candidates: 512,
     });

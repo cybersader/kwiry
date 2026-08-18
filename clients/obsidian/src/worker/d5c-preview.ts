@@ -93,6 +93,7 @@ type EvidenceTier =
   | "exact_phrase"
   | "all_terms"
   | "partial_coverage"
+  | "prefix_metadata"
   | "prefix";
 
 type RankingScalar =
@@ -327,7 +328,7 @@ function singleStagePlan(
   limit: number,
 ): ExecutionPlan {
   return {
-    schema_version: 3,
+    schema_version: 4,
     profile_id: "lexical-v1",
     disposition: plan.disposition === "explicit_bypass" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
@@ -342,6 +343,7 @@ function evidenceTier(stage: StagePlan): EvidenceTier {
     case "lexical_exact_phrase_v3": return "exact_phrase";
     case "lexical_all_terms_v3": return "all_terms";
     case "lexical_partial_coverage_v3": return "partial_coverage";
+    case "lexical_prefix_metadata_v3": return "prefix_metadata";
     case "lexical_prefix_v3": return "prefix";
   }
 }
@@ -639,6 +641,7 @@ function isEvidenceTier(value: unknown): value is EvidenceTier {
     || value === "exact_phrase"
     || value === "all_terms"
     || value === "partial_coverage"
+    || value === "prefix_metadata"
     || value === "prefix";
 }
 

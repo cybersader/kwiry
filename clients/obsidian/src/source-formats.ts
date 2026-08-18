@@ -245,6 +245,37 @@ export function enabledSourceFormatList(
     .sort();
 }
 
+/**
+ * Mirrors `FormatSpec::section_link_supported` in the Rust format registry;
+ * `rust/kwiry-obsidian-wasm/tests/typescript_mirror.rs` compares this map to
+ * what the adapter reports, so admitting a format cannot silently skip
+ * declaring its link behaviour.
+ *
+ * Only Markdown headings are Obsidian link anchors. A heading extracted from a
+ * PDF page, a DOCX outline, or a workbook sheet names a region of the
+ * extraction rather than a destination a `#` link can reach.
+ */
+export const SECTION_LINK_FORMATS: Readonly<Record<SourceFormat, boolean>> = Object.freeze({
+  markdown: true,
+  text: false,
+  base: false,
+  canvas: false,
+  docx: false,
+  pdf: false,
+  excalidraw: false,
+  excel: false,
+});
+
+/**
+ * Whether a matched heading of this format can be linked to directly.
+ *
+ * Note-level linking is deliberately not gated: every indexed source is a file
+ * in the vault and can be linked by name whatever its format.
+ */
+export function supportsSectionLinks(format: SourceFormat): boolean {
+  return SECTION_LINK_FORMATS[format] === true;
+}
+
 export function sourceFormatDescription(format: SourceFormat): string {
   switch (format) {
     case "markdown":

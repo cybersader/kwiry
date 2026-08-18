@@ -24,6 +24,7 @@ import {
   type LinkInsertionTarget,
 } from "./link-insertion";
 import { pageNavigationShortfall, validateOpenResult, type OpenTarget } from "./open-result";
+import { supportsSectionLinks } from "./source-formats";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
 import {
   presentBackgroundIndex,
@@ -515,8 +516,11 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     const hit = this.hitForResult(result);
     const validated = this.validatedResult(result);
     if (!validated) return;
-    if (hit.format !== "markdown") {
-      new Notice("Kwiry: link insertion is available only for Markdown results.");
+    // Note links reach any file in the vault, so only section links depend on
+    // the format, and the backend registry decides which formats have headings
+    // a link subpath can reach.
+    if (kind === "section" && !supportsSectionLinks(hit.format)) {
+      new Notice("Kwiry: this result's format has no headings a link can point to.");
       return;
     }
     const target = this.linkInsertionTarget;

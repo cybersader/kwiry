@@ -2000,8 +2000,8 @@ describe("exact generated production Worker", () => {
         result: {
           rustAbiVersion: 3,
           sourceSchemaVersion: 9,
-          querySchemaVersion: 4,
-          matchPlanSchemaVersion: 3,
+          querySchemaVersion: 5,
+          matchPlanSchemaVersion: 4,
           sqliteVersion: "3.53.0",
           fts5Enabled: 1,
         },
@@ -2444,6 +2444,76 @@ describe("exact generated production Worker", () => {
     }
   }, 120_000);
 
+
+  it("reaches a titled expansion behind a full budget of earlier vocabulary", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    // Every neighbour shares the typed stem and sorts before the title term,
+    // and there are more of them than the kept expansion budget. Filling that
+    // budget alphabetically drops the title term before any stage runs.
+    const neighbours = [
+      "zorba",
+      "zorbable",
+      "zorbaceous",
+      "zorbadic",
+      "zorbage",
+      "zorbal",
+      "zorbamic",
+      "zorbane",
+      "zorbant",
+      "zorbara",
+      "zorbate",
+      "zorbatic",
+      "zorbature",
+      "zorbec",
+      "zorbedly",
+      "zorbelic",
+      "zorbenic",
+      "zorbeous",
+      "zorberly",
+      "zorbetic",
+    ];
+    const decoys = neighbours.map((neighbour, index) => source(
+      `pinnacle-decoy-${String(index).padStart(2, "0")}.md`,
+      `---\ntitle: Quarry\n---\n# Decoy\nSynthetic ${neighbour} evidence.`,
+    ));
+    try {
+      await request(worker, {
+        id: 1,
+        operation: "initialize",
+        vault_id: "active-vault",
+        enabled_source_formats: ["markdown"],
+      });
+      await request(worker, { id: 2, operation: "begin_build", generation: "prefix-selection" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "prefix-selection",
+        sources: [
+          source(
+            "pinnacle-target.md",
+            "---\ntitle: Quarry Zorbification\n---\n# Target\nSynthetic selection target.",
+          ),
+          ...decoys.slice(0, 10),
+        ],
+      });
+      await request(worker, {
+        id: 4,
+        operation: "add_source_batch",
+        generation: "prefix-selection",
+        sources: decoys.slice(10),
+      });
+      await request(worker, { id: 5, operation: "commit_build", generation: "prefix-selection" });
+
+      const selected = await request(worker, {
+        id: 6, operation: "search", query: "quarry zorb", limit: 8,
+      });
+      expect(selected).toMatchObject({ ok: true, result: { hits: expect.any(Array) } });
+      expect(selected.result.hits[0]?.path).toBe("pinnacle-target.md");
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
   it("accepts required analyzed anchors before and after filename metadata promotion", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {
@@ -2565,6 +2635,35 @@ describe("exact generated production Worker", () => {
         ],
       });
       await request(worker, { id: 4, operation: "commit_build", generation: "stage-order" });
+      await expect(request(worker, {
+        id: 5, operation: "search", query: "orchard adop", limit: 8,
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("refuses a finalized plan that drops the metadata half of the prefix block", async () => {
+    const needle = "function isFinalizedQuery(value) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  if (value?.plan?.query === "orchard adop") { const stages = value.plan.evidence_stages; const metadata = stages.findIndex((stage) => stage.kind === "prefix_metadata"); if (metadata >= 0) { stages.splice(metadata, 1); stages.forEach((stage, index) => { stage.ordinal = index; }); value.execution_plan.stages.splice(metadata, 1); value.execution_plan.stages.forEach((stage, index) => { stage.ordinal = index; }); } }`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "prefix-pair" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "prefix-pair",
+        sources: [
+          source("orchard-adoption.md", "---\ntitle: Orchard Adoption\n---\nTarget"),
+          source("orchard-decoy.md", "---\ntitle: Orchard\n---\nDecoy"),
+        ],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "prefix-pair" });
       await expect(request(worker, {
         id: 5, operation: "search", query: "orchard adop", limit: 8,
       })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });

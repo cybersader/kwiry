@@ -415,6 +415,7 @@ fn resolve_query_plan(
                 &plan,
                 &probe.term,
                 plan.bounds.max_prefix_expansions_per_term,
+                plan.bounds.max_prefix_expansion_scan,
             )?
         } else {
             Vec::new()
@@ -511,8 +512,8 @@ fn support_document_frequency(
     Ok(total)
 }
 
-/// The `limit` lexicographically first distinct terms extending `term`, taken
-/// over the whole authorized vocabulary.
+/// The `limit` most useful distinct terms extending `term`, selected from a
+/// bounded lexicographic window over the whole authorized vocabulary.
 ///
 /// This reads the term dictionary directly rather than counting matches, so it
 /// sees every term a segment records, live or not. That is only safe because
@@ -521,30 +522,41 @@ fn support_document_frequency(
 /// live one and could crowd it out of the expansion set, and the typo ladder
 /// would silently fail to match a note that is really there.
 ///
-/// The budget is spent on *distinct terms*, not on dictionary entries visited,
-/// and each segment is streamed independently up to the same bound. That
-/// distinction is what makes the result a function of the vault rather than of
-/// the index's segment layout. Charging every visited entry against one shared
-/// counter — as this did before — makes a term that appears in three segments
-/// cost three times what the same term costs in a freshly merged index, so an
-/// incrementally maintained index and a rebuild of byte-identical content
-/// expand the same prefix to different term sets, and the prefix stage of the
-/// ladder then contributes different candidates to a bounded pool. See
+/// The scan budget is spent on *distinct terms*, not on dictionary entries
+/// visited, and each segment is streamed independently up to the same bound.
+/// That distinction is what makes the result a function of the vault rather
+/// than of the index's segment layout. Charging every visited entry against one
+/// shared counter — as this did before — makes a term that appears in three
+/// segments cost three times what the same term costs in a freshly merged
+/// index, so an incrementally maintained index and a rebuild of byte-identical
+/// content expand the same prefix to different term sets, and the prefix stages
+/// of the ladder then contribute different candidates to a bounded pool. See
 /// `runtime::tests::an_incremental_index_and_a_rebuild_rank_a_vault_identically`.
 ///
-/// Taking the first `limit` from each stream and then the first `limit` of
-/// their union yields exactly the globally first `limit`: if a term is among
-/// the globally first `limit`, then within any single segment fewer than
-/// `limit` prefix terms can precede it, because every one of those also
-/// precedes it globally. The work is bounded by `limit` entries per segment
-/// per field, and `limit` is `MAX_PREFIX_EXPANSIONS_PER_TERM`.
+/// Taking the first `scan` from each stream and then the first `scan` of their
+/// union yields exactly the globally first `scan`: if a term is among the
+/// globally first `scan`, then within any single segment fewer than `scan`
+/// prefix terms can precede it, because every one of those also precedes it
+/// globally. The work is bounded by `scan` entries per segment per field, and
+/// `scan` is `MAX_PREFIX_EXPANSION_SCAN`.
+///
+/// Selection then keeps `limit` of that window. Ordering it lexicographically —
+/// as this did before, with `scan` equal to `limit` — spends the whole budget on
+/// an arbitrary alphabetical slice, so a stem like `adop` never reaches
+/// `adoption` in a vault that also holds `adoptable`, `adopted`, `adoptee`, and
+/// their plurals, and no later stage can rank a term that was never a
+/// candidate. Preferring terms that occur in a metadata field, then the terms
+/// closest in length to what was typed, keeps the expansions a person is
+/// actually navigating toward. Both orderings are total and computed from the
+/// window alone, so the result stays a pure function of the vault.
 fn collect_prefix_expansions(
     contexts: &[NativeSearchContext<'_>],
     plan: &LexicalQueryPlan,
     term: &str,
     limit: usize,
+    scan: usize,
 ) -> Result<Vec<String>> {
-    if limit == 0 || contexts.is_empty() {
+    if limit == 0 || scan == 0 || contexts.is_empty() {
         return Ok(Vec::new());
     }
     let fields = field_bindings(
@@ -560,15 +572,25 @@ fn collect_prefix_expansions(
         return Ok(Vec::new());
     }
     let prefix = tokens[0].as_bytes();
-    let mut expansions = BTreeSet::new();
+    // `true` once the term was seen in a prefix-metadata field. The map is
+    // ordered, so both the window truncation and the selection sort below are
+    // deterministic regardless of the order fields and segments are visited in.
+    let mut window: BTreeMap<String, bool> = BTreeMap::new();
 
     for context in contexts {
+        let metadata_declared = declared_fields(plan, QueryFieldGroup::PrefixMetadata);
+        let metadata_fields: BTreeSet<_> =
+            field_bindings(context.fields, metadata_declared, QueryFieldGroup::Prefix)
+                .into_iter()
+                .map(|(field, _)| field)
+                .collect();
         let bindings = field_bindings(
             context.fields,
             declared_fields(plan, QueryFieldGroup::Prefix),
             QueryFieldGroup::Prefix,
         );
         for (field, _) in bindings {
+            let is_metadata = metadata_fields.contains(&field);
             for segment in context.searcher.segment_readers() {
                 let inverted = segment
                     .inverted_index(field)
@@ -580,20 +602,37 @@ fn collect_prefix_expansions(
                     .into_stream()
                     .map_err(|error| Error::Index(error.to_string()))?;
                 let mut taken = 0_usize;
-                while taken < limit && stream.advance() {
+                while taken < scan && stream.advance() {
                     let key = stream.key();
                     if !key.starts_with(prefix) {
                         break;
                     }
                     taken += 1;
                     if let Ok(expansion) = std::str::from_utf8(key) {
-                        expansions.insert(expansion.to_owned());
+                        let entry = window.entry(expansion.to_owned()).or_insert(false);
+                        *entry |= is_metadata;
                     }
                 }
             }
         }
     }
-    Ok(expansions.into_iter().take(limit).collect())
+
+    let mut selected: Vec<_> = window.into_iter().take(scan).collect();
+    selected.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.len().cmp(&right.0.len()))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    selected.truncate(limit);
+    let mut expansions: Vec<_> = selected
+        .into_iter()
+        .map(|(expansion, _)| expansion)
+        .collect();
+    // The plan carries expansions as a canonical set, not as a ranked list.
+    expansions.sort();
+    Ok(expansions)
 }
 
 fn execute_lexical_plan(
@@ -1519,7 +1558,7 @@ fn compile_evidence_stage(
         QueryEvidenceStageKind::AllTerms | QueryEvidenceStageKind::PartialCoverage => {
             required_terms_query(index, fields, plan, stage)
         }
-        QueryEvidenceStageKind::Prefix => {
+        QueryEvidenceStageKind::PrefixMetadata | QueryEvidenceStageKind::Prefix => {
             prefix_stage_query(index, fields, plan, stage, prefix_expansions)
         }
     }
@@ -1592,9 +1631,11 @@ fn prefix_stage_query(
         let expansions = prefix_expansions.get(term_index).ok_or_else(|| {
             Error::Query("prefix stage is missing its bounded expansions".to_owned())
         })?;
+        // The metadata-scoped stage and the searchable-text stage share one
+        // expansion set and differ only in the fields they may match.
         let bindings = field_bindings(
             fields,
-            declared_fields(plan, QueryFieldGroup::Prefix),
+            declared_fields(plan, stage.field_group),
             QueryFieldGroup::Prefix,
         );
         let mut alternatives = Vec::new();
@@ -1780,6 +1821,7 @@ fn declared_fields(plan: &LexicalQueryPlan, group: QueryFieldGroup) -> &[QueryFi
         QueryFieldGroup::Exact => &plan.field_groups.exact,
         QueryFieldGroup::Phrase => &plan.field_groups.phrase,
         QueryFieldGroup::Prefix => &plan.field_groups.prefix,
+        QueryFieldGroup::PrefixMetadata => &plan.field_groups.prefix_metadata,
     }
 }
 
@@ -3068,6 +3110,7 @@ mod tests {
                 QueryEvidenceStageKind::ExactMetadata,
                 QueryEvidenceStageKind::ExactPhrase,
                 QueryEvidenceStageKind::AllTerms,
+                QueryEvidenceStageKind::PrefixMetadata,
                 QueryEvidenceStageKind::Prefix,
                 QueryEvidenceStageKind::PartialCoverage,
             ]
@@ -3081,6 +3124,90 @@ mod tests {
                 .iter()
                 .all(|hit| hit.path.starts_with("orchard-decoy-"))
         );
+    }
+
+    /// A typed stem whose useful expansion sorts alphabetically behind more
+    /// than a full expansion budget of body-only neighbours. Selecting the
+    /// budget lexicographically drops the title term before any stage runs, so
+    /// this fails on candidate selection rather than on ranking.
+    #[test]
+    fn a_titled_expansion_survives_a_full_budget_of_alphabetically_earlier_neighbours() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("pinnacle-target.md"),
+            "---\ntitle: Quarry Zorbification\n---\nSynthetic target.",
+        )
+        .unwrap();
+        // Every decoy term shares the typed stem and sorts before the title
+        // term, and there are more of them than the kept expansion budget.
+        let neighbours = [
+            "zorba",
+            "zorbable",
+            "zorbaceous",
+            "zorbadic",
+            "zorbage",
+            "zorbal",
+            "zorbamic",
+            "zorbane",
+            "zorbant",
+            "zorbara",
+            "zorbate",
+            "zorbatic",
+            "zorbature",
+            "zorbec",
+            "zorbedly",
+            "zorbelic",
+            "zorbenic",
+            "zorbeous",
+            "zorberly",
+            "zorbetic",
+        ];
+        assert!(neighbours.len() > crate::MAX_PREFIX_EXPANSIONS_PER_TERM);
+        assert!(
+            neighbours
+                .iter()
+                .all(|neighbour| *neighbour < "zorbification")
+        );
+        for (index, neighbour) in neighbours.iter().enumerate() {
+            fs::write(
+                vault.join(format!("pinnacle-decoy-{index:02}.md")),
+                format!("---\ntitle: Quarry\n---\nSynthetic decoy {neighbour}."),
+            )
+            .unwrap();
+        }
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved = resolve_query_plan(std::slice::from_ref(&context), "quarry zorb").unwrap();
+        let expansions = resolved.prefix_expansions.values().next().unwrap();
+        assert!(expansions.len() <= crate::MAX_PREFIX_EXPANSIONS_PER_TERM);
+        assert!(expansions.iter().any(|term| term == "zorbification"));
+
+        let hits = search(&data, "quarry zorb", 8);
+        assert_eq!(hits.len(), 8);
+        assert_eq!(hits[0].path, "pinnacle-target.md");
     }
 
     #[test]

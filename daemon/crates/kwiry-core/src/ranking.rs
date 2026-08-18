@@ -297,6 +297,7 @@ pub enum LexicalEvidenceTier {
     ExactMetadata,
     ExactPhrase,
     AllTerms,
+    PrefixMetadata,
     Prefix,
     PartialCoverage,
 }
@@ -307,6 +308,7 @@ impl From<QueryEvidenceStageKind> for LexicalEvidenceTier {
             QueryEvidenceStageKind::ExactMetadata => Self::ExactMetadata,
             QueryEvidenceStageKind::ExactPhrase => Self::ExactPhrase,
             QueryEvidenceStageKind::AllTerms => Self::AllTerms,
+            QueryEvidenceStageKind::PrefixMetadata => Self::PrefixMetadata,
             QueryEvidenceStageKind::Prefix => Self::Prefix,
             QueryEvidenceStageKind::PartialCoverage => Self::PartialCoverage,
         }
@@ -1530,13 +1532,21 @@ mod tests {
     #[test]
     fn prefix_evidence_precedes_partial_coverage_in_d5c_reranking() {
         let profile = RelevanceProfile::D5cPreviewV1(D5cRelevanceProfile::preview());
+        let metadata = candidate(
+            "allowed",
+            "prefix-metadata",
+            "prefix-metadata",
+            "prefix-metadata.md",
+            LexicalEvidenceTier::PrefixMetadata,
+            1.0,
+        );
         let prefix = candidate(
             "allowed",
             "prefix",
             "prefix",
             "prefix.md",
             LexicalEvidenceTier::Prefix,
-            1.0,
+            50.0,
         );
         let partial = candidate(
             "allowed",
@@ -1546,14 +1556,25 @@ mod tests {
             LexicalEvidenceTier::PartialCoverage,
             100.0,
         );
-        let ordered = input(vec![prefix.clone(), partial.clone()]);
+        let ordered = input(vec![metadata.clone(), prefix.clone(), partial.clone()]);
 
         let result = rerank_candidates(&profile, &ordered).unwrap();
-        assert_eq!(paths(&result), ["prefix.md", "partial.md"]);
+        assert_eq!(
+            paths(&result),
+            ["prefix-metadata.md", "prefix.md", "partial.md"]
+        );
 
-        let reversed = input(vec![partial, prefix]);
+        let reversed = input(vec![partial, prefix.clone()]);
         assert_eq!(
             rerank_candidates(&profile, &reversed).unwrap_err().code,
+            "invalid_rerank_input"
+        );
+
+        // A title-scoped prefix hit is stronger evidence than the same
+        // expansion found only in body text, however well the latter scores.
+        let demoted = input(vec![prefix, metadata]);
+        assert_eq!(
+            rerank_candidates(&profile, &demoted).unwrap_err().code,
             "invalid_rerank_input"
         );
     }
