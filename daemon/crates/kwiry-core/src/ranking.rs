@@ -296,8 +296,8 @@ pub enum LexicalEvidenceTier {
     Explicit,
     ExactMetadata,
     ExactPhrase,
-    AllTerms,
     PrefixMetadata,
+    AllTerms,
     Prefix,
     PartialCoverage,
 }
@@ -307,8 +307,8 @@ impl From<QueryEvidenceStageKind> for LexicalEvidenceTier {
         match kind {
             QueryEvidenceStageKind::ExactMetadata => Self::ExactMetadata,
             QueryEvidenceStageKind::ExactPhrase => Self::ExactPhrase,
-            QueryEvidenceStageKind::AllTerms => Self::AllTerms,
             QueryEvidenceStageKind::PrefixMetadata => Self::PrefixMetadata,
+            QueryEvidenceStageKind::AllTerms => Self::AllTerms,
             QueryEvidenceStageKind::Prefix => Self::Prefix,
             QueryEvidenceStageKind::PartialCoverage => Self::PartialCoverage,
         }

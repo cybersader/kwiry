@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lexical::{normalize_raw, technical_identifier_spans, technical_identifiers};
 
-pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 6;
+pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 7;
 pub const MAX_QUERY_BYTES: usize = 4_096;
 pub const MAX_QUERY_TERMS: usize = 128;
 pub const MAX_TERM_SUPPORT_PROBES: usize = 128;
@@ -232,11 +232,19 @@ pub struct QueryEvidenceReport {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+/// The evidence ladder, strongest first.
+///
+/// `PrefixMetadata` sits above `AllTerms` because a note *named* for what was
+/// typed is better evidence than a note that merely mentions it. Stages fill the
+/// visible window in order, so a later stage never competes on score with an
+/// earlier one: with `AllTerms` first, a passing sentence in body prose
+/// containing the literal typed tokens outranked a filename or title carrying
+/// the words those tokens abbreviate.
 pub enum QueryEvidenceStageKind {
     ExactMetadata,
     ExactPhrase,
-    AllTerms,
     PrefixMetadata,
+    AllTerms,
     Prefix,
     PartialCoverage,
 }
@@ -440,15 +448,6 @@ impl LexicalQueryPlan {
                 self.bounds.max_candidates_per_stage,
             );
         }
-        push_stage(
-            &mut self.evidence_stages,
-            QueryEvidenceStageKind::AllTerms,
-            QueryFieldGroup::SearchableText,
-            all_indexes.clone(),
-            Vec::new(),
-            self.bounds.max_candidates_per_stage,
-        );
-
         let has_unsupported_context = self.term_intents.iter().any(|intent| {
             intent.role == QueryTermRole::OptionalContext
                 && intent.support == QueryTermSupport::Unsupported
@@ -463,19 +462,13 @@ impl LexicalQueryPlan {
             .take(self.bounds.max_partial_coverage_terms)
             .map(|intent| intent.index)
             .collect();
+        // Name evidence outranks body evidence: a note whose filename, stem,
+        // alias or title carries the words the typed stems abbreviate is a
+        // better answer than one that merely mentions those stems in prose.
+        // Stages fill the window in order, so this ordering is what makes the
+        // precedence real rather than a scoring preference.
+        let prefix_required = prefix_stage_required_indexes(&partial_indexes, &prefix_indexes);
         if !prefix_indexes.is_empty() {
-            // A prefix term now may also be independently supported, and a
-            // stage may not both require a term exactly and expand it. The
-            // expansion carries the term, so the exact form is dropped from
-            // the requirement rather than the other way round: requiring it
-            // would defeat the whole point of expanding it.
-            let prefix_required = prefix_stage_required_indexes(&partial_indexes, &prefix_indexes);
-            // A title or filename whose trailing token matches the typed stem
-            // is more specific evidence than the same expansion appearing in
-            // body text, and both executors stop once the visible window is
-            // full. Scoping the metadata fields into their own earlier stage
-            // makes that precedence categorical instead of leaving it to a
-            // BM25 field-weight blend that a rare body term can win.
             push_stage(
                 &mut self.evidence_stages,
                 QueryEvidenceStageKind::PrefixMetadata,
@@ -484,6 +477,20 @@ impl LexicalQueryPlan {
                 prefix_indexes.clone(),
                 self.bounds.max_candidates_per_stage,
             );
+        }
+        push_stage(
+            &mut self.evidence_stages,
+            QueryEvidenceStageKind::AllTerms,
+            QueryFieldGroup::SearchableText,
+            all_indexes.clone(),
+            Vec::new(),
+            self.bounds.max_candidates_per_stage,
+        );
+        if !prefix_indexes.is_empty() {
+            // A prefix term may also be independently supported, and a stage
+            // may not both require a term exactly and expand it. The expansion
+            // carries the term, so the exact form is dropped from the
+            // requirement rather than the other way round.
             push_stage(
                 &mut self.evidence_stages,
                 QueryEvidenceStageKind::Prefix,
@@ -837,12 +844,15 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
     if plan.phrase_intent.is_some() {
         expected_kinds.push(QueryEvidenceStageKind::ExactPhrase);
     }
+    // Bounded prefix evidence is always emitted as a pair straddling
+    // `AllTerms`: the metadata half above it, the searchable-text half below.
+    // A plan carrying only one half is rejected by the sequence comparison
+    // below rather than silently losing name precedence.
+    if has_prefix {
+        expected_kinds.push(QueryEvidenceStageKind::PrefixMetadata);
+    }
     expected_kinds.push(QueryEvidenceStageKind::AllTerms);
     if has_prefix {
-        // Bounded prefix evidence is always emitted as an ordered pair, so a
-        // plan carrying only one half is rejected by the sequence comparison
-        // below rather than silently losing metadata precedence.
-        expected_kinds.push(QueryEvidenceStageKind::PrefixMetadata);
         expected_kinds.push(QueryEvidenceStageKind::Prefix);
     }
     if has_unsupported_context && !relaxed_indexes.is_empty() && relaxed_indexes != all_indexes {
@@ -1493,13 +1503,20 @@ mod tests {
             [
                 QueryEvidenceStageKind::ExactMetadata,
                 QueryEvidenceStageKind::ExactPhrase,
-                QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::PrefixMetadata,
+                QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::Prefix,
             ]
         );
-        for ordinal in [3, 4] {
-            let stage = &finalized.evidence_stages[ordinal];
+        for kind in [
+            QueryEvidenceStageKind::PrefixMetadata,
+            QueryEvidenceStageKind::Prefix,
+        ] {
+            let stage = finalized
+                .evidence_stages
+                .iter()
+                .find(|stage| stage.kind == kind)
+                .expect("both prefix halves are present");
             assert_eq!(stage.prefix_term_indexes, [1]);
             // Index 1 is expanded, so it is absent from the requirement even
             // though it is Useful and would otherwise be relaxed into it.
@@ -1512,11 +1529,21 @@ mod tests {
             );
         }
         // The all-terms tier still demands both exact tokens.
-        assert_eq!(finalized.evidence_stages[2].required_term_indexes, [0, 1]);
+        let all_terms = finalized
+            .evidence_stages
+            .iter()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::AllTerms)
+            .expect("the all-terms tier is present");
+        assert_eq!(all_terms.required_term_indexes, [0, 1]);
 
         // Putting the expanded term back into the requirement is refused.
         let mut restated = finalized.clone();
-        restated.evidence_stages[3].required_term_indexes = vec![0, 1];
+        let metadata_ordinal = restated
+            .evidence_stages
+            .iter()
+            .position(|stage| stage.kind == QueryEvidenceStageKind::PrefixMetadata)
+            .expect("the metadata half is present");
+        restated.evidence_stages[metadata_ordinal].required_term_indexes = vec![0, 1];
         assert!(restated.validate().is_err());
     }
 
@@ -1530,14 +1557,16 @@ mod tests {
             [
                 QueryEvidenceStageKind::ExactMetadata,
                 QueryEvidenceStageKind::ExactPhrase,
-                QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::PrefixMetadata,
+                QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::Prefix,
                 QueryEvidenceStageKind::PartialCoverage,
             ]
         );
+        // The prefix pair now straddles the all-terms tier: name evidence above
+        // it, searchable-text evidence below.
         assert_eq!(
-            finalized.evidence_stages[3].field_group,
+            finalized.evidence_stages[2].field_group,
             QueryFieldGroup::PrefixMetadata
         );
         assert_eq!(
@@ -1546,9 +1575,9 @@ mod tests {
         );
         // Both halves carry the same relaxed requirement and the same bounded
         // expansion terms; only the fields they may match differ.
-        assert_eq!(finalized.evidence_stages[3].prefix_term_indexes, [1]);
+        assert_eq!(finalized.evidence_stages[2].prefix_term_indexes, [1]);
         assert_eq!(finalized.evidence_stages[4].prefix_term_indexes, [1]);
-        assert_eq!(finalized.evidence_stages[3].required_term_indexes, [0]);
+        assert_eq!(finalized.evidence_stages[2].required_term_indexes, [0]);
         assert_eq!(finalized.evidence_stages[5].required_term_indexes, [0]);
 
         let mut old_order = finalized.clone();
@@ -1559,7 +1588,7 @@ mod tests {
         assert!(old_order.validate().is_err());
 
         let mut swapped_prefixes = finalized.clone();
-        swapped_prefixes.evidence_stages.swap(3, 4);
+        swapped_prefixes.evidence_stages.swap(2, 4);
         for (ordinal, stage) in swapped_prefixes.evidence_stages.iter_mut().enumerate() {
             stage.ordinal = ordinal as u8;
         }
@@ -1568,7 +1597,7 @@ mod tests {
         // A plan that drops the metadata half keeps a valid-looking ladder but
         // loses categorical title precedence, so it must fail closed.
         let mut metadata_removed = finalized.clone();
-        metadata_removed.evidence_stages.remove(3);
+        metadata_removed.evidence_stages.remove(2);
         for (ordinal, stage) in metadata_removed.evidence_stages.iter_mut().enumerate() {
             stage.ordinal = ordinal as u8;
         }
@@ -1582,7 +1611,7 @@ mod tests {
         assert!(text_removed.validate().is_err());
 
         let mut regrouped = finalized.clone();
-        regrouped.evidence_stages[3].field_group = QueryFieldGroup::Prefix;
+        regrouped.evidence_stages[2].field_group = QueryFieldGroup::Prefix;
         assert!(regrouped.validate().is_err());
 
         let prepared = prepare_lexical_query("CVE-2026-1234 context").unwrap();
@@ -1676,7 +1705,7 @@ mod tests {
         let first = serde_json::to_string(&plan).unwrap();
         let second = serde_json::to_string(&plan.clone()).unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("{\"schema_version\":6,\"query\":\"RFC 9110 caching\""));
+        assert!(first.starts_with("{\"schema_version\":7,\"query\":\"RFC 9110 caching\""));
         let decoded: LexicalQueryPlan = serde_json::from_str(&first).unwrap();
         assert_eq!(serde_json::to_string(&decoded).unwrap(), first);
 

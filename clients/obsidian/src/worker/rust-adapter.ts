@@ -31,8 +31,8 @@ import type {
 
 const ABI_VERSION = 3;
 const SOURCE_SCHEMA_VERSION = 9;
-const QUERY_SCHEMA_VERSION = 6;
-const MATCH_PLAN_SCHEMA_VERSION = 5;
+const QUERY_SCHEMA_VERSION = 7;
+const MATCH_PLAN_SCHEMA_VERSION = 6;
 
 export interface RustIdentity {
   abi_version: 3;
@@ -63,8 +63,8 @@ export interface RustIdentity {
    * admitted after it was written.
    */
   section_link_formats: Record<string, boolean>;
-  lexical_query_plan_schema_version: 6;
-  fts5_match_plan_schema_version: 5;
+  lexical_query_plan_schema_version: 7;
+  fts5_match_plan_schema_version: 6;
   /**
    * The chunking contract the adapter applies. Chunk rows carry it per chunk,
    * but a generation with no chunks still has to name the contract its cached
@@ -153,7 +153,7 @@ export type QueryEvidenceStageKind =
   | "prefix_metadata" | "prefix";
 
 export interface LexicalQueryPlan {
-  schema_version: 6;
+  schema_version: 7;
   query: string;
   kind: "explicit" | "ordinary" | "identifier";
   match_operator: "explicit" | "any" | "all";
@@ -216,12 +216,12 @@ export interface LexicalQueryPlan {
 
 export type EvidenceProbePlan =
   | {
-      schema_version: 5;
+      schema_version: 6;
       plan_id: "identifier_metadata_v3";
       match_value: string;
     }
   | {
-      schema_version: 5;
+      schema_version: 6;
       plan_id: "term_support_v3";
       probe_id: number;
       term_index: number;
@@ -269,7 +269,7 @@ export interface StagePlan {
 }
 
 export interface ExecutionPlan {
-  schema_version: 5;
+  schema_version: 6;
   profile_id: "lexical-v1";
   disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
   max_total_candidates: 512;
@@ -806,8 +806,8 @@ function isEvidenceStages(
   const kinds = [
     "exact_metadata",
     "exact_phrase",
-    "all_terms",
     "prefix_metadata",
+    "all_terms",
     "prefix",
     "partial_coverage",
   ];
@@ -822,10 +822,12 @@ function isEvidenceStages(
   const expectedKinds = [
     ...(hasExactIntent ? ["exact_metadata"] : []),
     ...(hasPhraseIntent ? ["exact_phrase"] : []),
+    // Bounded prefix evidence straddles the all-terms tier: name evidence
+    // above it, searchable-text evidence below. A plan carrying only one half
+    // fails the sequence comparison below.
+    ...(hasPrefix ? ["prefix_metadata"] : []),
     "all_terms",
-    // Bounded prefix evidence is always an ordered pair, so a plan carrying
-    // only one half fails the sequence comparison below.
-    ...(hasPrefix ? ["prefix_metadata", "prefix"] : []),
+    ...(hasPrefix ? ["prefix"] : []),
     ...(hasUnsupportedContext
       && relaxedIndexes.length > 0
       && JSON.stringify(relaxedIndexes) !== JSON.stringify(allIndexes)

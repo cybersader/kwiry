@@ -63,7 +63,7 @@ describe("fixed FTS5 query binder", () => {
 
   it("uses separate fixed support and bounded prefix statements", () => {
     const bound = bindEvidenceProbe({
-      schema_version: 5,
+      schema_version: 6,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -89,7 +89,7 @@ describe("fixed FTS5 query binder", () => {
 
   it("binds encoded exact identifier probes and hard intersections through dedicated FTS", () => {
     const probe = bindEvidenceProbe({
-      schema_version: 5,
+      schema_version: 6,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -142,14 +142,14 @@ describe("fixed FTS5 query binder", () => {
 
   it("rejects unknown plan identities, profiles, schemas, and invalid limits", () => {
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 2 as 5,
+      schema_version: 2 as 6,
       profile_id: "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
       stages: [],
     })).toThrow(/unsupported/);
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 5,
+      schema_version: 6,
       profile_id: "unknown" as "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,

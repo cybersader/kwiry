@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub const ADAPTER_ABI_VERSION: u32 = 3;
-pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 5;
+pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 6;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 #[cfg(feature = "internal-d5c-preview")]
 pub const MAX_D5C_PREVIEW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -2069,21 +2069,25 @@ mod tests {
             [
                 "exact_metadata",
                 "exact_phrase",
-                "all_terms",
                 "prefix_metadata",
+                "all_terms",
                 "prefix",
                 "partial_coverage",
             ]
         );
         assert_eq!(
-            mixed["result"]["execution_plan"]["stages"][3]["plan_id"],
+            mixed["result"]["execution_plan"]["stages"][2]["plan_id"],
             "lexical_prefix_metadata_v3"
         );
         // The metadata half is scoped to the fields a person names a note by;
         // the text half carries the identical expansion set over everything.
         assert_eq!(
-            mixed["result"]["execution_plan"]["stages"][3]["match_value"],
+            mixed["result"]["execution_plan"]["stages"][2]["match_value"],
             "{filename stem aliases title} : (\"orchard\" AND (\"adoption\"))"
+        );
+        assert_eq!(
+            mixed["result"]["execution_plan"]["stages"][3]["plan_id"],
+            "lexical_all_terms_v3"
         );
         assert_eq!(
             mixed["result"]["execution_plan"]["stages"][4]["plan_id"],
@@ -2164,8 +2168,11 @@ mod tests {
             .as_array()
             .expect("stages");
         assert_eq!(stages.last().unwrap()["plan_id"], "lexical_prefix_v3");
+        // Name evidence now precedes the all-terms tier rather than sitting
+        // immediately before the searchable-text half.
+        assert_eq!(stages[stages.len() - 2]["plan_id"], "lexical_all_terms_v3");
         assert_eq!(
-            stages[stages.len() - 2]["plan_id"],
+            stages[stages.len() - 3]["plan_id"],
             "lexical_prefix_metadata_v3"
         );
 
