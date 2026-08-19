@@ -2000,8 +2000,8 @@ describe("exact generated production Worker", () => {
         result: {
           rustAbiVersion: 3,
           sourceSchemaVersion: 9,
-          querySchemaVersion: 6,
-          matchPlanSchemaVersion: 5,
+          querySchemaVersion: 7,
+          matchPlanSchemaVersion: 6,
           sqliteVersion: "3.53.0",
           fts5Enabled: 1,
         },
@@ -2509,6 +2509,48 @@ describe("exact generated production Worker", () => {
       });
       expect(selected).toMatchObject({ ok: true, result: { hits: expect.any(Array) } });
       expect(selected.result.hits[0]?.path).toBe("pinnacle-target.md");
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("ranks a note named for the words above a note that only mentions them", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, {
+        id: 1,
+        operation: "initialize",
+        vault_id: "active-vault",
+        enabled_source_formats: ["markdown"],
+      });
+      await request(worker, { id: 2, operation: "begin_build", generation: "named" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "named",
+        sources: [
+          source(
+            "Zorbification-Quarries.md",
+            "---\ntitle: Zorbification Quarries\n---\nNotes from the recurring session.",
+          ),
+          // Both typed stems appear literally in prose, but not adjacently:
+          // this is the shape that used to win on the all-terms tier.
+          source(
+            "random-ops.md",
+            "---\ntitle: Random Ops Note\n---\nDiscuss zorb topics, then quar planning.",
+          ),
+        ],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "named" });
+
+      const abbreviated = await request(worker, {
+        id: 5, operation: "search", query: "zorb quar", limit: 8,
+      });
+      expect(abbreviated).toMatchObject({ ok: true, result: { hits: expect.any(Array) } });
+      expect(abbreviated.result.hits.map((hit) => hit.path)).toEqual([
+        "Zorbification-Quarries.md",
+        "random-ops.md",
+      ]);
     } finally {
       await worker.terminate();
     }

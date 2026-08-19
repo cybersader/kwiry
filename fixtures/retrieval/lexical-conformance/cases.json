@@ -461,8 +461,8 @@
       "stages": [
         "exact_metadata",
         "exact_phrase",
-        "all_terms",
         "prefix_metadata",
+        "all_terms",
         "prefix",
         "partial_coverage"
       ],
@@ -485,8 +485,8 @@
       "stages": [
         "exact_metadata",
         "exact_phrase",
-        "all_terms",
         "prefix_metadata",
+        "all_terms",
         "prefix"
       ],
       "anchors": [],
@@ -507,8 +507,8 @@
       "execution": "ready",
       "stages": [
         "exact_metadata",
-        "all_terms",
         "prefix_metadata",
+        "all_terms",
         "prefix"
       ],
       "anchors": [],
@@ -938,8 +938,8 @@
       "stages": [
         "exact_metadata",
         "exact_phrase",
-        "all_terms",
         "prefix_metadata",
+        "all_terms",
         "prefix"
       ],
       "anchors": [],
@@ -1028,8 +1028,8 @@
       "execution": "ready",
       "stages": [
         "exact_metadata",
-        "all_terms",
         "prefix_metadata",
+        "all_terms",
         "prefix"
       ],
       "anchors": [],
@@ -1142,8 +1142,8 @@
       "stages": [
         "exact_metadata",
         "exact_phrase",
-        "all_terms",
         "prefix_metadata",
+        "all_terms",
         "prefix",
         "partial_coverage"
       ],

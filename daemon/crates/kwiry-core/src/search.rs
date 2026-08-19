@@ -3138,8 +3138,8 @@ mod tests {
             [
                 QueryEvidenceStageKind::ExactMetadata,
                 QueryEvidenceStageKind::ExactPhrase,
-                QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::PrefixMetadata,
+                QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::Prefix,
                 QueryEvidenceStageKind::PartialCoverage,
             ]
@@ -3153,6 +3153,76 @@ mod tests {
                 .iter()
                 .all(|hit| hit.path.starts_with("orchard-decoy-"))
         );
+    }
+
+    /// A note named for the words beats a note that merely mentions the
+    /// letters that were typed.
+    ///
+    /// Stages fill the visible window in order, so with the all-terms tier
+    /// first a passing sentence carrying both literal stems outranked the
+    /// filename and title carrying the words those stems abbreviate. That is
+    /// the reported `vuln meet` behaviour, reduced to invented words.
+    #[test]
+    fn a_named_note_outranks_a_body_mention_of_the_typed_letters() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("Zorbification-Quarries.md"),
+            "---\ntitle: Zorbification Quarries\n---\nNotes from the recurring session.",
+        )
+        .unwrap();
+        // Body prose carrying both typed stems literally but not adjacently,
+        // which is the realistic shape: an exact phrase match is separately
+        // strong evidence and is not what this test is about.
+        fs::write(
+            vault.join("random-ops.md"),
+            "---\ntitle: Random Ops Note\n---\nDiscuss zorb topics, then quar planning next week.",
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved = resolve_query_plan(std::slice::from_ref(&context), "zorb quar").unwrap();
+        assert_eq!(
+            resolved
+                .plan
+                .evidence_stages
+                .iter()
+                .map(|stage| stage.kind)
+                .collect::<Vec<_>>(),
+            [
+                QueryEvidenceStageKind::ExactMetadata,
+                QueryEvidenceStageKind::ExactPhrase,
+                QueryEvidenceStageKind::PrefixMetadata,
+                QueryEvidenceStageKind::AllTerms,
+                QueryEvidenceStageKind::Prefix,
+            ]
+        );
+
+        let hits = search(&data, "zorb quar", 8);
+        assert_eq!(hits[0].path, "Zorbification-Quarries.md");
+        assert_eq!(hits[1].path, "random-ops.md");
     }
 
     /// An abbreviation stays expandable even once its exact form exists.
@@ -3211,8 +3281,8 @@ mod tests {
             [
                 QueryEvidenceStageKind::ExactMetadata,
                 QueryEvidenceStageKind::ExactPhrase,
-                QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::PrefixMetadata,
+                QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::Prefix,
                 QueryEvidenceStageKind::PartialCoverage,
             ]

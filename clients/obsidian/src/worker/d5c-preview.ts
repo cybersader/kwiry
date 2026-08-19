@@ -91,9 +91,9 @@ type EvidenceTier =
   | "explicit"
   | "exact_metadata"
   | "exact_phrase"
+  | "prefix_metadata"
   | "all_terms"
   | "partial_coverage"
-  | "prefix_metadata"
   | "prefix";
 
 type RankingScalar =
@@ -328,7 +328,7 @@ function singleStagePlan(
   limit: number,
 ): ExecutionPlan {
   return {
-    schema_version: 5,
+    schema_version: 6,
     profile_id: "lexical-v1",
     disposition: plan.disposition === "explicit_bypass" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
