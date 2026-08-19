@@ -2556,6 +2556,47 @@ describe("exact generated production Worker", () => {
     }
   }, 120_000);
 
+  it("names why a search failed without leaking what threw", async () => {
+    // A query failure used to collapse into one catch-all code with the thrown
+    // value discarded, so a sanitized report could not say anything about its
+    // own cause. Inject a throw carrying secrets and assert the classification
+    // survives while the text does not.
+    // Replace the row parser's call site so the very next statement throws a
+    // SQLite-shaped error carrying secrets.
+    const needle =
+      "const rows = this.db.selectObjects(bound.sql, bound.bind).map(parseSearchRow);";
+    const thrownText = "SELECT * FROM chunks WHERE path = '/vault/Hidden Note.md'";
+    const injection = "{ const failure = new Error("
+      + JSON.stringify(thrownText)
+      + "); failure.name = \"SQLite3Error\"; throw failure; }";
+    const injected = guardWorkerSource.replace(needle, injection);
+    expect(injected).not.toBe(guardWorkerSource);
+
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "failure-cause",
+        path: "alpha.md",
+        text: "# Alpha\nstableterm portable cache",
+      });
+      const response = await request(worker, {
+        id: 9, operation: "search", query: "stableterm", limit: 20,
+      });
+
+      expect(response).toMatchObject({
+        ok: false,
+        error: { code: "query_execution_failed", stage: "query", failureCause: "sqlite" },
+      });
+      // Nothing from the thrown value may reach the response.
+      const serialized = JSON.stringify(response);
+      expect(serialized).not.toContain("SELECT");
+      expect(serialized).not.toContain("Hidden Note");
+      expect(serialized).not.toContain("/private/vault");
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
   it("expands an abbreviation whose exact form exists elsewhere in the vault", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {

@@ -770,6 +770,7 @@ function workerBackendError(error: unknown): KwiryBackendError {
           "query",
           error.retryable,
           "In-plugin lexical search could not complete.",
+          error.failureCause,
         );
       case "index_building":
         return new KwiryBackendError(
