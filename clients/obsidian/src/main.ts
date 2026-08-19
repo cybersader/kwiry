@@ -731,6 +731,9 @@ function diagnosticErrorDetails(error: unknown): Readonly<DiagnosticDetails> {
       code: diagnosticErrorCode(error.code),
       stage: error.stage,
       retryable: error.retryable,
+      // A catch-all code says only that search failed. The classified cause is
+      // what makes the report actionable without asking for logs.
+      ...(error.failureCause === undefined ? {} : { failureCause: error.failureCause }),
     };
   }
   const code = typeof error === "object" && error !== null && "code" in error

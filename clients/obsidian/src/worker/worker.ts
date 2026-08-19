@@ -64,6 +64,7 @@ import {
   type WorkerRequest,
   type WorkerResponse,
   emptySourceFormatCounts,
+  classifyWorkerCause,
   fixedWorkerError,
   isSourcePreparationDefectField,
   parseWorkerRequest,
@@ -1108,11 +1109,15 @@ function search(query: string, limit: number): SearchResult {
       }
     }
     if (error instanceof RustAdapterError) throw rustQueryError(error);
+    // The thrown value itself is discarded on purpose: an exception message can
+    // quote SQL, the query, or vault text. Its classification is safe to keep,
+    // and without it a failure report cannot say anything about its own cause.
     throw fixedWorkerError(
       "query_execution_failed",
       "query",
       "In-plugin lexical search could not complete.",
       true,
+      classifyWorkerCause(error),
     );
   }
 }

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 12 as const;
+export const WORKER_PROTOCOL_VERSION = 13 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -212,11 +212,26 @@ export type WorkerErrorCode =
   | "disposed"
   | "internal_error";
 
+/// Why a failure happened, drawn from a closed set.
+///
+/// `query_execution_failed` is a catch-all: every throw inside search collapses
+/// into it, and the thrown value is deliberately discarded because an exception
+/// message may quote SQL, a query, or vault text. That left a failure report
+/// unable to say anything about its own cause. This names the cause in fixed
+/// words instead, so a sanitized report can be acted on without asking anyone
+/// for logs or vault content.
+export type WorkerErrorCause =
+  | "sqlite"
+  | "plan_rejected"
+  | "bounds_exceeded"
+  | "internal";
+
 export interface WorkerError {
   code: WorkerErrorCode;
   stage: "protocol" | "artifact" | "rust" | "sqlite" | "index" | "query" | "lifecycle";
   message: string;
   retryable: boolean;
+  failureCause?: WorkerErrorCause;
 }
 
 export interface SourceDescriptorInput {
@@ -847,8 +862,28 @@ export function fixedWorkerError(
   stage: WorkerError["stage"],
   message: string,
   retryable: boolean,
+  failureCause?: WorkerErrorCause,
 ): WorkerError {
-  return { code, stage, message, retryable };
+  return failureCause === undefined
+    ? { code, stage, message, retryable }
+    : { code, stage, message, retryable, failureCause };
+}
+
+const WORKER_ERROR_CAUSES: ReadonlySet<string> = new Set([
+  "sqlite", "plan_rejected", "bounds_exceeded", "internal",
+]);
+
+/// Classify a thrown value without ever reading its message.
+///
+/// The distinction that matters in a report is whether the database rejected
+/// the statement, the bound plan was refused, an internal bound was hit, or
+/// something else entirely - each points at a different half of the system.
+export function classifyWorkerCause(error: unknown): WorkerErrorCause {
+  if (!(error instanceof Error)) return "internal";
+  const name = error.name;
+  if (name === "SQLite3Error" || name === "SqliteError") return "sqlite";
+  if (error instanceof RangeError) return "bounds_exceeded";
+  return "internal";
 }
 
 export function isGeneration(value: unknown): value is string {
@@ -1429,7 +1464,11 @@ function indexedSourceCount(counts: SourceFormatCounts): number {
 
 export function isWorkerError(value: unknown): value is WorkerError {
   if (!isRecord(value)
-    || !hasExactKeys(value, ["code", "stage", "message", "retryable"])
+    || !hasRequiredAndOptionalKeys(
+      value, ["code", "stage", "message", "retryable"], ["failureCause"])
+    || (value.failureCause !== undefined
+      && (typeof value.failureCause !== "string"
+        || !WORKER_ERROR_CAUSES.has(value.failureCause)))
     || typeof value.code !== "string"
     || typeof value.stage !== "string"
     || typeof value.message !== "string"
@@ -1534,6 +1573,16 @@ function isNormalizedVaultRelativePath(value: unknown): value is string {
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasRequiredAndOptionalKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const actual = Object.keys(value);
+  return required.every((key) => actual.includes(key))
+    && actual.every((key) => required.includes(key) || optional.includes(key));
 }
 
 export function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

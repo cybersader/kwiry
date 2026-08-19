@@ -26,6 +26,10 @@ export type DiagnosticEventCode =
   | "promise.rejected";
 
 export type DiagnosticTextValue =
+  | "sqlite"
+  | "plan_rejected"
+  | "bounds_exceeded"
+  | "internal"
   | "daemon"
   | "in_plugin"
   | "connecting"
@@ -254,6 +258,10 @@ export interface DiagnosticDetails {
   resurrected?: number;
   resultCount?: number;
   cacheBytes?: number;
+  /// Fixed classification of a failure, drawn from the closed text vocabulary.
+  /// `query_execution_failed` is a catch-all that discards the thrown value on
+  /// purpose; without this a report cannot name its own cause.
+  failureCause?: DiagnosticTextValue;
   pluginLoadCompleteMs?: number | null;
   layoutReadyMs?: number | null;
   firstProgressMs?: number | null;
@@ -380,7 +388,7 @@ const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
   "pending",
   "sourcesEnumerated", "sourcesRead", "sourcesSkipped", "sourcesOversized", "sourcesFailed",
   "bytesRead", "batchCount", "upserts", "removals", "renames", "rescans", "resurrected",
-  "resultCount", "cacheBytes",
+  "resultCount", "cacheBytes", "failureCause",
   "pluginLoadCompleteMs", "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs",
   "fullyCurrentMs", "retryable",
   "recoverable", "searchable", "dirty", "rebuilding", "cacheHit", "recovery",

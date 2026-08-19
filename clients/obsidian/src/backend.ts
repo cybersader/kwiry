@@ -136,6 +136,9 @@ export class KwiryBackendError extends Error {
       | "lifecycle",
     public readonly retryable: boolean,
     public readonly safeMessage: string,
+    /// Fixed classification of what failed, when the backend knows it. Never
+    /// an exception message: those can quote SQL, the query, or vault text.
+    public readonly failureCause?: "sqlite" | "plan_rejected" | "bounds_exceeded" | "internal",
   ) {
     super(safeMessage);
     this.name = "KwiryBackendError";

@@ -58,6 +58,8 @@ export class WorkerRpcError extends Error {
   readonly code: WorkerError["code"];
   readonly stage: WorkerError["stage"];
   readonly retryable: boolean;
+  /// Fixed classification of the failure, when the Worker could name one.
+  readonly failureCause: WorkerError["failureCause"];
 
   constructor(error: WorkerError) {
     super(error.message);
@@ -65,6 +67,7 @@ export class WorkerRpcError extends Error {
     this.code = error.code;
     this.stage = error.stage;
     this.retryable = error.retryable;
+    this.failureCause = error.failureCause;
   }
 }
 
