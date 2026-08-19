@@ -18,7 +18,7 @@
 
 <p align="center">
   <strong>Local-first search for the knowledge you already own.</strong><br>
-  In the desktop sidecar profile, kwiry combines Tantivy BM25, fully offline ONNX embeddings, and RRF hybrid ranking in one Rust binary — nothing leaves your machine, and no cloud API is required. Point it at a supported source tree, not just an Obsidian vault, then search through its watching daemon, authenticated HTTP API, or BRAT-installable Obsidian client. Beta.15 also publishes an explicit **In-plugin · Lexical** profile using portable Rust plus official SQLite FTS5-WASM for desktops that cannot run a daemon. It supports multi-format extraction with Excel disabled by default and a disposable machine-local warm start. Property projection and grouped UX are published, while ranking, daily-drive, and distribution acceptance remain pending. Enterprise deployments use the separate OpenClast profile and its governed server-to-server boundary.
+  In the desktop sidecar profile, kwiry combines Tantivy BM25, fully offline ONNX embeddings, and RRF hybrid ranking in one Rust binary — nothing leaves your machine, and no cloud API is required. Point it at a supported source tree, not just an Obsidian vault, then search through its watching daemon, authenticated HTTP API, or BRAT-installable Obsidian client. The plugin also publishes an explicit **In-plugin · Lexical** profile using portable Rust plus official SQLite FTS5-WASM for desktops that cannot run a daemon. It supports multi-format extraction — PDF and Excel off by default, the rest on — bounded prefix completion for words you have not finished typing, and a disposable machine-local warm start. See [releases](https://github.com/cybersader/kwiry/releases) for the current beta. Property projection and grouped UX are published, while ranking, daily-drive, and distribution acceptance remain pending. Enterprise deployments use the separate OpenClast profile and its governed server-to-server boundary.
 </p>
 
 ---
@@ -30,7 +30,8 @@ A single Rust binary provides:
 - **Hybrid ranking** (reciprocal rank fusion over both legs)
 - A **watching daemon** with authenticated HTTP API, incremental hash-based updates, rename/delete correctness, and boot reconciliation for offline changes
 - A **disposable index**: files are the sole source of truth; all derived state rebuilds from nothing, deterministically
-- A published **In-plugin · Lexical** Obsidian profile using portable Rust and official SQLite FTS5-WASM, with supported multi-format extraction and Excel disabled by default
+- A published **In-plugin · Lexical** Obsidian profile using portable Rust and official SQLite FTS5-WASM, with supported multi-format extraction (PDF and Excel off by default)
+- **Bounded prefix completion**: an unfinished word is completed from your own vault's vocabulary within fixed limits, preferring completions that appear in a filename, stem, alias, or title
 
 ## Quick start
 
@@ -74,7 +75,7 @@ Start with the orientation layer, then follow links to the canonical contract an
 - [`docs/vertical-3.md`](docs/vertical-3.md) — local semantic and hybrid search
 - [`docs/openclast-ig1.md`](docs/openclast-ig1.md) — identity-governed OpenClast lexical gateway and operator configuration
 - [`clients/obsidian/README.md`](clients/obsidian/README.md) — published Daemon and In-plugin · Lexical behavior, installation, formats, and privacy boundaries
-- [`docs/design/obsidian-lite.md`](docs/design/obsidian-lite.md) — in-plugin architecture, historical feasibility gates, published beta.15 baseline, and remaining acceptance gates
+- [`docs/design/obsidian-lite.md`](docs/design/obsidian-lite.md) — in-plugin architecture, historical feasibility gates, the published in-plugin baseline, and remaining acceptance gates
 - [`bench/fts5-wasm/README.md`](bench/fts5-wasm/README.md) — verified standalone official SQLite FTS5-WASM Gate 1 evidence and limitations
 - [`bench/fts5-wasm-obsidian-probe/README.md`](bench/fts5-wasm-obsidian-probe/README.md) — one-file Gate 2 automation, public frozen releases, field evidence, and accepted verdict
 - [`docs/roadmap/desktop-obsidian.md`](docs/roadmap/desktop-obsidian.md) — D5 status, including published property projection and grouped UX plus pending ranking/daily-drive/distribution acceptance
@@ -103,7 +104,7 @@ Unless a path contains its own license notice, repository content outside `clien
 
 The accepted responsive logo system and preserved design archive live in [`docs/logo/`](docs/logo/README.md): the untouched mark is used at 64px and below, while the graphite-K mark is used at 96px and above.
 
-The Obsidian plugin is GPL-3.0-only and may port code from [Omnisearch](https://github.com/scambier/obsidian-omnisearch) by Simon Cambier. Beta.15 publishes explicit Daemon and In-plugin · Lexical profiles; the latter packages portable dual-licensed Rust preparation code plus official SQLite FTS5-WASM behind the GPL plugin. No GPL plugin code moves into the daemon or core.
+The Obsidian plugin is GPL-3.0-only and may port code from [Omnisearch](https://github.com/scambier/obsidian-omnisearch) by Simon Cambier. The plugin publishes explicit Daemon and In-plugin · Lexical profiles; the latter packages portable dual-licensed Rust preparation code plus official SQLite FTS5-WASM behind the GPL plugin. No GPL plugin code moves into the daemon or core.
 
 ## Design invariants
 
