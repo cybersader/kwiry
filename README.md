@@ -6,7 +6,6 @@
 
 <p align="center">
   <strong>K</strong>nowledge <strong>W</strong>orkspace <strong>I</strong>nformation <strong>R</strong>etrieval <strong>Y</strong>oke — pronounced <em>“query”</em><br>
-  <em>one retrieval core yoking your knowledge into a truthful search experience</em>
 </p>
 
 <p align="center">
