@@ -1,7 +1,7 @@
 {
   "id": "kwiry-search",
   "name": "Kwiry Search",
-  "version": "0.6.0-beta.23",
+  "version": "0.6.0-beta.24",
   "minAppVersion": "1.7.2",
   "description": "Search with in-plugin lexical or a local kwiry daemon; daemon mode also supports semantic and hybrid ranking.",
   "author": "cybersader",
