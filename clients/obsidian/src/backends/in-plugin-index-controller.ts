@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import type {
+  UnreadableVaultSourceCause,
+  UnreadableVaultSourceCauseCount,
+} from "../backend";
 import {
   ACTIVE_VAULT_ID,
   canonicalMtimeNanos,
@@ -166,6 +170,7 @@ export interface IndexControllerStatus {
   sourceFormatCounts: SourceFormatCounts;
   quarantinedSources: number;
   unreadableSources: number;
+  unreadableSourceCauses?: readonly UnreadableVaultSourceCauseCount[];
   quarantineValidatorFields: readonly SourcePreparationDefectField[];
   dirty: boolean;
   rebuilding: boolean;
@@ -270,6 +275,8 @@ const DEFAULT_LIMITS: IndexControllerLimits = {
 };
 const DEFAULT_IDLE_EXPORT_MS = 2_000;
 const DEFAULT_SOURCE_READ_TIMEOUT_MS = 30_000;
+const INITIAL_UNREADABLE_RETRY_MS = 5_000;
+const MAX_UNREADABLE_RETRY_MS = 5 * 60_000;
 const FAILURE_CHECKPOINT_DEADLINE_MS = 1_500;
 const DEFAULT_SOURCE_POLICY_HASH = "629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8";
 const MAX_GENERATION_ALLOCATION_ATTEMPTS = 32;
@@ -294,10 +301,17 @@ interface Snapshot {
   cut: number;
 }
 
+interface UnreadableSourceRecord {
+  cause: UnreadableVaultSourceCause;
+  failureCount: number;
+  nextRetryAt: number;
+  retryQueued: boolean;
+}
+
 interface SourceOmissions {
   sourceFormatCounts: SourceFormatCounts;
   quarantinedSources: number;
-  unreadableSources: string[];
+  unreadableSources: Array<{ path: string; record: UnreadableSourceRecord }>;
   quarantineValidatorFields: SourcePreparationDefectField[];
 }
 
@@ -355,6 +369,7 @@ export class InPluginIndexController {
   private shutdownPreparation: Promise<void> | null = null;
   private disposal: Promise<void> = Promise.resolve();
   private exportTimer: ReturnType<typeof setTimeout> | null = null;
+  private unreadableRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private disposed = false;
   private stoppingForCheckpoint = false;
@@ -381,11 +396,12 @@ export class InPluginIndexController {
   private databaseByteLimit = 1;
   private sourceFormatCounts = emptySourceFormatCounts();
   private quarantinedSources = 0;
-  private readonly unreadableSources = new Set<string>();
+  private readonly unreadableSources = new Map<string, UnreadableSourceRecord>();
   private readonly quarantineValidatorFields = new Set<SourcePreparationDefectField>();
   private activeSourceFormatCounts = emptySourceFormatCounts();
   private activeQuarantinedSources = 0;
   private activeUnreadableSources = 0;
+  private activeUnreadableSourceCauses: UnreadableVaultSourceCauseCount[] = [];
   private readonly activeQuarantineValidatorFields = new Set<SourcePreparationDefectField>();
   private stage: IndexControllerStage = "starting";
   private activity: IndexControllerActivity = "inventory";
@@ -473,6 +489,7 @@ export class InPluginIndexController {
     this.inFlight = 0;
     if (this.cacheIssue === "cache_save_failed") this.cacheIssue = null;
     this.cancelExportTimer();
+    this.cancelUnreadableRetryTimer();
     // Omissions are NOT cleared here. Requesting a rebuild does not replace the
     // active generation -- that one stays searchable, still missing the same
     // notes, until buildGeneration() actually starts and clears them there.
@@ -510,6 +527,7 @@ export class InPluginIndexController {
     this.mutationEpoch += 1;
     this.invalidateCurrentReadWindow(new ShutdownRequestedError());
     this.cancelExportTimer();
+    this.cancelUnreadableRetryTimer();
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.pendingUpserts.clear();
@@ -542,6 +560,7 @@ export class InPluginIndexController {
     this.mutationEpoch += 1;
     this.invalidateCurrentReadWindow(new Error("in-plugin index controller is disposed"));
     this.cancelExportTimer();
+    this.cancelUnreadableRetryTimer();
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.pendingUpserts.clear();
@@ -646,10 +665,14 @@ export class InPluginIndexController {
   private queueUpsert(path: string): void {
     this.pendingRemovals.delete(path);
     if ([...this.pendingRenames.values()].includes(path)) return;
+    const unreadable = this.unreadableSources.get(path);
+    if (unreadable) unreadable.retryQueued = true;
     this.pendingUpserts.add(path);
   }
 
   private queueRemoval(path: string): void {
+    const unreadable = this.unreadableSources.get(path);
+    if (unreadable) unreadable.retryQueued = true;
     const chained = [...this.pendingRenames.entries()]
       .find(([, destination]) => destination === path);
     if (chained) {
@@ -700,6 +723,7 @@ export class InPluginIndexController {
   }
 
   private requestAuthoritativeRescan(): void {
+    this.cancelUnreadableRetryTimer();
     this.pendingUpserts.clear();
     this.pendingRemovals.clear();
     this.pendingRenames.clear();
@@ -729,6 +753,7 @@ export class InPluginIndexController {
       .finally(() => {
         if (this.running === task) this.running = null;
         if (this.hasWork() && !this.blocked && !this.disposed) this.scheduleWork();
+        else this.scheduleUnreadableRetry();
       });
     this.running = task;
   }
@@ -1442,7 +1467,7 @@ export class InPluginIndexController {
           inspection = this.inspectSource(path);
         } catch (error) {
           if (!(error instanceof UnreadableVaultSourceError)) throw error;
-          this.unreadableSources.add(path);
+          this.markSourceUnreadable(path, error.failureCause);
           if (this.total !== null && this.completed < this.total) this.emit("replay");
           continue;
         }
@@ -1454,7 +1479,7 @@ export class InPluginIndexController {
       }
       const generationBeforeApply: string | null = this.activeGeneration;
       if (inspection.kind === "missing") {
-        this.unreadableSources.delete(path);
+        this.clearSourceUnreadable(path);
         await this.applyReconciliationChange([], [{ vault_id: ACTIVE_VAULT_ID, path }]);
       } else if (!await this.applySnapshotRefresh(
         { path, inspection },
@@ -1487,7 +1512,7 @@ export class InPluginIndexController {
       return { kind: "read", inspection: entry.inspection, read };
     } catch (error) {
       if (!(error instanceof UnreadableVaultSourceError)) throw error;
-      this.unreadableSources.add(entry.path);
+      this.markSourceUnreadable(entry.path, error.failureCause);
       return { kind: "unreadable" };
     }
   }
@@ -1498,7 +1523,7 @@ export class InPluginIndexController {
       inspection = this.inspectSource(path);
     } catch (error) {
       if (!(error instanceof UnreadableVaultSourceError)) throw error;
-      this.unreadableSources.add(path);
+      this.markSourceUnreadable(path, error.failureCause);
       return { kind: "unreadable" };
     }
     if (inspection.kind === "missing") {
@@ -1523,12 +1548,12 @@ export class InPluginIndexController {
       if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) return false;
       // A read exception is evidence about availability, never proof of deletion.
       // Keep the last known-good cached row searchable and report the omission.
-      this.unreadableSources.add(entry.path);
+      this.markSourceUnreadable(entry.path, error.failureCause);
       return true;
     }
     this.requireActive();
     if (!this.reconciliationTupleIsCurrent(expectedGeneration, expectedEpoch)) return false;
-    this.unreadableSources.delete(entry.path);
+    this.clearSourceUnreadable(entry.path);
     if (this.wasTouchedAfter(entry.path, cut)) return true;
     if (read.kind === "source") {
       await this.applyReconciliationChange([read.source], []);
@@ -1662,7 +1687,7 @@ export class InPluginIndexController {
         // a replacement candidate known to omit at least one source. This is a
         // degraded freshness verdict, not a Worker failure, so it remains locally
         // recoverable through a later explicit rebuild without raising onFailure.
-        const unreadableEvidence = [...this.unreadableSources];
+        const unreadableEvidence = this.captureUnreadableSourceRecords();
         began = false;
         this.clearInitialColdPreview();
         await this.worker.abortBuild(generation);
@@ -1670,7 +1695,9 @@ export class InPluginIndexController {
         if (activeOmissions) {
           this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
         }
-        this.blocked = !this.rebuildRequested && !this.rescanRequested;
+        // Source-local unreadability leaves the active generation intact. Keep the
+        // controller schedulable so a later vault event or delayed retry can heal it.
+        this.blocked = false;
         this.candidateGeneration = null;
         this.replacementBuildInProgress = false;
         this.emit("degraded", "sources_unreadable");
@@ -1697,7 +1724,7 @@ export class InPluginIndexController {
       this.clearInitialColdPreview();
       this.invalidateReadWindowForGeneration(generation, error);
       if (error instanceof ShutdownRequestedError) throw error;
-      const unreadableEvidence = rebuilding ? [...this.unreadableSources] : [];
+      const unreadableEvidence = rebuilding ? this.captureUnreadableSourceRecords() : [];
       let failure = error;
       if (began) {
         if (!rebuilding) await this.persistInitialBuildCheckpoint("failure");
@@ -1733,17 +1760,17 @@ export class InPluginIndexController {
         if (!(error instanceof UnreadableVaultSourceError)) throw error;
         unreadableInspections += 1;
         firstUnreadableError ??= error;
-        this.unreadableSources.add(path);
+        this.markSourceUnreadable(path, error.failureCause);
         continue;
       }
       if (inspection.kind === "missing") {
         // Enumeration only proved the path existed at an earlier instant. Once
         // it has vanished there is no source to quarantine, and omitting it from
         // reconciliation correctly removes any cached copy.
-        this.unreadableSources.delete(path);
+        this.clearSourceUnreadable(path);
         continue;
       }
-      this.unreadableSources.delete(path);
+      this.clearSourceUnreadable(path);
       entries.push({ path, inspection });
     }
     if (firstUnreadableError
@@ -1873,12 +1900,12 @@ export class InPluginIndexController {
           if (!(result.reason instanceof UnreadableVaultSourceError)) throw result.reason;
           firstUnreadableError ??= result.reason;
           unreadableCandidateReads += 1;
-          this.unreadableSources.add(entry.path);
+          this.markSourceUnreadable(entry.path, result.reason.failureCause);
           this.emit(rebuilding ? "rebuild" : "snapshot");
           continue;
         }
         const read = result.value;
-        this.unreadableSources.delete(entry.path);
+        this.clearSourceUnreadable(entry.path);
         if (!this.wasTouchedAfter(entry.path, snapshot.cut)) {
           const upsert = sourceUpsert(read);
           if (upsert) {
@@ -2076,7 +2103,7 @@ export class InPluginIndexController {
       const removals = new Map<string, SourceRemoval>();
       for (const path of changes.removals) {
         removals.set(path, { vault_id: ACTIVE_VAULT_ID, path });
-        this.unreadableSources.delete(path);
+        this.clearSourceUnreadable(path);
       }
       for (const path of changes.upserts) {
         let read: StableSourceRead;
@@ -2084,7 +2111,7 @@ export class InPluginIndexController {
           read = await this.readStable(path, generation);
         } catch (error) {
           if (!(error instanceof UnreadableVaultSourceError)) throw error;
-          this.unreadableSources.add(path);
+          this.markSourceUnreadable(path, error.failureCause);
           if (changes.rename && nextGeneration !== null) {
             // A rename must remain an atomic removal/reinsert. If the destination
             // cannot be read, keep the old path searchable and require a fresh
@@ -2095,7 +2122,7 @@ export class InPluginIndexController {
           continue;
         }
         this.requireActive();
-        this.unreadableSources.delete(path);
+        this.clearSourceUnreadable(path);
         const upsert = sourceUpsert(read);
         if (upsert) {
           if ("bytes" in upsert && upsert.bytes.byteLength > this.limits.maxBatchBytes) {
@@ -2182,7 +2209,7 @@ export class InPluginIndexController {
     } catch (error) {
       // Inspection names exactly one source, so failure proves nothing about the
       // rest of the vault and belongs on the per-source omission path.
-      throw new UnreadableVaultSourceError(error);
+      throw new UnreadableVaultSourceError("source_inspect_failed", error);
     }
   }
 
@@ -2222,7 +2249,7 @@ export class InPluginIndexController {
           this.assertReadWindowCurrent(lease);
         }
       }
-      throw new UnreadableVaultSourceError(lastError);
+      throw new UnreadableVaultSourceError("source_read_rejected", lastError);
     } finally {
       if (!sharedLease) this.finishSourceReadWindow(lease);
     }
@@ -2232,6 +2259,7 @@ export class InPluginIndexController {
     const lease = this.beginSourceReadWindow(generation, 1);
     try {
       let readError: unknown = null;
+      let failureCause: UnreadableVaultSourceCause = "source_snapshot_unstable";
       for (let attempt = 0; attempt < this.limits.maxStableReadAttempts; attempt += 1) {
         this.assertReadWindowCurrent(lease);
         try {
@@ -2240,18 +2268,24 @@ export class InPluginIndexController {
           const read = await this.readSourceWithinWindow(inspection, lease);
           this.assertReadWindowCurrent(lease);
           if (read.kind !== "stale") return read;
+          failureCause = "source_snapshot_unstable";
+          readError = null;
         } catch (error) {
           if (error instanceof SourceReadWindowError || error instanceof ShutdownRequestedError) {
             throw error;
           }
           if (this.disposed) throw error;
           readError = error;
+          failureCause = error instanceof UnreadableVaultSourceError
+            ? error.failureCause
+            : "source_read_rejected";
           this.assertReadWindowCurrent(lease);
         }
       }
       // Every attempt concerned this one path. Continuous churn or share-level
       // metadata lag therefore omits that source; it does not prove a dead vault.
       throw new UnreadableVaultSourceError(
+        failureCause,
         readError ?? new Error("vault source did not become stable"),
       );
     } finally {
@@ -2394,18 +2428,27 @@ export class InPluginIndexController {
     throw new Error("generation allocator did not produce a fresh identifier");
   }
 
+  private captureUnreadableSourceRecords(): SourceOmissions["unreadableSources"] {
+    return [...this.unreadableSources.entries()]
+      .sort(([left], [right]) => comparePaths(left, right))
+      .map(([path, record]) => ({
+        path,
+        record: { ...record, retryQueued: false },
+      }));
+  }
+
   private captureSourceOmissions(): SourceOmissions {
     return {
       sourceFormatCounts: cloneSourceFormatCounts(this.sourceFormatCounts),
       quarantinedSources: this.quarantinedSources,
-      unreadableSources: [...this.unreadableSources],
+      unreadableSources: this.captureUnreadableSourceRecords(),
       quarantineValidatorFields: [...this.quarantineValidatorFields],
     };
   }
 
   private restoreSourceOmissions(
     omissions: SourceOmissions,
-    unreadableEvidence: readonly string[] = [],
+    unreadableEvidence: ReadonlyArray<SourceOmissions["unreadableSources"][number]> = [],
   ): void {
     this.sourceFormatCounts = cloneSourceFormatCounts(omissions.sourceFormatCounts);
     this.quarantinedSources = omissions.quarantinedSources;
@@ -2413,9 +2456,11 @@ export class InPluginIndexController {
     for (const field of omissions.quarantineValidatorFields) {
       this.quarantineValidatorFields.add(field);
     }
+    this.cancelUnreadableRetryTimer();
     this.unreadableSources.clear();
-    for (const path of omissions.unreadableSources) this.unreadableSources.add(path);
-    for (const path of unreadableEvidence) this.unreadableSources.add(path);
+    for (const { path, record } of [...omissions.unreadableSources, ...unreadableEvidence]) {
+      this.unreadableSources.set(path, { ...record, retryQueued: false });
+    }
     this.syncActiveOmissionsFromCurrent();
   }
 
@@ -2423,7 +2468,105 @@ export class InPluginIndexController {
     this.sourceFormatCounts = emptySourceFormatCounts();
     this.quarantinedSources = 0;
     this.quarantineValidatorFields.clear();
+    this.cancelUnreadableRetryTimer();
     this.unreadableSources.clear();
+  }
+
+  private markSourceUnreadable(path: string, cause: UnreadableVaultSourceCause): void {
+    const previous = this.unreadableSources.get(path);
+    const failureCount = (previous?.failureCount ?? 0) + 1;
+    const exponent = Math.min(failureCount - 1, 16);
+    const delayMs = Math.min(
+      INITIAL_UNREADABLE_RETRY_MS * (2 ** exponent),
+      MAX_UNREADABLE_RETRY_MS,
+    );
+    this.unreadableSources.set(path, {
+      cause,
+      failureCount,
+      nextRetryAt: Date.now() + delayMs,
+      retryQueued: false,
+    });
+    this.cancelUnreadableRetryTimer();
+    this.scheduleUnreadableRetry();
+  }
+
+  private clearSourceUnreadable(path: string): void {
+    if (!this.unreadableSources.delete(path)) return;
+    if (this.unreadableSources.size === 0) this.cancelUnreadableRetryTimer();
+  }
+
+  private unreadableSourceCauseCounts(): UnreadableVaultSourceCauseCount[] {
+    const counts = new Map<UnreadableVaultSourceCause, number>();
+    for (const { cause } of this.unreadableSources.values()) {
+      counts.set(cause, (counts.get(cause) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([cause, count]) => ({ cause, count }));
+  }
+
+  private scheduleUnreadableRetry(): void {
+    if (this.unreadableRetryTimer !== null
+      || this.disposed
+      || this.stoppingForCheckpoint
+      || this.blocked
+      || this.running !== null
+      || this.activeGeneration === null
+      || this.candidateGeneration !== null
+      || this.replacementBuildInProgress
+      || this.rebuildRequested
+      || this.rescanRequested) return;
+    const eligible = [...this.unreadableSources.values()]
+      .filter((record) => !record.retryQueued);
+    if (eligible.length === 0) return;
+    const nextRetryAt = Math.min(...eligible.map((record) => record.nextRetryAt));
+    const delayMs = Math.max(1, nextRetryAt - Date.now());
+    this.unreadableRetryTimer = this.setTimer(() => this.runUnreadableRetry(), delayMs);
+  }
+
+  private runUnreadableRetry(): void {
+    this.unreadableRetryTimer = null;
+    if (this.disposed
+      || this.stoppingForCheckpoint
+      || this.blocked
+      || this.running !== null
+      || this.activeGeneration === null
+      || this.candidateGeneration !== null
+      || this.replacementBuildInProgress
+      || this.rebuildRequested
+      || this.rescanRequested) {
+      this.scheduleUnreadableRetry();
+      return;
+    }
+    const now = Date.now();
+    const due = [...this.unreadableSources.entries()]
+      .filter(([, record]) => !record.retryQueued && record.nextRetryAt <= now)
+      .sort(([leftPath, left], [rightPath, right]) => (
+        left.nextRetryAt - right.nextRetryAt || comparePaths(leftPath, rightPath)
+      ));
+    const selected = due.slice(0, this.limits.maxBatchSources);
+    if (selected.length === 0) {
+      this.scheduleUnreadableRetry();
+      return;
+    }
+    for (const [path, record] of selected) {
+      record.retryQueued = true;
+      this.queueUpsert(path);
+    }
+    for (const [, record] of due.slice(selected.length)) {
+      record.nextRetryAt = now + INITIAL_UNREADABLE_RETRY_MS;
+    }
+    this.enforcePendingBound();
+    this.mutationEpoch += 1;
+    this.cancelExportTimer();
+    this.emit("degraded", "sources_unreadable");
+    this.scheduleWork();
+  }
+
+  private cancelUnreadableRetryTimer(): void {
+    if (this.unreadableRetryTimer === null) return;
+    this.clearTimer(this.unreadableRetryTimer);
+    this.unreadableRetryTimer = null;
   }
 
   private syncWorkerQuarantines(counts: IndexCounts): void {
@@ -2468,6 +2611,7 @@ export class InPluginIndexController {
     this.activeSourceFormatCounts = cloneSourceFormatCounts(this.sourceFormatCounts);
     this.activeQuarantinedSources = this.quarantinedSources;
     this.activeUnreadableSources = this.unreadableSources.size;
+    this.activeUnreadableSourceCauses = this.unreadableSourceCauseCounts();
     this.activeQuarantineValidatorFields.clear();
     for (const field of this.quarantineValidatorFields) {
       this.activeQuarantineValidatorFields.add(field);
@@ -2494,6 +2638,7 @@ export class InPluginIndexController {
     if (this.disposed) return;
     this.blocked = true;
     this.cancelExportTimer();
+    this.cancelUnreadableRetryTimer();
     this.inFlight = 0;
     const sourceReadWindowError = findSourceReadWindowError(error);
     if (sourceReadWindowError) {
@@ -2554,6 +2699,9 @@ export class InPluginIndexController {
     const visibleUnreadableSources = servingPriorDuringReplacement
       ? this.activeUnreadableSources
       : this.unreadableSources.size;
+    const visibleUnreadableSourceCauses = servingPriorDuringReplacement
+      ? this.activeUnreadableSourceCauses
+      : this.unreadableSourceCauseCounts();
     const visibleQuarantineFields = servingPriorDuringReplacement
       ? this.activeQuarantineValidatorFields
       : this.quarantineValidatorFields;
@@ -2578,6 +2726,9 @@ export class InPluginIndexController {
       sourceFormatCounts: cloneSourceFormatCounts(visibleSourceFormatCounts),
       quarantinedSources: visibleQuarantinedSources,
       unreadableSources: visibleUnreadableSources,
+      ...(visibleUnreadableSourceCauses.length === 0
+        ? {}
+        : { unreadableSourceCauses: visibleUnreadableSourceCauses.map((entry) => ({ ...entry })) }),
       quarantineValidatorFields: [...visibleQuarantineFields].sort(),
       dirty,
       rebuilding: stage === "rebuild",
@@ -2764,7 +2915,10 @@ class SourceReadWindowError extends VaultUnavailableError {
 }
 
 class UnreadableVaultSourceError extends Error {
-  constructor(cause: unknown) {
+  constructor(
+    readonly failureCause: UnreadableVaultSourceCause,
+    cause: unknown,
+  ) {
     super("one active vault source could not be read", { cause });
     this.name = "UnreadableVaultSourceError";
   }

@@ -986,6 +986,7 @@ describe("InPluginIndexController", () => {
       documents: 2,
       chunks: 2,
       unreadableSources: 1,
+      unreadableSourceCauses: [{ cause: "source_inspect_failed", count: 1 }],
       issue: "sources_unreadable",
     });
   });
@@ -1374,6 +1375,152 @@ describe("InPluginIndexController", () => {
     });
   });
 
+  it("recovers a cold-build omission after a bounded delay without another vault event", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("a.md", "a");
+      source.set("b.md", "b");
+      source.set("c.md", "c");
+      source.remainingReadFailures.set("b.md", 3);
+      const { controller, worker, statuses } = harness(source);
+
+      controller.start();
+      await controller.whenIdle();
+
+      expect(worker.activePaths).toEqual(new Set(["a.md", "c.md"]));
+      expect(source.readAttempts.get("b.md")).toBe(3);
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "ready",
+        unreadableSources: 1,
+        unreadableSourceCauses: [{ cause: "source_read_rejected", count: 1 }],
+      });
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(source.readAttempts.get("b.md")).toBe(3);
+      await vi.advanceTimersByTimeAsync(1);
+      await controller.whenIdle();
+
+      expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "c.md"]));
+      expect(source.readAttempts.get("b.md")).toBe(4);
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "ready",
+        unreadableSources: 0,
+      });
+      expect(statuses.at(-1)).not.toHaveProperty("unreadableSourceCauses");
+      controller.dispose();
+      await controller.whenDisposed();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { kind: "inspection", cause: "source_inspect_failed" },
+    { kind: "stale", cause: "source_snapshot_unstable" },
+  ] as const)("recovers a source-local $kind omission after it becomes readable", async ({
+    kind,
+    cause,
+  }) => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("good.md", "good");
+      source.set("recover.md", "recover");
+      let inspectionFails = kind === "inspection";
+      if (kind === "inspection") {
+        const originalInspect = source.inspectSource.bind(source);
+        source.inspectSource = vi.fn((path) => {
+          if (path === "recover.md" && inspectionFails) throw new Error("private failure");
+          return originalInspect(path);
+        });
+      } else {
+        source.staleReads.add("recover.md");
+      }
+      const { controller, worker, statuses } = harness(source);
+      controller.start();
+      await controller.whenIdle();
+      expect(worker.activePaths).toEqual(new Set(["good.md"]));
+      expect(statuses.at(-1)).toMatchObject({
+        unreadableSources: 1,
+        unreadableSourceCauses: [{ cause, count: 1 }],
+      });
+
+      inspectionFails = false;
+      source.staleReads.delete("recover.md");
+      await vi.advanceTimersByTimeAsync(5_000);
+      await controller.whenIdle();
+      expect(worker.activePaths).toEqual(new Set(["good.md", "recover.md"]));
+      expect(statuses.at(-1)).toMatchObject({ unreadableSources: 0 });
+      controller.dispose();
+      await controller.whenDisposed();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a consumed new-file upsert without requiring a second event", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("existing.md", "existing");
+      const { controller, worker, statuses } = harness(source);
+      controller.start();
+      await controller.whenIdle();
+
+      source.set("new.md", "new");
+      source.remainingReadFailures.set("new.md", 3);
+      source.emit({ kind: "upsert", path: "new.md" });
+      await controller.whenIdle();
+      expect(worker.activePaths).toEqual(new Set(["existing.md"]));
+      expect(statuses.at(-1)).toMatchObject({ unreadableSources: 1 });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await controller.whenIdle();
+      expect(worker.activePaths).toEqual(new Set(["existing.md", "new.md"]));
+      expect(statuses.at(-1)).toMatchObject({
+        stage: "ready",
+        unreadableSources: 0,
+      });
+      controller.dispose();
+      await controller.whenDisposed();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("backs off a permanently unreadable source and cancels its retry on disposal", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("good.md", "good");
+      source.set("locked.md", "locked");
+      source.remainingReadFailures.set("locked.md", 99);
+      const { controller } = harness(source);
+
+      controller.start();
+      await controller.whenIdle();
+      expect(source.readAttempts.get("locked.md")).toBe(3);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await controller.whenIdle();
+      expect(source.readAttempts.get("locked.md")).toBe(6);
+
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(source.readAttempts.get("locked.md")).toBe(6);
+      await vi.advanceTimersByTimeAsync(1);
+      await controller.whenIdle();
+      expect(source.readAttempts.get("locked.md")).toBe(9);
+
+      controller.dispose();
+      await controller.whenDisposed();
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(source.readAttempts.get("locked.md")).toBe(9);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("aborts after one fully retried window proves source reads are systemically unavailable", async () => {
     const source = new FakeSource();
     for (const path of ["a.md", "b.md", "c.md", "d.md"]) {
@@ -1456,6 +1603,10 @@ describe("InPluginIndexController", () => {
         sourceFormatCounts: sourceFormatCountsForPaths(["a.md", "b.md", "unreadable.md"]),
         quarantinedSources: 0,
         unreadableSources: 1,
+        unreadableSourceCauses: [{
+          cause: failureKind === "inspection" ? "source_inspect_failed" : "source_read_rejected",
+          count: 1,
+        }],
         quarantineValidatorFields: [],
         dirty: true,
         rebuilding: false,
@@ -1465,6 +1616,37 @@ describe("InPluginIndexController", () => {
       expect(JSON.stringify(statuses.at(-1))).not.toContain("private SMB inspection detail");
     },
   );
+
+  it("processes an ordinary modify after a source-local replacement abort", async () => {
+    const source = new FakeSource();
+    source.set("a.md", "a");
+    source.set("locked.md", "last known good");
+    const { controller, worker, statuses } = harness(source, new FakeWorker(), {
+      maxStableReadAttempts: 2,
+    });
+    controller.start();
+    await controller.whenIdle();
+
+    source.remainingReadFailures.set("locked.md", 2);
+    controller.requestRebuild();
+    await controller.whenIdle();
+    expect(worker.activeGeneration).toBe("generation-1");
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "degraded",
+      unreadableSources: 1,
+    });
+
+    source.set("locked.md", "current value", 2);
+    source.emit({ kind: "upsert", path: "locked.md" });
+    await controller.whenIdle();
+
+    expect(worker.activeGeneration).toBe("generation-3");
+    expect(worker.activePaths).toEqual(new Set(["a.md", "locked.md"]));
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      unreadableSources: 0,
+    });
+  });
 
   it("publishes a complete authoritative replacement that proves a source was deleted", async () => {
     const source = new FakeSource();
@@ -1558,6 +1740,7 @@ describe("InPluginIndexController", () => {
       ]),
       quarantinedSources: 0,
       unreadableSources: 2,
+      unreadableSourceCauses: [{ cause: "source_read_rejected", count: 2 }],
       quarantineValidatorFields: [],
       dirty: true,
       rebuilding: false,
@@ -2667,12 +2850,13 @@ describe("InPluginIndexController", () => {
       source.remainingReadFailures.set("unreadable.md", 0);
       controller.requestRebuild();
       await controller.whenIdle();
-      expect(worker.activeGeneration).toBe("generation-3");
+      const recoveredGeneration = worker.activeGeneration;
+      expect(recoveredGeneration).not.toBe("generation-1");
       expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "unreadable.md"]));
       await vi.advanceTimersByTimeAsync(2_000);
-      await vi.waitFor(() => expect(worker.exportCalls).toEqual(["generation-3"]));
+      await vi.waitFor(() => expect(worker.exportCalls).toEqual([recoveredGeneration]));
       await vi.waitFor(() => expect(store.puts).toHaveLength(1));
-      expect(store.puts[0]!.generationId).toBe("generation-3");
+      expect(store.puts[0]!.generationId).toBe(recoveredGeneration);
     } finally {
       vi.useRealTimers();
     }
@@ -3566,6 +3750,7 @@ describe("InPluginIndexController", () => {
       sourceFormatCounts: sourceFormatCountsForPaths(["a.md", "b.md", "unreadable.md"]),
       quarantinedSources: 0,
       unreadableSources: 1,
+      unreadableSourceCauses: [{ cause: "source_read_rejected", count: 1 }],
       quarantineValidatorFields: [],
       dirty: true,
       rebuilding: false,
@@ -3935,6 +4120,7 @@ describe("InPluginIndexController", () => {
       chunks: 2,
       quarantinedSources: 0,
       unreadableSources: 1,
+      unreadableSourceCauses: [{ cause: "source_snapshot_unstable", count: 1 }],
       dirty: false,
       issue: "sources_unreadable",
     });

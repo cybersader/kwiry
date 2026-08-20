@@ -14,7 +14,7 @@ export type QueryStatusFacts =
   | { phase: "searching" }
   | {
     phase: "settled";
-    resultCount: number;
+    returnedSectionCount: number;
     displayedSourceCount: number;
     omittedObservedSourceCount: number;
     candidateWindow: CandidateWindowFacts;
@@ -68,22 +68,22 @@ export function presentQueryStatus(facts: QueryStatusFacts): QueryStatusPresenta
       };
     case "settled": {
       const windowText = candidateWindowText(facts.candidateWindow.state);
-      if (facts.resultCount === 0) {
+      if (facts.returnedSectionCount === 0) {
         return {
           state: "no-match",
           text: `No matches — ${windowText}`,
           busy: false,
         };
       }
-      const noun = facts.resultCount === 1 ? "result" : "results";
-      const sourceDisplayText = facts.omittedObservedSourceCount > 0
-        ? `${countedNoun(facts.displayedSourceCount, "source")} shown; `
-          + `${countedNoun(facts.omittedObservedSourceCount, "observed source")} `
+      const sectionText = countedNoun(facts.returnedSectionCount, "returned section");
+      const sourceDisplayText = `${countedNoun(facts.displayedSourceCount, "source")} shown; `;
+      const omittedSourceText = facts.omittedObservedSourceCount > 0
+        ? `${countedNoun(facts.omittedObservedSourceCount, "observed source")} `
           + "omitted by the source-row limit; "
         : "";
       return {
         state: "results",
-        text: `${facts.resultCount} ${noun} returned — ${sourceDisplayText}${windowText}`,
+        text: `${sectionText} — ${sourceDisplayText}${omittedSourceText}${windowText}`,
         busy: false,
       };
     }

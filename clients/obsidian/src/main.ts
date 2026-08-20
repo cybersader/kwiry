@@ -547,6 +547,7 @@ export default class KwiryPlugin extends Plugin {
   ): void {
     const quarantinedSources = status.quarantinedSources ?? 0;
     const unreadableSources = status.unreadableSources ?? 0;
+    const unreadableSourceCauses = status.unreadableSourceCauses ?? [];
     const quarantineFields = status.quarantineValidatorFields ?? [];
     const progress = status.progress;
     if (isMeaningfulBackendProgress(progress) && this.isCurrent(pluginEpoch, activationEpoch)) {
@@ -575,6 +576,7 @@ export default class KwiryPlugin extends Plugin {
       status.rebuilding,
       quarantinedSources,
       unreadableSources,
+      unreadableSourceCauses.map(({ cause, count }) => `${cause}=${count}`).join(","),
       quarantineFields.join(","),
       issueCode,
       progress?.stage ?? "none",
@@ -626,15 +628,15 @@ export default class KwiryPlugin extends Plugin {
         sourcesSkipped: quarantinedSources,
       }, () => undefined);
     }
-    if (unreadableSources > 0) {
+    for (const { cause, count } of unreadableSourceCauses) {
       void this.diagnostics.capture("warn", "index.lifecycle", {
         profile: status.identity.profile,
         phase: status.phase,
         outcome: "skipped",
         operation: "status",
         code: "vault_read_failed",
-        errorName: "vault_read",
-        sourcesFailed: unreadableSources,
+        failureCause: cause,
+        sourcesFailed: count,
       }, () => undefined);
     }
   }
