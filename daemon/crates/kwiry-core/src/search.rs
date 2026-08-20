@@ -46,7 +46,7 @@ use crate::ranking::{
     PropertyRule, QualifiedSourceId, RERANK_INPUT_SCHEMA_VERSION, RankingScalar, RelevanceProfile,
     RerankCandidate, RerankInput, SourceSignalObservation, rerank_candidates_with_initial_work,
 };
-use crate::source::excel_content_role_from_chunk_id;
+use crate::source::tagged_content_role_from_chunk_id;
 
 const MAX_RESULTS: usize = 100;
 const BOOST_FILENAME: f32 = 5.0;
@@ -2108,10 +2108,10 @@ impl SegmentCollector for StableSegmentCollector {
                 return;
             }
         };
-        if source_format == SourceFormat::Excel
-            && excel_content_role_from_chunk_id(&chunk_id).is_none()
+        if source_format.spec().policy.role_tagged_chunk_ids
+            && tagged_content_role_from_chunk_id(&chunk_id).is_none()
         {
-            self.error = Some("scored Excel document has an invalid content-role tag".to_owned());
+            self.error = Some("scored document has an invalid content-role tag".to_owned());
             return;
         }
         // The role never touches the score (§10.5: identical text-evidence

@@ -60,9 +60,9 @@ Native installers and packages are still planned. See [`docs/setup.md`](docs/set
 - Query modal, result rendering, status indication, and explicit lexical, semantic, and hybrid selection.
 - The token is read on demand and never persisted by the plugin.
 
-### D5B — no-daemon in-plugin lexical host — Published in beta.15; owner field acceptance pending
+### D5B — no-daemon in-plugin lexical host — Published; owner field acceptance pending
 
-- Beta.15 publishes the explicit **In-plugin · Lexical** profile alongside **Daemon** for desktops where policy or device constraints prohibit a native daemon. The in-plugin profile searches the active vault across the supported extractor set, with Excel disabled by default.
+- The explicit **In-plugin · Lexical** profile is published alongside **Daemon** for desktops where policy or device constraints prohibit a native daemon. It searches the active vault across Markdown, plain text, Base, Canvas, DOCX, Excalidraw, PDF, Excel, and standalone UTF-8 HTML (`.html`/`.htm`). HTML is enabled by default; PDF and Excel are the only default-off formats.
 - The first path proved thread-free fresh Tantivy indexes can run in WASM, but Tantivy 0.26.1's normal `IndexWriter` failed while spawning its segment-updater thread. The hard gate stopped before a fork or production integration.
 - The isolated official SQLite FTS5-WASM Gate 1 passed: the pinned runtime, FTS5 behavior, external-content synchronization, weighted BM25, query/excerpt behavior, transactional source replacement, rollback, integrity, and repeated close lifecycle were verified.
 - The separate one-file compatibility probe now passes automated packaging, protocol, real-Worker, privacy, corruption, deterministic-build, and 25-cycle lifecycle checks. CI enforces the Gate 1 baseline plus Gate 2 checks on Node 22 and 24. See [`bench/fts5-wasm-obsidian-probe/README.md`](bench/fts5-wasm-obsidian-probe/README.md).

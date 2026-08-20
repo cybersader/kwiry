@@ -22,7 +22,8 @@ The binding version of these principles lives in [`CONTRACT.md`](../CONTRACT.md)
 Files and connector materializations
     │
     ├─ Markdown, text, and enabled supported document formats
-    ├─ Excel extraction supported but disabled by default
+    ├─ standalone HTML extraction supported and enabled by default
+    ├─ PDF and Excel extraction supported but disabled by default
     ├─ headings, links, paths, and frontmatter
     └─ future provenance and ACL sidecars
     │
@@ -36,7 +37,7 @@ Kwiry core
     └─ future authorized structural projections
     │
     ├─ desktop sidecar ── CLI, local HTTP, full Obsidian modes, future local MCP
-    ├─ in-plugin lexical ── portable Rust preparation + FTS5-WASM, published in beta.15
+    ├─ in-plugin lexical ── portable Rust preparation + FTS5-WASM
     │
     └─ OpenClast sidecar ── governed enterprise search and future agent access
 ```
@@ -69,7 +70,7 @@ A connector credential permits synchronization; it does not define a user's sear
 
 ### In-plugin lexical profile
 
-Beta.15 publishes the constrained desktop profile for environments where Obsidian may run but a native daemon may not. It uses portable Rust plus official SQLite FTS5-WASM, supports the published multi-format extractor set with Excel disabled by default, and never exposes semantic or hybrid modes. D5C property projection is published but excluded from lexical ranking; D5D grouped UX is published while daily-drive and distribution acceptance remain pending.
+The constrained desktop profile serves environments where Obsidian may run but a native daemon may not. It uses portable Rust plus official SQLite FTS5-WASM and supports Markdown, plain text, Base, Canvas, DOCX, Excalidraw, PDF, Excel, and standalone UTF-8 HTML (`.html`/`.htm`). HTML is enabled by default; PDF and Excel are the only default-off formats. The profile never exposes semantic or hybrid modes. D5C property projection is published but excluded from lexical ranking; D5D grouped UX is published while daily-drive and distribution acceptance remain pending.
 
 See [`design/obsidian-lite.md`](design/obsidian-lite.md) and [`roadmap/desktop-obsidian.md`](roadmap/desktop-obsidian.md).
 
@@ -97,7 +98,7 @@ Desktop semantic and hybrid behavior is documented in [`vertical-3.md`](vertical
 | Semantic retrieval | Available when the local model is loaded | Planned governed gate |
 | Hybrid retrieval | Available when the local model is loaded | Planned governed gate |
 | Obsidian daemon-backed search | Available as a desktop beta | OpenClast uses its gateway instead |
-| Obsidian in-plugin lexical host | Published in beta.15; supported multi-format extraction with Excel disabled by default; owner field acceptance pending | Not an enterprise browser profile |
+| Obsidian in-plugin lexical host | Published; standalone HTML supported/on by default, PDF and Excel off by default; owner field acceptance pending | Not an enterprise browser profile |
 | Read-only MCP retrieval | Planned | Planned through governed OpenClast mediation |
 | Scoped chunk/evidence access | Planned | Planned with the same authorization context |
 | External connectors | File-tree registration today; materializers planned | Planned with ACL/resource normalization |

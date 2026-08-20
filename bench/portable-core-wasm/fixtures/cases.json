@@ -13,7 +13,7 @@
     },
     "content": {
       "encoding": "utf8",
-      "text": "---\ntitle: HTTP caching\naliases: [RFC cache, cache guide]\ntags: [web, standards]\nstatus: stable\n---\nPreamble links to [[Network Notes|networking]].\n\n# RFC 9110\nUse ETag and If-None-Match.\n\n## Unicode café\nSee [[HTTP caching#validators]]."
+      "text": "---\ntitle: HTTP caching\naliases: [RFC cache, cache guide]\ntags: [web, standards]\nstatus: stable\n---\nPreamble links to [[Network Notes|networking]].\n\n# RFC 9110\nUse ETag and If-None-Match.\n\n## Unicode caf\u00e9\nSee [[HTTP caching#validators]]."
     }
   },
   {
@@ -62,6 +62,71 @@
     "content": {
       "encoding": "utf8",
       "text": "Plain text with CVE-2026-1234 and RFC 9110."
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "html-title-carrier",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "site/title-only.htm",
+      "format": "html",
+      "byte_length": 31,
+      "mtime": 1700000004,
+      "mtime_nanos": "1700000004000000001"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "<title>Canonical Portal</title>"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "html-primary-latent-separation",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "site/roles.html",
+      "format": "html",
+      "byte_length": 163,
+      "mtime": 1700000004,
+      "mtime_nanos": "1700000004000000002"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "<h1>Primary Heading</h1><p>primary CVE-2026-1234</p><nav><h2>Chrome Heading</h2><p>latent CVE-2026-9999</p></nav><p aria-label=\"attribute CVE-2026-7777\">reader</p>"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "html-malformed-recovery",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "site/malformed.html",
+      "format": "html",
+      "byte_length": 69,
+      "mtime": 1700000004,
+      "mtime_nanos": "1700000004000000003"
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "<p><b><i>one</b>two</i><table>before<tr><td>cell</tr>after</table>end"
+    }
+  },
+  {
+    "operation": "prepare_source",
+    "name": "html-whole-source-quarantine",
+    "descriptor": {
+      "vault_id": "notes",
+      "path": "site/quarantined.html",
+      "format": "html",
+      "byte_length": 650013,
+      "mtime": 1700000004,
+      "mtime_nanos": "1700000004000000004"
+    },
+    "content": {
+      "encoding": "repeat",
+      "text": "<p>prefix</p>",
+      "count": 50001
     }
   },
   {
@@ -306,7 +371,8 @@
         "docx": "portable",
         "pdf": "portable",
         "excalidraw": "portable",
-        "excel": "portable"
+        "excel": "portable",
+        "html": "portable"
       },
       "format_identities": {
         "markdown": "0101010101010101010101010101010101010101010101010101010101010101",
@@ -316,7 +382,8 @@
         "docx": "0505050505050505050505050505050505050505050505050505050505050505",
         "pdf": "0606060606060606060606060606060606060606060606060606060606060606",
         "excalidraw": "0707070707070707070707070707070707070707070707070707070707070707",
-        "excel": "0808080808080808080808080808080808080808080808080808080808080808"
+        "excel": "0808080808080808080808080808080808080808080808080808080808080808",
+        "html": "0909090909090909090909090909090909090909090909090909090909090909"
       },
       "documents": 3,
       "chunks": 7,
@@ -371,6 +438,13 @@
           "quarantined": 0
         },
         "excel": {
+          "indexed-complete": 0,
+          "indexed-partial": 0,
+          "skipped-no-extractable-text": 0,
+          "unreadable": 0,
+          "quarantined": 0
+        },
+        "html": {
           "indexed-complete": 0,
           "indexed-partial": 0,
           "skipped-no-extractable-text": 0,

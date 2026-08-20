@@ -31,7 +31,7 @@ import {
 } from "./rpc-client";
 import { PRODUCTION_RPC_PROTOCOL } from "./production-rpc-protocol";
 
-const DEFAULT_SOURCE_POLICY_HASH = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860";
+const DEFAULT_SOURCE_POLICY_HASH = "629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8";
 const FULL_CORPUS_REQUEST_TIMEOUT_MS = 300_000;
 
 export class InPluginWorkerSession {

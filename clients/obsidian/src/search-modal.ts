@@ -80,6 +80,7 @@ export const FORMAT_CHIP_PRESENTATIONS = {
   docx: { label: "DOCX", accessibleLabel: "Word document source format" },
   pdf: { label: "PDF", accessibleLabel: "PDF source format" },
   excel: { label: "XLSX", accessibleLabel: "Excel workbook source format" },
+  html: { label: "HTML", accessibleLabel: "HTML document source format" },
 } as const satisfies Record<BackendSearchHit["format"], FormatChipPresentation>;
 
 export const SEARCH_STATUS_ANIMATION_DELAY_MS = 180;

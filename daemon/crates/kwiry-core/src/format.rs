@@ -15,6 +15,14 @@ pub enum SourceFormat {
     Pdf,
     Excalidraw,
     Excel,
+    Html,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FormatPolicy {
+    pub role_tagged_chunk_ids: bool,
+    pub suppress_non_primary_boosts: bool,
+    pub metadata_only_carrier: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +31,7 @@ pub struct FormatSpec {
     pub name: &'static str,
     pub extensions: &'static [&'static str],
     pub extraction_supported: bool,
+    pub policy: FormatPolicy,
     /// Whether a matched heading of this format resolves as an Obsidian link
     /// subpath. Every vault file can be linked to by name, but only Markdown
     /// headings are real anchors: a heading extracted from a PDF page, a DOCX
@@ -39,6 +48,11 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "markdown",
         extensions: &["md", "markdown", "mdx"],
         extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: false,
+            suppress_non_primary_boosts: false,
+            metadata_only_carrier: false,
+        },
         section_link_supported: true,
     },
     FormatSpec {
@@ -46,6 +60,11 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "text",
         extensions: &["txt"],
         extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: false,
+            suppress_non_primary_boosts: false,
+            metadata_only_carrier: false,
+        },
         section_link_supported: false,
     },
     FormatSpec {
@@ -53,6 +72,11 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "base",
         extensions: &["base"],
         extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: false,
+            suppress_non_primary_boosts: false,
+            metadata_only_carrier: false,
+        },
         section_link_supported: false,
     },
     FormatSpec {
@@ -60,6 +84,11 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "canvas",
         extensions: &["canvas"],
         extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: false,
+            suppress_non_primary_boosts: false,
+            metadata_only_carrier: false,
+        },
         section_link_supported: false,
     },
     FormatSpec {
@@ -67,6 +96,11 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "excalidraw",
         extensions: &["excalidraw"],
         extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: false,
+            suppress_non_primary_boosts: false,
+            metadata_only_carrier: false,
+        },
         section_link_supported: false,
     },
     FormatSpec {
@@ -74,6 +108,11 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "docx",
         extensions: &["docx"],
         extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: false,
+            suppress_non_primary_boosts: false,
+            metadata_only_carrier: false,
+        },
         section_link_supported: false,
     },
     FormatSpec {
@@ -81,6 +120,11 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "pdf",
         extensions: &["pdf"],
         extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: false,
+            suppress_non_primary_boosts: false,
+            metadata_only_carrier: false,
+        },
         section_link_supported: false,
     },
     FormatSpec {
@@ -88,6 +132,23 @@ const FORMAT_SPECS: &[FormatSpec] = &[
         name: "excel",
         extensions: &["xlsx", "xlsm"],
         extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: true,
+            suppress_non_primary_boosts: true,
+            metadata_only_carrier: false,
+        },
+        section_link_supported: false,
+    },
+    FormatSpec {
+        format: SourceFormat::Html,
+        name: "html",
+        extensions: &["html", "htm"],
+        extraction_supported: true,
+        policy: FormatPolicy {
+            role_tagged_chunk_ids: true,
+            suppress_non_primary_boosts: true,
+            metadata_only_carrier: true,
+        },
         section_link_supported: false,
     },
 ];
@@ -142,6 +203,7 @@ impl SourceFormat {
             Self::Excel => "excel",
             Self::Docx => "docx",
             Self::Pdf => "pdf",
+            Self::Html => "html",
         }
     }
 }
@@ -156,7 +218,7 @@ mod tests {
 
     #[test]
     fn registry_is_closed_complete_and_classifies_case_insensitively() {
-        assert_eq!(format_specs().len(), 8);
+        assert_eq!(format_specs().len(), 9);
         assert_eq!(
             SourceFormat::from_path("note.md"),
             Some(SourceFormat::Markdown)
@@ -193,6 +255,15 @@ mod tests {
             SourceFormat::from_path("macros.xlsm"),
             Some(SourceFormat::Excel)
         );
+        assert_eq!(
+            SourceFormat::from_path("page.HTML"),
+            Some(SourceFormat::Html)
+        );
+        assert_eq!(
+            SourceFormat::from_path("legacy.htm"),
+            Some(SourceFormat::Html)
+        );
+        assert_eq!(SourceFormat::from_path("page.xhtml"), None);
         assert_eq!(SourceFormat::from_path("image.png"), None);
         assert!(SourceFormat::Canvas.spec().extraction_supported);
         assert!(SourceFormat::Docx.spec().extraction_supported);

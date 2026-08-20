@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::HashSet;
-use std::ops::Range;
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -20,7 +19,7 @@ use crate::model::{
 };
 use crate::policy::{ExtractionProfile, extraction_profile_for};
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 9;
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 10;
 pub const MAX_PREPARED_CHUNKS_PER_SOURCE: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
 pub const MAX_PREPARED_HEADING_BYTES_PER_SOURCE: usize = MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE;
 
@@ -81,6 +80,11 @@ pub struct SourcePreparation {
     /// or reclassify integral floats before the durable projection is built.
     #[serde(with = "frontmatter_abi")]
     pub frontmatter: PropertyBag,
+    /// Compact canonical metadata that is not representable as an authored
+    /// property bag. Omitted for every pre-HTML format so their preparation
+    /// bytes remain unchanged; HTML uses it only for its canonical title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_frontmatter: Option<Frontmatter>,
     pub chunks: Vec<PreparedChunk>,
     pub kind: SourcePreparationKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +111,8 @@ struct SourcePreparationWire {
     normalized_exact: SourceExactMetadata,
     #[serde(with = "frontmatter_abi")]
     frontmatter: PropertyBag,
+    #[serde(default)]
+    canonical_frontmatter: Option<Frontmatter>,
     chunks: Vec<PreparedChunk>,
     kind: SourcePreparationKind,
     #[serde(default)]
@@ -119,7 +125,11 @@ impl<'de> Deserialize<'de> for SourcePreparation {
         D: Deserializer<'de>,
     {
         let mut wire = SourcePreparationWire::deserialize(deserializer)?;
-        let source_frontmatter = Arc::new(Frontmatter::from_properties(&wire.frontmatter));
+        let source_frontmatter = Arc::new(
+            wire.canonical_frontmatter
+                .clone()
+                .unwrap_or_else(|| Frontmatter::from_properties(&wire.frontmatter)),
+        );
         for chunk in &mut wire.chunks {
             chunk.source_format = Some(wire.format);
             chunk.extraction_coverage = Some(wire.coverage);
@@ -142,6 +152,7 @@ impl<'de> Deserialize<'de> for SourcePreparation {
             retrieval: wire.retrieval,
             normalized_exact: wire.normalized_exact,
             frontmatter: wire.frontmatter,
+            canonical_frontmatter: wire.canonical_frontmatter,
             chunks: wire.chunks,
             kind: wire.kind,
             warning: wire.warning,
@@ -215,7 +226,11 @@ pub fn prepare_oversized_source(
         path: descriptor.path.clone(),
         format: descriptor.format,
         extraction_profile: extraction_profile_for(descriptor.format),
-        coverage: ExtractionCoverage::Unreadable,
+        coverage: if descriptor.format == SourceFormat::Html {
+            ExtractionCoverage::Quarantined
+        } else {
+            ExtractionCoverage::Unreadable
+        },
         content_hash: None,
         byte_length: descriptor.byte_length,
         mtime: descriptor.mtime,
@@ -223,12 +238,17 @@ pub fn prepare_oversized_source(
         normalized_exact: source_exact_metadata(&retrieval, &Frontmatter::default()),
         retrieval,
         frontmatter: Default::default(),
+        canonical_frontmatter: None,
         chunks: Vec::new(),
         kind: SourcePreparationKind::Skipped,
-        warning: Some(format!(
-            "skipped file larger than {MAX_FILE_BYTES} bytes ({})",
-            descriptor.byte_length
-        )),
+        warning: Some(if descriptor.format == SourceFormat::Html {
+            "HTML extraction exceeded a mandatory budget".to_owned()
+        } else {
+            format!(
+                "skipped file larger than {MAX_FILE_BYTES} bytes ({})",
+                descriptor.byte_length
+            )
+        }),
     })
 }
 
@@ -283,118 +303,138 @@ pub fn prepare_source_buffer(
 
     let retrieval = retrieval_metadata(&descriptor.path, extracted.aliases);
     let normalized_exact = source_exact_metadata(&retrieval, &extracted.frontmatter);
+    let canonical_frontmatter = (descriptor.format == SourceFormat::Html
+        && extracted.frontmatter != Frontmatter::from_properties(&extracted.properties))
+    .then(|| extracted.frontmatter.clone());
     let source_frontmatter = Arc::new(extracted.frontmatter);
     let properties = extracted.properties;
     let links_out = extracted.links_out;
     let coverage = extracted.coverage;
 
-    let mut chunks = Vec::new();
-    let mut chunk_ix = 0_u64;
-    let mut prepared_heading_bytes = 0_usize;
-    for section in extracted.sections {
-        for part in split_oversized(&section.content) {
-            if part.trim().is_empty() {
-                continue;
+    let format_policy = descriptor.format.spec().policy;
+    let metadata_only_carrier =
+        format_policy.metadata_only_carrier && source_frontmatter.title().is_some();
+    let chunks_result = (|| -> Result<Vec<PreparedChunk>, SourcePreparationError> {
+        let mut chunks = Vec::new();
+        let mut chunk_ix = 0_u64;
+        let mut prepared_heading_bytes = 0_usize;
+        for section in extracted.sections {
+            for part in split_oversized(&section.content) {
+                if part.trim().is_empty() {
+                    continue;
+                }
+                if chunks.len() == MAX_PREPARED_CHUNKS_PER_SOURCE {
+                    return Err(chunk_inventory_error());
+                }
+                let heading_text = section.heading_path.join(" ");
+                let normalized_heading = normalize_raw(&heading_text);
+                let heading_cost = heading_path_bytes(&section.heading_path)
+                    .saturating_add(heading_text.len())
+                    .saturating_add(normalized_heading.as_ref().map_or(0, String::len));
+                prepared_heading_bytes = prepared_heading_bytes
+                    .checked_add(heading_cost)
+                    .filter(|total| *total <= MAX_PREPARED_HEADING_BYTES_PER_SOURCE)
+                    .ok_or_else(heading_inventory_error)?;
+                let content = part.trim().to_owned();
+                let chunk = Chunk {
+                    chunk_id: chunk_id(
+                        &descriptor.vault_id,
+                        &descriptor.path,
+                        &section.heading_path,
+                        chunk_ix,
+                        format_policy.role_tagged_chunk_ids.then_some(section.role),
+                    ),
+                    vault_id: descriptor.vault_id.clone(),
+                    room: descriptor.room.clone(),
+                    path: descriptor.path.clone(),
+                    heading_path: section.heading_path.clone(),
+                    content,
+                    frontmatter: Frontmatter::default(),
+                    links_out: links_out.clone(),
+                    mtime: descriptor.mtime,
+                    content_hash: content_hash.clone(),
+                    chunking_version: CHUNKING_VERSION,
+                };
+                let boosted_fields =
+                    !format_policy.suppress_non_primary_boosts || section.role.is_primary();
+                chunks.push(PreparedChunk {
+                    normalized_heading: boosted_fields.then_some(normalized_heading).flatten(),
+                    heading_text: if boosted_fields {
+                        heading_text
+                    } else {
+                        String::new()
+                    },
+                    technical_identifiers: if boosted_fields {
+                        technical_identifiers(&chunk.content)
+                    } else {
+                        Vec::new()
+                    },
+                    content_role: section.role,
+                    source_locator: section.locator.clone(),
+                    source_format: Some(descriptor.format),
+                    extraction_coverage: Some(coverage),
+                    source_properties: properties.clone(),
+                    source_frontmatter: Arc::clone(&source_frontmatter),
+                    chunk,
+                });
+                chunk_ix += 1;
             }
-            if chunks.len() == MAX_PREPARED_CHUNKS_PER_SOURCE {
-                return Err(chunk_inventory_error());
-            }
-            let heading_text = section.heading_path.join(" ");
-            let normalized_heading = normalize_raw(&heading_text);
-            let heading_cost = heading_path_bytes(&section.heading_path)
-                .saturating_add(heading_text.len())
-                .saturating_add(normalized_heading.as_ref().map_or(0, String::len));
-            prepared_heading_bytes = prepared_heading_bytes
-                .checked_add(heading_cost)
-                .filter(|total| *total <= MAX_PREPARED_HEADING_BYTES_PER_SOURCE)
-                .ok_or_else(heading_inventory_error)?;
-            let content = part.trim().to_owned();
+        }
+
+        // Source-owned metadata may need a deterministic empty carrier without
+        // copying canonical metadata into body content. HTML uses this for a
+        // title-only document; existing property-only sources retain their
+        // current behavior.
+        if chunks.is_empty() && (!properties.is_empty() || metadata_only_carrier) {
             let chunk = Chunk {
                 chunk_id: chunk_id(
                     &descriptor.vault_id,
                     &descriptor.path,
-                    &section.heading_path,
-                    chunk_ix,
-                    (descriptor.format == SourceFormat::Excel).then_some(section.role),
+                    &[],
+                    0,
+                    format_policy
+                        .role_tagged_chunk_ids
+                        .then_some(ContentRole::Primary),
                 ),
                 vault_id: descriptor.vault_id.clone(),
                 room: descriptor.room.clone(),
                 path: descriptor.path.clone(),
-                heading_path: section.heading_path.clone(),
-                content,
+                heading_path: Vec::new(),
+                content: String::new(),
                 frontmatter: Frontmatter::default(),
                 links_out: links_out.clone(),
                 mtime: descriptor.mtime,
                 content_hash: content_hash.clone(),
                 chunking_version: CHUNKING_VERSION,
             };
-            // Amendment 10b: non-primary Excel content is "searchable, never
-            // boosted". Its text still lands in the plain content field, but
-            // it must not feed the boosted heading or technical-identifier
-            // lanes — formula text in particular parses as identifiers, which
-            // would hand latent content the largest boost in the schema.
-            let boosted_fields =
-                descriptor.format != SourceFormat::Excel || section.role.is_primary();
             chunks.push(PreparedChunk {
-                normalized_heading: boosted_fields.then_some(normalized_heading).flatten(),
-                heading_text: if boosted_fields {
-                    heading_text
-                } else {
-                    String::new()
-                },
-                technical_identifiers: if boosted_fields {
-                    technical_identifiers(&chunk.content)
-                } else {
-                    Vec::new()
-                },
-                content_role: section.role,
-                source_locator: section.locator.clone(),
+                heading_text: String::new(),
+                normalized_heading: None,
+                technical_identifiers: Vec::new(),
+                content_role: ContentRole::Primary,
+                source_locator: None,
                 source_format: Some(descriptor.format),
                 extraction_coverage: Some(coverage),
                 source_properties: properties.clone(),
                 source_frontmatter: Arc::clone(&source_frontmatter),
                 chunk,
             });
-            chunk_ix += 1;
         }
-    }
-
-    // A source with authored properties but no text still needs a deterministic searchable result.
-    // Its empty portable chunk carries no source-level projection; native indexing shares both
-    // source-owned views.
-    if chunks.is_empty() && !properties.is_empty() {
-        let chunk = Chunk {
-            chunk_id: chunk_id(
-                &descriptor.vault_id,
-                &descriptor.path,
-                &[],
-                0,
-                (descriptor.format == SourceFormat::Excel).then_some(ContentRole::Primary),
-            ),
-            vault_id: descriptor.vault_id.clone(),
-            room: descriptor.room.clone(),
-            path: descriptor.path.clone(),
-            heading_path: Vec::new(),
-            content: String::new(),
-            frontmatter: Frontmatter::default(),
-            links_out,
-            mtime: descriptor.mtime,
-            content_hash: content_hash.clone(),
-            chunking_version: CHUNKING_VERSION,
-        };
-        chunks.push(PreparedChunk {
-            heading_text: String::new(),
-            normalized_heading: None,
-            technical_identifiers: Vec::new(),
-            content_role: ContentRole::Primary,
-            source_locator: None,
-            source_format: Some(descriptor.format),
-            extraction_coverage: Some(coverage),
-            source_properties: properties.clone(),
-            source_frontmatter: Arc::clone(&source_frontmatter),
-            chunk,
-        });
-    }
+        Ok(chunks)
+    })();
+    let chunks = match chunks_result {
+        Ok(chunks) => chunks,
+        Err(error) => {
+            return Ok(skipped_preparation(
+                descriptor,
+                source_key,
+                empty_retrieval,
+                Some(content_hash),
+                ExtractionCoverage::Quarantined,
+                error.message,
+            ));
+        }
+    };
 
     Ok(SourcePreparation {
         schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
@@ -412,6 +452,7 @@ pub fn prepare_source_buffer(
         retrieval,
         normalized_exact,
         frontmatter: properties,
+        canonical_frontmatter,
         chunks,
         kind: SourcePreparationKind::Indexed,
         warning,
@@ -497,6 +538,7 @@ fn skipped_preparation(
         normalized_exact: source_exact_metadata(&retrieval, &Frontmatter::default()),
         retrieval,
         frontmatter: Default::default(),
+        canonical_frontmatter: None,
         chunks: Vec::new(),
         kind: SourcePreparationKind::Skipped,
         warning: Some(warning),
@@ -555,60 +597,77 @@ fn heading_path_bytes(path: &[String]) -> usize {
 }
 
 fn split_oversized(source: &str) -> Vec<&str> {
-    let boundaries = char_boundaries(source);
-    let char_count = boundaries.len().saturating_sub(1);
+    let char_count = source.chars().count();
     if char_count <= MAX_CHUNK_CHARS {
         return vec![source];
     }
 
+    // Keep preparation memory proportional to the emitted chunk inventory. The
+    // old implementation materialized one usize per source character, which
+    // alone consumed roughly 80 MiB for a maximum-size ASCII source. This scan
+    // preserves the same split preference without retaining whole-source
+    // boundary state.
     let mut parts = Vec::new();
-    let mut start = 0;
-    while start < char_count {
-        let target = (start + MAX_CHUNK_CHARS).min(char_count);
-        let end = if target == char_count {
-            target
+    let mut start_byte = 0_usize;
+    let mut start_char = 0_usize;
+    while start_char < char_count {
+        let remaining = char_count - start_char;
+        let target_chars = remaining.min(MAX_CHUNK_CHARS);
+        let target_byte = byte_after_chars(source, start_byte, target_chars);
+        let end_byte = if target_chars == remaining {
+            target_byte
         } else {
-            find_split(source, &boundaries, start, target)
+            find_split_byte(source, start_byte, target_byte)
         };
-        parts.push(&source[boundaries[start]..boundaries[end]]);
-        if end == char_count {
+        parts.push(&source[start_byte..end_byte]);
+        let emitted_chars = source[start_byte..end_byte].chars().count();
+        let end_char = start_char + emitted_chars;
+        if end_char == char_count {
             break;
         }
-        let next = end.saturating_sub(CHUNK_OVERLAP_CHARS);
-        start = if next > start { next } else { end };
+        if emitted_chars > CHUNK_OVERLAP_CHARS {
+            start_byte = byte_before_end_chars(source, end_byte, CHUNK_OVERLAP_CHARS);
+            start_char = end_char - CHUNK_OVERLAP_CHARS;
+        } else {
+            start_byte = end_byte;
+            start_char = end_char;
+        }
     }
     parts
 }
 
-fn char_boundaries(source: &str) -> Vec<usize> {
-    source
+fn byte_after_chars(source: &str, start_byte: usize, count: usize) -> usize {
+    source[start_byte..]
         .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(source.len()))
-        .collect()
+        .nth(count)
+        .map_or(source.len(), |(offset, _)| start_byte + offset)
 }
 
-fn find_split(source: &str, boundaries: &[usize], start: usize, target: usize) -> usize {
-    let floor = start + (MAX_CHUNK_CHARS * 3 / 4);
-    let search: Range<usize> = floor.min(target)..target;
+fn byte_before_end_chars(source: &str, end_byte: usize, count: usize) -> usize {
+    source[..end_byte]
+        .char_indices()
+        .rev()
+        .nth(count.saturating_sub(1))
+        .map_or(0, |(byte, _)| byte)
+}
 
-    for index in search.clone().rev() {
-        let byte = boundaries[index];
+fn find_split_byte(source: &str, start_byte: usize, target_byte: usize) -> usize {
+    let floor_chars = MAX_CHUNK_CHARS * 3 / 4;
+    let mut paragraph = None;
+    let mut whitespace = None;
+    for (index, (offset, character)) in source[start_byte..target_byte].char_indices().enumerate() {
+        if index < floor_chars {
+            continue;
+        }
+        let byte = start_byte + offset;
         if source[..byte].ends_with("\n\n") {
-            return index;
+            paragraph = Some(byte);
+        }
+        if character.is_whitespace() {
+            whitespace = Some(byte);
         }
     }
-    for index in search.rev() {
-        let byte = boundaries[index];
-        if source[byte..]
-            .chars()
-            .next()
-            .is_some_and(char::is_whitespace)
-        {
-            return index;
-        }
-    }
-    target
+    paragraph.or(whitespace).unwrap_or(target_byte)
 }
 
 fn chunk_id(
@@ -616,7 +675,7 @@ fn chunk_id(
     path: &str,
     heading_path: &[String],
     chunk_ix: u64,
-    excel_role: Option<ContentRole>,
+    content_role_tag: Option<ContentRole>,
 ) -> String {
     let heading_json = serde_json::to_vec(heading_path).expect("heading paths serialize");
     let mut digest = Sha256::new();
@@ -626,7 +685,7 @@ fn chunk_id(
     update_component(&mut digest, &heading_json);
     digest.update(chunk_ix.to_le_bytes());
     let mut digest = digest.finalize();
-    if let Some(role) = excel_role {
+    if let Some(role) = content_role_tag {
         let tag = match role {
             ContentRole::Primary => 0x00,
             ContentRole::Supporting => 0x40,
@@ -638,7 +697,7 @@ fn chunk_id(
 }
 
 #[cfg(feature = "native")]
-pub(crate) fn excel_content_role_from_chunk_id(chunk_id: &str) -> Option<ContentRole> {
+pub(crate) fn tagged_content_role_from_chunk_id(chunk_id: &str) -> Option<ContentRole> {
     let prefix = chunk_id.get(..2)?;
     let first = u8::from_str_radix(prefix, 16).ok()?;
     match first & 0xc0 {
@@ -921,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn excel_role_bytes_order_primary_before_supporting_before_latent() {
+    fn content_role_tag_bytes_order_primary_before_supporting_before_latent() {
         // The role byte leads the chunk ID, and both engines break score ties
         // by ascending chunk ID. This lexicographic property is therefore the
         // whole tie-break: at equal text evidence a primary cell outranks a
@@ -1449,6 +1508,19 @@ views:
         assert_eq!(prepared.kind, SourcePreparationKind::Skipped);
         assert_eq!(prepared.byte_length, MAX_FILE_BYTES + 1);
         assert!(prepared.content_hash.is_none());
+
+        let html = prepare_source_buffer(
+            &descriptor("large.html", SourceFormat::Html, &oversized),
+            &oversized,
+        )
+        .unwrap();
+        assert_eq!(html.kind, SourcePreparationKind::Skipped);
+        assert_eq!(html.coverage, ExtractionCoverage::Quarantined);
+        assert_eq!(
+            html.warning.as_deref(),
+            Some("HTML extraction exceeded a mandatory budget")
+        );
+        assert!(html.content_hash.is_none());
     }
 
     #[test]

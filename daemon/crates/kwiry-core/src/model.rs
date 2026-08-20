@@ -643,6 +643,7 @@ pub struct SourceFormatCounts {
     pub pdf: ExtractionCoverageCounts,
     pub excalidraw: ExtractionCoverageCounts,
     pub excel: ExtractionCoverageCounts,
+    pub html: ExtractionCoverageCounts,
 }
 
 impl SourceFormatCounts {
@@ -656,6 +657,7 @@ impl SourceFormatCounts {
             SourceFormat::Pdf => &mut self.pdf,
             SourceFormat::Excalidraw => &mut self.excalidraw,
             SourceFormat::Excel => &mut self.excel,
+            SourceFormat::Html => &mut self.html,
         };
         counts.record(coverage);
     }
@@ -669,6 +671,7 @@ impl SourceFormatCounts {
             + self.excalidraw.indexed_documents()
             + self.pdf.indexed_documents()
             + self.excel.indexed_documents()
+            + self.html.indexed_documents()
     }
 
     pub const fn total_sources(&self) -> usize {
@@ -680,6 +683,7 @@ impl SourceFormatCounts {
             + self.excalidraw.total_sources()
             + self.pdf.total_sources()
             + self.excel.total_sources()
+            + self.html.total_sources()
     }
 }
 
@@ -760,9 +764,10 @@ mod tests {
         );
         counts.record(SourceFormat::Base, ExtractionCoverage::Quarantined);
         counts.record(SourceFormat::Canvas, ExtractionCoverage::Unreadable);
+        counts.record(SourceFormat::Html, ExtractionCoverage::Quarantined);
 
         assert_eq!(counts.indexed_documents(), 2);
-        assert_eq!(counts.total_sources(), 5);
+        assert_eq!(counts.total_sources(), 6);
         assert_eq!(
             serde_json::to_value(counts).unwrap(),
             serde_json::json!({
@@ -821,6 +826,13 @@ mod tests {
                     "skipped-no-extractable-text": 0,
                     "unreadable": 0,
                     "quarantined": 0
+                },
+                "html": {
+                    "indexed-complete": 0,
+                    "indexed-partial": 0,
+                    "skipped-no-extractable-text": 0,
+                    "unreadable": 0,
+                    "quarantined": 1
                 }
             })
         );

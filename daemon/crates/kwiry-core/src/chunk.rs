@@ -1,14 +1,15 @@
-use std::fs;
+use std::fs::{File, Metadata};
+use std::io::Read;
 
 use crate::format::SourceFormat;
 use crate::model::{
-    DiscoveredFile, FileIngestOutcome, FileOutcomeKind, IngestReport, IngestWarning, PreparedChunk,
-    VaultRegistration,
+    DiscoveredFile, FileIngestOutcome, FileOutcomeKind, IngestReport, IngestWarning,
+    MAX_FILE_BYTES, PreparedChunk, VaultRegistration,
 };
 use crate::policy::extraction_profile_for;
 use crate::source::{
-    SourceDescriptor, SourcePreparation, SourcePreparationKind, prepare_source_buffer,
-    retrieval_metadata,
+    SourceDescriptor, SourcePreparation, SourcePreparationKind, prepare_oversized_source,
+    prepare_source_buffer, retrieval_metadata,
 };
 use crate::walk::{EnumerationResult, discover_vault};
 
@@ -67,9 +68,9 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
             )),
         );
     }
-    let bytes = match fs::read(&file.absolute_path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
+    let read = match bounded_snapshot_read(file) {
+        Ok(read) => read,
+        Err(ReadFailure::Unavailable) => {
             return file_outcome(
                 vault,
                 file,
@@ -77,18 +78,50 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
                 None,
                 Vec::new(),
                 FileOutcomeKind::TransientError,
-                Some(error.to_string()),
+                Some("host_read: source is unavailable".to_owned()),
             );
         }
+        Err(ReadFailure::Stale) => {
+            return file_outcome(
+                vault,
+                file,
+                crate::extract::ExtractionCoverage::Unreadable,
+                None,
+                Vec::new(),
+                FileOutcomeKind::TransientError,
+                Some("host_read: source changed during bounded read".to_owned()),
+            );
+        }
+    };
+    let byte_length = match &read {
+        SnapshotRead::Bytes(bytes) => bytes.len() as u64,
+        SnapshotRead::Oversized(byte_length) => *byte_length,
     };
     let descriptor = SourceDescriptor {
         vault_id: vault.id.clone(),
         room: vault.room.clone(),
         path: file.relative_path.clone(),
         format,
-        byte_length: file.byte_length,
+        byte_length,
         mtime: file.mtime,
         mtime_nanos: file.mtime_nanos,
+    };
+    if matches!(read, SnapshotRead::Oversized(_)) {
+        return match prepare_oversized_source(&descriptor) {
+            Ok(preparation) => file_outcome_from_preparation(file, preparation),
+            Err(_) => file_outcome(
+                vault,
+                file,
+                crate::extract::ExtractionCoverage::Unreadable,
+                None,
+                Vec::new(),
+                FileOutcomeKind::Skipped,
+                Some("host_read: oversized source could not be recorded".to_owned()),
+            ),
+        };
+    }
+    let SnapshotRead::Bytes(bytes) = read else {
+        unreachable!("oversized reads return above")
     };
     match prepare_source_buffer(&descriptor, &bytes) {
         Ok(preparation) => file_outcome_from_preparation(file, preparation),
@@ -102,6 +135,58 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
             Some(error.to_string()),
         ),
     }
+}
+
+enum SnapshotRead {
+    Bytes(Vec<u8>),
+    Oversized(u64),
+}
+
+enum ReadFailure {
+    Unavailable,
+    Stale,
+}
+
+fn bounded_snapshot_read(file: &DiscoveredFile) -> Result<SnapshotRead, ReadFailure> {
+    let mut handle = File::open(&file.absolute_path).map_err(|_| ReadFailure::Unavailable)?;
+    let before = handle.metadata().map_err(|_| ReadFailure::Unavailable)?;
+    if before.len() != file.byte_length {
+        return Err(ReadFailure::Stale);
+    }
+    if before.len() > MAX_FILE_BYTES {
+        let after = handle.metadata().map_err(|_| ReadFailure::Unavailable)?;
+        if !same_snapshot(&before, &after) {
+            return Err(ReadFailure::Stale);
+        }
+        return Ok(SnapshotRead::Oversized(before.len()));
+    }
+
+    let capacity = usize::try_from(before.len().saturating_add(1))
+        .unwrap_or(MAX_FILE_BYTES as usize + 1)
+        .min(MAX_FILE_BYTES as usize + 1);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| ReadFailure::Unavailable)?;
+    handle
+        .by_ref()
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ReadFailure::Unavailable)?;
+    let after = handle.metadata().map_err(|_| ReadFailure::Unavailable)?;
+    if !same_snapshot(&before, &after) || bytes.len() as u64 != before.len() {
+        return Err(ReadFailure::Stale);
+    }
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Ok(SnapshotRead::Oversized(after.len().max(bytes.len() as u64)));
+    }
+    Ok(SnapshotRead::Bytes(bytes))
+}
+
+fn same_snapshot(before: &Metadata, after: &Metadata) -> bool {
+    before.len() == after.len()
+        && before.modified().ok() == after.modified().ok()
+        && before.is_file() == after.is_file()
 }
 
 fn file_outcome_from_preparation(
@@ -263,6 +348,37 @@ mod tests {
     }
 
     #[test]
+    fn native_ingest_records_oversized_html_as_quarantined_without_reading_it() {
+        let temporary = tempdir().unwrap();
+        fs::File::create(temporary.path().join("large.html"))
+            .unwrap()
+            .set_len(crate::model::MAX_FILE_BYTES + 1)
+            .unwrap();
+        let vault = VaultRegistration {
+            id: "fixture".into(),
+            path: temporary.path().to_path_buf(),
+            room: None,
+        };
+        let enumeration = discover_vault(&vault);
+        assert_eq!(enumeration.files.len(), 1);
+
+        let outcome = ingest_file(&vault, &enumeration.files[0]);
+        assert_eq!(outcome.kind, FileOutcomeKind::Skipped);
+        assert_eq!(
+            outcome.coverage,
+            crate::extract::ExtractionCoverage::Quarantined
+        );
+        assert!(outcome.chunks.is_empty());
+        assert_eq!(
+            outcome
+                .warning
+                .as_ref()
+                .map(|warning| warning.message.as_str()),
+            Some("HTML extraction exceeded a mandatory budget")
+        );
+    }
+
+    #[test]
     fn native_ingest_delegates_all_source_outcomes_to_portable_preparation() {
         let temporary = tempdir().unwrap();
         let vault = VaultRegistration {
@@ -345,9 +461,12 @@ mod tests {
             mtime_nanos: 42_000_000_000,
         };
         let outcome = ingest_file(&vault, &changed_during_read);
-        assert_eq!(outcome.kind, FileOutcomeKind::Skipped);
+        assert_eq!(outcome.kind, FileOutcomeKind::TransientError);
         assert!(outcome.content_hash.is_none());
-        assert!(outcome.warning.unwrap().message.contains("does not match"));
+        assert_eq!(
+            outcome.warning.unwrap().message,
+            "host_read: source changed during bounded read"
+        );
 
         #[cfg(unix)]
         {

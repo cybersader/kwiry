@@ -18,7 +18,7 @@
 
 <p align="center">
   <strong>Local-first search for the knowledge you already own.</strong><br>
-  In the desktop sidecar profile, kwiry combines Tantivy BM25, fully offline ONNX embeddings, and RRF hybrid ranking in one Rust binary — nothing leaves your machine, and no cloud API is required. Point it at a supported source tree, not just an Obsidian vault, then search through its watching daemon, authenticated HTTP API, or BRAT-installable Obsidian client. Beta.15 also publishes an explicit **In-plugin · Lexical** profile using portable Rust plus official SQLite FTS5-WASM for desktops that cannot run a daemon. It supports multi-format extraction with Excel disabled by default and a disposable machine-local warm start. Property projection and grouped UX are published, while ranking, daily-drive, and distribution acceptance remain pending. Enterprise deployments use the separate OpenClast profile and its governed server-to-server boundary.
+  In the desktop sidecar profile, kwiry combines Tantivy BM25, fully offline ONNX embeddings, and RRF hybrid ranking in one Rust binary — nothing leaves your machine, and no cloud API is required. Point it at a supported source tree, not just an Obsidian vault, then search through its watching daemon, authenticated HTTP API, or BRAT-installable Obsidian client. The explicit **In-plugin · Lexical** profile uses portable Rust plus official SQLite FTS5-WASM for desktops that cannot run a daemon. It supports Markdown, plain text, Base, Canvas, DOCX, Excalidraw, PDF, Excel, and standalone UTF-8 HTML (`.html`/`.htm`); PDF and Excel are off by default, while HTML is on by default. It also provides a disposable machine-local warm start. Property projection and grouped UX are published, while ranking, daily-drive, and distribution acceptance remain pending. Enterprise deployments use the separate OpenClast profile and its governed server-to-server boundary.
 </p>
 
 ---
@@ -30,7 +30,7 @@ A single Rust binary provides:
 - **Hybrid ranking** (reciprocal rank fusion over both legs)
 - A **watching daemon** with authenticated HTTP API, incremental hash-based updates, rename/delete correctness, and boot reconciliation for offline changes
 - A **disposable index**: files are the sole source of truth; all derived state rebuilds from nothing, deterministically
-- A published **In-plugin · Lexical** Obsidian profile using portable Rust and official SQLite FTS5-WASM, with supported multi-format extraction and Excel disabled by default
+- A published **In-plugin · Lexical** Obsidian profile using portable Rust and official SQLite FTS5-WASM, with HTML supported and on by default and only PDF and Excel off by default
 
 ## Quick start
 

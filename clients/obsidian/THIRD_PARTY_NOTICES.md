@@ -10,6 +10,10 @@ Kwiry Search bundles portable Rust code and the official SQLite WebAssembly runt
 
 The Apache License 2.0 text is included at [`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt). Exact Rust dependency selections and required MIT, Unlicense, WHATWG BSD-3-Clause, and Unicode License v3 notices are included at [`licenses/Rust-DEPENDENCY-LICENSES.md`](licenses/Rust-DEPENDENCY-LICENSES.md).
 
+## HTML named-character-reference data
+
+The bounded HTML extractor includes a generated trie derived from the fixed `markup5ever` 0.14.1 named-entity table from the html5ever project. This is fixed derived source data, not a Cargo package or runtime dependency. The selected upstream MIT terms are preserved at [`licenses/markup5ever-entities-MIT.txt`](licenses/markup5ever-entities-MIT.txt), and exact source/generated/notice checksums plus table and notice counts are pinned under the explicit `fixed-derived-data` category in [`licenses/html-entity-provenance.json`](licenses/html-entity-provenance.json).
+
 ## Official SQLite WASM package
 
 This plugin bundles `@sqlite.org/sqlite-wasm` version `3.53.0-build1`.

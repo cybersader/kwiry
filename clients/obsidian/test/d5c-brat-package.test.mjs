@@ -95,6 +95,8 @@ describe("D5C BRAT package", () => {
       "SHA256SUMS",
       "THIRD_PARTY_NOTICES.md",
       "d5c-balanced-playground.attestation.json",
+      "html-entity-provenance.json",
+      "markup5ever-entities-MIT.txt",
     ]);
     const allNames = [
       ...await readdir(packaged.pluginRoot),
@@ -112,18 +114,37 @@ describe("D5C BRAT package", () => {
       resolve(packaged.supportRoot, "Rust-DEPENDENCY-LICENSES.md"),
       "utf8",
     );
+    const entityNotice = await readFile(
+      resolve(packaged.supportRoot, "markup5ever-entities-MIT.txt"),
+      "utf8",
+    );
+    const entityProvenance = JSON.parse(await readFile(
+      resolve(packaged.supportRoot, "html-entity-provenance.json"),
+      "utf8",
+    ));
     expect(notices).toContain("`Apache-2.0.txt`");
     expect(notices).toContain("`Emscripten-LICENSE.txt`");
     expect(notices).toContain("`Rust-DEPENDENCY-LICENSES.md`");
+    expect(notices).toContain("`markup5ever-entities-MIT.txt`");
+    expect(notices).toContain("`html-entity-provenance.json`");
     expect(notices).toContain("University of Illinois/NCSA Open Source License");
     expect(notices).not.toContain("(licenses/Apache-2.0.txt)");
     expect(notices).not.toContain("(licenses/Emscripten-LICENSE.txt)");
     expect(notices).not.toContain("(licenses/Rust-DEPENDENCY-LICENSES.md)");
+    expect(notices).not.toContain("(licenses/markup5ever-entities-MIT.txt)");
+    expect(notices).not.toContain("(licenses/html-entity-provenance.json)");
     expect(apache).toContain("Apache License");
     expect(apache).toContain("Version 2.0, January 2004");
     expect(emscripten).toContain("Emscripten is available under 2 licenses");
     expect(emscripten).toContain("Permission is hereby granted");
     expect(emscripten).toContain("University of Illinois/NCSA Open Source License");
+    expect(entityNotice).toContain("Copyright (c) 2014 The html5ever Project Developers");
+    expect(entityProvenance).toMatchObject({
+      category: "fixed-derived-data",
+      upstream: { package: "markup5ever", version: "0.14.1", entries: 2231 },
+      generated: { trie_nodes: 9854, trie_edges: 9853 },
+    });
+    expect(rustDependencies).not.toContain("markup5ever");
     expect(rustDependencies).toContain("generic-array 0.14.7 — MIT");
     expect(rustDependencies).toContain("Copyright (c) 2015 Bartłomiej Kamiński");
     expect(rustDependencies).toContain(

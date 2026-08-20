@@ -7,7 +7,7 @@ import { sourcePreparationDefect } from "../src/worker/source-defect";
 import { classifyFailure } from "../src/diagnostics/classify-failure";
 
 const VALID = {
-  schema_version: 9,
+  schema_version: 10,
   source_key: "a".repeat(64),
   vault_id: "active-vault",
   path: "Notes/Example.md",
@@ -41,7 +41,7 @@ describe("sourcePreparationDefect", () => {
     // refused it" without ever saying which check refused.
     expect(sourcePreparationDefect({ ...VALID, mtime_nanos: "-1000000" })).toBe("mtime_nanos");
     expect(sourcePreparationDefect({ ...VALID, mtime: -1 })).toBe("mtime");
-    expect(sourcePreparationDefect({ ...VALID, format: "html" })).toBe("format");
+    expect(sourcePreparationDefect({ ...VALID, format: "epub" })).toBe("format");
     expect(sourcePreparationDefect({ ...VALID, path: "" })).toBe("path");
     expect(sourcePreparationDefect({ ...VALID, byte_length: 1.5 })).toBe("byte_length");
     expect(sourcePreparationDefect({ ...VALID, kind: "indexed", content_hash: null }))
@@ -62,6 +62,86 @@ describe("sourcePreparationDefect", () => {
       ...VALID,
       normalized_exact: { ...VALID.normalized_exact, aliases: [""] },
     })).toBe("normalized_exact");
+  });
+
+  it("accepts canonical HTML title metadata and rejects impossible shapes safely", () => {
+    const preparation = {
+      ...VALID,
+      path: "site/index.html",
+      format: "html",
+      kind: "indexed",
+      coverage: "indexed-complete",
+      normalized_exact: { ...VALID.normalized_exact, title: "canonical portal" },
+      canonical_frontmatter: { title: "Canonical Portal" },
+      chunks: [{
+        chunk: {
+          chunk_id: `00${"a".repeat(62)}`,
+          vault_id: VALID.vault_id,
+          room: null,
+          path: "site/index.html",
+          heading_path: [],
+          content: "",
+          frontmatter: {},
+          links_out: [],
+          mtime: VALID.mtime,
+          content_hash: VALID.content_hash,
+          chunking_version: 1,
+        },
+        heading_text: "",
+        normalized_heading: null,
+        technical_identifiers: [],
+      }],
+    };
+    expect(sourcePreparationDefect(preparation)).toBeNull();
+    // A valid Rust title can exceed the normalized-exact byte ceiling. The
+    // canonical field remains source-bounded and searchable even when its exact
+    // projection is deliberately absent.
+    expect(sourcePreparationDefect({
+      ...preparation,
+      normalized_exact: { ...preparation.normalized_exact, title: null },
+      canonical_frontmatter: { title: "x".repeat(4_097) },
+    })).toBeNull();
+    expect(sourcePreparationDefect({
+      ...preparation,
+      normalized_exact: { ...preparation.normalized_exact, title: null },
+      canonical_frontmatter: { title: "x".repeat(1_048_577) },
+    })).toBe("canonical_frontmatter");
+    expect(sourcePreparationDefect({
+      ...preparation,
+      chunks: [{
+        ...preparation.chunks[0],
+        chunk: {
+          ...preparation.chunks[0]!.chunk,
+          heading_path: ["x".repeat(1_025)],
+        },
+        heading_text: "x".repeat(1_025),
+      }],
+    })).toBe("chunks_contents");
+    const { canonical_frontmatter: _missing, ...withoutCanonical } = preparation;
+    expect(sourcePreparationDefect(withoutCanonical)).toBe("canonical_frontmatter");
+    expect(sourcePreparationDefect({
+      ...preparation,
+      canonical_frontmatter: { title: 7 },
+    })).toBe("canonical_frontmatter");
+    expect(sourcePreparationDefect({
+      ...preparation,
+      canonical_frontmatter: { title: "Canonical Portal", arbitrary: "secret" },
+    })).toBe("canonical_frontmatter");
+    expect(sourcePreparationDefect({
+      ...preparation,
+      canonical_frontmatter: {
+        title: "Canonical Portal",
+        description: "latent metadata must not enter the canonical title lane",
+      },
+    })).toBe("canonical_frontmatter");
+    expect(sourcePreparationDefect({
+      ...preparation,
+      format: "markdown",
+    })).toBe("canonical_frontmatter");
+    expect(sourcePreparationDefect({
+      ...preparation,
+      canonical_frontmatter: {},
+    })).toBe("canonical_frontmatter");
   });
 
   it("never throws on a hostile value", () => {
@@ -151,6 +231,26 @@ describe("chunk/source correlation", () => {
     expect(sourcePreparationDefect(preparation)).toBe("chunks_content_role");
     body.chunk_id = `80${"a".repeat(62)}`;
     chunk.source_locator = { kind: "excel_cell", sheet: "Roles", cell: "" };
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
+  });
+
+  it("accepts matching HTML role tags, requires no locator, and rejects corrupt roles", () => {
+    const preparation = indexed();
+    preparation.format = "html";
+    preparation.path = "site/index.htm";
+    (preparation.normalized_exact as Record<string, unknown>).title = "canonical portal";
+    (preparation as Record<string, unknown>).canonical_frontmatter = { title: "Canonical Portal" };
+    const chunk = preparation.chunks[0] as Record<string, unknown>;
+    const body = chunk.chunk as Record<string, unknown>;
+    body.path = preparation.path;
+    body.chunk_id = `80${"a".repeat(62)}`;
+    chunk.content_role = "latent";
+    expect(sourcePreparationDefect(preparation)).toBeNull();
+
+    chunk.content_role = "primary";
+    expect(sourcePreparationDefect(preparation)).toBe("chunks_content_role");
+    chunk.content_role = "latent";
+    chunk.source_locator = { kind: "pdf_page", page: 1 };
     expect(sourcePreparationDefect(preparation)).toBe("chunks_source_locator");
   });
 

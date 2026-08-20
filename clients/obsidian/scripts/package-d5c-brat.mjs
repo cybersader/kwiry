@@ -27,7 +27,9 @@ const RUNTIME_FILES = Object.freeze(["main.js", "manifest.json", "styles.css"]);
 const SUPPORT_FILES = Object.freeze([
   "Apache-2.0.txt",
   "Emscripten-LICENSE.txt",
+  "html-entity-provenance.json",
   "LICENSE",
+  "markup5ever-entities-MIT.txt",
   "Rust-DEPENDENCY-LICENSES.md",
   "THIRD_PARTY_NOTICES.md",
   "SHA256SUMS",
@@ -115,6 +117,14 @@ export async function packageD5cBrat({
     resolve(supportRoot, "Emscripten-LICENSE.txt"),
   );
   await copyFile(
+    resolve(root, "licenses/html-entity-provenance.json"),
+    resolve(supportRoot, "html-entity-provenance.json"),
+  );
+  await copyFile(
+    resolve(root, "licenses/markup5ever-entities-MIT.txt"),
+    resolve(supportRoot, "markup5ever-entities-MIT.txt"),
+  );
+  await copyFile(
     resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md"),
     resolve(supportRoot, "Rust-DEPENDENCY-LICENSES.md"),
   );
@@ -131,11 +141,21 @@ export async function packageD5cBrat({
     .replace(
       "[`licenses/Rust-DEPENDENCY-LICENSES.md`](licenses/Rust-DEPENDENCY-LICENSES.md)",
       "`Rust-DEPENDENCY-LICENSES.md`",
+    )
+    .replace(
+      "[`licenses/markup5ever-entities-MIT.txt`](licenses/markup5ever-entities-MIT.txt)",
+      "`markup5ever-entities-MIT.txt`",
+    )
+    .replace(
+      "[`licenses/html-entity-provenance.json`](licenses/html-entity-provenance.json)",
+      "`html-entity-provenance.json`",
     );
   if (noticeText === noticeSource
     || noticeText.includes("licenses/Apache-2.0.txt")
     || noticeText.includes("licenses/Emscripten-LICENSE.txt")
-    || noticeText.includes("licenses/Rust-DEPENDENCY-LICENSES.md")) {
+    || noticeText.includes("licenses/Rust-DEPENDENCY-LICENSES.md")
+    || noticeText.includes("licenses/markup5ever-entities-MIT.txt")
+    || noticeText.includes("licenses/html-entity-provenance.json")) {
     throw new Error("D5C BRAT notices did not contain the expected release-local license links");
   }
   await writeFile(resolve(supportRoot, "THIRD_PARTY_NOTICES.md"), noticeText);

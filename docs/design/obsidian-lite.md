@@ -6,7 +6,7 @@ D5B remains the urgent desktop need. The first approved engine path reached a te
 
 The approved boundary prohibited a Tantivy fork or replacement writer, so broad plugin/core integration stopped before daemon behavior changed. The owner subsequently selected **official SQLite FTS5-WASM** as the next bounded feasibility path. Its isolated Gate 1 runtime checkpoint passed without a patch, custom build, persistence, network dependency, or production integration.
 
-Beta.15 publishes the explicit **In-plugin · Lexical** profile alongside **Daemon**. Gates 1–4 are owner-accepted GO, and the release includes the Gate 5 active-vault lifecycle plus the owner-authorized Gate 6 durable machine-local cache. The automated lifecycle and exact-Worker matrices pass. Generated Node Worker evidence meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional added-memory target; installed long-running quality, declared-reference-hardware measurement, private aggregate-only evidence, and explicit owner field acceptance remain pending.
+The explicit **In-plugin · Lexical** profile is published alongside **Daemon**. Gates 1–4 are owner-accepted GO, and the current baseline includes the Gate 5 active-vault lifecycle plus the owner-authorized Gate 6 durable machine-local cache. The automated lifecycle and exact-Worker matrices pass. Generated Node Worker evidence meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional added-memory target; installed long-running quality, declared-reference-hardware measurement, private aggregate-only evidence, and explicit owner field acceptance remain pending.
 
 The 2026-07-25 durability amendment permits the published machine-local disposable cache and explicit stale/reconciling warm start. It does not approve OPFS, a helper Worker, a third WASM input, or vault-relative/synced cache storage. Publication does not amend `CONTRACT.md` or establish owner performance, daily-drive, ranking, or distribution acceptance. Historical Tantivy evidence lives in [`../../bench/tantivy-wasm/README.md`](../../bench/tantivy-wasm/README.md); the verified FTS5 Gate 1 evidence lives in [`../../bench/fts5-wasm/README.md`](../../bench/fts5-wasm/README.md), and the Gate 3 native/WASM parity witness lives in [`../../bench/portable-core-wasm/README.md`](../../bench/portable-core-wasm/README.md).
 
@@ -19,13 +19,15 @@ Some managed desktops permit Obsidian plugins but prohibit a native binary or ba
 | Property | Daemon-backed desktop | In-plugin lite |
 |---|---|---|
 | Host | `kwiry` native process | Portable Kwiry Rust preparation/planning plus official SQLite FTS5-WASM in an application-owned worker |
-| Source scope | Registered supported source trees | Current open vault; supported extractor set, with Excel disabled by default |
+| Source scope | Registered supported source trees | Current open vault; supported extractor set, with HTML on by default and PDF and Excel off by default |
 | Transport | Authenticated loopback HTTP | Direct project-owned worker interface |
 | Modes | Lexical; semantic/hybrid when loaded | Lexical only |
 | Derived state | Versioned machine-local disposable index | In-memory active index plus an optional validated machine-local disposable startup cache |
 | Credential | Local token file | None |
 
 Selection is explicit. Daemon failure never activates lite mode, and lite never pretends to serve semantic or hybrid search.
+
+The current portable extractor set admits Markdown, plain text, Base, Canvas, DOCX, Excalidraw, PDF, Excel, and standalone UTF-8 HTML (`.html`/`.htm`, not XHTML). HTML is enabled by default. Its canonical document title feeds the existing title/display metadata lane without becoming an authored property or body copy; description, document chrome, and hidden text remain ordinary latent searchable content. The extractor does not dereference URLs or read embedded resources, emits no outgoing links or locator, and does not support section-link navigation.
 
 ## Staged feasibility checkpoints
 

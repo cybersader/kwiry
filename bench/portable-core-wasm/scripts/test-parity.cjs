@@ -82,7 +82,7 @@ const get = (name) => {
   return value;
 };
 
-assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 9);
+assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 10);
 assert.equal(get("markdown-frontmatter-links-identifiers").preparation.retrieval.aliases.length, 2);
 assert.ok(
   get("markdown-frontmatter-links-identifiers").preparation.chunks.some((chunk) =>
@@ -95,6 +95,50 @@ assert.deepEqual(get("crlf-frontmatter").preparation.frontmatter.title, {
 });
 assert.ok(get("malformed-frontmatter").preparation.warning);
 assert.equal(get("plain-text").preparation.format, "text");
+const htmlTitle = get("html-title-carrier").preparation;
+assert.equal(htmlTitle.schema_version, 10);
+assert.equal(htmlTitle.format, "html");
+assert.deepEqual(htmlTitle.frontmatter, {});
+assert.equal(htmlTitle.canonical_frontmatter.title, "Canonical Portal");
+assert.equal(htmlTitle.chunks.length, 1);
+assert.equal(htmlTitle.chunks[0].chunk.content, "");
+assert.equal(htmlTitle.chunks[0].content_role ?? "primary", "primary");
+
+const htmlRoles = get("html-primary-latent-separation").preparation;
+const primaryHtml = htmlRoles.chunks.find((chunk) =>
+  chunk.chunk.content.includes("CVE-2026-1234")
+);
+const latentHtml = htmlRoles.chunks.filter((chunk) => chunk.content_role === "latent");
+assert.ok(primaryHtml);
+assert.equal(primaryHtml.content_role ?? "primary", "primary");
+assert.equal(primaryHtml.heading_text, "Primary Heading");
+assert.ok(primaryHtml.technical_identifiers.includes("cve-2026-1234"));
+assert.ok(latentHtml.some((chunk) => chunk.chunk.content.includes("CVE-2026-9999")));
+assert.ok(latentHtml.every((chunk) =>
+  chunk.heading_text === ""
+  && chunk.normalized_heading === null
+  && chunk.technical_identifiers.length === 0
+  && (Number.parseInt(chunk.chunk.chunk_id.slice(0, 2), 16) & 0xc0) === 0x80
+));
+assert.ok(htmlRoles.chunks.every((chunk) =>
+  chunk.source_locator === undefined && chunk.chunk.links_out.length === 0
+));
+
+const malformedHtml = get("html-malformed-recovery").preparation;
+assert.equal(malformedHtml.coverage, "indexed-complete");
+const recoveredHtml = malformedHtml.chunks.map((chunk) => chunk.chunk.content).join(" ");
+for (const token of ["one", "two", "before", "after", "cell", "end"]) {
+  assert.equal(recoveredHtml.split(token).length - 1, 1);
+}
+
+const quarantinedHtml = get("html-whole-source-quarantine").preparation;
+assert.equal(quarantinedHtml.kind, "skipped");
+assert.equal(quarantinedHtml.coverage, "quarantined");
+assert.deepEqual(quarantinedHtml.chunks, []);
+assert.deepEqual(quarantinedHtml.frontmatter, {});
+assert.equal(quarantinedHtml.canonical_frontmatter, undefined);
+assert.equal(quarantinedHtml.normalized_exact.title, null);
+assert.equal(quarantinedHtml.warning, "HTML extraction exceeded a mandatory budget");
 assert.equal(get("nul-source").preparation.kind, "skipped");
 assert.ok(get("nul-source").preparation.content_hash);
 assert.equal(get("invalid-utf8").preparation.kind, "skipped");
@@ -139,9 +183,14 @@ assert.deepEqual(get("portable-daemon-status").daemon_status.source_format_count
   pdf: zeroCoverageCounts,
   excalidraw: zeroCoverageCounts,
   excel: zeroCoverageCounts,
+  html: zeroCoverageCounts,
 });
-assert.equal(get("portable-daemon-status").daemon_status.state, "ready");
-assert.equal(get("portable-daemon-status").daemon_status.generation, "generation-0001");
+const portableStatus = get("portable-daemon-status").daemon_status;
+assert.equal(Object.keys(portableStatus.extraction_policy).length, 9);
+assert.equal(Object.keys(portableStatus.format_identities).length, 9);
+assert.equal(Object.keys(portableStatus.source_format_counts).length, 9);
+assert.equal(portableStatus.state, "ready");
+assert.equal(portableStatus.generation, "generation-0001");
 assert.equal(
   get("portable-daemon-status").daemon_status.chunking_version,
   get("markdown-frontmatter-links-identifiers").preparation.chunks[0].chunk.chunking_version,
@@ -150,6 +199,7 @@ assert.equal(
   typeof get("markdown-frontmatter-links-identifiers").preparation.mtime_nanos,
   "string",
 );
+assert.equal(cases.size, 27);
 
 process.stdout.write(JSON.stringify({
   status: "pass",

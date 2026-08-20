@@ -5,6 +5,7 @@ mod canvas;
 mod docx;
 mod excalidraw;
 pub(crate) mod excel;
+mod html;
 mod markdown;
 mod ooxml;
 mod pdf;
@@ -15,8 +16,7 @@ use crate::format::SourceFormat;
 
 #[cfg(feature = "internal-docx-extractor")]
 pub use docx::{
-    ContentRole, DocxCandidate, DocxProperties, ExtractionScope, SemanticSection,
-    extract_candidate_outcome,
+    DocxCandidate, DocxProperties, ExtractionScope, SemanticSection, extract_candidate_outcome,
 };
 
 #[cfg(feature = "internal-excel-extractor")]
@@ -53,6 +53,7 @@ pub fn extract_source(
         SourceFormat::Docx => Ok(docx::extract(bytes)),
         SourceFormat::Pdf => Ok(pdf::extract(bytes)),
         SourceFormat::Excel => Ok(excel::extract(bytes)),
+        SourceFormat::Html => html::extract(bytes),
     }
 }
 

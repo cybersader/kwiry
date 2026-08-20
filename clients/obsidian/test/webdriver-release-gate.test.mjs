@@ -46,7 +46,8 @@ async function createCandidateFixture() {
   await mkdir(root, { recursive: true });
   for (const name of [
     "main.js", "manifest.json", "styles.css", "LICENSE", "THIRD_PARTY_NOTICES.md",
-    "Apache-2.0.txt", "Emscripten-LICENSE.txt", "Rust-DEPENDENCY-LICENSES.md",
+    "Apache-2.0.txt", "Emscripten-LICENSE.txt", "html-entity-provenance.json",
+    "markup5ever-entities-MIT.txt", "Rust-DEPENDENCY-LICENSES.md",
     "gate5.evidence.json", "kwiry-search.zip", "SHA256SUMS",
   ]) await writeFile(resolve(root, name), name === "manifest.json"
     ? `${JSON.stringify({ id: "kwiry-search", version: "0.6.0-beta.15" })}\n`

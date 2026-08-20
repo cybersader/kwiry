@@ -96,7 +96,7 @@ export class KwirySettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Indexed source formats")
       .setDesc(
-        "Changing any format rebuilds the index from scratch. Search is unavailable until the rebuild completes.",
+        "Changing a format reuses compatible cached sources, removes disabled formats before publication, and reconciles newly enabled files. A source or cache schema upgrade may require one complete rebuild.",
       )
       .setHeading();
 
@@ -286,5 +286,6 @@ function sourceFormatLabel(format: SourceFormat): string {
     case "pdf": return "PDF";
     case "excalidraw": return "Excalidraw";
     case "excel": return "Excel";
+    case "html": return "HTML";
   }
 }
