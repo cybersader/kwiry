@@ -61,7 +61,13 @@ async function createFixture() {
     writeJson(resolve(sourceRoot, "gate5.evidence.json"), gate5Evidence()),
     copyFile(resolve(repositoryRoot, "LICENSE"), resolve(sourceRoot, "LICENSE")),
     copyFile(resolve(repositoryRoot, "THIRD_PARTY_NOTICES.md"), resolve(sourceRoot, "THIRD_PARTY_NOTICES.md")),
-    ...["Apache-2.0.txt", "Emscripten-LICENSE.txt", "Rust-DEPENDENCY-LICENSES.md"].map((name) =>
+    ...[
+      "Apache-2.0.txt",
+      "Emscripten-LICENSE.txt",
+      "html-entity-provenance.json",
+      "markup5ever-entities-MIT.txt",
+      "Rust-DEPENDENCY-LICENSES.md",
+    ].map((name) =>
       copyFile(resolve(repositoryRoot, "licenses", name), resolve(sourceRoot, "licenses", name))),
   ]);
   await prepareProductionPackage({ sourceRoot, outputRoot: candidateRoot });

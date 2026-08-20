@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(INDEX_FORMAT_VERSION, 12);
         // Deliberately unchanged. `SourcePreparation` did not change shape;
         // only the manifest record around it did.
-        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 9);
+        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 10);
         // The identity shape is new, so its schema starts at 1. It is core: a
         // fourth component would bump this and invalidate everything, which is
         // what lets the per-format digest stay at exactly three facts.

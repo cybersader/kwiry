@@ -14,7 +14,7 @@ export const D5C_COMPARE_SCHEMA_VERSION = 2 as const;
 const MAX_PATH_CHARACTERS = 16_384;
 const MAX_HEADING_DEPTH = 64;
 const MAX_HEADING_CHARACTERS = 4_096;
-const MAX_TITLE_CHARACTERS = 4_096;
+const MAX_TITLE_BYTES = 1_048_576;
 const U64_MAX = 18_446_744_073_709_551_615n;
 
 export interface D5cDisplayHit {
@@ -185,7 +185,7 @@ function isDisplayHit(value: unknown): value is D5cDisplayHit {
     && keys.every((key) => key === "title")
     && (value.frontmatter.title === undefined
       || (typeof value.frontmatter.title === "string"
-        && value.frontmatter.title.length <= MAX_TITLE_CHARACTERS));
+        && new TextEncoder().encode(value.frontmatter.title).byteLength <= MAX_TITLE_BYTES));
 }
 
 function isWorkerError(value: unknown): value is WorkerError {

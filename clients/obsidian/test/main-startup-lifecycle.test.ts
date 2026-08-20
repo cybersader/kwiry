@@ -549,6 +549,8 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     const initialHash = harness.cachePolicyHashes[0];
     expect(initialHash).toMatch(/^[0-9a-f]{64}$/u);
     expect(harness.sourcePolicies[0]?.pdf).toBe(false);
+    expect(harness.sourcePolicies[0]?.excel).toBe(false);
+    expect(harness.sourcePolicies[0]?.html).toBe(true);
     expect(harness.sourcePolicies[0]?.text).toBe(true);
 
     plugin.settings.enabledSourceFormats.text = false;

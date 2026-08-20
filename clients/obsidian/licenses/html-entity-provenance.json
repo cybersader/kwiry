@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "category": "fixed-derived-data",
+  "component": "kwiry bounded HTML named-character-reference trie",
+  "upstream": {
+    "package": "markup5ever",
+    "version": "0.14.1",
+    "repository": "https://github.com/servo/html5ever",
+    "source_file": "entities.rs",
+    "source_sha256": "4f1f33f9d1c8777371be06e2fd2987d7721b1229daeb4a0879f3f800d50256c9",
+    "entries": 2231,
+    "license": "MIT OR Apache-2.0",
+    "selected_license": "MIT"
+  },
+  "generated": {
+    "path": "daemon/crates/kwiry-core/src/formats/html/entities.rs",
+    "sha256": "970587009d4dce1c1598acd46355f3e644bc2e71442ec4fd2c5485eb5b06aac5",
+    "entries": 2231,
+    "trie_nodes": 9854,
+    "trie_edges": 9853
+  },
+  "notice": {
+    "path": "clients/obsidian/licenses/markup5ever-entities-MIT.txt",
+    "sha256": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3",
+    "bytes": 1076,
+    "lines": 25
+  }
+}

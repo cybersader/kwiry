@@ -173,7 +173,7 @@ const handleInternalD5cPreviewMessage = __KWIRY_D5C_OWNER_WORKER__
 
 async function initialize(
   vaultId: string,
-  sourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
+  sourcePolicyHash = "629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8",
   enabledFormats: readonly SourceFormat[] = SOURCE_FORMATS,
 ): Promise<InitializeResult> {
   if (state !== "cold") {
@@ -1338,7 +1338,7 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
   const filename = descriptor.path.split("/").at(-1) ?? descriptor.path;
   const separator = filename.lastIndexOf(".");
   return {
-    schema_version: 9,
+    schema_version: 10,
     source_key: await sourceKey(descriptor.vault_id, descriptor.path),
     vault_id: descriptor.vault_id,
     ...(descriptor.room === undefined ? {} : { room: descriptor.room }),

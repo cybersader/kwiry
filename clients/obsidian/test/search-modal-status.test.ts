@@ -988,6 +988,9 @@ describe("KwirySearchModal grouped interactions", () => {
       { format: "canvas", path: "Map.canvas", label: "CANVAS", accessibleLabel: "Obsidian Canvas source format" },
       { format: "docx", path: "Draft.docx", label: "DOCX", accessibleLabel: "Word document source format" },
       { format: "pdf", path: "Paper.pdf", label: "PDF", accessibleLabel: "PDF source format" },
+      { format: "excalidraw", path: "Sketch.excalidraw", label: "EXCA", accessibleLabel: "Excalidraw drawing source format" },
+      { format: "excel", path: "Budget.xlsx", label: "XLSX", accessibleLabel: "Excel workbook source format" },
+      { format: "html", path: "Portal.htm", label: "HTML", accessibleLabel: "HTML document source format" },
     ] as const;
 
     await settleInputSearch(modal, backend, "formats", executionWithHits(
@@ -1395,6 +1398,14 @@ describe("KwirySearchModal grouped interactions", () => {
       exactSubpath: undefined,
     },
     {
+      format: "html",
+      path: "A.htm",
+      representativeLocator: null,
+      exactLocator: null,
+      representativeSubpath: undefined,
+      exactSubpath: undefined,
+    },
+    {
       // The heading paths below are ignored for a PDF: only the page locator
       // decides where each row opens, so the source row lands on the
       // representative's page and the drilled row on its own.
@@ -1531,13 +1542,14 @@ describe("KwirySearchModal grouped interactions", () => {
       "docx",
       "excalidraw",
       "excel",
+      "html",
       "markdown",
       "pdf",
       "text",
     ]);
-    expect(searchModalModule.FORMAT_CHIP_PRESENTATIONS.pdf).toEqual({
-      label: "PDF",
-      accessibleLabel: "PDF source format",
+    expect(searchModalModule.FORMAT_CHIP_PRESENTATIONS.html).toEqual({
+      label: "HTML",
+      accessibleLabel: "HTML document source format",
     });
   });
 

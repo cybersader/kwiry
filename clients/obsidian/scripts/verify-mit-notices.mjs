@@ -27,9 +27,11 @@ import {
 } from "./validate-d5c-rust-licenses.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = resolve(root, "../..");
 const manifestPath = resolve(root, "rust/kwiry-obsidian-wasm/Cargo.toml");
 const noticeBundlePath = resolve(root, "licenses/Rust-DEPENDENCY-LICENSES.md");
 const noticePinsPath = resolve(root, "licenses/mit-notice-pins.json");
+const fixedDerivedDataPath = resolve(root, "licenses/html-entity-provenance.json");
 const reviewRoot = resolve(root, ".tmp/notice-review");
 const TARGET = "wasm32-unknown-unknown";
 const ALL_FEATURES = Object.freeze(["internal-d5c-preview", "internal-docx-extractor"]);
@@ -37,6 +39,7 @@ const FENCE = "```";
 
 export const NOTICE_PINS_PATH = noticePinsPath;
 export const NOTICE_BUNDLE_PATH = noticeBundlePath;
+export const FIXED_DERIVED_DATA_PATH = fixedDerivedDataPath;
 
 // Upstream licence files are not uniform: quick-xml and generic-array ship
 // CRLF, and ecb, generic-array and rawzip ship no trailing newline at all. The
@@ -129,6 +132,104 @@ export function validateNoticePins(pins) {
     }
   }
   return pins;
+}
+
+export function validateFixedDerivedDataPin(pin) {
+  if (!isRecord(pin)
+    || !hasExactKeys(pin, ["schema_version", "category", "component", "upstream", "generated", "notice"])
+    || pin.schema_version !== 1
+    || pin.category !== "fixed-derived-data"
+    || !isBoundedString(pin.component, 256)
+    || !isRecord(pin.upstream)
+    || !hasExactKeys(pin.upstream, [
+      "package",
+      "version",
+      "repository",
+      "source_file",
+      "source_sha256",
+      "entries",
+      "license",
+      "selected_license",
+    ])
+    || !isBoundedString(pin.upstream.package, 128)
+    || !isBoundedString(pin.upstream.version, 64)
+    || !isBoundedString(pin.upstream.repository, 512)
+    || !isBoundedString(pin.upstream.source_file, 128)
+    || !/^[0-9a-f]{64}$/u.test(pin.upstream.source_sha256)
+    || !isPositiveInteger(pin.upstream.entries)
+    || !isBoundedString(pin.upstream.license, 128)
+    || pin.upstream.selected_license !== "MIT"
+    || !isRecord(pin.generated)
+    || !hasExactKeys(pin.generated, ["path", "sha256", "entries", "trie_nodes", "trie_edges"])
+    || !isSafeRepositoryPath(pin.generated.path)
+    || !/^[0-9a-f]{64}$/u.test(pin.generated.sha256)
+    || !isPositiveInteger(pin.generated.entries)
+    || !isPositiveInteger(pin.generated.trie_nodes)
+    || !isPositiveInteger(pin.generated.trie_edges)
+    || pin.generated.entries !== pin.upstream.entries
+    || !isRecord(pin.notice)
+    || !hasExactKeys(pin.notice, ["path", "sha256", "bytes", "lines"])
+    || !isSafeRepositoryPath(pin.notice.path)
+    || !/^[0-9a-f]{64}$/u.test(pin.notice.sha256)
+    || !isPositiveInteger(pin.notice.bytes)
+    || !isPositiveInteger(pin.notice.lines)) {
+    throw new Error("fixed derived data pin is invalid");
+  }
+  return pin;
+}
+
+export async function checkFixedDerivedData({ pin, readPinnedFile }) {
+  validateFixedDerivedDataPin(pin);
+  const findings = [];
+  const add = (kind, detail) => findings.push({
+    kind,
+    subject: pin.component,
+    detail,
+  });
+
+  let generated;
+  try {
+    generated = await readPinnedFile(pin.generated.path);
+  } catch {
+    add("fixed_derived_data_unreadable", "generated table is unreadable");
+  }
+  if (generated !== undefined) {
+    if (sha256(generated) !== pin.generated.sha256) {
+      add("fixed_derived_data_digest_mismatch", "generated table checksum differs from its pin");
+    }
+    const text = Buffer.isBuffer(generated) ? generated.toString("utf8") : String(generated);
+    const declaredNodes = /^static NODES: \[TrieNode; (\d+)\] = \[$/mu.exec(text)?.[1];
+    const declaredEdges = /^static EDGES: \[TrieEdge; (\d+)\] = \[$/mu.exec(text)?.[1];
+    const nodeRows = [...text.matchAll(/^\s*TrieNode \{ first_edge: \d+, edge_count: \d+, first: (\d+), second: \d+ \},$/gmu)];
+    const edgeRows = [...text.matchAll(/^\s*TrieEdge \{ byte: .+, next: \d+ \},$/gmu)];
+    const entries = nodeRows.filter((match) => match[1] !== "0").length;
+    if (Number(declaredNodes) !== pin.generated.trie_nodes
+      || Number(declaredEdges) !== pin.generated.trie_edges
+      || nodeRows.length !== pin.generated.trie_nodes
+      || edgeRows.length !== pin.generated.trie_edges
+      || entries !== pin.generated.entries) {
+      add("fixed_derived_data_count_mismatch", "generated table dimensions differ from their pins");
+    }
+  }
+
+  let notice;
+  try {
+    notice = await readPinnedFile(pin.notice.path);
+  } catch {
+    add("fixed_derived_data_notice_unreadable", "selected fixed-data notice is unreadable");
+  }
+  if (notice !== undefined) {
+    const bytes = Buffer.isBuffer(notice) ? notice : Buffer.from(String(notice), "utf8");
+    const text = bytes.toString("utf8");
+    const lines = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+    if (sha256(bytes) !== pin.notice.sha256
+      || bytes.byteLength !== pin.notice.bytes
+      || lines !== pin.notice.lines) {
+      add("fixed_derived_data_notice_mismatch", "selected fixed-data notice differs from its pins");
+    }
+  }
+
+  return { findings, checkedFixedDerivedData: 1 };
 }
 
 // The core check, with every input injected so the failure modes below can be
@@ -348,15 +449,17 @@ export function vendoredLicenseReader(roots) {
 }
 
 async function loadLocalInputs() {
-  const [pinsText, bundleText, d5c, docx] = await Promise.all([
+  const [pinsText, bundleText, fixedDerivedDataText, d5c, docx] = await Promise.all([
     readFile(noticePinsPath, "utf8"),
     readFile(noticeBundlePath, "utf8"),
+    readFile(fixedDerivedDataPath, "utf8"),
     readD5cRustLicenseInventory(),
     readDocxRustLicenseInventory(),
   ]);
   return {
     pins: JSON.parse(pinsText),
     bundleText,
+    fixedDerivedData: JSON.parse(fixedDerivedDataText),
     inventories: [
       { label: "D5C", mitCrates: mitCratesOf(d5c) },
       { label: "DOCX", mitCrates: mitCratesOf(docx) },
@@ -372,11 +475,22 @@ function mitCratesOf(inventory) {
 
 export async function verifyMitNotices() {
   const inputs = await loadLocalInputs();
-  const outcome = await checkMitNotices({
-    ...inputs,
+  const cargoOutcome = await checkMitNotices({
+    pins: inputs.pins,
+    bundleText: inputs.bundleText,
+    inventories: inputs.inventories,
     readVendoredLicense: vendoredLicenseReader(resolveCrateRoots()),
   });
-  return { ...outcome, ...inputs };
+  const fixedOutcome = await checkFixedDerivedData({
+    pin: inputs.fixedDerivedData,
+    readPinnedFile: (path) => readFile(resolve(repositoryRoot, path)),
+  });
+  return {
+    ...cargoOutcome,
+    ...fixedOutcome,
+    findings: [...cargoOutcome.findings, ...fixedOutcome.findings],
+    ...inputs,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -735,6 +849,16 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function isPositiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function isSafeRepositoryPath(value) {
+  if (!isBoundedString(value, 512) || value.startsWith("/") || value.includes("\\")) return false;
+  const segments = value.split("/");
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -755,7 +879,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   } else if (mode === "apply") {
     await runApply(process.argv.slice(3));
   } else if (mode === "check") {
-    const { findings, checkedCrates, pins } = await verifyMitNotices();
+    const { findings, checkedCrates, checkedFixedDerivedData, pins } = await verifyMitNotices();
     if (findings.length > 0) {
       process.stderr.write(`MIT notice verification failed:\n${formatFindings(findings)}\n`);
       process.stderr.write("Run `npm run verify:mit:notices -- review` to see the difference.\n");
@@ -764,6 +888,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       process.stdout.write(`${JSON.stringify({
         notices: pins.notices.length,
         crates: checkedCrates,
+        fixed_derived_data: checkedFixedDerivedData,
       })}\n`);
     }
   } else {

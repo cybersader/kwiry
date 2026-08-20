@@ -1431,7 +1431,7 @@ describe("restored cache generation", () => {
 
   it.each([
     ["protocol_version", 1, "cache_version_mismatch"],
-    ["cache_schema_version", 7, "cache_version_mismatch"],
+    ["cache_schema_version", 11, "cache_version_mismatch"],
     ["chunking_version", 999, "cache_version_mismatch"],
     ["sqlite_version", "3.52.0", "cache_version_mismatch"],
     ["sqlite_wasm_sha256", "a".repeat(64), "cache_version_mismatch"],
@@ -1620,6 +1620,7 @@ describe("restored cache generation", () => {
   }, 120_000);
 
   it.each([
+    ["internal schema-11 cache", (db) => db.exec("PRAGMA user_version = 11"), "cache_version_mismatch"],
     ["internal user_version drift", (db) => db.exec(`PRAGMA user_version = ${CACHE_SCHEMA_VERSION + 1}`), "cache_version_mismatch"],
     ["extra schema object", (db) => db.exec("CREATE TABLE unexpected_cache_object(value TEXT)"), "cache_image_invalid"],
     ["invalid source inventory", (db) => db.exec("UPDATE sources SET content_hash = ''"), "cache_image_invalid"],
@@ -1999,7 +2000,7 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: {
           rustAbiVersion: 3,
-          sourceSchemaVersion: 9,
+          sourceSchemaVersion: 10,
           querySchemaVersion: 7,
           matchPlanSchemaVersion: 6,
           sqliteVersion: "3.53.0",
@@ -2171,6 +2172,87 @@ describe("exact generated production Worker", () => {
           },
         },
       });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("projects HTML canonical title, primary text, and latent text through the generated Worker", async () => {
+    const html = [
+      "<!doctype html><html><head>",
+      "<title>Canonical Portal</title>",
+      "<meta name=\"description\" content=\"latentsummarytoken\">",
+      "</head><body>",
+      "<h1>Reader heading</h1><p>readerbodytoken</p>",
+      "<nav>chrometoken RFC-HTML-9001</nav>",
+      "</body></html>",
+    ].join("");
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "html-parity" });
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "html-parity",
+        sources: [sourceWithFormat("site/index.htm", "html", html)],
+      })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          documents: 1,
+          source_format_counts: { html: { "indexed-complete": 1 } },
+        },
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "html-parity" });
+
+      for (const [id, query] of [
+        [5, "canonical portal"],
+        [6, "readerbodytoken"],
+        [7, "latentsummarytoken"],
+        [8, "chrometoken"],
+      ]) {
+        const response = await request(worker, { id, operation: "search", query, limit: 20 });
+        expect(response).toMatchObject({
+          ok: true,
+          result: { generation: "html-parity" },
+        });
+        expect(response.result.hits.length).toBeGreaterThan(0);
+        expect(response.result.hits.every((hit) =>
+          hit.path === "site/index.htm"
+          && hit.format === "html"
+          && hit.locator === null
+          && hit.frontmatter.title === "Canonical Portal")).toBe(true);
+      }
+
+      const exported = await request(worker, {
+        id: 9,
+        operation: "export_generation",
+        generation: "html-parity",
+        cache_identity: CACHE_IDENTITY,
+      });
+      const db = await openExportedImage(exported.result.bytes);
+      try {
+        expect(db.selectValue(
+          "SELECT title_text FROM sources WHERE path = 'site/index.htm'",
+        )).toBe("Canonical Portal");
+        expect(db.selectValue(
+          "SELECT count(*) FROM source_properties AS p JOIN sources AS s ON s.source_key = p.source_key WHERE s.path = 'site/index.htm'",
+        )).toBe(0);
+        expect(db.selectValue(
+          "SELECT count(*) FROM chunks AS c JOIN sources AS s ON s.source_key = c.source_key WHERE s.path = 'site/index.htm' AND c.locator_json IS NOT NULL",
+        )).toBe(0);
+        expect(db.selectValue(
+          "SELECT count(*) FROM chunks AS c JOIN sources AS s ON s.source_key = c.source_key WHERE s.path = 'site/index.htm' AND instr(c.content, 'Canonical Portal') > 0",
+        )).toBe(0);
+        const latentRows = db.selectObjects(
+          "SELECT c.heading_text, c.identifiers_json FROM chunks AS c JOIN sources AS s ON s.source_key = c.source_key WHERE s.path = 'site/index.htm' AND (instr(c.content, 'latentsummarytoken') > 0 OR instr(c.content, 'chrometoken') > 0)",
+        );
+        expect(latentRows.length).toBeGreaterThan(0);
+        expect(latentRows.every((row) => row.heading_text === "" && row.identifiers_json === "[]"))
+          .toBe(true);
+      } finally {
+        db.close();
+      }
     } finally {
       await worker.terminate();
     }

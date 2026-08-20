@@ -5,7 +5,7 @@
 // free of the WASM import so it is directly testable. The adapter cannot be
 // imported in a unit test because it pulls in the Rust binary.
 
-const SOURCE_SCHEMA_VERSION = 9;
+const SOURCE_SCHEMA_VERSION = 10;
 
 // This mirrors Rust's call-stack safety boundary. It is deliberately the only
 // property-bag bound: source byte limits already protect allocation, while a
@@ -40,7 +40,7 @@ export function sourcePreparationDefect(value: unknown): string | null {
     "chunks",
     "kind",
   ];
-  if (!hasRequiredAndOptionalKeys(value, required, ["room", "warning"])) {
+  if (!hasRequiredAndOptionalKeys(value, required, ["room", "canonical_frontmatter", "warning"])) {
     return "preparation_fields";
   }
 
@@ -61,6 +61,12 @@ export function sourcePreparationDefect(value: unknown): string | null {
       && /^[0-9]{1,39}$/u.test(value.mtime_nanos)],
     ["retrieval", () => isRetrieval(value.retrieval)],
     ["normalized_exact", () => isNormalizedExact(value.normalized_exact)],
+    ["canonical_frontmatter", () => canonicalFrontmatterIsValid(
+      value.canonical_frontmatter,
+      value.format,
+      value.kind,
+      value.normalized_exact,
+    )],
     ["chunks_shape", () => Array.isArray(value.chunks) && value.chunks.length <= 100_000],
   ];
   for (const [name, check] of checks) {
@@ -297,6 +303,10 @@ function preparedChunkDefect(
     || (chunk.room !== null && !isBoundedString(chunk.room, 1_024))
     || !isBoundedString(chunk.path, 4_096)
     || !isStringArray(chunk.heading_path)
+    || (owner.format === "html" && (
+      chunk.heading_path.length > 6
+      || chunk.heading_path.some((heading) => !isBoundedUtf8String(heading, 1_024))
+    ))
     || !isBoundedString(chunk.content, 16_384, true)
     || !isStringArray(chunk.links_out)
     || !isNonNegativeSafeInteger(chunk.mtime)
@@ -312,8 +322,8 @@ function preparedChunkDefect(
       && value.content_role !== "latent")) {
     return "chunks_contents";
   }
-  if (owner.format === "excel"
-    && excelContentRoleFromChunkId(chunk.chunk_id) !== (value.content_role ?? "primary")) {
+  if (isRoleTaggedFormat(owner.format)
+    && taggedContentRoleFromChunkId(chunk.chunk_id) !== (value.content_role ?? "primary")) {
     return "chunks_content_role";
   }
   if (value.source_locator !== undefined
@@ -330,7 +340,7 @@ function preparedChunkDefect(
   return propertyBagDefect(chunk.frontmatter);
 }
 
-function excelContentRoleFromChunkId(
+function taggedContentRoleFromChunkId(
   value: unknown,
 ): "primary" | "supporting" | "latent" | null {
   if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) return null;
@@ -339,6 +349,35 @@ function excelContentRoleFromChunkId(
   if (nibble <= 7) return "supporting";
   if (nibble <= 11) return "latent";
   return null;
+}
+
+function isRoleTaggedFormat(value: unknown): boolean {
+  return value === "excel" || value === "html";
+}
+
+function canonicalFrontmatterIsValid(
+  value: unknown,
+  format: unknown,
+  kind: unknown,
+  normalizedExact: unknown,
+): boolean {
+  if (value === undefined) {
+    // An indexed HTML source with a normalized canonical title necessarily
+    // carries the compact canonical field in schema 10. Body-only HTML and all
+    // skipped outcomes legitimately omit it.
+    return format !== "html"
+      || kind !== "indexed"
+      || (isRecord(normalizedExact) && normalizedExact.title === null);
+  }
+  if (format !== "html" || kind !== "indexed" || !isRecord(value)) return false;
+  // Schema 10's HTML producer emits exactly one canonical field. Accepting the
+  // rest of the compact Frontmatter vocabulary would admit a preparation this
+  // adapter cannot produce and could promote latent metadata into title lanes.
+  if (!hasExactKeys(value, ["title"])
+    || !isBoundedUtf8String(value.title, 1_048_576)) {
+    return false;
+  }
+  return true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -353,7 +392,8 @@ function isSourceFormat(value: unknown): boolean {
     || value === "docx"
     || value === "pdf"
     || value === "excalidraw"
-    || value === "excel";
+    || value === "excel"
+    || value === "html";
 }
 
 // Mirrors kwiry_core::policy::ExtractionProfile. Recorded on every preparation
@@ -432,9 +472,13 @@ function isNormalizedExact(value: unknown): boolean {
 }
 
 function isBoundedNormalizedExact(value: unknown): value is string {
+  return isBoundedUtf8String(value, 4_096);
+}
+
+function isBoundedUtf8String(value: unknown, maximumBytes: number, allowEmpty = false): value is string {
   return typeof value === "string"
-    && value.length > 0
-    && new TextEncoder().encode(value).byteLength <= 4_096;
+    && (allowEmpty || value.length > 0)
+    && new TextEncoder().encode(value).byteLength <= maximumBytes;
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

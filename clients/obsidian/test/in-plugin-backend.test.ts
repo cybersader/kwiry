@@ -876,6 +876,53 @@ describe("InPluginLexicalBackend", () => {
     },
   );
 
+  it("rejects a schema-11 cache envelope and performs one honest whole-vault build", async () => {
+    const source = new FakeSource();
+    source.set("vault-note.md", "<title>Portal</title><p>body</p>");
+    const loaded = cacheHit();
+    (loaded.record.identity as { cache_schema_version: number }).cache_schema_version = 11;
+    const refusal = Object.assign(new Error("cache schema mismatch"), {
+      code: "cache_version_mismatch",
+    });
+    const session = fakeSession({
+      restore: async (hit) => {
+        expect(hit.record.identity.cache_schema_version).toBe(11);
+        throw refusal;
+      },
+    });
+    const store = new FakeCacheStore(loaded);
+    const inPlugin = backend(source, [session], {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    await inPlugin.initialize();
+    await vi.waitFor(async () => {
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "ready",
+        searchable: true,
+        generation: "generation-1",
+        documents: 0,
+        dirty: false,
+        issue: {
+          code: "cache_incompatible",
+          safeMessage: "Fresh index is current; replacing the incompatible cache…",
+        },
+      });
+    });
+    expect(store.discards).toEqual(["incompatible"]);
+    expect(session.restoreGeneration).toHaveBeenCalledTimes(1);
+    expect(session.beginBuild).toHaveBeenCalledTimes(1);
+    expect(session.addSourceBatch).toHaveBeenCalledTimes(1);
+    expect(session.addSourceBatch).toHaveBeenCalledWith(
+      "generation-1",
+      [expect.objectContaining({
+        descriptor: expect.objectContaining({ path: "vault-note.md" }),
+      })],
+    );
+    expect(session.commitBuild).toHaveBeenCalledTimes(1);
+    expect(session.planReconciliation).not.toHaveBeenCalled();
+  });
+
   it.each(["internal_error", "invalid_state"] as const)(
     "reports a %s restore failure as cache-restore-unavailable and builds clean",
     async (code) => {

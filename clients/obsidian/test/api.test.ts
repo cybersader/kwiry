@@ -144,8 +144,45 @@ describe("KwiryClient.search", () => {
     });
   });
 
+  it("parses an HTML hit without inventing a locator", async () => {
+    const htmlHit = {
+      ...HIT,
+      path: "site/index.htm",
+      format: "html",
+      heading_path: ["Reader heading"],
+      locator: null,
+      frontmatter: { title: "Canonical Portal" },
+    };
+    const { transport } = mockTransport(200, { hits: [htmlHit], next_cursor: null });
+    await expect(client(transport).search({ q: "portal", mode: "lexical" })).resolves.toMatchObject({
+      hits: [{
+        path: "site/index.htm",
+        format: "html",
+        locator: null,
+        frontmatter: { title: "Canonical Portal" },
+      }],
+    });
+  });
+
+  it("accepts source-bounded HTML titles beyond the exact-title ceiling", async () => {
+    const title = "x".repeat(4_097);
+    const htmlHit = {
+      ...HIT,
+      path: "site/index.html",
+      format: "html",
+      heading_path: [],
+      locator: null,
+      frontmatter: { title },
+    };
+    const { transport } = mockTransport(200, { hits: [htmlHit], next_cursor: null });
+    await expect(client(transport).search({ q: "portal", mode: "lexical" })).resolves.toMatchObject({
+      hits: [{ format: "html", frontmatter: { title } }],
+    });
+  });
+
   it.each([
     { format: "epub" },
+    { format: "html", path: "site/index.html", locator: { kind: "pdf_page", page: 1 } },
     { locator: { kind: "base_view", view: "Active" } },
     { locator: { kind: "page", page: 3 } },
     { locator: { kind: "base_view", view: "" } },

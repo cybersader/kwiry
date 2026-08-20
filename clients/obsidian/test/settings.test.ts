@@ -40,6 +40,10 @@ describe("loadSettings", () => {
     expect(classifySourcePath("board.canvas")).toBe("canvas");
     expect(classifySourcePath("report.docx")).toBe("docx");
     expect(classifySourcePath("paper.PDF")).toBe("pdf");
+    expect(classifySourcePath("site/Page.HTML")).toBe("html");
+    expect(classifySourcePath("site/legacy.htm")).toBe("html");
+    expect(classifySourcePath("site/archive.html.md")).toBe("markdown");
+    expect(classifySourcePath("site/page.xhtml")).toBeNull();
     expect(classifySourcePath("../escape.md")).toBeNull();
     expect(classifySourcePath("image.png")).toBeNull();
   });
@@ -133,6 +137,7 @@ describe("loadSettings", () => {
       pdf: false,
       excalidraw: true,
       excel: false,
+      html: true,
     });
     const loaded = loadSettings({
       enabledSourceFormats: {
@@ -144,6 +149,7 @@ describe("loadSettings", () => {
         pdf: true,
         excalidraw: true,
         excel: true,
+        html: false,
         unknown: false,
       },
     });
@@ -166,6 +172,7 @@ describe("loadSettings", () => {
       pdf: true,
       excalidraw: true,
       excel: true,
+      html: false,
     });
     expect(loaded.enabledSourceFormats).not.toBe(DEFAULT_SETTINGS.enabledSourceFormats);
     expect(isSourceFormatExtractable("canvas")).toBe(true);
@@ -176,17 +183,24 @@ describe("loadSettings", () => {
     expect(DEFAULT_ENABLED_SOURCE_FORMATS.pdf).toBe(false);
     expect(DEFAULT_ENABLED_SOURCE_FORMATS.excel).toBe(false);
     expect(isSourceFormatExtractable("excel")).toBe(true);
+    expect(isSourceFormatExtractable("html")).toBe(true);
+    expect(DEFAULT_ENABLED_SOURCE_FORMATS.html).toBe(true);
     expect(isSourceFormatEnabled("pdf", { ...loaded.enabledSourceFormats, pdf: false }))
       .toBe(false);
     expect(isSourceFormatEnabled("pdf", { ...loaded.enabledSourceFormats, pdf: true }))
       .toBe(true);
+    // Existing installations did not store an HTML key. Loading from defaults
+    // intentionally enables the newly admitted, low-cost format on upgrade.
+    expect(loadSettings({ enabledSourceFormats: { markdown: false } })
+      .enabledSourceFormats.html).toBe(true);
   });
 
-  it("describes every admitted format including PDF and Excel costs", () => {
+  it("describes every admitted format including HTML and default costs", () => {
     expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain(
-      "DOCX, Excalidraw, PDF, and Excel are available",
+      "DOCX, Excalidraw, PDF, Excel, and standalone HTML are available",
     );
     expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("PDF and Excel are off by default");
+    expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).toContain("HTML is on by default");
     expect(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION).not.toContain("remains unavailable");
     expect(sourceFormatDescription("canvas")).toContain("without reading referenced files");
     // Latent content is extracted but labelled, so the description must not
@@ -202,6 +216,12 @@ describe("loadSettings", () => {
     expect(sourceFormatDescription("pdf")).toContain("Encrypted documents are refused");
     expect(sourceFormatDescription("pdf")).toContain("no text at all rather than a partial");
     expect(sourceFormatDescription("pdf")).not.toContain("Unavailable");
+    expect(sourceFormatDescription("html")).toContain("standalone UTF-8 HTML reader text");
+    expect(sourceFormatDescription("html")).toContain("canonical title");
+    expect(sourceFormatDescription("html")).toContain("searchable latent text");
+    expect(sourceFormatDescription("html")).toContain("never dereferenced");
+    expect(sourceFormatDescription("html")).toContain("never read");
+    expect(sourceFormatDescription("html")).toContain("Section-link navigation is not supported");
   });
 
   it("digests only core facts, so a Settings toggle no longer moves the identity", async () => {
@@ -211,7 +231,8 @@ describe("loadSettings", () => {
     // The whole point of the split. Under the old single fingerprint the
     // enabled set was digest material, so every one of these was a different
     // identity and every one of them discarded a complete cache.
-    expect(first).toBe("ed64b7acaeaa182997208b295449aa71ba8f436f382554612347d86fb55de7e9");
+    expect(first).toBe("629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8");
+    expect(first).not.toBe("ed64b7acaeaa182997208b295449aa71ba8f436f382554612347d86fb55de7e9");
     // The `-v2` digest of the shipped default set, and of that set with PDF
     // turned on. Pinned as negatives: the material changed, so a cache written
     // under either must be refused rather than silently reused.
@@ -241,6 +262,7 @@ describe("loadSettings", () => {
       pdf: "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
       excalidraw: "e1f6868bd320172f6b8d9afc3ac716e309499b065c62fa1b17ae4c2c09d98348",
       excel: "ddfee1499472f960540644e47069db3942a572e883d2328e2b5df856dbd04889",
+      html: "218acfdef07624a39eb071ba8221a7761b6f2ebf26e3ef180928dd7a6a65a9d7",
     });
     // Total over the compiled set: a format with no identity has no way to
     // prove a cached row of it is reusable.
@@ -302,9 +324,9 @@ describe("loadSettings", () => {
 
   it("reports the enabled set as configuration, sorted and never digested", () => {
     expect(enabledSourceFormatList(DEFAULT_ENABLED_SOURCE_FORMATS))
-      .toEqual(["base", "canvas", "docx", "excalidraw", "markdown", "text"]);
+      .toEqual(["base", "canvas", "docx", "excalidraw", "html", "markdown", "text"]);
     expect(enabledSourceFormatList({ ...DEFAULT_ENABLED_SOURCE_FORMATS, pdf: true }))
-      .toEqual(["base", "canvas", "docx", "excalidraw", "markdown", "pdf", "text"]);
+      .toEqual(["base", "canvas", "docx", "excalidraw", "html", "markdown", "pdf", "text"]);
     expect(enabledSourceFormatList({
       markdown: false,
       text: false,
@@ -314,6 +336,7 @@ describe("loadSettings", () => {
       pdf: false,
       excalidraw: false,
       excel: false,
+      html: false,
     })).toEqual([]);
   });
 
@@ -324,14 +347,14 @@ describe("loadSettings", () => {
     // policy hash during onload(), before the adapter exists — so a drifted
     // mirror would restore a cache the adapter could never have produced.
     expect(EXTRACTION_POLICY_FINGERPRINT)
-      .toBe("15c0642d97954a127fc6cb7a929dd4e2361a679cf6f251c47b4e99668cb26b8a");
+      .toBe("a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061");
     // The pre-admission digest, when the adapter compiled no PDF extractor at
     // all and reported `pdf=none`. Pinned as a negative because the source
     // preparation schema is still 9 and the default enabled set is unchanged,
     // so this fingerprint is the only thing that refuses a pre-PDF cache image.
     expect(EXTRACTION_POLICY_FINGERPRINT)
       .not.toBe("1b393b155b0af728b1ec9c9131573c105c9e7aba41ff31a4d12c824d4c73adef");
-    expect(SOURCE_PREPARATION_SCHEMA_VERSION).toBe(9);
+    expect(SOURCE_PREPARATION_SCHEMA_VERSION).toBe(10);
   });
 
   it("keeps normal settings unaware of private-build namespaces", () => {

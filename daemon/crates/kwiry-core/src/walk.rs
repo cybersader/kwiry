@@ -62,6 +62,8 @@ pub(crate) fn discover_vault(vault: &VaultRegistration) -> EnumerationResult {
         let Some(extension) = normalized_extension(&path) else {
             continue;
         };
+        let format = SourceFormat::from_extension(&extension)
+            .expect("normalized extension belongs to the closed format registry");
 
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
@@ -74,7 +76,7 @@ pub(crate) fn discover_vault(vault: &VaultRegistration) -> EnumerationResult {
             }
         };
 
-        if metadata.len() > MAX_FILE_BYTES {
+        if metadata.len() > MAX_FILE_BYTES && format != SourceFormat::Html {
             warnings.push(IngestWarning {
                 path: path.clone(),
                 message: format!(
@@ -213,6 +215,10 @@ mod tests {
             .unwrap()
             .set_len(MAX_FILE_BYTES + 1)
             .unwrap();
+        fs::File::create(temporary.path().join("oversized.html"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
         let vault = VaultRegistration {
             id: "fixture".into(),
             path: temporary.path().to_path_buf(),
@@ -221,7 +227,14 @@ mod tests {
 
         let result = discover_vault(&vault);
 
-        assert!(result.files.is_empty());
+        assert_eq!(
+            result
+                .files
+                .iter()
+                .map(|file| file.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["oversized.html"]
+        );
         assert_eq!(result.warnings.len(), 1);
         assert_eq!(result.completeness, EnumerationCompleteness::Defective);
     }

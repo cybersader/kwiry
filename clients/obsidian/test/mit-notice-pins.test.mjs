@@ -8,12 +8,14 @@ import { describe, expect, it } from "vitest";
 
 import { collectRustReleaseGraph } from "../scripts/validate-d5c-rust-licenses.mjs";
 import {
+  checkFixedDerivedData,
   checkMitNotices,
   crateKey,
   extractNoticeSections,
   normalizeLicenseText,
   sha256,
   unifiedDiff,
+  validateFixedDerivedDataPin,
   validateNoticePins,
   verifyMitNotices,
 } from "../scripts/verify-mit-notices.mjs";
@@ -41,6 +43,60 @@ in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software.
 `;
+
+function fixedDerivedDataWorld() {
+  const generatedPath = "daemon/crates/kwiry-core/src/formats/html/entities.rs";
+  const noticePath = "clients/obsidian/licenses/markup5ever-entities-MIT.txt";
+  const generated = Buffer.from(`static NODES: [TrieNode; 3] = [
+    TrieNode { first_edge: 0, edge_count: 1, first: 0, second: 0 },
+    TrieNode { first_edge: 1, edge_count: 1, first: 38, second: 0 },
+    TrieNode { first_edge: 2, edge_count: 0, first: 169, second: 0 },
+];
+static EDGES: [TrieEdge; 2] = [
+    TrieEdge { byte: b'a', next: 1 },
+    TrieEdge { byte: b'm', next: 2 },
+];
+`);
+  const notice = Buffer.from("Copyright (c) fixture\n\nPermission is hereby granted.\n");
+  const pin = {
+    schema_version: 1,
+    category: "fixed-derived-data",
+    component: "fixture generated entity trie",
+    upstream: {
+      package: "markup5ever",
+      version: "0.14.1",
+      repository: "https://example.invalid/upstream",
+      source_file: "entities.rs",
+      source_sha256: "1".repeat(64),
+      entries: 2,
+      license: "MIT OR Apache-2.0",
+      selected_license: "MIT",
+    },
+    generated: {
+      path: generatedPath,
+      sha256: sha256(generated),
+      entries: 2,
+      trie_nodes: 3,
+      trie_edges: 2,
+    },
+    notice: {
+      path: noticePath,
+      sha256: sha256(notice),
+      bytes: notice.byteLength,
+      lines: 3,
+    },
+  };
+  const files = new Map([[generatedPath, generated], [noticePath, notice]]);
+  return {
+    pin,
+    files,
+    readPinnedFile: async (path) => {
+      const value = files.get(path);
+      if (value === undefined) throw new Error("absent fixture");
+      return value;
+    },
+  };
+}
 
 function world() {
   // A miniature but structurally identical world: pin file, notice bundle, two
@@ -271,11 +327,70 @@ describe("MIT notice three-way verification", () => {
   });
 });
 
+describe("fixed derived data notice verification", () => {
+  it("passes when the generated table dimensions, checksum, and selected notice agree", async () => {
+    const fixture = fixedDerivedDataWorld();
+    const outcome = await checkFixedDerivedData(fixture);
+    expect(outcome.findings).toEqual([]);
+    expect(outcome.checkedFixedDerivedData).toBe(1);
+  });
+
+  it("requires the explicit fixed-derived-data category and repository-relative paths", () => {
+    const { pin } = fixedDerivedDataWorld();
+    pin.category = "cargo-dependency";
+    expect(() => validateFixedDerivedDataPin(pin)).toThrow("fixed derived data pin is invalid");
+
+    const { pin: escaped } = fixedDerivedDataWorld();
+    escaped.generated.path = "../entities.rs";
+    expect(() => validateFixedDerivedDataPin(escaped)).toThrow("fixed derived data pin is invalid");
+  });
+
+  it("kills generated table byte drift even when its dimensions still match", async () => {
+    const fixture = fixedDerivedDataWorld();
+    fixture.files.set(
+      fixture.pin.generated.path,
+      Buffer.concat([fixture.files.get(fixture.pin.generated.path), Buffer.from("// drift\n")]),
+    );
+    const { findings } = await checkFixedDerivedData(fixture);
+    expect(kinds(findings)).toContain("fixed_derived_data_digest_mismatch");
+    expect(kinds(findings)).not.toContain("fixed_derived_data_count_mismatch");
+  });
+
+  it("kills generated table dimension drift independently of its checksum", async () => {
+    const fixture = fixedDerivedDataWorld();
+    fixture.pin.upstream.entries = 3;
+    fixture.pin.generated.entries = 3;
+    const { findings } = await checkFixedDerivedData(fixture);
+    expect(kinds(findings)).toContain("fixed_derived_data_count_mismatch");
+  });
+
+  it("kills selected MIT notice checksum, byte-count, or line-count drift", async () => {
+    const fixture = fixedDerivedDataWorld();
+    fixture.files.set(fixture.pin.notice.path, Buffer.from("different notice\n"));
+    const { findings } = await checkFixedDerivedData(fixture);
+    expect(kinds(findings)).toContain("fixed_derived_data_notice_mismatch");
+  });
+
+  it("reports unreadable fixed data through a fixed category without forwarding exceptions", async () => {
+    const fixture = fixedDerivedDataWorld();
+    fixture.readPinnedFile = async () => {
+      throw new Error("sensitive machine path and stack detail");
+    };
+    const { findings } = await checkFixedDerivedData(fixture);
+    expect(kinds(findings)).toEqual([
+      "fixed_derived_data_notice_unreadable",
+      "fixed_derived_data_unreadable",
+    ]);
+    expect(JSON.stringify(findings)).not.toContain("sensitive machine path");
+  });
+});
+
 describe("the tracked MIT notice pins", () => {
-  it("agrees with the vendored crates, the bundle, and both inventories", async () => {
-    const { findings, checkedCrates } = await verifyMitNotices();
+  it("agrees with the vendored crates, fixed derived data, the bundle, and both inventories", async () => {
+    const { findings, checkedCrates, checkedFixedDerivedData } = await verifyMitNotices();
     expect(findings).toEqual([]);
     expect(checkedCrates).toBe(10);
+    expect(checkedFixedDerivedData).toBe(1);
   });
 
   it("stays in the canonical form `apply` writes, so accepting a notice never churns it", async () => {
@@ -419,6 +534,25 @@ describe("the tracked MIT notice pins", () => {
         .toEqual(d5c.dependencies);
     }
   }, 30_000);
+
+  it("keeps HTML entity provenance out of Cargo inventories and Cargo notice pins", async () => {
+    const [d5cText, docxText, pinsText, bundle, provenanceText] = await Promise.all([
+      readFile(resolve(root, "d5c-rust-license-inventory.json"), "utf8"),
+      readFile(resolve(root, "docx-rust-license-inventory.json"), "utf8"),
+      readFile(pinsPath, "utf8"),
+      readFile(bundlePath, "utf8"),
+      readFile(resolve(root, "licenses/html-entity-provenance.json"), "utf8"),
+    ]);
+    const [d5c, docx, pins, provenance] = [d5cText, docxText, pinsText, provenanceText]
+      .map((text) => JSON.parse(text));
+    for (const inventory of [d5c, docx]) {
+      expect(inventory.dependencies.some(({ name }) => name === "markup5ever")).toBe(false);
+    }
+    expect(pins.notices.some(({ crates }) => crates.some(({ name }) => name === "markup5ever")))
+      .toBe(false);
+    expect(bundle).not.toContain("markup5ever 0.14.1 named-entity data — MIT");
+    expect(provenance.category).toBe("fixed-derived-data");
+  });
 
   // The "Release license selections" roll-up is prose, so nothing re-derived it
   // when the DOCX and PDF waves grew the graph and it silently under-reported 29

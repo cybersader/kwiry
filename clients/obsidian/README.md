@@ -1,21 +1,22 @@
 # Kwiry Search (Obsidian plugin)
 
-Beta.15 publishes two explicit profiles. **Daemon** provides lexical (BM25), semantic (local embeddings), and hybrid (RRF) retrieval over registered trees. **In-plugin · Lexical** performs active-vault lexical retrieval inside desktop Obsidian through portable Kwiry Rust plus official SQLite FTS5-WASM, without a daemon or token file. The profiles never silently fall back into one another.
+Kwiry Search publishes two explicit profiles. **Daemon** provides lexical (BM25), semantic (local embeddings), and hybrid (RRF) retrieval over registered trees. **In-plugin · Lexical** performs active-vault lexical retrieval inside desktop Obsidian through portable Kwiry Rust plus official SQLite FTS5-WASM, without a daemon or token file. The profiles never silently fall back into one another.
 
 The presentation plugin does not own parsing, chunking, ranking, authorization, or index behavior. Project-owned Rust and engine adapters retain those responsibilities in both profiles.
 
 ## Current requirements
 
 - **Daemon** profile: a running kwiry daemon (`kwiry serve`, add `--semantic` for semantic/hybrid modes).
-- **In-plugin · Lexical:** desktop Obsidian; no daemon or token file; supported multi-format extraction, with Excel disabled by default.
+- **In-plugin · Lexical:** desktop Obsidian; no daemon or token file; supported multi-format extraction, with HTML on by default and PDF and Excel off by default.
 
 ## In-plugin profile status
 
-**In-plugin · Lexical** is published in beta.15 with active-vault indexing, atomic publication, live create/modify/delete/rename reconciliation, progress, manual rebuild, bounded Worker recovery, and a validated disposable machine-local warm-start cache. Generated evidence meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional added-memory target; declared-reference-hardware measurement, private aggregate-only evidence, installed long-running quality, and explicit owner field acceptance remain pending. Passing automation and the narrow real-Obsidian WebDriver result-click proof are not owner acceptance.
+**In-plugin · Lexical** provides active-vault indexing, atomic publication, live create/modify/delete/rename reconciliation, progress, manual rebuild, bounded Worker recovery, and a validated disposable machine-local warm-start cache. Generated evidence meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional added-memory target; declared-reference-hardware measurement, private aggregate-only evidence, installed long-running quality, and explicit owner field acceptance remain pending. Passing automation and the narrow real-Obsidian WebDriver result-click proof are not owner acceptance.
 
 Published scope:
 
-- current open vault using the supported extractor set; Excel extraction is supported but disabled by default;
+- current open vault using Markdown, plain text, Base, Canvas, DOCX, Excalidraw, PDF, Excel, and standalone UTF-8 HTML (`.html`/`.htm`); HTML is on by default, while PDF and Excel are off by default;
+- HTML canonical titles use the normal title/display lane without becoming authored properties or body text; latent descriptions, chrome, and hidden text remain searchable, with no URL dereference, embedded-resource read, locator, or section-link navigation;
 - one active FTS5 generation, optionally accelerated by a validated disposable cache outside the vault on machine-local storage;
 - lexical mode only, with no semantic/hybrid fallback;
 - explicit backend selection rather than automatic daemon failover;
@@ -46,7 +47,7 @@ BRAT installs `main.js`, `manifest.json`, and `styles.css` from each versioned G
 ## Setup
 
 1. In **Settings → Kwiry Search**, choose **In-plugin · Lexical** or **Daemon** explicitly.
-2. For In-plugin · Lexical, configure any desired supported extractors; Excel is disabled by default. No daemon or token is required.
+2. For In-plugin · Lexical, configure any desired supported extractors. HTML is enabled by default; PDF and Excel are disabled by default. No daemon or token is required.
 3. For Daemon, start `kwiry serve`, configure the literal-loopback URL and token path, and map the current vault for local open actions.
 4. Run **Kwiry Search: Search notes**. `Tab` cycles only modes supported by the selected profile; `Enter` opens, and `Ctrl+Enter` opens in a new tab.
 

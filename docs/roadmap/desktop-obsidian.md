@@ -67,7 +67,9 @@ The Gate 4 production baseline has explicit daemon/in-plugin selection, hardened
 
 ### Checkpoint B5 — active-vault lifecycle and package — Published in beta.15; owner acceptance pending
 
-Beta.15 publishes an atomic initial index and reconciles create, modify, delete, and rename events with bounded reads/queues and no partial-corpus publication. It supports the published multi-format extractor set, with Excel disabled by default. Deterministic corpora, strict aggregate evidence, lifecycle and exact-Worker tests, disposable-vault smoke, and separated candidate/publication workflows supported publication. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional 300 MiB added-memory target; declared-reference-hardware, private real-vault, and owner field acceptance remain separate.
+Beta.15 publishes an atomic initial index and reconciles create, modify, delete, and rename events with bounded reads/queues and no partial-corpus publication. Deterministic corpora, strict aggregate evidence, lifecycle and exact-Worker tests, disposable-vault smoke, and separated candidate/publication workflows supported publication. The generated Node Worker capture meets the provisional build, warm-search, update-visibility, and event-loop targets but misses the provisional 300 MiB added-memory target; declared-reference-hardware, private real-vault, and owner field acceptance remain separate.
+
+The current extractor baseline supports Markdown, plain text, Base, Canvas, DOCX, Excalidraw, PDF, Excel, and standalone UTF-8 HTML (`.html`/`.htm`). HTML is enabled by default; PDF and Excel remain the only default-off formats. HTML canonical title metadata is searchable and returned without becoming an authored property or body copy; latent HTML description/chrome/hidden text remains searchable without heading or identifier boosts, and HTML carries no locator or section-link support.
 
 ### Checkpoint B6 — durable differential warm start — Published in beta.15; owner acceptance pending
 

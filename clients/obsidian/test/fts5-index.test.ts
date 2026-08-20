@@ -157,7 +157,7 @@ function sourceAt(
   frontmatter: PropertyBag = { title, tags: ["test"] },
 ): SourcePreparation {
   return {
-    schema_version: 9,
+    schema_version: 10,
     source_key: sourceKey,
     vault_id: "active",
     path,
@@ -292,6 +292,105 @@ describe("Fts5GenerationIndex", () => {
     expect(hits.slice(0, -1).map((hit) => hit.chunk_id)).toEqual(latentChunkIds);
     // Primary is searchable and scored by the same rules, just weaker here.
     expect(hits[hits.length - 1]!.score).toBeLessThan(latentScores[0]!);
+  });
+
+  it("projects a title-only HTML carrier through canonical title lanes without authored properties", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const html = sourceAt(
+        "portal",
+        "site/index.html",
+        `00${"a".repeat(62)}`,
+        "",
+        "Canonical Portal",
+        {},
+      );
+      html.format = "html";
+      html.retrieval = { filename: "index.html", stem: "index", aliases: [] };
+      html.normalized_exact = {
+        filename: "index.html",
+        stem: "index",
+        aliases: [],
+        title: "canonical portal",
+      };
+      html.canonical_frontmatter = { title: "Canonical Portal" };
+      html.chunks[0]!.chunk.heading_path = [];
+      html.chunks[0]!.heading_text = "";
+      html.chunks[0]!.normalized_heading = null;
+      html.chunks[0]!.chunk.frontmatter = {};
+      scoped.replaceSource(html);
+
+      const hits = scoped.search(anyPlan("canonical"), 20);
+      expect(hits).toEqual([expect.objectContaining({
+        path: "site/index.html",
+        format: "html",
+        locator: null,
+        excerpt: "",
+        frontmatter: { title: "Canonical Portal" },
+      })]);
+      expect(db.selectValue("SELECT title_text FROM sources WHERE source_key = 'portal'"))
+        .toBe("Canonical Portal");
+      expect(db.selectValue("SELECT frontmatter_json FROM chunks WHERE source_key = 'portal'"))
+        .toBe('{"title":"Canonical Portal"}');
+      expect(db.selectValue("SELECT content FROM chunks WHERE source_key = 'portal'"))
+        .toBe("");
+      expect(db.selectValue("SELECT count(*) FROM source_properties WHERE source_key = 'portal'"))
+        .toBe(0);
+
+      const restored = openRestoredFts5Generation(sqlite, scoped.exportImage(sqlite), 1);
+      try {
+        expect(restored.search(anyPlan("portal"), 20)).toEqual([expect.objectContaining({
+          format: "html",
+          frontmatter: { title: "Canonical Portal" },
+          excerpt: "",
+        })]);
+        restored.assertIntegrity();
+      } finally {
+        restored.close();
+      }
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("restores HTML canonical titles whose exact projection is intentionally absent", () => {
+    const title = "x".repeat(4_097);
+    const html = sourceAt(
+      "long-title",
+      "site/long-title.html",
+      `00${"b".repeat(62)}`,
+      "",
+      title,
+      {},
+    );
+    html.format = "html";
+    html.retrieval = { filename: "long-title.html", stem: "long-title", aliases: [] };
+    html.normalized_exact = {
+      filename: "long-title.html",
+      stem: "long-title",
+      aliases: [],
+      title: null,
+    };
+    html.canonical_frontmatter = { title };
+    html.chunks[0]!.chunk.heading_path = [];
+    html.chunks[0]!.heading_text = "";
+    html.chunks[0]!.normalized_heading = null;
+    html.chunks[0]!.chunk.frontmatter = {};
+    index.replaceSource(html);
+
+    const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
+    try {
+      expect(restored.search(anyPlan("long-title"), 20)).toEqual([
+        expect.objectContaining({
+          format: "html",
+          frontmatter: { title },
+        }),
+      ]);
+      expect(() => restored.assertIntegrity()).not.toThrow();
+    } finally {
+      restored.close();
+    }
   });
 
   it("hydrates Base format, coverage, locator, excerpt, and status counts after ranking", () => {
@@ -2252,40 +2351,14 @@ describe("Fts5GenerationIndex", () => {
     }
   });
 
-  it("migrates schema 10 in place without reindexing another format", () => {
+  it("rejects an internal schema-11 image instead of migrating it in place", () => {
     index.replaceSource(source("alpha", "chunk-a", "legacyterm"));
     const legacy = mutateExportedImage(index.exportImage(sqlite), (db) => {
-      db.exec("PRAGMA writable_schema = ON");
-      db.exec(
-        "UPDATE sqlite_schema SET sql = replace(sql, ?, '') WHERE name = 'sources'",
-        { bind: [",'excel'"] },
-      );
-      db.exec("PRAGMA writable_schema = OFF");
-      db.exec("PRAGMA user_version = 10");
+      db.exec("PRAGMA user_version = 11");
     });
 
-    const restored = openRestoredFts5Generation(sqlite, legacy, 1);
-    try {
-      expect(restored.sources).toBe(1);
-      expect(restored.documents).toBe(1);
-      expect(restored.chunks).toBe(1);
-      expect(restored.search(anyPlan("legacyterm"), 20).map((hit) => hit.chunk_id))
-        .toEqual(["chunk-a"]);
-      for (const format of SOURCE_FORMATS) {
-        expect(restored.evictions.stale_identity[format]).toBe(0);
-      }
-      const migrated = deserialize(sqlite, restored.exportImage(sqlite));
-      try {
-        expect(Number(migrated.selectValue("PRAGMA user_version"))).toBe(11);
-        expect(String(migrated.selectValue(
-          "SELECT sql FROM sqlite_schema WHERE name = 'sources'",
-        ))).toContain("'excel'");
-      } finally {
-        migrated.close();
-      }
-    } finally {
-      restored.close();
-    }
+    expect(() => openRestoredFts5Generation(sqlite, legacy, 1))
+      .toThrow(CacheVersionMismatchError);
   });
 
   it("requires the durable database budget to fit inside the transport ceiling", () => {

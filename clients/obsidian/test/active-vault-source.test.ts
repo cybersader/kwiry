@@ -205,6 +205,51 @@ describe("ObsidianActiveVaultSource", () => {
     expect(events).toEqual([{ kind: "upsert", path: "paper.PDF" }]);
   });
 
+  it("admits HTML and HTM case-insensitively while rejecting XHTML and wrapper suffixes", async () => {
+    const fake = new FakeVault();
+    const htmlBytes = new TextEncoder().encode("<title>Portal</title><p>Body</p>");
+    fake.files.set("site/Page.HTML", file("site/Page.HTML", htmlBytes.byteLength, 4));
+    fake.contents.set("site/Page.HTML", htmlBytes);
+    fake.files.set("site/legacy.htm", file("site/legacy.htm", htmlBytes.byteLength, 5));
+    fake.contents.set("site/legacy.htm", htmlBytes);
+    fake.files.set("site/page.xhtml", file("site/page.xhtml", htmlBytes.byteLength, 6));
+    fake.files.set("site/archive.html.md", file("site/archive.html.md", htmlBytes.byteLength, 7));
+    fake.contents.set("site/archive.html.md", htmlBytes);
+    const active = source(fake);
+
+    expect(active.listSourcePaths()).toEqual([
+      "site/Page.HTML",
+      "site/archive.html.md",
+      "site/legacy.htm",
+    ]);
+    expect(active.inspectSource("site/Page.HTML")).toMatchObject({
+      kind: "candidate",
+      format: "html",
+    });
+    expect(active.inspectSource("site/legacy.htm")).toMatchObject({
+      kind: "candidate",
+      format: "html",
+    });
+    expect(active.inspectSource("site/page.xhtml")).toEqual({
+      kind: "missing",
+      path: "site/page.xhtml",
+    });
+    expect(active.inspectSource("site/archive.html.md")).toMatchObject({
+      kind: "candidate",
+      format: "markdown",
+    });
+
+    const inspection = active.inspectSource("site/legacy.htm");
+    if (inspection.kind !== "candidate") throw new Error("expected HTML candidate");
+    await expect(active.readSource(inspection)).resolves.toMatchObject({
+      kind: "source",
+      source: {
+        descriptor: { path: "site/legacy.htm", format: "html" },
+        bytes: htmlBytes,
+      },
+    });
+  });
+
   it("inventories, inspects, emits, and reads admitted DOCX files", async () => {
     const fake = new FakeVault();
     fake.files.set("report.docx", file("report.docx", 4, 1));

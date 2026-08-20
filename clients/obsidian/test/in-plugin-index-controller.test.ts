@@ -259,7 +259,7 @@ class FakeWorker implements IndexWorkerPort {
 
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
 const OLD_SOURCE_POLICY_HASH = "c32007f375c07577ac536ca290a078525a6f2f125405a803f584216daf1dad97";
-const SOURCE_POLICY_HASH = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860";
+const SOURCE_POLICY_HASH = "629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8";
 
 async function sha256Text(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -2142,6 +2142,47 @@ describe("InPluginIndexController", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("rejects one schema-11 cache and performs one honest cold whole-vault build", async () => {
+    const source = new FakeSource();
+    source.set("note.md", "markdown body", 1);
+    source.set("site/index.html", "<title>Portal</title>", 1);
+    const worker = new FakeCacheWorker();
+    worker.restoreGeneration = vi.fn(async () => {
+      throw Object.assign(new Error("cache schema mismatch"), {
+        code: "cache_version_mismatch",
+      });
+    });
+    const hit = cacheHit("schema-11-generation");
+    (hit.record.identity as { cache_schema_version: number }).cache_schema_version = 11;
+    const store = new FakeCacheStore(hit);
+    const { controller, statuses } = harness(source, worker, {}, {
+      openStore: async () => ({ kind: "available", store }),
+    });
+
+    controller.start();
+    await controller.whenIdle();
+
+    expect(store.discards).toEqual(["incompatible"]);
+    expect(worker.restoreGeneration).toHaveBeenCalledOnce();
+    expect(worker.planCalls).toEqual([]);
+    expect(worker.calls.filter((call) => call.startsWith("begin:"))).toEqual([
+      "begin:generation-1",
+    ]);
+    expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual([
+      "commit:generation-1",
+    ]);
+    expect(worker.activePaths).toEqual(new Set(["note.md", "site/index.html"]));
+    expect(statuses.some((status) => status.issue === "cache_incompatible")).toBe(true);
+    expect(statuses.at(-1)).toMatchObject({
+      stage: "ready",
+      searchable: true,
+      generation: "generation-1",
+      documents: 2,
+      dirty: false,
+      rebuilding: false,
+    });
   });
 
   it("binds before awaits, audits metadata matches, and mutates only changed sources", async () => {

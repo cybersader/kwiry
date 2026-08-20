@@ -140,6 +140,7 @@ describe("openTargetForHit", () => {
     ["docx", "report.docx"],
     ["excalidraw", "sketch.excalidraw"],
     ["excel", "budget.xlsx"],
+    ["html", "site/index.htm"],
   ] as const)("opens %s results file-only", (format, path) => {
     expect(openTargetForHit(hit({ path, format, heading_path: ["Ignored"] }))).toEqual({ path });
   });
@@ -245,6 +246,14 @@ describe("openTargetForHit", () => {
       exactTarget: { path: "budget.xlsx" },
     },
     {
+      format: "html",
+      path: "site/index.html",
+      representative: { locator: null, heading_path: ["Representative"] },
+      exact: { locator: null, heading_path: ["Exact"] },
+      representativeTarget: { path: "site/index.html" },
+      exactTarget: { path: "site/index.html" },
+    },
+    {
       // Grouped search opens a source row from its representative hit and a
       // drilled row from its own hit. A PDF has no heading path, so the page
       // locator is the only thing that keeps those two apart.
@@ -313,6 +322,10 @@ describe("normalized vault source paths", () => {
   it("validates generic paths separately from format agreement", () => {
     expect(isNormalizedVaultFilePath("folder/report.pdf")).toBe(true);
     expect(pathMatchesFormat("folder/report.PDF", "pdf")).toBe(true);
+    expect(pathMatchesFormat("site/Page.HTML", "html")).toBe(true);
+    expect(pathMatchesFormat("site/legacy.htm", "html")).toBe(true);
+    expect(pathMatchesFormat("site/page.xhtml", "html")).toBe(false);
+    expect(pathMatchesFormat("site/archive.html.md", "markdown")).toBe(true);
     expect(pathMatchesFormat("folder/report.pdf", "docx")).toBe(false);
     expect(isNormalizedVaultFilePath("folder/../report.pdf")).toBe(false);
   });

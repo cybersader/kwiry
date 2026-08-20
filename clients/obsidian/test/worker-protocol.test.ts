@@ -147,11 +147,11 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
-  it("publishes protocol 13, cache schema 11, and the closed eight-format set", () => {
-    // Excel extends the transported format and locator unions. Cache schema 11
-    // widens only the sources-table format check and migrates schema 10 in place.
+  it("publishes protocol 13, cache schema 12, and the closed nine-format set", () => {
+    // HTML extends the transported format set without changing the Worker wire shape.
+    // Cache schema 12 widens the sources-table format check; protocol remains 13.
     expect(WORKER_PROTOCOL_VERSION).toBe(13);
-    expect(CACHE_SCHEMA_VERSION).toBe(11);
+    expect(CACHE_SCHEMA_VERSION).toBe(12);
     expect(SOURCE_FORMATS).toEqual([
       "markdown",
       "text",
@@ -161,6 +161,7 @@ describe("Worker protocol", () => {
       "pdf",
       "excalidraw",
       "excel",
+      "html",
     ]);
   });
 
@@ -218,9 +219,10 @@ describe("Worker protocol", () => {
     expect(request).toMatchObject({ operation: "add_source_batch" });
   });
 
-  it("accepts all six source formats and rejects open-ended format strings", () => {
+  it("accepts all nine source formats and rejects open-ended format strings", () => {
     for (const format of SOURCE_FORMATS) {
-      const candidate = source(`note.${format === "markdown" ? "md" : format}`);
+      const extension = format === "markdown" ? "md" : format === "excel" ? "xlsx" : format;
+      const candidate = source(`note.${extension}`);
       candidate.descriptor.format = format;
       expect(parseWorkerRequest({
         version: WORKER_PROTOCOL_VERSION,
@@ -231,7 +233,7 @@ describe("Worker protocol", () => {
       })).toMatchObject({ operation: "add_source_batch" });
     }
     const invalid = source();
-    (invalid.descriptor as { format: string }).format = "html";
+    (invalid.descriptor as { format: string }).format = "epub";
     expect(parseWorkerRequest({
       version: WORKER_PROTOCOL_VERSION,
       id: 1,
@@ -969,6 +971,10 @@ describe("Worker protocol", () => {
     expect(isWorkerResponse(response({}))).toBe(true);
     expect(isWorkerResponse(response({ payload: "x".repeat(2 * 1024 * 1024) }))).toBe(false);
     expect(isWorkerResponse(response({ title: "x".repeat(1_025) }))).toBe(false);
+    const longHtmlTitle = response({ title: "x".repeat(4_097) });
+    longHtmlTitle.result.hits[0]!.format = "html";
+    longHtmlTitle.result.hits[0]!.path = "site/index.html";
+    expect(isWorkerResponse(longHtmlTitle)).toBe(true);
   });
 
   it("holds the multi-format search hit shape and bounded stored excerpt exactly", () => {
@@ -1040,6 +1046,17 @@ describe("Worker protocol", () => {
       hits: [{ ...pdfHit, locator: null },
       ],
     }))).toBe(true);
+    const htmlHit = {
+      ...hit,
+      path: "site/index.htm",
+      format: "html",
+      locator: null,
+    };
+    expect(isWorkerResponse(response({ generation: "g1", hits: [htmlHit] }))).toBe(true);
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...htmlHit, locator: { kind: "pdf_page", page: 1 } }],
+    }))).toBe(false);
     // Each locator kind pairs with exactly one format, in both directions.
     expect(isWorkerResponse(response({
       generation: "g1",

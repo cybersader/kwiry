@@ -32,22 +32,29 @@ describe("published Obsidian documentation truth", () => {
     ]) expect(text).not.toContain(stale);
   });
 
-  it("states the published profiles and preserves owner acceptance boundaries", async () => {
-    const [roadmap, plugin, product, release] = await Promise.all([
+  it("states current capabilities without release pinning and preserves acceptance boundaries", async () => {
+    const [root, roadmap, plugin, product, design, desktopRoadmap, release] = await Promise.all([
+      readFile(resolve(repositoryRoot, "README.md"), "utf8"),
       readFile(resolve(repositoryRoot, "ROADMAP.md"), "utf8"),
       readFile(resolve(repositoryRoot, "clients/obsidian/README.md"), "utf8"),
       readFile(resolve(repositoryRoot, "docs/product-map.md"), "utf8"),
+      readFile(resolve(repositoryRoot, "docs/design/obsidian-lite.md"), "utf8"),
+      readFile(resolve(repositoryRoot, "docs/roadmap/desktop-obsidian.md"), "utf8"),
       readFile(resolve(repositoryRoot, "docs/releases/0.6.0-beta.15.md"), "utf8"),
     ]);
-    for (const text of [roadmap, plugin, product, release]) {
-      expect(text).toContain("beta.15");
+    for (const text of [root, roadmap, plugin, product, design, desktopRoadmap]) {
       expect(text).toContain("In-plugin · Lexical");
-      expect(text).toContain("Excel");
+      expect(text).toContain("HTML");
+      expect(text).toContain("PDF and Excel");
     }
+    // Historical release notes keep their historical version vocabulary; current
+    // capability pages no longer need a future release number to state truth.
+    expect(release).toContain("beta.15");
+    expect(release).toContain("In-plugin · Lexical");
+    expect(release).toContain("This release does not amend `CONTRACT.md`");
     expect(roadmap).toContain("Property projection does not authorize ranking");
     expect(plugin).toContain("not owner acceptance");
     expect(product).toContain("does not imply accepted property ranking");
-    expect(release).toContain("This release does not amend `CONTRACT.md`");
   });
 
   it("keeps root and plugin manifest descriptions identical", async () => {

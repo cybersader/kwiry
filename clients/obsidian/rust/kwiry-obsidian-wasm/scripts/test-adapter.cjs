@@ -111,12 +111,13 @@ if (nativeJson !== wasmJson) {
 
 const byName = Object.fromEntries(wasmOutput.map((fixture) => [fixture.name, fixture.output]));
 if (byName["abi-identity"].abi_version !== 3
-  || byName["abi-identity"].source_preparation_schema_version !== 9
+  || byName["abi-identity"].source_preparation_schema_version !== 10
   // The shipped plugin compiles the portable PDF tier and never the enhanced
   // one. This is the artifact the user installs, so it is the right place to
   // assert it: a build that had picked up `native-pdf-extractor` would report
   // `enhanced` here, and one that had lost the reader would report `none`.
   || byName["abi-identity"].extraction_policy.pdf !== "portable"
+  || byName["abi-identity"].extraction_policy.html !== "portable"
   || byName["abi-identity"].format_identity_schema_version !== 1
   || byName["abi-identity"].lexical_query_plan_schema_version !== 7
   || byName["abi-identity"].fts5_match_plan_schema_version !== 6
@@ -126,6 +127,14 @@ if (byName["abi-identity"].abi_version !== 3
   || byName["abi-identity"].section_link_formats.markdown !== true
   || byName["abi-identity"].section_link_formats.pdf !== false
   || byName["abi-identity"].section_link_formats.excel !== false
+  || byName["abi-identity"].section_link_formats.html !== false
+  || byName["html-source"].result.preparation.schema_version !== 10
+  || byName["html-source"].result.preparation.format !== "html"
+  || byName["html-source"].result.preparation.canonical_frontmatter.title !== "Canonical Portal"
+  || Object.keys(byName["html-source"].result.preparation.frontmatter).length !== 0
+  || byName["html-source"].result.preparation.chunks.some((chunk) => chunk.source_locator !== undefined)
+  || byName["html-source"].result.preparation.chunks.some((chunk) => chunk.chunk.links_out.length !== 0)
+  || !byName["html-source"].result.preparation.chunks.some((chunk) => chunk.content_role === "latent")
   || byName["ordinary-any-match"].result.execution_plan.stages[0].plan_id
     !== "lexical_exact_metadata_v3"
   || byName["ordinary-any-match"].result.execution_plan.stages[0].match_value !== undefined
@@ -188,6 +197,7 @@ const PINNED_FORMAT_IDENTITIES = {
   pdf: "980924c70d64fc5de65ddc2141d043e9188f8856ec6196d30c0d5c11d363c3bc",
   excalidraw: "e1f6868bd320172f6b8d9afc3ac716e309499b065c62fa1b17ae4c2c09d98348",
   excel: "ddfee1499472f960540644e47069db3942a572e883d2328e2b5df856dbd04889",
+  html: "218acfdef07624a39eb071ba8221a7761b6f2ebf26e3ef180928dd7a6a65a9d7",
 };
 const reportedIdentities = byName["abi-identity"].format_identities;
 if (JSON.stringify(Object.keys(reportedIdentities).sort())

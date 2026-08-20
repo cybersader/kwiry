@@ -280,7 +280,7 @@ CREATE TABLE sources (
   vault_id TEXT NOT NULL,
   path TEXT NOT NULL,
   source_format TEXT NOT NULL
-    CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf','excalidraw','excel')),
+    CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf','excalidraw','excel','html')),
   format_identity TEXT NOT NULL
     CHECK(length(format_identity) = 64 AND format_identity NOT GLOB '*[^0-9a-f]*'),
   extraction_coverage TEXT NOT NULL
@@ -519,18 +519,9 @@ const EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] = [
   { type: "table", name: "source_property_text_fts_data", table: "source_property_text_fts_data", sql: "CREATE TABLE 'source_property_text_fts_data'(id INTEGER PRIMARY KEY, block BLOB)" },
   { type: "table", name: "source_property_text_fts_docsize", table: "source_property_text_fts_docsize", sql: "CREATE TABLE 'source_property_text_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)" },
   { type: "table", name: "source_property_text_fts_idx", table: "source_property_text_fts_idx", sql: "CREATE TABLE 'source_property_text_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID" },
-  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,source_format TEXT NOT NULL CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf','excalidraw','excel')),format_identity TEXT NOT NULL CHECK(length(format_identity) = 64 AND format_identity NOT GLOB '*[^0-9a-f]*'),extraction_coverage TEXT NOT NULL CHECK(extraction_coverage IN ('indexed-complete','indexed-partial','skipped-no-extractable-text','unreadable','quarantined')),outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),exact_filename TEXT,exact_stem TEXT,exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),exact_title TEXT,aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK((outcome = 'indexed' AND extraction_coverage IN ('indexed-complete','indexed-partial')) OR (outcome = 'skipped' AND extraction_coverage IN ('skipped-no-extractable-text','unreadable','quarantined'))),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
+  { type: "table", name: "sources", table: "sources", sql: "CREATE TABLE sources (source_key TEXT PRIMARY KEY,vault_id TEXT NOT NULL,path TEXT NOT NULL,source_format TEXT NOT NULL CHECK(source_format IN ('markdown','text','base','canvas','docx','pdf','excalidraw','excel','html')),format_identity TEXT NOT NULL CHECK(length(format_identity) = 64 AND format_identity NOT GLOB '*[^0-9a-f]*'),extraction_coverage TEXT NOT NULL CHECK(extraction_coverage IN ('indexed-complete','indexed-partial','skipped-no-extractable-text','unreadable','quarantined')),outcome TEXT NOT NULL CHECK(outcome IN ('indexed','skipped')),content_hash TEXT,byte_length INTEGER NOT NULL CHECK(byte_length >= 0),mtime_nanos TEXT NOT NULL CHECK(mtime_nanos <> '' AND mtime_nanos NOT GLOB '*[^0-9]*'),retrieval_json TEXT NOT NULL CHECK(json_valid(retrieval_json)),exact_filename TEXT,exact_stem TEXT,exact_aliases_json TEXT NOT NULL CHECK(json_valid(exact_aliases_json)),exact_title TEXT,aliases_text TEXT NOT NULL,title_text TEXT NOT NULL,tags_text TEXT NOT NULL,chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),property_count INTEGER NOT NULL CHECK(property_count >= 0),property_scalar_count INTEGER NOT NULL CHECK(property_scalar_count >= 0),CHECK(outcome = 'skipped' OR content_hash IS NOT NULL),CHECK((outcome = 'indexed' AND extraction_coverage IN ('indexed-complete','indexed-partial')) OR (outcome = 'skipped' AND extraction_coverage IN ('skipped-no-extractable-text','unreadable','quarantined'))),CHECK(outcome = 'indexed' OR (chunk_count = 0 AND property_count = 0 AND property_scalar_count = 0)),UNIQUE(vault_id, path))" },
   { type: "view", name: "chunk_search", table: "chunk_search", sql: "CREATE VIEW chunk_search AS SELECT c.rowid AS rowid,json_extract(s.retrieval_json,'$.filename') AS filename,json_extract(s.retrieval_json,'$.stem') AS stem,s.aliases_text AS aliases,s.title_text AS title,c.heading_text AS heading_text,s.path AS path_text,s.tags_text AS tags,c.content AS content FROM chunks c JOIN sources s ON s.source_key = c.source_key" },
 ];
-
-const LEGACY_CACHE_SCHEMA_VERSION = 10;
-const LEGACY_EXPECTED_SCHEMA_OBJECTS: readonly ExpectedSchemaObject[] =
-  EXPECTED_SCHEMA_OBJECTS.map((object) => object.name === "sources"
-    ? {
-        ...object,
-        sql: object.sql?.replace(",\'excel\'", "") ?? null,
-      }
-    : object);
 
 const SOURCE_COLUMNS_SQL = `
 source_key, vault_id, path, source_format, format_identity, extraction_coverage, outcome,
@@ -764,7 +755,7 @@ export class Fts5GenerationIndex {
     limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
     existing?: ExistingGenerationState,
     private readonly vaultId = "active",
-    private readonly sourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
+    private readonly sourcePolicyHash = "629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8",
   ) {
     this.limits = resolveIndexLimits(limits);
     this.effectiveDatabaseByteLimit = configureDatabasePageLimit(db, this.limits);
@@ -1037,7 +1028,9 @@ export class Fts5GenerationIndex {
                 change.preparation.kind === "indexed"
                   ? change.preparation.retrieval.aliases.join(" ")
                   : "",
-                change.preparation.kind === "indexed" ? legacyTitle(change.frontmatter) : "",
+                change.preparation.kind === "indexed"
+                  ? sourceTitle(change.preparation, change.frontmatter)
+                  : "",
                 change.preparation.kind === "indexed" ? legacyTags(change.frontmatter) : "",
                 change.rows.length,
                 propertyCount,
@@ -1660,7 +1653,7 @@ export function openFts5Generation(
   sqlite: SQLiteApi,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   vaultId = "active",
-  sourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
+  sourcePolicyHash = "629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8",
 ): Fts5GenerationIndex {
   return new Fts5GenerationIndex(
     new sqlite.oo1.DB(":memory:", "c"),
@@ -1682,7 +1675,7 @@ export function openRestoredFts5Generation(
   chunkingVersion: number,
   limits: Fts5IndexLimits = DEFAULT_INDEX_LIMITS,
   expectedVaultId = "active",
-  expectedSourcePolicyHash = "c414b56f31d22f8e1fbe69f5074bc8862337d1c8ee6065b6ad0da441b4f63860",
+  expectedSourcePolicyHash = "629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8",
   enabledSourceFormats: readonly SourceFormat[] = SOURCE_FORMATS,
 ): Fts5GenerationIndex {
   let handle: BlockVfsHandle | null = null;
@@ -1693,13 +1686,10 @@ export function openRestoredFts5Generation(
     // page cache so those reads do not grow the shared WASM heap with image size.
     db.exec("PRAGMA cache_size = -512");
     const storedVersion = Number(db.selectValue("PRAGMA user_version"));
-    if (storedVersion === LEGACY_CACHE_SCHEMA_VERSION) {
-      migrateLegacyCacheSchema(db);
-    } else if (storedVersion !== CACHE_SCHEMA_VERSION) {
+    if (storedVersion !== CACHE_SCHEMA_VERSION) {
       throw new CacheVersionMismatchError();
-    } else {
-      validateExactSchema(db);
     }
+    validateExactSchema(db);
     installVocabularyTable(db);
     const resolvedLimits = resolveIndexLimits(limits);
     const effectiveDatabaseByteLimit = configureDatabasePageLimit(db, resolvedLimits);
@@ -1896,51 +1886,6 @@ function validateExactSchema(
   }
 }
 
-function migrateLegacyCacheSchema(db: SQLiteDatabase): void {
-  validateExactSchema(db, LEGACY_EXPECTED_SCHEMA_OBJECTS);
-  const sourcesSql = EXPECTED_SCHEMA_OBJECTS.find((object) => object.name === "sources")?.sql;
-  const chunkSearchSql = EXPECTED_SCHEMA_OBJECTS.find((object) => object.name === "chunk_search")?.sql;
-  if (sourcesSql === null || sourcesSql === undefined
-    || chunkSearchSql === null || chunkSearchSql === undefined) {
-    throw new Error("compiled cache schema is incomplete");
-  }
-
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.exec("DROP VIEW chunk_search");
-    db.exec("ALTER TABLE sources RENAME TO sources_v10");
-    db.exec(sourcesSql);
-    db.exec(
-      `INSERT INTO sources (${SOURCE_COLUMNS_SQL}) `
-        + `SELECT ${SOURCE_COLUMNS_SQL} FROM sources_v10`,
-    );
-    db.exec("DROP TABLE sources_v10");
-    db.exec(
-      "CREATE INDEX sources_exact_filename ON sources(exact_filename, source_key) "
-        + "WHERE exact_filename IS NOT NULL",
-    );
-    db.exec(
-      "CREATE INDEX sources_exact_stem ON sources(exact_stem, source_key) "
-        + "WHERE exact_stem IS NOT NULL",
-    );
-    db.exec(
-      "CREATE INDEX sources_exact_title ON sources(exact_title, source_key) "
-        + "WHERE exact_title IS NOT NULL",
-    );
-    db.exec(chunkSearchSql);
-    db.exec(`PRAGMA user_version = ${requireSchemaVersionLiteral(CACHE_SCHEMA_VERSION)}`);
-    db.exec("COMMIT");
-  } catch {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      // Preserve the migration failure, not a secondary rollback failure.
-    }
-    throw new CacheImageInvalidError("cache image schema migration failed");
-  }
-  validateExactSchema(db);
-}
-
 function normalizeSchemaSql(value: string | null): string | null {
   return value === null ? null : value.replace(/\s+/gu, " ").replace(/\s*([(),=])\s*/gu, "$1").trim();
 }
@@ -1996,9 +1941,13 @@ function readRestoredInventory(
   const legacyBySource = readCanonicalLegacyProjections(db, sourcesByKey);
   for (const source of sourcesByKey.values()) {
     const legacy = legacyBySource.get(source.source_key) ?? emptyLegacyProjection();
+    const titleProjectionIsValid = source.source_format === "html"
+      ? legacy.title === ""
+        && (source.title_text.length !== 0 || source.exact_title === null)
+      : source.title_text === legacy.title;
     if (JSON.stringify(source.retrieval) !== JSON.stringify(expectedRetrieval(source.path, legacy))
       || source.aliases_text !== legacy.aliases.join(" ")
-      || source.title_text !== legacy.title
+      || !titleProjectionIsValid
       || source.tags_text !== legacy.tags) {
       throw new CacheImageInvalidError("cache source retrieval metadata is invalid");
     }
@@ -2056,12 +2005,13 @@ function validateRestoredChunk(
   }
   const source = sourcesByKey.get(row.source_key);
   const legacy = legacyBySource.get(row.source_key) ?? emptyLegacyProjection();
+  const displayTitle = source?.source_format === "html" ? source.title_text : legacy.title;
   if (!source
     || source.outcome !== "indexed"
     || row.vault_id !== source.vault_id
     || row.path !== source.path
     || !locatorMatchesFormat(locator, source.source_format)
-    || row.frontmatter_json !== displayFrontmatterJsonFromTitle(legacy.title)) {
+    || row.frontmatter_json !== displayFrontmatterJsonFromTitle(displayTitle, source.source_format)) {
     throw new CacheImageInvalidError("cache chunk identity does not match its source");
   }
 }
@@ -2624,15 +2574,15 @@ function projectChunk(
     || chunk.content_hash !== preparation.content_hash) {
     throw new Error("prepared chunk does not match its source");
   }
-  if (preparation.format === "excel") {
-    const encodedRole = excelContentRoleFromChunkId(chunk.chunk_id);
+  if (isRoleTaggedFormat(preparation.format)) {
+    const encodedRole = taggedContentRoleFromChunkId(chunk.chunk_id);
     const declaredRole = prepared.content_role ?? "primary";
     if (encodedRole === null || encodedRole !== declaredRole) {
-      throw new Error("prepared Excel chunk has an invalid content-role tag");
+      throw new Error("prepared role-tagged chunk has an invalid content-role tag");
     }
   }
   const aliases = preparation.retrieval.aliases.join(" ");
-  const title = legacyTitle(sourceFrontmatter);
+  const title = sourceTitle(preparation, sourceFrontmatter);
   const tags = legacyTags(sourceFrontmatter);
   const fields = [
     preparation.retrieval.filename,
@@ -2651,7 +2601,7 @@ function projectChunk(
       chunk.path,
       JSON.stringify(chunk.heading_path),
       prepared.source_locator === undefined ? null : JSON.stringify(prepared.source_locator),
-      displayFrontmatterJson(sourceFrontmatter),
+      displayFrontmatterJsonFromTitle(title, preparation.format),
       prepared.heading_text,
       prepared.normalized_heading,
       chunk.content,
@@ -2664,7 +2614,11 @@ function projectChunk(
   };
 }
 
-function excelContentRoleFromChunkId(
+function isRoleTaggedFormat(format: SourceFormat): boolean {
+  return format === "excel" || format === "html";
+}
+
+function taggedContentRoleFromChunkId(
   chunkId: string,
 ): "primary" | "supporting" | "latent" | null {
   if (!/^[0-9a-f]{64}$/u.test(chunkId)) return null;
@@ -2925,6 +2879,13 @@ function canonicalJson(value: PreparedPropertyValue): string {
   return `{"type":${JSON.stringify(value.type)},"value":${JSON.stringify(value.value)}}`;
 }
 
+function sourceTitle(
+  preparation: SourcePreparation,
+  authoredFrontmatter: PreparedFrontmatter,
+): string {
+  return preparation.canonical_frontmatter?.title ?? legacyTitle(authoredFrontmatter);
+}
+
 function legacyTitle(frontmatter: PreparedFrontmatter): string {
   return legacyScalarString(frontmatter.title) ?? "";
 }
@@ -2966,12 +2927,12 @@ function legacyScalarString(value: PreparedPropertyValue | undefined): string | 
   return value.value;
 }
 
-function displayFrontmatterJson(frontmatter: PreparedFrontmatter): string {
-  return displayFrontmatterJsonFromTitle(legacyTitle(frontmatter));
-}
 
-function displayFrontmatterJsonFromTitle(title: string): string {
-  return title.length <= 1_024 ? JSON.stringify(title.length > 0 ? { title } : {}) : "{}";
+function displayFrontmatterJsonFromTitle(title: string, format: SourceFormat): string {
+  const withinDisplayLimit = format === "html"
+    ? new TextEncoder().encode(title).byteLength <= 1_048_576
+    : title.length <= 1_024;
+  return withinDisplayLimit ? JSON.stringify(title.length > 0 ? { title } : {}) : "{}";
 }
 
 /**
@@ -3329,6 +3290,12 @@ function isBoundedNormalizedExact(value: unknown): value is string {
     && new TextEncoder().encode(value).byteLength <= 4_096;
 }
 
+function isBoundedUtf8String(value: unknown, maximumBytes: number, allowEmpty = false): value is string {
+  return typeof value === "string"
+    && (allowEmpty || value.length > 0)
+    && new TextEncoder().encode(value).byteLength <= maximumBytes;
+}
+
 function parseHeadingPathJson(value: unknown): string[] | null {
   if (typeof value !== "string") return null;
   let parsed: unknown;
@@ -3368,7 +3335,7 @@ function parseDisplayFrontmatterJson(value: unknown): WorkerFrontmatter | null {
   const record = parsed as Record<string, unknown>;
   if (Object.keys(record).some((key) => key !== "title")) return null;
   if (record.title !== undefined
-    && (typeof record.title !== "string" || record.title.length > 1_024)) {
+    && !isBoundedUtf8String(record.title, 1_048_576, true)) {
     return null;
   }
   return record as WorkerFrontmatter;

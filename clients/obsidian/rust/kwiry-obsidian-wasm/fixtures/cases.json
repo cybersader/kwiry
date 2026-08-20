@@ -25,6 +25,26 @@
   },
   {
     "operation": "prepare_source",
+    "name": "html-source",
+    "request": {
+      "abi_version": 3,
+      "operation": "prepare_source",
+      "descriptor": {
+        "vault_id": "active-vault",
+        "path": "site/index.html",
+        "format": "html",
+        "byte_length": 186,
+        "mtime": 11,
+        "mtime_nanos": "11000000001"
+      }
+    },
+    "content": {
+      "encoding": "utf8",
+      "text": "<html><head><title>Canonical Portal</title><meta name=\"description\" content=\"Latent summary\"></head><body><h1>Reader heading</h1><p>Primary body</p><nav>Hidden chrome</nav></body></html>"
+    }
+  },
+  {
+    "operation": "prepare_source",
     "name": "invalid-source-envelope",
     "request": {
       "abi_version": 3,

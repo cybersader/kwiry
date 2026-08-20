@@ -30,7 +30,7 @@ import type {
 } from "./protocol";
 
 const ABI_VERSION = 3;
-const SOURCE_SCHEMA_VERSION = 9;
+const SOURCE_SCHEMA_VERSION = 10;
 const QUERY_SCHEMA_VERSION = 7;
 const MATCH_PLAN_SCHEMA_VERSION = 6;
 
@@ -38,7 +38,7 @@ export interface RustIdentity {
   abi_version: 3;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
-  source_preparation_schema_version: 9;
+  source_preparation_schema_version: 10;
   /**
    * The extraction-policy identity the adapter compiles. Mirrored in
    * `source-formats.ts` because the host needs it before the adapter exists;
@@ -89,6 +89,15 @@ export interface PreparedFrontmatter {
   [name: string]: PreparedPropertyValue;
 }
 
+/** Compact canonical metadata that is not an authored property bag. */
+export interface CanonicalFrontmatter {
+  title?: string;
+  description?: string;
+  tags?: string[];
+  status?: string;
+  date?: string;
+}
+
 export type ContentRole = "primary" | "supporting" | "latent";
 
 export interface PreparedChunk {
@@ -113,7 +122,7 @@ export interface PreparedChunk {
 }
 
 export interface SourcePreparation {
-  schema_version: 9;
+  schema_version: 10;
   source_key: string;
   vault_id: string;
   room?: string;
@@ -138,6 +147,7 @@ export interface SourcePreparation {
     title: string | null;
   };
   frontmatter: PreparedFrontmatter;
+  canonical_frontmatter?: CanonicalFrontmatter;
   chunks: PreparedChunk[];
   kind: "indexed" | "skipped";
   warning?: string;

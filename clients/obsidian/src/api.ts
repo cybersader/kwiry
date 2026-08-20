@@ -288,7 +288,7 @@ function parseSearchHit(value: unknown): SearchHit {
     heading_path: value.heading_path,
     score: value.score,
     excerpt: value.excerpt,
-    frontmatter: parseFrontmatter(value.frontmatter),
+    frontmatter: parseFrontmatter(value.frontmatter, value.format),
   };
 }
 
@@ -300,7 +300,8 @@ function isSourceFormat(value: unknown): value is SourceFormat {
     || value === "docx"
     || value === "pdf"
     || value === "excalidraw"
-    || value === "excel";
+    || value === "excel"
+    || value === "html";
 }
 
 function isExtractionCoverage(value: unknown): value is ExtractionCoverage {
@@ -346,7 +347,7 @@ function locatorMatchesFormat(locator: SourceLocator | null, format: SourceForma
   }
 }
 
-function parseFrontmatter(value: unknown): Frontmatter {
+function parseFrontmatter(value: unknown, format: SourceFormat): Frontmatter {
   if (!isRecord(value)) {
     throw invalidResponse("Daemon returned invalid frontmatter.");
   }
@@ -354,7 +355,13 @@ function parseFrontmatter(value: unknown): Frontmatter {
   if (Object.keys(value).some((key) => !allowed.includes(key))) {
     throw invalidResponse("Daemon returned invalid frontmatter.");
   }
-  for (const key of ["title", "description", "status", "date"] as const) {
+  if (value.title !== undefined
+    && !(format === "html"
+      ? isBoundedUtf8String(value.title, 1_048_576, true)
+      : isBoundedString(value.title, MAX_SHORT_TEXT_CHARACTERS, true))) {
+    throw invalidResponse("Daemon returned invalid frontmatter.");
+  }
+  for (const key of ["description", "status", "date"] as const) {
     const field = value[key];
     if (field !== undefined && !isBoundedString(field, MAX_SHORT_TEXT_CHARACTERS, true)) {
       throw invalidResponse("Daemon returned invalid frontmatter.");
@@ -540,6 +547,12 @@ function isBoundedString(value: unknown, maximum: number, allowEmpty = false): v
   return typeof value === "string"
     && value.length <= maximum
     && (allowEmpty || value.length > 0);
+}
+
+function isBoundedUtf8String(value: unknown, maximumBytes: number, allowEmpty = false): value is string {
+  return typeof value === "string"
+    && (allowEmpty || value.length > 0)
+    && new TextEncoder().encode(value).byteLength <= maximumBytes;
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

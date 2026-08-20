@@ -77,6 +77,8 @@ async function createSourceFixture() {
     ...[
       "Apache-2.0.txt",
       "Emscripten-LICENSE.txt",
+      "html-entity-provenance.json",
+      "markup5ever-entities-MIT.txt",
       "Rust-DEPENDENCY-LICENSES.md",
     ].map((name) => copyFile(
       resolve(repositoryRoot, "licenses", name),
@@ -267,9 +269,11 @@ describe("production release package", () => {
       "SHA256SUMS",
       "THIRD_PARTY_NOTICES.md",
       "gate5.evidence.json",
+      "html-entity-provenance.json",
       "kwiry-search.zip",
       "main.js",
       "manifest.json",
+      "markup5ever-entities-MIT.txt",
       "styles.css",
     ]);
     expect((await readdir(packageRoot)).sort()).toEqual(packaged.files);
@@ -278,6 +282,8 @@ describe("production release package", () => {
     for (const name of [
       "Apache-2.0.txt",
       "Emscripten-LICENSE.txt",
+      "html-entity-provenance.json",
+      "markup5ever-entities-MIT.txt",
       "Rust-DEPENDENCY-LICENSES.md",
     ]) {
       expect(notices).toContain(`[\`${name}\`](${name})`);
@@ -312,8 +318,10 @@ describe("production release package", () => {
       "LICENSE",
       "Rust-DEPENDENCY-LICENSES.md",
       "THIRD_PARTY_NOTICES.md",
+      "html-entity-provenance.json",
       "main.js",
       "manifest.json",
+      "markup5ever-entities-MIT.txt",
       "styles.css",
     ]);
     // Every entry must be the package's own file, so nothing reaches a user

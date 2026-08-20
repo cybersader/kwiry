@@ -89,17 +89,16 @@ pub use connection::{
 pub use error::{Error, Result};
 #[cfg(feature = "portable")]
 pub use extract::{
-    ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionCoverage, ExtractionError,
-    ExtractionNotice, SourceLocator,
+    ContentRole, ExtractedSection, ExtractedSource, ExtractionCompleteness, ExtractionCoverage,
+    ExtractionError, ExtractionNotice, SourceLocator,
 };
 #[cfg(feature = "portable")]
-pub use format::{FormatSpec, SourceFormat, format_specs};
+pub use format::{FormatPolicy, FormatSpec, SourceFormat, format_specs};
 #[cfg(feature = "portable")]
 pub use formats::extract_source;
 #[cfg(feature = "internal-docx-extractor")]
 pub use formats::{
-    ContentRole, DocxCandidate, DocxProperties, ExtractionScope, SemanticSection,
-    extract_candidate_outcome,
+    DocxCandidate, DocxProperties, ExtractionScope, SemanticSection, extract_candidate_outcome,
 };
 // Feature-gated direct SpreadsheetML candidate API. Normal Excel extraction is
 // admitted through the portable SourceFormat registry and dispatcher.

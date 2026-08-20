@@ -31,6 +31,7 @@ export const SOURCE_PREPARATION_DEFECT_FIELDS = [
   "mtime_nanos",
   "retrieval",
   "normalized_exact",
+  "canonical_frontmatter",
   "chunks_shape",
   "chunks_contents",
   "chunks_source_correlation",
@@ -53,7 +54,7 @@ export type SourcePreparationDefectField = typeof SOURCE_PREPARATION_DEFECT_FIEL
  * `PRAGMA user_version`). Any schema edit must bump it: an image whose value
  * differs from the running build's is not restorable.
  */
-export const CACHE_SCHEMA_VERSION = 11;
+export const CACHE_SCHEMA_VERSION = 12;
 export const INITIAL_BUILD_CHECKPOINT_RECORD_VERSION = 1 as const;
 export const INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION = 1 as const;
 export const INITIAL_BUILD_CHECKPOINT_RECORD_KIND = "initial_build_checkpoint" as const;
@@ -79,6 +80,7 @@ export const SOURCE_FORMATS = [
   "pdf",
   "excalidraw",
   "excel",
+  "html",
 ] as const;
 export type SourceFormat = typeof SOURCE_FORMATS[number];
 
@@ -408,7 +410,7 @@ export type WorkerRequest =
 
 export interface InitializeResult {
   rustAbiVersion: 3;
-  sourceSchemaVersion: 9;
+  sourceSchemaVersion: 10;
   querySchemaVersion: 7;
   matchPlanSchemaVersion: 6;
   sqliteVersion: "3.53.0";
@@ -1060,7 +1062,7 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
       "fts5Enabled",
     ])
     && value.rustAbiVersion === 3
-    && value.sourceSchemaVersion === 9
+    && value.sourceSchemaVersion === 10
     && value.querySchemaVersion === 7
     && value.matchPlanSchemaVersion === 6
     && value.sqliteVersion === "3.53.0"
@@ -1364,13 +1366,16 @@ function isSearchHit(value: unknown): value is WorkerSearchHit {
     // Excerpts are hydrated only after final hit selection from the stored
     // canonical chunk content. They never participate in MATCH, BM25, or ordering.
     && isBoundedString(value.excerpt, 16_384, true)
-    && isFrontmatter(value.frontmatter);
+    && isFrontmatter(value.frontmatter, value.format);
 }
 
-function isFrontmatter(value: unknown): value is WorkerFrontmatter {
+function isFrontmatter(value: unknown, format: unknown): value is WorkerFrontmatter {
   return isRecord(value)
     && Object.keys(value).every((key) => key === "title")
-    && (value.title === undefined || isBoundedString(value.title, 1_024, true));
+    && (value.title === undefined
+      || (format === "html"
+        ? isBoundedUtf8String(value.title, 1_048_576, true)
+        : isBoundedString(value.title, 1_024, true)));
 }
 
 export function isSourceFormat(value: unknown): value is SourceFormat {
@@ -1556,6 +1561,12 @@ export function isBoundedString(value: unknown, maximum: number, allowEmpty = fa
   return typeof value === "string"
     && value.length <= maximum
     && (allowEmpty || value.length > 0);
+}
+
+function isBoundedUtf8String(value: unknown, maximumBytes: number, allowEmpty = false): value is string {
+  return typeof value === "string"
+    && (allowEmpty || value.length > 0)
+    && new TextEncoder().encode(value).byteLength <= maximumBytes;
 }
 
 function isNormalizedVaultRelativePath(value: unknown): value is string {
