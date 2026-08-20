@@ -421,6 +421,34 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
         },
       });
     }
+    listener?.({
+      identity: {
+        profile: "in_plugin",
+        instanceId: "in_plugin-1",
+        label: "In-plugin",
+        boundVaultId: "active-vault",
+      },
+      capabilities: {
+        supportedModes: ["lexical"],
+        sourceScope: "active_vault",
+        manualRebuild: true,
+      },
+      phase: "degraded",
+      liveness: "alive",
+      searchable: true,
+      generation: "generation-1",
+      dirty: true,
+      rebuilding: false,
+      documents: 999,
+      chunks: 2_000,
+      unreadableSources: 1,
+      unreadableSourceCauses: [{ cause: "source_read_rejected", count: 1 }],
+      issue: {
+        code: "sources_unreadable",
+        safeMessage: privateText,
+        recoverable: true,
+      },
+    });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -444,8 +472,15 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       && record.details.operation === "status"
       && record.details.activity === "read");
 
+    const unreadableCauseRecords = structured.records.filter((record: {
+      code: string;
+      details: { failureCause?: string; sourcesFailed?: number };
+    }) => record.code === "index.lifecycle"
+      && record.details.failureCause === "source_read_rejected");
     expect(progressRecords.length).toBeGreaterThanOrEqual(20);
     expect(progressRecords.length).toBeLessThanOrEqual(21);
+    expect(unreadableCauseRecords).toHaveLength(1);
+    expect(unreadableCauseRecords[0]?.details.sourcesFailed).toBe(1);
     expect(report).not.toContain(privateText);
     expect(progressRecords.every((record: { details: Record<string, unknown> }) =>
       !("path" in record.details))).toBe(true);

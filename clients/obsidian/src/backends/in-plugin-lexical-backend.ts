@@ -459,6 +459,9 @@ function mapControllerStatus(
     sourceFormatCounts: status.sourceFormatCounts,
     quarantinedSources: status.quarantinedSources,
     unreadableSources: status.unreadableSources,
+    ...((status.unreadableSourceCauses?.length ?? 0) === 0
+      ? {}
+      : { unreadableSourceCauses: status.unreadableSourceCauses!.map((entry) => ({ ...entry })) }),
     quarantineValidatorFields: status.quarantineValidatorFields,
     dirty: status.dirty,
     rebuilding: status.rebuilding,

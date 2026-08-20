@@ -63,14 +63,14 @@ describe("presentQueryStatus", () => {
       name: "one settled result with an exhausted window",
       facts: {
         phase: "settled",
-        resultCount: 1,
+        returnedSectionCount: 1,
         displayedSourceCount: 1,
         omittedObservedSourceCount: 0,
         candidateWindow: window("exhausted"),
       },
       expected: {
         state: "results",
-        text: "1 result returned — search window complete.",
+        text: "1 returned section — 1 source shown; search window complete.",
         busy: false,
       },
     },
@@ -78,14 +78,14 @@ describe("presentQueryStatus", () => {
       name: "settled results with observed extra candidates",
       facts: {
         phase: "settled",
-        resultCount: 7,
+        returnedSectionCount: 7,
         displayedSourceCount: 3,
         omittedObservedSourceCount: 0,
         candidateWindow: window("more_available"),
       },
       expected: {
         state: "results",
-        text: "7 results returned — more candidates are available.",
+        text: "7 returned sections — 3 sources shown; more candidates are available.",
         busy: false,
       },
     },
@@ -93,14 +93,14 @@ describe("presentQueryStatus", () => {
       name: "settled results at the candidate limit",
       facts: {
         phase: "settled",
-        resultCount: 20,
+        returnedSectionCount: 20,
         displayedSourceCount: 4,
         omittedObservedSourceCount: 0,
         candidateWindow: window("candidate_limit_reached"),
       },
       expected: {
         state: "results",
-        text: "20 results returned — candidate window limit reached.",
+        text: "20 returned sections — 4 sources shown; candidate window limit reached.",
         busy: false,
       },
     },
@@ -108,14 +108,14 @@ describe("presentQueryStatus", () => {
       name: "settled results with unknown completeness",
       facts: {
         phase: "settled",
-        resultCount: 20,
+        returnedSectionCount: 20,
         displayedSourceCount: 4,
         omittedObservedSourceCount: 0,
         candidateWindow: window("unknown"),
       },
       expected: {
         state: "results",
-        text: "20 results returned — window completeness is unknown.",
+        text: "20 returned sections — 4 sources shown; window completeness is unknown.",
         busy: false,
       },
     },
@@ -123,7 +123,7 @@ describe("presentQueryStatus", () => {
       name: "no match with a complete window",
       facts: {
         phase: "settled",
-        resultCount: 0,
+        returnedSectionCount: 0,
         displayedSourceCount: 0,
         omittedObservedSourceCount: 0,
         candidateWindow: window("exhausted"),
@@ -138,7 +138,7 @@ describe("presentQueryStatus", () => {
       name: "no match at a bounded candidate limit",
       facts: {
         phase: "settled",
-        resultCount: 0,
+        returnedSectionCount: 0,
         displayedSourceCount: 0,
         omittedObservedSourceCount: 0,
         candidateWindow: window("candidate_limit_reached"),
@@ -182,13 +182,13 @@ describe("presentQueryStatus", () => {
   it("discloses local source-row truncation separately from candidate completeness", () => {
     expect(presentQueryStatus({
       phase: "settled",
-      resultCount: 2,
+      returnedSectionCount: 2,
       displayedSourceCount: 1,
       omittedObservedSourceCount: 1,
       candidateWindow: window("exhausted"),
     })).toEqual({
       state: "results",
-      text: "2 results returned — 1 source shown; 1 observed source omitted by the source-row limit; search window complete.",
+      text: "2 returned sections — 1 source shown; 1 observed source omitted by the source-row limit; search window complete.",
       busy: false,
     });
   });
@@ -196,7 +196,7 @@ describe("presentQueryStatus", () => {
   it("never promotes candidate counts into result or corpus totals", () => {
     const facts: QueryStatusFacts = {
       phase: "settled",
-      resultCount: 3,
+      returnedSectionCount: 3,
       displayedSourceCount: 2,
       omittedObservedSourceCount: 0,
       candidateWindow: {
@@ -207,7 +207,7 @@ describe("presentQueryStatus", () => {
     };
 
     expect(presentQueryStatus(facts).text).toBe(
-      "3 results returned — candidate window limit reached.",
+      "3 returned sections — 2 sources shown; candidate window limit reached.",
     );
   });
 });

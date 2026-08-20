@@ -684,7 +684,7 @@ describe("KwirySearchModal status rail", () => {
 
     backend.searches[0]!.resolve(execution(1, "exhausted"));
     await expect(pending).resolves.toHaveLength(1);
-    expect(query.textContent).toBe("1 result returned — search window complete.");
+    expect(query.textContent).toBe("1 returned section — 1 source shown; search window complete.");
     expect(query.classList.contains("is-animation-ready")).toBe(false);
     expect(results.attributes.get("aria-busy")).toBe("false");
     modal.onClose();
@@ -707,7 +707,7 @@ describe("KwirySearchModal status rail", () => {
     backend.searches[0]!.resolve(execution(1, state));
     await expect(pending).resolves.toHaveLength(1);
 
-    expect(query.textContent).toBe(`1 result returned — ${disclosure}`);
+    expect(query.textContent).toBe(`1 returned section — 1 source shown; ${disclosure}`);
     modal.onClose();
   });
 
@@ -720,11 +720,34 @@ describe("KwirySearchModal status rail", () => {
     const newer = modal.getSuggestions("newer");
     backend.searches[1]!.resolve(execution(7, "more_available"));
     await expect(newer).resolves.toHaveLength(7);
-    expect(query.textContent).toBe("7 results returned — more candidates are available.");
+    expect(query.textContent).toBe("7 returned sections — 7 sources shown; more candidates are available.");
 
     backend.searches[0]!.resolve(execution(0, "exhausted"));
     await expect(older).resolves.toEqual([]);
-    expect(query.textContent).toBe("7 results returned — more candidates are available.");
+    expect(query.textContent).toBe("7 returned sections — 7 sources shown; more candidates are available.");
+    modal.onClose();
+  });
+
+  it("reports returned sections separately from grouped source rows", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+    const { query } = modalElements(modal);
+
+    const pending = modal.getSuggestions("grouped counts");
+    backend.searches[0]!.resolve(executionWithHits([
+      hit("a-1", "A.md", ["One"]),
+      hit("b-1", "B.md"),
+      hit("a-2", "A.md", ["Two"]),
+      hit("c-1", "C.md"),
+      hit("d-1", "D.md"),
+      hit("e-1", "E.md", ["One"]),
+      hit("e-2", "E.md", ["Two"]),
+    ]));
+
+    await expect(pending).resolves.toHaveLength(5);
+    expect(query.textContent).toBe(
+      "7 returned sections — 5 sources shown; search window complete.",
+    );
     modal.onClose();
   });
 
@@ -960,6 +983,24 @@ describe("KwirySearchModal grouped interactions", () => {
     modal.onClose();
   });
 
+  it("uses the HTML filename as the source-row title instead of the document title", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+
+    await settleInputSearch(modal, backend, "portal", executionWithHits([
+      hit("html", "site/index.html", ["Overview"], {
+        format: "html",
+        frontmatter: { title: "Canonical Portal" },
+      }),
+    ]));
+
+    const sourceRow = renderedRows(modal)[0]!;
+    expect(findByClass(sourceRow, "kwiry-result-title")?.textContent).toBe("index.html");
+    expect(findByClass(sourceRow, "kwiry-result-meta")?.textContent)
+      .toBe("site/index.html › Overview");
+    modal.onClose();
+  });
+
   it("discloses source-row truncation independently from an exhausted candidate window", async () => {
     const backend = new DeferredBackend();
     const modal = createModal(backend, status(), plugin({ resultLimit: 1 }));
@@ -973,7 +1014,7 @@ describe("KwirySearchModal grouped interactions", () => {
     expect(modal.suggestions).toHaveLength(1);
     expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe("A.md › A");
     expect(query.textContent).toBe(
-      "2 results returned — 1 source shown; 1 observed source omitted by the source-row limit; search window complete.",
+      "2 returned sections — 1 source shown; 1 observed source omitted by the source-row limit; search window complete.",
     );
     modal.onClose();
   });

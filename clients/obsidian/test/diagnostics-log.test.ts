@@ -271,6 +271,25 @@ describe("DiagnosticLog", () => {
     } as never, () => undefined)).rejects.toThrow("Invalid diagnostic details");
   });
 
+  it("accepts only fixed source-local read causes", async () => {
+    const log = new DiagnosticLog(4, clock(0), clock(0, 1));
+    await capture(log, "warn", "index.lifecycle", {
+      code: "vault_read_failed",
+      failureCause: "source_read_rejected",
+      sourcesFailed: 1,
+    });
+
+    expect(log.snapshot().entries[0]?.details).toMatchObject({
+      code: "vault_read_failed",
+      failureCause: "source_read_rejected",
+      sourcesFailed: 1,
+    });
+    await expect(log.capture("warn", "index.lifecycle", {
+      failureCause: "private read exception text",
+    } as never, () => undefined)).rejects.toThrow("Invalid diagnostic details");
+    expect(JSON.stringify(log.snapshot())).not.toContain("private read exception text");
+  });
+
   it("renders both a pasteable summary and the structured JSON records", async () => {
     const log = new DiagnosticLog(4, clock(0), clock(0, 1_000));
     await log.capture("error", "failure.caught", {

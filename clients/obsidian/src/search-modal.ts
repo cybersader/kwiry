@@ -222,10 +222,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       switch (outcome.kind) {
         case "results": {
           const grouped = groupSearchExecution(outcome.execution, sourceLimit);
-          const resultCount = grouped.facts.returnedSectionCount;
+          const returnedSectionCount = grouped.facts.returnedSectionCount;
           if (!this.completeQueryStatus(epoch, {
             phase: "settled",
-            resultCount,
+            returnedSectionCount,
             displayedSourceCount: grouped.facts.displayedSourceCount,
             omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
             candidateWindow: grouped.facts.candidateWindow,
@@ -250,7 +250,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
             grouped,
           };
           this.resultView = { kind: "sources" };
-          event.set({ outcome: "succeeded", resultCount });
+          event.set({ outcome: "succeeded", resultCount: returnedSectionCount });
           return this.sourceResults(grouped);
         }
         case "error":
@@ -298,7 +298,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     const heading = el.createDiv({ cls: "kwiry-result-heading" });
     const title = heading.createDiv({ cls: "kwiry-result-title" });
     if (result.kind === "source") {
-      title.setText(hit.frontmatter.title ?? basename(hit.path));
+      title.setText(sourceRowTitle(hit));
     } else {
       title.setText(sectionResultTitle(hit, result.returnedSectionIndex));
     }
@@ -777,6 +777,11 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       button.setAttribute("aria-pressed", String(option.selected));
     }
   }
+}
+
+function sourceRowTitle(hit: BackendSearchHit): string {
+  const filename = basename(hit.path);
+  return hit.format === "html" ? filename : hit.frontmatter.title ?? filename;
 }
 
 function basename(path: string): string {

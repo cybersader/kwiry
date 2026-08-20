@@ -58,6 +58,9 @@ export type DiagnosticTextValue =
   | "apply"
   | "source_read_timeout"
   | "source_read_capacity"
+  | "source_inspect_failed"
+  | "source_read_rejected"
+  | "source_snapshot_unstable"
   | "worker_timeout"
   | "snapshot"
   | "replay"
@@ -348,7 +351,8 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "unavailable", "disposed", "unknown", "alive", "unreachable", "terminated", "lexical",
   "semantic", "hybrid", "configuration", "transport", "protocol", "index", "query",
   "lifecycle", "inventory", "read", "prepare", "apply", "source_read_timeout",
-  "source_read_capacity", "worker_timeout", "snapshot", "replay", "rebuild", "create",
+  "source_read_capacity", "source_inspect_failed", "source_read_rejected",
+  "source_snapshot_unstable", "worker_timeout", "snapshot", "replay", "rebuild", "create",
   "modify", "delete", "rename",
   "activate", "dispose", "initialize", "status", "search", "open", "load", "restore",
   "export", "discard", "build", "reconcile", "update", "poll", "save", "copy", "clear",

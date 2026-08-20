@@ -23,6 +23,14 @@ export type BackendIndexStallCategory =
   | "source_read_timeout"
   | "source_read_capacity"
   | "worker_timeout";
+export type UnreadableVaultSourceCause =
+  | "source_inspect_failed"
+  | "source_read_rejected"
+  | "source_snapshot_unstable";
+export interface UnreadableVaultSourceCauseCount {
+  cause: UnreadableVaultSourceCause;
+  count: number;
+}
 export type BackendRebuildResult = "scheduled" | "already_building";
 
 export interface BackendIdentity {
@@ -56,6 +64,7 @@ export interface BackendStatus {
   sourceFormatCounts?: SourceFormatCounts;
   quarantinedSources?: number;
   unreadableSources?: number;
+  unreadableSourceCauses?: readonly UnreadableVaultSourceCauseCount[];
   quarantineValidatorFields?: readonly SourcePreparationDefectField[];
   dirty: boolean;
   rebuilding: boolean;
