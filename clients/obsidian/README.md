@@ -49,7 +49,7 @@ BRAT installs `main.js`, `manifest.json`, and `styles.css` from each versioned G
 1. In **Settings → Kwiry Search**, choose **In-plugin · Lexical** or **Daemon** explicitly.
 2. For In-plugin · Lexical, configure any desired supported extractors. HTML is enabled by default; PDF and Excel are disabled by default. No daemon or token is required.
 3. For Daemon, start `kwiry serve`, configure the literal-loopback URL and token path, and map the current vault for local open actions.
-4. Run **Kwiry Search: Search notes**. `Tab` cycles only modes supported by the selected profile; `Enter` opens, and `Ctrl+Enter` opens in a new tab.
+4. Run **Kwiry Search: Search notes**. `Tab` cycles only modes supported by the selected profile. `Enter` opens a grouped source generally; `Ctrl+L` toggles between Sources and that source's already returned sections, where `Enter` opens the exact selected heading, view, or PDF page. `Ctrl+H` remains a compatibility return to Sources, and `Ctrl+Enter` opens the selected target in a new tab.
 
 In-plugin · Lexical builds, restores, and reconciles the current vault locally. Daemon results may include registered trees outside the current vault; those results remain searchable but show a factual notice instead of opening locally.
 

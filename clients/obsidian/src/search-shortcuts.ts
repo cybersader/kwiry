@@ -13,7 +13,7 @@ export type SearchShortcutAction =
   | "insert-section-link"
   | "move-down"
   | "move-up"
-  | "drill-source"
+  | "toggle-result-level"
   | "back-to-sources"
   | "cycle-mode";
 
@@ -27,6 +27,7 @@ export interface SearchShortcutBinding {
   readonly command: string;
   readonly purpose: string;
   readonly register: boolean;
+  readonly instruction?: boolean;
 }
 
 export interface SearchShortcutEvent {
@@ -107,9 +108,9 @@ export const SEARCH_SHORTCUT_BINDINGS: readonly SearchShortcutBinding[] = [
   {
     modifiers: ["Ctrl"],
     key: "l",
-    action: "drill-source",
+    action: "toggle-result-level",
     command: "ctrl L",
-    purpose: "show returned sections",
+    purpose: "toggle sources / returned sections",
     register: true,
   },
   {
@@ -119,6 +120,7 @@ export const SEARCH_SHORTCUT_BINDINGS: readonly SearchShortcutBinding[] = [
     command: "ctrl H",
     purpose: "return to sources",
     register: true,
+    instruction: false,
   },
   {
     modifiers: [],

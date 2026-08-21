@@ -8,6 +8,17 @@ import { describe, expect, it } from "vitest";
 const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
 describe("search status rail CSS", () => {
+  it("uses one compact wrapping context bar without the former duplicate rows", () => {
+    const context = rule(".kwiry-context-bar");
+    expect(context).toContain("display: flex");
+    expect(context).toContain("flex-wrap: wrap");
+    expect(context).toContain("justify-content: space-between");
+    expect(context).toContain("min-width: 0");
+    expect(rule(".kwiry-result-level")).toContain("flex-wrap: wrap");
+    expect(styles).not.toContain(".kwiry-profile-label");
+    expect(styles).not.toContain(".kwiry-mode-control");
+  });
+
   it("reserves two status rows instead of changing layout height", () => {
     const rail = rule(".kwiry-status-rail");
     expect(rail).toContain("display: grid");
