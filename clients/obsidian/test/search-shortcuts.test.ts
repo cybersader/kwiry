@@ -59,7 +59,7 @@ function expectedAction(
   }
   if (key.toLowerCase() === "l") {
     return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
-      ? "drill-source"
+      ? "toggle-result-level"
       : null;
   }
   if (key.toLowerCase() === "h") {
@@ -140,9 +140,9 @@ describe("SEARCH_SHORTCUT_BINDINGS", () => {
       {
         modifiers: ["Ctrl"],
         key: "l",
-        action: "drill-source",
+        action: "toggle-result-level",
         command: "ctrl L",
-        purpose: "show returned sections",
+        purpose: "toggle sources / returned sections",
         register: true,
       },
       {
@@ -152,6 +152,7 @@ describe("SEARCH_SHORTCUT_BINDINGS", () => {
         command: "ctrl H",
         purpose: "return to sources",
         register: true,
+        instruction: false,
       },
       {
         modifiers: [],

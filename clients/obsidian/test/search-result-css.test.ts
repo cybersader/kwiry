@@ -28,6 +28,25 @@ describe("search result format-chip CSS", () => {
     expect(chip).not.toContain("interactive-accent");
     expect(styles).not.toMatch(/\.kwiry-result-format\[data-format/gu);
   });
+
+  it("keeps details compact and lets highlighted matches lead a quieter excerpt", () => {
+    const details = rule(".kwiry-result-details");
+    expect(details).toContain("display: flex");
+    expect(details).toContain("flex-wrap: wrap");
+    expect(details).toContain("color: var(--text-muted)");
+    expect(details).toContain("font-variant-numeric: tabular-nums");
+
+    const meta = rule(".kwiry-result-meta");
+    expect(meta).toContain("min-width: 0");
+    expect(meta).toContain("text-overflow: ellipsis");
+
+    expect(rule(".kwiry-result-context")).toContain("color: var(--text-muted)");
+    expect(rule(".kwiry-result-excerpt")).toContain("color: var(--text-muted)");
+    const mark = rule(".kwiry-result-excerpt mark");
+    expect(mark).toContain("background-color: var(--text-highlight-bg)");
+    expect(mark).toContain("color: var(--text-normal)");
+    expect(styles).not.toMatch(/\.kwiry-(?:source|section)-result[^}]*background/gu);
+  });
 });
 
 function rule(selector: string): string {

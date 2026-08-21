@@ -4,6 +4,8 @@
 import type { BackendIdentity, BackendSearchHit } from "./backend";
 import { pathMatchesFormat } from "./vault-path";
 
+export type OpenNavigationIntent = "source" | "section";
+
 export interface OpenTarget {
   path: string;
   subpath?: string;
@@ -38,7 +40,9 @@ export type OpenResultDecision =
 
 export function openTargetForHit(
   hit: Pick<BackendSearchHit, "path" | "format" | "locator" | "heading_path">,
+  intent: OpenNavigationIntent,
 ): OpenTarget {
+  if (intent === "source") return { path: hit.path };
   if (hit.format === "markdown") {
     const heading = hit.heading_path.at(-1);
     return heading ? { path: hit.path, subpath: `#${heading}` } : { path: hit.path };
@@ -46,10 +50,9 @@ export function openTargetForHit(
   if (hit.format === "base" && hit.locator?.kind === "base_view") {
     return { path: hit.path, subpath: `#${hit.locator.view}` };
   }
-  // A PDF has no headings, so the page locator is the only route back to where
-  // a match was found. Grouped search needs no special case: a source row is
-  // opened from its representative hit and a drilled row from its own hit, so
-  // each already arrives here carrying the page it means.
+  // A PDF has no headings, so an explicitly selected section uses its page
+  // locator. Source-level navigation returned above intentionally opens the file
+  // generally rather than inheriting a representative match's page.
   if (hit.format === "pdf" && hit.locator?.kind === "pdf_page") {
     return {
       path: hit.path,
@@ -84,6 +87,7 @@ export function validateOpenResult(
   hit: BackendSearchHit,
   activeBackend: BackendIdentity,
   daemonCurrentVaultId: string,
+  intent: OpenNavigationIntent,
 ): OpenResultDecision {
   if (
     hit.origin.profile !== activeBackend.profile
@@ -131,7 +135,7 @@ export function validateOpenResult(
     };
   }
 
-  return { ok: true, ...openTargetForHit(hit) };
+  return { ok: true, ...openTargetForHit(hit, intent) };
 }
 
 export {

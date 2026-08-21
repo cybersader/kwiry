@@ -690,6 +690,58 @@ describe("KwirySearchModal status rail", () => {
     modal.onClose();
   });
 
+  it("renders one compact active backend/mode context without a singleton mode button", () => {
+    const inPluginModal = createModal(new DeferredBackend());
+    expect(findByClass(inPluginModal.contentEl, "kwiry-result-level-name")?.textContent).toBe("Sources");
+    expect(findByClass(inPluginModal.contentEl, "kwiry-backend-state")?.textContent)
+      .toBe("In-plugin");
+    expect(findByClass(inPluginModal.contentEl, "kwiry-mode-static")?.textContent)
+      .toBe(" · Lexical");
+    expect(findByClass(inPluginModal.contentEl, "kwiry-mode-segments")).toBeNull();
+    expect(findByClass(inPluginModal.contentEl, "kwiry-profile-label")).toBeNull();
+    expect(findByClass(inPluginModal.contentEl, "kwiry-mode-control")).toBeNull();
+    inPluginModal.onClose();
+
+    const daemonIdentity: BackendIdentity = {
+      profile: "daemon",
+      instanceId: "daemon-1",
+      label: "Daemon",
+      boundVaultId: "notes",
+    };
+    const daemonStatus = status({
+      identity: daemonIdentity,
+      capabilities: {
+        supportedModes: ["lexical", "semantic", "hybrid"],
+        sourceScope: "registered_trees",
+        manualRebuild: false,
+      },
+    });
+    const daemonModal = createModal(
+      new DeferredBackend(daemonIdentity),
+      daemonStatus,
+      plugin({ activeBackend: daemonIdentity }),
+    );
+    const segments = findByClass(daemonModal.contentEl, "kwiry-mode-segments");
+    expect(findByClass(daemonModal.contentEl, "kwiry-backend-state")?.textContent).toBe("Daemon");
+    expect(segments?.attributes.get("role")).toBe("group");
+    expect(segments?.attributes.get("aria-label")).toBe("Requested search mode");
+    expect(segments?.children.map((child) => child.textContent)).toEqual([
+      "Lexical",
+      "Semantic",
+      "Hybrid",
+    ]);
+    daemonModal.onClose();
+
+    const unavailableModal = createModal(
+      new DeferredBackend(daemonIdentity),
+      { ...daemonStatus, phase: "unavailable", liveness: "unreachable", searchable: false },
+      plugin({ activeBackend: daemonIdentity }),
+    );
+    expect(findByClass(unavailableModal.contentEl, "kwiry-backend-state")?.textContent)
+      .toBe("Daemon unavailable");
+    unavailableModal.onClose();
+  });
+
   it.each([
     { state: "exhausted", disclosure: "search window complete." },
     { state: "more_available", disclosure: "more candidates are available." },
@@ -971,9 +1023,9 @@ describe("KwirySearchModal grouped interactions", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]?.classList.contains("kwiry-source-result")).toBe(true);
     expect(findByClass(rows[0]!, "kwiry-result-title")?.textContent).toBe("Title Folder/A.md");
-    expect(findByClass(rows[0]!, "kwiry-result-meta")?.textContent).toBe(
-      "Folder/A.md › Highest ranked",
-    );
+    expect(findByClass(rows[0]!, "kwiry-result-meta")?.textContent).toBe("Folder/A.md");
+    expect(findByClass(rows[0]!, "kwiry-result-details")?.children.map((child) => child.textContent))
+      .toEqual(["Folder/A.md", "2 returned sections"]);
     expect(findByClass(rows[0]!, "kwiry-result-context")?.textContent).toBe(
       "2 returned sections",
     );
@@ -996,8 +1048,7 @@ describe("KwirySearchModal grouped interactions", () => {
 
     const sourceRow = renderedRows(modal)[0]!;
     expect(findByClass(sourceRow, "kwiry-result-title")?.textContent).toBe("index.html");
-    expect(findByClass(sourceRow, "kwiry-result-meta")?.textContent)
-      .toBe("site/index.html › Overview");
+    expect(findByClass(sourceRow, "kwiry-result-meta")?.textContent).toBe("site/index.html");
     modal.onClose();
   });
 
@@ -1012,7 +1063,7 @@ describe("KwirySearchModal grouped interactions", () => {
     ], "exhausted"));
 
     expect(modal.suggestions).toHaveLength(1);
-    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe("A.md › A");
+    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe("A.md");
     expect(query.textContent).toBe(
       "2 returned sections — 1 source shown; 1 observed source omitted by the source-row limit; search window complete.",
     );
@@ -1087,6 +1138,9 @@ describe("KwirySearchModal grouped interactions", () => {
     ], "more_available"));
     const settledText = query.textContent;
     const settledMutations = query.textSetCount;
+    expect(findByClass(modal.contentEl, "kwiry-result-level-name")?.textContent).toBe("Sources");
+    expect(findByClass(modal.contentEl, "kwiry-result-level-hint")?.textContent)
+      .toBe("Ctrl+L show returned sections");
 
     modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
     expect(modal.activeIndex).toBe(1);
@@ -1105,6 +1159,14 @@ describe("KwirySearchModal grouped interactions", () => {
     ]);
     expect(renderedRows(modal).every((row) =>
       row.classList.contains("kwiry-section-result"))).toBe(true);
+    expect(findByClass(renderedRows(modal)[1]!, "kwiry-result-meta")?.textContent)
+      .toBe("B.md › Second");
+    expect(findByClass(renderedRows(modal)[1]!, "kwiry-result-context")?.textContent)
+      .toBe("Title B.md · returned section 2 of 3");
+    expect(findByClass(modal.contentEl, "kwiry-result-level-name")?.textContent)
+      .toBe("Sources › Sections in Title B.md");
+    expect(findByClass(modal.contentEl, "kwiry-result-level-hint")?.textContent)
+      .toBe("Ctrl+L return to sources");
 
     modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
     modal.triggerScope(["Ctrl"], "j", keyboard("j", { ctrlKey: true }));
@@ -1113,15 +1175,25 @@ describe("KwirySearchModal grouped interactions", () => {
     modal.triggerScope(["Ctrl"], "k", keyboard("k", { ctrlKey: true }));
     expect(modal.activeIndex).toBe(1);
 
-    modal.triggerScope(["Ctrl"], "h", keyboard("h", { ctrlKey: true }));
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
     await modal.flushSuggestions();
     await vi.advanceTimersByTimeAsync(0);
     expect(backend.requests).toHaveLength(1);
     expect(modal.suggestions).toHaveLength(2);
     expect(modal.activeIndex).toBe(1);
     expect(modal.inputEl.focusCount).toBe(1);
+    expect(findByClass(modal.contentEl, "kwiry-result-level-name")?.textContent).toBe("Sources");
     expect(query.textContent).toBe(settledText);
     expect(query.textSetCount).toBe(settledMutations);
+
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    modal.triggerScope(["Ctrl"], "h", keyboard("h", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backend.requests).toHaveLength(1);
+    expect(modal.suggestions).toHaveLength(2);
+    expect(modal.activeIndex).toBe(1);
     modal.onClose();
   });
 
@@ -1362,7 +1434,7 @@ describe("KwirySearchModal grouped interactions", () => {
     expect(backend.requests).toHaveLength(2);
     expect(modal.suggestions).toHaveLength(1);
     expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
-      "B.md › B1",
+      "B.md",
     );
     modal.onClose();
   });
@@ -1383,7 +1455,7 @@ describe("KwirySearchModal grouped interactions", () => {
     await modal.flushSuggestions();
     expect(modal.suggestions).toHaveLength(1);
     expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
-      "New.md › New 1",
+      "New.md",
     );
 
     backend.searches[0]!.resolve(executionWithHits(
@@ -1395,7 +1467,7 @@ describe("KwirySearchModal grouped interactions", () => {
     await Promise.resolve();
     expect(modal.suggestions).toHaveLength(1);
     expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
-      "New.md › New 1",
+      "New.md",
     );
     modal.selectSuggestion(modal.suggestions[0]!, keyboard("Enter"));
     await Promise.resolve();
@@ -1447,9 +1519,8 @@ describe("KwirySearchModal grouped interactions", () => {
       exactSubpath: undefined,
     },
     {
-      // The heading paths below are ignored for a PDF: only the page locator
-      // decides where each row opens, so the source row lands on the
-      // representative's page and the drilled row on its own.
+      // The source row opens the PDF generally. Only the explicitly selected
+      // drilled row uses its page locator.
       format: "pdf",
       path: "A.pdf",
       representativeLocator: { kind: "pdf_page" as const, page: 4 },
@@ -1457,12 +1528,11 @@ describe("KwirySearchModal grouped interactions", () => {
       representativeSubpath: "#page=4",
       exactSubpath: "#page=19",
     },
-  ] as const)("opens representative and drilled exact $format hits correctly", async ({
+  ] as const)("opens general sources and drilled exact $format hits correctly", async ({
     format,
     path,
     representativeLocator,
     exactLocator,
-    representativeSubpath,
     exactSubpath,
   }) => {
     for (const view of ["source", "section"] as const) {
@@ -1492,9 +1562,9 @@ describe("KwirySearchModal grouped interactions", () => {
       expect(pluginHarness.openFile).toHaveBeenCalledWith(
         expect.any(FakeTFile),
         {
-          eState: (view === "source" ? representativeSubpath : exactSubpath) === undefined
+          eState: view === "source" || exactSubpath === undefined
             ? undefined
-            : { subpath: view === "source" ? representativeSubpath : exactSubpath },
+            : { subpath: exactSubpath },
         },
       );
       await vi.advanceTimersByTimeAsync(0);
@@ -1512,6 +1582,8 @@ describe("KwirySearchModal grouped interactions", () => {
       await settleInputSearch(modal, backend, "page open", executionWithHits([
         hit("page-31", "A.pdf", [], { format: "pdf", locator: { kind: "pdf_page", page: 31 } }),
       ]));
+      modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+      await modal.flushSuggestions();
 
       modal.selectSuggestion(modal.suggestions[0], keyboard("Enter"));
 
@@ -1536,6 +1608,8 @@ describe("KwirySearchModal grouped interactions", () => {
     await settleInputSearch(modal, backend, "page open", executionWithHits([
       hit("page-31", "A.pdf", [], { format: "pdf", locator: { kind: "pdf_page", page: 31 } }),
     ]));
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
 
     modal.selectSuggestion(modal.suggestions[0], keyboard("Enter"));
 
@@ -1599,7 +1673,7 @@ describe("KwirySearchModal grouped interactions", () => {
     { name: "new tab", modifiers: ["Mod"], key: "Enter", placement: "tab", background: false },
     { name: "new split", modifiers: ["Mod", "Alt"], key: "Enter", placement: "split", background: false },
     { name: "background tab", modifiers: ["Mod"], key: "o", placement: "tab", background: true },
-  ] as const)("routes representative and exact hits for $name", async ({
+  ] as const)("routes general source and exact section targets for $name", async ({
     modifiers,
     key,
     placement,
@@ -1632,7 +1706,7 @@ describe("KwirySearchModal grouped interactions", () => {
       expect(pluginHarness.getLeaf).toHaveBeenCalledWith(placement);
       expect(pluginHarness.openFile).toHaveBeenCalledWith(
         expect.any(FakeTFile),
-        { eState: { subpath: view === "source" ? "#Representative" : "#Exact" } },
+        { eState: view === "source" ? undefined : { subpath: "#Exact" } },
       );
       expect(modal.activeIndex).toBe(view === "source" ? 0 : 1);
       expect(modal.closed).toBe(!background);
@@ -1749,7 +1823,7 @@ describe("KwirySearchModal grouped interactions", () => {
     expect(modal.closed).toBe(false);
     expect(backgroundHarness.openFile).toHaveBeenCalledWith(
       expect.any(FakeTFile),
-      { eState: { subpath: "#B" } },
+      { eState: undefined },
     );
     modal.onClose();
 
@@ -1772,7 +1846,7 @@ describe("KwirySearchModal grouped interactions", () => {
       } as MouseEvent);
       expect(mouseHarness.openFile).toHaveBeenCalledWith(
         expect.any(FakeTFile),
-        { eState: { subpath: view === "source" ? "#Representative" : "#Exact" } },
+        { eState: view === "source" ? undefined : { subpath: "#Exact" } },
       );
       mouseModal.onClose();
     }

@@ -262,8 +262,9 @@ describe("groupSearchExecution", () => {
     expect(grouped.groups).toHaveLength(1);
     const group = grouped.groups[0]!;
     expect(group.source.path).toBe("papers/report.pdf");
-    // The representative is the highest-ranked hit, so opening the source row
-    // lands on the best-matching page rather than page one.
+    // The representative remains the highest-ranked preview hit. Navigation
+    // intent is decided later: source rows open generally and drilled rows use
+    // their exact page locators.
     expect(group.representative).toBe(page19);
     expect(group.sections).toEqual([page19, page4]);
     expect(group.sections.map((section) => section.locator)).toEqual([

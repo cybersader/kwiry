@@ -42,18 +42,30 @@ function hit(overrides: Partial<BackendSearchHit> = {}): BackendSearchHit {
   };
 }
 
+function validateSectionResult(
+  result: BackendSearchHit,
+  activeBackend: BackendIdentity,
+  daemonCurrentVaultId: string,
+) {
+  return validateOpenResult(result, activeBackend, daemonCurrentVaultId, "section");
+}
+
+function sectionTargetForHit(result: BackendSearchHit) {
+  return openTargetForHit(result, "section");
+}
+
 describe("validateOpenResult", () => {
   it("opens a daemon result only through the explicit current-vault mapping", () => {
-    expect(validateOpenResult(hit(), DAEMON, "notes")).toEqual({
+    expect(validateSectionResult(hit(), DAEMON, "notes")).toEqual({
       ok: true,
       path: "folder/note.md",
       subpath: "#Heading",
     });
-    expect(validateOpenResult(hit(), DAEMON, "")).toMatchObject({
+    expect(validateSectionResult(hit(), DAEMON, "")).toMatchObject({
       ok: false,
       code: "vault_mapping_required",
     });
-    expect(validateOpenResult(hit({ vault_id: "other" }), DAEMON, "notes")).toMatchObject({
+    expect(validateSectionResult(hit({ vault_id: "other" }), DAEMON, "notes")).toMatchObject({
       ok: false,
       code: "vault_mismatch",
     });
@@ -61,7 +73,7 @@ describe("validateOpenResult", () => {
 
   it("rejects results from an inactive backend activation", () => {
     expect(
-      validateOpenResult(
+      validateSectionResult(
         hit({
           origin: {
             profile: "daemon",
@@ -90,11 +102,11 @@ describe("validateOpenResult", () => {
         vaultId: "active-vault",
       },
     });
-    expect(validateOpenResult(local, backend, "ignored").ok).toBe(true);
+    expect(validateSectionResult(local, backend, "ignored").ok).toBe(true);
   });
 
   it("carries a validated PDF page through to the open decision", () => {
-    expect(validateOpenResult(
+    expect(validateSectionResult(
       hit({
         path: "papers/report.pdf",
         format: "pdf",
@@ -107,26 +119,44 @@ describe("validateOpenResult", () => {
   });
 
   it("rejects safe paths whose extension disagrees with the declared format", () => {
-    expect(validateOpenResult(hit({ format: "base" }), DAEMON, "notes")).toMatchObject({
+    expect(validateSectionResult(hit({ format: "base" }), DAEMON, "notes")).toMatchObject({
       ok: false,
       code: "invalid_path",
     });
-    expect(validateOpenResult(hit({ path: "folder/note.pdf" }), DAEMON, "notes"))
+    expect(validateSectionResult(hit({ path: "folder/note.pdf" }), DAEMON, "notes"))
       .toMatchObject({ ok: false, code: "invalid_path" });
   });
 });
 
 describe("openTargetForHit", () => {
+  it.each([
+    ["markdown", "note.md", null, ["Deep"]],
+    ["base", "projects.base", { kind: "base_view" as const, view: "Active" }, ["Active"]],
+    ["pdf", "papers/report.pdf", { kind: "pdf_page" as const, page: 7 }, []],
+  ] as const)("opens a %s source generally without inheriting its representative locator", (
+    format,
+    path,
+    locator,
+    headingPath,
+  ) => {
+    expect(openTargetForHit(hit({
+      path,
+      format,
+      locator,
+      heading_path: [...headingPath],
+    }), "source")).toEqual({ path });
+  });
+
   it("opens Markdown at the deepest heading", () => {
-    expect(openTargetForHit(hit({ heading_path: ["Top", "Deep"] }))).toEqual({
+    expect(sectionTargetForHit(hit({ heading_path: ["Top", "Deep"] }))).toEqual({
       path: "folder/note.md",
       subpath: "#Deep",
     });
-    expect(openTargetForHit(hit({ heading_path: [] }))).toEqual({ path: "folder/note.md" });
+    expect(sectionTargetForHit(hit({ heading_path: [] }))).toEqual({ path: "folder/note.md" });
   });
 
   it("opens a Base view from its non-ranking locator", () => {
-    expect(openTargetForHit(hit({
+    expect(sectionTargetForHit(hit({
       path: "projects.base",
       format: "base",
       locator: { kind: "base_view", view: "Active" },
@@ -142,14 +172,14 @@ describe("openTargetForHit", () => {
     ["excel", "budget.xlsx"],
     ["html", "site/index.htm"],
   ] as const)("opens %s results file-only", (format, path) => {
-    expect(openTargetForHit(hit({ path, format, heading_path: ["Ignored"] }))).toEqual({ path });
+    expect(sectionTargetForHit(hit({ path, format, heading_path: ["Ignored"] }))).toEqual({ path });
   });
 
   it.each([
     ["budget.xlsx", { kind: "excel_cell" as const, sheet: "Budget", cell: "B4" }],
     ["macros.xlsm", { kind: "excel_cell" as const, sheet: "Inputs", cell: "C9" }],
   ])("keeps Excel locator metadata out of the open target for %s", (path, locator) => {
-    expect(openTargetForHit(hit({
+    expect(sectionTargetForHit(hit({
       path,
       format: "excel",
       locator,
@@ -158,7 +188,7 @@ describe("openTargetForHit", () => {
   });
 
   it("opens a PDF at the page its locator names", () => {
-    expect(openTargetForHit(hit({
+    expect(sectionTargetForHit(hit({
       path: "papers/report.pdf",
       format: "pdf",
       locator: { kind: "pdf_page", page: 7 },
@@ -167,7 +197,7 @@ describe("openTargetForHit", () => {
   });
 
   it("opens a PDF file-only when no page survived to the hit", () => {
-    expect(openTargetForHit(hit({
+    expect(sectionTargetForHit(hit({
       path: "papers/report.pdf",
       format: "pdf",
       locator: null,
@@ -178,13 +208,13 @@ describe("openTargetForHit", () => {
   it("never turns a foreign locator into a page jump", () => {
     // The wire validators reject these pairings before a hit reaches here; this
     // asserts the open path does not invent navigation if one ever slipped past.
-    expect(openTargetForHit(hit({
+    expect(sectionTargetForHit(hit({
       path: "papers/report.pdf",
       format: "pdf",
       locator: { kind: "base_view", view: "Active" },
       heading_path: [],
     }))).toEqual({ path: "papers/report.pdf" });
-    expect(openTargetForHit(hit({
+    expect(sectionTargetForHit(hit({
       path: "board.canvas",
       format: "canvas",
       locator: { kind: "pdf_page", page: 3 },
@@ -254,9 +284,8 @@ describe("openTargetForHit", () => {
       exactTarget: { path: "site/index.html" },
     },
     {
-      // Grouped search opens a source row from its representative hit and a
-      // drilled row from its own hit. A PDF has no heading path, so the page
-      // locator is the only thing that keeps those two apart.
+      // Representative and exact hits can both serve explicit section intents.
+      // A PDF has no heading path, so the page locator keeps those targets apart.
       format: "pdf",
       path: "papers/report.pdf",
       representative: { locator: { kind: "pdf_page" as const, page: 4 }, heading_path: [] },
@@ -272,13 +301,13 @@ describe("openTargetForHit", () => {
     representativeTarget,
     exactTarget,
   }) => {
-    expect(openTargetForHit(hit({
+    expect(sectionTargetForHit(hit({
       path,
       format,
       locator: representative.locator,
       heading_path: [...representative.heading_path],
     }))).toEqual(representativeTarget);
-    expect(openTargetForHit(hit({
+    expect(sectionTargetForHit(hit({
       path,
       format,
       locator: exact.locator,

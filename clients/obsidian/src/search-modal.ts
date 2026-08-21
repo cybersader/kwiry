@@ -23,7 +23,12 @@ import {
   type LinkInsertionKind,
   type LinkInsertionTarget,
 } from "./link-insertion";
-import { pageNavigationShortfall, validateOpenResult, type OpenTarget } from "./open-result";
+import {
+  pageNavigationShortfall,
+  validateOpenResult,
+  type OpenNavigationIntent,
+  type OpenTarget,
+} from "./open-result";
 import { supportsSectionLinks } from "./source-formats";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
 import {
@@ -124,6 +129,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private lastErrorCode: string | null = null;
   private queryStatusEl: HTMLElement | null = null;
   private indexStatusEl: HTMLElement | null = null;
+  private resultLevelEl: HTMLElement | null = null;
+  private resultLevelHintEl: HTMLElement | null = null;
+  private backendStateEl: HTMLElement | null = null;
   private progressTimer: number | null = null;
   private queryAnimationTimer: number | null = null;
   private progressFailureRecorded = false;
@@ -165,11 +173,12 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       : null;
     this.setPlaceholder("Search your notes with kwiry…");
     this.emptyStateText = "";
-    this.createProfileLabel(status);
-    this.createModeControl();
+    this.createContextBar(status);
     this.createStatusRail(status);
     this.setInstructions(
-      SEARCH_SHORTCUT_BINDINGS.map(({ command, purpose }) => ({ command, purpose })),
+      SEARCH_SHORTCUT_BINDINGS
+        .filter(({ instruction }) => instruction !== false)
+        .map(({ command, purpose }) => ({ command, purpose })),
     );
     for (const binding of SEARCH_SHORTCUT_BINDINGS) {
       if (!binding.register) continue;
@@ -250,6 +259,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
             grouped,
           };
           this.resultView = { kind: "sources" };
+          this.syncResultContext();
           event.set({ outcome: "succeeded", resultCount: returnedSectionCount });
           return this.sourceResults(grouped);
         }
@@ -307,10 +317,13 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       "aria-label",
       formatChip.accessibleLabel,
     );
-    const meta = el.createDiv({ cls: "kwiry-result-meta" });
-    const breadcrumb = hit.heading_path.length > 0 ? ` › ${hit.heading_path.join(" › ")}` : "";
+    const details = el.createDiv({ cls: "kwiry-result-details" });
+    const meta = details.createSpan({ cls: "kwiry-result-meta" });
+    const breadcrumb = result.kind === "section" && hit.heading_path.length > 0
+      ? ` › ${hit.heading_path.join(" › ")}`
+      : "";
     meta.setText(`${hit.path}${breadcrumb}`);
-    const context = el.createDiv({ cls: "kwiry-result-context" });
+    const context = details.createSpan({ cls: "kwiry-result-context" });
     if (result.kind === "source") {
       context.setText(returnedSectionCountText(result.group.observedSectionCount));
     } else {
@@ -333,8 +346,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
 
   selectSuggestion(result: ModalResult, event: MouseEvent | KeyboardEvent): void {
     const action = this.shortcutAction(event);
-    if (action === "drill-source") {
-      this.drillIntoSource(result);
+    if (action === "toggle-result-level") {
+      if (this.resultView.kind === "sections") this.returnToSources();
+      else this.drillIntoSource(result);
       return;
     }
     // SuggestModal closes before onChooseSuggestion. Background open is the one
@@ -399,6 +413,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     if (!group) return;
     this.clearRestorationTimer();
     this.resultView = { kind: "sections", source: group.source };
+    this.syncResultContext();
     this.refreshLocalProjection();
   }
 
@@ -408,6 +423,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     const generation = this.settledProjection.generation;
     const backendInstanceId = this.settledProjection.backendInstanceId;
     this.resultView = { kind: "sources" };
+    this.syncResultContext();
     this.refreshLocalProjection();
     this.restorationTimer = window.setTimeout(() => {
       this.restorationTimer = null;
@@ -477,6 +493,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     this.clearRestorationTimer();
     this.settledProjection = null;
     this.resultView = { kind: "sources" };
+    this.syncResultContext();
     this.localProjectionRefresh = false;
   }
 
@@ -495,7 +512,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   private openResult(result: ModalResult, placement: OpenPlacement): void {
-    const validated = this.validatedResult(result);
+    const validated = this.validatedResult(result, result.kind);
     if (!validated) return;
     const leaf = this.app.workspace.getLeaf(placement === "current" ? false : placement);
     void leaf.openFile(validated.file, {
@@ -515,7 +532,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
 
   private insertResultLink(result: ModalResult, kind: LinkInsertionKind): void {
     const hit = this.hitForResult(result);
-    const validated = this.validatedResult(result);
+    const validated = this.validatedResult(result, kind === "note" ? "source" : "section");
     if (!validated) return;
     // Note links reach any file in the vault, so only section links depend on
     // the format, and the backend registry decides which formats have headings
@@ -539,7 +556,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     if (!outcome.ok) new Notice(`Kwiry: ${outcome.safeMessage}`);
   }
 
-  private validatedResult(result: ModalResult): { file: TFile; target: OpenTarget } | null {
+  private validatedResult(
+    result: ModalResult,
+    intent: OpenNavigationIntent,
+  ): { file: TFile; target: OpenTarget } | null {
     const hit = this.hitForResult(result);
     if (!this.isCurrentProjectedResult(result)) {
       new Notice("Kwiry: these search results are out of date. Wait for the refreshed results.");
@@ -554,6 +574,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       hit,
       activeBackend,
       this.plugin.settings.daemonCurrentVaultId,
+      intent,
     );
     if (!decision.ok) {
       new Notice(`Kwiry: ${decision.safeMessage}`);
@@ -678,6 +699,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     const becameSearchable = !this.lastSearchable && status.searchable;
     this.lastSearchable = status.searchable;
     this.reconcileStatusGeneration(status);
+    this.syncBackendContext(status);
     const line = this.indexStatusEl;
     if (!line) return;
     const presentation = presentBackgroundIndex(status);
@@ -725,40 +747,72 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  private createProfileLabel(status: BackendStatus): void {
-    const profile = this.contentEl.createDiv({ cls: "kwiry-profile-label" });
-    const modes = status.capabilities.supportedModes
-      .map((mode) => mode[0]!.toUpperCase() + mode.slice(1))
-      .join(" / ");
-    profile.setText(`${status.identity.label} · ${modes}`);
-    this.resultContainerEl.before(profile);
-  }
+  private createContextBar(status: BackendStatus): void {
+    const bar = this.contentEl.createDiv({ cls: "kwiry-context-bar" });
+    const resultContext = bar.createDiv({ cls: "kwiry-result-level" });
+    resultContext.setAttribute("aria-label", "Search result level");
+    this.resultLevelEl = resultContext.createSpan({ cls: "kwiry-result-level-name" });
+    this.resultLevelHintEl = resultContext.createSpan({ cls: "kwiry-result-level-hint" });
 
-  private createModeControl(): void {
-    const control = this.contentEl.createDiv({ cls: "kwiry-mode-control" });
-    control.createSpan({ cls: "kwiry-mode-label", text: "Requested mode" });
-    const segments = control.createDiv({ cls: "kwiry-mode-segments" });
-    segments.setAttribute("role", "group");
-    segments.setAttribute("aria-label", "Requested search mode");
+    const backendContext = bar.createDiv({ cls: "kwiry-backend-mode" });
+    this.backendStateEl = backendContext.createSpan({ cls: "kwiry-backend-state" });
+    if (this.session.supportedModes.length === 1) {
+      backendContext.createSpan({
+        cls: "kwiry-mode-static",
+        text: ` · ${searchModeLabel(this.mode)}`,
+      });
+    } else {
+      backendContext.createSpan({ cls: "kwiry-backend-mode-separator", text: " · " });
+      const segments = backendContext.createDiv({ cls: "kwiry-mode-segments" });
+      segments.setAttribute("role", "group");
+      segments.setAttribute("aria-label", "Requested search mode");
 
-    for (const option of selectedSearchModeOptions(this.mode, this.session.supportedModes)) {
-      const button = segments.createEl("button", {
-        cls: "kwiry-mode-segment",
-        text: option.label,
-        attr: {
-          type: "button",
-          "aria-pressed": String(option.selected),
-        },
-      });
-      button.addEventListener("click", () => {
-        this.selectMode(option.mode);
-        this.inputEl.focus();
-      });
-      this.modeButtons.set(option.mode, button);
+      for (const option of selectedSearchModeOptions(this.mode, this.session.supportedModes)) {
+        const button = segments.createEl("button", {
+          cls: "kwiry-mode-segment",
+          text: option.label,
+          attr: {
+            type: "button",
+            "aria-pressed": String(option.selected),
+          },
+        });
+        button.addEventListener("click", () => {
+          this.selectMode(option.mode);
+          this.inputEl.focus();
+        });
+        this.modeButtons.set(option.mode, button);
+      }
     }
 
-    this.resultContainerEl.before(control);
+    this.resultContainerEl.before(bar);
+    this.syncResultContext();
+    this.syncBackendContext(status);
     this.syncModeControl();
+  }
+
+  private syncResultContext(): void {
+    const level = this.resultLevelEl;
+    const hint = this.resultLevelHintEl;
+    if (!level || !hint) return;
+    if (this.resultView.kind === "sources") {
+      level.setText("Sources");
+      hint.setText("Ctrl+L show returned sections");
+      return;
+    }
+    const group = this.settledProjection
+      ? findSourceGroup(this.settledProjection.grouped, this.resultView.source)
+      : undefined;
+    const sourceTitle = group
+      ? sourceRowTitle(group.representative)
+      : basename(this.resultView.source.path);
+    level.setText(`Sources › Sections in ${sourceTitle}`);
+    hint.setText("Ctrl+L return to sources");
+  }
+
+  private syncBackendContext(status: BackendStatus): void {
+    if (status.identity.instanceId !== this.backend.identity.instanceId) return;
+    const unavailable = status.phase === "unavailable" ? " unavailable" : "";
+    this.backendStateEl?.setText(`${status.identity.label}${unavailable}`);
   }
 
   private selectMode(mode: SearchMode): void {
@@ -788,6 +842,10 @@ function basename(path: string): string {
   const slash = path.lastIndexOf("/");
   const name = slash >= 0 ? path.slice(slash + 1) : path;
   return name.replace(/\.md$/u, "");
+}
+
+function searchModeLabel(mode: SearchMode): string {
+  return mode[0]!.toUpperCase() + mode.slice(1);
 }
 
 function returnedSectionCountText(count: number): string {
