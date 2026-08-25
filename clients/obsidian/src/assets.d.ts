@@ -54,6 +54,7 @@ declare module "virtual:kwiry-rust-wasm-bindings" {
   export function prepare_oversized_source(requestJson: string): string;
   export function prepare_query(requestJson: string): string;
   export function finalize_query(requestJson: string): string;
+  export function finalize_lexical_v2_rank(requestJson: string): string;
   export function prepare_typo_suggestion_probe(requestJson: string): string;
   export function finalize_typo_suggestion_probe(requestJson: string): string;
   export function prepare_d5c_preview(requestJson: string): string;

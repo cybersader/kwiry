@@ -128,12 +128,23 @@ export class DaemonBackend implements SearchBackend {
     }
 
     try {
-      const response = await this.makeClient().search(request);
+      const result = await this.makeClient().searchWithPolicy(request);
+      if (result.queryPolicy === null && hasLeadingFieldControl(request.q)) {
+        throw new KwiryBackendError(
+          "daemon_upgrade_required",
+          "daemon",
+          "query",
+          false,
+          "Field controls require a beta.27-compatible daemon.",
+        );
+      }
+      const response = result.response;
       this.requireActive();
       return {
         backend: this.identity,
         requestedMode: request.mode,
         effectiveMode: request.mode,
+        queryPolicy: result.queryPolicy,
         generation: status.generation,
         candidateWindow: {
           // The frozen daemon body exposes only positive continuation evidence.
@@ -204,6 +215,10 @@ export class DaemonBackend implements SearchBackend {
       },
     };
   }
+}
+
+function hasLeadingFieldControl(query: string): boolean {
+  return /^\s*(?:in:[^\s]+|>[^\s]+)/u.test(query);
 }
 
 function backendErrorFrom(error: unknown): KwiryBackendError {

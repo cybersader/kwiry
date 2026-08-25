@@ -119,8 +119,8 @@ if (byName["abi-identity"].abi_version !== 3
   || byName["abi-identity"].extraction_policy.pdf !== "portable"
   || byName["abi-identity"].extraction_policy.html !== "portable"
   || byName["abi-identity"].format_identity_schema_version !== 1
-  || byName["abi-identity"].lexical_query_plan_schema_version !== 7
-  || byName["abi-identity"].fts5_match_plan_schema_version !== 6
+  || byName["abi-identity"].lexical_query_plan_schema_version !== 8
+  || byName["abi-identity"].fts5_match_plan_schema_version !== 7
   // Link behaviour is declared by the backend registry, so the shipped
   // artifact must carry it: a client that decides for itself silently refuses
   // every format admitted later.
@@ -145,11 +145,14 @@ if (byName["abi-identity"].abi_version !== 3
   || byName["allowlisted-explicit-match"].result.execution_plan.stages[0].plan_id
     !== "lexical_explicit_v3"
   || byName["no-evidence-empty"].result.execution_plan.disposition !== "empty_no_evidence"
-  || byName["bounded-prefix"].result.execution_plan.stages.at(-1).plan_id !== "lexical_prefix_v3"
-  || byName["bounded-prefix"].result.execution_plan.stages.at(-3).plan_id
-    !== "lexical_prefix_metadata_v3"
-  || JSON.stringify(byName["prefix-before-partial"].result.execution_plan.stages
-    .map((stage) => stage.plan_id)) !== JSON.stringify([
+  || !byName["bounded-prefix"].result.execution_plan.stages.some(
+    (stage) => stage.plan_id === "lexical_prefix_v3",
+  )
+  || !byName["bounded-prefix"].result.execution_plan.stages.some(
+    (stage) => stage.plan_id === "lexical_prefix_metadata_v3",
+  )
+  || JSON.stringify([...new Set(byName["prefix-before-partial"].result.execution_plan.stages
+    .map((stage) => stage.plan_id))]) !== JSON.stringify([
     "lexical_exact_metadata_v3",
     "lexical_exact_phrase_v3",
     "lexical_prefix_metadata_v3",
@@ -157,12 +160,14 @@ if (byName["abi-identity"].abi_version !== 3
     "lexical_prefix_v3",
     "lexical_partial_coverage_v3",
   ])
-  // The metadata half is scoped to the fields a note is named by; the text
-  // half carries the identical expansion set over everything.
-  || byName["prefix-before-partial"].result.execution_plan.stages[2].match_value
-    !== "{filename stem aliases title} : (\"orchard\" AND (\"adoption\"))"
-  || byName["prefix-before-partial"].result.execution_plan.stages[4].match_value
-    !== "{filename stem aliases title heading_text tags content} : (\"orchard\" AND (\"adoption\"))"
+  // Lexical-v2 emits field-coherent lanes. The source-identity and body lanes
+  // must carry the same bounded expansion without collapsing into one SQL plan.
+  || !byName["prefix-before-partial"].result.execution_plan.stages.some((stage) =>
+    stage.plan_id === "lexical_prefix_metadata_v3"
+      && stage.match_value === "{filename stem} : (\"orchard\" AND (\"adoption\"))")
+  || !byName["prefix-before-partial"].result.execution_plan.stages.some((stage) =>
+    stage.plan_id === "lexical_prefix_v3"
+      && stage.match_value === "{content} : (\"orchard\" AND (\"adoption\"))")
   || byName["numeric-field-explicit"].result.plan.kind !== "explicit"
   || byName["natural-question"].result.plan.kind !== "ordinary"
   || byName["natural-parenthetical"].result.plan.kind !== "ordinary"

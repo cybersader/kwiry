@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 13 as const;
+export const WORKER_PROTOCOL_VERSION = 14 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -192,6 +192,7 @@ export type WorkerErrorCode =
   | "fts5_unavailable"
   | "source_rejected"
   | "explicit_query_unsupported"
+  | "invalid_field_control"
   | "invalid_query"
   | "invalid_query_plan"
   | "query_execution_failed"
@@ -411,8 +412,8 @@ export type WorkerRequest =
 export interface InitializeResult {
   rustAbiVersion: 3;
   sourceSchemaVersion: 10;
-  querySchemaVersion: 7;
-  matchPlanSchemaVersion: 6;
+  querySchemaVersion: 8;
+  matchPlanSchemaVersion: 7;
   sqliteVersion: "3.53.0";
   fts5Enabled: 1;
 }
@@ -488,7 +489,7 @@ export type CandidateWindowState = typeof CANDIDATE_WINDOW_STATES[number];
 
 /**
  * Closed evidence from the bounded in-plugin collector. `candidate_count` is the
- * number of candidate rows actually inspected, never a corpus/result total.
+ * number of unique authorized candidate identities retained for ranking, never a corpus/result total.
  */
 export interface WorkerCandidateWindow {
   state: CandidateWindowState;
@@ -496,10 +497,27 @@ export interface WorkerCandidateWindow {
   candidate_limit: 512;
 }
 
+export type WorkerQueryPublicField =
+  | "name"
+  | "filename"
+  | "title"
+  | "alias"
+  | "heading"
+  | "tag"
+  | "body";
+
+export interface WorkerQueryPolicy {
+  profile_id: "lexical-v1" | "lexical-v2";
+  query_text: string;
+  scope: WorkerQueryPublicField | null;
+  emphasis: WorkerQueryPublicField | null;
+}
+
 export interface SearchResult {
   generation: string;
   hits: WorkerSearchHit[];
   candidate_window: WorkerCandidateWindow;
+  query_policy: WorkerQueryPolicy;
 }
 
 export interface DisposeResult {
@@ -1063,8 +1081,8 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
     ])
     && value.rustAbiVersion === 3
     && value.sourceSchemaVersion === 10
-    && value.querySchemaVersion === 7
-    && value.matchPlanSchemaVersion === 6
+    && value.querySchemaVersion === 8
+    && value.matchPlanSchemaVersion === 7
     && value.sqliteVersion === "3.53.0"
     && value.fts5Enabled === 1;
 }
@@ -1315,17 +1333,42 @@ export function isStatusResult(value: unknown): value is StatusResult {
 
 export function isSearchResult(value: unknown): value is SearchResult {
   return isRecord(value)
-    && hasExactKeys(value, ["generation", "hits", "candidate_window"])
+    && hasExactKeys(value, ["generation", "hits", "candidate_window", "query_policy"])
     && isGeneration(value.generation)
     && Array.isArray(value.hits)
     && value.hits.length <= MAX_SEARCH_HITS
     && value.hits.every(isSearchHit)
     && isWorkerCandidateWindow(value.candidate_window)
+    && isWorkerQueryPolicy(value.query_policy)
     && value.candidate_window.candidate_count >= value.hits.length
-    && (value.candidate_window.state !== "candidate_limit_reached"
-      || value.candidate_window.candidate_count === value.candidate_window.candidate_limit)
     && (value.candidate_window.state !== "more_available"
       || value.candidate_window.candidate_count > value.hits.length);
+}
+
+function isWorkerQueryPolicy(value: unknown): value is WorkerQueryPolicy {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ["profile_id", "query_text", "scope", "emphasis"])
+    || (value.profile_id !== "lexical-v1" && value.profile_id !== "lexical-v2")
+    || !isBoundedString(value.query_text, MAX_QUERY_CHARACTERS)
+    || !isWorkerQueryPublicFieldOrNull(value.scope)
+    || !isWorkerQueryPublicFieldOrNull(value.emphasis)) {
+    return false;
+  }
+  return value.profile_id === "lexical-v2"
+    || (value.scope === null && value.emphasis === null);
+}
+
+function isWorkerQueryPublicFieldOrNull(
+  value: unknown,
+): value is WorkerQueryPublicField | null {
+  return value === null
+    || value === "name"
+    || value === "filename"
+    || value === "title"
+    || value === "alias"
+    || value === "heading"
+    || value === "tag"
+    || value === "body";
 }
 
 function isWorkerCandidateWindow(value: unknown): value is WorkerCandidateWindow {
@@ -1333,6 +1376,7 @@ function isWorkerCandidateWindow(value: unknown): value is WorkerCandidateWindow
     && hasExactKeys(value, ["state", "candidate_count", "candidate_limit"])
     && CANDIDATE_WINDOW_STATES.includes(value.state as CandidateWindowState)
     && isNonNegativeSafeInteger(value.candidate_count)
+    && (value.state !== "candidate_limit_reached" || value.candidate_count > 0)
     && value.candidate_limit === 512
     && value.candidate_count <= value.candidate_limit;
 }
@@ -1491,6 +1535,7 @@ export function isWorkerError(value: unknown): value is WorkerError {
     "fts5_unavailable",
     "source_rejected",
     "explicit_query_unsupported",
+    "invalid_field_control",
     "invalid_query",
     "invalid_query_plan",
     "query_execution_failed",

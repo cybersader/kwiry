@@ -19,6 +19,14 @@ describe("search status rail CSS", () => {
     expect(styles).not.toContain(".kwiry-mode-control");
   });
 
+  it("keeps field syntax in the context bar instead of adding a status row", () => {
+    const tools = rule(".kwiry-query-tools");
+    expect(tools).toContain("flex: 1 0 100%");
+    expect(rule(".kwiry-query-controls")).toContain("display: none");
+    expect(rule(".kwiry-query-controls.has-controls")).toContain("display: inline");
+    expect(rule(".kwiry-query-help")).toContain("background: transparent");
+  });
+
   it("reserves two status rows instead of changing layout height", () => {
     const rail = rule(".kwiry-status-rail");
     expect(rail).toContain("display: grid");

@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::lexical::{normalize_raw, technical_identifier_spans, technical_identifiers};
 
-pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 7;
+pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 8;
+pub const LEXICAL_V1_PROFILE_ID: &str = "lexical-v1";
+pub const LEXICAL_V2_PROFILE_ID: &str = "lexical-v2";
+pub const FIELD_CONTROLS_SCHEMA_VERSION: u32 = 1;
 pub const MAX_QUERY_BYTES: usize = 4_096;
 pub const MAX_QUERY_TERMS: usize = 128;
 pub const MAX_TERM_SUPPORT_PROBES: usize = 128;
@@ -89,6 +92,69 @@ pub enum QueryField {
     ContentIdentifiers,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryPublicField {
+    Name,
+    Filename,
+    Title,
+    Alias,
+    Heading,
+    Tag,
+    Body,
+}
+
+impl QueryPublicField {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Filename => "filename",
+            Self::Title => "title",
+            Self::Alias => "alias",
+            Self::Heading => "heading",
+            Self::Tag => "tag",
+            Self::Body => "body",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "name" => Some(Self::Name),
+            "filename" => Some(Self::Filename),
+            "title" => Some(Self::Title),
+            "alias" => Some(Self::Alias),
+            "heading" => Some(Self::Heading),
+            "tag" => Some(Self::Tag),
+            "body" => Some(Self::Body),
+            _ => None,
+        }
+    }
+
+    fn fields(self) -> &'static [QueryField] {
+        match self {
+            Self::Name => &[
+                QueryField::Filename,
+                QueryField::Stem,
+                QueryField::Aliases,
+                QueryField::Title,
+            ],
+            Self::Filename => &[QueryField::Filename, QueryField::Stem],
+            Self::Title => &[QueryField::Title],
+            Self::Alias => &[QueryField::Aliases],
+            Self::Heading => &[QueryField::Heading],
+            Self::Tag => &[QueryField::Tags],
+            Self::Body => &[QueryField::Content],
+        }
+    }
+
+    fn contains(self, field: Self) -> bool {
+        field
+            .fields()
+            .iter()
+            .all(|candidate| self.fields().contains(candidate))
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryFieldGroup {
@@ -135,6 +201,56 @@ impl QueryFieldGroups {
             phrase: searchable_text.clone(),
             prefix: searchable_text.clone(),
             prefix_metadata: searchable_text[..4].to_vec(),
+            searchable_text,
+        }
+    }
+
+    fn lexical_v2(scope: Option<QueryPublicField>) -> Self {
+        let searchable_text = scope.map_or_else(
+            || Self::lexical_v1().searchable_text,
+            |field| field.fields().to_vec(),
+        );
+        let metadata = searchable_text
+            .iter()
+            .copied()
+            .filter(|field| *field != QueryField::Content)
+            .collect::<Vec<_>>();
+        let prefix_metadata = searchable_text
+            .iter()
+            .copied()
+            .filter(|field| {
+                matches!(
+                    field,
+                    QueryField::Filename
+                        | QueryField::Stem
+                        | QueryField::Aliases
+                        | QueryField::Title
+                )
+            })
+            .collect::<Vec<_>>();
+        let exact = match scope {
+            None => Self::lexical_v1().exact,
+            Some(QueryPublicField::Name) => vec![
+                QueryField::Filename,
+                QueryField::Stem,
+                QueryField::Aliases,
+                QueryField::Title,
+            ],
+            Some(QueryPublicField::Filename) => {
+                vec![QueryField::Filename, QueryField::Stem]
+            }
+            Some(QueryPublicField::Title) => vec![QueryField::Title],
+            Some(QueryPublicField::Alias) => vec![QueryField::Aliases],
+            Some(QueryPublicField::Heading) => vec![QueryField::Heading],
+            Some(QueryPublicField::Tag) => vec![QueryField::Tags],
+            Some(QueryPublicField::Body) => vec![QueryField::ContentIdentifiers],
+        };
+        Self {
+            metadata,
+            exact,
+            phrase: searchable_text.clone(),
+            prefix: searchable_text.clone(),
+            prefix_metadata,
             searchable_text,
         }
     }
@@ -283,7 +399,14 @@ pub struct QueryMetadataProbe {
 #[serde(deny_unknown_fields)]
 pub struct LexicalQueryPlan {
     pub schema_version: u32,
+    pub profile_id: String,
+    pub field_controls_schema_version: u32,
     pub query: String,
+    pub query_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<QueryPublicField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<QueryPublicField>,
     pub kind: QueryPlanKind,
     pub match_operator: QueryMatchOperator,
     pub assistance: QueryAssistanceEligibility,
@@ -468,7 +591,7 @@ impl LexicalQueryPlan {
         // Stages fill the window in order, so this ordering is what makes the
         // precedence real rather than a scoring preference.
         let prefix_required = prefix_stage_required_indexes(&partial_indexes, &prefix_indexes);
-        if !prefix_indexes.is_empty() {
+        if !prefix_indexes.is_empty() && !self.field_groups.prefix_metadata.is_empty() {
             push_stage(
                 &mut self.evidence_stages,
                 QueryEvidenceStageKind::PrefixMetadata,
@@ -525,6 +648,95 @@ pub struct QueryPlanError {
     pub message: String,
 }
 
+fn metadata_fields_for_scope(scope: Option<QueryPublicField>) -> Vec<QueryMetadataField> {
+    let fields = scope.map_or_else(
+        || QueryFieldGroups::lexical_v1().metadata,
+        |field| field.fields().to_vec(),
+    );
+    fields
+        .into_iter()
+        .filter_map(|field| match field {
+            QueryField::Filename => Some(QueryMetadataField::Filename),
+            QueryField::Stem => Some(QueryMetadataField::Stem),
+            QueryField::Aliases => Some(QueryMetadataField::Aliases),
+            QueryField::Title => Some(QueryMetadataField::Title),
+            QueryField::Heading => Some(QueryMetadataField::Heading),
+            QueryField::Tags => Some(QueryMetadataField::Tags),
+            QueryField::Content | QueryField::ContentIdentifiers => None,
+        })
+        .collect()
+}
+
+struct ParsedFieldControls {
+    query_text: String,
+    scope: Option<QueryPublicField>,
+    emphasis: Option<QueryPublicField>,
+}
+
+fn parse_field_controls(query: &str) -> Result<ParsedFieldControls, QueryPlanError> {
+    let mut rest = query.trim_start();
+    let mut scope = None;
+    let mut emphasis = None;
+    let mut parsed_any = false;
+
+    loop {
+        let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        if let Some(value) = token.strip_prefix("in:") {
+            parsed_any = true;
+            let field = QueryPublicField::parse(value).ok_or_else(|| {
+                invalid_control("unknown field scope; expected name, filename, title, alias, heading, tag, or body")
+            })?;
+            if scope.replace(field).is_some() {
+                return Err(invalid_control("field scope may be declared only once"));
+            }
+        } else if let Some(value) = token.strip_prefix('>') {
+            if value.is_empty() {
+                break;
+            }
+            parsed_any = true;
+            let field = QueryPublicField::parse(value).ok_or_else(|| {
+                invalid_control("unknown emphasized field; expected name, filename, title, alias, heading, tag, or body")
+            })?;
+            if emphasis.replace(field).is_some() {
+                return Err(invalid_control("field emphasis may be declared only once"));
+            }
+        } else {
+            break;
+        }
+        rest = rest[token_end..].trim_start();
+    }
+
+    if !parsed_any {
+        return Ok(ParsedFieldControls {
+            query_text: query.to_owned(),
+            scope: None,
+            emphasis: None,
+        });
+    }
+    if rest.is_empty() {
+        return Err(invalid_control("field controls require query text"));
+    }
+    if has_explicit_syntax(rest) {
+        return Err(invalid_control(
+            "field controls cannot be combined with explicit query syntax",
+        ));
+    }
+    if let (Some(scope), Some(emphasis)) = (scope, emphasis)
+        && !scope.contains(emphasis)
+    {
+        return Err(invalid_control(
+            "emphasized field must belong to the selected field scope",
+        ));
+    }
+
+    Ok(ParsedFieldControls {
+        query_text: rest.to_owned(),
+        scope,
+        emphasis,
+    })
+}
+
 pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanError> {
     if query.trim().is_empty() {
         return Err(invalid_query("query must not be empty"));
@@ -540,24 +752,20 @@ pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanE
         )));
     }
 
-    let kind = classify_query(query);
+    let controls = parse_field_controls(query)?;
+    let kind = classify_query(&controls.query_text);
     let assistance = if kind == QueryPlanKind::Explicit {
         QueryAssistanceEligibility::ExplicitSyntaxBypass
     } else {
         QueryAssistanceEligibility::Eligible
     };
+    let metadata_fields = metadata_fields_for_scope(controls.scope);
     let metadata_probe = (kind == QueryPlanKind::Ordinary
-        && is_lowercase_identifier_candidate(query))
+        && !metadata_fields.is_empty()
+        && is_lowercase_identifier_candidate(&controls.query_text))
     .then(|| QueryMetadataProbe {
-        query: query.to_owned(),
-        fields: vec![
-            QueryMetadataField::Filename,
-            QueryMetadataField::Stem,
-            QueryMetadataField::Aliases,
-            QueryMetadataField::Title,
-            QueryMetadataField::Heading,
-            QueryMetadataField::Tags,
-        ],
+        query: controls.query_text.clone(),
+        fields: metadata_fields,
         conjunction: true,
     });
     let match_operator = match kind {
@@ -568,7 +776,7 @@ pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanE
     let term_intents = if kind == QueryPlanKind::Explicit {
         Vec::new()
     } else {
-        query_term_intents(query, kind)
+        query_term_intents(&controls.query_text, kind)
     };
     let terms = term_intents
         .iter()
@@ -590,7 +798,7 @@ pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanE
     }
 
     let normalized_exact = (assistance == QueryAssistanceEligibility::Eligible)
-        .then(|| normalize_raw(query))
+        .then(|| normalize_raw(&controls.query_text))
         .flatten();
     let exact_intent = normalized_exact
         .as_ref()
@@ -613,9 +821,24 @@ pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanE
         QueryAssistanceEligibility::Eligible => QueryExecutionDisposition::AwaitingEvidence,
     };
 
+    let profile_id = if kind == QueryPlanKind::Explicit {
+        LEXICAL_V1_PROFILE_ID
+    } else {
+        LEXICAL_V2_PROFILE_ID
+    };
+    let field_groups = if kind == QueryPlanKind::Explicit {
+        QueryFieldGroups::lexical_v1()
+    } else {
+        QueryFieldGroups::lexical_v2(controls.scope)
+    };
     let plan = LexicalQueryPlan {
         schema_version: LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
+        profile_id: profile_id.to_owned(),
+        field_controls_schema_version: FIELD_CONTROLS_SCHEMA_VERSION,
         query: query.to_owned(),
+        query_text: controls.query_text,
+        scope: controls.scope,
+        emphasis: controls.emphasis,
         kind,
         match_operator,
         assistance,
@@ -626,7 +849,7 @@ pub fn prepare_lexical_query(query: &str) -> Result<LexicalQueryPlan, QueryPlanE
         exact_intent,
         phrase_boost,
         phrase_intent,
-        field_groups: QueryFieldGroups::lexical_v1(),
+        field_groups,
         bounds: QueryBounds::lexical_v1(),
         typo_stage: QueryTypoStage::Disabled,
         support_probes,
@@ -641,8 +864,13 @@ fn validate_plan(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
     if plan.schema_version != LEXICAL_QUERY_PLAN_SCHEMA_VERSION {
         return Err(invalid_plan("query plan schema version is unsupported"));
     }
+    if plan.field_controls_schema_version != FIELD_CONTROLS_SCHEMA_VERSION {
+        return Err(invalid_plan("field control schema version is unsupported"));
+    }
     if plan.query.trim().is_empty()
         || plan.query.len() > MAX_QUERY_BYTES
+        || plan.query_text.trim().is_empty()
+        || plan.query_text.len() > MAX_QUERY_BYTES
         || plan
             .query
             .split_whitespace()
@@ -652,7 +880,38 @@ fn validate_plan(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
     {
         return Err(invalid_plan("query plan contains an invalid query"));
     }
-    if plan.field_groups != QueryFieldGroups::lexical_v1() {
+    let expected_profile = if plan.kind == QueryPlanKind::Explicit {
+        LEXICAL_V1_PROFILE_ID
+    } else {
+        LEXICAL_V2_PROFILE_ID
+    };
+    if plan.profile_id != expected_profile {
+        return Err(invalid_plan("query plan relevance profile is unsupported"));
+    }
+    if plan.kind == QueryPlanKind::Explicit && (plan.scope.is_some() || plan.emphasis.is_some()) {
+        return Err(invalid_plan(
+            "explicit query plan cannot carry field controls",
+        ));
+    }
+    if let (Some(scope), Some(emphasis)) = (plan.scope, plan.emphasis)
+        && !scope.contains(emphasis)
+    {
+        return Err(invalid_plan("query plan field controls are contradictory"));
+    }
+    let parsed_controls = parse_field_controls(&plan.query)
+        .map_err(|_| invalid_plan("query plan field controls are not canonical"))?;
+    if parsed_controls.query_text != plan.query_text
+        || parsed_controls.scope != plan.scope
+        || parsed_controls.emphasis != plan.emphasis
+    {
+        return Err(invalid_plan("query plan field controls are not canonical"));
+    }
+    let expected_fields = if plan.kind == QueryPlanKind::Explicit {
+        QueryFieldGroups::lexical_v1()
+    } else {
+        QueryFieldGroups::lexical_v2(plan.scope)
+    };
+    if plan.field_groups != expected_fields {
         return Err(invalid_plan("query plan field groups are not recognized"));
     }
     if plan.bounds != QueryBounds::lexical_v1() {
@@ -837,6 +1096,16 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
         .evidence_stages
         .iter()
         .any(|stage| stage.kind == QueryEvidenceStageKind::Prefix);
+    let has_prefix_metadata = plan
+        .evidence_stages
+        .iter()
+        .any(|stage| stage.kind == QueryEvidenceStageKind::PrefixMetadata);
+    let expects_prefix_metadata = has_prefix && !plan.field_groups.prefix_metadata.is_empty();
+    if has_prefix_metadata != expects_prefix_metadata {
+        return Err(invalid_plan(
+            "prefix metadata stage is not canonical for the selected scope",
+        ));
+    }
     let mut expected_kinds = Vec::new();
     if plan.exact_intent.is_some() {
         expected_kinds.push(QueryEvidenceStageKind::ExactMetadata);
@@ -844,11 +1113,10 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
     if plan.phrase_intent.is_some() {
         expected_kinds.push(QueryEvidenceStageKind::ExactPhrase);
     }
-    // Bounded prefix evidence is always emitted as a pair straddling
-    // `AllTerms`: the metadata half above it, the searchable-text half below.
-    // A plan carrying only one half is rejected by the sequence comparison
-    // below rather than silently losing name precedence.
-    if has_prefix {
+    // Bounded prefix evidence normally straddles `AllTerms`. A strict scope
+    // with no source-identity fields (for example `in:body`) has no metadata
+    // half, so only the searchable-text prefix stage is emitted.
+    if has_prefix_metadata {
         expected_kinds.push(QueryEvidenceStageKind::PrefixMetadata);
     }
     expected_kinds.push(QueryEvidenceStageKind::AllTerms);
@@ -1023,6 +1291,13 @@ fn promote_identifier_candidate(plan: &mut LexicalQueryPlan) {
 fn invalid_query(message: &str) -> QueryPlanError {
     QueryPlanError {
         code: "invalid_query".to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+fn invalid_control(message: &str) -> QueryPlanError {
+    QueryPlanError {
+        code: "invalid_field_control".to_owned(),
         message: message.to_owned(),
     }
 }
@@ -1424,9 +1699,68 @@ mod tests {
             plan.phrase_intent.as_ref().unwrap().terms,
             ["resume", "cache"]
         );
-        assert_eq!(plan.field_groups, QueryFieldGroups::lexical_v1());
+        assert_eq!(plan.profile_id, LEXICAL_V2_PROFILE_ID);
+        assert_eq!(plan.field_groups, QueryFieldGroups::lexical_v2(None));
         assert_eq!(plan.bounds, QueryBounds::lexical_v1());
         assert_eq!(plan.typo_stage, QueryTypoStage::Disabled);
+    }
+
+    #[test]
+    fn leading_field_controls_are_canonical_bounded_and_scope_aware() {
+        let scoped = prepare_lexical_query("in:name >title Rapid7 meeting").unwrap();
+        assert_eq!(scoped.profile_id, LEXICAL_V2_PROFILE_ID);
+        assert_eq!(scoped.query, "in:name >title Rapid7 meeting");
+        assert_eq!(scoped.query_text, "Rapid7 meeting");
+        assert_eq!(scoped.scope, Some(QueryPublicField::Name));
+        assert_eq!(scoped.emphasis, Some(QueryPublicField::Title));
+        assert_eq!(
+            scoped.field_groups.searchable_text,
+            [
+                QueryField::Filename,
+                QueryField::Stem,
+                QueryField::Aliases,
+                QueryField::Title,
+            ]
+        );
+
+        let body = prepare_lexical_query("in:body vuln meet").unwrap();
+        assert_eq!(body.field_groups.searchable_text, [QueryField::Content]);
+        assert!(body.field_groups.metadata.is_empty());
+        assert!(body.field_groups.prefix_metadata.is_empty());
+        assert!(body.metadata_probe.is_none());
+        let report = evidence_report(&body, None, &[(3, 2), (0, 2)]);
+        let body = body.finalize_evidence(report).unwrap();
+        assert!(!stage_kinds(&body).contains(&QueryEvidenceStageKind::PrefixMetadata));
+        assert!(stage_kinds(&body).contains(&QueryEvidenceStageKind::Prefix));
+
+        let preferred = prepare_lexical_query(">body Rapid7 meeting").unwrap();
+        assert_eq!(preferred.scope, None);
+        assert_eq!(preferred.emphasis, Some(QueryPublicField::Body));
+        assert_eq!(preferred.field_groups, QueryFieldGroups::lexical_v2(None));
+    }
+
+    #[test]
+    fn invalid_field_controls_fail_categorically_without_rewriting() {
+        for query in [
+            "in:unknown cache",
+            ">unknown cache",
+            "in:title in:body cache",
+            ">title >body cache",
+            "in:title >body cache",
+            "in:title",
+            ">title title:cache",
+        ] {
+            let error = prepare_lexical_query(query).unwrap_err();
+            assert_eq!(error.code, "invalid_field_control", "{query}");
+        }
+
+        let explicit = prepare_lexical_query("title:cache").unwrap();
+        assert_eq!(explicit.profile_id, LEXICAL_V1_PROFILE_ID);
+        assert_eq!(explicit.query_text, "title:cache");
+        assert_eq!(
+            explicit.execution,
+            QueryExecutionDisposition::ExplicitBypass
+        );
     }
 
     #[test]
@@ -1705,7 +2039,7 @@ mod tests {
         let first = serde_json::to_string(&plan).unwrap();
         let second = serde_json::to_string(&plan.clone()).unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("{\"schema_version\":7,\"query\":\"RFC 9110 caching\""));
+        assert!(first.starts_with("{\"schema_version\":8,\"profile_id\":\"lexical-v2\",\"field_controls_schema_version\":1,\"query\":\"RFC 9110 caching\",\"query_text\":\"RFC 9110 caching\""));
         let decoded: LexicalQueryPlan = serde_json::from_str(&first).unwrap();
         assert_eq!(serde_json::to_string(&decoded).unwrap(), first);
 

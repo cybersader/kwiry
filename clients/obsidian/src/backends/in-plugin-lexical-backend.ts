@@ -180,12 +180,17 @@ export class InPluginLexicalBackend implements SearchBackend {
       // Ranking completes before the Worker hydrates authoritative stored chunk
       // content. Presentation folds that bounded content locally; no vault file
       // is reread and format/locator/coverage remain non-ranking metadata.
-      const hydrate = createExcerptHydrator(extractHighlightTerms(request.q));
+      const hydrate = createExcerptHydrator(extractHighlightTerms(result.query_policy.query_text));
 
       return {
         backend: this.identity,
         requestedMode: "lexical",
         effectiveMode: "lexical",
+        queryPolicy: {
+          lexical_profile: result.query_policy.profile_id,
+          scope: result.query_policy.scope,
+          emphasis: result.query_policy.emphasis,
+        },
         generation: result.generation,
         candidateWindow: {
           state: result.candidate_window.state,

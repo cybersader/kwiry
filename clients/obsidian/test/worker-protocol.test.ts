@@ -150,7 +150,7 @@ describe("Worker protocol", () => {
   it("publishes protocol 13, cache schema 12, and the closed nine-format set", () => {
     // HTML extends the transported format set without changing the Worker wire shape.
     // Cache schema 12 widens the sources-table format check; protocol remains 13.
-    expect(WORKER_PROTOCOL_VERSION).toBe(13);
+    expect(WORKER_PROTOCOL_VERSION).toBe(14);
     expect(CACHE_SCHEMA_VERSION).toBe(12);
     expect(SOURCE_FORMATS).toEqual([
       "markdown",
@@ -965,6 +965,12 @@ describe("Worker protocol", () => {
           candidate_count: 1,
           candidate_limit: 512,
         },
+        query_policy: {
+          profile_id: "lexical-v2",
+          query_text: "query",
+          scope: null,
+          emphasis: null,
+        },
       },
     });
     expect(isWorkerResponse(response({ title: "Display title" }))).toBe(true);
@@ -1000,7 +1006,16 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "search" as const,
       ok: true as const,
-      result: { ...result, candidate_window: candidateWindow },
+      result: {
+        ...result,
+        candidate_window: candidateWindow,
+        query_policy: {
+          profile_id: "lexical-v2",
+          query_text: "query",
+          scope: null,
+          emphasis: null,
+        },
+      },
     });
 
     expect(isWorkerResponse(response({ generation: "g1", hits: [hit] }))).toBe(true);
@@ -1092,12 +1107,18 @@ describe("Worker protocol", () => {
         generation: "g1",
         hits: [],
         candidate_window: candidateWindow,
+        query_policy: {
+          profile_id: "lexical-v2",
+          query_text: "query",
+          scope: null,
+          emphasis: null,
+        },
       },
     });
     for (const [state, candidateCount] of [
       ["exhausted", 0],
       ["more_available", 1],
-      ["candidate_limit_reached", 512],
+      ["candidate_limit_reached", 1],
       ["unknown", 0],
     ] as const) {
       expect(isWorkerResponse(response({

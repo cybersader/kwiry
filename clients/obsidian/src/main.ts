@@ -59,7 +59,7 @@ const STATUS_POLL_MS = 30_000;
 
 const obsidianTransport: Transport = async ({ url, method, headers, body }) => {
   const response = await requestUrl({ url, method, headers, body, throw: false });
-  return { status: response.status, text: response.text };
+  return { status: response.status, text: response.text, headers: response.headers };
 };
 
 const VAULT_ACTIVITY_INTERVAL_MS = 5_000;
@@ -752,8 +752,10 @@ function diagnosticErrorCode(code: unknown): DiagnosticTextValue {
       return "vault_read_failed";
     case "disposed":
     case "daemon_unreachable":
+    case "daemon_upgrade_required":
     case "mode_unavailable":
     case "explicit_query_unsupported":
+    case "invalid_field_control":
     case "invalid_query":
     case "invalid_query_plan":
     case "query_execution_failed":

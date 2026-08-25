@@ -16,6 +16,8 @@ describe("fixed FTS5 query binder", () => {
     const bound = bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_explicit_v3",
+      proof_field: "cross_field",
+      proof_kind: "cross_field_all_terms",
       match_value: sentinel,
       max_candidates: 256,
     }, 20);
@@ -27,6 +29,8 @@ describe("fixed FTS5 query binder", () => {
     const bound = bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_all_terms_v3",
+      proof_field: "cross_field",
+      proof_kind: "cross_field_all_terms",
       match_value: "\"quasar\"",
       max_candidates: 256,
     }, 20);
@@ -41,6 +45,8 @@ describe("fixed FTS5 query binder", () => {
     const bound = bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_exact_metadata_v3",
+      proof_field: "cross_field",
+      proof_kind: "exact",
       exact_value: "quasar guide",
       max_candidates: 256,
     }, 20);
@@ -63,7 +69,7 @@ describe("fixed FTS5 query binder", () => {
 
   it("uses separate fixed support and bounded prefix statements", () => {
     const bound = bindEvidenceProbe({
-      schema_version: 6,
+      schema_version: 7,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -89,7 +95,7 @@ describe("fixed FTS5 query binder", () => {
 
   it("binds encoded exact identifier probes and hard intersections through dedicated FTS", () => {
     const probe = bindEvidenceProbe({
-      schema_version: 6,
+      schema_version: 7,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -109,6 +115,8 @@ describe("fixed FTS5 query binder", () => {
     const combined = bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_all_terms_v3",
+      proof_field: "cross_field",
+      proof_kind: "cross_field_all_terms",
       match_value: "{content} : (\"cache\")",
       required_identifiers: ["rfc 9110", "cve-2026-1234"],
       max_candidates: 256,
@@ -126,6 +134,8 @@ describe("fixed FTS5 query binder", () => {
     const identifierOnly = bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_partial_coverage_v3",
+      proof_field: "cross_field",
+      proof_kind: "partial_coverage",
       required_identifiers: ["rfc 9110"],
       max_candidates: 256,
     }, 20);
@@ -142,14 +152,14 @@ describe("fixed FTS5 query binder", () => {
 
   it("rejects unknown plan identities, profiles, schemas, and invalid limits", () => {
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 2 as 6,
+      schema_version: 2 as 7,
       profile_id: "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
       stages: [],
     })).toThrow(/unsupported/);
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 6,
+      schema_version: 7,
       profile_id: "unknown" as "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
@@ -158,18 +168,24 @@ describe("fixed FTS5 query binder", () => {
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "unknown" as "lexical_all_terms_v3",
+      proof_field: "cross_field",
+      proof_kind: "cross_field_all_terms",
       match_value: "query",
       max_candidates: 256,
     }, 20)).toThrow(/unsupported/);
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_all_terms_v3",
+      proof_field: "cross_field",
+      proof_kind: "cross_field_all_terms",
       match_value: "query",
       max_candidates: 256,
     }, 0)).toThrow(/limit/);
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_exact_metadata_v3",
+      proof_field: "cross_field",
+      proof_kind: "exact",
       match_value: "query",
       exact_value: "query",
       max_candidates: 256,
@@ -177,6 +193,8 @@ describe("fixed FTS5 query binder", () => {
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_exact_metadata_v3",
+      proof_field: "cross_field",
+      proof_kind: "exact",
       max_candidates: 256,
     }, 20)).toThrow(/exact stage/);
   });
@@ -186,12 +204,16 @@ describe("fixed FTS5 query binder", () => {
     expect(bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_exact_metadata_v3",
+      proof_field: "cross_field",
+      proof_kind: "exact",
       exact_value: exact,
       max_candidates: 256,
     }, 20).bind).toEqual([exact, encodeExactIdentifierToken(exact), 20]);
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_exact_metadata_v3",
+      proof_field: "cross_field",
+      proof_kind: "exact",
       exact_value: "🚀".repeat(1_025),
       max_candidates: 256,
     }, 20)).toThrow(/exact stage/u);

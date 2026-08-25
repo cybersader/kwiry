@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import type { SearchMode, SearchRequest, SearchResponse } from "./api";
+import type {
+  SearchMode,
+  SearchQueryPolicyFacts,
+  SearchRequest,
+  SearchResponse,
+} from "./api";
 import type { ExcerptSegment } from "./excerpt";
 import type {
   SourceFormatCounts,
@@ -117,6 +122,7 @@ export interface SearchExecution {
   backend: BackendIdentity;
   requestedMode: SearchMode;
   effectiveMode: SearchMode;
+  queryPolicy: SearchQueryPolicyFacts | null;
   generation: string | null;
   candidateWindow: CandidateWindowFacts;
   response: BackendSearchResponse;

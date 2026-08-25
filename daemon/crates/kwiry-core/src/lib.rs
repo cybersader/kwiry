@@ -41,7 +41,7 @@ mod partition;
 mod policy;
 #[cfg(feature = "portable")]
 mod query;
-#[cfg(feature = "internal-d5c-preview")]
+#[cfg(feature = "portable")]
 mod ranking;
 #[cfg(feature = "internal-d5c-preview")]
 mod ranking_eval;
@@ -154,15 +154,16 @@ pub use policy::{
 };
 #[cfg(feature = "portable")]
 pub use query::{
-    LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, MAX_CANDIDATES_PER_STAGE,
-    MAX_EVIDENCE_STAGES, MAX_PARTIAL_COVERAGE_TERMS, MAX_PREFIX_EXPANSIONS_PER_TERM,
-    MAX_PREFIX_TERMS, MAX_QUERY_BYTES, MAX_QUERY_TERMS, MAX_TERM_SUPPORT_PROBES,
-    MAX_TOTAL_CANDIDATES, MIN_PREFIX_CHARS, QueryAssistanceEligibility, QueryBounds,
-    QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageKind, QueryExactIntent,
-    QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryFieldGroups, QueryMatchOperator,
-    QueryMetadataField, QueryMetadataProbe, QueryPhraseIntent, QueryPlanError, QueryPlanKind,
-    QueryTermIntent, QueryTermProjection, QueryTermRole, QueryTermSupport,
-    QueryTermSupportObservation, QueryTermSupportProbe, QueryTypoStage, prepare_lexical_query,
+    FIELD_CONTROLS_SCHEMA_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LEXICAL_V1_PROFILE_ID,
+    LEXICAL_V2_PROFILE_ID, LexicalQueryPlan, MAX_CANDIDATES_PER_STAGE, MAX_EVIDENCE_STAGES,
+    MAX_PARTIAL_COVERAGE_TERMS, MAX_PREFIX_EXPANSIONS_PER_TERM, MAX_PREFIX_TERMS, MAX_QUERY_BYTES,
+    MAX_QUERY_TERMS, MAX_TERM_SUPPORT_PROBES, MAX_TOTAL_CANDIDATES, MIN_PREFIX_CHARS,
+    QueryAssistanceEligibility, QueryBounds, QueryEvidenceReport, QueryEvidenceStage,
+    QueryEvidenceStageKind, QueryExactIntent, QueryExecutionDisposition, QueryField,
+    QueryFieldGroup, QueryFieldGroups, QueryMatchOperator, QueryMetadataField, QueryMetadataProbe,
+    QueryPhraseIntent, QueryPlanError, QueryPlanKind, QueryPublicField, QueryTermIntent,
+    QueryTermProjection, QueryTermRole, QueryTermSupport, QueryTermSupportObservation,
+    QueryTermSupportProbe, QueryTypoStage, prepare_lexical_query,
 };
 #[cfg(feature = "internal-d5c-preview")]
 pub use ranking::{
@@ -172,13 +173,19 @@ pub use ranking::{
     MAX_PROPERTY_VALUES_PER_SOURCE_OBSERVATION, MAX_RANKING_FOLDER_PREFIX_BYTES,
     MAX_RANKING_JSON_POINTER_BYTES, MAX_RANKING_PATH_DEPTH, MAX_RANKING_PROPERTY_NAME_BYTES,
     MAX_RANKING_RULE_ID_BYTES, MAX_RANKING_VALUE_BYTES, MAX_RANKING_WORK_UNITS,
-    MAX_RELEVANCE_PROFILE_BYTES, MAX_RERANK_CANDIDATES, MAX_RERANK_SOURCE_OBSERVATIONS,
-    MAX_TOTAL_RANKING_RULES, PathDepthPredicate, PathDepthRule, PropertyPredicate, PropertyRule,
-    PropertyScalarObservation, QualifiedSourceId, RELEVANCE_PROFILE_SCHEMA_VERSION,
-    RERANK_INPUT_SCHEMA_VERSION, RankingError, RankingScalar, RecencyClock, RecencyHorizon,
-    RecencyRule, RelevanceProfile, RerankCandidate, RerankEvidence, RerankEvidenceEntry,
-    RerankInput, RerankResult, RuleEffect, RuleStrength, SourceSignalObservation,
-    rerank_candidates,
+    MAX_RELEVANCE_PROFILE_BYTES, MAX_RERANK_SOURCE_OBSERVATIONS, MAX_TOTAL_RANKING_RULES,
+    PathDepthPredicate, PathDepthRule, PropertyPredicate, PropertyRule, PropertyScalarObservation,
+    RELEVANCE_PROFILE_SCHEMA_VERSION, RERANK_INPUT_SCHEMA_VERSION, RankingScalar, RecencyClock,
+    RecencyHorizon, RecencyRule, RelevanceProfile, RerankCandidate, RerankEvidence,
+    RerankEvidenceEntry, RerankInput, RerankResult, RuleEffect, RuleStrength,
+    SourceSignalObservation, rerank_candidates,
+};
+#[cfg(feature = "portable")]
+pub use ranking::{
+    LEXICAL_V2_EMPHASIS_POINTS, LEXICAL_V2_RANK_SCHEMA_VERSION, LexicalV2Candidate, LexicalV2Proof,
+    LexicalV2ProofField, LexicalV2ProofKind, LexicalV2RankInput, LexicalV2RankedCandidate,
+    MAX_LEXICAL_V2_LANES, MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE, MAX_RERANK_CANDIDATES,
+    QualifiedSourceId, RankingError, lexical_v2_evidence_points, rank_lexical_v2,
 };
 #[cfg(feature = "internal-d5c-preview")]
 pub use ranking_eval::{

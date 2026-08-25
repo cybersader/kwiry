@@ -66,6 +66,11 @@ function execution(
     },
     requestedMode: "lexical",
     effectiveMode: "lexical",
+    queryPolicy: {
+      lexical_profile: "lexical-v2",
+      scope: null,
+      emphasis: null,
+    },
     generation: "generation-1",
     candidateWindow,
     response: { hits, next_cursor: null },

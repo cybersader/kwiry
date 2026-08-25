@@ -30,6 +30,9 @@ use crate::watcher::spawn_watcher;
 
 const INDEX_FRESHNESS_HEADER: &str = "x-kwiry-index-freshness";
 const GENERATION_HEADER: &str = "x-kwiry-generation";
+const LEXICAL_PROFILE_HEADER: &str = "x-kwiry-lexical-profile";
+const FIELD_SCOPE_HEADER: &str = "x-kwiry-field-scope";
+const FIELD_EMPHASIS_HEADER: &str = "x-kwiry-field-emphasis";
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -500,6 +503,9 @@ async fn search(
             error.body_text(),
         )
     })?;
+    let prepared_query = request
+        .prepare_query()
+        .map_err(|error| HttpError::new(StatusCode::BAD_REQUEST, error.code, error.message))?;
     let semantic_available =
         state.profile == HostProfile::Desktop && state.runtime.semantic_ready();
     request.validate(semantic_available).map_err(|error| {
@@ -518,28 +524,33 @@ async fn search(
     }
 
     let runtime = state.runtime.clone();
-    let query = request.q.clone();
+    let mode = request.mode;
+    let limit = request.limit;
+    let filters = request.filters.clone();
+    let policy = prepared_query.policy.clone();
+    let lexical_query = prepared_query.lexical_query;
+    let semantic_query = prepared_query.semantic_query;
     let profile = state.profile;
     let resources = principal.resources.clone();
     // Semantic legs run ONNX inference; keep them off the async executor.
     let result = tokio::task::spawn_blocking(move || match profile {
-        HostProfile::Desktop => match request.mode {
+        HostProfile::Desktop => match mode {
             SearchMode::Lexical => {
-                runtime.search_filtered_with_generation(&query, request.limit, &request.filters)
+                runtime.search_filtered_with_generation(&lexical_query, limit, &filters)
             }
             SearchMode::Semantic => {
-                runtime.search_semantic_with_generation(&query, request.limit, &request.filters)
+                runtime.search_semantic_with_generation(&semantic_query, limit, &filters)
             }
-            SearchMode::Hybrid => {
-                runtime.search_hybrid_with_generation(&query, request.limit, &request.filters)
-            }
+            SearchMode::Hybrid => runtime.search_hybrid_prepared_with_generation(
+                &lexical_query,
+                &semantic_query,
+                limit,
+                &filters,
+            ),
         },
-        HostProfile::OpenClast => runtime.search_authorized_with_generation(
-            &query,
-            request.limit,
-            &request.filters,
-            &resources,
-        ),
+        HostProfile::OpenClast => {
+            runtime.search_authorized_with_generation(&lexical_query, limit, &filters, &resources)
+        }
     })
     .await
     .map_err(|_| {
@@ -584,7 +595,34 @@ async fn search(
             )
         })?,
     );
+    let lexical_profile = if mode == SearchMode::Semantic {
+        "none"
+    } else {
+        policy.profile_id.as_str()
+    };
+    response.headers_mut().insert(
+        LEXICAL_PROFILE_HEADER,
+        policy_header_value(lexical_profile)?,
+    );
+    response.headers_mut().insert(
+        FIELD_SCOPE_HEADER,
+        policy_header_value(policy.scope.map_or("none", |field| field.as_str()))?,
+    );
+    response.headers_mut().insert(
+        FIELD_EMPHASIS_HEADER,
+        policy_header_value(policy.emphasis.map_or("none", |field| field.as_str()))?,
+    );
     Ok(response)
+}
+
+fn policy_header_value(value: &str) -> std::result::Result<HeaderValue, HttpError> {
+    HeaderValue::from_str(value).map_err(|_| {
+        HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "the effective query policy could not be represented safely",
+        )
+    })
 }
 
 fn response_freshness(
@@ -966,7 +1004,7 @@ mod tests {
                     .header(AUTHORIZATION, "Bearer secret")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"q":"shapeprobe","mode":"lexical","limit":20}"#,
+                        r#"{"q":">body shapeprobe","mode":"lexical","limit":20}"#,
                     ))
                     .unwrap(),
             )
@@ -980,6 +1018,15 @@ mod tests {
         assert_eq!(
             response.headers().get(GENERATION_HEADER).unwrap(),
             generation.as_str()
+        );
+        assert_eq!(
+            response.headers().get(LEXICAL_PROFILE_HEADER).unwrap(),
+            "lexical-v2"
+        );
+        assert_eq!(response.headers().get(FIELD_SCOPE_HEADER).unwrap(), "none");
+        assert_eq!(
+            response.headers().get(FIELD_EMPHASIS_HEADER).unwrap(),
+            "body"
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1047,6 +1094,37 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let error: ApiErrorEnvelope = serde_json::from_slice(&body).unwrap();
         assert_eq!(error.error.code, "mode_unavailable");
+    }
+
+    #[tokio::test]
+    async fn field_controls_are_rejected_by_mode_before_mode_availability() {
+        let app = build_router(
+            test_state(),
+            AuthState::desktop("secret".to_owned()),
+            HostProfile::Desktop,
+        );
+        for body in [
+            r#"{"q":"in:title Vendor7 meeting","mode":"hybrid","limit":20}"#,
+            r#"{"q":">body Vendor7 meeting","mode":"semantic","limit":20}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v0/search")
+                        .header(AUTHORIZATION, "Bearer secret")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let error: ApiErrorEnvelope = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error.error.code, "invalid_field_control");
+        }
     }
 
     #[tokio::test]
@@ -1217,6 +1295,15 @@ mod tests {
         assert_eq!(
             response.headers().get(GENERATION_HEADER).unwrap(),
             generation.as_str()
+        );
+        assert_eq!(
+            response.headers().get(LEXICAL_PROFILE_HEADER).unwrap(),
+            "lexical-v2"
+        );
+        assert_eq!(response.headers().get(FIELD_SCOPE_HEADER).unwrap(), "none");
+        assert_eq!(
+            response.headers().get(FIELD_EMPHASIS_HEADER).unwrap(),
+            "none"
         );
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let response: ApiSearchResponse = serde_json::from_slice(&body).unwrap();

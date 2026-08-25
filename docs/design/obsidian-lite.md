@@ -132,14 +132,16 @@ The MVP preserves existing ordinary lexical fields and technical-identifier beha
 
 ## D5C relevance phases
 
-The open-property projection foundation is published in beta.15. Its ranking and public-behavior phases remain separately designed and owner-reviewed:
+The open-property projection foundation is published in beta.15. The 2026-08-24 owner amendment accepts only the bounded `lexical-v2` text-evidence profile and simple query-time field controls for beta.27; the remaining ranking and public-behavior phases stay separately designed and reviewed:
 
+- **Lexical-v2 text evidence:** shared Rust owns a fixed, versioned scorecard over field-coherent proofs and bounded cross-lane candidate collection. Strong filename/title identity may outrank body-only phrase evidence. `lexical-v1` remains a compatibility identity, imported engines retain tokenization/matching/BM25, and cross-engine acceptance uses judged partial orders rather than raw-score equality.
+- **Field controls:** one leading `in:<field>` scope and one leading `><field>` fixed emphasis are accepted for `name`, `filename`, `title`, `alias`, `heading`, `tag`, and `body`. Lexical supports both; hybrid supports emphasis only on its lexical leg and receives stripped semantic text; semantic-only rejects controls. Invalid or unsupported combinations fail explicitly. Arbitrary numeric boosts, path scope, recursive-property scope, and source-authored ranking instructions are excluded.
 - **Recency:** decay horizon, query/global behavior, source-of-time trust, and protection for authoritative older notes; no default or ranking effect is accepted yet.
-- **Properties:** resolve bounded scopes/rules, policy ownership, exact/range/text behavior, per-property weighting, privacy exclusions, validation, disclosure, degradation, and rebuild semantics. Allowlists and bounds govern future query/ranking policy, not the default durable projection of the source-owned bag. Open-default projection does not authorize unrestricted search or ranking exposure of private metadata.
+- **Properties:** resolve exact/range/text behavior, privacy exclusions, degradation, and any future scoring semantics. The durable source-owned property bag remains outside ordinary lexical eligibility and ranking. Open-default projection does not authorize unrestricted search or ranking exposure of private metadata.
 - **Folder hierarchy:** path segments, depth, ancestor matching, archive penalties, active-folder proximity, and named authority folders; no defaults are accepted yet.
-- **Configuration:** evaluate named tested profiles first, with bounded values, reset, effective-profile disclosure, schema/profile versions, migrations, and deterministic evidence. No profile, field set, weight, default, explanation envelope, or changed result ordering is accepted yet.
+- **Configuration:** further named profiles, arbitrary sliders, metadata crossing lexical-v2 text-evidence bands, reset/migration behavior, and broader explanation envelopes remain separately owner-reviewed.
 
-Each signal needs judged queries and reproducible regressions; arbitrary sliders are not an adequate relevance design. Zero-result copy is implemented, field scopes remain conditionally authorized and design-gated rather than accepted as a final grammar/default, and typo assistance remains prototype-only pending performance and visible-limitation evidence.
+Every admitted signal needs judged queries and reproducible regressions. The accepted controls use fixed versioned internal values rather than user-authored numbers. Zero-result copy is implemented, beta.27 field controls are accepted, and typo assistance remains prototype-only pending performance and visible-limitation evidence.
 
 A narrow real-Obsidian WebDriver proof may verify a named host lifecycle or regression, but it is not owner field, daily-drive, ranking, performance, or distribution acceptance.
 

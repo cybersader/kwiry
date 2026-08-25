@@ -30,6 +30,15 @@ import type {
   SourcePreparation,
 } from "../src/worker/rust-adapter";
 
+vi.mock("../src/worker/rust-adapter", () => ({
+  finalizeLexicalV2RankWithRust: (input: {
+    candidates: Array<{ proofs: Array<{ engine_score: number }> }>;
+  }) => ({
+    ordered_candidate_ordinals: input.candidates.map((_, index) => index),
+    selected_scores: input.candidates.map((candidate) => candidate.proofs[0]?.engine_score ?? 0),
+  }),
+}));
+
 /**
  * Opens an exported image as a real database. Nothing about the export is
  * taken on trust: the bytes have to load and answer queries, or the test fails.
@@ -207,13 +216,21 @@ const matchPlan = (
     | "lexical_partial_coverage_v3" | "lexical_prefix_v3",
   matchValue: string,
 ) => ({
-  schema_version: 6 as const,
-  profile_id: "lexical-v1" as const,
+  schema_version: 7 as const,
+  profile_id: planId === "lexical_explicit_v3" ? "lexical-v1" as const : "lexical-v2" as const,
   disposition: planId === "lexical_explicit_v3" ? "explicit_bypass" as const : "ready" as const,
   max_total_candidates: 512 as const,
   stages: [{
     ordinal: 0,
     plan_id: planId,
+    proof_field: "cross_field" as const,
+    proof_kind: planId === "lexical_exact_phrase_v3"
+      ? "phrase" as const
+      : planId === "lexical_partial_coverage_v3"
+        ? "partial_coverage" as const
+        : planId === "lexical_prefix_v3"
+          ? "prefix_assisted" as const
+          : "cross_field_all_terms" as const,
     match_value: matchValue,
     max_candidates: 256,
   }],
@@ -227,7 +244,7 @@ describe("Fts5GenerationIndex", () => {
     expect(index.documents).toBe(1);
     expect(index.chunks).toBe(1);
     expect(index.observeQuery([{
-      schema_version: 6,
+      schema_version: 7,
       plan_id: "identifier_metadata_v3",
       match_value: "{filename stem aliases title heading_text} : (\"quasar\")",
     }]).identifier_probe_matched).toBe(true);
@@ -522,7 +539,7 @@ describe("Fts5GenerationIndex", () => {
     index.applySourceChanges([gamma, beta, alpha], []);
 
     expect(index.observeQuery([{
-      schema_version: 6,
+      schema_version: 7,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -535,13 +552,15 @@ describe("Fts5GenerationIndex", () => {
     }]).term_support[0]?.document_frequency).toBe(1);
 
     const combined = index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_all_terms_v3",
+          proof_field: "cross_field",
+          proof_kind: "cross_field_all_terms",
         match_value: "{content} : (\"cache\")",
         required_identifiers: ["rfc 9110", "cve-2026-1234"],
         max_candidates: 256,
@@ -550,13 +569,15 @@ describe("Fts5GenerationIndex", () => {
     expect(combined.map((hit) => hit.chunk_id)).toEqual(["chunk-beta"]);
 
     const identifierOnly = index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_partial_coverage_v3",
+          proof_field: "cross_field",
+          proof_kind: "partial_coverage",
         required_identifiers: ["rfc 9110", "cve-2026-1234"],
         max_candidates: 256,
       }],
@@ -647,13 +668,15 @@ describe("Fts5GenerationIndex", () => {
 
     for (const exactValue of prepared.chunks[0]!.technical_identifiers) {
       const hits = index.search({
-        schema_version: 6,
-        profile_id: "lexical-v1",
+        schema_version: 7,
+        profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
           exact_value: exactValue,
           max_candidates: 256,
         }],
@@ -666,20 +689,24 @@ describe("Fts5GenerationIndex", () => {
     index.replaceSource(source("exact", "chunk-exact", "ordinary body", "Quasar Guide"));
     index.replaceSource(source("phrase", "chunk-phrase", "quasar guide quasar guide quasar guide"));
     const hits = index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [
         {
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
           exact_value: "quasar guide",
           max_candidates: 256,
         },
         {
           ordinal: 1,
           plan_id: "lexical_exact_phrase_v3",
+          proof_field: "cross_field",
+          proof_kind: "phrase",
           match_value: "{filename stem aliases title heading_text content} : \"quasar guide\"",
           max_candidates: 256,
         },
@@ -722,13 +749,15 @@ describe("Fts5GenerationIndex", () => {
     ));
 
     const hits = index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
         exact_value: "résumé cache",
         max_candidates: 256,
       }],
@@ -748,13 +777,15 @@ describe("Fts5GenerationIndex", () => {
     ));
 
     const hits = index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
         exact_value: `${prefix}y`,
         max_candidates: 256,
       }],
@@ -783,13 +814,15 @@ describe("Fts5GenerationIndex", () => {
       expect(db.selectValue("SELECT count(*) FROM source_exact_aliases")).toBe(1);
       expect(db.selectValue("SELECT count(*) FROM chunk_exact_identifier_fts_docsize")).toBe(1);
       const exactPlan = (value: string) => ({
-        schema_version: 6 as const,
-        profile_id: "lexical-v1" as const,
+        schema_version: 7 as const,
+        profile_id: "lexical-v2" as const,
         disposition: "ready" as const,
         max_total_candidates: 512 as const,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3" as const,
+          proof_field: "cross_field" as const,
+          proof_kind: "exact" as const,
           exact_value: value,
           max_candidates: 256,
         }],
@@ -887,13 +920,15 @@ describe("Fts5GenerationIndex", () => {
     index.replaceSource(source("needle-exact", "chunk-needle-exact", "ordinary body", "Needle Signal"));
 
     const hits = index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
         exact_value: "needle signal",
         max_candidates: 256,
       }],
@@ -921,23 +956,29 @@ describe("Fts5GenerationIndex", () => {
     }
 
     const plan = {
-      schema_version: 6 as const,
-      profile_id: "lexical-v1" as const,
+      schema_version: 7 as const,
+      profile_id: "lexical-v2" as const,
       disposition: "ready" as const,
       max_total_candidates: 512 as const,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_prefix_metadata_v3" as const,
+        proof_field: "cross_field" as const,
+        proof_kind: "prefix_assisted" as const,
         match_value: "{filename stem aliases title} : (\"orchard\" AND \"adoption\")",
         max_candidates: 256,
       }, {
         ordinal: 1,
         plan_id: "lexical_prefix_v3" as const,
+        proof_field: "cross_field" as const,
+        proof_kind: "prefix_assisted" as const,
         match_value: "\"orchard\" AND \"adoption\"",
         max_candidates: 256,
       }, {
         ordinal: 2,
         plan_id: "lexical_partial_coverage_v3" as const,
+        proof_field: "cross_field" as const,
+        proof_kind: "partial_coverage" as const,
         match_value: "\"orchard\"",
         max_candidates: 256,
       }],
@@ -952,7 +993,7 @@ describe("Fts5GenerationIndex", () => {
       .toBe(true);
     expect(result.candidate_window).toEqual({
       state: "more_available",
-      candidate_count: 27,
+      candidate_count: 25,
       candidate_limit: 512,
     });
     expect(summary.stages.map((stage) => stage.kind)).toEqual([
@@ -986,18 +1027,22 @@ describe("Fts5GenerationIndex", () => {
     }
 
     const plan = {
-      schema_version: 6 as const,
-      profile_id: "lexical-v1" as const,
+      schema_version: 7 as const,
+      profile_id: "lexical-v2" as const,
       disposition: "ready" as const,
       max_total_candidates: 512 as const,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_prefix_metadata_v3" as const,
+        proof_field: "cross_field" as const,
+        proof_kind: "prefix_assisted" as const,
         match_value: "{filename stem aliases title} : (\"quarry\" AND \"zorbification\")",
         max_candidates: 256,
       }, {
         ordinal: 1,
         plan_id: "lexical_prefix_v3" as const,
+        proof_field: "cross_field" as const,
+        proof_kind: "prefix_assisted" as const,
         match_value: "\"quarry\" AND \"zorbification\"",
         max_candidates: 256,
       }],
@@ -1010,7 +1055,7 @@ describe("Fts5GenerationIndex", () => {
     // the metadata-scoped half of the prefix block runs first.
     expect(result.hits[0]?.chunk_id).toBe("chunk-titled-zorb");
     expect(summary.stages.map((stage) => stage.candidate_count)).toEqual([1, 25]);
-    expect(summary.stages.map((stage) => stage.output_count)).toEqual([1, 7]);
+    expect(summary.stages.map((stage) => stage.output_count)).toEqual([1, 24]);
   });
 
   it("proves an exact result limit exhausted only when the searched stage itself exhausted", () => {
@@ -1065,13 +1110,15 @@ describe("Fts5GenerationIndex", () => {
     }
     const stage = {
       plan_id: "lexical_all_terms_v3" as const,
+      proof_field: "cross_field" as const,
+      proof_kind: "cross_field_all_terms" as const,
       match_value: "\"windowcap\"",
       max_candidates: 256,
     };
 
     const result = index.searchWithCandidateWindow({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [
@@ -1082,7 +1129,7 @@ describe("Fts5GenerationIndex", () => {
     expect(result.hits).toHaveLength(256);
     expect(result.candidate_window).toEqual({
       state: "candidate_limit_reached",
-      candidate_count: 512,
+      candidate_count: 256,
       candidate_limit: 512,
     });
   });
@@ -1108,13 +1155,15 @@ describe("Fts5GenerationIndex", () => {
 
     const trace = index.beginInternalLexicalTrace(() => 0);
     const hits = index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
         exact_value: "needle.md",
         max_candidates: 256,
       }],
@@ -1172,8 +1221,8 @@ describe("Fts5GenerationIndex", () => {
   it("returns no rows for a typed no-evidence execution plan", () => {
     index.replaceSource(source("alpha", "chunk-a", "popular common document"));
     expect(index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
       stages: [],
@@ -1191,7 +1240,7 @@ describe("Fts5GenerationIndex", () => {
       { tags: ["tag-only-nebula"] },
     ));
     const observed = index.observeQuery([{
-      schema_version: 6,
+      schema_version: 7,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -1216,7 +1265,7 @@ describe("Fts5GenerationIndex", () => {
     const values = [0, 1, 2, 3, 4, 5, 6, 7];
     const trace = index.beginInternalLexicalTrace(() => values.shift() ?? 7);
     index.observeQuery([{
-      schema_version: 6,
+      schema_version: 7,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -1269,7 +1318,7 @@ describe("Fts5GenerationIndex", () => {
     const values = [0, 0, 10_000, 10_000, 20_000, 20_000];
     const trace = index.beginInternalLexicalTrace(() => values.shift() ?? 20_000);
     const evidence = index.observeQuery([{
-      schema_version: 6,
+      schema_version: 7,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -1281,13 +1330,15 @@ describe("Fts5GenerationIndex", () => {
       max_prefix_term_bytes: 96,
     }], trace);
     const hits = index.search({
-      schema_version: 6,
-      profile_id: "lexical-v1",
+      schema_version: 7,
+      profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_prefix_v3",
+        proof_field: "cross_field",
+        proof_kind: "prefix_assisted",
         match_value: "{content} : (\"durationprefix00\")",
         max_candidates: 256,
       }],
@@ -2582,13 +2633,15 @@ describe("Fts5GenerationIndex", () => {
     const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
     try {
       const hits = restored.search({
-        schema_version: 6,
-        profile_id: "lexical-v1",
+        schema_version: 7,
+        profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
           exact_value: "résumé cache",
           max_candidates: 256,
         }],
@@ -2615,13 +2668,15 @@ describe("Fts5GenerationIndex", () => {
     const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
     try {
       const hits = restored.search({
-        schema_version: 6,
-        profile_id: "lexical-v1",
+        schema_version: 7,
+        profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
           exact_value: "cve-2026-1234",
           max_candidates: 256,
         }],
@@ -2811,13 +2866,15 @@ describe("Fts5GenerationIndex", () => {
     const restored = openRestoredFts5Generation(sqlite, authored, 1);
     try {
       expect(restored.search({
-        schema_version: 6,
-        profile_id: "lexical-v1",
+        schema_version: 7,
+        profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
+          proof_field: "cross_field",
+          proof_kind: "exact",
           exact_value: "rust-authored-title",
           max_candidates: 256,
         }],

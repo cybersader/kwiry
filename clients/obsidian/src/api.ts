@@ -10,6 +10,13 @@ import { normalizeDaemonBaseUrl, normalizeDaemonToken } from "./credentials";
 import { SOURCE_FORMATS, type SourceFormat as PluginSourceFormat } from "./source-formats";
 
 export type SearchMode = "lexical" | "semantic" | "hybrid";
+export type SearchPublicField = "name" | "filename" | "title" | "alias" | "heading" | "tag" | "body";
+
+export interface SearchQueryPolicyFacts {
+  lexical_profile: "none" | "lexical-v1" | "lexical-v2";
+  scope: SearchPublicField | null;
+  emphasis: SearchPublicField | null;
+}
 
 export interface SearchFilters {
   vault_id?: string;
@@ -82,6 +89,11 @@ export interface SearchResponse {
   next_cursor: string | null;
 }
 
+export interface SearchResponseWithPolicy {
+  response: SearchResponse;
+  queryPolicy: SearchQueryPolicyFacts | null;
+}
+
 export interface DaemonModelStatus {
   name: string;
   version: string;
@@ -136,7 +148,7 @@ export interface Transport {
     method: string;
     headers: Record<string, string>;
     body?: string;
-  }): Promise<{ status: number; text: string }>;
+  }): Promise<{ status: number; text: string; headers?: Record<string, string> }>;
 }
 
 export interface KwiryClientOptions {
@@ -163,6 +175,10 @@ export class KwiryClient {
   }
 
   async search(request: SearchRequest): Promise<SearchResponse> {
+    return (await this.searchWithPolicy(request)).response;
+  }
+
+  async searchWithPolicy(request: SearchRequest): Promise<SearchResponseWithPolicy> {
     const body: SearchRequest = {
       q: request.q,
       mode: request.mode,
@@ -171,7 +187,11 @@ export class KwiryClient {
     if (request.filters && Object.keys(request.filters).length > 0) {
       body.filters = request.filters;
     }
-    return parseSearchResponse(await this.call("POST", "/v0/search", body));
+    const result = await this.callWithMetadata("POST", "/v0/search", body);
+    return {
+      response: parseSearchResponse(result.body),
+      queryPolicy: parseSearchPolicyHeaders(result.headers),
+    };
   }
 
   async status(): Promise<DaemonStatus> {
@@ -193,6 +213,15 @@ export class KwiryClient {
     body?: unknown,
     authenticated = true,
   ): Promise<unknown> {
+    return (await this.callWithMetadata(method, path, body, authenticated)).body;
+  }
+
+  private async callWithMetadata(
+    method: string,
+    path: string,
+    body?: unknown,
+    authenticated = true,
+  ): Promise<{ body: unknown; headers: Record<string, string> }> {
     const headers: Record<string, string> = {};
     if (authenticated) {
       headers["Authorization"] = `Bearer ${normalizeDaemonToken(this.tokenProvider())}`;
@@ -201,7 +230,7 @@ export class KwiryClient {
       headers["Content-Type"] = "application/json";
     }
 
-    let response: { status: number; text: string };
+    let response: { status: number; text: string; headers?: Record<string, string> };
     try {
       response = await this.transport({
         url: `${this.baseUrl}${path}`,
@@ -229,12 +258,20 @@ export class KwiryClient {
     if (parsed === undefined) {
       throw invalidResponse("Daemon returned an invalid response.");
     }
-    return parsed;
+    return { body: parsed, headers: response.headers ?? {} };
   }
 }
 
 function parseSearchResponse(value: unknown): SearchResponse {
-  if (!isExactRecord(value, ["hits", "next_cursor"]) || !Array.isArray(value.hits)) {
+  if (!isRecord(value)) throw invalidResponse("Daemon returned an invalid search response.");
+  const keys = Object.keys(value).sort().join("\0");
+  const legacyKeys = ["hits", "next_cursor"].sort().join("\0");
+  const currentKeys = ["extraction_policy_fingerprint", "hits", "next_cursor"].sort().join("\0");
+  if ((keys !== legacyKeys && keys !== currentKeys)
+    || !Array.isArray(value.hits)
+    || (keys === currentKeys
+      && (typeof value.extraction_policy_fingerprint !== "string"
+        || !/^[0-9a-f]{64}$/u.test(value.extraction_policy_fingerprint)))) {
     throw invalidResponse("Daemon returned an invalid search response.");
   }
   if (value.hits.length > MAX_HITS) {
@@ -246,6 +283,41 @@ function parseSearchResponse(value: unknown): SearchResponse {
     throw invalidResponse("Daemon returned an invalid search cursor.");
   }
   return { hits, next_cursor: nextCursor };
+}
+
+function parseSearchPolicyHeaders(
+  headers: Record<string, string>,
+): SearchQueryPolicyFacts | null {
+  const header = (name: string): string | null => {
+    const entry = Object.entries(headers)
+      .find(([candidate]) => candidate.toLowerCase() === name);
+    return entry?.[1] ?? null;
+  };
+  const profile = header("x-kwiry-lexical-profile");
+  const scope = header("x-kwiry-field-scope");
+  const emphasis = header("x-kwiry-field-emphasis");
+  if (profile === null && scope === null && emphasis === null) return null;
+  if ((profile !== "none" && profile !== "lexical-v1" && profile !== "lexical-v2")
+    || !isSearchPublicFieldOrNone(scope)
+    || !isSearchPublicFieldOrNone(emphasis)) {
+    throw invalidResponse("Daemon returned invalid query-policy headers.");
+  }
+  return {
+    lexical_profile: profile,
+    scope: scope === "none" ? null : scope,
+    emphasis: emphasis === "none" ? null : emphasis,
+  };
+}
+
+function isSearchPublicFieldOrNone(value: string | null): value is SearchPublicField | "none" {
+  return value === "none"
+    || value === "name"
+    || value === "filename"
+    || value === "title"
+    || value === "alias"
+    || value === "heading"
+    || value === "tag"
+    || value === "body";
 }
 
 function parseSearchHit(value: unknown): SearchHit {
@@ -512,6 +584,8 @@ function safeApiMessage(code: string): string {
     case "index_not_ready":
     case "index_building":
       return "The selected backend does not have a ready index.";
+    case "invalid_field_control":
+      return "The field control is unavailable for the selected search mode.";
     case "invalid_query":
       return "The query is not valid for the selected backend.";
     case "invalid_filter":

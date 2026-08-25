@@ -362,6 +362,7 @@ function parseRustIdentity(source: string): {
       "prepare_oversized_source",
       "prepare_query",
       "finalize_query",
+      "finalize_lexical_v2_rank",
     ])) {
     throw failure("artifact_mismatch", "artifact", "Playground Rust identity is invalid.");
   }

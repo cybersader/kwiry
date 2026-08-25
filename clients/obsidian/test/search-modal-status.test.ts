@@ -486,7 +486,7 @@ function executionWithHits(
   state: SearchExecution["candidateWindow"]["state"] = "exhausted",
   overrides: Partial<Pick<
     SearchExecution,
-    "generation" | "backend" | "requestedMode" | "effectiveMode"
+    "generation" | "backend" | "requestedMode" | "effectiveMode" | "queryPolicy"
   >> = {},
 ): SearchExecution {
   return {
@@ -498,6 +498,11 @@ function executionWithHits(
     },
     requestedMode: overrides.requestedMode ?? "lexical",
     effectiveMode: overrides.effectiveMode ?? "lexical",
+    queryPolicy: overrides.queryPolicy ?? {
+      lexical_profile: "lexical-v2",
+      scope: null,
+      emphasis: null,
+    },
     generation: overrides.generation ?? "g1",
     candidateWindow: {
       state,
@@ -698,6 +703,13 @@ describe("KwirySearchModal status rail", () => {
     expect(findByClass(inPluginModal.contentEl, "kwiry-mode-static")?.textContent)
       .toBe(" · Lexical");
     expect(findByClass(inPluginModal.contentEl, "kwiry-mode-segments")).toBeNull();
+    const queryHelp = findByClass(inPluginModal.contentEl, "kwiry-query-help");
+    expect(queryHelp?.textContent).toBe("Field syntax");
+    expect(queryHelp?.attributes.get("aria-label")).toContain("in:name");
+    expect(queryHelp?.attributes.get("aria-label")).toContain("Hybrid");
+    queryHelp?.dispatchEvent(new Event("click"));
+    expect(notices.at(-1)).toContain("in:name");
+    expect(inPluginModal.inputEl.focusCount).toBe(1);
     expect(findByClass(inPluginModal.contentEl, "kwiry-profile-label")).toBeNull();
     expect(findByClass(inPluginModal.contentEl, "kwiry-mode-control")).toBeNull();
     inPluginModal.onClose();
@@ -740,6 +752,33 @@ describe("KwirySearchModal status rail", () => {
     expect(findByClass(unavailableModal.contentEl, "kwiry-backend-state")?.textContent)
       .toBe("Daemon unavailable");
     unavailableModal.onClose();
+  });
+
+  it("shows only active field controls and keeps syntax help available", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend);
+    const controls = findByClass(modal.contentEl, "kwiry-query-controls");
+    expect(controls?.textContent).toBe("");
+    expect(controls?.classList.contains("has-controls")).toBe(false);
+
+    const pending = modal.getSuggestions("in:name >title Vendor7 meeting");
+    backend.searches[0]!.resolve(executionWithHits(
+      [hit("chunk-control", "Vendor7.md")],
+      "exhausted",
+      {
+        queryPolicy: {
+          lexical_profile: "lexical-v2",
+          scope: "name",
+          emphasis: "title",
+        },
+      },
+    ));
+    await expect(pending).resolves.toHaveLength(1);
+
+    expect(controls?.textContent).toBe("Scope · Name · Prefer · Title");
+    expect(controls?.attributes.get("data-profile")).toBe("lexical-v2");
+    expect(controls?.classList.contains("has-controls")).toBe(true);
+    modal.onClose();
   });
 
   it.each([
@@ -820,22 +859,43 @@ describe("KwirySearchModal status rail", () => {
     modal.onClose();
   });
 
-  it("shows user-correctable query guidance inline without a Notice", async () => {
+  it.each([
+    {
+      code: "invalid_query",
+      profile: "in_plugin",
+      expected: "The query is invalid or exceeds the supported limits.",
+    },
+    {
+      code: "invalid_field_control",
+      profile: "in_plugin",
+      expected: "This field control is not valid for the selected search mode.",
+    },
+    {
+      code: "daemon_upgrade_required",
+      profile: "daemon",
+      expected: "Field controls require a beta.27-compatible daemon.",
+    },
+  ] as const)("shows $code guidance inline without a Notice", async ({
+    code,
+    profile,
+    expected,
+  }) => {
     const backend = new DeferredBackend();
     const modal = createModal(backend);
     const { query } = modalElements(modal);
 
-    const pending = modal.getSuggestions("title:(");
+    const pending = modal.getSuggestions("private field-control query");
     backend.searches[0]!.reject(new searchModalModule.KwiryBackendError(
-      "invalid_query",
-      "in_plugin",
+      code,
+      profile,
       "query",
       false,
-      "The query is invalid.",
+      "Private backend detail.",
     ));
 
     await expect(pending).resolves.toEqual([]);
-    expect(query.textContent).toBe("The query is invalid or exceeds the supported limits.");
+    expect(query.textContent).toBe(expected);
+    expect(query.textContent).not.toContain("private");
     expect(notices).toEqual([]);
     modal.onClose();
   });
@@ -1207,21 +1267,37 @@ describe("KwirySearchModal grouped interactions", () => {
       },
     });
     const modal = createModal(backend, multiModeStatus);
+    const controls = findByClass(modal.contentEl, "kwiry-query-controls");
     await settleInputSearch(modal, backend, "first", executionWithHits([
       hit("a1", "A.md", ["A1"]),
       hit("a2", "A.md", ["A2"]),
-    ]));
+    ], "exhausted", {
+      queryPolicy: {
+        lexical_profile: "lexical-v2",
+        scope: "name",
+        emphasis: null,
+      },
+    }));
+    expect(controls?.textContent).toBe("Scope · Name");
     modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
     await modal.flushSuggestions();
     expect(modal.suggestions).toHaveLength(2);
 
     modal.inputEl.value = "second";
     modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(controls?.classList.contains("has-controls")).toBe(false);
     backend.searches.at(-1)!.resolve(executionWithHits([
       hit("b1", "B.md", ["B1"]),
       hit("b2", "B.md", ["B2"]),
-    ]));
+    ], "exhausted", {
+      queryPolicy: {
+        lexical_profile: "lexical-v2",
+        scope: null,
+        emphasis: "body",
+      },
+    }));
     await modal.flushSuggestions();
+    expect(controls?.textContent).toBe("Prefer · Body");
     expect(modal.suggestions).toHaveLength(1);
     expect(renderedRows(modal)[0]?.classList.contains("kwiry-source-result")).toBe(true);
 
@@ -1229,6 +1305,7 @@ describe("KwirySearchModal grouped interactions", () => {
     await modal.flushSuggestions();
     const requestsBeforeMode = backend.requests.length;
     modal.triggerScope([], "Tab", keyboard("Tab"));
+    expect(controls?.classList.contains("has-controls")).toBe(false);
     backend.searches.at(-1)!.resolve(executionWithHits(
       [hit("c1", "C.md", ["C1"]), hit("c2", "C.md", ["C2"])],
       "exhausted",

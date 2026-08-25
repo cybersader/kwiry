@@ -4,7 +4,8 @@
 import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "./exact-identifier-token";
 import type { EvidenceProbePlan, ExecutionPlan, StagePlan } from "./rust-adapter";
 
-export const FTS5_PROFILE_ID = "lexical-v1" as const;
+export const FTS5_PROFILE_ID = "lexical-v2" as const;
+export const FTS5_COMPAT_PROFILE_ID = "lexical-v1" as const;
 export const FTS5_WEIGHTS = [5, 6, 6, 6, 3, 1, 2, 1] as const;
 
 // A content role never transforms a score: contract §10.5 ranks every format
@@ -22,6 +23,7 @@ const BM25_SCORE_SQL = `-bm25(chunks_fts, ${FTS5_WEIGHTS.join(", ")})`;
 
 const SEARCH_SQL = `
 SELECT
+  c.source_key,
   c.chunk_id,
   c.vault_id,
   c.path,
@@ -43,6 +45,7 @@ WITH eligible(rowid) AS (
   WHERE chunk_exact_identifier_fts MATCH ?
 )
 SELECT
+  c.source_key,
   c.chunk_id,
   c.vault_id,
   c.path,
@@ -65,6 +68,7 @@ WITH eligible(rowid) AS (
   WHERE chunk_exact_identifier_fts MATCH ?
 )
 SELECT
+  c.source_key,
   c.chunk_id,
   c.vault_id,
   c.path,
@@ -99,65 +103,6 @@ const EXACT_CANDIDATES_SQL = `
   UNION ALL
   SELECT rowid, 5.0
   FROM exact_identifier_matches
-`;
-
-const EXACT_SEARCH_SQL = `
-WITH exact(value) AS (VALUES (?)),
-exact_identifier_matches(rowid) AS (
-  SELECT rowid
-  FROM chunk_exact_identifier_fts
-  WHERE chunk_exact_identifier_fts MATCH ?
-),
-candidates(rowid, score) AS (
-${EXACT_CANDIDATES_SQL}
-),
-ranked(rowid, score) AS (
-  SELECT rowid, max(score) FROM candidates GROUP BY rowid
-)
-SELECT
-  c.chunk_id,
-  c.vault_id,
-  c.path,
-  c.heading_path_json,
-  c.frontmatter_json,
-  ${contentRoleScoreSql("ranked.score")} AS score
-FROM ranked JOIN chunks AS c ON c.rowid = ranked.rowid
-JOIN sources AS s ON s.source_key = c.source_key
-ORDER BY score DESC, c.chunk_id ASC, c.path ASC
-LIMIT ?
-`;
-
-const REQUIRED_IDENTIFIER_EXACT_SEARCH_SQL = `
-WITH exact(value) AS (VALUES (?)),
-eligible(rowid) AS (
-  SELECT rowid
-  FROM chunk_exact_identifier_fts
-  WHERE chunk_exact_identifier_fts MATCH ?
-),
-exact_identifier_matches(rowid) AS (
-  SELECT rowid
-  FROM chunk_exact_identifier_fts
-  WHERE chunk_exact_identifier_fts MATCH ?
-),
-candidates(rowid, score) AS (
-${EXACT_CANDIDATES_SQL}
-),
-ranked(rowid, score) AS (
-  SELECT candidates.rowid, max(candidates.score)
-  FROM candidates JOIN eligible ON eligible.rowid = candidates.rowid
-  GROUP BY candidates.rowid
-)
-SELECT
-  c.chunk_id,
-  c.vault_id,
-  c.path,
-  c.heading_path_json,
-  c.frontmatter_json,
-  ${contentRoleScoreSql("ranked.score")} AS score
-FROM ranked JOIN chunks AS c ON c.rowid = ranked.rowid
-JOIN sources AS s ON s.source_key = c.source_key
-ORDER BY score DESC, c.chunk_id ASC, c.path ASC
-LIMIT ?
 `;
 
 const FTS_EXISTS_SQL = `
@@ -229,11 +174,92 @@ export interface BoundEvidenceProbe {
   prefix: BoundPrefixProbe | null;
 }
 
+function exactCandidatesForField(field: StagePlan["proof_field"]): string {
+  if (field === "filename") {
+    return `
+  SELECT c.rowid, 12.0 AS score
+  FROM exact JOIN sources AS s ON s.exact_filename = exact.value
+  JOIN chunks AS c ON c.source_key = s.source_key
+  UNION ALL
+  SELECT c.rowid, 12.0
+  FROM exact JOIN sources AS s ON s.exact_stem = exact.value
+  JOIN chunks AS c ON c.source_key = s.source_key`;
+  }
+  if (field === "title") {
+    return `
+  SELECT c.rowid, 12.0 AS score
+  FROM exact JOIN sources AS s ON s.exact_title = exact.value
+  JOIN chunks AS c ON c.source_key = s.source_key`;
+  }
+  if (field === "alias") {
+    return `
+  SELECT c.rowid, 12.0 AS score
+  FROM exact JOIN source_exact_aliases AS alias ON alias.value = exact.value
+  JOIN chunks AS c ON c.source_key = alias.source_key`;
+  }
+  if (field === "heading") {
+    return `
+  SELECT c.rowid, 3.0 AS score
+  FROM exact JOIN chunks AS c ON c.exact_heading = exact.value`;
+  }
+  if (field === "body") {
+    return `
+  SELECT rowid, 5.0 AS score
+  FROM exact_identifier_matches`;
+  }
+  if (field === "cross_field") return EXACT_CANDIDATES_SQL;
+  throw new Error("unsupported Rust FTS5 exact field");
+}
+
+function exactSearchSql(field: StagePlan["proof_field"], required: boolean): string {
+  const candidates = exactCandidatesForField(field);
+  return required
+    ? `
+WITH exact(value) AS (VALUES (?)),
+eligible(rowid) AS (
+  SELECT rowid FROM chunk_exact_identifier_fts WHERE chunk_exact_identifier_fts MATCH ?
+),
+exact_identifier_matches(rowid) AS (
+  SELECT rowid FROM chunk_exact_identifier_fts WHERE chunk_exact_identifier_fts MATCH ?
+),
+candidates(rowid, score) AS (${candidates}
+),
+ranked(rowid, score) AS (
+  SELECT candidates.rowid, max(candidates.score)
+  FROM candidates JOIN eligible ON eligible.rowid = candidates.rowid
+  GROUP BY candidates.rowid
+)
+SELECT c.source_key, c.chunk_id, c.vault_id, c.path, c.heading_path_json,
+  c.frontmatter_json, ${contentRoleScoreSql("ranked.score")} AS score
+FROM ranked JOIN chunks AS c ON c.rowid = ranked.rowid
+JOIN sources AS s ON s.source_key = c.source_key
+ORDER BY score DESC, c.chunk_id ASC, c.path ASC
+LIMIT ?
+`
+    : `
+WITH exact(value) AS (VALUES (?)),
+exact_identifier_matches(rowid) AS (
+  SELECT rowid FROM chunk_exact_identifier_fts WHERE chunk_exact_identifier_fts MATCH ?
+),
+candidates(rowid, score) AS (${candidates}
+),
+ranked(rowid, score) AS (
+  SELECT rowid, max(score) FROM candidates GROUP BY rowid
+)
+SELECT c.source_key, c.chunk_id, c.vault_id, c.path, c.heading_path_json,
+  c.frontmatter_json, ${contentRoleScoreSql("ranked.score")} AS score
+FROM ranked JOIN chunks AS c ON c.rowid = ranked.rowid
+JOIN sources AS s ON s.source_key = c.source_key
+ORDER BY score DESC, c.chunk_id ASC, c.path ASC
+LIMIT ?
+`;
+}
+
 export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
-  if (plan.schema_version !== 6
-    || plan.profile_id !== FTS5_PROFILE_ID
+  if (plan.schema_version !== 7
+    || (plan.profile_id !== FTS5_PROFILE_ID && plan.profile_id !== FTS5_COMPAT_PROFILE_ID)
     || plan.max_total_candidates !== 512
-    || plan.stages.length > 6
+    || plan.stages.length > 42
     || plan.stages.some((stage, index) => stage.ordinal !== index)) {
     throw new Error("unsupported Rust FTS5 execution plan");
   }
@@ -242,12 +268,15 @@ export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
     return;
   }
   if (plan.disposition === "explicit_bypass") {
-    if (plan.stages.length !== 1 || plan.stages[0]?.plan_id !== "lexical_explicit_v3") {
+    if (plan.profile_id !== FTS5_COMPAT_PROFILE_ID
+      || plan.stages.length !== 1
+      || plan.stages[0]?.plan_id !== "lexical_explicit_v3") {
       throw new Error("invalid explicit FTS5 execution plan");
     }
     return;
   }
-  if (plan.disposition !== "ready" || plan.stages.length === 0
+  if (plan.disposition !== "ready" || plan.profile_id !== FTS5_PROFILE_ID
+    || plan.stages.length === 0
     || plan.stages.some((stage) => stage.plan_id === "lexical_explicit_v3")) {
     throw new Error("invalid assisted FTS5 execution plan");
   }
@@ -264,9 +293,12 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
     }
     const exactIdentifierToken = encodeExactIdentifierToken(stage.exact_value);
     return required.length === 0
-      ? { sql: EXACT_SEARCH_SQL, bind: [stage.exact_value, exactIdentifierToken, limit] }
+      ? {
+          sql: exactSearchSql(stage.proof_field, false),
+          bind: [stage.exact_value, exactIdentifierToken, limit],
+        }
       : {
-          sql: REQUIRED_IDENTIFIER_EXACT_SEARCH_SQL,
+          sql: exactSearchSql(stage.proof_field, true),
           bind: [
             stage.exact_value,
             encodeExactIdentifierMatch(required),
@@ -302,7 +334,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
 }
 
 export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
-  if (plan.schema_version !== 6) {
+  if (plan.schema_version !== 7) {
     throw new Error("unsupported Rust FTS5 evidence probe");
   }
   if (plan.plan_id === "identifier_metadata_v3") {

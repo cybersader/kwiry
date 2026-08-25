@@ -17,11 +17,12 @@ const TOKEN_B = "B".repeat(43);
 function mockTransport(
   status: number,
   responseBody: unknown,
+  responseHeaders: Record<string, string> = {},
 ): { transport: Transport; calls: Call[] } {
   const calls: Call[] = [];
   const transport: Transport = async (options) => {
     calls.push(options);
-    return { status, text: JSON.stringify(responseBody) };
+    return { status, text: JSON.stringify(responseBody), headers: responseHeaders };
   };
   return { transport, calls };
 }
@@ -61,6 +62,40 @@ describe("KwiryClient.search", () => {
     expect(JSON.parse(call.body!)).toEqual({ q: "query", mode: "hybrid", limit: 20 });
   });
 
+  it("reads closed field-policy headers without widening the frozen response body", async () => {
+    const { transport } = mockTransport(200, {
+      hits: [HIT],
+      next_cursor: null,
+      extraction_policy_fingerprint: "a".repeat(64),
+    }, {
+      "X-Kwiry-Lexical-Profile": "lexical-v2",
+      "X-Kwiry-Field-Scope": "name",
+      "X-Kwiry-Field-Emphasis": "title",
+    });
+    await expect(client(transport).searchWithPolicy({
+      q: "in:name >title query",
+      mode: "lexical",
+    })).resolves.toMatchObject({
+      queryPolicy: {
+        lexical_profile: "lexical-v2",
+        scope: "name",
+        emphasis: "title",
+      },
+      response: { hits: [{ chunk_id: "c1" }] },
+    });
+  });
+
+  it("rejects partial or unknown field-policy headers", async () => {
+    const { transport } = mockTransport(200, { hits: [], next_cursor: null }, {
+      "x-kwiry-lexical-profile": "lexical-v2",
+    });
+    const error = await client(transport)
+      .searchWithPolicy({ q: "query", mode: "lexical" })
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(KwiryApiError);
+    expect(error.code).toBe("invalid_response");
+  });
+
   it("reads the token provider fresh for every authenticated request", async () => {
     const { transport, calls } = mockTransport(200, { hits: [], next_cursor: null });
     const tokens = [TOKEN_A, TOKEN_B];
@@ -84,15 +119,18 @@ describe("KwiryClient.search", () => {
     expect(JSON.parse(calls[1]!.body!).filters).toEqual({ vault_id: "notes" });
   });
 
-  it("maps daemon errors to typed safe messages without echoing private input", async () => {
+  it.each([
+    "invalid_query",
+    "invalid_field_control",
+  ])("maps %s to a typed safe message without echoing private input", async (code) => {
     const { transport } = mockTransport(400, {
-      error: { code: "invalid_query", message: "private sentinel query" },
+      error: { code, message: "private sentinel query" },
     });
     const error = await client(transport)
       .search({ q: "private sentinel query", mode: "lexical" })
       .catch((caught) => caught);
     expect(error).toBeInstanceOf(KwiryApiError);
-    expect(error.code).toBe("invalid_query");
+    expect(error.code).toBe(code);
     expect(error.message).not.toContain("sentinel");
   });
 
