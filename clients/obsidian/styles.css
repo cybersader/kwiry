@@ -87,6 +87,48 @@
   color: var(--text-on-accent);
 }
 
+.kwiry-query-tools {
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  gap: var(--size-4-2);
+  color: var(--text-faint);
+}
+
+.kwiry-query-controls {
+  display: none;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-weight: var(--font-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kwiry-query-controls.has-controls {
+  display: inline;
+}
+
+.kwiry-query-help {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.kwiry-query-help:hover,
+.kwiry-query-help:focus-visible {
+  background: transparent;
+  color: var(--text-normal);
+}
+
 .kwiry-result {
   display: flex;
   flex-direction: column;

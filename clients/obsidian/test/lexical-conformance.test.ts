@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   openFts5Generation,
@@ -17,13 +17,26 @@ import {
 } from "../src/worker/fts5-index";
 import type {
   ExecutionPlan,
+  FinalizedLexicalV2Rank,
   FinalizedQuery,
+  LexicalV2RankInput,
   PreparedQuery,
   QueryEvidenceObservation,
   QueryEvidenceStageKind,
   SourcePreparation,
   StagePlan,
 } from "../src/worker/rust-adapter";
+
+const rustRankBridge = vi.hoisted(() => ({
+  finalize: null as ((input: LexicalV2RankInput) => FinalizedLexicalV2Rank) | null,
+}));
+
+vi.mock("../src/worker/rust-adapter", () => ({
+  finalizeLexicalV2RankWithRust: (input: LexicalV2RankInput): FinalizedLexicalV2Rank => {
+    if (rustRankBridge.finalize === null) throw new Error("portable Rust rank bridge is not ready");
+    return rustRankBridge.finalize(input);
+  },
+}));
 
 interface CorpusDocument {
   scope: string;
@@ -91,6 +104,7 @@ interface RawRustAdapter {
   prepare_source(request: string, bytes: Uint8Array): string;
   prepare_query(request: string): string;
   finalize_query(request: string): string;
+  finalize_lexical_v2_rank(request: string): string;
 }
 let rustAdapter: RawRustAdapter;
 let adapterPackageDirectory: string | null = null;
@@ -144,7 +158,7 @@ function finalizeQueryWithRust(
     operation: "finalize_query",
     query,
     evidence_report: {
-      schema_version: 7,
+      schema_version: 8,
       identifier_probe_matched: evidence.identifier_probe_matched,
       term_support: evidence.term_support,
     },
@@ -176,6 +190,13 @@ beforeAll(async () => {
     "--out-name", "kwiry_obsidian_wasm",
   ], adapterRoot);
   rustAdapter = require(join(adapterPackageDirectory, "kwiry_obsidian_wasm.js")) as RawRustAdapter;
+  rustRankBridge.finalize = (input) => adapterResult<FinalizedLexicalV2Rank>(
+    rustAdapter.finalize_lexical_v2_rank(JSON.stringify({
+      abi_version: 3,
+      operation: "finalize_lexical_v2_rank",
+      input,
+    })),
+  );
 
   const initializeSqlite = sqlite3InitModule as unknown as (options: {
     print: () => void;
@@ -185,6 +206,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(() => {
+  rustRankBridge.finalize = null;
   if (adapterPackageDirectory !== null) rmSync(adapterPackageDirectory, { recursive: true, force: true });
 });
 
@@ -240,8 +262,8 @@ function stageKind(stage: StagePlan): QueryEvidenceStageKind | "explicit" {
 
 function singleStagePlan(stage: StagePlan): ExecutionPlan {
   return {
-    schema_version: 6,
-    profile_id: "lexical-v1",
+    schema_version: 7,
+    profile_id: stage.plan_id === "lexical_explicit_v3" ? "lexical-v1" : "lexical-v2",
     disposition: stage.plan_id === "lexical_explicit_v3" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
     stages: [{ ...stage, ordinal: 0 }],

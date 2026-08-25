@@ -79,15 +79,17 @@ The feasibility gate ran before protocol integration and passed: the exact offic
 
 ## D5C — relevance signals and configuration
 
-State: the open-property projection foundation is published in beta.15. Properties remain excluded from ordinary lexical eligibility, scoring, and ranking; ranking semantics and changed ordering remain separately owner-reviewed.
+State: the open-property projection foundation is published in beta.15. The owner-approved 2026-08-24 amendment accepts the bounded `lexical-v2` text-evidence profile and simple field controls for beta.27; properties remain excluded from ordinary lexical eligibility, scoring, and ranking.
 
 ### C1 — recency
 
 Choose a testable decay model and protect canonical older notes from disappearing merely because they are old. No recency source, decay, default, or ranking effect is accepted yet.
 
-### C2 — properties
+### C2 — properties and field controls
 
-Preserve the complete recursive typed property bag and durable Tantivy/SQLite projections by default as disposable derived state. Ordinary lexical search does not yet read the bag for eligibility or scoring. Open-default projection does not authorize unrestricted search or ranking exposure of private metadata. Separately resolve bounded field scopes, exact/range/text rules, policy ownership, field weights, privacy exclusions, validation, disclosure, degradation, and rebuild semantics. No grammar, default profile, evidence contract, degradation behavior, or changed ordering is accepted yet.
+Preserve the complete recursive typed property bag and durable Tantivy/SQLite projections by default as disposable derived state. Ordinary lexical search does not read that bag for eligibility or scoring. Open-default projection does not authorize unrestricted search or ranking exposure of private metadata.
+
+Beta.27 accepts one strict leading `in:<field>` scope and one fixed leading `><field>` emphasis for `name`, `filename`, `title`, `alias`, `heading`, `tag`, and `body`. Shared Rust owns parsing, validation, closed field meanings, fixed weighting, work bounds, and ordering. Arbitrary numbers, recursive-property scope, path scope, and source-authored ranking instructions remain excluded. Lexical supports both controls; hybrid supports emphasis only on its lexical leg; semantic-only rejects them.
 
 ### C3 — folder hierarchy
 
@@ -95,9 +97,9 @@ Represent ancestor segments and depth; test root/deep priors, archive penalties,
 
 ### C4 — relevance profiles
 
-Evaluate named, versioned, judged profiles before exposing arbitrary sliders. Profile fields, weights, defaults, effective-profile disclosure, reset, migration, evidence, and deterministic fixtures remain separately owner-reviewed.
+`lexical-v2` is accepted as the default desktop, in-plugin, and OpenClast lexical profile, while `lexical-v1` remains an explicit compatibility identity. The profile uses bounded cross-lane collection and a fixed shared-Rust scorecard so strong source-identity text evidence can outrank body-only evidence. Native and portable hosts must satisfy the same judged partial orders without comparing raw engine scores. Further named profiles, arbitrary sliders, metadata signals crossing text-evidence bands, and broader configuration remain separately owner-reviewed.
 
-Query-assistance status is split: zero-result copy is implemented; field scopes remain conditionally authorized and design-gated rather than accepted as a final grammar/default; typo assistance remains prototype-only pending performance and visible-limitation evidence.
+Query-assistance status is split: zero-result copy and beta.27 field controls are accepted; typo assistance remains prototype-only pending performance and visible-limitation evidence.
 
 ## D5D — daily drive and distribution
 

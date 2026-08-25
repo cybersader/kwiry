@@ -9,7 +9,9 @@
 export type EmptyStateKind = "prompt" | "no-matches" | "error";
 
 const USER_CORRECTABLE_QUERY_ERRORS = new Set([
+  "daemon_upgrade_required",
   "explicit_query_unsupported",
+  "invalid_field_control",
   "invalid_query",
 ]);
 
@@ -31,8 +33,12 @@ export function emptyStateMessage(kind: EmptyStateKind, query = ""): string {
 
 export function searchErrorEmptyState(code: string): string {
   switch (code) {
+    case "daemon_upgrade_required":
+      return "Field controls require a beta.27-compatible daemon.";
     case "explicit_query_unsupported":
       return "This explicit query is not supported by the in-plugin backend.";
+    case "invalid_field_control":
+      return "This field control is not valid for the selected search mode.";
     case "invalid_query":
       return "The query is invalid or exceeds the supported limits.";
     default:

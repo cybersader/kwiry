@@ -337,7 +337,7 @@ function fakeSession(options: {
       : checkpointExportResult(generation, cursor)),
     restoreInitialBuildCheckpoint: vi.fn(),
     planInitialBuildCheckpointReconciliation: vi.fn(),
-    search: vi.fn(async () => {
+    search: vi.fn(async (query: string) => {
       const result = await (options.search ?? (async () => ({
         generation: "generation-1",
         hits: [{
@@ -359,6 +359,12 @@ function fakeSession(options: {
           state: "unknown",
           candidate_count: 0,
           candidate_limit: 512,
+        },
+        query_policy: {
+          profile_id: "lexical-v2",
+          query_text: query,
+          scope: null,
+          emphasis: null,
         },
       };
     }),
@@ -1169,6 +1175,12 @@ describe("InPluginLexicalBackend", () => {
           candidate_count: 11,
           candidate_limit: 512,
         },
+        query_policy: {
+          profile_id: "lexical-v2",
+          query_text: "match",
+          scope: "name",
+          emphasis: null,
+        },
       }),
     })]);
     await inPlugin.initialize();
@@ -1176,10 +1188,15 @@ describe("InPluginLexicalBackend", () => {
       await expect(inPlugin.status()).resolves.toMatchObject({ searchable: true });
     });
 
-    const execution = await inPlugin.search({ q: "match", mode: "lexical", limit: 10 });
+    const execution = await inPlugin.search({ q: "in:name match", mode: "lexical", limit: 10 });
     expect(execution).toMatchObject({
       requestedMode: "lexical",
       effectiveMode: "lexical",
+      queryPolicy: {
+        lexical_profile: "lexical-v2",
+        scope: "name",
+        emphasis: null,
+      },
       generation: "generation-1",
       candidateWindow: {
         state: "more_available",

@@ -74,13 +74,14 @@ Native installers and packages are still planned. See [`docs/setup.md`](docs/set
 
 See the historical Tantivy evidence in [`bench/tantivy-wasm/README.md`](bench/tantivy-wasm/README.md) and the selected sequence in [`docs/design/obsidian-lite.md`](docs/design/obsidian-lite.md).
 
-### D5C — relevance signals and configuration — Property projection published; ranking acceptance pending
+### D5C — relevance signals and configuration — Lexical-v2 field policy accepted for beta.27
 
-- Beta.15 publishes open recursive typed Obsidian properties/frontmatter as disposable derived state in native Tantivy and in-plugin SQLite.
-- Ordinary lexical search does not yet use the property bag for eligibility or scoring.
-- Future ranking policy is intended to remain bounded and outside note-authored metadata, but its configuration ownership, scopes/rules, field weights, hierarchy semantics, exclusions, and named-profile contract remain unresolved pending explicit semantics, deterministic limits, judged evidence, and owner review.
-- Open-default projection does not authorize unrestricted search or ranking exposure of private metadata. Any result-order change, profile/default, rule grammar, privacy boundary, evidence/explanation envelope, or degradation behavior remains separately owner-reviewed.
-- Query-assistance status is split: zero-result copy is implemented; field scopes remain conditionally authorized and design-gated; typo assistance remains prototype-only pending performance and limitation evidence.
+- Beta.15 publishes open recursive typed Obsidian properties/frontmatter as disposable derived state in native Tantivy and in-plugin SQLite. The property bag remains excluded from ordinary lexical eligibility and scoring.
+- The owner-approved 2026-08-24 amendment admits `lexical-v2` as the default desktop, in-plugin, and OpenClast lexical profile, with shared-Rust field-coherent text proofs, bounded cross-lane collection, and judged source-identity-over-body ordering. `lexical-v1` remains an explicit compatibility identity.
+- Beta.27 admits one strict leading `in:<field>` scope and one fixed leading `><field>` emphasis over the closed fields `name`, `filename`, `title`, `alias`, `heading`, `tag`, and `body`. The versioned profile owns the internal fixed values; arbitrary numeric boosts and sliders remain excluded.
+- Lexical accepts scope and emphasis. Hybrid accepts emphasis on its lexical leg and embeds stripped query text, but rejects strict scope. Semantic-only rejects lexical controls. Unsupported combinations fail explicitly without fallback.
+- Open-default property projection does not authorize unrestricted search or ranking exposure of private metadata. Recency, properties, hierarchy, path, format, source-specific mappings, broader profile configuration, explanation envelopes, and any ability for metadata to cross lexical-v2 text-evidence bands remain unresolved and separately owner-reviewed.
+- Query-assistance status remains split: zero-result copy and the beta.27 field controls are accepted; typo assistance remains prototype-only pending performance and limitation evidence.
 
 ### D5D — daily-drive acceptance and distribution — Grouped UX published; acceptance pending
 

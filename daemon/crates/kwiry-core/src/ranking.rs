@@ -1,10 +1,12 @@
+#![cfg_attr(not(feature = "internal-d5c-preview"), allow(dead_code))]
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::model::{PropertyBag, PropertyValue};
-use crate::query::QueryEvidenceStageKind;
+use crate::query::{LEXICAL_V2_PROFILE_ID, QueryEvidenceStageKind, QueryPublicField};
 
 pub const RELEVANCE_PROFILE_SCHEMA_VERSION: u32 = 1;
 pub const RERANK_INPUT_SCHEMA_VERSION: u32 = 1;
@@ -25,6 +27,10 @@ pub const MAX_RERANK_CANDIDATES: usize = crate::query::MAX_TOTAL_CANDIDATES;
 pub const MAX_RERANK_SOURCE_OBSERVATIONS: usize = MAX_RERANK_CANDIDATES;
 pub const MAX_PROPERTY_VALUES_PER_SOURCE_OBSERVATION: usize = 256;
 pub const MAX_RANKING_WORK_UNITS: usize = 65_536;
+pub const LEXICAL_V2_RANK_SCHEMA_VERSION: u32 = 1;
+pub const MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE: usize = 32;
+pub const MAX_LEXICAL_V2_LANES: usize = 42;
+pub const LEXICAL_V2_EMPHASIS_POINTS: i32 = 10;
 
 const MAX_AUTHORIZATION_SCOPE_BYTES: usize = 1_024;
 const MAX_SOURCE_KEY_BYTES: usize = 256;
@@ -288,6 +294,234 @@ impl RuleStrength {
 pub struct QualifiedSourceId {
     pub authorization_scope: String,
     pub source_key: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalV2ProofField {
+    Filename,
+    Title,
+    Alias,
+    Heading,
+    Tag,
+    Body,
+    CrossField,
+}
+
+impl LexicalV2ProofField {
+    fn points(self) -> i32 {
+        match self {
+            Self::Filename | Self::Title | Self::Alias => 10,
+            Self::Heading => 6,
+            Self::Tag => 3,
+            Self::Body | Self::CrossField => 0,
+        }
+    }
+
+    fn public_field(self) -> Option<QueryPublicField> {
+        match self {
+            Self::Filename => Some(QueryPublicField::Filename),
+            Self::Title => Some(QueryPublicField::Title),
+            Self::Alias => Some(QueryPublicField::Alias),
+            Self::Heading => Some(QueryPublicField::Heading),
+            Self::Tag => Some(QueryPublicField::Tag),
+            Self::Body => Some(QueryPublicField::Body),
+            Self::CrossField => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalV2ProofKind {
+    Exact,
+    Phrase,
+    AllTerms,
+    PrefixAssisted,
+    CrossFieldAllTerms,
+    PartialCoverage,
+}
+
+impl LexicalV2ProofKind {
+    fn points(self) -> i32 {
+        match self {
+            Self::Exact => 60,
+            Self::Phrase => 50,
+            Self::AllTerms | Self::PrefixAssisted => 45,
+            Self::CrossFieldAllTerms => 25,
+            Self::PartialCoverage => 15,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalV2Proof {
+    pub field: LexicalV2ProofField,
+    pub kind: LexicalV2ProofKind,
+    pub lane_ordinal: u8,
+    pub engine_score: f32,
+    pub engine_ordinal: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalV2Candidate {
+    pub source: QualifiedSourceId,
+    pub chunk_id: String,
+    pub path: String,
+    pub proofs: Vec<LexicalV2Proof>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalV2RankInput {
+    pub schema_version: u32,
+    pub profile_id: String,
+    pub lane_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<QueryPublicField>,
+    pub candidates: Vec<LexicalV2Candidate>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LexicalV2RankedCandidate {
+    pub candidate: LexicalV2Candidate,
+    pub selected_proof: LexicalV2Proof,
+    pub evidence_points: i32,
+}
+
+pub fn rank_lexical_v2(
+    input: &LexicalV2RankInput,
+) -> Result<Vec<LexicalV2RankedCandidate>, RankingError> {
+    validate_lexical_v2_input(input)?;
+    let mut ranked = Vec::with_capacity(input.candidates.len());
+    for candidate in &input.candidates {
+        let mut proofs = candidate.proofs.iter().cloned().collect::<Vec<_>>();
+        proofs.sort_by(|left, right| compare_lexical_v2_proofs(left, right, input.emphasis));
+        let selected_proof = proofs
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid_input("lexical-v2 candidate has no proof"))?;
+        let evidence_points = lexical_v2_evidence_points(&selected_proof, input.emphasis);
+        ranked.push(LexicalV2RankedCandidate {
+            candidate: candidate.clone(),
+            selected_proof,
+            evidence_points,
+        });
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .evidence_points
+            .cmp(&left.evidence_points)
+            .then_with(|| left.selected_proof.kind.cmp(&right.selected_proof.kind))
+            .then_with(|| left.selected_proof.field.cmp(&right.selected_proof.field))
+            .then_with(|| {
+                if left.selected_proof.kind == right.selected_proof.kind
+                    && left.selected_proof.field == right.selected_proof.field
+                {
+                    right
+                        .selected_proof
+                        .engine_score
+                        .total_cmp(&left.selected_proof.engine_score)
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .then_with(|| {
+                left.selected_proof
+                    .engine_ordinal
+                    .cmp(&right.selected_proof.engine_ordinal)
+            })
+            .then_with(|| left.candidate.source.cmp(&right.candidate.source))
+            .then_with(|| left.candidate.chunk_id.cmp(&right.candidate.chunk_id))
+            .then_with(|| left.candidate.path.cmp(&right.candidate.path))
+    });
+    Ok(ranked)
+}
+
+fn validate_lexical_v2_input(input: &LexicalV2RankInput) -> Result<(), RankingError> {
+    if input.schema_version != LEXICAL_V2_RANK_SCHEMA_VERSION
+        || input.profile_id != LEXICAL_V2_PROFILE_ID
+    {
+        return Err(invalid_input(
+            "lexical-v2 rank identity or schema is unsupported",
+        ));
+    }
+    if input.lane_count == 0 || input.lane_count > MAX_LEXICAL_V2_LANES {
+        return Err(invalid_input("lexical-v2 lane count exceeds its bound"));
+    }
+    if input.candidates.len() > MAX_RERANK_CANDIDATES {
+        return Err(invalid_input(
+            "lexical-v2 candidate count exceeds its bound",
+        ));
+    }
+    let mut identities = BTreeSet::new();
+    for candidate in &input.candidates {
+        validate_source_id(&candidate.source)?;
+        if candidate.chunk_id.is_empty()
+            || candidate.chunk_id.len() > MAX_CHUNK_ID_BYTES
+            || candidate.path.is_empty()
+            || candidate.path.len() > crate::query::MAX_QUERY_BYTES
+            || candidate.proofs.is_empty()
+            || candidate.proofs.len() > MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE
+        {
+            return Err(invalid_input("lexical-v2 candidate shape is invalid"));
+        }
+        if !identities.insert((
+            candidate.source.clone(),
+            candidate.chunk_id.clone(),
+            candidate.path.clone(),
+        )) {
+            return Err(invalid_input("lexical-v2 candidate identity is duplicated"));
+        }
+        let mut proofs = BTreeSet::new();
+        for proof in &candidate.proofs {
+            if usize::from(proof.lane_ordinal) >= input.lane_count
+                || !proof.engine_score.is_finite()
+                || !proofs.insert((proof.field, proof.kind, proof.lane_ordinal))
+            {
+                return Err(invalid_input("lexical-v2 proof is invalid or duplicated"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn lexical_v2_evidence_points(
+    proof: &LexicalV2Proof,
+    emphasis: Option<QueryPublicField>,
+) -> i32 {
+    let emphasized = match emphasis {
+        Some(QueryPublicField::Name) => matches!(
+            proof.field,
+            LexicalV2ProofField::Filename | LexicalV2ProofField::Title | LexicalV2ProofField::Alias
+        ),
+        Some(field) => proof.field.public_field() == Some(field),
+        None => false,
+    };
+    proof.kind.points() + proof.field.points() + i32::from(emphasized) * LEXICAL_V2_EMPHASIS_POINTS
+}
+
+fn compare_lexical_v2_proofs(
+    left: &LexicalV2Proof,
+    right: &LexicalV2Proof,
+    emphasis: Option<QueryPublicField>,
+) -> Ordering {
+    lexical_v2_evidence_points(right, emphasis)
+        .cmp(&lexical_v2_evidence_points(left, emphasis))
+        .then_with(|| left.kind.cmp(&right.kind))
+        .then_with(|| left.field.cmp(&right.field))
+        .then_with(|| {
+            if left.kind == right.kind && left.field == right.field {
+                right.engine_score.total_cmp(&left.engine_score)
+            } else {
+                Ordering::Equal
+            }
+        })
+        .then_with(|| left.engine_ordinal.cmp(&right.engine_ordinal))
+        .then_with(|| left.lane_ordinal.cmp(&right.lane_ordinal))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -1378,6 +1612,149 @@ mod tests {
             authorization_scope: scope.to_owned(),
             source_key: key.to_owned(),
         }
+    }
+
+    fn lexical_v2_candidate(
+        key: &str,
+        path: &str,
+        field: LexicalV2ProofField,
+        kind: LexicalV2ProofKind,
+        lane_ordinal: u8,
+        score: f32,
+    ) -> LexicalV2Candidate {
+        LexicalV2Candidate {
+            source: source("desktop", key),
+            chunk_id: format!("chunk-{key}"),
+            path: path.to_owned(),
+            proofs: vec![LexicalV2Proof {
+                field,
+                kind,
+                lane_ordinal,
+                engine_score: score,
+                engine_ordinal: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn lexical_v2_identity_can_cross_the_legacy_body_phrase_tier() {
+        let candidates = vec![
+            lexical_v2_candidate(
+                "body",
+                "body.md",
+                LexicalV2ProofField::Body,
+                LexicalV2ProofKind::Phrase,
+                0,
+                20.0,
+            ),
+            lexical_v2_candidate(
+                "identity",
+                "Vendor7-external-meetings.md",
+                LexicalV2ProofField::Filename,
+                LexicalV2ProofKind::AllTerms,
+                1,
+                1.0,
+            ),
+        ];
+        let mut input = LexicalV2RankInput {
+            schema_version: LEXICAL_V2_RANK_SCHEMA_VERSION,
+            profile_id: LEXICAL_V2_PROFILE_ID.to_owned(),
+            lane_count: 2,
+            emphasis: None,
+            candidates,
+        };
+
+        let default = rank_lexical_v2(&input).unwrap();
+        assert_eq!(default[0].candidate.path, "Vendor7-external-meetings.md");
+        assert_eq!(default[0].evidence_points, 55);
+        assert_eq!(default[1].evidence_points, 50);
+
+        input.emphasis = Some(QueryPublicField::Body);
+        let body = rank_lexical_v2(&input).unwrap();
+        assert_eq!(body[0].candidate.path, "body.md");
+        assert_eq!(body[0].evidence_points, 60);
+    }
+
+    #[test]
+    fn lexical_v2_emphasis_is_field_specific_and_engine_scores_stay_lane_local() {
+        let input = LexicalV2RankInput {
+            schema_version: LEXICAL_V2_RANK_SCHEMA_VERSION,
+            profile_id: LEXICAL_V2_PROFILE_ID.to_owned(),
+            lane_count: 3,
+            emphasis: Some(QueryPublicField::Title),
+            candidates: vec![
+                lexical_v2_candidate(
+                    "filename",
+                    "filename.md",
+                    LexicalV2ProofField::Filename,
+                    LexicalV2ProofKind::AllTerms,
+                    0,
+                    100.0,
+                ),
+                lexical_v2_candidate(
+                    "title",
+                    "title.md",
+                    LexicalV2ProofField::Title,
+                    LexicalV2ProofKind::AllTerms,
+                    1,
+                    1.0,
+                ),
+                lexical_v2_candidate(
+                    "body-a",
+                    "body-a.md",
+                    LexicalV2ProofField::Body,
+                    LexicalV2ProofKind::Phrase,
+                    2,
+                    2.0,
+                ),
+                lexical_v2_candidate(
+                    "body-b",
+                    "body-b.md",
+                    LexicalV2ProofField::Body,
+                    LexicalV2ProofKind::Phrase,
+                    2,
+                    3.0,
+                ),
+            ],
+        };
+        let ranked = rank_lexical_v2(&input).unwrap();
+        assert_eq!(ranked[0].candidate.path, "title.md");
+        let body_paths = ranked
+            .iter()
+            .filter(|entry| entry.selected_proof.field == LexicalV2ProofField::Body)
+            .map(|entry| entry.candidate.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(body_paths, ["body-b.md", "body-a.md"]);
+    }
+
+    #[test]
+    fn lexical_v2_rank_input_fails_closed_on_bounds_and_duplicate_identity() {
+        let candidate = lexical_v2_candidate(
+            "one",
+            "one.md",
+            LexicalV2ProofField::Body,
+            LexicalV2ProofKind::AllTerms,
+            0,
+            1.0,
+        );
+        let duplicate = LexicalV2RankInput {
+            schema_version: LEXICAL_V2_RANK_SCHEMA_VERSION,
+            profile_id: LEXICAL_V2_PROFILE_ID.to_owned(),
+            lane_count: 1,
+            emphasis: None,
+            candidates: vec![candidate.clone(), candidate],
+        };
+        assert_eq!(
+            rank_lexical_v2(&duplicate).unwrap_err().code,
+            "invalid_rerank_input"
+        );
+
+        let empty_lanes = LexicalV2RankInput {
+            candidates: Vec::new(),
+            lane_count: 0,
+            ..duplicate
+        };
+        assert!(rank_lexical_v2(&empty_lanes).is_err());
     }
 
     fn candidate(

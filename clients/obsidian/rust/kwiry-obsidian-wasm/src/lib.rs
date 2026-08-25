@@ -14,13 +14,15 @@ use kwiry_core::{
 };
 use kwiry_core::{
     CHUNKING_VERSION, FORMAT_IDENTITY_SCHEMA_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
-    LexicalQueryPlan, MAX_FILE_BYTES, QueryAssistanceEligibility, QueryEvidenceReport,
+    LexicalQueryPlan, LexicalV2Proof, LexicalV2ProofField, LexicalV2ProofKind, LexicalV2RankInput,
+    MAX_FILE_BYTES, QueryAssistanceEligibility, QueryEvidenceReport, QueryEvidenceStage,
     QueryEvidenceStageKind, QueryExecutionDisposition, QueryField, QueryFieldGroup,
-    QueryMatchOperator, QueryPlanKind, QueryTermProjection, QueryTermRole,
+    QueryMatchOperator, QueryPlanKind, QueryPublicField, QueryTermProjection, QueryTermRole,
     SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
     active_extraction_policy, active_format_identities, extraction_policy_fingerprint,
-    normalize_lexical_value, prepare_lexical_query,
+    lexical_v2_evidence_points, normalize_lexical_value, prepare_lexical_query,
     prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
+    rank_lexical_v2,
 };
 #[cfg(feature = "internal-docx-extractor")]
 use kwiry_core::{ExtractionScope, extract_candidate_outcome};
@@ -35,8 +37,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub const ADAPTER_ABI_VERSION: u32 = 3;
-pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 6;
+pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 7;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
+pub const MAX_LEXICAL_V2_RANK_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "internal-d5c-preview")]
 pub const MAX_D5C_PREVIEW_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_BUFFER_BYTES: usize = MAX_FILE_BYTES as usize + 1;
@@ -50,6 +53,7 @@ pub enum AdapterOperation {
     PrepareOversizedSource,
     PrepareQuery,
     FinalizeQuery,
+    FinalizeLexicalV2Rank,
     #[cfg(feature = "internal-docx-extractor")]
     InternalDocxExtract,
     #[cfg(feature = "internal-d5c-preview")]
@@ -105,7 +109,7 @@ pub struct AbiIdentity {
     pub chunking_version: u64,
     pub max_request_bytes: usize,
     pub max_source_buffer_bytes: usize,
-    pub operations: [AdapterOperation; 4],
+    pub operations: [AdapterOperation; 5],
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -177,6 +181,8 @@ pub enum Fts5StagePlanId {
 pub struct Fts5StagePlan {
     pub ordinal: u8,
     pub plan_id: Fts5StagePlanId,
+    pub proof_field: LexicalV2ProofField,
+    pub proof_kind: LexicalV2ProofKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub match_value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -189,7 +195,9 @@ pub struct Fts5StagePlan {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Fts5ExecutionPlan {
     pub schema_version: u32,
-    pub profile_id: &'static str,
+    pub profile_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<QueryPublicField>,
     pub disposition: Fts5ExecutionDisposition,
     pub max_total_candidates: usize,
     pub stages: Vec<Fts5StagePlan>,
@@ -199,6 +207,12 @@ pub struct Fts5ExecutionPlan {
 pub struct FinalizedQueryResult {
     pub plan: LexicalQueryPlan,
     pub execution_plan: Fts5ExecutionPlan,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FinalizedLexicalV2RankResult {
+    pub ordered_candidate_ordinals: Vec<usize>,
+    pub selected_scores: Vec<f32>,
 }
 
 #[cfg(feature = "internal-d5c-preview")]
@@ -339,6 +353,21 @@ enum FinalizeQueryOperation {
     FinalizeQuery,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FinalizeLexicalV2RankRequest {
+    abi_version: u32,
+    #[serde(rename = "operation")]
+    _operation: FinalizeLexicalV2RankOperation,
+    input: LexicalV2RankInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FinalizeLexicalV2RankOperation {
+    FinalizeLexicalV2Rank,
+}
+
 #[cfg(feature = "internal-docx-extractor")]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -471,6 +500,7 @@ pub fn abi_identity() -> String {
             AdapterOperation::PrepareOversizedSource,
             AdapterOperation::PrepareQuery,
             AdapterOperation::FinalizeQuery,
+            AdapterOperation::FinalizeLexicalV2Rank,
         ],
     })
     .unwrap_or_else(|_| "{\"abi_version\":3,\"adapter\":\"kwiry-obsidian-wasm\"}".to_owned())
@@ -636,6 +666,75 @@ pub fn finalize_query(request_json: &str) -> String {
         ),
         Err(error) => error_response(operation, error),
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn finalize_lexical_v2_rank(request_json: &str) -> String {
+    let operation = AdapterOperation::FinalizeLexicalV2Rank;
+    let request = match parse_lexical_v2_rank_request::<FinalizeLexicalV2RankRequest>(request_json)
+    {
+        Ok(request) => request,
+        Err(error) => return error_response(operation, error),
+    };
+    if let Err(error) = check_abi(request.abi_version) {
+        return error_response(operation, error);
+    }
+
+    let ordinals = request
+        .input
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(ordinal, candidate)| {
+            (
+                (
+                    candidate.source.clone(),
+                    candidate.chunk_id.clone(),
+                    candidate.path.clone(),
+                ),
+                ordinal,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let ranked = match rank_lexical_v2(&request.input) {
+        Ok(ranked) => ranked,
+        Err(error) => {
+            return error_response(
+                operation,
+                AdapterError {
+                    code: error.code,
+                    message: error.message,
+                },
+            );
+        }
+    };
+    let mut ordered_candidate_ordinals = Vec::with_capacity(ranked.len());
+    let mut selected_scores = Vec::with_capacity(ranked.len());
+    for ranked in ranked {
+        let identity = (
+            ranked.candidate.source,
+            ranked.candidate.chunk_id,
+            ranked.candidate.path,
+        );
+        let Some(ordinal) = ordinals.get(&identity).copied() else {
+            return error_response(
+                operation,
+                adapter_error(
+                    "invalid_rerank_input",
+                    "Lexical-v2 ranker returned an unknown candidate.",
+                ),
+            );
+        };
+        ordered_candidate_ordinals.push(ordinal);
+        selected_scores.push(ranked.selected_proof.engine_score);
+    }
+    success_response(
+        operation,
+        FinalizedLexicalV2RankResult {
+            ordered_candidate_ordinals,
+            selected_scores,
+        },
+    )
 }
 
 #[cfg(feature = "internal-d5c-preview")]
@@ -918,6 +1017,19 @@ fn parse_request<T: DeserializeOwned>(request_json: &str) -> Result<T, AdapterEr
         .map_err(|_| adapter_error("invalid_request", "Invalid adapter request."))
 }
 
+fn parse_lexical_v2_rank_request<T: DeserializeOwned>(
+    request_json: &str,
+) -> Result<T, AdapterError> {
+    if request_json.len() > MAX_LEXICAL_V2_RANK_REQUEST_BYTES {
+        return Err(adapter_error(
+            "invalid_request",
+            "Lexical-v2 rank request exceeds the supported size.",
+        ));
+    }
+    serde_json::from_str(request_json)
+        .map_err(|_| adapter_error("invalid_request", "Invalid lexical-v2 rank request."))
+}
+
 #[cfg(feature = "internal-d5c-preview")]
 fn parse_d5c_request<T: DeserializeOwned>(request_json: &str) -> Result<T, AdapterError> {
     if request_json.len() > MAX_D5C_PREVIEW_REQUEST_BYTES {
@@ -1107,7 +1219,9 @@ fn fts5_execution_plan(
                 vec![Fts5StagePlan {
                     ordinal: 0,
                     plan_id: Fts5StagePlanId::LexicalExplicitV3,
-                    match_value: Some(translate_explicit_query(&plan.query)?),
+                    proof_field: LexicalV2ProofField::CrossField,
+                    proof_kind: LexicalV2ProofKind::Exact,
+                    match_value: Some(translate_explicit_query(&plan.query_text)?),
                     exact_value: None,
                     required_identifiers: Vec::new(),
                     max_candidates: plan.bounds.max_total_candidates,
@@ -1117,80 +1231,10 @@ fn fts5_execution_plan(
         QueryExecutionDisposition::EmptyNoEvidence => {
             (Fts5ExecutionDisposition::EmptyNoEvidence, Vec::new())
         }
-        QueryExecutionDisposition::Ready => {
-            let mut stages = Vec::with_capacity(plan.evidence_stages.len());
-            for stage in &plan.evidence_stages {
-                let required_identifiers = exact_identifier_requirements(plan);
-                let (plan_id, match_value, exact_value) = match stage.kind {
-                    QueryEvidenceStageKind::ExactMetadata => (
-                        Fts5StagePlanId::LexicalExactMetadataV3,
-                        None,
-                        Some(exact_stage_value(plan)?),
-                    ),
-                    QueryEvidenceStageKind::ExactPhrase => (
-                        Fts5StagePlanId::LexicalExactPhraseV3,
-                        Some(scoped_phrase(plan, stage.field_group)?),
-                        None,
-                    ),
-                    QueryEvidenceStageKind::AllTerms => (
-                        Fts5StagePlanId::LexicalAllTermsV3,
-                        scoped_optional_analyzed_terms(
-                            plan,
-                            stage.field_group,
-                            &stage.required_term_indexes,
-                        )?,
-                        None,
-                    ),
-                    QueryEvidenceStageKind::PartialCoverage => (
-                        Fts5StagePlanId::LexicalPartialCoverageV3,
-                        scoped_optional_analyzed_terms(
-                            plan,
-                            stage.field_group,
-                            &stage.required_term_indexes,
-                        )?,
-                        None,
-                    ),
-                    // Both halves of the prefix block share one expansion set
-                    // and differ only in the fields they may match.
-                    QueryEvidenceStageKind::PrefixMetadata => (
-                        Fts5StagePlanId::LexicalPrefixMetadataV3,
-                        Some(scoped_prefix_terms(plan, stage, prefix_expansions)?),
-                        None,
-                    ),
-                    QueryEvidenceStageKind::Prefix => (
-                        Fts5StagePlanId::LexicalPrefixV3,
-                        Some(scoped_prefix_terms(plan, stage, prefix_expansions)?),
-                        None,
-                    ),
-                };
-                if plan_id == Fts5StagePlanId::LexicalExactMetadataV3
-                    && (exact_value.as_deref().is_none_or(str::is_empty) || match_value.is_some())
-                {
-                    return Err(adapter_error(
-                        "invalid_query_plan",
-                        "Exact evidence stage has no exact value.",
-                    ));
-                }
-                if plan_id != Fts5StagePlanId::LexicalExactMetadataV3
-                    && match_value.is_none()
-                    && required_identifiers.is_empty()
-                {
-                    return Err(adapter_error(
-                        "invalid_query_plan",
-                        "Evidence stage has no executable constraints.",
-                    ));
-                }
-                stages.push(Fts5StagePlan {
-                    ordinal: stage.ordinal,
-                    plan_id,
-                    match_value: match_value.map(bounded_match_value).transpose()?,
-                    exact_value,
-                    required_identifiers,
-                    max_candidates: stage.max_candidates,
-                });
-            }
-            (Fts5ExecutionDisposition::Ready, stages)
-        }
+        QueryExecutionDisposition::Ready => (
+            Fts5ExecutionDisposition::Ready,
+            fts5_lexical_v2_lanes(plan, prefix_expansions)?,
+        ),
         QueryExecutionDisposition::AwaitingEvidence => {
             return Err(adapter_error(
                 "invalid_query_plan",
@@ -1200,11 +1244,229 @@ fn fts5_execution_plan(
     };
     Ok(Fts5ExecutionPlan {
         schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
-        profile_id: "lexical-v1",
+        profile_id: plan.profile_id.clone(),
+        emphasis: plan.emphasis,
         disposition,
         max_total_candidates: plan.bounds.max_total_candidates,
         stages,
     })
+}
+
+fn fts5_lexical_v2_lanes(
+    plan: &LexicalQueryPlan,
+    prefix_expansions: &BTreeMap<u16, Vec<String>>,
+) -> Result<Vec<Fts5StagePlan>, AdapterError> {
+    let mut lanes = Vec::<(u8, Fts5StagePlan)>::new();
+    for stage in &plan.evidence_stages {
+        let declared = declared_query_fields(plan, stage.field_group);
+        let mut by_field = BTreeMap::<LexicalV2ProofField, Vec<QueryField>>::new();
+        for field in declared {
+            if let Some(proof_field) = lexical_v2_proof_field(*field) {
+                by_field.entry(proof_field).or_default().push(*field);
+            }
+        }
+        for (field, fields) in &by_field {
+            if stage.kind == QueryEvidenceStageKind::ExactMetadata
+                && *field == LexicalV2ProofField::Tag
+            {
+                continue;
+            }
+            let mut lane_plan = plan.clone();
+            set_query_fields(&mut lane_plan, stage.field_group, fields.clone());
+            if matches!(
+                stage.kind,
+                QueryEvidenceStageKind::PrefixMetadata | QueryEvidenceStageKind::Prefix
+            ) {
+                lane_plan.field_groups.searchable_text = fields.clone();
+            }
+            if stage.kind == QueryEvidenceStageKind::ExactMetadata {
+                lane_plan.field_groups.exact = fields.clone();
+            }
+            relax_single_token_identifier_for_lane(&mut lane_plan);
+            let kind = lexical_v2_proof_kind(stage.kind, false);
+            lanes.push((
+                stage.ordinal,
+                fts5_stage_plan(&lane_plan, stage, *field, kind, prefix_expansions)?,
+            ));
+        }
+        if by_field.len() > 1
+            && matches!(
+                stage.kind,
+                QueryEvidenceStageKind::AllTerms | QueryEvidenceStageKind::PartialCoverage
+            )
+        {
+            lanes.push((
+                stage.ordinal,
+                fts5_stage_plan(
+                    plan,
+                    stage,
+                    LexicalV2ProofField::CrossField,
+                    lexical_v2_proof_kind(stage.kind, true),
+                    prefix_expansions,
+                )?,
+            ));
+        }
+    }
+    lanes.sort_by(|(left_stage, left), (right_stage, right)| {
+        let left_proof = LexicalV2Proof {
+            field: left.proof_field,
+            kind: left.proof_kind,
+            lane_ordinal: 0,
+            engine_score: 0.0,
+            engine_ordinal: 0,
+        };
+        let right_proof = LexicalV2Proof {
+            field: right.proof_field,
+            kind: right.proof_kind,
+            lane_ordinal: 0,
+            engine_score: 0.0,
+            engine_ordinal: 0,
+        };
+        lexical_v2_evidence_points(&right_proof, plan.emphasis)
+            .cmp(&lexical_v2_evidence_points(&left_proof, plan.emphasis))
+            .then_with(|| left_stage.cmp(right_stage))
+            .then_with(|| left.proof_field.cmp(&right.proof_field))
+    });
+    if lanes.len() > kwiry_core::MAX_LEXICAL_V2_LANES {
+        return Err(adapter_error(
+            "invalid_query_plan",
+            "Lexical-v2 lane count exceeds its bound.",
+        ));
+    }
+    let mut stages = Vec::with_capacity(lanes.len());
+    for (ordinal, (_, mut stage)) in lanes.into_iter().enumerate() {
+        stage.ordinal = ordinal as u8;
+        stages.push(stage);
+    }
+    Ok(stages)
+}
+
+fn fts5_stage_plan(
+    plan: &LexicalQueryPlan,
+    stage: &QueryEvidenceStage,
+    proof_field: LexicalV2ProofField,
+    proof_kind: LexicalV2ProofKind,
+    prefix_expansions: &BTreeMap<u16, Vec<String>>,
+) -> Result<Fts5StagePlan, AdapterError> {
+    let required_identifiers = exact_identifier_requirements(plan);
+    let (plan_id, match_value, exact_value) = match stage.kind {
+        QueryEvidenceStageKind::ExactMetadata => (
+            Fts5StagePlanId::LexicalExactMetadataV3,
+            None,
+            Some(exact_stage_value(plan)?),
+        ),
+        QueryEvidenceStageKind::ExactPhrase => (
+            Fts5StagePlanId::LexicalExactPhraseV3,
+            Some(scoped_phrase(plan, stage.field_group)?),
+            None,
+        ),
+        QueryEvidenceStageKind::AllTerms => (
+            Fts5StagePlanId::LexicalAllTermsV3,
+            scoped_optional_analyzed_terms(plan, stage.field_group, &stage.required_term_indexes)?,
+            None,
+        ),
+        QueryEvidenceStageKind::PartialCoverage => (
+            Fts5StagePlanId::LexicalPartialCoverageV3,
+            scoped_optional_analyzed_terms(plan, stage.field_group, &stage.required_term_indexes)?,
+            None,
+        ),
+        QueryEvidenceStageKind::PrefixMetadata => (
+            Fts5StagePlanId::LexicalPrefixMetadataV3,
+            Some(scoped_prefix_terms(plan, stage, prefix_expansions)?),
+            None,
+        ),
+        QueryEvidenceStageKind::Prefix => (
+            Fts5StagePlanId::LexicalPrefixV3,
+            Some(scoped_prefix_terms(plan, stage, prefix_expansions)?),
+            None,
+        ),
+    };
+    if plan_id == Fts5StagePlanId::LexicalExactMetadataV3
+        && (exact_value.as_deref().is_none_or(str::is_empty) || match_value.is_some())
+    {
+        return Err(adapter_error(
+            "invalid_query_plan",
+            "Exact evidence lane has no exact value.",
+        ));
+    }
+    if plan_id != Fts5StagePlanId::LexicalExactMetadataV3
+        && match_value.is_none()
+        && required_identifiers.is_empty()
+    {
+        return Err(adapter_error(
+            "invalid_query_plan",
+            "Evidence lane has no executable constraints.",
+        ));
+    }
+    Ok(Fts5StagePlan {
+        ordinal: 0,
+        plan_id,
+        proof_field,
+        proof_kind,
+        match_value: match_value.map(bounded_match_value).transpose()?,
+        exact_value,
+        required_identifiers,
+        max_candidates: stage.max_candidates,
+    })
+}
+
+fn declared_query_fields(plan: &LexicalQueryPlan, group: QueryFieldGroup) -> &[QueryField] {
+    match group {
+        QueryFieldGroup::SearchableText => &plan.field_groups.searchable_text,
+        QueryFieldGroup::Metadata => &plan.field_groups.metadata,
+        QueryFieldGroup::Exact => &plan.field_groups.exact,
+        QueryFieldGroup::Phrase => &plan.field_groups.phrase,
+        QueryFieldGroup::Prefix => &plan.field_groups.prefix,
+        QueryFieldGroup::PrefixMetadata => &plan.field_groups.prefix_metadata,
+    }
+}
+
+fn set_query_fields(plan: &mut LexicalQueryPlan, group: QueryFieldGroup, fields: Vec<QueryField>) {
+    match group {
+        QueryFieldGroup::SearchableText => plan.field_groups.searchable_text = fields,
+        QueryFieldGroup::Metadata => plan.field_groups.metadata = fields,
+        QueryFieldGroup::Exact => plan.field_groups.exact = fields,
+        QueryFieldGroup::Phrase => plan.field_groups.phrase = fields,
+        QueryFieldGroup::Prefix => plan.field_groups.prefix = fields,
+        QueryFieldGroup::PrefixMetadata => plan.field_groups.prefix_metadata = fields,
+    }
+}
+
+fn lexical_v2_proof_field(field: QueryField) -> Option<LexicalV2ProofField> {
+    match field {
+        QueryField::Filename | QueryField::Stem => Some(LexicalV2ProofField::Filename),
+        QueryField::Aliases => Some(LexicalV2ProofField::Alias),
+        QueryField::Title => Some(LexicalV2ProofField::Title),
+        QueryField::Heading => Some(LexicalV2ProofField::Heading),
+        QueryField::Tags => Some(LexicalV2ProofField::Tag),
+        QueryField::Content | QueryField::ContentIdentifiers => Some(LexicalV2ProofField::Body),
+    }
+}
+
+fn lexical_v2_proof_kind(kind: QueryEvidenceStageKind, cross_field: bool) -> LexicalV2ProofKind {
+    match kind {
+        QueryEvidenceStageKind::ExactMetadata => LexicalV2ProofKind::Exact,
+        QueryEvidenceStageKind::ExactPhrase => LexicalV2ProofKind::Phrase,
+        QueryEvidenceStageKind::AllTerms if cross_field => LexicalV2ProofKind::CrossFieldAllTerms,
+        QueryEvidenceStageKind::AllTerms => LexicalV2ProofKind::AllTerms,
+        QueryEvidenceStageKind::PrefixMetadata | QueryEvidenceStageKind::Prefix => {
+            LexicalV2ProofKind::PrefixAssisted
+        }
+        QueryEvidenceStageKind::PartialCoverage => LexicalV2ProofKind::PartialCoverage,
+    }
+}
+
+fn relax_single_token_identifier_for_lane(plan: &mut LexicalQueryPlan) {
+    for intent in &mut plan.term_intents {
+        if intent.projection == QueryTermProjection::ExactIdentifier
+            && intent
+                .text
+                .chars()
+                .all(|character| character.is_alphanumeric() || character == '_')
+        {
+            intent.projection = QueryTermProjection::AnalyzedText;
+        }
+    }
 }
 
 fn exact_stage_value(plan: &LexicalQueryPlan) -> Result<String, AdapterError> {
@@ -1752,8 +2014,87 @@ mod tests {
                 "prepare_source",
                 "prepare_oversized_source",
                 "prepare_query",
-                "finalize_query"
+                "finalize_query",
+                "finalize_lexical_v2_rank"
             ])
+        );
+        assert_eq!(
+            identity["fts5_match_plan_schema_version"],
+            FTS5_MATCH_PLAN_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn lexical_v2_rank_operation_applies_shared_field_evidence_and_emphasis() {
+        let input = |emphasis: Option<&str>| {
+            let mut input = serde_json::json!({
+                "schema_version": 1,
+                "profile_id": "lexical-v2",
+                "lane_count": 2,
+                "candidates": [{
+                    "source": {
+                        "authorization_scope": "in_plugin",
+                        "source_key": "filename-source"
+                    },
+                    "chunk_id": "filename-chunk",
+                    "path": "Vendor7.md",
+                    "proofs": [{
+                        "field": "filename",
+                        "kind": "prefix_assisted",
+                        "lane_ordinal": 0,
+                        "engine_score": 1.0,
+                        "engine_ordinal": 0
+                    }]
+                }, {
+                    "source": {
+                        "authorization_scope": "in_plugin",
+                        "source_key": "body-source"
+                    },
+                    "chunk_id": "body-chunk",
+                    "path": "notes.md",
+                    "proofs": [{
+                        "field": "body",
+                        "kind": "phrase",
+                        "lane_ordinal": 1,
+                        "engine_score": 9.0,
+                        "engine_ordinal": 0
+                    }]
+                }]
+            });
+            if let Some(field) = emphasis {
+                input["emphasis"] = serde_json::json!(field);
+            }
+            input
+        };
+        let request = |input: Value| {
+            serde_json::json!({
+                "abi_version": ADAPTER_ABI_VERSION,
+                "operation": "finalize_lexical_v2_rank",
+                "input": input,
+            })
+            .to_string()
+        };
+
+        let default = response(finalize_lexical_v2_rank(&request(input(None))));
+        assert_eq!(default["status"], "ok");
+        assert_eq!(
+            default["result"]["ordered_candidate_ordinals"],
+            serde_json::json!([0, 1])
+        );
+        assert_eq!(
+            default["result"]["selected_scores"],
+            serde_json::json!([1.0, 9.0])
+        );
+
+        let emphasized = response(finalize_lexical_v2_rank(&request(input(Some("body")))));
+        assert_eq!(emphasized["status"], "ok");
+        assert_eq!(
+            emphasized["result"]["ordered_candidate_ordinals"],
+            serde_json::json!([1, 0])
+        );
+        assert_eq!(
+            emphasized["result"]["selected_scores"],
+            serde_json::json!([9.0, 1.0])
         );
     }
 
@@ -2044,14 +2385,28 @@ mod tests {
                 .get("match_value")
                 .is_none()
         );
-        assert_eq!(
-            ordinary["result"]["execution_plan"]["stages"][1]["match_value"],
-            "{filename stem aliases title heading_text tags content} : \"dungeons and dragons\""
+        let ordinary_stages = ordinary["result"]["execution_plan"]["stages"]
+            .as_array()
+            .expect("ordinary stages");
+        assert!(ordinary_stages.len() <= kwiry_core::MAX_LEXICAL_V2_LANES);
+        assert!(
+            ordinary_stages
+                .iter()
+                .enumerate()
+                .all(|(ordinal, stage)| { stage["ordinal"].as_u64() == Some(ordinal as u64) })
         );
-        assert_eq!(
-            ordinary["result"]["execution_plan"]["stages"][2]["match_value"],
-            "{filename stem aliases title heading_text tags content} : (\"dungeons\" AND \"and\" AND \"dragons\")"
-        );
+        assert!(ordinary_stages.iter().any(|stage| {
+            stage["plan_id"] == "lexical_exact_phrase_v3"
+                && stage["proof_field"] == "body"
+                && stage["match_value"] == "{content} : \"dungeons and dragons\""
+        }));
+        assert!(ordinary_stages.iter().any(|stage| {
+            stage["plan_id"] == "lexical_all_terms_v3"
+                && stage["proof_field"] == "cross_field"
+                && stage["proof_kind"] == "cross_field_all_terms"
+                && stage["match_value"]
+                    == "{filename stem aliases title heading_text tags content} : (\"dungeons\" AND \"and\" AND \"dragons\")"
+        }));
 
         let mixed = response(finalize_query(&finalize_request(
             "orchard adop",
@@ -2075,32 +2430,23 @@ mod tests {
                 "partial_coverage",
             ]
         );
-        assert_eq!(
-            mixed["result"]["execution_plan"]["stages"][2]["plan_id"],
-            "lexical_prefix_metadata_v3"
-        );
-        // The metadata half is scoped to the fields a person names a note by;
-        // the text half carries the identical expansion set over everything.
-        assert_eq!(
-            mixed["result"]["execution_plan"]["stages"][2]["match_value"],
-            "{filename stem aliases title} : (\"orchard\" AND (\"adoption\"))"
-        );
-        assert_eq!(
-            mixed["result"]["execution_plan"]["stages"][3]["plan_id"],
-            "lexical_all_terms_v3"
-        );
-        assert_eq!(
-            mixed["result"]["execution_plan"]["stages"][4]["plan_id"],
-            "lexical_prefix_v3"
-        );
-        assert_eq!(
-            mixed["result"]["execution_plan"]["stages"][4]["match_value"],
-            "{filename stem aliases title heading_text tags content} : (\"orchard\" AND (\"adoption\"))"
-        );
-        assert_eq!(
-            mixed["result"]["execution_plan"]["stages"][5]["plan_id"],
-            "lexical_partial_coverage_v3"
-        );
+        let mixed_stages = mixed["result"]["execution_plan"]["stages"]
+            .as_array()
+            .expect("mixed stages");
+        assert!(mixed_stages.iter().any(|stage| {
+            stage["plan_id"] == "lexical_prefix_metadata_v3"
+                && stage["proof_field"] == "title"
+                && stage["match_value"] == "{title} : (\"orchard\" AND (\"adoption\"))"
+        }));
+        assert!(mixed_stages.iter().any(|stage| {
+            stage["plan_id"] == "lexical_prefix_v3"
+                && stage["proof_field"] == "body"
+                && stage["match_value"] == "{content} : (\"orchard\" AND (\"adoption\"))"
+        }));
+        assert!(mixed_stages.iter().any(|stage| {
+            stage["plan_id"] == "lexical_partial_coverage_v3"
+                && stage["proof_field"] == "cross_field"
+        }));
 
         let identifier = response(finalize_query(&finalize_request(
             "IIA 2 line",
@@ -2109,9 +2455,12 @@ mod tests {
             &[vec![], vec![], vec![]],
         )));
         assert_eq!(identifier["result"]["plan"]["kind"], "identifier");
-        assert_eq!(
-            identifier["result"]["execution_plan"]["stages"][3]["plan_id"],
-            "lexical_partial_coverage_v3"
+        assert!(
+            identifier["result"]["execution_plan"]["stages"]
+                .as_array()
+                .expect("identifier stages")
+                .iter()
+                .any(|stage| stage["plan_id"] == "lexical_partial_coverage_v3")
         );
     }
 
@@ -2167,13 +2516,27 @@ mod tests {
         let stages = prefix["result"]["execution_plan"]["stages"]
             .as_array()
             .expect("stages");
-        assert_eq!(stages.last().unwrap()["plan_id"], "lexical_prefix_v3");
-        // Name evidence now precedes the all-terms tier rather than sitting
-        // immediately before the searchable-text half.
-        assert_eq!(stages[stages.len() - 2]["plan_id"], "lexical_all_terms_v3");
-        assert_eq!(
-            stages[stages.len() - 3]["plan_id"],
-            "lexical_prefix_metadata_v3"
+        assert!(stages.len() <= kwiry_core::MAX_LEXICAL_V2_LANES);
+        assert!(
+            stages
+                .iter()
+                .enumerate()
+                .all(|(ordinal, stage)| { stage["ordinal"].as_u64() == Some(ordinal as u64) })
+        );
+        assert!(
+            stages
+                .iter()
+                .any(|stage| stage["plan_id"] == "lexical_prefix_metadata_v3")
+        );
+        assert!(
+            stages
+                .iter()
+                .any(|stage| stage["plan_id"] == "lexical_prefix_v3")
+        );
+        assert!(
+            stages
+                .iter()
+                .any(|stage| stage["plan_id"] == "lexical_all_terms_v3")
         );
 
         let prepared = response(prepare_query(&query_request(

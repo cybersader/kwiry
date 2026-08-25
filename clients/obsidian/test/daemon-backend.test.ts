@@ -99,10 +99,18 @@ const HIT = {
   frontmatter: {},
 };
 
-function jsonTransport(handler: (url: string) => { status: number; body: unknown }): Transport {
+function jsonTransport(handler: (url: string) => {
+  status: number;
+  body: unknown;
+  headers?: Record<string, string>;
+}): Transport {
   return async (options) => {
     const response = handler(options.url);
-    return { status: response.status, text: JSON.stringify(response.body) };
+    return {
+      status: response.status,
+      text: JSON.stringify(response.body),
+      headers: response.headers,
+    };
   };
 }
 
@@ -165,6 +173,44 @@ describe("DaemonBackend", () => {
         vaultId: "notes",
       },
     });
+  });
+
+  it("carries closed field-policy facts from a beta.27 daemon", async () => {
+    const daemon = backend(jsonTransport((url) => url.endsWith("/v0/status")
+      ? {
+          status: 200,
+          body: { ...STATUS, model: { name: "model", version: "1" } },
+        }
+      : {
+          status: 200,
+          body: { hits: [HIT], next_cursor: null },
+          headers: {
+            "x-kwiry-lexical-profile": "lexical-v2",
+            "x-kwiry-field-scope": "none",
+            "x-kwiry-field-emphasis": "body",
+          },
+        }));
+    await daemon.status();
+
+    const execution = await daemon.search({ q: ">body match", mode: "hybrid" });
+    expect(execution.queryPolicy).toEqual({
+      lexical_profile: "lexical-v2",
+      scope: null,
+      emphasis: "body",
+    });
+  });
+
+  it("requires a beta.27 daemon for control-bearing queries without policy headers", async () => {
+    const daemon = backend(jsonTransport((url) => url.endsWith("/v0/status")
+      ? { status: 200, body: STATUS }
+      : { status: 200, body: { hits: [HIT], next_cursor: null } }));
+    await daemon.status();
+
+    await expect(daemon.search({ q: "in:name match", mode: "lexical" }))
+      .rejects.toMatchObject({
+        code: "daemon_upgrade_required",
+        safeMessage: "Field controls require a beta.27-compatible daemon.",
+      });
   });
 
   it("does not infer exhaustion or a total from an exact-limit response with next_cursor null", async () => {

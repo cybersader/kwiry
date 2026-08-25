@@ -262,10 +262,20 @@ impl SearchRuntime {
         limit: usize,
         filters: &SearchFilters,
     ) -> Result<GenerationSearchResult> {
+        self.search_hybrid_prepared_with_generation(query, query, limit, filters)
+    }
+
+    pub fn search_hybrid_prepared_with_generation(
+        &self,
+        lexical_query: &str,
+        semantic_query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+    ) -> Result<GenerationSearchResult> {
         let active = self.require_desktop_index()?;
         let semantic = self.require_semantic()?;
-        let lexical = active.search(query, HYBRID_CANDIDATES, filters)?;
-        let neighbors = semantic.search(query, HYBRID_CANDIDATES)?;
+        let lexical = active.search(lexical_query, HYBRID_CANDIDATES, filters)?;
+        let neighbors = semantic.search(semantic_query, HYBRID_CANDIDATES)?;
 
         let lexical_ids: Vec<String> = lexical.iter().map(|hit| hit.chunk_id.clone()).collect();
         let semantic_ids: Vec<String> = neighbors.into_iter().map(|hit| hit.chunk_id).collect();
@@ -274,7 +284,7 @@ impl SearchRuntime {
             .into_iter()
             .map(|trace| (trace.chunk_id, trace.fused_score as f32))
             .collect();
-        let mut hits = active.hydrate(&ordered, filters, Some(query))?;
+        let mut hits = active.hydrate(&ordered, filters, Some(semantic_query))?;
         hits.truncate(limit);
         Ok(GenerationSearchResult {
             generation: active.generation.clone(),

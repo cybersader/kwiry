@@ -31,6 +31,7 @@ import type {
   WorkerSearchHit,
 } from "./protocol";
 import { isPreparedPropertyBag } from "./source-defect";
+import { finalizeLexicalV2RankWithRust } from "./rust-adapter";
 import {
   bindEvidenceProbe,
   bindSearchStage,
@@ -39,7 +40,10 @@ import {
 import type {
   EvidenceProbePlan,
   ExecutionPlan,
+  LexicalV2Candidate,
+  LexicalV2Proof,
   QueryEvidenceObservation,
+  StagePlan,
   PreparedChunk,
   PreparedFrontmatter,
   PreparedPropertyValue,
@@ -48,6 +52,7 @@ import type {
 
 export const MAX_INDEX_CHUNKS = 100_000;
 export const DEFAULT_DATABASE_BYTE_LIMIT = 320 * 1024 * 1024;
+const MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE = 32;
 
 export type InternalLexicalTraceStageKind =
   | "evidence_support"
@@ -1297,25 +1302,51 @@ export class Fts5GenerationIndex {
       };
     }
 
-    const hits: SearchCandidate[] = [];
-    const seen = new Set<string>();
-    let candidates = 0;
-    let candidateLimitReached = false;
-    let state: WorkerCandidateWindow["state"] | null = null;
+    if (plan.disposition === "explicit_bypass") {
+      const stage = plan.stages[0];
+      if (stage === undefined) throw new Error("invalid explicit FTS5 execution plan");
+      const started = trace === undefined ? 0 : checkedClock(trace.clock);
+      const bound = bindSearchStage(stage, limit);
+      const hits = this.db.selectObjects(bound.sql, bound.bind).map(parseSearchRow);
+      const duration = trace === undefined
+        ? 0
+        : elapsedMilliseconds(started, checkedClock(trace.clock));
+      if (trace !== undefined) {
+        pushTraceStage(trace, {
+          kind: stage.plan_id,
+          mandatory: true,
+          status: "completed",
+          duration_ms: duration,
+          input_count: limit,
+          output_count: hits.length,
+          candidate_count: hits.length,
+        });
+        trace.candidateCount += hits.length;
+        trace.resultCount = hits.length;
+      }
+      return {
+        hits: this.hydrateStoredExcerpts(hits),
+        candidate_window: {
+          state: hits.length === limit ? "unknown" : "exhausted",
+          candidate_count: hits.length,
+          candidate_limit: plan.max_total_candidates,
+        },
+      };
+    }
 
-    for (const [stageIndex, stage] of plan.stages.entries()) {
-      if (candidates === plan.max_total_candidates) {
-        state = "candidate_limit_reached";
-        break;
-      }
-      const stageLimit = Math.min(
-        stage.max_candidates,
-        plan.max_total_candidates - candidates,
-      );
-      if (stageLimit < 1) {
-        state = "candidate_limit_reached";
-        break;
-      }
+    const hits: SearchCandidate[] = [];
+    const proofs: LexicalV2Proof[][] = [];
+    const candidateByIdentity = new Map<string, number>();
+    let candidateLimitReached = false;
+    const traceSummaries = new Map<InternalLexicalTraceStageKind, {
+      mandatory: boolean;
+      duration: number;
+      observed: Set<string>;
+      added: Set<string>;
+    }>();
+
+    for (const stage of plan.stages) {
+      const stageLimit = stage.max_candidates;
       const mandatory = stage.plan_id !== "lexical_partial_coverage_v3"
         && stage.plan_id !== "lexical_prefix_metadata_v3"
         && stage.plan_id !== "lexical_prefix_v3";
@@ -1326,52 +1357,107 @@ export class Fts5GenerationIndex {
         ? 0
         : elapsedMilliseconds(started, checkedClock(trace.clock));
       if (!mandatory && trace !== undefined) trace.optionalDurationMs += duration;
-      const previousHits = hits.length;
-      candidates += rows.length;
-      candidateLimitReached ||= rows.length === stageLimit;
-      let moreAvailable = false;
-      for (const hit of rows) {
-        if (seen.has(hit.chunk_id)) continue;
-        seen.add(hit.chunk_id);
-        if (hits.length < limit) hits.push(hit);
-        else moreAvailable = true;
-      }
+      let summary: {
+        mandatory: boolean;
+        duration: number;
+        observed: Set<string>;
+        added: Set<string>;
+      } | undefined;
       if (trace !== undefined) {
-        pushTraceStage(trace, {
-          kind: stage.plan_id,
-          mandatory,
-          status: "completed",
-          duration_ms: duration,
-          input_count: stageLimit,
-          output_count: hits.length - previousHits,
-          candidate_count: rows.length,
-        });
+        summary = traceSummaries.get(stage.plan_id);
+        if (summary === undefined) {
+          summary = {
+            mandatory,
+            duration: 0,
+            observed: new Set<string>(),
+            added: new Set<string>(),
+          };
+          traceSummaries.set(stage.plan_id, summary);
+        }
+        summary.duration += duration;
       }
-      if (moreAvailable) {
-        state = "more_available";
-        break;
-      }
-      if (hits.length === limit) {
-        const searchedEveryStage = stageIndex === plan.stages.length - 1;
-        state = candidateLimitReached
-          ? "candidate_limit_reached"
-          : searchedEveryStage
-            ? "exhausted"
-            : "unknown";
-        break;
+      candidateLimitReached ||= rows.length === stageLimit;
+      for (const [engineOrdinal, hit] of rows.entries()) {
+        const identity = `${hit.source_key}\0${hit.chunk_id}\0${hit.path}`;
+        summary?.observed.add(identity);
+        const proof: LexicalV2Proof = {
+          field: stage.proof_field,
+          kind: stage.proof_kind,
+          lane_ordinal: stage.ordinal,
+          engine_score: hit.score,
+          engine_ordinal: engineOrdinal,
+        };
+        const known = candidateByIdentity.get(identity);
+        if (known !== undefined) {
+          const knownProofs = proofs[known];
+          if (knownProofs !== undefined
+            && knownProofs.length < MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE
+            && !knownProofs.some((candidateProof) =>
+              candidateProof.field === proof.field
+              && candidateProof.kind === proof.kind
+              && candidateProof.lane_ordinal === proof.lane_ordinal)) {
+            knownProofs.push(proof);
+          }
+          continue;
+        }
+        if (hits.length === plan.max_total_candidates) continue;
+        candidateByIdentity.set(identity, hits.length);
+        hits.push(hit);
+        proofs.push([proof]);
+        summary?.added.add(identity);
       }
     }
 
-    state ??= candidateLimitReached ? "candidate_limit_reached" : "exhausted";
+    const rankCandidates: LexicalV2Candidate[] = hits.map((hit, index) => ({
+      source: {
+        authorization_scope: "in_plugin",
+        source_key: hit.source_key,
+      },
+      chunk_id: hit.chunk_id,
+      path: hit.path,
+      proofs: proofs[index] ?? [],
+    }));
+    const ranked = finalizeLexicalV2RankWithRust({
+      schema_version: 1,
+      profile_id: "lexical-v2",
+      lane_count: plan.stages.length,
+      ...(plan.emphasis === undefined ? {} : { emphasis: plan.emphasis }),
+      candidates: rankCandidates,
+    });
+    const rankedHits = ranked.ordered_candidate_ordinals.map((ordinal, index) => {
+      const hit = hits[ordinal];
+      const score = ranked.selected_scores[index];
+      if (hit === undefined || score === undefined) {
+        throw new Error("Rust returned an invalid lexical-v2 rank order");
+      }
+      return { ...hit, score };
+    });
+    const visibleHits = rankedHits.slice(0, limit);
+    const state: WorkerCandidateWindow["state"] = candidateLimitReached
+      ? "candidate_limit_reached"
+      : rankedHits.length > limit
+        ? "more_available"
+        : "exhausted";
     if (trace !== undefined) {
-      trace.candidateCount += candidates;
-      trace.resultCount = hits.length;
+      for (const [kind, summary] of traceSummaries) {
+        pushTraceStage(trace, {
+          kind,
+          mandatory: summary.mandatory,
+          status: "completed",
+          duration_ms: summary.duration,
+          input_count: plan.max_total_candidates,
+          output_count: summary.added.size,
+          candidate_count: summary.observed.size,
+        });
+      }
+      trace.candidateCount += hits.length;
+      trace.resultCount = visibleHits.length;
     }
     return {
-      hits: this.hydrateStoredExcerpts(hits),
+      hits: this.hydrateStoredExcerpts(visibleHits),
       candidate_window: {
         state,
-        candidate_count: candidates,
+        candidate_count: hits.length,
         candidate_limit: plan.max_total_candidates,
       },
     };
@@ -1415,7 +1501,15 @@ export class Fts5GenerationIndex {
     return hits.map((hit) => {
       const stored = byChunkId.get(hit.chunk_id);
       if (stored === undefined) throw new Error("stored search content is incomplete");
-      return { ...hit, ...stored };
+      return {
+        chunk_id: hit.chunk_id,
+        vault_id: hit.vault_id,
+        path: hit.path,
+        heading_path: hit.heading_path,
+        score: hit.score,
+        frontmatter: hit.frontmatter,
+        ...stored,
+      };
     });
   }
 
@@ -2440,7 +2534,9 @@ function onePastLimit(limit: number): number {
   return limit === Number.MAX_SAFE_INTEGER ? limit : limit + 1;
 }
 
-type SearchCandidate = Omit<WorkerSearchHit, "format" | "coverage" | "locator" | "excerpt">;
+type SearchCandidate = Omit<WorkerSearchHit, "format" | "coverage" | "locator" | "excerpt"> & {
+  source_key: string;
+};
 
 interface ProjectedChunk {
   /** Chunk identity, display metadata, and canonical chunk-local lexical inputs. */
@@ -3267,7 +3363,7 @@ function isInternalLexicalTraceStage(value: unknown): value is InternalLexicalTr
     && isTraceNumber(stage.duration_ms)
     && isTraceCount(stage.input_count, 512)
     && isTraceCount(stage.output_count, 512)
-    && isTraceCount(stage.candidate_count, 256);
+    && isTraceCount(stage.candidate_count, 512);
 }
 
 function isTraceNumber(value: unknown): value is number {
@@ -3356,7 +3452,8 @@ function parsePropertyValueJson(value: string): PreparedPropertyValue | undefine
 function parseSearchRow(row: Record<string, unknown>): SearchCandidate {
   const headingPath = parseHeadingPathJson(row.heading_path_json);
   const frontmatter = parseDisplayFrontmatterJson(row.frontmatter_json);
-  if (!isBoundedString(row.chunk_id, 128)
+  if (!isBoundedString(row.source_key, 128)
+    || !isBoundedString(row.chunk_id, 128)
     || !isBoundedString(row.vault_id, 1_024)
     || row.vault_id.trim().length === 0
     || !isNormalizedVaultRelativePath(row.path)
@@ -3367,6 +3464,7 @@ function parseSearchRow(row: Record<string, unknown>): SearchCandidate {
     throw new Error("SQLite returned invalid stored metadata");
   }
   return {
+    source_key: row.source_key,
     chunk_id: row.chunk_id,
     vault_id: row.vault_id,
     path: row.path,

@@ -1099,6 +1099,12 @@ function search(query: string, limit: number): SearchResult {
       generation: active.id,
       hits: collected.hits,
       candidate_window: collected.candidate_window,
+      query_policy: {
+        profile_id: finalized.plan.profile_id,
+        query_text: finalized.plan.query_text,
+        scope: finalized.plan.scope ?? null,
+        emphasis: finalized.plan.emphasis ?? null,
+      },
     };
   } catch (error) {
     if (!traceFinished) {
@@ -1129,6 +1135,13 @@ function rustQueryError(error: RustAdapterError): WorkerError {
         "explicit_query_unsupported",
         "query",
         "This explicit query is unavailable in the in-plugin backend.",
+        false,
+      );
+    case "invalid_field_control":
+      return fixedWorkerError(
+        "invalid_field_control",
+        "query",
+        "The query contains an invalid field control.",
         false,
       );
     case "invalid_query":

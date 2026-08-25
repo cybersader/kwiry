@@ -5,7 +5,7 @@
 // (https://github.com/scambier/obsidian-omnisearch), GPL-3.0.
 
 import { Notice, Platform, SuggestModal, TFile } from "obsidian";
-import type { SearchMode } from "./api";
+import type { SearchMode, SearchQueryPolicyFacts } from "./api";
 import type { BackendSearchHit, BackendStatus, SearchBackend } from "./backend";
 import type KwiryPlugin from "./main";
 import { shouldNoticeSearchError } from "./empty-state";
@@ -89,6 +89,8 @@ export const FORMAT_CHIP_PRESENTATIONS = {
 } as const satisfies Record<BackendSearchHit["format"], FormatChipPresentation>;
 
 export const SEARCH_STATUS_ANIMATION_DELAY_MS = 180;
+export const FIELD_CONTROL_HELP_TEXT =
+  "Field controls: in:name or in:title strictly scopes lexical search; >title or >body prefers one field. Hybrid supports preference but not strict scope. Semantic supports neither control.";
 
 /**
  * Title for one drilled section row. A PDF has no heading path by construction,
@@ -132,6 +134,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private resultLevelEl: HTMLElement | null = null;
   private resultLevelHintEl: HTMLElement | null = null;
   private backendStateEl: HTMLElement | null = null;
+  private queryControlsEl: HTMLElement | null = null;
   private progressTimer: number | null = null;
   private queryAnimationTimer: number | null = null;
   private progressFailureRecorded = false;
@@ -207,6 +210,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     }
 
     this.invalidateProjection();
+    this.syncQueryControls(null);
     const epoch = ++this.requestEpoch;
     this.beginQueryStatus(epoch, query.trim().length > 0
       ? { phase: "searching" }
@@ -260,6 +264,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
           };
           this.resultView = { kind: "sources" };
           this.syncResultContext();
+          this.syncQueryControls(outcome.execution.queryPolicy);
           event.set({ outcome: "succeeded", resultCount: returnedSectionCount });
           return this.sourceResults(grouped);
         }
@@ -784,6 +789,23 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       }
     }
 
+    const queryTools = bar.createDiv({ cls: "kwiry-query-tools" });
+    this.queryControlsEl = queryTools.createSpan({ cls: "kwiry-query-controls" });
+    this.queryControlsEl.setAttribute("aria-label", "Active field controls");
+    const help = queryTools.createEl("button", {
+      cls: "kwiry-query-help",
+      text: "Field syntax",
+      attr: {
+        type: "button",
+        "aria-label": FIELD_CONTROL_HELP_TEXT,
+        title: FIELD_CONTROL_HELP_TEXT,
+      },
+    });
+    help.addEventListener("click", () => {
+      new Notice(`Kwiry: ${FIELD_CONTROL_HELP_TEXT}`);
+      this.inputEl.focus();
+    });
+
     this.resultContainerEl.before(bar);
     this.syncResultContext();
     this.syncBackendContext(status);
@@ -815,10 +837,22 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     this.backendStateEl?.setText(`${status.identity.label}${unavailable}`);
   }
 
+  private syncQueryControls(policy: SearchQueryPolicyFacts | null): void {
+    const label = this.queryControlsEl;
+    if (!label) return;
+    label.setAttribute("data-profile", policy?.lexical_profile ?? "unknown");
+    const parts: string[] = [];
+    if (policy?.scope) parts.push(`Scope · ${fieldControlLabel(policy.scope)}`);
+    if (policy?.emphasis) parts.push(`Prefer · ${fieldControlLabel(policy.emphasis)}`);
+    label.setText(parts.join(" · "));
+    label.classList.toggle("has-controls", parts.length > 0);
+  }
+
   private selectMode(mode: SearchMode): void {
     this.session.setMode(mode);
     this.mode = mode;
     this.invalidateProjection();
+    this.syncQueryControls(null);
     this.syncModeControl();
     this.inputEl.dispatchEvent(new Event("input"));
   }
@@ -846,6 +880,10 @@ function basename(path: string): string {
 
 function searchModeLabel(mode: SearchMode): string {
   return mode[0]!.toUpperCase() + mode.slice(1);
+}
+
+function fieldControlLabel(field: NonNullable<SearchQueryPolicyFacts["scope"]>): string {
+  return field[0]!.toUpperCase() + field.slice(1);
 }
 
 function returnedSectionCountText(count: number): string {

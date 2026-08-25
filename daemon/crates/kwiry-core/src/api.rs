@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::model::SearchHit;
+use crate::query::{QueryPublicField, prepare_lexical_query};
 
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
@@ -44,6 +45,20 @@ pub struct ApiSearchRequest {
     pub limit: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchQueryPolicy {
+    pub profile_id: String,
+    pub scope: Option<QueryPublicField>,
+    pub emphasis: Option<QueryPublicField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedSearchQuery {
+    pub lexical_query: String,
+    pub semantic_query: String,
+    pub policy: SearchQueryPolicy,
 }
 
 impl ApiSearchRequest {
@@ -101,6 +116,42 @@ impl ApiSearchRequest {
             }
         }
         Ok(())
+    }
+
+    pub fn prepare_query(&self) -> std::result::Result<PreparedSearchQuery, ApiRequestError> {
+        let plan = prepare_lexical_query(&self.q).map_err(|error| {
+            let code = if error.code == "invalid_field_control" {
+                "invalid_field_control"
+            } else {
+                "invalid_query"
+            };
+            ApiRequestError::new(code, error.message)
+        })?;
+        match self.mode {
+            SearchMode::Lexical => {}
+            SearchMode::Hybrid if plan.scope.is_some() => {
+                return Err(ApiRequestError::new(
+                    "invalid_field_control",
+                    "hybrid mode does not support strict field scope; remove in:<field> or use lexical mode",
+                ));
+            }
+            SearchMode::Semantic if plan.scope.is_some() || plan.emphasis.is_some() => {
+                return Err(ApiRequestError::new(
+                    "invalid_field_control",
+                    "semantic mode does not support lexical field controls; remove in:<field> and ><field>",
+                ));
+            }
+            SearchMode::Hybrid | SearchMode::Semantic => {}
+        }
+        Ok(PreparedSearchQuery {
+            lexical_query: self.q.clone(),
+            semantic_query: plan.query_text.clone(),
+            policy: SearchQueryPolicy {
+                profile_id: plan.profile_id,
+                scope: plan.scope,
+                emphasis: plan.emphasis,
+            },
+        })
     }
 }
 
@@ -220,6 +271,37 @@ mod tests {
         assert_eq!(request.limit, 20);
         assert_eq!(request.filters, SearchFilters::default());
         request.validate_vertical_2().unwrap();
+    }
+
+    #[test]
+    fn field_controls_route_by_mode_without_reaching_semantic_text() {
+        let lexical: ApiSearchRequest =
+            serde_json::from_str(r#"{"q":"in:name >title Vendor7 meeting","mode":"lexical"}"#)
+                .unwrap();
+        let prepared = lexical.prepare_query().unwrap();
+        assert_eq!(prepared.lexical_query, "in:name >title Vendor7 meeting");
+        assert_eq!(prepared.semantic_query, "Vendor7 meeting");
+        assert_eq!(prepared.policy.profile_id, "lexical-v2");
+        assert_eq!(prepared.policy.scope, Some(QueryPublicField::Name));
+        assert_eq!(prepared.policy.emphasis, Some(QueryPublicField::Title));
+
+        let hybrid: ApiSearchRequest =
+            serde_json::from_str(r#"{"q":">body Vendor7 meeting","mode":"hybrid"}"#).unwrap();
+        let prepared = hybrid.prepare_query().unwrap();
+        assert_eq!(prepared.semantic_query, "Vendor7 meeting");
+        assert_eq!(prepared.policy.scope, None);
+        assert_eq!(prepared.policy.emphasis, Some(QueryPublicField::Body));
+
+        for request in [
+            r#"{"q":"in:title Vendor7 meeting","mode":"hybrid"}"#,
+            r#"{"q":">body Vendor7 meeting","mode":"semantic"}"#,
+        ] {
+            let request: ApiSearchRequest = serde_json::from_str(request).unwrap();
+            assert_eq!(
+                request.prepare_query().unwrap_err().code,
+                "invalid_field_control"
+            );
+        }
     }
 
     #[test]

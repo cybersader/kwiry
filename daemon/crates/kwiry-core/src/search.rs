@@ -43,8 +43,13 @@ use crate::query::{
 #[cfg(feature = "internal-d5c-preview")]
 use crate::ranking::{
     D5cRelevanceProfile, LexicalEvidenceTier, MAX_RANKING_WORK_UNITS, PropertyPredicate,
-    PropertyRule, QualifiedSourceId, RERANK_INPUT_SCHEMA_VERSION, RankingScalar, RelevanceProfile,
-    RerankCandidate, RerankInput, SourceSignalObservation, rerank_candidates_with_initial_work,
+    PropertyRule, RERANK_INPUT_SCHEMA_VERSION, RankingScalar, RelevanceProfile, RerankCandidate,
+    RerankInput, SourceSignalObservation, rerank_candidates_with_initial_work,
+};
+use crate::ranking::{
+    LEXICAL_V2_RANK_SCHEMA_VERSION, LexicalV2Candidate, LexicalV2Proof, LexicalV2ProofField,
+    LexicalV2ProofKind, LexicalV2RankInput, MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE, QualifiedSourceId,
+    lexical_v2_evidence_points, rank_lexical_v2,
 };
 use crate::source::tagged_content_role_from_chunk_id;
 
@@ -59,7 +64,6 @@ const BOOST_CONTENT: f32 = 1.0;
 const BOOST_EXACT_METADATA: f32 = 12.0;
 const BOOST_PHRASE: f32 = 4.0;
 const BOOST_CONTENT_IDENTIFIER: f32 = 5.0;
-#[cfg(feature = "internal-d5c-preview")]
 const DESKTOP_AUTHORIZATION_SCOPE: &str = "desktop";
 
 pub fn search_index(data_dir: &Path, request: &LexicalSearchRequest) -> Result<Vec<SearchHit>> {
@@ -685,12 +689,323 @@ fn execute_lexical_plan(
             execute_explicit(contexts, &resolved.plan, limit, filters, statistics)
         }
         QueryExecutionDisposition::Ready => {
-            execute_evidence_stages(contexts, resolved, limit, filters, statistics)
+            execute_lexical_v2(contexts, resolved, limit, filters, statistics)
         }
         QueryExecutionDisposition::AwaitingEvidence => Err(Error::Query(
             "query plan reached execution without finalized evidence".to_owned(),
         )),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct NativeLexicalV2Identity {
+    source: QualifiedSourceId,
+    chunk_id: String,
+    path: String,
+}
+
+#[derive(Debug, Clone)]
+struct NativeLexicalV2Hit {
+    source: QualifiedSourceId,
+    hit: SearchHit,
+    proofs: Vec<LexicalV2Proof>,
+}
+
+impl NativeLexicalV2Hit {
+    fn identity(&self) -> NativeLexicalV2Identity {
+        NativeLexicalV2Identity {
+            source: self.source.clone(),
+            chunk_id: self.hit.chunk_id.clone(),
+            path: self.hit.path.clone(),
+        }
+    }
+
+    fn candidate(&self) -> LexicalV2Candidate {
+        LexicalV2Candidate {
+            source: self.source.clone(),
+            chunk_id: self.hit.chunk_id.clone(),
+            path: self.hit.path.clone(),
+            proofs: self.proofs.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LexicalV2Lane {
+    ordinal: u8,
+    field: LexicalV2ProofField,
+    kind: LexicalV2ProofKind,
+    plan: LexicalQueryPlan,
+    stage: QueryEvidenceStage,
+}
+
+fn execute_lexical_v2(
+    contexts: &[NativeSearchContext<'_>],
+    resolved: &ResolvedLexicalPlan,
+    limit: usize,
+    filters: &SearchFilters,
+    statistics: &dyn Bm25StatisticsProvider,
+) -> Result<Vec<SearchHit>> {
+    let lanes = lexical_v2_lanes(&resolved.plan)?;
+    if lanes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut candidates = BTreeMap::<NativeLexicalV2Identity, NativeLexicalV2Hit>::new();
+    for lane in &lanes {
+        let mut lane_hits = Vec::new();
+        for context in contexts {
+            let Some(stage_query) = compile_evidence_stage(
+                context.index,
+                context.fields,
+                &lane.plan,
+                &lane.stage,
+                &resolved.prefix_expansions,
+            )?
+            else {
+                continue;
+            };
+            let query = filtered_query(stage_query, filters, context.fields)?;
+            let partition_hits = collect_stable_lexical_v2_hits(
+                context,
+                query.as_ref(),
+                lane.stage.max_candidates,
+                statistics,
+                lane,
+            )?;
+            merge_bounded_lexical_v2_hits(
+                &mut lane_hits,
+                partition_hits,
+                lane.stage.max_candidates,
+            );
+        }
+        for hit in lane_hits {
+            let identity = hit.identity();
+            if let Some(existing) = candidates.get_mut(&identity) {
+                for proof in hit.proofs {
+                    if existing.proofs.len() < MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE
+                        && !existing.proofs.iter().any(|known| {
+                            known.field == proof.field
+                                && known.kind == proof.kind
+                                && known.lane_ordinal == proof.lane_ordinal
+                        })
+                    {
+                        existing.proofs.push(proof);
+                    }
+                }
+            } else if candidates.len() < resolved.plan.bounds.max_total_candidates {
+                candidates.insert(identity, hit);
+            }
+        }
+    }
+
+    let input = LexicalV2RankInput {
+        schema_version: LEXICAL_V2_RANK_SCHEMA_VERSION,
+        profile_id: resolved.plan.profile_id.clone(),
+        lane_count: lanes.len(),
+        emphasis: resolved.plan.emphasis,
+        candidates: candidates
+            .values()
+            .map(NativeLexicalV2Hit::candidate)
+            .collect(),
+    };
+    let ranked = rank_lexical_v2(&input).map_err(ranking_error)?;
+    let mut hits_by_identity = candidates;
+    let mut hits = Vec::with_capacity(ranked.len().min(limit));
+    for ranked in ranked.into_iter().take(limit) {
+        let identity = NativeLexicalV2Identity {
+            source: ranked.candidate.source,
+            chunk_id: ranked.candidate.chunk_id,
+            path: ranked.candidate.path,
+        };
+        let mut hit = hits_by_identity
+            .remove(&identity)
+            .ok_or_else(|| {
+                Error::Index("lexical-v2 ranker returned an unknown candidate".to_owned())
+            })?
+            .hit;
+        hit.score = ranked.selected_proof.engine_score;
+        hits.push(hit);
+    }
+    Ok(hits)
+}
+
+fn lexical_v2_lanes(plan: &LexicalQueryPlan) -> Result<Vec<LexicalV2Lane>> {
+    let mut lanes = Vec::new();
+    for stage in &plan.evidence_stages {
+        let declared = declared_fields(plan, stage.field_group);
+        let mut by_field = BTreeMap::<LexicalV2ProofField, Vec<QueryField>>::new();
+        for field in declared {
+            if let Some(proof_field) = lexical_v2_proof_field(*field) {
+                by_field.entry(proof_field).or_default().push(*field);
+            }
+        }
+        for (field, fields) in &by_field {
+            let mut lane_plan = plan.clone();
+            set_declared_fields(&mut lane_plan, stage.field_group, fields.clone());
+            if matches!(
+                stage.kind,
+                QueryEvidenceStageKind::PrefixMetadata | QueryEvidenceStageKind::Prefix
+            ) {
+                lane_plan.field_groups.searchable_text = fields.clone();
+            }
+            if stage.kind == QueryEvidenceStageKind::ExactMetadata {
+                lane_plan.field_groups.exact = fields.clone();
+            }
+            lanes.push(LexicalV2Lane {
+                ordinal: 0,
+                field: *field,
+                kind: lexical_v2_proof_kind(stage.kind, false),
+                plan: lane_plan,
+                stage: stage.clone(),
+            });
+        }
+        if by_field.len() > 1
+            && matches!(
+                stage.kind,
+                QueryEvidenceStageKind::AllTerms | QueryEvidenceStageKind::PartialCoverage
+            )
+        {
+            lanes.push(LexicalV2Lane {
+                ordinal: 0,
+                field: LexicalV2ProofField::CrossField,
+                kind: lexical_v2_proof_kind(stage.kind, true),
+                plan: plan.clone(),
+                stage: stage.clone(),
+            });
+        }
+    }
+    lanes.sort_by(|left, right| {
+        let left_proof = LexicalV2Proof {
+            field: left.field,
+            kind: left.kind,
+            lane_ordinal: 0,
+            engine_score: 0.0,
+            engine_ordinal: 0,
+        };
+        let right_proof = LexicalV2Proof {
+            field: right.field,
+            kind: right.kind,
+            lane_ordinal: 0,
+            engine_score: 0.0,
+            engine_ordinal: 0,
+        };
+        lexical_v2_evidence_points(&right_proof, plan.emphasis)
+            .cmp(&lexical_v2_evidence_points(&left_proof, plan.emphasis))
+            .then_with(|| left.stage.ordinal.cmp(&right.stage.ordinal))
+            .then_with(|| left.field.cmp(&right.field))
+    });
+    if lanes.len() > crate::ranking::MAX_LEXICAL_V2_LANES {
+        return Err(Error::Query(
+            "lexical-v2 lane count exceeds its bound".to_owned(),
+        ));
+    }
+    for (ordinal, lane) in lanes.iter_mut().enumerate() {
+        lane.ordinal = ordinal as u8;
+    }
+    Ok(lanes)
+}
+
+fn lexical_v2_proof_field(field: QueryField) -> Option<LexicalV2ProofField> {
+    match field {
+        QueryField::Filename | QueryField::Stem => Some(LexicalV2ProofField::Filename),
+        QueryField::Aliases => Some(LexicalV2ProofField::Alias),
+        QueryField::Title => Some(LexicalV2ProofField::Title),
+        QueryField::Heading => Some(LexicalV2ProofField::Heading),
+        QueryField::Tags => Some(LexicalV2ProofField::Tag),
+        QueryField::Content | QueryField::ContentIdentifiers => Some(LexicalV2ProofField::Body),
+    }
+}
+
+fn lexical_v2_proof_kind(kind: QueryEvidenceStageKind, cross_field: bool) -> LexicalV2ProofKind {
+    match kind {
+        QueryEvidenceStageKind::ExactMetadata => LexicalV2ProofKind::Exact,
+        QueryEvidenceStageKind::ExactPhrase => LexicalV2ProofKind::Phrase,
+        QueryEvidenceStageKind::AllTerms if cross_field => LexicalV2ProofKind::CrossFieldAllTerms,
+        QueryEvidenceStageKind::AllTerms => LexicalV2ProofKind::AllTerms,
+        QueryEvidenceStageKind::PrefixMetadata | QueryEvidenceStageKind::Prefix => {
+            LexicalV2ProofKind::PrefixAssisted
+        }
+        QueryEvidenceStageKind::PartialCoverage => LexicalV2ProofKind::PartialCoverage,
+    }
+}
+
+fn set_declared_fields(
+    plan: &mut LexicalQueryPlan,
+    group: QueryFieldGroup,
+    fields: Vec<QueryField>,
+) {
+    match group {
+        QueryFieldGroup::SearchableText => plan.field_groups.searchable_text = fields,
+        QueryFieldGroup::Metadata => plan.field_groups.metadata = fields,
+        QueryFieldGroup::Exact => plan.field_groups.exact = fields,
+        QueryFieldGroup::Phrase => plan.field_groups.phrase = fields,
+        QueryFieldGroup::Prefix => plan.field_groups.prefix = fields,
+        QueryFieldGroup::PrefixMetadata => plan.field_groups.prefix_metadata = fields,
+    }
+}
+
+fn collect_stable_lexical_v2_hits(
+    context: &NativeSearchContext<'_>,
+    query: &dyn Query,
+    limit: usize,
+    statistics: &dyn Bm25StatisticsProvider,
+    lane: &LexicalV2Lane,
+) -> Result<Vec<NativeLexicalV2Hit>> {
+    let source_key_field = context.fields.source_key.ok_or_else(|| {
+        Error::Index("active generation is missing the source_key field".to_owned())
+    })?;
+    let collector = StableDocCollector {
+        limit,
+        chunk_id: context.fields.chunk_id,
+        path: context.fields.path,
+        source_format: context.fields.source_format,
+    };
+    let documents = context
+        .searcher
+        .search_with_statistics_provider(query, &collector, statistics)
+        .map_err(|error| Error::Query(error.to_string()))?;
+    let snippet_generator =
+        SnippetGenerator::create(context.searcher, query, context.fields.content)
+            .map_err(|error| Error::Query(error.to_string()))?;
+    let mut hits = Vec::with_capacity(documents.len());
+    for (engine_ordinal, ranked) in documents.into_iter().enumerate() {
+        validate_document_resource(&ranked.document, context.fields, context.resource)?;
+        let source_key = text(&ranked.document, source_key_field)?.to_owned();
+        let hit = hit_from_document(
+            &ranked.document,
+            context.fields,
+            ranked.score,
+            Some(&snippet_generator),
+        )?;
+        hits.push(NativeLexicalV2Hit {
+            source: QualifiedSourceId {
+                authorization_scope: authorization_scope(context.resource),
+                source_key,
+            },
+            hit,
+            proofs: vec![LexicalV2Proof {
+                field: lane.field,
+                kind: lane.kind,
+                lane_ordinal: lane.ordinal,
+                engine_score: ranked.score,
+                engine_ordinal: engine_ordinal as u16,
+            }],
+        });
+    }
+    Ok(hits)
+}
+
+fn merge_bounded_lexical_v2_hits(
+    target: &mut Vec<NativeLexicalV2Hit>,
+    incoming: Vec<NativeLexicalV2Hit>,
+    limit: usize,
+) {
+    target.extend(incoming);
+    target.sort_by(|left, right| compare_hits(&left.hit, &right.hit));
+    let mut seen = BTreeSet::new();
+    target.retain(|hit| seen.insert(hit.identity()));
+    target.truncate(limit);
 }
 
 #[derive(Debug, Clone)]
@@ -1372,7 +1687,6 @@ fn parse_f64_bits(value: &str) -> Result<f64> {
     }
 }
 
-#[cfg(feature = "internal-d5c-preview")]
 fn authorization_scope(resource: Option<&ResourceKey>) -> String {
     resource.map_or_else(
         || DESKTOP_AUTHORIZATION_SCOPE.to_owned(),
@@ -1380,7 +1694,6 @@ fn authorization_scope(resource: Option<&ResourceKey>) -> String {
     )
 }
 
-#[cfg(feature = "internal-d5c-preview")]
 fn validate_document_resource(
     document: &TantivyDocument,
     fields: &Fields,
@@ -1409,7 +1722,6 @@ fn validate_d5c_profile(profile: &RelevanceProfile) -> Result<()> {
     profile.validate().map_err(ranking_error)
 }
 
-#[cfg(feature = "internal-d5c-preview")]
 fn ranking_error(error: crate::ranking::RankingError) -> Error {
     Error::Query(format!("{}: {}", error.code, error.message))
 }
@@ -1505,6 +1817,9 @@ fn simple_explicit_prefix_query(
         .then(|| Box::new(DisjunctionMaxQuery::new(alternatives)) as Box<dyn Query>))
 }
 
+// Retained as the exact lexical-v1 compatibility executor; production plans
+// select lexical-v2 while serialized regression fixtures still exercise this ladder.
+#[allow(dead_code)]
 fn execute_evidence_stages(
     contexts: &[NativeSearchContext<'_>],
     resolved: &ResolvedLexicalPlan,
@@ -1687,18 +2002,38 @@ fn identifier_anchor_query(
     plan: &LexicalQueryPlan,
     text: &str,
 ) -> Result<Option<Box<dyn Query>>> {
-    if !declared_fields(plan, QueryFieldGroup::Exact).contains(&QueryField::ContentIdentifiers) {
+    let mut bindings = field_bindings(
+        fields,
+        declared_fields(plan, QueryFieldGroup::Exact),
+        QueryFieldGroup::Exact,
+    );
+    // A single mixed-alphanumeric identity such as `Vendor7` is also a complete
+    // token in filename/title fields. Keep the exact identifier projection for
+    // multi-token and punctuated identities, while allowing that complete token
+    // to prove identity inside the selected lexical field scope.
+    bindings.extend(field_bindings(
+        fields,
+        declared_fields(plan, QueryFieldGroup::SearchableText),
+        QueryFieldGroup::SearchableText,
+    ));
+    if bindings.is_empty() {
         return Err(Error::Query(
             "exact identifier projection is not declared".to_owned(),
         ));
     }
-    Ok(Some(Box::new(BoostQuery::new(
-        Box::new(TermQuery::new(
-            Term::from_field_text(fields.content_identifiers, text),
-            IndexRecordOption::Basic,
-        )),
-        BOOST_CONTENT_IDENTIFIER,
-    ))))
+    let alternatives = bindings
+        .into_iter()
+        .map(|(field, boost)| {
+            Box::new(BoostQuery::new(
+                Box::new(TermQuery::new(
+                    Term::from_field_text(field, text),
+                    IndexRecordOption::Basic,
+                )),
+                boost,
+            )) as Box<dyn Query>
+        })
+        .collect();
+    Ok(Some(Box::new(DisjunctionMaxQuery::new(alternatives))))
 }
 
 fn with_exact_identifier_anchors(
@@ -2865,6 +3200,80 @@ mod tests {
             .unwrap();
         assert!(exact_rank < phrase_rank);
         assert!(phrase_rank < all_terms_rank);
+    }
+
+    #[test]
+    fn native_lexical_v2_crosses_body_phrase_with_bounded_field_controls() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("Vendor7-external-meetings.md"),
+            "Identity-bearing source with unrelated prose.",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("body-phrase.md"),
+            "Vendor7 meeting. Vendor7 meeting. Vendor7 meeting.",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("canonical.md"),
+            "---\ntitle: Vendor7 Meeting\n---\nCanonical title carrier.",
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let default = search(&data, "Vendor7 meeting", 20);
+        let identity_rank = default
+            .iter()
+            .position(|hit| hit.path == "Vendor7-external-meetings.md")
+            .unwrap();
+        let body_rank = default
+            .iter()
+            .position(|hit| hit.path == "body-phrase.md")
+            .unwrap();
+        assert!(identity_rank < body_rank);
+
+        let body_preferred = search(&data, ">body Vendor7 meeting", 20);
+        let preferred_body_rank = body_preferred
+            .iter()
+            .position(|hit| hit.path == "body-phrase.md")
+            .unwrap();
+        let preferred_identity_rank = body_preferred
+            .iter()
+            .position(|hit| hit.path == "Vendor7-external-meetings.md")
+            .unwrap();
+        assert!(preferred_body_rank < preferred_identity_rank);
+
+        let body_only = search(&data, "in:body Vendor7 meeting", 20);
+        assert_eq!(body_only.len(), 1);
+        assert_eq!(body_only[0].path, "body-phrase.md");
+
+        let name_only = search(&data, "in:name Vendor7 meeting", 20);
+        assert!(
+            name_only
+                .iter()
+                .any(|hit| hit.path == "Vendor7-external-meetings.md")
+        );
+        assert!(name_only.iter().any(|hit| hit.path == "canonical.md"));
+        assert!(!name_only.iter().any(|hit| hit.path == "body-phrase.md"));
+
+        let title_only = search(&data, "in:title Vendor7 meeting", 20);
+        assert_eq!(title_only.len(), 1);
+        assert_eq!(title_only[0].path, "canonical.md");
     }
 
     #[test]

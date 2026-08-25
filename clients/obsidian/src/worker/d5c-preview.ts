@@ -328,8 +328,9 @@ function singleStagePlan(
   limit: number,
 ): ExecutionPlan {
   return {
-    schema_version: 6,
-    profile_id: "lexical-v1",
+    schema_version: 7,
+    profile_id: plan.profile_id,
+    ...(plan.emphasis === undefined ? {} : { emphasis: plan.emphasis }),
     disposition: plan.disposition === "explicit_bypass" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
     stages: [{ ...stage, ordinal: 0, max_candidates: limit }],

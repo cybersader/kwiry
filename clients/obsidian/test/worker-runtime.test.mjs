@@ -2001,8 +2001,8 @@ describe("exact generated production Worker", () => {
         result: {
           rustAbiVersion: 3,
           sourceSchemaVersion: 10,
-          querySchemaVersion: 7,
-          matchPlanSchemaVersion: 6,
+          querySchemaVersion: 8,
+          matchPlanSchemaVersion: 7,
           sqliteVersion: "3.53.0",
           fts5Enabled: 1,
         },

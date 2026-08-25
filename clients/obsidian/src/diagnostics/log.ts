@@ -154,7 +154,9 @@ export type DiagnosticTextValue =
   | "unsafe_path"
   | "locked"
   | "daemon_unreachable"
+  | "daemon_upgrade_required"
   | "mode_unavailable"
+  | "invalid_field_control"
   | "internal_error"
   | "BlockVfsUnavailableError"
   | "IndexCapacityError"
@@ -371,7 +373,7 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "root_inside_vault", "root_not_a_directory", "root_not_writable", "root_probe_failed",
   "vault_location_unavailable", "invalid_generation_id", "invalid_identity", "invalid_blob",
   "write_failed", "discard_failed", "unsafe_path", "locked", "daemon_unreachable",
-  "mode_unavailable", "internal_error",
+  "daemon_upgrade_required", "mode_unavailable", "invalid_field_control", "internal_error",
   // Constructor names of errors this codebase and the JS runtime define.
   // These are fixed identifiers chosen here, not caller-supplied text, so
   // recording one leaks nothing while turning an "unknown" report into a
