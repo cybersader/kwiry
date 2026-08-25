@@ -398,7 +398,7 @@ pub fn rank_lexical_v2(
     validate_lexical_v2_input(input)?;
     let mut ranked = Vec::with_capacity(input.candidates.len());
     for candidate in &input.candidates {
-        let mut proofs = candidate.proofs.iter().cloned().collect::<Vec<_>>();
+        let mut proofs = candidate.proofs.to_vec();
         proofs.sort_by(|left, right| compare_lexical_v2_proofs(left, right, input.emphasis));
         let selected_proof = proofs
             .into_iter()
