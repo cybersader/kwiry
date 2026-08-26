@@ -19,11 +19,19 @@ describe("search status rail CSS", () => {
     expect(styles).not.toContain(".kwiry-mode-control");
   });
 
-  it("keeps field syntax in the context bar instead of adding a status row", () => {
+  it("keeps field syntax inline and shows compact controls only when active", () => {
     const tools = rule(".kwiry-query-tools");
-    expect(tools).toContain("flex: 1 0 100%");
+    expect(tools).toContain("flex: 0 1 auto");
+    expect(tools).not.toContain("100%");
     expect(rule(".kwiry-query-controls")).toContain("display: none");
-    expect(rule(".kwiry-query-controls.has-controls")).toContain("display: inline");
+    const activeControls = rule(".kwiry-query-controls.has-controls");
+    expect(activeControls).toContain("display: inline-flex");
+    expect(activeControls).toContain("gap: var(--size-4-1)");
+    const chip = rule(".kwiry-query-control");
+    expect(chip).toContain("flex: 0 0 auto");
+    expect(chip).toContain("border: 1px solid var(--background-modifier-border)");
+    expect(chip).toContain("background: var(--background-secondary)");
+    expect(chip).toContain("font-size: var(--font-ui-smaller)");
     expect(rule(".kwiry-query-help")).toContain("background: transparent");
   });
 

@@ -791,6 +791,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
 
     const queryTools = bar.createDiv({ cls: "kwiry-query-tools" });
     this.queryControlsEl = queryTools.createSpan({ cls: "kwiry-query-controls" });
+    this.queryControlsEl.setAttribute("role", "group");
     this.queryControlsEl.setAttribute("aria-label", "Active field controls");
     const help = queryTools.createEl("button", {
       cls: "kwiry-query-help",
@@ -838,14 +839,26 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   private syncQueryControls(policy: SearchQueryPolicyFacts | null): void {
-    const label = this.queryControlsEl;
-    if (!label) return;
-    label.setAttribute("data-profile", policy?.lexical_profile ?? "unknown");
-    const parts: string[] = [];
-    if (policy?.scope) parts.push(`Scope · ${fieldControlLabel(policy.scope)}`);
-    if (policy?.emphasis) parts.push(`Prefer · ${fieldControlLabel(policy.emphasis)}`);
-    label.setText(parts.join(" · "));
-    label.classList.toggle("has-controls", parts.length > 0);
+    const controls = this.queryControlsEl;
+    if (!controls) return;
+    controls.setAttribute("data-profile", policy?.lexical_profile ?? "unknown");
+    controls.empty();
+    let hasControls = false;
+    if (policy?.scope) {
+      controls.createSpan({
+        cls: "kwiry-query-control",
+        text: `Scope · ${fieldControlLabel(policy.scope)}`,
+      });
+      hasControls = true;
+    }
+    if (policy?.emphasis) {
+      controls.createSpan({
+        cls: "kwiry-query-control",
+        text: `Prefer · ${fieldControlLabel(policy.emphasis)}`,
+      });
+      hasControls = true;
+    }
+    controls.classList.toggle("has-controls", hasControls);
   }
 
   private selectMode(mode: SearchMode): void {
