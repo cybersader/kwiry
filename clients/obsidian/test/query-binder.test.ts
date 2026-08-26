@@ -7,6 +7,7 @@ import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "../src/w
 import {
   bindEvidenceProbe,
   bindSearchStage,
+  QueryPlanRejectedError,
   requireExecutionPlanIdentity,
 } from "../src/worker/query-binder";
 
@@ -157,14 +158,14 @@ describe("fixed FTS5 query binder", () => {
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
       stages: [],
-    })).toThrow(/unsupported/);
+    })).toThrow(QueryPlanRejectedError);
     expect(() => requireExecutionPlanIdentity({
       schema_version: 7,
       profile_id: "unknown" as "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
       stages: [],
-    })).toThrow(/unsupported/);
+    })).toThrow(QueryPlanRejectedError);
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "unknown" as "lexical_all_terms_v3",
@@ -172,7 +173,7 @@ describe("fixed FTS5 query binder", () => {
       proof_kind: "cross_field_all_terms",
       match_value: "query",
       max_candidates: 256,
-    }, 20)).toThrow(/unsupported/);
+    }, 20)).toThrow(QueryPlanRejectedError);
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_all_terms_v3",
@@ -180,7 +181,7 @@ describe("fixed FTS5 query binder", () => {
       proof_kind: "cross_field_all_terms",
       match_value: "query",
       max_candidates: 256,
-    }, 0)).toThrow(/limit/);
+    }, 0)).toThrow(QueryPlanRejectedError);
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_exact_metadata_v3",
@@ -189,14 +190,14 @@ describe("fixed FTS5 query binder", () => {
       match_value: "query",
       exact_value: "query",
       max_candidates: 256,
-    }, 20)).toThrow(/exact stage/);
+    }, 20)).toThrow(QueryPlanRejectedError);
     expect(() => bindSearchStage({
       ordinal: 0,
       plan_id: "lexical_exact_metadata_v3",
       proof_field: "cross_field",
       proof_kind: "exact",
       max_candidates: 256,
-    }, 20)).toThrow(/exact stage/);
+    }, 20)).toThrow(QueryPlanRejectedError);
   });
 
   it("accepts complete Rust-authored exact values beyond the old lossy prefix", () => {
@@ -216,6 +217,6 @@ describe("fixed FTS5 query binder", () => {
       proof_kind: "exact",
       exact_value: "🚀".repeat(1_025),
       max_candidates: 256,
-    }, 20)).toThrow(/exact stage/u);
+    }, 20)).toThrow(QueryPlanRejectedError);
   });
 });
