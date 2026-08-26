@@ -100,6 +100,7 @@ describe("classifyFailure worker protocol errors", () => {
 
   it.each([
     "explicit_query_unsupported",
+    "invalid_field_control",
     "invalid_query",
     "invalid_query_plan",
     "query_execution_failed",
@@ -115,9 +116,11 @@ describe("classifyFailure worker protocol errors", () => {
     expect(JSON.stringify(result)).not.toContain("Acme");
   });
 
-  it("routes a SQLite init failure to the vfs subsystem", () => {
+  it("routes infrastructure failures to their fixed subsystems", () => {
     expect(classifyFailure({ code: "sqlite_init_failed" }).subsystem).toBe("vfs");
     expect(classifyFailure({ code: "fts5_unavailable" }).subsystem).toBe("vfs");
+    expect(classifyFailure({ code: "checkpoint_digest_mismatch" }).subsystem)
+      .toBe("cache_store");
   });
 
   it("ignores an unrecognised code rather than echoing it", () => {
@@ -195,11 +198,14 @@ describe("defect field cannot leak a note title", () => {
     expect(JSON.stringify(result)).not.toContain("QuarterlyBudget");
   });
 
-  it("still reports a real validator field", () => {
-    expect(classifyFailure({
-      code: "source_rejected",
-      stage: "rust",
-      message: "Portable Rust rejected a source batch: chunks_contents",
-    }).defectField).toBe("chunks_contents");
-  });
+  it.each(["chunks_contents", "chunks_source_locator", "canonical_frontmatter"])(
+    "still reports the real validator field %s",
+    (field) => {
+      expect(classifyFailure({
+        code: "source_rejected",
+        stage: "rust",
+        message: `Portable Rust rejected a source batch: ${field}`,
+      }).defectField).toBe(field);
+    },
+  );
 });

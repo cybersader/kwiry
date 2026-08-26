@@ -12,6 +12,14 @@ const CONTEXT = {
   platform: "linux" as const,
   backendProfile: "in_plugin" as const,
 };
+const UNAVAILABLE_SOURCE_GENERATION = {
+  schemaVersion: 1,
+  availability: "unavailable",
+} as const;
+const UNAVAILABLE_LEXICAL_EXECUTION = {
+  schemaVersion: 1,
+  availability: "unavailable",
+} as const;
 
 describe("PluginDiagnostics", () => {
   it("captures one completed wide event", async () => {
@@ -22,7 +30,12 @@ describe("PluginDiagnostics", () => {
       operation: "search",
       mode: "lexical",
     }, (event) => {
-      event.set({ resultCount: 3 });
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 3,
+        sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
+        lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
+      });
     });
 
     const report = diagnostics.format(CONTEXT);
@@ -91,6 +104,31 @@ describe("PluginDiagnostics", () => {
     expect(report).not.toContain("private-vault");
   });
 
+  it("records rejected annotations without changing the observed operation", async () => {
+    const diagnostics = new PluginDiagnostics("info");
+    const privateValue = "Clients/Private/Target.md";
+    let completed = false;
+
+    await diagnostics.capture("info", "search.lifecycle", {
+      operation: "search",
+    }, (event) => {
+      event.set({ resultCount: 1 });
+      event.complete("error", {
+        outcome: "failed",
+        code: privateValue,
+      } as never);
+      completed = true;
+    });
+
+    expect(completed).toBe(true);
+    const report = diagnostics.format(CONTEXT);
+    expect(report).toContain("ERROR search.lifecycle");
+    expect(report).toContain("outcome=failed");
+    expect(report).toContain("code=diagnostic_annotation_rejected");
+    expect(report).toContain("annotationRejectedCount=1");
+    expect(report).not.toContain(privateValue);
+  });
+
   it("runs operations without retaining events when disabled", async () => {
     const diagnostics = new PluginDiagnostics("off");
     let ran = false;
@@ -108,7 +146,9 @@ describe("PluginDiagnostics", () => {
     await diagnostics.capture("info", "search.lifecycle", {
       operation: "search",
       mode: "lexical",
-    }, () => undefined);
+    }, (event) => {
+      event.complete("info", { outcome: "skipped" });
+    });
     await expect(diagnostics.capture("info", "backend.activate", {
       operation: "activate",
     }, () => {

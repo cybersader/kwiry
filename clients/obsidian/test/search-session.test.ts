@@ -68,6 +68,12 @@ class DeferredBackend implements SearchBackend {
         candidateCount: null,
         candidateLimit: null,
       },
+      diagnostics: {
+        sourceGeneration: { availability: "unavailable" },
+        lexicalExecution: mode === "semantic"
+          ? { availability: "not_applicable" }
+          : { availability: "unavailable" },
+      },
       response: { hits: [], next_cursor: null },
     };
   }

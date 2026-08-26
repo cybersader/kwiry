@@ -2058,6 +2058,18 @@ describe("exact generated production Worker", () => {
             candidate_count: 1,
             candidate_limit: 512,
           },
+          source_generation: {
+            documents: 1,
+            chunks: 1,
+            zero_chunk_sources: 0,
+          },
+          lexical_execution: {
+            schema_version: 1,
+            disposition: "ready",
+            unique_candidate_count: 1,
+            returned_count: 1,
+            retained_candidate_truncation_count: 0,
+          },
         },
       });
 

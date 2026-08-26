@@ -32,6 +32,7 @@ import {
   type ExportGenerationResult,
   type InitialBuildCheckpointCursor,
   type InitialBuildCheckpointExportResult,
+  type WorkerLexicalExecution,
 } from "../src/worker/protocol";
 import { WorkerRpcError } from "../src/worker/rpc-client";
 import type { InPluginWorkerSession } from "../src/worker/session";
@@ -113,6 +114,79 @@ class FakeSource implements ActiveVaultSource {
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
 const SOURCE_POLICY_HASH = "e".repeat(64);
 
+function oneMarkdownSourceFormatCounts() {
+  const counts = emptySourceFormatCounts();
+  counts.markdown["indexed-complete"] = 1;
+  return counts;
+}
+
+function lexicalExecution(
+  candidateCount: number,
+  returnedCount: number,
+  resultLimit: number,
+): WorkerLexicalExecution {
+  const aggregate = <K extends "lexical_all_terms_v3" | "body">(key: K) => ({
+    key,
+    planned_lane_count: 1,
+    executed_lane_count: 1,
+    zero_observation_lane_count: 0,
+    saturated_lane_count: 0,
+    observation_count: candidateCount,
+    added_unique_count: candidateCount,
+    duplicate_observation_count: 0,
+    collection_cap_discarded_observation_count: 0,
+  });
+  return {
+    schema_version: 1,
+    disposition: "ready",
+    evidence_probe_count: 1,
+    matched_evidence_probe_count: 1,
+    prefix_probe_count: 0,
+    prefix_expansion_count: 0,
+    planned_lane_count: 1,
+    executed_lane_count: 1,
+    zero_observation_lane_count: 0,
+    saturated_lane_count: 0,
+    observation_count: candidateCount,
+    duplicate_observation_count: 0,
+    collection_cap_discarded_observation_count: 0,
+    unique_candidate_count: candidateCount,
+    returned_count: returnedCount,
+    result_limit: resultLimit,
+    retained_candidate_truncation_count: candidateCount - returnedCount,
+    candidate_limit: 512,
+    unique_candidate_limit_reached: false,
+    lane_kinds: [aggregate("lexical_all_terms_v3")],
+    proof_fields: [aggregate("body")],
+  };
+}
+
+function emptyLexicalExecution(): WorkerLexicalExecution {
+  return {
+    schema_version: 1,
+    disposition: "empty_no_evidence",
+    evidence_probe_count: 0,
+    matched_evidence_probe_count: 0,
+    prefix_probe_count: 0,
+    prefix_expansion_count: 0,
+    planned_lane_count: 0,
+    executed_lane_count: 0,
+    zero_observation_lane_count: 0,
+    saturated_lane_count: 0,
+    observation_count: 0,
+    duplicate_observation_count: 0,
+    collection_cap_discarded_observation_count: 0,
+    unique_candidate_count: 0,
+    returned_count: 0,
+    result_limit: 20,
+    retained_candidate_truncation_count: 0,
+    candidate_limit: 512,
+    unique_candidate_limit_reached: false,
+    lane_kinds: [],
+    proof_fields: [],
+  };
+}
+
 function cacheHit(generationId = "cached-generation"): Extract<CacheLoad, { kind: "hit" }> {
   return {
     kind: "hit",
@@ -167,6 +241,7 @@ function checkpointExportResult(
     generation,
     documents: cursor.acknowledged_prefix_sources,
     chunks: cursor.acknowledged_prefix_sources,
+    zero_chunk_sources: 0,
     database_bytes: 1,
     database_byte_limit: 1_000_000,
     quarantined_sources: 0,
@@ -366,6 +441,13 @@ function fakeSession(options: {
           scope: null,
           emphasis: null,
         },
+        source_generation: {
+          documents: 0,
+          chunks: 0,
+          zero_chunk_sources: 0,
+          source_format_counts: emptySourceFormatCounts(),
+        },
+        lexical_execution: emptyLexicalExecution(),
       };
     }),
     dispose: vi.fn(async () => ({ closed: true as const })),
@@ -1181,6 +1263,13 @@ describe("InPluginLexicalBackend", () => {
           scope: "name",
           emphasis: null,
         },
+        source_generation: {
+          documents: 1,
+          chunks: 1,
+          zero_chunk_sources: 0,
+          source_format_counts: oneMarkdownSourceFormatCounts(),
+        },
+        lexical_execution: lexicalExecution(11, 1, 10),
       }),
     })]);
     await inPlugin.initialize();
@@ -1202,6 +1291,26 @@ describe("InPluginLexicalBackend", () => {
         state: "more_available",
         candidateCount: 11,
         candidateLimit: 512,
+      },
+      diagnostics: {
+        sourceGeneration: {
+          availability: "available",
+          value: {
+            documents: 1,
+            chunks: 1,
+            zero_chunk_sources: 0,
+          },
+        },
+        lexicalExecution: {
+          availability: "available",
+          value: {
+            disposition: "ready",
+            observation_count: 11,
+            unique_candidate_count: 11,
+            returned_count: 1,
+            retained_candidate_truncation_count: 10,
+          },
+        },
       },
       response: {
         hits: [{
@@ -1565,6 +1674,12 @@ describe("InPluginLexicalBackend", () => {
       "query",
       false,
       "This explicit query is unavailable in the in-plugin backend.",
+    ],
+    [
+      "invalid_field_control",
+      "query",
+      false,
+      "The query contains an invalid field control.",
     ],
     [
       "invalid_query",

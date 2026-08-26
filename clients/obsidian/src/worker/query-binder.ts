@@ -8,6 +8,18 @@ export const FTS5_PROFILE_ID = "lexical-v2" as const;
 export const FTS5_COMPAT_PROFILE_ID = "lexical-v1" as const;
 export const FTS5_WEIGHTS = [5, 6, 6, 6, 3, 1, 2, 1] as const;
 
+/** Fixed-vocabulary refusal for a Rust-authored plan the FTS5 binder cannot accept. */
+export class QueryPlanRejectedError extends Error {
+  constructor() {
+    super("query plan rejected");
+    this.name = "QueryPlanRejectedError";
+  }
+}
+
+function rejectPlan(): never {
+  throw new QueryPlanRejectedError();
+}
+
 // A content role never transforms a score: contract §10.5 ranks every format
 // by identical text-evidence rules, and banding Excel scores into [0,3) both
 // demoted strong Excel matches below mid-strength Markdown matches and
@@ -208,7 +220,7 @@ function exactCandidatesForField(field: StagePlan["proof_field"]): string {
   FROM exact_identifier_matches`;
   }
   if (field === "cross_field") return EXACT_CANDIDATES_SQL;
-  throw new Error("unsupported Rust FTS5 exact field");
+  rejectPlan();
 }
 
 function exactSearchSql(field: StagePlan["proof_field"], required: boolean): string {
@@ -261,35 +273,35 @@ export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
     || plan.max_total_candidates !== 512
     || plan.stages.length > 42
     || plan.stages.some((stage, index) => stage.ordinal !== index)) {
-    throw new Error("unsupported Rust FTS5 execution plan");
+    rejectPlan();
   }
   if (plan.disposition === "empty_no_evidence") {
-    if (plan.stages.length !== 0) throw new Error("invalid empty FTS5 execution plan");
+    if (plan.stages.length !== 0) rejectPlan();
     return;
   }
   if (plan.disposition === "explicit_bypass") {
     if (plan.profile_id !== FTS5_COMPAT_PROFILE_ID
       || plan.stages.length !== 1
       || plan.stages[0]?.plan_id !== "lexical_explicit_v3") {
-      throw new Error("invalid explicit FTS5 execution plan");
+      rejectPlan();
     }
     return;
   }
   if (plan.disposition !== "ready" || plan.profile_id !== FTS5_PROFILE_ID
     || plan.stages.length === 0
     || plan.stages.some((stage) => stage.plan_id === "lexical_explicit_v3")) {
-    throw new Error("invalid assisted FTS5 execution plan");
+    rejectPlan();
   }
 }
 
 export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchStage {
   if (!isLimit(limit) || stage.max_candidates < limit) {
-    throw new Error("invalid FTS5 stage search limit");
+    rejectPlan();
   }
   const required = requireIdentifiers(stage.required_identifiers);
   if (stage.plan_id === "lexical_exact_metadata_v3") {
     if (!isOpaqueUnicodeScalarValue(stage.exact_value, 4_096) || stage.match_value !== undefined) {
-      throw new Error("unsupported Rust FTS5 exact stage");
+      rejectPlan();
     }
     const exactIdentifierToken = encodeExactIdentifierToken(stage.exact_value);
     return required.length === 0
@@ -308,14 +320,14 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
         };
   }
   if (!MATCH_STAGE_IDS.has(stage.plan_id) || stage.exact_value !== undefined) {
-    throw new Error("unsupported Rust FTS5 match stage");
+    rejectPlan();
   }
   if (stage.plan_id === "lexical_explicit_v3" && required.length !== 0) {
-    throw new Error("unsupported Rust FTS5 explicit stage");
+    rejectPlan();
   }
   if (stage.match_value === undefined) {
     if (required.length === 0 || stage.plan_id === "lexical_explicit_v3") {
-      throw new Error("unsupported Rust FTS5 match stage");
+      rejectPlan();
     }
     return {
       sql: IDENTIFIER_ONLY_SEARCH_SQL,
@@ -323,7 +335,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
     };
   }
   if (!isOpaqueValue(stage.match_value, 16_384)) {
-    throw new Error("unsupported Rust FTS5 match stage");
+    rejectPlan();
   }
   return required.length === 0
     ? { sql: SEARCH_SQL, bind: [stage.match_value, limit] }
@@ -335,11 +347,11 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
 
 export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
   if (plan.schema_version !== 7) {
-    throw new Error("unsupported Rust FTS5 evidence probe");
+    rejectPlan();
   }
   if (plan.plan_id === "identifier_metadata_v3") {
     if (!isOpaqueValue(plan.match_value, 16_384)) {
-      throw new Error("unsupported Rust FTS5 metadata probe");
+      rejectPlan();
     }
     return { exists: { sql: FTS_EXISTS_SQL, bind: [plan.match_value] }, prefix: null };
   }
@@ -349,11 +361,11 @@ export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
     || plan.max_prefix_term_bytes !== 96
     || !Number.isSafeInteger(plan.probe_id)
     || !Number.isSafeInteger(plan.term_index)) {
-    throw new Error("unsupported Rust FTS5 term probe");
+    rejectPlan();
   }
   const hasMatch = isOpaqueValue(plan.match_value, 16_384);
   const hasIdentifier = isOpaqueUnicodeScalarValue(plan.exact_identifier, 4_096);
-  if (hasMatch === hasIdentifier) throw new Error("unsupported Rust FTS5 term probe");
+  if (hasMatch === hasIdentifier) rejectPlan();
   const prefix = plan.prefix_pattern === null
     ? null
     : hasMatch && isOpaqueValue(plan.prefix_pattern, 4_096)
@@ -368,7 +380,7 @@ export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
         }
       : null;
   if (plan.prefix_pattern !== null && prefix === null) {
-    throw new Error("unsupported Rust FTS5 prefix probe");
+    rejectPlan();
   }
   return {
     exists: hasIdentifier
@@ -388,7 +400,7 @@ function requireIdentifiers(value: unknown): string[] {
     || value.length > 128
     || !value.every((identifier) => isOpaqueUnicodeScalarValue(identifier, 4_096))
     || new Set(value).size !== value.length) {
-    throw new Error("unsupported Rust FTS5 identifier constraints");
+    rejectPlan();
   }
   return value;
 }

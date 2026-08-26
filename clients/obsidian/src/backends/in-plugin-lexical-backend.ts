@@ -197,6 +197,18 @@ export class InPluginLexicalBackend implements SearchBackend {
           candidateCount: result.candidate_window.candidate_count,
           candidateLimit: result.candidate_window.candidate_limit,
         },
+        diagnostics: {
+          sourceGeneration: {
+            availability: "available",
+            value: {
+              ...result.source_generation,
+              enabledSourceFormats: this.enabledSourceFormats === null
+                ? null
+                : [...this.enabledSourceFormats],
+            },
+          },
+          lexicalExecution: { availability: "available", value: result.lexical_execution },
+        },
         response: {
           hits: result.hits.map((hit) => ({
             ...hit,
@@ -286,7 +298,7 @@ export class InPluginLexicalBackend implements SearchBackend {
               this.automaticRecoveries = 0;
             }
           }
-          this.publish(mapControllerStatus(this.identity, status, this.recovering));
+          this.publish(mapControllerStatus(this.identity, status, this.recovering, this.enabledSourceFormats));
         },
         onFailure: (error) => {
           // Classify before any epoch guard returns. The controller's issue
@@ -303,7 +315,12 @@ export class InPluginLexicalBackend implements SearchBackend {
             this.handleUncertainWorkerFailure();
           } else if (this.recovering && latestStatus) {
             this.recovering = false;
-            this.publish(mapControllerStatus(this.identity, latestStatus, false));
+            this.publish(mapControllerStatus(
+              this.identity,
+              latestStatus,
+              false,
+              this.enabledSourceFormats,
+            ));
           }
         },
         onStartupObservation: (observation) => {
@@ -402,6 +419,7 @@ function mapControllerStatus(
   identity: BackendIdentity,
   status: IndexControllerStatus,
   recovering: boolean,
+  enabledSourceFormats: readonly SourceFormat[] | null,
 ): BackendStatus {
   if (status.stage === "disposed") return disposedStatus(identity);
   const issue = recovering && !(status.stage === "ready" && !status.dirty)
@@ -461,7 +479,9 @@ function mapControllerStatus(
     capabilities: CAPABILITIES,
     documents: status.documents,
     chunks: status.chunks,
+    zeroChunkSources: status.zeroChunkSources,
     sourceFormatCounts: status.sourceFormatCounts,
+    ...(enabledSourceFormats === null ? {} : { enabledSourceFormats: [...enabledSourceFormats] }),
     quarantinedSources: status.quarantinedSources,
     unreadableSources: status.unreadableSources,
     ...((status.unreadableSourceCauses?.length ?? 0) === 0
@@ -756,6 +776,14 @@ function workerBackendError(error: unknown): KwiryBackendError {
           "query",
           false,
           "This explicit query is unavailable in the in-plugin backend.",
+        );
+      case "invalid_field_control":
+        return new KwiryBackendError(
+          error.code,
+          "in_plugin",
+          "query",
+          false,
+          "The query contains an invalid field control.",
         );
       case "invalid_query":
         return new KwiryBackendError(

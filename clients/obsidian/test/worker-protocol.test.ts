@@ -15,6 +15,7 @@ import {
   MAX_SOURCE_CHANGES,
   SOURCE_FORMATS,
   WORKER_PROTOCOL_VERSION,
+  classifyWorkerCause,
   emptyRestoreEvictionReport,
   emptySourceFormatCounts,
   emptySourceFormatTally,
@@ -22,6 +23,7 @@ import {
   isWorkerResponse,
   parseWorkerRequest,
 } from "../src/worker/protocol";
+import { QueryPlanRejectedError } from "../src/worker/query-binder";
 
 const CACHE_IDENTITY = "0123456789abcdef".repeat(4);
 
@@ -29,6 +31,59 @@ function sourceFormatCounts(indexed = 0) {
   const counts = emptySourceFormatCounts();
   counts.markdown["indexed-complete"] = indexed;
   return counts;
+}
+
+function sourceGeneration(documents = 1, chunks = 1, zeroChunkSources = 0) {
+  return {
+    documents,
+    chunks,
+    zero_chunk_sources: zeroChunkSources,
+    source_format_counts: sourceFormatCounts(documents),
+  };
+}
+
+function candidateCount(value: unknown): number {
+  if (typeof value !== "object" || value === null || !("candidate_count" in value)) return 0;
+  const count = (value as { candidate_count?: unknown }).candidate_count;
+  return typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : 0;
+}
+
+function lexicalExecution(candidateCount = 1, returnedCount = candidateCount) {
+  const empty = candidateCount === 0;
+  const aggregate = (key: string) => ({
+    key,
+    planned_lane_count: 1,
+    executed_lane_count: 1,
+    zero_observation_lane_count: 0,
+    saturated_lane_count: 0,
+    observation_count: candidateCount,
+    added_unique_count: candidateCount,
+    duplicate_observation_count: 0,
+    collection_cap_discarded_observation_count: 0,
+  });
+  return {
+    schema_version: 1,
+    disposition: empty ? "empty_no_evidence" : "ready",
+    evidence_probe_count: 0,
+    matched_evidence_probe_count: 0,
+    prefix_probe_count: 0,
+    prefix_expansion_count: 0,
+    planned_lane_count: empty ? 0 : 1,
+    executed_lane_count: empty ? 0 : 1,
+    zero_observation_lane_count: 0,
+    saturated_lane_count: 0,
+    observation_count: candidateCount,
+    duplicate_observation_count: 0,
+    collection_cap_discarded_observation_count: 0,
+    unique_candidate_count: candidateCount,
+    returned_count: returnedCount,
+    result_limit: 100,
+    retained_candidate_truncation_count: candidateCount - returnedCount,
+    candidate_limit: 512,
+    unique_candidate_limit_reached: candidateCount === 512,
+    lane_kinds: empty ? [] : [aggregate("lexical_all_terms_v3")],
+    proof_fields: empty ? [] : [aggregate("cross_field")],
+  };
 }
 
 function exportEnvelope(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -103,6 +158,7 @@ function checkpointExportEnvelope(overrides: Record<string, unknown> = {}): Reco
     generation: "g1",
     documents: 1,
     chunks: 2,
+    zero_chunk_sources: 0,
     database_bytes: 65_536,
     database_byte_limit: 1024 * 1024,
     quarantined_sources: 0,
@@ -147,10 +203,9 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
-  it("publishes protocol 13, cache schema 12, and the closed nine-format set", () => {
-    // HTML extends the transported format set without changing the Worker wire shape.
-    // Cache schema 12 widens the sources-table format check; protocol remains 13.
-    expect(WORKER_PROTOCOL_VERSION).toBe(14);
+  it("publishes protocol 15, cache schema 12, and the closed nine-format set", () => {
+    // Protocol 15 adds count-only diagnostic evidence without changing cache storage.
+    expect(WORKER_PROTOCOL_VERSION).toBe(15);
     expect(CACHE_SCHEMA_VERSION).toBe(12);
     expect(SOURCE_FORMATS).toEqual([
       "markdown",
@@ -623,6 +678,7 @@ describe("Worker protocol", () => {
         generation: "g1",
         documents: 1,
         chunks: 2,
+        zero_chunk_sources: 0,
         database_bytes: 65_536,
         database_byte_limit: 1024 * 1024,
         quarantined_sources: 0,
@@ -681,6 +737,7 @@ describe("Worker protocol", () => {
         generation: "g1",
         documents: 1,
         chunks: 2,
+        zero_chunk_sources: 0,
         database_bytes: 65_536,
         database_byte_limit: 1024 * 1024,
         quarantined_sources: 0,
@@ -705,6 +762,7 @@ describe("Worker protocol", () => {
         generation: "g1",
         documents: 1,
         chunks: 2,
+        zero_chunk_sources: 0,
         database_bytes: 65_536,
         database_byte_limit: 1024 * 1024,
         quarantined_sources: 0,
@@ -780,7 +838,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "export_generation",
       ok: true,
-      result: { generation: "g1", documents: 1, chunks: 1, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [], source_format_counts: sourceFormatCounts(1) },
+      result: { generation: "g1", documents: 1, chunks: 1, zero_chunk_sources: 0, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [], source_format_counts: sourceFormatCounts(1) },
     })).toBe(false);
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
@@ -837,7 +895,13 @@ describe("Worker protocol", () => {
     })).toBe(false);
   });
 
-  it("accepts only the protocol-10 structured query error vocabulary", () => {
+  it("classifies branded binder refusals without retaining plan text", () => {
+    const error = new QueryPlanRejectedError();
+    expect(classifyWorkerCause(error)).toBe("plan_rejected");
+    expect(JSON.stringify(classifyWorkerCause(error))).not.toContain(error.message);
+  });
+
+  it("accepts only the protocol-15 structured query error vocabulary", () => {
     const response = (code: string) => ({
       version: WORKER_PROTOCOL_VERSION,
       id: 1,
@@ -869,7 +933,7 @@ describe("Worker protocol", () => {
       id: 1,
       operation: "apply_source_changes",
       ok: true,
-      result: { generation: "g2", documents: 1, chunks: 1, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [], source_format_counts: sourceFormatCounts(1) },
+      result: { generation: "g2", documents: 1, chunks: 1, zero_chunk_sources: 0, database_bytes: 65_536, database_byte_limit: 1024 * 1024, quarantined_sources: 0, quarantine_fields: [], source_format_counts: sourceFormatCounts(1) },
     })).toBe(true);
     expect(isWorkerResponse({
       version: WORKER_PROTOCOL_VERSION,
@@ -907,6 +971,7 @@ describe("Worker protocol", () => {
       staging_generation: null,
       documents: 1,
       chunks: 2,
+      zero_chunk_sources: 0,
       active_database_bytes: 131_072,
       staging_database_bytes: 0,
       database_byte_limit: 1024 * 1024,
@@ -971,6 +1036,8 @@ describe("Worker protocol", () => {
           scope: null,
           emphasis: null,
         },
+        source_generation: sourceGeneration(),
+        lexical_execution: lexicalExecution(),
       },
     });
     expect(isWorkerResponse(response({ title: "Display title" }))).toBe(true);
@@ -1015,6 +1082,11 @@ describe("Worker protocol", () => {
           scope: null,
           emphasis: null,
         },
+        source_generation: sourceGeneration(),
+        lexical_execution: lexicalExecution(
+          candidateWindow.candidate_count,
+          Array.isArray(result.hits) ? result.hits.length : 0,
+        ),
       },
     });
 
@@ -1095,6 +1167,18 @@ describe("Worker protocol", () => {
       generation: "g1",
       hits: [{ ...hit, excerpt: null }],
     }))).toBe(false);
+    const privateTrace = response({ generation: "g1", hits: [hit] });
+    (privateTrace.result as Record<string, unknown>).lexical_execution = {
+      ...privateTrace.result.lexical_execution,
+      query: "private query",
+    };
+    expect(isWorkerResponse(privateTrace)).toBe(false);
+    const privateGeneration = response({ generation: "g1", hits: [hit] });
+    (privateGeneration.result as Record<string, unknown>).source_generation = {
+      ...privateGeneration.result.source_generation,
+      path: "private.md",
+    };
+    expect(isWorkerResponse(privateGeneration)).toBe(false);
   });
 
   it("requires closed truthful candidate-window facts on every search result", () => {
@@ -1113,6 +1197,8 @@ describe("Worker protocol", () => {
           scope: null,
           emphasis: null,
         },
+        source_generation: sourceGeneration(),
+        lexical_execution: lexicalExecution(candidateCount(candidateWindow), 0),
       },
     });
     for (const [state, candidateCount] of [

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 14 as const;
+export const WORKER_PROTOCOL_VERSION = 15 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -422,6 +422,7 @@ export interface BuildResult {
   generation: string;
   documents: number;
   chunks: number;
+  zero_chunk_sources: number;
   database_bytes: number;
   database_byte_limit: number;
   quarantined_sources: number;
@@ -436,6 +437,7 @@ export interface StatusResult {
   staging_generation: string | null;
   documents: number;
   chunks: number;
+  zero_chunk_sources: number;
   active_database_bytes: number;
   staging_database_bytes: number;
   database_byte_limit: number;
@@ -513,11 +515,75 @@ export interface WorkerQueryPolicy {
   emphasis: WorkerQueryPublicField | null;
 }
 
+export interface WorkerSourceGeneration {
+  documents: number;
+  chunks: number;
+  zero_chunk_sources: number;
+  source_format_counts: SourceFormatCounts;
+}
+
+export const WORKER_LEXICAL_LANE_KINDS = [
+  "lexical_explicit_v3",
+  "lexical_exact_metadata_v3",
+  "lexical_exact_phrase_v3",
+  "lexical_all_terms_v3",
+  "lexical_partial_coverage_v3",
+  "lexical_prefix_metadata_v3",
+  "lexical_prefix_v3",
+] as const;
+export type WorkerLexicalLaneKind = typeof WORKER_LEXICAL_LANE_KINDS[number];
+
+export const WORKER_LEXICAL_PROOF_FIELDS = [
+  "filename", "title", "alias", "heading", "tag", "body", "cross_field",
+] as const;
+export type WorkerLexicalProofField = typeof WORKER_LEXICAL_PROOF_FIELDS[number];
+
+export interface WorkerLexicalExecutionAggregate<
+  Key extends WorkerLexicalLaneKind | WorkerLexicalProofField =
+    WorkerLexicalLaneKind | WorkerLexicalProofField,
+> {
+  key: Key;
+  planned_lane_count: number;
+  executed_lane_count: number;
+  zero_observation_lane_count: number;
+  saturated_lane_count: number;
+  observation_count: number;
+  added_unique_count: number;
+  duplicate_observation_count: number;
+  collection_cap_discarded_observation_count: number;
+}
+
+export interface WorkerLexicalExecution {
+  schema_version: 1;
+  disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
+  evidence_probe_count: number;
+  matched_evidence_probe_count: number;
+  prefix_probe_count: number;
+  prefix_expansion_count: number;
+  planned_lane_count: number;
+  executed_lane_count: number;
+  zero_observation_lane_count: number;
+  saturated_lane_count: number;
+  observation_count: number;
+  duplicate_observation_count: number;
+  collection_cap_discarded_observation_count: number;
+  unique_candidate_count: number;
+  returned_count: number;
+  result_limit: number;
+  retained_candidate_truncation_count: number;
+  candidate_limit: 512;
+  unique_candidate_limit_reached: boolean;
+  lane_kinds: WorkerLexicalExecutionAggregate<WorkerLexicalLaneKind>[];
+  proof_fields: WorkerLexicalExecutionAggregate<WorkerLexicalProofField>[];
+}
+
 export interface SearchResult {
   generation: string;
   hits: WorkerSearchHit[];
   candidate_window: WorkerCandidateWindow;
   query_policy: WorkerQueryPolicy;
+  source_generation: WorkerSourceGeneration;
+  lexical_execution: WorkerLexicalExecution;
 }
 
 export interface DisposeResult {
@@ -902,6 +968,7 @@ export function classifyWorkerCause(error: unknown): WorkerErrorCause {
   if (!(error instanceof Error)) return "internal";
   const name = error.name;
   if (name === "SQLite3Error" || name === "SqliteError") return "sqlite";
+  if (name === "QueryPlanRejectedError") return "plan_rejected";
   if (error instanceof RangeError) return "bounds_exceeded";
   return "internal";
 }
@@ -1091,6 +1158,7 @@ const BUILD_RESULT_KEYS = [
   "generation",
   "documents",
   "chunks",
+  "zero_chunk_sources",
   "database_bytes",
   "database_byte_limit",
   "quarantined_sources",
@@ -1115,6 +1183,8 @@ function hasValidBuildResultFields(value: Record<string, unknown>): boolean {
   return isGeneration(value.generation)
     && isNonNegativeSafeInteger(value.documents)
     && isNonNegativeSafeInteger(value.chunks)
+    && isNonNegativeSafeInteger(value.zero_chunk_sources)
+    && value.zero_chunk_sources <= value.documents
     && isNonNegativeSafeInteger(value.database_bytes)
     && isPositiveSafeInteger(value.database_byte_limit)
     && value.database_bytes <= value.database_byte_limit
@@ -1304,6 +1374,7 @@ export function isStatusResult(value: unknown): value is StatusResult {
       "staging_generation",
       "documents",
       "chunks",
+      "zero_chunk_sources",
       "active_database_bytes",
       "staging_database_bytes",
       "database_byte_limit",
@@ -1320,6 +1391,8 @@ export function isStatusResult(value: unknown): value is StatusResult {
     && (value.staging_generation === null || isGeneration(value.staging_generation))
     && isNonNegativeSafeInteger(value.documents)
     && isNonNegativeSafeInteger(value.chunks)
+    && isNonNegativeSafeInteger(value.zero_chunk_sources)
+    && value.zero_chunk_sources <= value.documents
     && isNonNegativeSafeInteger(value.active_database_bytes)
     && isNonNegativeSafeInteger(value.staging_database_bytes)
     && isPositiveSafeInteger(value.database_byte_limit)
@@ -1333,16 +1406,150 @@ export function isStatusResult(value: unknown): value is StatusResult {
 
 export function isSearchResult(value: unknown): value is SearchResult {
   return isRecord(value)
-    && hasExactKeys(value, ["generation", "hits", "candidate_window", "query_policy"])
+    && hasExactKeys(value, [
+      "generation", "hits", "candidate_window", "query_policy", "source_generation",
+      "lexical_execution",
+    ])
     && isGeneration(value.generation)
     && Array.isArray(value.hits)
     && value.hits.length <= MAX_SEARCH_HITS
     && value.hits.every(isSearchHit)
     && isWorkerCandidateWindow(value.candidate_window)
     && isWorkerQueryPolicy(value.query_policy)
+    && isWorkerSourceGeneration(value.source_generation)
+    && isWorkerLexicalExecution(value.lexical_execution)
     && value.candidate_window.candidate_count >= value.hits.length
+    && value.lexical_execution.unique_candidate_count === value.candidate_window.candidate_count
+    && value.lexical_execution.returned_count === value.hits.length
+    && value.lexical_execution.candidate_limit === value.candidate_window.candidate_limit
     && (value.candidate_window.state !== "more_available"
       || value.candidate_window.candidate_count > value.hits.length);
+}
+
+function isWorkerSourceGeneration(value: unknown): value is WorkerSourceGeneration {
+  return isRecord(value)
+    && hasExactKeys(value, ["documents", "chunks", "zero_chunk_sources", "source_format_counts"])
+    && isNonNegativeSafeInteger(value.documents)
+    && isNonNegativeSafeInteger(value.chunks)
+    && isNonNegativeSafeInteger(value.zero_chunk_sources)
+    && value.zero_chunk_sources <= value.documents
+    && isSourceFormatCounts(value.source_format_counts)
+    && indexedSourceCount(value.source_format_counts) === value.documents;
+}
+
+export function isWorkerLexicalExecution(value: unknown): value is WorkerLexicalExecution {
+  if (!isRecord(value)
+    || !hasExactKeys(value, [
+      "schema_version", "disposition", "evidence_probe_count", "matched_evidence_probe_count",
+      "prefix_probe_count", "prefix_expansion_count", "planned_lane_count",
+      "executed_lane_count", "zero_observation_lane_count", "saturated_lane_count",
+      "observation_count", "duplicate_observation_count",
+      "collection_cap_discarded_observation_count", "unique_candidate_count",
+      "returned_count", "result_limit", "retained_candidate_truncation_count",
+      "candidate_limit", "unique_candidate_limit_reached", "lane_kinds", "proof_fields",
+    ])
+    || value.schema_version !== 1
+    || (value.disposition !== "explicit_bypass"
+      && value.disposition !== "ready"
+      && value.disposition !== "empty_no_evidence")
+    || !boundedCount(value.evidence_probe_count, 129)
+    || !boundedCount(value.matched_evidence_probe_count, value.evidence_probe_count)
+    || !boundedCount(value.prefix_probe_count, 8)
+    || !boundedCount(value.prefix_expansion_count, 128)
+    || !boundedCount(value.planned_lane_count, 42)
+    || !boundedCount(value.executed_lane_count, value.planned_lane_count)
+    || !boundedCount(value.zero_observation_lane_count, value.executed_lane_count)
+    || !boundedCount(value.saturated_lane_count, value.executed_lane_count)
+    || !boundedCount(value.observation_count, 42 * 256)
+    || !boundedCount(value.duplicate_observation_count, value.observation_count)
+    || !boundedCount(value.collection_cap_discarded_observation_count, value.observation_count)
+    || !boundedCount(value.unique_candidate_count, 512)
+    || !boundedCount(value.returned_count, MAX_SEARCH_HITS)
+    || !boundedCount(value.result_limit, MAX_SEARCH_HITS) || value.result_limit < 1
+    || !boundedCount(value.retained_candidate_truncation_count, 512)
+    || value.candidate_limit !== 512
+    || typeof value.unique_candidate_limit_reached !== "boolean"
+    || value.unique_candidate_limit_reached !== (value.unique_candidate_count === 512)
+    || value.returned_count > value.result_limit
+    || value.unique_candidate_count !== value.returned_count + value.retained_candidate_truncation_count
+    || value.observation_count !== value.unique_candidate_count
+      + value.duplicate_observation_count
+      + value.collection_cap_discarded_observation_count
+    || !isLexicalExecutionAggregates(value.lane_kinds, WORKER_LEXICAL_LANE_KINDS)
+    || !isLexicalExecutionAggregates(value.proof_fields, WORKER_LEXICAL_PROOF_FIELDS)) {
+    return false;
+  }
+  if (value.disposition === "empty_no_evidence") {
+    return value.planned_lane_count === 0
+      && value.executed_lane_count === 0
+      && value.observation_count === 0
+      && value.unique_candidate_count === 0
+      && value.returned_count === 0
+      && value.lane_kinds.length === 0
+      && value.proof_fields.length === 0;
+  }
+  const execution = value as unknown as WorkerLexicalExecution;
+  return value.planned_lane_count > 0
+    && aggregateTotalsMatch(value.lane_kinds, execution)
+    && aggregateTotalsMatch(value.proof_fields, execution);
+}
+
+function isLexicalExecutionAggregates(
+  value: unknown,
+  keys: readonly string[],
+): value is WorkerLexicalExecutionAggregate[] {
+  if (!Array.isArray(value) || value.length > keys.length) return false;
+  const seen = new Set<string>();
+  for (const aggregate of value) {
+    if (!isRecord(aggregate)
+      || !hasExactKeys(aggregate, [
+        "key", "planned_lane_count", "executed_lane_count", "zero_observation_lane_count",
+        "saturated_lane_count", "observation_count", "added_unique_count",
+        "duplicate_observation_count", "collection_cap_discarded_observation_count",
+      ])
+      || typeof aggregate.key !== "string"
+      || !keys.includes(aggregate.key)
+      || seen.has(aggregate.key)
+      || !boundedCount(aggregate.planned_lane_count, 42)
+      || !boundedCount(aggregate.executed_lane_count, aggregate.planned_lane_count)
+      || !boundedCount(aggregate.zero_observation_lane_count, aggregate.executed_lane_count)
+      || !boundedCount(aggregate.saturated_lane_count, aggregate.executed_lane_count)
+      || !boundedCount(aggregate.observation_count, 42 * 256)
+      || !boundedCount(aggregate.added_unique_count, 512)
+      || !boundedCount(aggregate.duplicate_observation_count, aggregate.observation_count)
+      || !boundedCount(
+        aggregate.collection_cap_discarded_observation_count,
+        aggregate.observation_count,
+      )
+      || aggregate.observation_count !== aggregate.added_unique_count
+        + aggregate.duplicate_observation_count
+        + aggregate.collection_cap_discarded_observation_count) {
+      return false;
+    }
+    seen.add(aggregate.key);
+  }
+  return true;
+}
+
+function aggregateTotalsMatch(
+  aggregates: WorkerLexicalExecutionAggregate[],
+  execution: WorkerLexicalExecution,
+): boolean {
+  const sum = (field: keyof Omit<WorkerLexicalExecutionAggregate, "key">) =>
+    aggregates.reduce((total, aggregate) => total + aggregate[field], 0);
+  return sum("planned_lane_count") === execution.planned_lane_count
+    && sum("executed_lane_count") === execution.executed_lane_count
+    && sum("zero_observation_lane_count") === execution.zero_observation_lane_count
+    && sum("saturated_lane_count") === execution.saturated_lane_count
+    && sum("observation_count") === execution.observation_count
+    && sum("added_unique_count") === execution.unique_candidate_count
+    && sum("duplicate_observation_count") === execution.duplicate_observation_count
+    && sum("collection_cap_discarded_observation_count")
+      === execution.collection_cap_discarded_observation_count;
+}
+
+function boundedCount(value: unknown, maximum: number): value is number {
+  return isNonNegativeSafeInteger(value) && value <= maximum;
 }
 
 function isWorkerQueryPolicy(value: unknown): value is WorkerQueryPolicy {
