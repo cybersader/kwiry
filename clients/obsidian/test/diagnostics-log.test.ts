@@ -22,6 +22,87 @@ function clock(...timestamps: number[]): () => number {
   return () => timestamps[index++] ?? timestamps.at(-1) ?? 0;
 }
 
+const UNAVAILABLE_SOURCE_GENERATION = {
+  schemaVersion: 1,
+  availability: "unavailable",
+} as const;
+const UNAVAILABLE_LEXICAL_EXECUTION = {
+  schemaVersion: 1,
+  availability: "unavailable",
+} as const;
+
+function sourceGeneration() {
+  const empty = (policy: "enabled" | "disabled" | "unknown" = "unknown") => ({
+    policy,
+    indexedComplete: 0,
+    indexedPartial: 0,
+    skippedNoExtractableText: 0,
+    unreadable: 0,
+    quarantined: 0,
+  });
+  return {
+    schemaVersion: 1 as const,
+    availability: "available" as const,
+    documents: 1,
+    chunks: 2,
+    zeroChunkSources: 0,
+    formats: {
+      markdown: { ...empty("enabled"), indexedComplete: 1 },
+      text: empty("enabled"),
+      base: empty("enabled"),
+      canvas: empty("enabled"),
+      docx: empty("enabled"),
+      pdf: empty("enabled"),
+      excalidraw: empty("enabled"),
+      excel: empty("enabled"),
+      html: empty("enabled"),
+    },
+  };
+}
+
+function lexicalExecution() {
+  return {
+    schemaVersion: 1 as const,
+    availability: "available" as const,
+    disposition: "ready" as const,
+    evidenceProbeCount: 1,
+    matchedEvidenceProbeCount: 1,
+    prefixProbeCount: 0,
+    prefixExpansionCount: 0,
+    plannedLaneCount: 1,
+    executedLaneCount: 1,
+    zeroObservationLaneCount: 0,
+    saturatedLaneCount: 0,
+    observationCount: 1,
+    uniqueCandidateCount: 1,
+    duplicateObservationCount: 0,
+    collectionCapDiscardedObservationCount: 0,
+    returnedCount: 1,
+    resultLimit: 20,
+    retainedCandidateTruncationCount: 0,
+    candidateLimit: 512,
+    candidateLimitReached: false,
+    lanes: [{
+      kind: "lexical_exact_metadata_v3" as const,
+      plannedLaneCount: 1,
+      executedLaneCount: 1,
+      zeroObservationLaneCount: 0,
+      saturatedLaneCount: 0,
+      observationCount: 1,
+      addedUniqueCount: 1,
+    }],
+    fields: [{
+      field: "filename" as const,
+      plannedLaneCount: 1,
+      executedLaneCount: 1,
+      zeroObservationLaneCount: 0,
+      saturatedLaneCount: 0,
+      observationCount: 1,
+      addedUniqueCount: 1,
+    }],
+  };
+}
+
 async function capture(
   log: DiagnosticLog,
   level: DiagnosticLevel,
@@ -222,7 +303,7 @@ describe("DiagnosticLog", () => {
       // @ts-expect-error Startup diagnostics cannot carry vault paths.
       vaultPath: "smb://server/private-vault",
     })).toThrow("Invalid diagnostic details");
-    expect(() => log.record("info", "startup.lifecycle", 0, 1, {
+    expect(() => log.record("error", "startup.lifecycle", 0, 1, {
       profile: "in_plugin",
       outcome: "failed",
       reason: "activation_failed",
@@ -274,6 +355,7 @@ describe("DiagnosticLog", () => {
   it("accepts only fixed source-local read causes", async () => {
     const log = new DiagnosticLog(4, clock(0), clock(0, 1));
     await capture(log, "warn", "index.lifecycle", {
+      outcome: "skipped",
       code: "vault_read_failed",
       failureCause: "source_read_rejected",
       sourcesFailed: 1,
@@ -311,13 +393,13 @@ describe("DiagnosticLog", () => {
       "dropped_entries: 0\nminimum_level: debug\ncategories: all\nretained_entries: 1\nfiltered_out_entries: 0\n\nSummary:",
     );
     expect(output).toContain(
-      "1 1970-01-01T00:00:00.000Z +1000ms ERROR failure.caught profile=in_plugin outcome=succeeded",
+      "1 1970-01-01T00:00:00.000Z +1000ms ERROR failure.caught profile=in_plugin outcome=failed code=cache_unavailable",
     );
     const jsonText = output.split("Structured records (JSON):\n")[1];
     expect(jsonText).toBeDefined();
     const structured = JSON.parse(jsonText!);
     expect(structured).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       context: {
         pluginVersion: "0.2.2",
         obsidianVersion: "1.8.10",
@@ -406,7 +488,7 @@ describe("DiagnosticLog", () => {
     expect(summaryLines.at(-1)).toBe("");
   });
 
-  it("streams schema-v1 structured records in bounded UTF-8 chunks", () => {
+  it("streams schema-v2 structured records in bounded UTF-8 chunks", () => {
     const log = populatedDiagnosticLog(32);
     const plan = createDiagnosticExportPlan(log, {
       pluginVersion: "0.2.2",
@@ -421,13 +503,117 @@ describe("DiagnosticLog", () => {
     const output = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
     const structured = JSON.parse(output.split("Structured records (JSON):\n")[1]!);
     expect(structured).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       capacity: 32,
       storedEntries: 32,
       droppedEntries: 0,
       minimumLevel: "debug",
     });
     expect(structured.records).toEqual(plan.entries);
+  });
+
+  it("commits severity and terminal details atomically", async () => {
+    const log = new DiagnosticLog(4, clock(0), clock(0, 1));
+    const secret = "Clients/Private/Target.md";
+
+    await expect(log.capture("info", "search.lifecycle", {
+      operation: "search",
+    }, (event) => {
+      event.complete("error", {
+        outcome: "failed",
+        code: secret,
+      } as never);
+    })).rejects.toThrow("Invalid diagnostic details");
+
+    const [entry] = log.snapshot().entries;
+    expect(entry).toMatchObject({
+      level: "error",
+      details: { outcome: "failed", code: "internal_error" },
+    });
+    expect(JSON.stringify(entry)).not.toContain(secret);
+    expect(() => log.record("error", "failure.caught", 0, 1, {
+      outcome: "succeeded",
+      code: "worker_failed",
+    })).not.toThrow();
+    expect(log.snapshot().entries[1]).toMatchObject({
+      level: "error",
+      details: { outcome: "failed", code: "worker_failed" },
+    });
+  });
+
+  it("retains exact schema-v2 search-miss evidence without private material", async () => {
+    const log = new DiagnosticLog(4, clock(0), clock(0, 1));
+    await log.capture("info", "search.lifecycle", {
+      operation: "search",
+      mode: "lexical",
+    }, (event) => {
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 1,
+        sourceGeneration: sourceGeneration(),
+        lexicalExecution: lexicalExecution(),
+      });
+    });
+
+    const [entry] = log.snapshot().entries;
+    expect(entry?.details.sourceGeneration).toMatchObject({
+      availability: "available",
+      documents: 1,
+      chunks: 2,
+      zeroChunkSources: 0,
+    });
+    expect(entry?.details.lexicalExecution).toMatchObject({
+      availability: "available",
+      disposition: "ready",
+      uniqueCandidateCount: 1,
+      returnedCount: 1,
+    });
+    const output = formatDiagnosticLog(log, {
+      pluginVersion: "0.2.2",
+      obsidianVersion: "1.8.10",
+      platform: "linux",
+      backendProfile: "in_plugin",
+    });
+    expect(output).toContain("sourceGeneration=available:1/2/zero=0");
+    expect(output).toContain("lexicalExecution=ready:lanes=1/1,candidates=1,returned=1");
+    expect(output).not.toMatch(/query|path|sql|match_value|secret/iu);
+
+    const hostileSource = sourceGeneration() as unknown as Record<string, unknown>;
+    hostileSource.path = "private/path.md";
+    await expect(log.capture("info", "index.lifecycle", {
+      sourceGeneration: hostileSource as never,
+    }, () => undefined)).rejects.toThrow("Invalid diagnostic details");
+    const hostile = lexicalExecution() as unknown as Record<string, unknown>;
+    hostile.query = "private query";
+    await expect(log.capture("info", "index.lifecycle", {
+      lexicalExecution: hostile as never,
+    }, () => undefined)).rejects.toThrow("Invalid diagnostic details");
+    const inconsistent = lexicalExecution();
+    inconsistent.duplicateObservationCount = 1;
+    await expect(log.capture("info", "index.lifecycle", {
+      lexicalExecution: inconsistent,
+    }, () => undefined)).rejects.toThrow("Invalid diagnostic details");
+  });
+
+  it("requires explicit evidence for successful search records", async () => {
+    const log = new DiagnosticLog(4, clock(0), clock(0, 1));
+    await expect(log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("info", { outcome: "succeeded", resultCount: 0 });
+    })).rejects.toThrow("Invalid search diagnostic details");
+    expect(log.snapshot().entries[0]).toMatchObject({
+      level: "error",
+      details: { outcome: "failed", code: "internal_error" },
+    });
+
+    await log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 0,
+        sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
+        lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
+      });
+    });
+    expect(log.snapshot().entries[1]?.details.outcome).toBe("succeeded");
   });
 
   it("rejects unstructured text at both the type and runtime boundaries", async () => {
@@ -443,7 +629,7 @@ describe("DiagnosticLog", () => {
       profile: "in_plugin" as const,
       queryText: "confidential acquisition notes",
     };
-    await expect(log.capture("info", "search.lifecycle", {}, (event) => {
+    await expect(log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
       event.set(structurallySmuggled);
     })).rejects.toThrow("Invalid diagnostic details");
 

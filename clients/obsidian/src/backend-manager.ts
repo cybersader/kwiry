@@ -32,7 +32,8 @@ const NOOP_DIAGNOSTICS: BackendManagerDiagnostics = {
   capture: async (_level, _code, _details, operation) => operation({
     set: () => undefined,
     increment: () => undefined,
-    setLevel: () => undefined,
+    complete: () => undefined,
+    rejectAnnotation: () => undefined,
   }),
 };
 

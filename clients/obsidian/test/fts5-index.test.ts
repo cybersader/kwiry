@@ -1004,6 +1004,16 @@ describe("Fts5GenerationIndex", () => {
     // The title-scoped half reaches the target first; the text half then
     // re-finds it and contributes nothing new before partial coverage runs.
     expect(summary.stages.map((stage) => stage.candidate_count)).toEqual([1, 1, 25]);
+    expect(summary).toMatchObject({
+      planned_lane_count: 3,
+      executed_lane_count: 3,
+      observation_count: 27,
+      duplicate_observation_count: 2,
+      collection_cap_discarded_observation_count: 0,
+      unique_candidate_count: 25,
+      returned_count: 8,
+      retained_candidate_truncation_count: 17,
+    });
     expect(summary.stages.every((stage) => stage.mandatory)).toBe(false);
   });
 
@@ -1985,6 +1995,69 @@ describe("Fts5GenerationIndex", () => {
       expect(scoped.documents).toBe(0);
       expect(scoped.sources).toBe(1);
       expect(() => scoped.assertIntegrity()).not.toThrow();
+    } finally {
+      scoped.close();
+    }
+  });
+
+  it("reports an indexed zero-chunk source that cannot enter filename lanes", () => {
+    const db = new sqlite.oo1.DB(":memory:", "c");
+    const scoped = new Fts5GenerationIndex(db);
+    try {
+      const empty = sourceAt(
+        "sample-briefings",
+        "Sample-Briefings.md",
+        "unused",
+        "",
+        "",
+        {},
+      );
+      empty.chunks = [];
+      empty.retrieval.stem = "Sample-Briefings";
+      scoped.replaceSource(empty);
+
+      expect(scoped.sourceGeneration).toMatchObject({
+        documents: 1,
+        chunks: 0,
+        zero_chunk_sources: 1,
+      });
+      const restored = openRestoredFts5Generation(sqlite, scoped.exportImage(sqlite), 1);
+      try {
+        expect(restored.sourceGeneration).toMatchObject({
+          documents: 1,
+          chunks: 0,
+          zero_chunk_sources: 1,
+        });
+      } finally {
+        restored.close();
+      }
+      expect(scoped.search({
+        schema_version: 7,
+        profile_id: "lexical-v2",
+        disposition: "ready",
+        max_total_candidates: 512,
+        stages: [{
+          ordinal: 0,
+          plan_id: "lexical_exact_metadata_v3",
+          proof_field: "filename",
+          proof_kind: "exact",
+          exact_value: "sample-briefings",
+          max_candidates: 256,
+        }],
+      }, 20)).toEqual([]);
+
+      scoped.replaceSource(sourceAt(
+        "sample-briefings",
+        "Sample-Briefings.md",
+        "chunk-sample",
+        "meeting notes",
+      ));
+      expect(scoped.zeroChunkSources).toBe(0);
+      scoped.replaceSource(empty);
+      expect(scoped.zeroChunkSources).toBe(1);
+
+      scoped.applySourceChanges([], [{ vault_id: "active", path: "Sample-Briefings.md" }]);
+      expect(scoped.zeroChunkSources).toBe(0);
     } finally {
       scoped.close();
     }

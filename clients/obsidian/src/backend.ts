@@ -9,8 +9,11 @@ import type {
 } from "./api";
 import type { ExcerptSegment } from "./excerpt";
 import type {
+  SourceFormat,
   SourceFormatCounts,
   SourcePreparationDefectField,
+  WorkerLexicalExecution,
+  WorkerSourceGeneration,
 } from "./worker/protocol";
 
 export type BackendProfile = "daemon" | "in_plugin";
@@ -66,7 +69,9 @@ export interface BackendStatus {
   capabilities: BackendCapabilities;
   documents: number;
   chunks: number;
+  zeroChunkSources?: number;
   sourceFormatCounts?: SourceFormatCounts;
+  enabledSourceFormats?: readonly SourceFormat[];
   quarantinedSources?: number;
   unreadableSources?: number;
   unreadableSourceCauses?: readonly UnreadableVaultSourceCauseCount[];
@@ -118,6 +123,19 @@ export interface CandidateWindowFacts {
   candidateLimit: number | null;
 }
 
+export type BackendDiagnosticEvidence<T> =
+  | { availability: "available"; value: T }
+  | { availability: "unavailable" | "not_applicable" };
+
+export interface BackendSourceGenerationFacts extends WorkerSourceGeneration {
+  enabledSourceFormats: readonly SourceFormat[] | null;
+}
+
+export interface SearchDiagnosticFacts {
+  sourceGeneration: BackendDiagnosticEvidence<BackendSourceGenerationFacts>;
+  lexicalExecution: BackendDiagnosticEvidence<WorkerLexicalExecution>;
+}
+
 export interface SearchExecution {
   backend: BackendIdentity;
   requestedMode: SearchMode;
@@ -125,6 +143,7 @@ export interface SearchExecution {
   queryPolicy: SearchQueryPolicyFacts | null;
   generation: string | null;
   candidateWindow: CandidateWindowFacts;
+  diagnostics: SearchDiagnosticFacts;
   response: BackendSearchResponse;
 }
 

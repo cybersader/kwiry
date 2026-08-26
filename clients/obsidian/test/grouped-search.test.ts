@@ -73,6 +73,10 @@ function execution(
     },
     generation: "generation-1",
     candidateWindow,
+    diagnostics: {
+      sourceGeneration: { availability: "unavailable" },
+      lexicalExecution: { availability: "unavailable" },
+    },
     response: { hits, next_cursor: null },
   };
 }

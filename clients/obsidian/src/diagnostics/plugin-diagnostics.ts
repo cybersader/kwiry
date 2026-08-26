@@ -23,7 +23,8 @@ import type { StartupTimelineRecord } from "./startup-timeline";
 const NOOP_EVENT: DiagnosticEventBuilder = {
   set: () => undefined,
   increment: () => undefined,
-  setLevel: () => undefined,
+  complete: () => undefined,
+  rejectAnnotation: () => undefined,
 };
 
 export class PluginDiagnostics {
@@ -76,7 +77,7 @@ export class PluginDiagnostics {
     if (!this.shouldCapture("info")) return;
     try {
       this.log.record(
-        "info",
+        record.details.outcome === "failed" ? "error" : "info",
         "startup.lifecycle",
         record.startedAtMs,
         record.durationMs,
@@ -128,28 +129,20 @@ export class PluginDiagnostics {
 }
 
 function safeEvent(event: DiagnosticEventBuilder): DiagnosticEventBuilder {
+  const isolate = (annotation: () => void): void => {
+    try {
+      annotation();
+    } catch {
+      // The recorder owns this fallback: producer text and rejected values are
+      // discarded, while the retained terminal state remains coherent.
+      event.rejectAnnotation();
+    }
+  };
   return {
-    set: (details) => {
-      try {
-        event.set(details);
-      } catch {
-        // Invalid diagnostics must not interrupt the observed operation.
-      }
-    },
-    increment: (counter, amount) => {
-      try {
-        event.increment(counter, amount);
-      } catch {
-        // Invalid diagnostics must not interrupt the observed operation.
-      }
-    },
-    setLevel: (level) => {
-      try {
-        event.setLevel(level);
-      } catch {
-        // Invalid diagnostics must not interrupt the observed operation.
-      }
-    },
+    set: (details) => isolate(() => event.set(details)),
+    increment: (counter, amount) => isolate(() => event.increment(counter, amount)),
+    complete: (level, details) => isolate(() => event.complete(level, details)),
+    rejectAnnotation: () => event.rejectAnnotation(),
   };
 }
 

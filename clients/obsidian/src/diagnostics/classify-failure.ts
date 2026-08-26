@@ -28,6 +28,7 @@ export type FailureSubsystem =
 export type FailureReason =
   | "worker_failed"
   | "explicit_query_unsupported"
+  | "invalid_field_control"
   | "invalid_query"
   | "invalid_query_plan"
   | "query_execution_failed"
@@ -76,10 +77,10 @@ const SOURCE_DEFECT_FIELDS = new Set<string>([
   "not_a_record", "preparation_fields", "schema_version", "source_key", "vault_id",
   "extraction_profile",
   "room", "path", "format", "content_hash", "byte_length", "mtime", "mtime_nanos",
-  "retrieval", "chunks_shape", "chunks_contents", "frontmatter_not_a_record",
-  "frontmatter_property_value", "frontmatter_property_nesting",
-  "frontmatter_property_cycle", "kind", "warning", "skipped_has_chunks",
-  "indexed_missing_hash",
+  "retrieval", "normalized_exact", "canonical_frontmatter", "chunks_shape", "chunks_contents",
+  "chunks_source_correlation", "chunks_content_role", "chunks_source_locator",
+  "frontmatter_not_a_record", "frontmatter_property_value", "frontmatter_property_nesting",
+  "frontmatter_property_cycle", "kind", "warning", "skipped_has_chunks", "indexed_missing_hash",
 ]);
 
 const IDENTIFIER_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
@@ -99,11 +100,14 @@ const KNOWN_ERROR_NAMES = new Set<FailureErrorName>([
 export type WorkerFailureCode =
   | "protocol_mismatch" | "invalid_request" | "invalid_state" | "artifact_mismatch"
   | "rust_init_failed" | "sqlite_init_failed" | "fts5_unavailable" | "source_rejected"
-  | "explicit_query_unsupported" | "invalid_query" | "invalid_query_plan"
-  | "query_execution_failed" | "index_building" | "index_limit_exceeded"
-  | "integrity_failed" | "cache_identity_mismatch" | "cache_version_mismatch"
-  | "cache_digest_mismatch" | "cache_image_invalid" | "cache_blob_too_large"
-  | "worker_crashed" | "timeout" | "disposed" | "internal_error";
+  | "explicit_query_unsupported" | "invalid_field_control" | "invalid_query"
+  | "invalid_query_plan" | "query_execution_failed" | "index_building"
+  | "index_limit_exceeded" | "integrity_failed" | "cache_identity_mismatch"
+  | "cache_version_mismatch" | "cache_digest_mismatch" | "cache_image_invalid"
+  | "cache_blob_too_large" | "checkpoint_kind_mismatch" | "checkpoint_identity_mismatch"
+  | "checkpoint_version_mismatch" | "checkpoint_digest_mismatch"
+  | "checkpoint_image_invalid" | "checkpoint_blob_too_large" | "worker_crashed"
+  | "timeout" | "disposed" | "internal_error";
 
 /// The Worker's own stage vocabulary. `source_rejected` alone does not say
 /// whether portable Rust or the SQLite index refused the batch; the stage is
@@ -118,17 +122,19 @@ const WORKER_ERROR_STAGES = new Set<WorkerFailureStage>([
 const WORKER_ERROR_CODES = new Set<WorkerFailureCode>([
   "protocol_mismatch", "invalid_request", "invalid_state", "artifact_mismatch",
   "rust_init_failed", "sqlite_init_failed", "fts5_unavailable", "source_rejected",
-  "explicit_query_unsupported", "invalid_query", "invalid_query_plan",
+  "explicit_query_unsupported", "invalid_field_control", "invalid_query", "invalid_query_plan",
   "query_execution_failed", "index_building", "index_limit_exceeded", "integrity_failed",
   "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch",
-  "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
+  "cache_image_invalid", "cache_blob_too_large", "checkpoint_kind_mismatch",
+  "checkpoint_identity_mismatch", "checkpoint_version_mismatch", "checkpoint_digest_mismatch",
+  "checkpoint_image_invalid", "checkpoint_blob_too_large", "worker_crashed", "timeout",
   "disposed", "internal_error",
 ]);
 
 function workerSubsystem(code: WorkerFailureCode): FailureSubsystem {
   if (code === "rust_init_failed") return "worker";
   if (code === "sqlite_init_failed" || code === "fts5_unavailable") return "vfs";
-  if (code.startsWith("cache_")) return "cache_store";
+  if (code.startsWith("cache_") || code.startsWith("checkpoint_")) return "cache_store";
   if (code === "worker_crashed" || code === "timeout") return "rpc";
   return "worker";
 }
@@ -136,6 +142,7 @@ function workerSubsystem(code: WorkerFailureCode): FailureSubsystem {
 function workerReason(code: WorkerFailureCode, fallback: FailureReason): FailureReason {
   switch (code) {
     case "explicit_query_unsupported":
+    case "invalid_field_control":
     case "invalid_query":
     case "invalid_query_plan":
     case "query_execution_failed":

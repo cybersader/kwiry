@@ -6,7 +6,18 @@
 
 import { Notice, Platform, SuggestModal, TFile } from "obsidian";
 import type { SearchMode, SearchQueryPolicyFacts } from "./api";
-import type { BackendSearchHit, BackendStatus, SearchBackend } from "./backend";
+import type {
+  BackendSearchHit,
+  BackendStatus,
+  SearchBackend,
+  SearchExecution,
+} from "./backend";
+import {
+  diagnosticGenerationId,
+  type DiagnosticDetails,
+  type DiagnosticLexicalExecution,
+  type DiagnosticSourceGeneration,
+} from "./diagnostics/log";
 import type KwiryPlugin from "./main";
 import { shouldNoticeSearchError } from "./empty-state";
 import {
@@ -31,6 +42,7 @@ import {
 } from "./open-result";
 import { supportsSectionLinks } from "./source-formats";
 import { nextSearchMode, selectSupportedMode, selectedSearchModeOptions } from "./search-mode";
+import { SOURCE_FORMATS } from "./worker/protocol";
 import {
   presentBackgroundIndex,
   presentQueryStatus,
@@ -236,6 +248,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
         case "results": {
           const grouped = groupSearchExecution(outcome.execution, sourceLimit);
           const returnedSectionCount = grouped.facts.returnedSectionCount;
+          const executionDetails = searchExecutionDiagnosticDetails(outcome.execution);
           if (!this.completeQueryStatus(epoch, {
             phase: "settled",
             returnedSectionCount,
@@ -243,7 +256,13 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
             omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
             candidateWindow: grouped.facts.candidateWindow,
           })) {
-            event.set({ outcome: "superseded" });
+            event.complete("info", {
+              outcome: "superseded",
+              ...executionDetails,
+              returnedSectionCount,
+              displayedSourceCount: grouped.facts.displayedSourceCount,
+              omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
+            });
             return [];
           }
           this.lastErrorCode = null;
@@ -265,7 +284,14 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
           this.resultView = { kind: "sources" };
           this.syncResultContext();
           this.syncQueryControls(outcome.execution.queryPolicy);
-          event.set({ outcome: "succeeded", resultCount: returnedSectionCount });
+          event.complete("info", {
+            outcome: "succeeded",
+            ...executionDetails,
+            resultCount: returnedSectionCount,
+            returnedSectionCount,
+            displayedSourceCount: grouped.facts.displayedSourceCount,
+            omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
+          });
           return this.sourceResults(grouped);
         }
         case "error":
@@ -274,11 +300,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
             code: outcome.error.code,
             safeMessage: outcome.error.safeMessage,
           })) {
-            event.set({ outcome: "superseded" });
+            event.complete("info", { outcome: "superseded" });
             return [];
           }
-          event.setLevel("error");
-          event.set({
+          event.complete("error", {
             outcome: "failed",
             ...this.plugin.diagnosticErrorDetails(outcome.error),
           });
@@ -290,14 +315,14 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
           return [];
         case "empty":
           if (!this.completeQueryStatus(epoch, { phase: "prompt" })) {
-            event.set({ outcome: "superseded" });
+            event.complete("info", { outcome: "superseded" });
             return [];
           }
           this.lastErrorCode = null;
-          event.set({ outcome: "skipped" });
+          event.complete("info", { outcome: "skipped" });
           return [];
         case "stale":
-          event.set({ outcome: "superseded" });
+          event.complete("info", { outcome: "superseded" });
           // A superseded request must not overwrite the newer request's
           // status, clear its delayed activity indicator, or erase a newer
           // settled local projection when SuggestModal resolves out of order.
@@ -878,6 +903,121 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       button.setAttribute("aria-pressed", String(option.selected));
     }
   }
+}
+
+function searchExecutionDiagnosticDetails(execution: SearchExecution): DiagnosticDetails {
+  let generationId: DiagnosticDetails["generationId"];
+  if (execution.generation !== null) {
+    try {
+      generationId = diagnosticGenerationId(execution.generation);
+    } catch {
+      // A backend generation that does not match a project-owned identity shape
+      // is omitted rather than copied into the sanitized record.
+    }
+  }
+  return {
+    requestedMode: execution.requestedMode,
+    effectiveMode: execution.effectiveMode,
+    lexicalProfile: execution.queryPolicy?.lexical_profile ?? "unknown",
+    ...(execution.queryPolicy?.scope === null || execution.queryPolicy?.scope === undefined
+      ? {}
+      : { fieldScope: execution.queryPolicy.scope }),
+    ...(execution.queryPolicy?.emphasis === null || execution.queryPolicy?.emphasis === undefined
+      ? {}
+      : { fieldEmphasis: execution.queryPolicy.emphasis }),
+    candidateWindowState: execution.candidateWindow.state,
+    ...(execution.candidateWindow.candidateCount === null
+      ? {}
+      : { candidateCount: execution.candidateWindow.candidateCount }),
+    ...(execution.candidateWindow.candidateLimit === null
+      ? {}
+      : { candidateLimit: execution.candidateWindow.candidateLimit }),
+    ...(generationId === undefined ? {} : { generationId }),
+    sourceGeneration: diagnosticSourceGeneration(execution),
+    lexicalExecution: diagnosticLexicalExecution(execution),
+  };
+}
+
+function diagnosticSourceGeneration(execution: SearchExecution): DiagnosticSourceGeneration {
+  const evidence = execution.diagnostics.sourceGeneration;
+  if (evidence.availability !== "available") {
+    return { schemaVersion: 1, availability: evidence.availability };
+  }
+  const enabled = evidence.value.enabledSourceFormats === null
+    ? null
+    : new Set(evidence.value.enabledSourceFormats);
+  const formats = Object.create(null) as Extract<
+    DiagnosticSourceGeneration,
+    { availability: "available" }
+  >["formats"];
+  for (const format of SOURCE_FORMATS) {
+    const counts = evidence.value.source_format_counts[format];
+    formats[format] = {
+      policy: enabled === null ? "unknown" : enabled.has(format) ? "enabled" : "disabled",
+      indexedComplete: counts["indexed-complete"],
+      indexedPartial: counts["indexed-partial"],
+      skippedNoExtractableText: counts["skipped-no-extractable-text"],
+      unreadable: counts.unreadable,
+      quarantined: counts.quarantined,
+    };
+  }
+  return {
+    schemaVersion: 1,
+    availability: "available",
+    documents: evidence.value.documents,
+    chunks: evidence.value.chunks,
+    zeroChunkSources: evidence.value.zero_chunk_sources,
+    formats,
+  };
+}
+
+function diagnosticLexicalExecution(execution: SearchExecution): DiagnosticLexicalExecution {
+  const evidence = execution.diagnostics.lexicalExecution;
+  if (evidence.availability !== "available") {
+    return { schemaVersion: 1, availability: evidence.availability };
+  }
+  const value = evidence.value;
+  return {
+    schemaVersion: 1,
+    availability: "available",
+    disposition: value.disposition,
+    evidenceProbeCount: value.evidence_probe_count,
+    matchedEvidenceProbeCount: value.matched_evidence_probe_count,
+    prefixProbeCount: value.prefix_probe_count,
+    prefixExpansionCount: value.prefix_expansion_count,
+    plannedLaneCount: value.planned_lane_count,
+    executedLaneCount: value.executed_lane_count,
+    zeroObservationLaneCount: value.zero_observation_lane_count,
+    saturatedLaneCount: value.saturated_lane_count,
+    observationCount: value.observation_count,
+    uniqueCandidateCount: value.unique_candidate_count,
+    duplicateObservationCount: value.duplicate_observation_count,
+    collectionCapDiscardedObservationCount:
+      value.collection_cap_discarded_observation_count,
+    returnedCount: value.returned_count,
+    resultLimit: value.result_limit,
+    retainedCandidateTruncationCount: value.retained_candidate_truncation_count,
+    candidateLimit: value.candidate_limit,
+    candidateLimitReached: value.unique_candidate_limit_reached,
+    lanes: value.lane_kinds.map((aggregate) => ({
+      kind: aggregate.key,
+      plannedLaneCount: aggregate.planned_lane_count,
+      executedLaneCount: aggregate.executed_lane_count,
+      zeroObservationLaneCount: aggregate.zero_observation_lane_count,
+      saturatedLaneCount: aggregate.saturated_lane_count,
+      observationCount: aggregate.observation_count,
+      addedUniqueCount: aggregate.added_unique_count,
+    })),
+    fields: value.proof_fields.map((aggregate) => ({
+      field: aggregate.key,
+      plannedLaneCount: aggregate.planned_lane_count,
+      executedLaneCount: aggregate.executed_lane_count,
+      zeroObservationLaneCount: aggregate.zero_observation_lane_count,
+      saturatedLaneCount: aggregate.saturated_lane_count,
+      observationCount: aggregate.observation_count,
+      addedUniqueCount: aggregate.added_unique_count,
+    })),
+  };
 }
 
 function sourceRowTitle(hit: BackendSearchHit): string {

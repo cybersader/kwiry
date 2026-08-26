@@ -153,6 +153,12 @@ export class DaemonBackend implements SearchBackend {
           candidateCount: null,
           candidateLimit: null,
         },
+        diagnostics: {
+          sourceGeneration: { availability: "unavailable" },
+          lexicalExecution: request.mode === "semantic"
+            ? { availability: "not_applicable" }
+            : { availability: "unavailable" },
+        },
         response: {
           hits: response.hits.map((hit) => ({
             ...hit,

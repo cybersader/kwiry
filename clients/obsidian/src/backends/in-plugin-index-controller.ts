@@ -167,6 +167,7 @@ export interface IndexControllerStatus {
   initialColdPreview?: InitialColdPreviewLease;
   documents: number;
   chunks: number;
+  zeroChunkSources: number;
   sourceFormatCounts: SourceFormatCounts;
   quarantinedSources: number;
   unreadableSources: number;
@@ -310,6 +311,7 @@ interface UnreadableSourceRecord {
 
 interface SourceOmissions {
   sourceFormatCounts: SourceFormatCounts;
+  zeroChunkSources: number;
   quarantinedSources: number;
   unreadableSources: Array<{ path: string; record: UnreadableSourceRecord }>;
   quarantineValidatorFields: SourcePreparationDefectField[];
@@ -392,6 +394,7 @@ export class InPluginIndexController {
   private activeGeneration: string | null = null;
   private documents = 0;
   private chunks = 0;
+  private zeroChunkSources = 0;
   private databaseBytes = 0;
   private databaseByteLimit = 1;
   private sourceFormatCounts = emptySourceFormatCounts();
@@ -399,6 +402,7 @@ export class InPluginIndexController {
   private readonly unreadableSources = new Map<string, UnreadableSourceRecord>();
   private readonly quarantineValidatorFields = new Set<SourcePreparationDefectField>();
   private activeSourceFormatCounts = emptySourceFormatCounts();
+  private activeZeroChunkSources = 0;
   private activeQuarantinedSources = 0;
   private activeUnreadableSources = 0;
   private activeUnreadableSourceCauses: UnreadableVaultSourceCauseCount[] = [];
@@ -2066,6 +2070,7 @@ export class InPluginIndexController {
       generation,
       documents: this.documents,
       chunks: this.chunks,
+      zero_chunk_sources: this.zeroChunkSources,
       database_bytes: this.databaseBytes,
       database_byte_limit: this.databaseByteLimit,
       quarantined_sources: this.quarantinedSources,
@@ -2440,6 +2445,7 @@ export class InPluginIndexController {
   private captureSourceOmissions(): SourceOmissions {
     return {
       sourceFormatCounts: cloneSourceFormatCounts(this.sourceFormatCounts),
+      zeroChunkSources: this.zeroChunkSources,
       quarantinedSources: this.quarantinedSources,
       unreadableSources: this.captureUnreadableSourceRecords(),
       quarantineValidatorFields: [...this.quarantineValidatorFields],
@@ -2451,6 +2457,7 @@ export class InPluginIndexController {
     unreadableEvidence: ReadonlyArray<SourceOmissions["unreadableSources"][number]> = [],
   ): void {
     this.sourceFormatCounts = cloneSourceFormatCounts(omissions.sourceFormatCounts);
+    this.zeroChunkSources = omissions.zeroChunkSources;
     this.quarantinedSources = omissions.quarantinedSources;
     this.quarantineValidatorFields.clear();
     for (const field of omissions.quarantineValidatorFields) {
@@ -2466,6 +2473,7 @@ export class InPluginIndexController {
 
   private clearSourceOmissions(): void {
     this.sourceFormatCounts = emptySourceFormatCounts();
+    this.zeroChunkSources = 0;
     this.quarantinedSources = 0;
     this.quarantineValidatorFields.clear();
     this.cancelUnreadableRetryTimer();
@@ -2571,6 +2579,7 @@ export class InPluginIndexController {
 
   private syncWorkerQuarantines(counts: IndexCounts): void {
     this.sourceFormatCounts = cloneSourceFormatCounts(counts.source_format_counts);
+    this.zeroChunkSources = counts.zero_chunk_sources;
     this.quarantinedSources = counts.quarantined_sources;
     this.quarantineValidatorFields.clear();
     for (const field of counts.quarantine_fields) this.quarantineValidatorFields.add(field);
@@ -2609,6 +2618,7 @@ export class InPluginIndexController {
 
   private syncActiveOmissionsFromCurrent(): void {
     this.activeSourceFormatCounts = cloneSourceFormatCounts(this.sourceFormatCounts);
+    this.activeZeroChunkSources = this.zeroChunkSources;
     this.activeQuarantinedSources = this.quarantinedSources;
     this.activeUnreadableSources = this.unreadableSources.size;
     this.activeUnreadableSourceCauses = this.unreadableSourceCauseCounts();
@@ -2693,6 +2703,9 @@ export class InPluginIndexController {
     const visibleSourceFormatCounts = servingPriorDuringReplacement
       ? this.activeSourceFormatCounts
       : this.sourceFormatCounts;
+    const visibleZeroChunkSources = servingPriorDuringReplacement
+      ? this.activeZeroChunkSources
+      : this.zeroChunkSources;
     const visibleQuarantinedSources = servingPriorDuringReplacement
       ? this.activeQuarantinedSources
       : this.quarantinedSources;
@@ -2723,6 +2736,7 @@ export class InPluginIndexController {
         : { initialColdPreview: this.initialColdPreview }),
       documents: this.documents,
       chunks: this.chunks,
+      zeroChunkSources: visibleZeroChunkSources,
       sourceFormatCounts: cloneSourceFormatCounts(visibleSourceFormatCounts),
       quarantinedSources: visibleQuarantinedSources,
       unreadableSources: visibleUnreadableSources,

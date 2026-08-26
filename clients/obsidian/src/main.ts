@@ -40,6 +40,7 @@ import type {
   DiagnosticEventBuilder,
   DiagnosticEventCode,
   DiagnosticLevel,
+  DiagnosticSourceGeneration,
   DiagnosticTextValue,
 } from "./diagnostics/log";
 import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
@@ -47,6 +48,7 @@ import { LatestRequestEpoch } from "./latest-request-epoch";
 import { KwirySearchModal } from "./search-modal";
 import { corePolicyFingerprint, enabledSourceFormatList } from "./source-formats";
 import { formatStatus } from "./status-format";
+import { SOURCE_FORMATS } from "./worker/protocol";
 import {
   DEFAULT_SETTINGS,
   loadSettings,
@@ -364,7 +366,7 @@ export default class KwiryPlugin extends Plugin {
     details: Readonly<DiagnosticDetails> = {},
     outcome: "failed" | "superseded" = "failed",
   ): void {
-    void this.diagnostics.capture("error", "failure.caught", {
+    void this.diagnostics.capture(outcome === "failed" ? "error" : "info", "failure.caught", {
       subsystem,
       operation,
       outcome,
@@ -482,8 +484,7 @@ export default class KwiryPlugin extends Plugin {
             : "Kwiry: in-plugin lexical rebuild started.");
         }
       } catch (error) {
-        event.setLevel("error");
-        event.set({ outcome: "failed", ...diagnosticErrorDetails(error) });
+        event.complete("error", { outcome: "failed", ...diagnosticErrorDetails(error) });
         if (this.isCurrent(pluginEpoch, activationEpoch)) {
           new Notice("Kwiry: the in-plugin lexical index could not be rebuilt.");
         }
@@ -531,8 +532,7 @@ export default class KwiryPlugin extends Plugin {
           mode: backend.identity.profile === "daemon" ? this.settings.defaultMode : "lexical",
         });
       } catch (error) {
-        event.setLevel("error");
-        event.set({ outcome: "failed", ...diagnosticErrorDetails(error) });
+        event.complete("error", { outcome: "failed", ...diagnosticErrorDetails(error) });
         if (this.isCurrent(pluginEpoch, activationEpoch)) {
           new Notice("Kwiry: the selected search backend is unavailable.");
         }
@@ -549,6 +549,7 @@ export default class KwiryPlugin extends Plugin {
     const unreadableSources = status.unreadableSources ?? 0;
     const unreadableSourceCauses = status.unreadableSourceCauses ?? [];
     const quarantineFields = status.quarantineValidatorFields ?? [];
+    const sourceGeneration = diagnosticBackendSourceGeneration(status);
     const progress = status.progress;
     if (isMeaningfulBackendProgress(progress) && this.isCurrent(pluginEpoch, activationEpoch)) {
       this.startupTimeline?.markFirstProgress();
@@ -574,6 +575,9 @@ export default class KwiryPlugin extends Plugin {
       status.searchable,
       status.dirty,
       status.rebuilding,
+      status.zeroChunkSources ?? "unavailable",
+      status.enabledSourceFormats?.join(",") ?? "unknown",
+      diagnosticSourceFormatSignature(status),
       quarantinedSources,
       unreadableSources,
       unreadableSourceCauses.map(({ cause, count }) => `${cause}=${count}`).join(","),
@@ -601,6 +605,7 @@ export default class KwiryPlugin extends Plugin {
       rebuilding: status.rebuilding,
       documents: status.documents,
       chunks: status.chunks,
+      sourceGeneration,
       sourcesSkipped: quarantinedSources,
       sourcesFailed: unreadableSources,
       ...(progress === undefined
@@ -715,6 +720,46 @@ function desktopVaultRoot(adapter: unknown): string | null {
   } catch {
     return null;
   }
+}
+
+function diagnosticBackendSourceGeneration(status: BackendStatus): DiagnosticSourceGeneration {
+  if (status.sourceFormatCounts === undefined || status.zeroChunkSources === undefined) {
+    return { schemaVersion: 1, availability: "unavailable" };
+  }
+  const enabled = status.enabledSourceFormats === undefined
+    ? null
+    : new Set(status.enabledSourceFormats);
+  const formats = Object.create(null) as Extract<
+    DiagnosticSourceGeneration,
+    { availability: "available" }
+  >["formats"];
+  for (const format of SOURCE_FORMATS) {
+    const counts = status.sourceFormatCounts[format];
+    formats[format] = {
+      policy: enabled === null ? "unknown" : enabled.has(format) ? "enabled" : "disabled",
+      indexedComplete: counts["indexed-complete"],
+      indexedPartial: counts["indexed-partial"],
+      skippedNoExtractableText: counts["skipped-no-extractable-text"],
+      unreadable: counts.unreadable,
+      quarantined: counts.quarantined,
+    };
+  }
+  return {
+    schemaVersion: 1,
+    availability: "available",
+    documents: status.documents,
+    chunks: status.chunks,
+    zeroChunkSources: status.zeroChunkSources,
+    formats,
+  };
+}
+
+function diagnosticSourceFormatSignature(status: BackendStatus): string {
+  if (status.sourceFormatCounts === undefined) return "unavailable";
+  return SOURCE_FORMATS.map((format) => {
+    const counts = status.sourceFormatCounts![format];
+    return `${format}=${counts["indexed-complete"]},${counts["indexed-partial"]},${counts["skipped-no-extractable-text"]},${counts.unreadable},${counts.quarantined}`;
+  }).join(";");
 }
 
 function diagnosticPlatform(): "android" | "ios" | "linux" | "macos" | "windows" | "unknown" {

@@ -157,6 +157,7 @@ export type DiagnosticTextValue =
   | "daemon_upgrade_required"
   | "mode_unavailable"
   | "invalid_field_control"
+  | "diagnostic_annotation_rejected"
   | "internal_error"
   | "BlockVfsUnavailableError"
   | "IndexCapacityError"
@@ -193,6 +194,12 @@ export type DiagnosticTextValue =
   | "cache_digest_mismatch"
   | "cache_image_invalid"
   | "cache_blob_too_large"
+  | "checkpoint_kind_mismatch"
+  | "checkpoint_identity_mismatch"
+  | "checkpoint_version_mismatch"
+  | "checkpoint_digest_mismatch"
+  | "checkpoint_image_invalid"
+  | "checkpoint_blob_too_large"
   | "worker_crashed"
   | "timeout"
   | "fully_current"
@@ -213,6 +220,117 @@ export type DiagnosticHash = string & { readonly [diagnosticHashBrand]: true };
 /** A generation identifier in one of Kwiry's machine-generated formats. */
 export type DiagnosticGenerationId = string & { readonly [diagnosticGenerationBrand]: true };
 
+export type DiagnosticSourceFormat =
+  | "markdown"
+  | "text"
+  | "base"
+  | "canvas"
+  | "docx"
+  | "pdf"
+  | "excalidraw"
+  | "excel"
+  | "html";
+
+export type DiagnosticSourceFormatPolicy = "enabled" | "disabled" | "unknown";
+
+export interface DiagnosticSourceFormatSnapshot {
+  policy: DiagnosticSourceFormatPolicy;
+  indexedComplete: number;
+  indexedPartial: number;
+  skippedNoExtractableText: number;
+  unreadable: number;
+  quarantined: number;
+}
+
+export interface DiagnosticAvailableSourceGeneration {
+  schemaVersion: 1;
+  availability: "available";
+  documents: number;
+  chunks: number;
+  zeroChunkSources: number;
+  formats: Record<DiagnosticSourceFormat, DiagnosticSourceFormatSnapshot>;
+}
+
+export type DiagnosticSourceGeneration =
+  | DiagnosticAvailableSourceGeneration
+  | { schemaVersion: 1; availability: "unavailable" | "not_applicable" };
+
+export type DiagnosticLexicalLaneKind =
+  | "lexical_explicit_v3"
+  | "lexical_exact_metadata_v3"
+  | "lexical_exact_phrase_v3"
+  | "lexical_all_terms_v3"
+  | "lexical_partial_coverage_v3"
+  | "lexical_prefix_metadata_v3"
+  | "lexical_prefix_v3";
+
+export type DiagnosticQueryPublicField =
+  | "name"
+  | "filename"
+  | "title"
+  | "alias"
+  | "heading"
+  | "tag"
+  | "body";
+
+export type DiagnosticLexicalProofField =
+  | "filename"
+  | "title"
+  | "alias"
+  | "heading"
+  | "tag"
+  | "body"
+  | "cross_field";
+
+export interface DiagnosticLexicalLaneAggregate {
+  kind: DiagnosticLexicalLaneKind;
+  plannedLaneCount: number;
+  executedLaneCount: number;
+  zeroObservationLaneCount: number;
+  saturatedLaneCount: number;
+  observationCount: number;
+  addedUniqueCount: number;
+}
+
+export interface DiagnosticLexicalFieldAggregate {
+  field: DiagnosticLexicalProofField;
+  plannedLaneCount: number;
+  executedLaneCount: number;
+  zeroObservationLaneCount: number;
+  saturatedLaneCount: number;
+  observationCount: number;
+  addedUniqueCount: number;
+}
+
+export interface DiagnosticAvailableLexicalExecution {
+  schemaVersion: 1;
+  availability: "available";
+  disposition: "ready" | "empty_no_evidence" | "explicit_bypass";
+  evidenceProbeCount: number;
+  matchedEvidenceProbeCount: number;
+  prefixProbeCount: number;
+  prefixExpansionCount: number;
+  plannedLaneCount: number;
+  executedLaneCount: number;
+  zeroObservationLaneCount: number;
+  saturatedLaneCount: number;
+  observationCount: number;
+  uniqueCandidateCount: number;
+  duplicateObservationCount: number;
+  collectionCapDiscardedObservationCount: number;
+  returnedCount: number;
+  resultLimit: number;
+  retainedCandidateTruncationCount: number;
+  candidateLimit: number;
+  candidateLimitReached: boolean;
+  lanes: readonly DiagnosticLexicalLaneAggregate[];
+  fields: readonly DiagnosticLexicalFieldAggregate[];
+}
+
+export type DiagnosticLexicalExecution =
+  | DiagnosticAvailableLexicalExecution
+  | { schemaVersion: 1; availability: "unavailable" | "not_applicable" };
+
 export interface DiagnosticDetails {
   profile?: "daemon" | "in_plugin";
   phase?: DiagnosticTextValue;
@@ -221,6 +339,12 @@ export interface DiagnosticDetails {
   stallCategory?: "source_read_timeout" | "source_read_capacity" | "worker_timeout";
   liveness?: "unknown" | "alive" | "unreachable" | "terminated";
   mode?: "lexical" | "semantic" | "hybrid";
+  requestedMode?: "lexical" | "semantic" | "hybrid";
+  effectiveMode?: "lexical" | "semantic" | "hybrid";
+  lexicalProfile?: "none" | "lexical-v1" | "lexical-v2" | "unknown";
+  fieldScope?: DiagnosticQueryPublicField;
+  fieldEmphasis?: DiagnosticQueryPublicField;
+  candidateWindowState?: "exhausted" | "more_available" | "candidate_limit_reached" | "unknown";
   outcome?: DiagnosticTextValue;
   code?: DiagnosticTextValue;
   reason?: DiagnosticTextValue;
@@ -262,6 +386,14 @@ export interface DiagnosticDetails {
   /// A non-zero value means something is restoring files behind the user.
   resurrected?: number;
   resultCount?: number;
+  candidateCount?: number;
+  candidateLimit?: number;
+  returnedSectionCount?: number;
+  displayedSourceCount?: number;
+  omittedObservedSourceCount?: number;
+  annotationRejectedCount?: number;
+  sourceGeneration?: DiagnosticSourceGeneration;
+  lexicalExecution?: DiagnosticLexicalExecution;
   cacheBytes?: number;
   /// Fixed classification of a failure, drawn from the closed text vocabulary.
   /// `query_execution_failed` is a catch-all that discards the thrown value on
@@ -306,7 +438,8 @@ export type DiagnosticCounter =
 export interface DiagnosticEventBuilder {
   set(details: Readonly<DiagnosticDetails>): void;
   increment(counter: DiagnosticCounter, amount?: number): void;
-  setLevel(level: DiagnosticLevel): void;
+  complete(level: DiagnosticLevel, details: Readonly<DiagnosticDetails>): void;
+  rejectAnnotation(): void;
 }
 
 export interface DiagnosticEntry {
@@ -373,7 +506,8 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "root_inside_vault", "root_not_a_directory", "root_not_writable", "root_probe_failed",
   "vault_location_unavailable", "invalid_generation_id", "invalid_identity", "invalid_blob",
   "write_failed", "discard_failed", "unsafe_path", "locked", "daemon_unreachable",
-  "daemon_upgrade_required", "mode_unavailable", "invalid_field_control", "internal_error",
+  "daemon_upgrade_required", "mode_unavailable", "invalid_field_control",
+  "diagnostic_annotation_rejected", "internal_error",
   // Constructor names of errors this codebase and the JS runtime define.
   // These are fixed identifiers chosen here, not caller-supplied text, so
   // recording one leaks nothing while turning an "unknown" report into a
@@ -382,19 +516,22 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "CacheImageInvalidError", "CacheVersionMismatchError", "VaultSourceReadError",
   "WorkerRpcError", "RustAdapterError", "TypeError", "RangeError",
   "ReferenceError", "SyntaxError", "Error", "other", "rust", "sqlite", "artifact",
-  "fts5_unavailable", "rust_init_failed", "sqlite_init_failed", "artifact_mismatch", "protocol_mismatch", "invalid_request", "invalid_state", "source_rejected", "explicit_query_unsupported", "invalid_query", "invalid_query_plan", "query_execution_failed", "integrity_failed", "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch", "cache_image_invalid", "cache_blob_too_large", "worker_crashed", "timeout",
+  "fts5_unavailable", "rust_init_failed", "sqlite_init_failed", "artifact_mismatch", "protocol_mismatch", "invalid_request", "invalid_state", "source_rejected", "explicit_query_unsupported", "invalid_query", "invalid_query_plan", "query_execution_failed", "integrity_failed", "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch", "cache_image_invalid", "cache_blob_too_large", "checkpoint_kind_mismatch", "checkpoint_identity_mismatch", "checkpoint_version_mismatch", "checkpoint_digest_mismatch", "checkpoint_image_invalid", "checkpoint_blob_too_large", "worker_crashed", "timeout",
   "fully_current", "sources_omitted", "vault_unavailable", "index_capacity", "backend_unavailable",
   "plugin_load_failed", "activation_failed", "plugin_unloaded",
 ];
 const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
-  "profile", "phase", "stage", "activity", "stallCategory", "liveness", "mode", "outcome",
-  "code", "reason", "errorName", "operation",
+  "profile", "phase", "stage", "activity", "stallCategory", "liveness", "mode",
+  "requestedMode", "effectiveMode", "lexicalProfile", "fieldScope", "fieldEmphasis",
+  "candidateWindowState", "outcome", "code", "reason", "errorName", "operation",
   "subsystem", "generationId", "pathHash", "pluginEpoch", "activationEpoch", "mutationEpoch",
   "count", "limit", "documents", "chunks", "completed", "total", "inFlight", "warningCount",
   "pending",
   "sourcesEnumerated", "sourcesRead", "sourcesSkipped", "sourcesOversized", "sourcesFailed",
   "bytesRead", "batchCount", "upserts", "removals", "renames", "rescans", "resurrected",
-  "resultCount", "cacheBytes", "failureCause",
+  "resultCount", "candidateCount", "candidateLimit", "returnedSectionCount",
+  "displayedSourceCount", "omittedObservedSourceCount", "annotationRejectedCount",
+  "sourceGeneration", "lexicalExecution", "cacheBytes", "failureCause",
   "pluginLoadCompleteMs", "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs",
   "fullyCurrentMs", "retryable",
   "recoverable", "searchable", "dirty", "rebuilding", "cacheHit", "recovery",
@@ -405,7 +542,8 @@ const NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "sourcesSkipped",
   "sourcesOversized", "sourcesFailed", "bytesRead", "batchCount", "upserts", "removals",
   "renames", "rescans", "resurrected",
-  "resultCount", "cacheBytes",
+  "resultCount", "candidateCount", "candidateLimit", "returnedSectionCount",
+  "displayedSourceCount", "omittedObservedSourceCount", "annotationRejectedCount", "cacheBytes",
 ]);
 const NULLABLE_NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "pluginLoadCompleteMs", "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs",
@@ -441,6 +579,18 @@ const INDEX_ACTIVITY_SET = new Set<NonNullable<DiagnosticDetails["activity"]>>([
 ]);
 const INDEX_STALL_CATEGORY_SET = new Set<NonNullable<DiagnosticDetails["stallCategory"]>>([
   "source_read_timeout", "source_read_capacity", "worker_timeout",
+]);
+const SEARCH_MODE_SET = new Set<"lexical" | "semantic" | "hybrid">([
+  "lexical", "semantic", "hybrid",
+]);
+const LEXICAL_PROFILE_SET = new Set<NonNullable<DiagnosticDetails["lexicalProfile"]>>([
+  "none", "lexical-v1", "lexical-v2", "unknown",
+]);
+const QUERY_FIELD_SET = new Set<DiagnosticQueryPublicField>([
+  "name", "filename", "title", "alias", "heading", "tag", "body",
+]);
+const CANDIDATE_WINDOW_STATE_SET = new Set<NonNullable<DiagnosticDetails["candidateWindowState"]>>([
+  "exhausted", "more_available", "candidate_limit_reached", "unknown",
 ]);
 const EVENT_CODE_SET = new Set<DiagnosticEventCode>(EVENT_CODES);
 const LEVEL_SET = new Set<DiagnosticLevel>(LEVELS);
@@ -502,22 +652,20 @@ export class DiagnosticLog {
     }
     const startedAtMs = this.readWallClock();
     const monotonicStartedAtMs = this.readMonotonicClock();
-    const event = new MutableDiagnosticEvent(level, initialDetails);
+    const event = new MutableDiagnosticEvent(level, code, initialDetails);
     try {
       const result = await operation(event);
-      event.defaultOutcome("succeeded");
+      event.completeDefault();
       return result;
     } catch (error) {
-      event.setLevel("error");
-      event.set({ outcome: "failed" });
-      event.defaultCode("internal_error");
+      event.fail();
       throw error;
     } finally {
       // A broken monotonic clock must not erase the operation record that the
       // wrapper exists to guarantee; zero duration is safer than wall-clock skew.
       const endedAtMs = this.readMonotonicClockOr(monotonicStartedAtMs);
       const durationMs = Math.max(0, Math.round(endedAtMs - monotonicStartedAtMs));
-      this.append(event.finish(code, startedAtMs, durationMs));
+      this.append(event.finish(startedAtMs, durationMs));
     }
   }
 
@@ -531,10 +679,9 @@ export class DiagnosticLog {
     if (!LEVEL_SET.has(level) || !EVENT_CODE_SET.has(code)) {
       throw new TypeError("Invalid diagnostic event");
     }
-    const event = new MutableDiagnosticEvent(level, details);
-    event.defaultOutcome("succeeded");
+    const event = new MutableDiagnosticEvent(level, code, details);
+    event.completeDefault();
     this.append(event.finish(
-      code,
       validDiagnosticTimestamp(startedAtMs),
       nonNegativeSafeInteger(durationMs, "Invalid diagnostic duration"),
     ));
@@ -605,7 +752,7 @@ export interface DiagnosticReportOptions {
 }
 
 export interface DiagnosticExportPlan {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly reportUnavailable: boolean;
   readonly context: Readonly<DiagnosticExportContext>;
   readonly capacity: number;
@@ -681,7 +828,7 @@ export function createDiagnosticExportPlan(
       && (categories === null || categories.includes(entry.code)));
   const entries = Object.freeze(selected);
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     reportUnavailable: false,
     context: safeContext,
     capacity: snapshot.capacity,
@@ -697,7 +844,7 @@ export function createDiagnosticExportPlan(
 
 export function createUnavailableDiagnosticExportPlan(): DiagnosticExportPlan {
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     reportUnavailable: true,
     context: Object.freeze({
       pluginVersion: "unknown",
@@ -828,7 +975,7 @@ function* diagnosticTextSegments(
 
   yield "\nStructured records (JSON):\n";
   const prefix = JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     context: plan.context,
     capacity: plan.capacity,
     storedEntries: plan.selectedEntries,
@@ -869,10 +1016,26 @@ function diagnosticHeaderLines(plan: DiagnosticExportPlan): string[] {
 function formatDiagnosticEntry(entry: DiagnosticEntry): string {
   const detail = DETAIL_KEYS.flatMap((key) => {
     const value = entry.details[key];
-    return value === undefined ? [] : [`${key}=${String(value)}`];
+    return value === undefined ? [] : [`${key}=${formatDiagnosticDetail(key, value)}`];
   }).join(" ");
   const prefix = `${entry.sequence} ${new Date(entry.startedAtMs).toISOString()} +${entry.durationMs}ms ${entry.level.toUpperCase()} ${entry.code}`;
   return detail.length === 0 ? prefix : `${prefix} ${detail}`;
+}
+
+function formatDiagnosticDetail(key: keyof DiagnosticDetails, value: unknown): string {
+  if (key === "sourceGeneration") {
+    const generation = value as DiagnosticSourceGeneration;
+    return generation.availability === "available"
+      ? `available:${generation.documents}/${generation.chunks}/zero=${generation.zeroChunkSources}`
+      : generation.availability;
+  }
+  if (key === "lexicalExecution") {
+    const execution = value as DiagnosticLexicalExecution;
+    return execution.availability === "available"
+      ? `${execution.disposition}:lanes=${execution.executedLaneCount}/${execution.plannedLaneCount},candidates=${execution.uniqueCandidateCount},returned=${execution.returnedCount}`
+      : execution.availability;
+  }
+  return String(value);
 }
 
 function clipboardFooter(emittedEntries: number, omittedEntries: number): string {
@@ -908,25 +1071,31 @@ function validateExportContext(
 
 class MutableDiagnosticEvent implements DiagnosticEventBuilder {
   private level: DiagnosticLevel;
-  private readonly details: Partial<DiagnosticDetails>;
+  private details: Partial<DiagnosticDetails>;
+  private terminal = false;
   private finished = false;
 
-  constructor(level: DiagnosticLevel, initialDetails: Readonly<DiagnosticDetails>) {
+  constructor(
+    level: DiagnosticLevel,
+    private readonly code: DiagnosticEventCode,
+    initialDetails: Readonly<DiagnosticDetails>,
+  ) {
     this.level = level;
     this.details = { ...validateDetails(initialDetails) };
   }
 
   set(details: Readonly<DiagnosticDetails>): void {
-    this.requireOpen();
+    this.requireMutable();
     const validated = validateDetails(details);
-    if (new Set([...Object.keys(this.details), ...Object.keys(validated)]).size > MAX_DETAIL_FIELDS) {
+    const merged = { ...this.details, ...validated };
+    if (Object.keys(merged).length > MAX_DETAIL_FIELDS) {
       throw new TypeError("Invalid diagnostic details");
     }
-    Object.assign(this.details, validated);
+    this.details = { ...merged };
   }
 
   increment(counter: DiagnosticCounter, amount = 1): void {
-    this.requireOpen();
+    this.requireMutable();
     if (!COUNTERS.has(counter) || !isNonNegativeInteger(amount)) {
       throw new TypeError("Invalid diagnostic counter");
     }
@@ -936,34 +1105,86 @@ class MutableDiagnosticEvent implements DiagnosticEventBuilder {
     this.details[counter] = next;
   }
 
-  setLevel(level: DiagnosticLevel): void {
-    this.requireOpen();
+  complete(level: DiagnosticLevel, details: Readonly<DiagnosticDetails>): void {
+    this.requireMutable();
     if (!LEVEL_SET.has(level)) throw new TypeError("Invalid diagnostic level");
+    const merged = { ...this.details, ...validateDetails(details) };
+    if (Object.keys(merged).length > MAX_DETAIL_FIELDS) {
+      throw new TypeError("Invalid diagnostic details");
+    }
+    const validated = validateEventDetails(this.code, level, merged);
     this.level = level;
+    this.details = { ...validated };
+    this.terminal = true;
   }
 
-  defaultOutcome(outcome: DiagnosticTextValue): void {
-    if (this.details.outcome === undefined) this.details.outcome = outcome;
+  rejectAnnotation(): void {
+    this.requireOpen();
+    const previous = this.details.annotationRejectedCount ?? 0;
+    this.level = "error";
+    this.details = {
+      outcome: "failed",
+      code: "diagnostic_annotation_rejected",
+      annotationRejectedCount: Math.min(previous + 1, Number.MAX_SAFE_INTEGER),
+    };
+    this.terminal = true;
   }
 
-  defaultCode(code: DiagnosticTextValue): void {
-    if (this.details.code === undefined) this.details.code = code;
+  completeDefault(): void {
+    if (this.terminal) return;
+    if (this.details.outcome !== undefined) {
+      if (this.level === "error"
+        && (this.details.outcome !== "failed"
+          || (this.code !== "startup.lifecycle" && this.details.code === undefined))) {
+        this.fail();
+        return;
+      }
+      this.complete(this.level, {});
+      return;
+    }
+    if (this.level === "error") {
+      this.fail();
+      return;
+    }
+    this.complete(this.level, { outcome: "succeeded" });
+  }
+
+  fail(): void {
+    this.requireOpen();
+    const merged: DiagnosticDetails = {
+      ...this.details,
+      outcome: "failed",
+      code: this.details.code ?? "internal_error",
+    };
+    try {
+      const validated = validateEventDetails(this.code, "error", merged);
+      this.level = "error";
+      this.details = { ...validated };
+      this.terminal = true;
+    } catch {
+      this.rejectAnnotation();
+    }
   }
 
   finish(
-    code: DiagnosticEventCode,
     startedAtMs: number,
     durationMs: number,
   ): Omit<DiagnosticEntry, "sequence"> {
     this.requireOpen();
+    if (!this.terminal) this.completeDefault();
     this.finished = true;
     return Object.freeze({
       startedAtMs,
       durationMs,
       level: this.level,
-      code,
-      details: validateEventDetails(code, this.details),
+      code: this.code,
+      details: validateEventDetails(this.code, this.level, this.details),
     });
+  }
+
+  private requireMutable(): void {
+    this.requireOpen();
+    if (this.terminal) throw new Error("Diagnostic event is already completed");
   }
 
   private requireOpen(): void {
@@ -973,10 +1194,30 @@ class MutableDiagnosticEvent implements DiagnosticEventBuilder {
 
 function validateEventDetails(
   code: DiagnosticEventCode,
+  level: DiagnosticLevel,
   details: Readonly<DiagnosticDetails>,
 ): Readonly<DiagnosticDetails> {
   const validated = validateDetails(details);
-  if (code !== "startup.lifecycle") return validated;
+  if (validated.outcome === undefined) throw new TypeError("Invalid diagnostic terminal state");
+  const failed = validated.outcome === "failed";
+  if (code === "startup.lifecycle") {
+    if ((level === "error") !== failed) throw new TypeError("Invalid diagnostic terminal state");
+    validateStartupDetails(validated);
+    return validated;
+  }
+  if ((level === "error") !== failed || (failed && validated.code === undefined)) {
+    throw new TypeError("Invalid diagnostic terminal state");
+  }
+  if (validated.outcome === "succeeded" && validated.failureCause !== undefined) {
+    throw new TypeError("Invalid diagnostic terminal state");
+  }
+  if (code === "search.lifecycle" && validated.operation === "search") {
+    validateSearchDetails(level, validated);
+  }
+  return validated;
+}
+
+function validateStartupDetails(validated: Readonly<DiagnosticDetails>): void {
   const keys = Object.keys(validated) as Array<keyof DiagnosticDetails>;
   if (keys.some((key) => !STARTUP_DETAIL_KEYS.has(key))
     || REQUIRED_STARTUP_DETAIL_KEYS.some((key) => validated[key] === undefined)) {
@@ -1000,7 +1241,40 @@ function validateEventDetails(
   } else if (validated.reason === "fully_current" || validated.fullyCurrentMs !== null) {
     throw new TypeError("Invalid startup diagnostic details");
   }
-  return validated;
+}
+
+function validateSearchDetails(
+  level: DiagnosticLevel,
+  validated: Readonly<DiagnosticDetails>,
+): void {
+  if (validated.outcome === "succeeded") {
+    if (level === "error"
+      || validated.resultCount === undefined
+      || validated.sourceGeneration === undefined
+      || validated.lexicalExecution === undefined
+      || validated.code !== undefined
+      || validated.failureCause !== undefined) {
+      throw new TypeError("Invalid search diagnostic details");
+    }
+    if (validated.returnedSectionCount !== undefined
+      && validated.returnedSectionCount !== validated.resultCount) {
+      throw new TypeError("Invalid search diagnostic details");
+    }
+    return;
+  }
+  if (validated.outcome === "failed") {
+    if (level !== "error" || validated.code === undefined || validated.resultCount !== undefined) {
+      throw new TypeError("Invalid search diagnostic details");
+    }
+    return;
+  }
+  if (validated.outcome === "superseded" || validated.outcome === "skipped") {
+    if (level === "error" || validated.resultCount !== undefined || validated.failureCause !== undefined) {
+      throw new TypeError("Invalid search diagnostic details");
+    }
+    return;
+  }
+  throw new TypeError("Invalid search diagnostic details");
 }
 
 function validateDetails(details: Readonly<DiagnosticDetails>): Readonly<DiagnosticDetails> {
@@ -1009,11 +1283,10 @@ function validateDetails(details: Readonly<DiagnosticDetails>): Readonly<Diagnos
   const validated: Partial<DiagnosticDetails> = Object.create(null) as Partial<DiagnosticDetails>;
   for (const [rawKey, value] of entries) {
     const key = DETAIL_KEYS.find((candidate) => candidate === rawKey);
-    if (!key || !isValidDetailValue(key, value)) {
-      throw new TypeError("Invalid diagnostic details");
-    }
+    if (!key) throw new TypeError("Invalid diagnostic details");
+    const normalized = validatedDetailValue(key, value);
     Object.defineProperty(validated, key, {
-      value,
+      value: normalized,
       enumerable: true,
       configurable: false,
       writable: false,
@@ -1024,33 +1297,302 @@ function validateDetails(details: Readonly<DiagnosticDetails>): Readonly<Diagnos
 
 const ERROR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
 
-function isValidDetailValue(key: keyof DiagnosticDetails, value: unknown): boolean {
+function validatedDetailValue(key: keyof DiagnosticDetails, value: unknown): unknown {
   // The single field that accepts a value outside the fixed vocabulary, and
   // therefore the one that has to justify itself. A JavaScript error class name
   // is a bare identifier; the pattern rejects anything containing a space,
   // slash, dot, or quote, so a path, query, or message cannot pass through it.
-  if (key === "errorName") return typeof value === "string" && ERROR_NAME_PATTERN.test(value);
-  if (key === "pathHash") return typeof value === "string" && HASH_PATTERN.test(value);
-  if (key === "generationId") {
-    return typeof value === "string"
-      && (IN_PLUGIN_GENERATION_PATTERN.test(value) || DAEMON_GENERATION_PATTERN.test(value));
-  }
-  if (key === "activity") {
-    return typeof value === "string"
-      && INDEX_ACTIVITY_SET.has(value as NonNullable<DiagnosticDetails["activity"]>);
-  }
-  if (key === "stallCategory") {
-    return typeof value === "string"
+  if (key === "errorName") {
+    if (typeof value === "string" && ERROR_NAME_PATTERN.test(value)) return value;
+  } else if (key === "pathHash") {
+    if (typeof value === "string" && HASH_PATTERN.test(value)) return value;
+  } else if (key === "generationId") {
+    if (typeof value === "string"
+      && (IN_PLUGIN_GENERATION_PATTERN.test(value) || DAEMON_GENERATION_PATTERN.test(value))) {
+      return value;
+    }
+  } else if (key === "activity") {
+    if (typeof value === "string"
+      && INDEX_ACTIVITY_SET.has(value as NonNullable<DiagnosticDetails["activity"]>)) return value;
+  } else if (key === "stallCategory") {
+    if (typeof value === "string"
       && INDEX_STALL_CATEGORY_SET.has(
         value as NonNullable<DiagnosticDetails["stallCategory"]>,
-      );
+      )) return value;
+  } else if (key === "mode" || key === "requestedMode" || key === "effectiveMode") {
+    if (typeof value === "string" && SEARCH_MODE_SET.has(value as never)) return value;
+  } else if (key === "lexicalProfile") {
+    if (typeof value === "string" && LEXICAL_PROFILE_SET.has(value as never)) return value;
+  } else if (key === "fieldScope" || key === "fieldEmphasis") {
+    if (typeof value === "string" && QUERY_FIELD_SET.has(value as never)) return value;
+  } else if (key === "candidateWindowState") {
+    if (typeof value === "string" && CANDIDATE_WINDOW_STATE_SET.has(value as never)) return value;
+  } else if (key === "sourceGeneration") {
+    return validateSourceGeneration(value);
+  } else if (key === "lexicalExecution") {
+    return validateLexicalExecution(value);
+  } else if (key === "total" || NULLABLE_NUMERIC_DETAIL_KEYS.has(key)) {
+    if (value === null || isNonNegativeInteger(value)) return value;
+  } else if (NUMERIC_DETAIL_KEYS.has(key)) {
+    if (isNonNegativeInteger(value)) return value;
+  } else if (BOOLEAN_DETAIL_KEYS.has(key)) {
+    if (typeof value === "boolean") return value;
+  } else if (typeof value === "string" && TEXT_VALUE_SET.has(value as DiagnosticTextValue)) {
+    return value;
   }
-  if (key === "total" || NULLABLE_NUMERIC_DETAIL_KEYS.has(key)) {
-    return value === null || isNonNegativeInteger(value);
+  throw new TypeError("Invalid diagnostic details");
+}
+
+const DIAGNOSTIC_SOURCE_FORMATS: readonly DiagnosticSourceFormat[] = [
+  "markdown", "text", "base", "canvas", "docx", "pdf", "excalidraw", "excel", "html",
+];
+const DIAGNOSTIC_LANE_KINDS: readonly DiagnosticLexicalLaneKind[] = [
+  "lexical_explicit_v3", "lexical_exact_metadata_v3", "lexical_exact_phrase_v3",
+  "lexical_all_terms_v3", "lexical_partial_coverage_v3", "lexical_prefix_metadata_v3",
+  "lexical_prefix_v3",
+];
+const DIAGNOSTIC_PROOF_FIELDS: readonly DiagnosticLexicalProofField[] = [
+  "filename", "title", "alias", "heading", "tag", "body", "cross_field",
+];
+const SOURCE_FORMAT_SNAPSHOT_KEYS = [
+  "policy", "indexedComplete", "indexedPartial", "skippedNoExtractableText",
+  "unreadable", "quarantined",
+] as const;
+const LEXICAL_AGGREGATE_COUNT_KEYS = [
+  "plannedLaneCount", "executedLaneCount", "zeroObservationLaneCount", "saturatedLaneCount",
+  "observationCount", "addedUniqueCount",
+] as const;
+
+function validateSourceGeneration(value: unknown): DiagnosticSourceGeneration {
+  const record = requireExactRecord(value, ["schemaVersion", "availability"], [
+    "schemaVersion", "availability", "documents", "chunks", "zeroChunkSources", "formats",
+  ]);
+  if (record.schemaVersion !== 1) throw new TypeError("Invalid diagnostic details");
+  if (record.availability === "unavailable" || record.availability === "not_applicable") {
+    if (!hasExactKeys(record, ["schemaVersion", "availability"])) {
+      throw new TypeError("Invalid diagnostic details");
+    }
+    return Object.freeze({ schemaVersion: 1, availability: record.availability });
   }
-  if (NUMERIC_DETAIL_KEYS.has(key)) return isNonNegativeInteger(value);
-  if (BOOLEAN_DETAIL_KEYS.has(key)) return typeof value === "boolean";
-  return typeof value === "string" && TEXT_VALUE_SET.has(value as DiagnosticTextValue);
+  if (record.availability !== "available"
+    || !hasExactKeys(record, [
+      "schemaVersion", "availability", "documents", "chunks", "zeroChunkSources", "formats",
+    ])
+    || !isNonNegativeInteger(record.documents)
+    || !isNonNegativeInteger(record.chunks)
+    || !isNonNegativeInteger(record.zeroChunkSources)
+    || record.zeroChunkSources > record.documents) {
+    throw new TypeError("Invalid diagnostic details");
+  }
+  const formatsRecord = requireExactRecord(record.formats, DIAGNOSTIC_SOURCE_FORMATS);
+  const formats = Object.create(null) as Record<DiagnosticSourceFormat, DiagnosticSourceFormatSnapshot>;
+  let indexedSources = 0;
+  for (const format of DIAGNOSTIC_SOURCE_FORMATS) {
+    const snapshot = requireExactRecord(formatsRecord[format], SOURCE_FORMAT_SNAPSHOT_KEYS);
+    if (snapshot.policy !== "enabled" && snapshot.policy !== "disabled" && snapshot.policy !== "unknown") {
+      throw new TypeError("Invalid diagnostic details");
+    }
+    for (const key of SOURCE_FORMAT_SNAPSHOT_KEYS.slice(1)) {
+      if (!isNonNegativeInteger(snapshot[key])) throw new TypeError("Invalid diagnostic details");
+    }
+    if (snapshot.policy === "disabled"
+      && SOURCE_FORMAT_SNAPSHOT_KEYS.slice(1).some((key) => Number(snapshot[key]) !== 0)) {
+      throw new TypeError("Invalid diagnostic details");
+    }
+    indexedSources += Number(snapshot.indexedComplete) + Number(snapshot.indexedPartial);
+    formats[format] = Object.freeze({
+      policy: snapshot.policy,
+      indexedComplete: Number(snapshot.indexedComplete),
+      indexedPartial: Number(snapshot.indexedPartial),
+      skippedNoExtractableText: Number(snapshot.skippedNoExtractableText),
+      unreadable: Number(snapshot.unreadable),
+      quarantined: Number(snapshot.quarantined),
+    });
+  }
+  if (indexedSources !== record.documents) throw new TypeError("Invalid diagnostic details");
+  return Object.freeze({
+    schemaVersion: 1,
+    availability: "available",
+    documents: record.documents,
+    chunks: record.chunks,
+    zeroChunkSources: record.zeroChunkSources,
+    formats: Object.freeze(formats),
+  });
+}
+
+function validateLexicalExecution(value: unknown): DiagnosticLexicalExecution {
+  const minimalKeys = ["schemaVersion", "availability"] as const;
+  const fullKeys = [
+    "schemaVersion", "availability", "disposition", "evidenceProbeCount",
+    "matchedEvidenceProbeCount", "prefixProbeCount", "prefixExpansionCount",
+    "plannedLaneCount", "executedLaneCount", "zeroObservationLaneCount",
+    "saturatedLaneCount", "observationCount", "uniqueCandidateCount",
+    "duplicateObservationCount", "collectionCapDiscardedObservationCount", "returnedCount",
+    "resultLimit", "retainedCandidateTruncationCount", "candidateLimit",
+    "candidateLimitReached", "lanes", "fields",
+  ] as const;
+  const record = requireExactRecord(value, minimalKeys, fullKeys);
+  if (record.schemaVersion !== 1) throw new TypeError("Invalid diagnostic details");
+  if (record.availability === "unavailable" || record.availability === "not_applicable") {
+    if (!hasExactKeys(record, minimalKeys)) throw new TypeError("Invalid diagnostic details");
+    return Object.freeze({ schemaVersion: 1, availability: record.availability });
+  }
+  if (record.availability !== "available"
+    || !hasExactKeys(record, fullKeys)
+    || (record.disposition !== "ready"
+      && record.disposition !== "empty_no_evidence"
+      && record.disposition !== "explicit_bypass")
+    || typeof record.candidateLimitReached !== "boolean"
+    || !Array.isArray(record.lanes)
+    || !Array.isArray(record.fields)
+    || record.lanes.length > DIAGNOSTIC_LANE_KINDS.length
+    || record.fields.length > DIAGNOSTIC_PROOF_FIELDS.length) {
+    throw new TypeError("Invalid diagnostic details");
+  }
+  const countKeys = [
+    "evidenceProbeCount", "matchedEvidenceProbeCount", "prefixProbeCount",
+    "prefixExpansionCount", "plannedLaneCount", "executedLaneCount",
+    "zeroObservationLaneCount", "saturatedLaneCount", "observationCount",
+    "uniqueCandidateCount", "duplicateObservationCount",
+    "collectionCapDiscardedObservationCount", "returnedCount", "resultLimit",
+    "retainedCandidateTruncationCount", "candidateLimit",
+  ] as const;
+  for (const key of countKeys) {
+    if (!isNonNegativeInteger(record[key])) throw new TypeError("Invalid diagnostic details");
+  }
+  if (Number(record.matchedEvidenceProbeCount) > Number(record.evidenceProbeCount)
+    || Number(record.executedLaneCount) > Number(record.plannedLaneCount)
+    || Number(record.zeroObservationLaneCount) > Number(record.executedLaneCount)
+    || Number(record.saturatedLaneCount) > Number(record.executedLaneCount)
+    || Number(record.uniqueCandidateCount) > Number(record.candidateLimit)
+    || Number(record.returnedCount) > Number(record.resultLimit)
+    || Number(record.returnedCount) + Number(record.retainedCandidateTruncationCount)
+      !== Number(record.uniqueCandidateCount)
+    || Number(record.observationCount) !== Number(record.uniqueCandidateCount)
+      + Number(record.duplicateObservationCount)
+      + Number(record.collectionCapDiscardedObservationCount)
+    || Number(record.plannedLaneCount) > 42
+    || Number(record.executedLaneCount) > 42
+    || Number(record.candidateLimit) > 512
+    || Number(record.resultLimit) < 1
+    || Number(record.resultLimit) > 100) {
+    throw new TypeError("Invalid diagnostic details");
+  }
+  const lanes = validateLexicalAggregates(
+    record.lanes,
+    "kind",
+    DIAGNOSTIC_LANE_KINDS,
+  ) as DiagnosticLexicalLaneAggregate[];
+  const fields = validateLexicalAggregates(
+    record.fields,
+    "field",
+    DIAGNOSTIC_PROOF_FIELDS,
+  ) as DiagnosticLexicalFieldAggregate[];
+  validateAggregateTotals(record, lanes);
+  validateAggregateTotals(record, fields);
+  if (record.disposition === "empty_no_evidence"
+    && (Number(record.plannedLaneCount) !== 0
+      || Number(record.executedLaneCount) !== 0
+      || Number(record.observationCount) !== 0
+      || Number(record.uniqueCandidateCount) !== 0
+      || Number(record.returnedCount) !== 0
+      || lanes.length !== 0
+      || fields.length !== 0)) {
+    throw new TypeError("Invalid diagnostic details");
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    availability: "available",
+    disposition: record.disposition,
+    evidenceProbeCount: Number(record.evidenceProbeCount),
+    matchedEvidenceProbeCount: Number(record.matchedEvidenceProbeCount),
+    prefixProbeCount: Number(record.prefixProbeCount),
+    prefixExpansionCount: Number(record.prefixExpansionCount),
+    plannedLaneCount: Number(record.plannedLaneCount),
+    executedLaneCount: Number(record.executedLaneCount),
+    zeroObservationLaneCount: Number(record.zeroObservationLaneCount),
+    saturatedLaneCount: Number(record.saturatedLaneCount),
+    observationCount: Number(record.observationCount),
+    uniqueCandidateCount: Number(record.uniqueCandidateCount),
+    duplicateObservationCount: Number(record.duplicateObservationCount),
+    collectionCapDiscardedObservationCount: Number(record.collectionCapDiscardedObservationCount),
+    returnedCount: Number(record.returnedCount),
+    resultLimit: Number(record.resultLimit),
+    retainedCandidateTruncationCount: Number(record.retainedCandidateTruncationCount),
+    candidateLimit: Number(record.candidateLimit),
+    candidateLimitReached: record.candidateLimitReached,
+    lanes: Object.freeze(lanes),
+    fields: Object.freeze(fields),
+  });
+}
+
+function validateLexicalAggregates(
+  value: unknown[],
+  identityKey: "kind" | "field",
+  identities: readonly string[],
+): Array<DiagnosticLexicalLaneAggregate | DiagnosticLexicalFieldAggregate> {
+  const seen = new Set<string>();
+  return value.map((candidate) => {
+    const aggregate = requireExactRecord(candidate, [identityKey, ...LEXICAL_AGGREGATE_COUNT_KEYS]);
+    const identity = aggregate[identityKey];
+    if (typeof identity !== "string" || !identities.includes(identity) || seen.has(identity)) {
+      throw new TypeError("Invalid diagnostic details");
+    }
+    seen.add(identity);
+    for (const key of LEXICAL_AGGREGATE_COUNT_KEYS) {
+      if (!isNonNegativeInteger(aggregate[key])) throw new TypeError("Invalid diagnostic details");
+    }
+    if (Number(aggregate.executedLaneCount) > Number(aggregate.plannedLaneCount)
+      || Number(aggregate.zeroObservationLaneCount) > Number(aggregate.executedLaneCount)
+      || Number(aggregate.saturatedLaneCount) > Number(aggregate.executedLaneCount)
+      || Number(aggregate.addedUniqueCount) > Number(aggregate.observationCount)) {
+      throw new TypeError("Invalid diagnostic details");
+    }
+    const counts = {
+      plannedLaneCount: Number(aggregate.plannedLaneCount),
+      executedLaneCount: Number(aggregate.executedLaneCount),
+      zeroObservationLaneCount: Number(aggregate.zeroObservationLaneCount),
+      saturatedLaneCount: Number(aggregate.saturatedLaneCount),
+      observationCount: Number(aggregate.observationCount),
+      addedUniqueCount: Number(aggregate.addedUniqueCount),
+    };
+    return identityKey === "kind"
+      ? Object.freeze({ kind: identity as DiagnosticLexicalLaneKind, ...counts })
+      : Object.freeze({ field: identity as DiagnosticLexicalProofField, ...counts });
+  });
+}
+
+function validateAggregateTotals(
+  record: Record<string, unknown>,
+  aggregates: Array<DiagnosticLexicalLaneAggregate | DiagnosticLexicalFieldAggregate>,
+): void {
+  for (const key of LEXICAL_AGGREGATE_COUNT_KEYS) {
+    const topLevelKey = key === "addedUniqueCount" ? "uniqueCandidateCount" : key;
+    const total = aggregates.reduce((sum, aggregate) => sum + aggregate[key], 0);
+    if (total !== Number(record[topLevelKey])) throw new TypeError("Invalid diagnostic details");
+  }
+}
+
+function requireExactRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+  allowedKeys: readonly string[] = requiredKeys,
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Invalid diagnostic details");
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (requiredKeys.some((key) => !keys.includes(key))
+    || keys.some((key) => !allowedKeys.includes(key))) {
+    throw new TypeError("Invalid diagnostic details");
+  }
+  return record;
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => actual.includes(key));
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

@@ -31,6 +31,7 @@ import {
   MAX_INDEX_CHUNKS,
   openFts5Generation,
   openRestoredFts5Generation,
+  projectInternalLexicalTrace,
   type Fts5GenerationIndex,
   type SQLiteApi,
 } from "./fts5-index";
@@ -1093,7 +1094,7 @@ function search(query: string, limit: number): SearchResult {
       limit,
       trace,
     );
-    active.index.finishInternalLexicalTrace(trace);
+    const finishedTrace = active.index.finishInternalLexicalTrace(trace);
     traceFinished = true;
     return {
       generation: active.id,
@@ -1105,6 +1106,8 @@ function search(query: string, limit: number): SearchResult {
         scope: finalized.plan.scope ?? null,
         emphasis: finalized.plan.emphasis ?? null,
       },
+      source_generation: active.index.sourceGeneration,
+      lexical_execution: projectInternalLexicalTrace(finishedTrace),
     };
   } catch (error) {
     if (!traceFinished) {
@@ -1174,6 +1177,7 @@ function status(): StatusResult {
       staging_generation: null,
       documents: 0,
       chunks: 0,
+      zero_chunk_sources: 0,
       active_database_bytes: 0,
       staging_database_bytes: 0,
       database_byte_limit: DEFAULT_DATABASE_BYTE_LIMIT,
@@ -1190,6 +1194,7 @@ function status(): StatusResult {
     staging_generation: staging?.id ?? null,
     documents: active?.index.documents ?? 0,
     chunks: active?.index.chunks ?? 0,
+    zero_chunk_sources: active?.index.zeroChunkSources ?? 0,
     active_database_bytes: active?.index.databaseBytes ?? 0,
     staging_database_bytes: staging?.index.databaseBytes ?? 0,
     database_byte_limit: active?.index.databaseByteLimit
@@ -1288,6 +1293,7 @@ function generationResult(generation: Generation): BuildResult {
     generation: generation.id,
     documents: generation.index.documents,
     chunks: generation.index.chunks,
+    zero_chunk_sources: generation.index.zeroChunkSources,
     database_bytes: generation.index.databaseBytes,
     database_byte_limit: generation.index.databaseByteLimit,
     quarantined_sources: generation.quarantinedSources.size,

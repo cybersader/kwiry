@@ -14,6 +14,7 @@ import {
   isExtractionCoverage,
   isSourceFormat,
   isSourceLocator,
+  isWorkerLexicalExecution,
   locatorMatchesFormat,
 } from "./protocol";
 import type {
@@ -28,7 +29,12 @@ import type {
   SourceRemoval,
   WorkerCandidateWindow,
   WorkerFrontmatter,
+  WorkerLexicalExecution,
+  WorkerLexicalExecutionAggregate,
+  WorkerLexicalLaneKind,
+  WorkerLexicalProofField,
   WorkerSearchHit,
+  WorkerSourceGeneration,
 } from "./protocol";
 import { isPreparedPropertyBag } from "./source-defect";
 import { finalizeLexicalV2RankWithRust } from "./rust-adapter";
@@ -57,13 +63,7 @@ const MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE = 32;
 export type InternalLexicalTraceStageKind =
   | "evidence_support"
   | "evidence_prefix"
-  | "lexical_explicit_v3"
-  | "lexical_exact_metadata_v3"
-  | "lexical_exact_phrase_v3"
-  | "lexical_all_terms_v3"
-  | "lexical_partial_coverage_v3"
-  | "lexical_prefix_metadata_v3"
-  | "lexical_prefix_v3";
+  | WorkerLexicalLaneKind;
 
 export interface InternalLexicalTraceStage {
   kind: InternalLexicalTraceStageKind;
@@ -75,27 +75,42 @@ export interface InternalLexicalTraceStage {
   candidate_count: number;
 }
 
-export interface InternalLexicalTrace {
-  schema_version: 1;
+export interface InternalLexicalTrace extends WorkerLexicalExecution {
   outcome: "complete";
   total_duration_ms: number;
   optional_duration_ms: number;
-  evidence_probe_count: number;
-  prefix_probe_count: number;
   stage_count: number;
   candidate_count: number;
   result_count: number;
   stages: InternalLexicalTraceStage[];
 }
 
+type MutableLexicalExecutionAggregate = Omit<WorkerLexicalExecutionAggregate, "key">;
+
 export interface InternalLexicalTraceHandle {
   readonly clock: () => number;
   readonly startedAtMs: number;
   optionalDurationMs: number;
+  disposition: WorkerLexicalExecution["disposition"];
   evidenceProbeCount: number;
+  matchedEvidenceProbeCount: number;
   prefixProbeCount: number;
+  prefixExpansionCount: number;
+  plannedLaneCount: number;
+  executedLaneCount: number;
+  zeroObservationLaneCount: number;
+  saturatedLaneCount: number;
+  observationCount: number;
+  duplicateObservationCount: number;
+  collectionCapDiscardedObservationCount: number;
   candidateCount: number;
   resultCount: number;
+  resultLimit: number;
+  retainedCandidateTruncationCount: number;
+  candidateLimit: 512;
+  uniqueCandidateLimitReached: boolean;
+  laneKinds: Map<WorkerLexicalLaneKind, MutableLexicalExecutionAggregate>;
+  proofFields: Map<WorkerLexicalProofField, MutableLexicalExecutionAggregate>;
   outcome: InternalLexicalTrace["outcome"];
   stages: InternalLexicalTraceStage[];
   finished: boolean;
@@ -116,6 +131,33 @@ export interface Fts5IndexLimits {
 export interface Fts5SearchResult {
   hits: WorkerSearchHit[];
   candidate_window: WorkerCandidateWindow;
+}
+
+export function projectInternalLexicalTrace(trace: InternalLexicalTrace): WorkerLexicalExecution {
+  return {
+    schema_version: trace.schema_version,
+    disposition: trace.disposition,
+    evidence_probe_count: trace.evidence_probe_count,
+    matched_evidence_probe_count: trace.matched_evidence_probe_count,
+    prefix_probe_count: trace.prefix_probe_count,
+    prefix_expansion_count: trace.prefix_expansion_count,
+    planned_lane_count: trace.planned_lane_count,
+    executed_lane_count: trace.executed_lane_count,
+    zero_observation_lane_count: trace.zero_observation_lane_count,
+    saturated_lane_count: trace.saturated_lane_count,
+    observation_count: trace.observation_count,
+    duplicate_observation_count: trace.duplicate_observation_count,
+    collection_cap_discarded_observation_count:
+      trace.collection_cap_discarded_observation_count,
+    unique_candidate_count: trace.unique_candidate_count,
+    returned_count: trace.returned_count,
+    result_limit: trace.result_limit,
+    retained_candidate_truncation_count: trace.retained_candidate_truncation_count,
+    candidate_limit: trace.candidate_limit,
+    unique_candidate_limit_reached: trace.unique_candidate_limit_reached,
+    lane_kinds: trace.lane_kinds.map((aggregate) => ({ ...aggregate })),
+    proof_fields: trace.proof_fields.map((aggregate) => ({ ...aggregate })),
+  };
 }
 
 interface ResolvedFts5IndexLimits {
@@ -728,6 +770,7 @@ SELECT
 interface ExistingGenerationState {
   documents: number;
   chunks: number;
+  zeroChunkSources: number;
   sources: number;
   sourceFormatCounts: SourceFormatCounts;
   chunkingVersion: number;
@@ -740,6 +783,7 @@ interface ExistingGenerationState {
 export class Fts5GenerationIndex {
   private documentCount = 0;
   private chunkCount = 0;
+  private zeroChunkSourceCount = 0;
   private sourceCount = 0;
   private formatCounts = emptySourceFormatCounts();
   private observedChunkingVersion: number | null = null;
@@ -797,6 +841,7 @@ export class Fts5GenerationIndex {
     requireDatabaseWithinLimit(db, this.effectiveDatabaseByteLimit);
     this.documentCount = existing.documents;
     this.chunkCount = existing.chunks;
+    this.zeroChunkSourceCount = existing.zeroChunkSources;
     this.sourceCount = existing.sources;
     this.formatCounts = cloneSourceFormatCounts(existing.sourceFormatCounts);
     this.observedChunkingVersion = existing.chunks === 0 ? null : existing.chunkingVersion;
@@ -819,6 +864,20 @@ export class Fts5GenerationIndex {
 
   get chunks(): number {
     return this.chunkCount;
+  }
+
+  /** Indexed source rows that produced no searchable chunks. */
+  get zeroChunkSources(): number {
+    return this.zeroChunkSourceCount;
+  }
+
+  get sourceGeneration(): WorkerSourceGeneration {
+    return {
+      documents: this.documentCount,
+      chunks: this.chunkCount,
+      zero_chunk_sources: this.zeroChunkSourceCount,
+      source_format_counts: cloneSourceFormatCounts(this.formatCounts),
+    };
   }
 
   /** Full durable SQLite footprint, including schema, indexes, FTS, and freelist pages. */
@@ -911,9 +970,15 @@ export class Fts5GenerationIndex {
     // source is re-prepared, turning a benign re-scan into a rejected batch.
     const removedDocuments = stored.filter((source) => source.outcome === "indexed").length;
     const removedChunks = sumSafe(stored.map((source) => source.chunk_count));
+    const removedZeroChunkSources = stored.filter((source) =>
+      source.outcome === "indexed" && source.chunk_count === 0).length;
     const addedChunks = sumSafe(indexed.map((change) => change.rows.length));
+    const addedZeroChunkSources = indexed.filter((change) => change.rows.length === 0).length;
     const nextDocuments = this.documentCount - removedDocuments + indexed.length;
     const nextChunks = this.chunkCount - removedChunks + addedChunks;
+    const nextZeroChunkSources = this.zeroChunkSourceCount
+      - removedZeroChunkSources
+      + addedZeroChunkSources;
     const nextSources = this.sourceCount - touched.size + projected.length;
     const nextFormatCounts = updatedSourceFormatCounts(this.formatCounts, stored, projected);
     const nextChunkingVersion = requireSingleChunkingVersion(
@@ -921,6 +986,11 @@ export class Fts5GenerationIndex {
       projected,
     );
     requireProjectedCounts(nextDocuments, nextChunks, nextSources, this.limits);
+    if (!Number.isSafeInteger(nextZeroChunkSources)
+      || nextZeroChunkSources < 0
+      || nextZeroChunkSources > nextDocuments) {
+      throw new Error("projected zero-chunk source count is invalid");
+    }
 
     let mutationError: unknown;
     try {
@@ -1068,6 +1138,7 @@ export class Fts5GenerationIndex {
 
     this.documentCount = nextDocuments;
     this.chunkCount = nextChunks;
+    this.zeroChunkSourceCount = nextZeroChunkSources;
     this.sourceCount = nextSources;
     this.formatCounts = nextFormatCounts;
     this.observedChunkingVersion = nextChunkingVersion;
@@ -1136,10 +1207,26 @@ export class Fts5GenerationIndex {
       clock,
       startedAtMs,
       optionalDurationMs: 0,
+      disposition: "empty_no_evidence",
       evidenceProbeCount: 0,
+      matchedEvidenceProbeCount: 0,
       prefixProbeCount: 0,
+      prefixExpansionCount: 0,
+      plannedLaneCount: 0,
+      executedLaneCount: 0,
+      zeroObservationLaneCount: 0,
+      saturatedLaneCount: 0,
+      observationCount: 0,
+      duplicateObservationCount: 0,
+      collectionCapDiscardedObservationCount: 0,
       candidateCount: 0,
       resultCount: 0,
+      resultLimit: 1,
+      retainedCandidateTruncationCount: 0,
+      candidateLimit: 512,
+      uniqueCandidateLimitReached: false,
+      laneKinds: new Map(),
+      proofFields: new Map(),
       outcome: "complete",
       stages: [],
       finished: false,
@@ -1151,11 +1238,29 @@ export class Fts5GenerationIndex {
     handle.finished = true;
     const trace: InternalLexicalTrace = {
       schema_version: 1,
+      disposition: handle.disposition,
       outcome: handle.outcome,
       total_duration_ms: elapsedMilliseconds(handle.startedAtMs, checkedClock(handle.clock)),
       optional_duration_ms: roundedMilliseconds(handle.optionalDurationMs),
       evidence_probe_count: handle.evidenceProbeCount,
+      matched_evidence_probe_count: handle.matchedEvidenceProbeCount,
       prefix_probe_count: handle.prefixProbeCount,
+      prefix_expansion_count: handle.prefixExpansionCount,
+      planned_lane_count: handle.plannedLaneCount,
+      executed_lane_count: handle.executedLaneCount,
+      zero_observation_lane_count: handle.zeroObservationLaneCount,
+      saturated_lane_count: handle.saturatedLaneCount,
+      observation_count: handle.observationCount,
+      duplicate_observation_count: handle.duplicateObservationCount,
+      collection_cap_discarded_observation_count: handle.collectionCapDiscardedObservationCount,
+      unique_candidate_count: handle.candidateCount,
+      returned_count: handle.resultCount,
+      result_limit: handle.resultLimit,
+      retained_candidate_truncation_count: handle.retainedCandidateTruncationCount,
+      candidate_limit: handle.candidateLimit,
+      unique_candidate_limit_reached: handle.uniqueCandidateLimitReached,
+      lane_kinds: finishLexicalAggregates(handle.laneKinds),
+      proof_fields: finishLexicalAggregates(handle.proofFields),
       stage_count: handle.stages.length,
       candidate_count: handle.candidateCount,
       result_count: handle.resultCount,
@@ -1169,7 +1274,12 @@ export class Fts5GenerationIndex {
   latestInternalLexicalTrace(): InternalLexicalTrace | null {
     return this.latestLexicalTrace === null
       ? null
-      : { ...this.latestLexicalTrace, stages: this.latestLexicalTrace.stages.map((stage) => ({ ...stage })) };
+      : {
+          ...this.latestLexicalTrace,
+          lane_kinds: this.latestLexicalTrace.lane_kinds.map((aggregate) => ({ ...aggregate })),
+          proof_fields: this.latestLexicalTrace.proof_fields.map((aggregate) => ({ ...aggregate })),
+          stages: this.latestLexicalTrace.stages.map((stage) => ({ ...stage })),
+        };
   }
 
   observeQuery(
@@ -1197,6 +1307,8 @@ export class Fts5GenerationIndex {
     }
     if (trace !== undefined) {
       trace.evidenceProbeCount += probes.length;
+      trace.matchedEvidenceProbeCount += Number(identifierProbeMatched === true)
+        + observedTerms.filter(({ matched }) => matched).length;
       pushTraceStage(trace, {
         kind: "evidence_support",
         mandatory: true,
@@ -1255,6 +1367,7 @@ export class Fts5GenerationIndex {
     }
     if (trace !== undefined && prefixProbeCount > 0) {
       trace.prefixProbeCount += prefixProbeCount;
+      trace.prefixExpansionCount += prefixOutputCount;
       pushTraceStage(trace, {
         kind: "evidence_prefix",
         mandatory: false,
@@ -1289,7 +1402,13 @@ export class Fts5GenerationIndex {
     requireActiveTrace(trace);
     requireExecutionPlanIdentity(plan);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 512) {
-      throw new Error("invalid FTS5 search limit");
+      throw new RangeError("invalid FTS5 search limit");
+    }
+    if (trace !== undefined) {
+      trace.disposition = plan.disposition;
+      trace.plannedLaneCount = plan.stages.length;
+      trace.resultLimit = limit;
+      trace.candidateLimit = plan.max_total_candidates;
     }
     if (plan.disposition === "empty_no_evidence") {
       return {
@@ -1321,8 +1440,16 @@ export class Fts5GenerationIndex {
           output_count: hits.length,
           candidate_count: hits.length,
         });
-        trace.candidateCount += hits.length;
+        recordLexicalLane(trace, stage, {
+          observationCount: hits.length,
+          addedUniqueCount: hits.length,
+          duplicateObservationCount: 0,
+          collectionCapDiscardedObservationCount: 0,
+          saturated: hits.length === limit,
+        });
+        trace.candidateCount = hits.length;
         trace.resultCount = hits.length;
+        trace.uniqueCandidateLimitReached = hits.length === plan.max_total_candidates;
       }
       return {
         hits: this.hydrateStoredExcerpts(hits),
@@ -1376,7 +1503,11 @@ export class Fts5GenerationIndex {
         }
         summary.duration += duration;
       }
-      candidateLimitReached ||= rows.length === stageLimit;
+      const saturated = rows.length === stageLimit;
+      candidateLimitReached ||= saturated;
+      let stageAddedUniqueCount = 0;
+      let stageDuplicateObservationCount = 0;
+      let stageCollectionCapDiscardedObservationCount = 0;
       for (const [engineOrdinal, hit] of rows.entries()) {
         const identity = `${hit.source_key}\0${hit.chunk_id}\0${hit.path}`;
         summary?.observed.add(identity);
@@ -1389,6 +1520,7 @@ export class Fts5GenerationIndex {
         };
         const known = candidateByIdentity.get(identity);
         if (known !== undefined) {
+          stageDuplicateObservationCount += 1;
           const knownProofs = proofs[known];
           if (knownProofs !== undefined
             && knownProofs.length < MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE
@@ -1400,11 +1532,25 @@ export class Fts5GenerationIndex {
           }
           continue;
         }
-        if (hits.length === plan.max_total_candidates) continue;
+        if (hits.length === plan.max_total_candidates) {
+          stageCollectionCapDiscardedObservationCount += 1;
+          continue;
+        }
         candidateByIdentity.set(identity, hits.length);
         hits.push(hit);
         proofs.push([proof]);
+        stageAddedUniqueCount += 1;
         summary?.added.add(identity);
+      }
+      if (trace !== undefined) {
+        recordLexicalLane(trace, stage, {
+          observationCount: rows.length,
+          addedUniqueCount: stageAddedUniqueCount,
+          duplicateObservationCount: stageDuplicateObservationCount,
+          collectionCapDiscardedObservationCount:
+            stageCollectionCapDiscardedObservationCount,
+          saturated,
+        });
       }
     }
 
@@ -1450,8 +1596,10 @@ export class Fts5GenerationIndex {
           candidate_count: summary.observed.size,
         });
       }
-      trace.candidateCount += hits.length;
+      trace.candidateCount = hits.length;
       trace.resultCount = visibleHits.length;
+      trace.retainedCandidateTruncationCount = rankedHits.length - visibleHits.length;
+      trace.uniqueCandidateLimitReached = hits.length === plan.max_total_candidates;
     }
     return {
       hits: this.hydrateStoredExcerpts(visibleHits),
@@ -1588,6 +1736,7 @@ export class Fts5GenerationIndex {
     if (this.db.pointer !== undefined) throw new Error("SQLite database remained open");
     this.documentCount = 0;
     this.chunkCount = 0;
+    this.zeroChunkSourceCount = 0;
     this.sourceCount = 0;
     this.formatCounts = emptySourceFormatCounts();
     this.observedChunkingVersion = null;
@@ -1992,6 +2141,7 @@ function readRestoredInventory(
 ): {
   documents: number;
   chunks: number;
+  zeroChunkSources: number;
   sources: number;
   sourceFormatCounts: SourceFormatCounts;
 } {
@@ -2012,6 +2162,7 @@ function readRestoredInventory(
   if (sourceRows.length > resolvedLimits.maxSources) throw new IndexCapacityError();
 
   let documents = 0;
+  let zeroChunkSources = 0;
   const sourceFormatCounts = emptySourceFormatCounts();
   const sourcesByKey = new Map<string, StoredSource>();
   for (const row of sourceRows) {
@@ -2028,7 +2179,10 @@ function readRestoredInventory(
     }
     sourcesByKey.set(source.source_key, source);
     sourceFormatCounts[source.source_format][source.extraction_coverage] += 1;
-    if (source.outcome === "indexed") documents += 1;
+    if (source.outcome === "indexed") {
+      documents += 1;
+      if (source.chunk_count === 0) zeroChunkSources += 1;
+    }
   }
 
   validateRestoredProperties(db, sourcesByKey);
@@ -2070,6 +2224,7 @@ function readRestoredInventory(
   return {
     documents,
     chunks: chunkRows.length,
+    zeroChunkSources,
     sources: sourceRows.length,
     sourceFormatCounts,
   };
@@ -3318,30 +3473,107 @@ function pushTraceStage(
   trace.stages.push({ ...stage, duration_ms: roundedMilliseconds(stage.duration_ms) });
 }
 
+function recordLexicalLane(
+  trace: InternalLexicalTraceHandle,
+  stage: StagePlan,
+  counts: {
+    observationCount: number;
+    addedUniqueCount: number;
+    duplicateObservationCount: number;
+    collectionCapDiscardedObservationCount: number;
+    saturated: boolean;
+  },
+): void {
+  trace.executedLaneCount += 1;
+  trace.zeroObservationLaneCount += Number(counts.observationCount === 0);
+  trace.saturatedLaneCount += Number(counts.saturated);
+  trace.observationCount += counts.observationCount;
+  trace.duplicateObservationCount += counts.duplicateObservationCount;
+  trace.collectionCapDiscardedObservationCount +=
+    counts.collectionCapDiscardedObservationCount;
+  updateLexicalAggregate(trace.laneKinds, stage.plan_id, counts);
+  updateLexicalAggregate(trace.proofFields, stage.proof_field, counts);
+}
+
+function updateLexicalAggregate<K extends WorkerLexicalLaneKind | WorkerLexicalProofField>(
+  aggregates: Map<K, MutableLexicalExecutionAggregate>,
+  key: K,
+  counts: {
+    observationCount: number;
+    addedUniqueCount: number;
+    duplicateObservationCount: number;
+    collectionCapDiscardedObservationCount: number;
+    saturated: boolean;
+  },
+): void {
+  const aggregate = aggregates.get(key) ?? {
+    planned_lane_count: 0,
+    executed_lane_count: 0,
+    zero_observation_lane_count: 0,
+    saturated_lane_count: 0,
+    observation_count: 0,
+    added_unique_count: 0,
+    duplicate_observation_count: 0,
+    collection_cap_discarded_observation_count: 0,
+  };
+  aggregate.planned_lane_count += 1;
+  aggregate.executed_lane_count += 1;
+  aggregate.zero_observation_lane_count += Number(counts.observationCount === 0);
+  aggregate.saturated_lane_count += Number(counts.saturated);
+  aggregate.observation_count += counts.observationCount;
+  aggregate.added_unique_count += counts.addedUniqueCount;
+  aggregate.duplicate_observation_count += counts.duplicateObservationCount;
+  aggregate.collection_cap_discarded_observation_count +=
+    counts.collectionCapDiscardedObservationCount;
+  aggregates.set(key, aggregate);
+}
+
+function finishLexicalAggregates<K extends WorkerLexicalLaneKind | WorkerLexicalProofField>(
+  aggregates: ReadonlyMap<K, MutableLexicalExecutionAggregate>,
+): WorkerLexicalExecutionAggregate<K>[] {
+  return [...aggregates.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, aggregate]) => ({ key, ...aggregate }));
+}
+
 export function isInternalLexicalTrace(value: unknown): value is InternalLexicalTrace {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const trace = value as Record<string, unknown>;
-  const keys = [
-    "schema_version", "outcome", "total_duration_ms", "optional_duration_ms",
-    "evidence_probe_count", "prefix_probe_count", "stage_count", "candidate_count",
-    "result_count", "stages",
+  const executionKeys = [
+    "schema_version", "disposition", "evidence_probe_count", "matched_evidence_probe_count",
+    "prefix_probe_count", "prefix_expansion_count", "planned_lane_count",
+    "executed_lane_count", "zero_observation_lane_count", "saturated_lane_count",
+    "observation_count", "duplicate_observation_count",
+    "collection_cap_discarded_observation_count", "unique_candidate_count", "returned_count",
+    "result_limit", "retained_candidate_truncation_count", "candidate_limit",
+    "unique_candidate_limit_reached", "lane_kinds", "proof_fields",
   ];
-  if (Object.keys(trace).sort().join("\0") !== [...keys].sort().join("\0")
-    || trace.schema_version !== 1
-    || trace.outcome !== "complete"
-    || !isTraceNumber(trace.total_duration_ms)
-    || !isTraceNumber(trace.optional_duration_ms)
-    || !isTraceCount(trace.evidence_probe_count, 129)
-    || !isTraceCount(trace.prefix_probe_count, 8)
-    || !isTraceCount(trace.stage_count, 8)
-    || !isTraceCount(trace.candidate_count, 512)
-    || !isTraceCount(trace.result_count, 100)
-    || !Array.isArray(trace.stages)
-    || trace.stages.length !== trace.stage_count
-    || !trace.stages.every(isInternalLexicalTraceStage)) {
-    return false;
-  }
-  return trace.optional_duration_ms <= trace.total_duration_ms;
+  const internalKeys = [
+    ...executionKeys, "outcome", "total_duration_ms", "optional_duration_ms", "stage_count",
+    "candidate_count", "result_count", "stages",
+  ];
+  if (Object.keys(trace).sort().join("\0") !== [...internalKeys].sort().join("\0")) return false;
+  const {
+    outcome,
+    total_duration_ms: totalDurationMs,
+    optional_duration_ms: optionalDurationMs,
+    stage_count: stageCount,
+    candidate_count: candidateCount,
+    result_count: resultCount,
+    stages,
+    ...execution
+  } = trace;
+  return outcome === "complete"
+    && isTraceNumber(totalDurationMs)
+    && isTraceNumber(optionalDurationMs)
+    && optionalDurationMs <= totalDurationMs
+    && isTraceCount(stageCount, 8)
+    && candidateCount === execution.unique_candidate_count
+    && resultCount === execution.returned_count
+    && Array.isArray(stages)
+    && stages.length === stageCount
+    && stages.every(isInternalLexicalTraceStage)
+    && isWorkerLexicalExecution(execution);
 }
 
 function isInternalLexicalTraceStage(value: unknown): value is InternalLexicalTraceStage {

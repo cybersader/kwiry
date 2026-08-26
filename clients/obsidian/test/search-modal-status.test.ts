@@ -509,6 +509,10 @@ function executionWithHits(
       candidateCount: state === "unknown" ? null : 24,
       candidateLimit: state === "candidate_limit_reached" ? 24 : null,
     },
+    diagnostics: {
+      sourceGeneration: { availability: "unavailable" },
+      lexicalExecution: { availability: "unavailable" },
+    },
     response: { hits, next_cursor: null },
   };
 }
@@ -575,9 +579,14 @@ function plugin(options: {
       _details: unknown,
       operation: (event: {
         set(values: unknown): void;
-        setLevel(level: string): void;
+        complete(level: string, values: unknown): void;
+        rejectAnnotation(): void;
       }) => Promise<unknown>,
-    ) => operation({ set(): void {}, setLevel(): void {} }),
+    ) => operation({
+      set(): void {},
+      complete(): void {},
+      rejectAnnotation(): void {},
+    }),
     diagnosticErrorDetails: () => ({}),
     recordCaughtFailure: vi.fn(),
     getActiveBackendIdentity: () => activeBackend,
