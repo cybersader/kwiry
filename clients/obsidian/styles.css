@@ -89,7 +89,7 @@
 
 .kwiry-query-tools {
   display: flex;
-  flex: 1 0 100%;
+  flex: 0 1 auto;
   align-items: center;
   justify-content: flex-end;
   min-width: 0;
@@ -101,14 +101,27 @@
   display: none;
   min-width: 0;
   overflow: hidden;
-  color: var(--text-muted);
-  font-weight: var(--font-medium);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .kwiry-query-controls.has-controls {
-  display: inline;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-1);
+}
+
+.kwiry-query-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 1px 5px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  line-height: 1.2;
+  letter-spacing: 0.03em;
 }
 
 .kwiry-query-help {

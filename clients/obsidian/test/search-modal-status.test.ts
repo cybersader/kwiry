@@ -758,7 +758,9 @@ describe("KwirySearchModal status rail", () => {
     const backend = new DeferredBackend();
     const modal = createModal(backend);
     const controls = findByClass(modal.contentEl, "kwiry-query-controls");
-    expect(controls?.textContent).toBe("");
+    expect(controls?.attributes.get("role")).toBe("group");
+    expect(controls?.attributes.get("aria-label")).toBe("Active field controls");
+    expect(controls?.children).toEqual([]);
     expect(controls?.classList.contains("has-controls")).toBe(false);
 
     const pending = modal.getSuggestions("in:name >title Vendor7 meeting");
@@ -775,9 +777,28 @@ describe("KwirySearchModal status rail", () => {
     ));
     await expect(pending).resolves.toHaveLength(1);
 
-    expect(controls?.textContent).toBe("Scope · Name · Prefer · Title");
+    expect(controls?.children.map((child) => child.textContent)).toEqual([
+      "Scope · Name",
+      "Prefer · Title",
+    ]);
+    expect(controls?.children.every((child) =>
+      child.classList.contains("kwiry-query-control"))).toBe(true);
     expect(controls?.attributes.get("data-profile")).toBe("lexical-v2");
     expect(controls?.classList.contains("has-controls")).toBe(true);
+
+    const ordinary = modal.getSuggestions("Vendor7 meeting");
+    expect(controls?.children).toEqual([]);
+    backend.searches[1]!.resolve(executionWithHits([], "exhausted", {
+      queryPolicy: {
+        lexical_profile: "lexical-v2",
+        scope: null,
+        emphasis: null,
+      },
+    }));
+    await expect(ordinary).resolves.toEqual([]);
+    expect(controls?.children).toEqual([]);
+    expect(controls?.attributes.get("data-profile")).toBe("lexical-v2");
+    expect(controls?.classList.contains("has-controls")).toBe(false);
     modal.onClose();
   });
 
@@ -802,20 +823,39 @@ describe("KwirySearchModal status rail", () => {
     modal.onClose();
   });
 
-  it("does not let a stale request replace the current request status", async () => {
+  it("does not let a stale request replace the current request status or controls", async () => {
     const backend = new DeferredBackend();
     const modal = createModal(backend);
     const { query } = modalElements(modal);
+    const controls = findByClass(modal.contentEl, "kwiry-query-controls");
 
     const older = modal.getSuggestions("older");
     const newer = modal.getSuggestions("newer");
-    backend.searches[1]!.resolve(execution(7, "more_available"));
+    backend.searches[1]!.resolve(executionWithHits(
+      Array.from({ length: 7 }, (_, index) => hit(`new-${index}`, `New-${index}.md`)),
+      "more_available",
+      {
+        queryPolicy: {
+          lexical_profile: "lexical-v2",
+          scope: null,
+          emphasis: "body",
+        },
+      },
+    ));
     await expect(newer).resolves.toHaveLength(7);
     expect(query.textContent).toBe("7 returned sections — 7 sources shown; more candidates are available.");
+    expect(controls?.children.map((child) => child.textContent)).toEqual(["Prefer · Body"]);
 
-    backend.searches[0]!.resolve(execution(0, "exhausted"));
+    backend.searches[0]!.resolve(executionWithHits([], "exhausted", {
+      queryPolicy: {
+        lexical_profile: "lexical-v2",
+        scope: "name",
+        emphasis: null,
+      },
+    }));
     await expect(older).resolves.toEqual([]);
     expect(query.textContent).toBe("7 returned sections — 7 sources shown; more candidates are available.");
+    expect(controls?.children.map((child) => child.textContent)).toEqual(["Prefer · Body"]);
     modal.onClose();
   });
 
@@ -1278,13 +1318,14 @@ describe("KwirySearchModal grouped interactions", () => {
         emphasis: null,
       },
     }));
-    expect(controls?.textContent).toBe("Scope · Name");
+    expect(controls?.children.map((child) => child.textContent)).toEqual(["Scope · Name"]);
     modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
     await modal.flushSuggestions();
     expect(modal.suggestions).toHaveLength(2);
 
     modal.inputEl.value = "second";
     modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(controls?.children).toEqual([]);
     expect(controls?.classList.contains("has-controls")).toBe(false);
     backend.searches.at(-1)!.resolve(executionWithHits([
       hit("b1", "B.md", ["B1"]),
@@ -1297,7 +1338,7 @@ describe("KwirySearchModal grouped interactions", () => {
       },
     }));
     await modal.flushSuggestions();
-    expect(controls?.textContent).toBe("Prefer · Body");
+    expect(controls?.children.map((child) => child.textContent)).toEqual(["Prefer · Body"]);
     expect(modal.suggestions).toHaveLength(1);
     expect(renderedRows(modal)[0]?.classList.contains("kwiry-source-result")).toBe(true);
 
@@ -1305,6 +1346,7 @@ describe("KwirySearchModal grouped interactions", () => {
     await modal.flushSuggestions();
     const requestsBeforeMode = backend.requests.length;
     modal.triggerScope([], "Tab", keyboard("Tab"));
+    expect(controls?.children).toEqual([]);
     expect(controls?.classList.contains("has-controls")).toBe(false);
     backend.searches.at(-1)!.resolve(executionWithHits(
       [hit("c1", "C.md", ["C1"]), hit("c2", "C.md", ["C2"])],
