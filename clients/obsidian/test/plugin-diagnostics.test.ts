@@ -104,6 +104,42 @@ describe("PluginDiagnostics", () => {
     expect(report).not.toContain("private-vault");
   });
 
+  it.each([
+    "sqlite",
+    "plan_rejected",
+    "bounds_exceeded",
+    "internal",
+  ] as const)("retains the fixed %s search failure classification", async (failureCause) => {
+    const diagnostics = new PluginDiagnostics("info");
+
+    await diagnostics.capture("info", "search.lifecycle", {
+      operation: "search",
+    }, (event) => {
+      event.complete("error", {
+        outcome: "failed",
+        code: "query_execution_failed",
+        stage: "query",
+        retryable: true,
+        failureCause,
+      });
+    });
+
+    const plan = diagnostics.createExportPlan(CONTEXT);
+    expect(plan.entries).toHaveLength(1);
+    expect(plan.entries[0]?.details).toMatchObject({
+      operation: "search",
+      outcome: "failed",
+      code: "query_execution_failed",
+      stage: "query",
+      retryable: true,
+      failureCause,
+    });
+    expect(plan.entries[0]?.details).not.toHaveProperty("annotationRejectedCount");
+    const report = diagnostics.format(CONTEXT);
+    expect(report).toContain(`failureCause=${failureCause}`);
+    expect(report).not.toContain("diagnostic_annotation_rejected");
+  });
+
   it("records rejected annotations without changing the observed operation", async () => {
     const diagnostics = new PluginDiagnostics("info");
     const privateValue = "Clients/Private/Target.md";
