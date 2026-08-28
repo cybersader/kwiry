@@ -20,6 +20,13 @@ interface LifecycleHarness {
   exportVaultRoots: string[];
   exportChunkIterations: number;
   exportResult: "saved" | "cancelled" | "inside_vault" | "unsafe_destination" | "unavailable" | "write_failed";
+  desktopExportAvailable: boolean;
+  adapterBasePath: string | null;
+  adapterBasePathThrows: boolean;
+  fullClipboardAvailable: boolean;
+  fullClipboardCalls: number;
+  fullClipboardReports: string[];
+  fullClipboardResult: "saved" | "cancelled" | "inside_vault" | "unsafe_destination" | "unavailable" | "write_failed";
   notices: string[];
   savedData: unknown[];
   storedData: Record<string, unknown>;
@@ -39,6 +46,13 @@ const harness: LifecycleHarness = {
   exportVaultRoots: [],
   exportChunkIterations: 0,
   exportResult: "saved",
+  desktopExportAvailable: true,
+  adapterBasePath: "/synthetic-vault",
+  adapterBasePathThrows: false,
+  fullClipboardAvailable: true,
+  fullClipboardCalls: 0,
+  fullClipboardReports: [],
+  fullClipboardResult: "saved",
   notices: [],
   savedData: [],
   storedData: {},
@@ -98,6 +112,7 @@ function lifecycleHarnessPlugin(): EsbuildPlugin {
     ["./cache/build-cache-options", "cache-options"],
     ["./credentials", "credentials"],
     ["./diagnostics/desktop-export-host", "desktop-export-host"],
+    ["./diagnostics/full-report-clipboard-host", "full-report-clipboard-host"],
     ["./internal/private-tools", "private-tools"],
     ["./search-modal", "search-modal"],
     ["./settings-tab", "settings-tab"],
@@ -128,7 +143,12 @@ function stubSource(path: string): string {
         export class Plugin {
           app = {
             vault: {
-              adapter: { getBasePath() { return "/synthetic-vault"; } },
+              adapter: harness.adapterBasePath === null ? {} : {
+                getBasePath() {
+                  if (harness.adapterBasePathThrows) throw new Error("synthetic adapter failure");
+                  return harness.adapterBasePath;
+                },
+              },
             },
             workspace: {
               onLayoutReady(callback) { harness.layoutReady = callback; },
@@ -241,6 +261,7 @@ function stubSource(path: string): string {
         const harness = globalThis.__kwiryStartupLifecycleHarness;
         export function createProductionDesktopDiagnosticsExportHost() {
           return {
+            isAvailable() { return harness.desktopExportAvailable; },
             async save({ vaultRoot, chunks }) {
               harness.exportVaultRoots.push(vaultRoot);
               if (harness.exportResult === "saved") {
@@ -254,6 +275,28 @@ function stubSource(path: string): string {
                 harness.exportReports.push(parts.join(""));
               }
               return { kind: harness.exportResult };
+            },
+          };
+        }
+      `;
+    case "full-report-clipboard-host":
+      return `
+        const harness = globalThis.__kwiryStartupLifecycleHarness;
+        export function createProductionFullReportClipboardHost() {
+          return {
+            isAvailable() { return harness.fullClipboardAvailable; },
+            copy({ chunks }) {
+              harness.fullClipboardCalls += 1;
+              if (harness.fullClipboardResult === "saved") {
+                const decoder = new TextDecoder();
+                const parts = [];
+                for (const chunk of chunks) {
+                  parts.push(decoder.decode(chunk, { stream: true }));
+                }
+                parts.push(decoder.decode());
+                harness.fullClipboardReports.push(parts.join(""));
+              }
+              return Promise.resolve({ kind: harness.fullClipboardResult });
             },
           };
         }
@@ -292,6 +335,13 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.exportVaultRoots.length = 0;
     harness.exportChunkIterations = 0;
     harness.exportResult = "saved";
+    harness.desktopExportAvailable = true;
+    harness.adapterBasePath = "/synthetic-vault";
+    harness.adapterBasePathThrows = false;
+    harness.fullClipboardAvailable = true;
+    harness.fullClipboardCalls = 0;
+    harness.fullClipboardReports.length = 0;
+    harness.fullClipboardResult = "saved";
     harness.notices.length = 0;
     harness.savedData.length = 0;
     harness.storedData = {};
@@ -486,6 +536,61 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       !("path" in record.details))).toBe(true);
   });
 
+  it.each([
+    { label: "missing base path", basePath: null, throws: false },
+    { label: "throwing base path", basePath: "/synthetic-vault", throws: true },
+    { label: "invalid base path", basePath: "", throws: false },
+  ])("copies the full report synchronously when the adapter has a $label", async ({
+    basePath,
+    throws,
+  }) => {
+    harness.adapterBasePath = basePath;
+    harness.adapterBasePathThrows = throws;
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+
+    const exportPromise = plugin.exportDiagnosticsFile();
+    expect(harness.fullClipboardCalls).toBe(1);
+    await exportPromise;
+
+    expect(harness.exportVaultRoots).toEqual([]);
+    expect(harness.fullClipboardReports).toHaveLength(1);
+    expect(harness.fullClipboardReports[0]).toContain("Structured records (JSON)");
+    expect(harness.notices.at(-1)).toBe(
+      "Kwiry: full diagnostics report copied. Paste it into a text file outside the active vault, then clear the clipboard.",
+    );
+  });
+
+  it("uses the full clipboard fallback when Electron file authority is unavailable", async () => {
+    harness.desktopExportAvailable = false;
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+
+    await plugin.exportDiagnosticsFile();
+
+    expect(harness.exportVaultRoots).toEqual([]);
+    expect(harness.fullClipboardCalls).toBe(1);
+    expect(harness.fullClipboardReports).toHaveLength(1);
+  });
+
+  it("fails closed without either full-export authority", async () => {
+    harness.adapterBasePath = null;
+    harness.fullClipboardAvailable = false;
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+
+    await plugin.exportDiagnosticsFile();
+
+    expect(harness.fullClipboardCalls).toBe(0);
+    expect(harness.exportChunkIterations).toBe(0);
+    expect(harness.notices.at(-1)).toBe(
+      "Kwiry: full diagnostics export is unavailable on this device.",
+    );
+  });
+
   it("never copies more than 64 KiB and reports retained events omitted by the clipboard cap", async () => {
     const KwiryPlugin = await loadProductionPlugin();
     const plugin = new KwiryPlugin();
@@ -542,6 +647,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(harness.notices).toHaveLength(beforeCancellation);
     expect(harness.exportChunkIterations).toBe(0);
     expect(harness.exportReports).toEqual([]);
+    expect(harness.fullClipboardCalls).toBe(0);
 
     harness.exportResult = "inside_vault";
     await plugin.exportDiagnosticsFile();
@@ -550,6 +656,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     );
     expect(harness.notices.join("\n")).not.toContain("/synthetic-vault");
     expect(harness.exportChunkIterations).toBe(0);
+    expect(harness.fullClipboardCalls).toBe(0);
 
     harness.exportResult = "saved";
     await plugin.exportDiagnosticsFile();
@@ -557,6 +664,23 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(harness.exportChunkIterations).toBeGreaterThan(0);
     expect(harness.notices.at(-1)).toBe("Kwiry: full diagnostics report exported.");
     expect(harness.notices.join("\n")).not.toContain("/synthetic-vault");
+    expect(harness.fullClipboardCalls).toBe(0);
+  });
+
+  it.each([
+    ["unsafe_destination", "Kwiry: the diagnostics export destination was refused."],
+    ["unavailable", "Kwiry: full diagnostics export is unavailable on this device."],
+    ["write_failed", "Kwiry: diagnostics could not be exported."],
+  ] as const)("does not bypass a selected desktop %s result", async (result, notice) => {
+    harness.exportResult = result;
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+
+    await plugin.exportDiagnosticsFile();
+
+    expect(harness.fullClipboardCalls).toBe(0);
+    expect(harness.notices.at(-1)).toBe(notice);
   });
 
   it("ignores legacy report-detail values and omits them on the next save", async () => {

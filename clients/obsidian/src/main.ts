@@ -24,9 +24,9 @@ import {
 } from "./backends/in-plugin-lexical-backend";
 import { createInPluginCacheOptions } from "./cache/build-cache-options";
 import { readDaemonToken } from "./credentials";
-import {
-  createProductionDesktopDiagnosticsExportHost,
-} from "./diagnostics/desktop-export-host";
+import { createProductionDesktopDiagnosticsExportHost } from "./diagnostics/desktop-export-host";
+import type { DiagnosticsExportResult } from "./diagnostics/export-contract";
+import { createProductionFullReportClipboardHost } from "./diagnostics/full-report-clipboard-host";
 import { PluginDiagnostics } from "./diagnostics/plugin-diagnostics";
 import { StartupTimeline } from "./diagnostics/startup-timeline";
 import {
@@ -78,6 +78,7 @@ export default class KwiryPlugin extends Plugin {
   private readonly statusRefresh = new LatestRequestEpoch();
   private readonly diagnostics = new PluginDiagnostics(DEFAULT_SETTINGS.diagnosticsLogLevel);
   private readonly diagnosticsExportHost = createProductionDesktopDiagnosticsExportHost();
+  private readonly fullReportClipboardHost = createProductionFullReportClipboardHost();
   private startupTimeline: StartupTimeline | null = null;
   private privateTools: PrivateTools = createPrivateTools(this, undefined);
   private sourcePolicyHash: string | null = null;
@@ -281,20 +282,42 @@ export default class KwiryPlugin extends Plugin {
 
   async exportDiagnosticsFile(): Promise<void> {
     const vaultRoot = desktopVaultRoot(this.app.vault.adapter);
-    if (vaultRoot === null) {
+    const desktopVault = vaultRoot !== null && this.diagnosticsExportHost.isAvailable()
+      ? vaultRoot
+      : null;
+    if (desktopVault === null && !this.fullReportClipboardHost.isAvailable()) {
       this.recordDiagnosticsExportFailure("unsupported_platform");
       new Notice("Kwiry: full diagnostics export is unavailable on this device.");
       return;
     }
 
     const plan = this.createDiagnosticsExportPlan();
-    const result = await this.diagnosticsExportHost.save({
-      vaultRoot,
-      chunks: serializeDiagnosticExport(plan),
-    });
+    const chunks = serializeDiagnosticExport(plan);
+    if (desktopVault !== null) {
+      const result = await this.diagnosticsExportHost.save({
+        vaultRoot: desktopVault,
+        chunks,
+      });
+      this.presentDiagnosticsExportResult(result, "desktop");
+      return;
+    }
+
+    // Invoke the clipboard before the first await so the direct settings-button
+    // activation remains available to the browser permission boundary.
+    const resultPromise = this.fullReportClipboardHost.copy({ chunks });
+    const result = await resultPromise;
+    this.presentDiagnosticsExportResult(result, "clipboard");
+  }
+
+  private presentDiagnosticsExportResult(
+    result: DiagnosticsExportResult,
+    transport: "desktop" | "clipboard",
+  ): void {
     switch (result.kind) {
       case "saved":
-        new Notice("Kwiry: full diagnostics report exported.");
+        new Notice(transport === "desktop"
+          ? "Kwiry: full diagnostics report exported."
+          : "Kwiry: full diagnostics report copied. Paste it into a text file outside the active vault, then clear the clipboard.");
         return;
       case "cancelled":
         return;
@@ -312,7 +335,9 @@ export default class KwiryPlugin extends Plugin {
         return;
       case "write_failed":
         this.recordDiagnosticsExportFailure("write_failed");
-        new Notice("Kwiry: diagnostics could not be exported.");
+        new Notice(transport === "desktop"
+          ? "Kwiry: diagnostics could not be exported."
+          : "Kwiry: full diagnostics report could not be copied.");
         return;
     }
   }

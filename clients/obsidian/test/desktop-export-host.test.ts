@@ -164,6 +164,7 @@ describe("desktop diagnostics export host", () => {
       dialog: dialogResult({ canceled: false, filePath: destination }),
     }));
 
+    expect(host.isAvailable()).toBe(true);
     await expect(host.save({ vaultRoot, chunks: chunks("safe") }))
       .resolves.toEqual({ kind: "saved" });
     expect(readFileSync(destination, "utf8")).toBe("safe");
@@ -171,6 +172,7 @@ describe("desktop diagnostics export host", () => {
 
     let iterated = false;
     const unavailable = createProductionDesktopDiagnosticsExportHost(() => null);
+    expect(unavailable.isAvailable()).toBe(false);
     await expect(unavailable.save({
       vaultRoot,
       chunks: (function* () {

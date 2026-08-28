@@ -286,14 +286,20 @@ function assertD5cOwnerWorkerGraph(metafile) {
 }
 
 function assertDiagnosticsExportGraph(mainMetafile, workerMetafile) {
-  const desktopHost = "src/diagnostics/desktop-export-host.ts";
+  const authorities = [
+    "src/diagnostics/desktop-export-host.ts",
+    "src/diagnostics/full-report-clipboard-host.ts",
+    "src/diagnostics/export-contract.ts",
+  ];
   const mainInputs = Object.keys(mainMetafile.inputs).map((input) => input.replaceAll("\\", "/"));
   const workerInputs = Object.keys(workerMetafile.inputs).map((input) => input.replaceAll("\\", "/"));
-  if (!mainInputs.some((input) => input.endsWith(desktopHost))) {
-    throw new Error("Main build omitted the desktop diagnostics export host");
-  }
-  if (workerInputs.some((input) => input.endsWith(desktopHost))) {
-    throw new Error("Worker build selected the desktop diagnostics export host");
+  for (const authority of authorities) {
+    if (!mainInputs.some((input) => input.endsWith(authority))) {
+      throw new Error(`Main build omitted diagnostics export authority: ${authority}`);
+    }
+    if (workerInputs.some((input) => input.endsWith(authority))) {
+      throw new Error(`Worker build selected diagnostics export authority: ${authority}`);
+    }
   }
 }
 
