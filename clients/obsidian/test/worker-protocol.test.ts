@@ -895,14 +895,25 @@ describe("Worker protocol", () => {
     })).toBe(false);
   });
 
-  it("classifies branded binder refusals without retaining plan text", () => {
-    const error = new QueryPlanRejectedError();
-    expect(classifyWorkerCause(error)).toBe("plan_rejected");
-    expect(JSON.stringify(classifyWorkerCause(error))).not.toContain(error.message);
+  it("classifies only fixed worker causes without retaining thrown text", () => {
+    const sqlite = new Error("unretained database detail");
+    sqlite.name = "SQLite3Error";
+    const plan = new QueryPlanRejectedError();
+    const bounds = new RangeError("unretained bound detail");
+    const internal = new Error("unretained internal detail");
+    for (const [error, cause] of [
+      [sqlite, "sqlite"],
+      [plan, "plan_rejected"],
+      [bounds, "bounds_exceeded"],
+      [internal, "internal"],
+    ] as const) {
+      expect(classifyWorkerCause(error)).toBe(cause);
+      expect(JSON.stringify(classifyWorkerCause(error))).not.toContain(error.message);
+    }
   });
 
   it("accepts only the protocol-15 structured query error vocabulary", () => {
-    const response = (code: string) => ({
+    const response = (code: string, failureCause?: string) => ({
       version: WORKER_PROTOCOL_VERSION,
       id: 1,
       operation: "search",
@@ -912,6 +923,7 @@ describe("Worker protocol", () => {
         stage: "query",
         message: "Safe query failure.",
         retryable: false,
+        ...(failureCause === undefined ? {} : { failureCause }),
       },
     });
     for (const code of [
@@ -923,6 +935,20 @@ describe("Worker protocol", () => {
     ]) {
       expect(isWorkerResponse(response(code)), code).toBe(true);
     }
+    for (const failureCause of [
+      "sqlite",
+      "plan_rejected",
+      "bounds_exceeded",
+      "internal",
+    ]) {
+      expect(isWorkerResponse(response("query_execution_failed", failureCause)), failureCause)
+        .toBe(true);
+    }
+    expect(isWorkerResponse(response("query_execution_failed", "unsupported_cause"))).toBe(false);
+    expect(isWorkerResponse({
+      ...response("query_execution_failed", "internal"),
+      extra: true,
+    })).toBe(false);
     expect(isWorkerResponse(response("query_rejected"))).toBe(false);
     expect(isWorkerResponse(response("private_adapter_code"))).toBe(false);
   });
