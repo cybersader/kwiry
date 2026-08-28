@@ -155,6 +155,50 @@ describe("KwiryClient.search", () => {
     expect(error.code).toBe("invalid_response");
   });
 
+  it("preserves bounded daemon heading paths exactly", async () => {
+    const headingPath = Array.from({ length: 64 }, (_, index) =>
+      index === 63 ? "h".repeat(1_024) : `h${index}`);
+    const { transport } = mockTransport(200, {
+      hits: [{ ...HIT, heading_path: headingPath }],
+      next_cursor: null,
+    });
+
+    await expect(client(transport).search({ q: "a", mode: "lexical" })).resolves.toMatchObject({
+      hits: [{ heading_path: headingPath }],
+    });
+  });
+
+  it.each([
+    ["a deep path", Array.from({ length: 65 }, (_, index) => `h${index}`)],
+    ["a long component", ["h".repeat(1_025)]],
+    ["an empty component", [""]],
+  ])("normalizes %s from a daemon to source-level navigation", async (_name, headingPath) => {
+    const { transport } = mockTransport(200, {
+      hits: [{ ...HIT, heading_path: headingPath }],
+      next_cursor: null,
+    });
+
+    await expect(client(transport).search({ q: "a", mode: "lexical" })).resolves.toMatchObject({
+      hits: [{ heading_path: [] }],
+    });
+  });
+
+  it.each([
+    ["a non-array", "Heading"],
+    ["a non-string component", ["Heading", 42]],
+  ])("rejects %s in a daemon heading path", async (_name, headingPath) => {
+    const { transport } = mockTransport(200, {
+      hits: [{ ...HIT, heading_path: headingPath }],
+      next_cursor: null,
+    });
+    const error = await client(transport)
+      .search({ q: "a", mode: "lexical" })
+      .catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(KwiryApiError);
+    expect(error.code).toBe("invalid_response");
+  });
+
   it("parses the closed source format and Base view locator", async () => {
     const baseHit = {
       ...HIT,

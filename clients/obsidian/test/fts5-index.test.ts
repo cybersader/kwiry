@@ -268,6 +268,94 @@ describe("Fts5GenerationIndex", () => {
     });
   });
 
+  it("keeps structurally valid heading paths durable and bounds only published navigation", () => {
+    const cases = [
+      {
+        sourceKey: "bounded-component",
+        chunkId: "chunk-bounded-component",
+        term: "amberwave",
+        headingPath: ["h".repeat(1_024)],
+        expectedPath: ["h".repeat(1_024)],
+      },
+      {
+        sourceKey: "bounded-depth",
+        chunkId: "chunk-bounded-depth",
+        term: "briskfern",
+        headingPath: Array.from({ length: 64 }, (_, ordinal) => `h${ordinal}`),
+        expectedPath: Array.from({ length: 64 }, (_, ordinal) => `h${ordinal}`),
+      },
+      {
+        sourceKey: "long-component",
+        chunkId: "chunk-long-component",
+        term: "cinderleaf",
+        headingPath: ["h".repeat(1_025)],
+        expectedPath: [],
+      },
+      {
+        sourceKey: "deep-path",
+        chunkId: "chunk-deep-path",
+        term: "dawnmoss",
+        headingPath: Array.from({ length: 65 }, (_, ordinal) => `h${ordinal}`),
+        expectedPath: [],
+      },
+      {
+        sourceKey: "empty-component",
+        chunkId: "chunk-empty-component",
+        term: "emberroot",
+        headingPath: [""],
+        expectedPath: [],
+      },
+    ];
+
+    for (const fixture of cases) {
+      const prepared = source(
+        fixture.sourceKey,
+        fixture.chunkId,
+        `${fixture.term} body`,
+      );
+      prepared.chunks[0]!.chunk.heading_path = fixture.headingPath;
+      prepared.chunks[0]!.heading_text = fixture.headingPath.join(" ");
+      prepared.chunks[0]!.normalized_heading = normalizedFixtureExact(
+        prepared.chunks[0]!.heading_text,
+      );
+      index.replaceSource(prepared);
+
+      expect(index.search(anyPlan(fixture.term), 20)).toEqual([
+        expect.objectContaining({
+          chunk_id: fixture.chunkId,
+          heading_path: fixture.expectedPath,
+        }),
+      ]);
+    }
+
+    const image = index.exportImage(sqlite);
+    const durable = deserialize(sqlite, image);
+    try {
+      for (const fixture of cases) {
+        expect(durable.selectValue(
+          "SELECT heading_path_json FROM chunks WHERE source_key = ?",
+          [fixture.sourceKey],
+        )).toBe(JSON.stringify(fixture.headingPath));
+      }
+    } finally {
+      durable.close();
+    }
+
+    const restored = openRestoredFts5Generation(sqlite, image, cases.length);
+    try {
+      for (const fixture of cases) {
+        expect(restored.search(anyPlan(fixture.term), 20)).toEqual([
+          expect.objectContaining({
+            chunk_id: fixture.chunkId,
+            heading_path: fixture.expectedPath,
+          }),
+        ]);
+      }
+    } finally {
+      restored.close();
+    }
+  });
+
   it("ranks Excel formula text by the same text-evidence rules as every format", () => {
     const primary = formatted(
       "primary",
@@ -2982,6 +3070,9 @@ describe("Fts5GenerationIndex", () => {
   it.each([
     ["malformed heading JSON", (db: SQLiteDatabase) => {
       db.exec("UPDATE chunks SET heading_path_json = 'not-json'");
+    }],
+    ["non-string heading component", (db: SQLiteDatabase) => {
+      db.exec("UPDATE chunks SET heading_path_json = '[\"Heading\",42]'");
     }],
     ["property JSON disagreeing with its typed projection", (db: SQLiteDatabase) => {
       db.exec("UPDATE source_properties SET value_json = '42' WHERE property_name = 'title'");

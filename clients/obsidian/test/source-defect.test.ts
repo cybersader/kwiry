@@ -496,11 +496,26 @@ describe("no count ceiling is enforced anywhere", () => {
     }
   });
 
-  it("still rejects a non-string element, which does indicate corruption", () => {
+  it.each([
+    ["one long heading component", ["h".repeat(1_025)]],
+    ["a deep heading path", Array.from({ length: 65 }, (_, index) => `h${index}`)],
+  ])("accepts %s as structurally valid non-HTML source data", (_name, headingPath) => {
     expect(sourcePreparationDefect({
       ...VALID,
       kind: "indexed",
-      chunks: [chunkWith({ links_out: ["ok", 42] })],
+      coverage: "indexed-complete",
+      chunks: [chunkWith({ heading_path: headingPath })],
+    })).toBeNull();
+  });
+
+  it.each([
+    ["links", { links_out: ["ok", 42] }],
+    ["headings", { heading_path: ["ok", 42] }],
+  ])("still rejects a non-string element in %s", (_name, over) => {
+    expect(sourcePreparationDefect({
+      ...VALID,
+      kind: "indexed",
+      chunks: [chunkWith(over)],
     })).toBe("chunks_contents");
   });
 });

@@ -1118,6 +1118,23 @@ describe("Worker protocol", () => {
 
     expect(isWorkerResponse(response({ generation: "g1", hits: [hit] }))).toBe(true);
     expect(isWorkerResponse(response({ generation: "g1", hits: [] }))).toBe(true);
+    const boundedHeadingPath = Array.from({ length: 64 }, (_, index) =>
+      index === 63 ? "h".repeat(1_024) : `h${index}`);
+    expect(isWorkerResponse(response({
+      generation: "g1",
+      hits: [{ ...hit, heading_path: boundedHeadingPath }],
+    }))).toBe(true);
+    for (const headingPath of [
+      Array.from({ length: 65 }, (_, index) => `h${index}`),
+      ["h".repeat(1_025)],
+      [""],
+      ["Heading", 42],
+    ]) {
+      expect(isWorkerResponse(response({
+        generation: "g1",
+        hits: [{ ...hit, heading_path: headingPath }],
+      }))).toBe(false);
+    }
     expect(isWorkerResponse({
       ...response({ generation: "g1", hits: [hit] }),
       result: {
