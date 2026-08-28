@@ -184,7 +184,7 @@ export class KwirySettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Diagnostic report")
       .setDesc(
-        "Copy a sanitized summary capped at 64 KiB, export the full sanitized report through a system dialog outside the vault, or clear the in-memory log.",
+        "Copy a sanitized summary capped at 64 KiB, or export the full sanitized report. When desktop file export is unavailable, full export copies at most 16 MiB to the clipboard; paste it into a text file outside the vault and clear the clipboard when finished.",
       )
       .addButton((button) =>
         button

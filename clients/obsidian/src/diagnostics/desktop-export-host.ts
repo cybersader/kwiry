@@ -8,16 +8,14 @@ import { randomBytes } from "crypto";
 import * as fsPromises from "fs/promises";
 import * as path from "path";
 
-const FILE_MODE = 0o600;
-const MAX_EXPORT_BYTES = 16 * 1_024 * 1_024;
+import {
+  DIAGNOSTIC_EXPORT_MAX_BYTES,
+  type DiagnosticsExportResult,
+} from "./export-contract";
 
-export type DesktopDiagnosticsExportResult =
-  | { readonly kind: "saved" }
-  | { readonly kind: "cancelled" }
-  | { readonly kind: "inside_vault" }
-  | { readonly kind: "unsafe_destination" }
-  | { readonly kind: "unavailable" }
-  | { readonly kind: "write_failed" };
+const FILE_MODE = 0o600;
+
+export type DesktopDiagnosticsExportResult = DiagnosticsExportResult;
 
 export interface DesktopDiagnosticsExportRequest {
   readonly vaultRoot: string;
@@ -25,6 +23,7 @@ export interface DesktopDiagnosticsExportRequest {
 }
 
 export interface DesktopDiagnosticsExportHost {
+  isAvailable(): boolean;
   save(request: DesktopDiagnosticsExportRequest): Promise<DesktopDiagnosticsExportResult>;
 }
 
@@ -97,6 +96,7 @@ export function createDesktopDiagnosticsExportHost(
   dependencies: DesktopDiagnosticsExportDependencies,
 ): DesktopDiagnosticsExportHost {
   return {
+    isAvailable: () => true,
     save: (request) => saveDiagnosticsExport(request, dependencies),
   };
 }
@@ -237,7 +237,7 @@ async function saveDiagnosticsExport(
     for await (const chunk of request.chunks) {
       if (!(chunk instanceof Uint8Array)) throw new TypeError("invalid diagnostic export chunk");
       totalBytes += chunk.byteLength;
-      if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_EXPORT_BYTES) {
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > DIAGNOSTIC_EXPORT_MAX_BYTES) {
         throw new RangeError("diagnostic export exceeds byte limit");
       }
       let offset = 0;
@@ -374,6 +374,7 @@ function loadElectronRemote(): DesktopElectronRemote | null {
 
 function unavailableHost(): DesktopDiagnosticsExportHost {
   return {
+    isAvailable: () => false,
     save: async () => ({ kind: "unavailable" }),
   };
 }
