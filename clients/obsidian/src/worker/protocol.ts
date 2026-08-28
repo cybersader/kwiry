@@ -1588,6 +1588,12 @@ function isWorkerCandidateWindow(value: unknown): value is WorkerCandidateWindow
     && value.candidate_count <= value.candidate_limit;
 }
 
+export function isPublicHeadingPath(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length <= 64
+    && value.every((heading) => isBoundedString(heading, 1_024));
+}
+
 function isSearchHit(value: unknown): value is WorkerSearchHit {
   return isRecord(value)
     && hasExactKeys(value, [
@@ -1609,9 +1615,7 @@ function isSearchHit(value: unknown): value is WorkerSearchHit {
     && (value.coverage === "indexed-complete" || value.coverage === "indexed-partial")
     && (value.locator === null || isSourceLocator(value.locator))
     && locatorMatchesFormat(value.locator as SourceLocator | null, value.format)
-    && Array.isArray(value.heading_path)
-    && value.heading_path.length <= 64
-    && value.heading_path.every((heading) => isBoundedString(heading, 1_024))
+    && isPublicHeadingPath(value.heading_path)
     && typeof value.score === "number"
     && Number.isFinite(value.score)
     // Excerpts are hydrated only after final hit selection from the stored

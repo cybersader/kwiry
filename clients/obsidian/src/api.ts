@@ -8,6 +8,7 @@
 
 import { normalizeDaemonBaseUrl, normalizeDaemonToken } from "./credentials";
 import { SOURCE_FORMATS, type SourceFormat as PluginSourceFormat } from "./source-formats";
+import { isPublicHeadingPath } from "./worker/protocol";
 
 export type SearchMode = "lexical" | "semantic" | "hybrid";
 export type SearchPublicField = "name" | "filename" | "title" | "alias" | "heading" | "tag" | "body";
@@ -342,8 +343,7 @@ function parseSearchHit(value: unknown): SearchHit {
     || !isSourceLocator(value.locator)
     || !locatorMatchesFormat(value.locator, value.format)
     || !Array.isArray(value.heading_path)
-    || value.heading_path.length > 64
-    || !value.heading_path.every((heading) => isBoundedString(heading, MAX_SHORT_TEXT_CHARACTERS))
+    || !value.heading_path.every((heading) => typeof heading === "string")
     || typeof value.score !== "number"
     || !Number.isFinite(value.score)
     || !isBoundedString(value.excerpt, MAX_EXCERPT_CHARACTERS, true)
@@ -357,7 +357,7 @@ function parseSearchHit(value: unknown): SearchHit {
     format: value.format,
     coverage: value.coverage,
     locator: value.locator,
-    heading_path: value.heading_path,
+    heading_path: isPublicHeadingPath(value.heading_path) ? value.heading_path : [],
     score: value.score,
     excerpt: value.excerpt,
     frontmatter: parseFrontmatter(value.frontmatter, value.format),

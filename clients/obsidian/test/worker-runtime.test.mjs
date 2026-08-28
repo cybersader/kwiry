@@ -1626,6 +1626,9 @@ describe("restored cache generation", () => {
     ["invalid source inventory", (db) => db.exec("UPDATE sources SET content_hash = ''"), "cache_image_invalid"],
     ["per-source tally mismatch", (db) => db.exec("UPDATE sources SET chunk_count = chunk_count + 1"), "cache_image_invalid"],
     ["malformed heading JSON", (db) => db.exec("UPDATE chunks SET heading_path_json = 'not-json'"), "cache_image_invalid"],
+    ["non-string heading component", (db) => db.exec(
+      "UPDATE chunks SET heading_path_json = '[\"Heading\",42]'",
+    ), "cache_image_invalid"],
     ["negative property FTS rowid", (db) => {
       db.exec(
         "INSERT INTO source_property_text_fts(rowid, string_value) VALUES(-1, 'negative')",
@@ -2647,6 +2650,68 @@ describe("exact generated production Worker", () => {
       ]);
     } finally {
       await worker.terminate();
+    }
+  }, 120_000);
+
+  it("bounds unrepresentable heading navigation after fresh and restored production search", async () => {
+    const heading = "h".repeat(1_025);
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    let envelope;
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "heading-bounds",
+        path: "neutral-heading.md",
+        text: `# ${heading}\ncedarlight body`,
+      });
+      await expect(request(worker, {
+        id: 5, operation: "search", query: "cedarlight", limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          generation: "heading-bounds",
+          hits: [{ path: "neutral-heading.md", heading_path: [] }],
+        },
+      });
+      const exported = await request(worker, {
+        id: 6,
+        operation: "export_generation",
+        generation: "heading-bounds",
+        cache_identity: CACHE_IDENTITY,
+      });
+      expect(exported).toMatchObject({ ok: true });
+      envelope = exported.result;
+    } finally {
+      await worker.terminate();
+    }
+
+    const durable = await openExportedImage(envelope.bytes);
+    try {
+      expect(durable.selectValue("SELECT heading_path_json FROM chunks LIMIT 1"))
+        .toBe(JSON.stringify([heading]));
+    } finally {
+      durable.close();
+    }
+
+    const restoredWorker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    try {
+      await request(restoredWorker, {
+        id: 1,
+        operation: "initialize",
+        vault_id: "active-vault",
+      });
+      await expect(request(restoredWorker, restoreFromExport(envelope, { id: 2 })))
+        .resolves.toMatchObject({ ok: true });
+      await expect(request(restoredWorker, {
+        id: 3, operation: "search", query: "cedarlight", limit: 20,
+      })).resolves.toMatchObject({
+        ok: true,
+        result: {
+          generation: "heading-bounds",
+          hits: [{ path: "neutral-heading.md", heading_path: [] }],
+        },
+      });
+    } finally {
+      await restoredWorker.terminate();
     }
   }, 120_000);
 

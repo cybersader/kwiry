@@ -12,6 +12,7 @@ import {
   emptySourceFormatCounts,
   emptySourceFormatTally,
   isExtractionCoverage,
+  isPublicHeadingPath,
   isSourceFormat,
   isSourceLocator,
   isWorkerLexicalExecution,
@@ -1653,7 +1654,7 @@ export class Fts5GenerationIndex {
         chunk_id: hit.chunk_id,
         vault_id: hit.vault_id,
         path: hit.path,
-        heading_path: hit.heading_path,
+        heading_path: isPublicHeadingPath(hit.heading_path) ? hit.heading_path : [],
         score: hit.score,
         frontmatter: hit.frontmatter,
         ...stored,
@@ -3633,8 +3634,7 @@ function parseHeadingPathJson(value: unknown): string[] | null {
     return null;
   }
   return Array.isArray(parsed)
-    && parsed.length <= 64
-    && parsed.every((heading) => isBoundedString(heading, 1_024))
+    && parsed.every((heading) => typeof heading === "string")
     ? parsed
     : null;
 }
