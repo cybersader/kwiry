@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "./exact-identifier-token";
+import { LEXICAL_CANDIDATE_LIMIT, MAX_LEXICAL_LANE_COUNT } from "./protocol";
 import type { EvidenceProbePlan, ExecutionPlan, StagePlan } from "./rust-adapter";
 
 export const FTS5_PROFILE_ID = "lexical-v2" as const;
@@ -270,8 +271,8 @@ LIMIT ?
 export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
   if (plan.schema_version !== 7
     || (plan.profile_id !== FTS5_PROFILE_ID && plan.profile_id !== FTS5_COMPAT_PROFILE_ID)
-    || plan.max_total_candidates !== 512
-    || plan.stages.length > 42
+    || plan.max_total_candidates !== LEXICAL_CANDIDATE_LIMIT
+    || plan.stages.length > MAX_LEXICAL_LANE_COUNT
     || plan.stages.some((stage, index) => stage.ordinal !== index)) {
     rejectPlan();
   }
@@ -406,7 +407,7 @@ function requireIdentifiers(value: unknown): string[] {
 }
 
 function isLimit(value: number): boolean {
-  return Number.isSafeInteger(value) && value >= 1 && value <= 512;
+  return Number.isSafeInteger(value) && value >= 1 && value <= LEXICAL_CANDIDATE_LIMIT;
 }
 
 function isOpaqueValue(value: unknown, maximum: number): value is string {

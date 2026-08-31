@@ -8,7 +8,10 @@ import {
   INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
   INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
   INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+  LEXICAL_CANDIDATE_LIMIT,
   MAX_EXPORT_BLOB_BYTES,
+  MAX_LEXICAL_LANE_COUNT,
+  MAX_LEXICAL_OBSERVATION_COUNT,
   MAX_QUERY_CHARACTERS,
   MAX_RECONCILIATION_SOURCES,
   MAX_SOURCE_BYTES,
@@ -20,6 +23,7 @@ import {
   emptySourceFormatCounts,
   emptySourceFormatTally,
   type SourceInput,
+  isWorkerLexicalExecution,
   isWorkerResponse,
   parseWorkerRequest,
 } from "../src/worker/protocol";
@@ -1222,6 +1226,49 @@ describe("Worker protocol", () => {
       path: "private.md",
     };
     expect(isWorkerResponse(privateGeneration)).toBe(false);
+  });
+
+  it("bounds lexical observations independently from retained candidates", () => {
+    const executionAt = (observationCount: number) => {
+      const discarded = observationCount - LEXICAL_CANDIDATE_LIMIT;
+      const aggregate = (key: "lexical_all_terms_v3" | "cross_field") => ({
+        key,
+        planned_lane_count: MAX_LEXICAL_LANE_COUNT,
+        executed_lane_count: MAX_LEXICAL_LANE_COUNT,
+        zero_observation_lane_count: 0,
+        saturated_lane_count: MAX_LEXICAL_LANE_COUNT,
+        observation_count: observationCount,
+        added_unique_count: LEXICAL_CANDIDATE_LIMIT,
+        duplicate_observation_count: 0,
+        collection_cap_discarded_observation_count: discarded,
+      });
+      return {
+        schema_version: 1,
+        disposition: "ready",
+        evidence_probe_count: 0,
+        matched_evidence_probe_count: 0,
+        prefix_probe_count: 0,
+        prefix_expansion_count: 0,
+        planned_lane_count: MAX_LEXICAL_LANE_COUNT,
+        executed_lane_count: MAX_LEXICAL_LANE_COUNT,
+        zero_observation_lane_count: 0,
+        saturated_lane_count: MAX_LEXICAL_LANE_COUNT,
+        observation_count: observationCount,
+        duplicate_observation_count: 0,
+        collection_cap_discarded_observation_count: discarded,
+        unique_candidate_count: LEXICAL_CANDIDATE_LIMIT,
+        returned_count: 100,
+        result_limit: 100,
+        retained_candidate_truncation_count: LEXICAL_CANDIDATE_LIMIT - 100,
+        candidate_limit: LEXICAL_CANDIDATE_LIMIT,
+        unique_candidate_limit_reached: true,
+        lane_kinds: [aggregate("lexical_all_terms_v3")],
+        proof_fields: [aggregate("cross_field")],
+      };
+    };
+
+    expect(isWorkerLexicalExecution(executionAt(MAX_LEXICAL_OBSERVATION_COUNT))).toBe(true);
+    expect(isWorkerLexicalExecution(executionAt(MAX_LEXICAL_OBSERVATION_COUNT + 1))).toBe(false);
   });
 
   it("requires closed truthful candidate-window facts on every search result", () => {

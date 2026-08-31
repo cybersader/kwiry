@@ -11,6 +11,11 @@ export const MAX_BATCH_BYTES = 16 * 1024 * 1024;
 export const MAX_GENERATION_CHARACTERS = 128;
 export const MAX_QUERY_CHARACTERS = 4_096;
 export const MAX_SEARCH_HITS = 100;
+export const MAX_LEXICAL_LANE_COUNT = 42 as const;
+export const MAX_LEXICAL_CANDIDATES_PER_LANE = 256 as const;
+export const MAX_LEXICAL_OBSERVATION_COUNT =
+  MAX_LEXICAL_LANE_COUNT * MAX_LEXICAL_CANDIDATES_PER_LANE;
+export const LEXICAL_CANDIDATE_LIMIT = 512 as const;
 export const MAX_RECONCILIATION_SOURCES = 200_000;
 export const MAX_RECONCILIATION_PLAN_PATHS = MAX_RECONCILIATION_SOURCES * 2;
 export const SOURCE_QUARANTINE_WARNING_CODE = "source_rejected" as const;
@@ -496,7 +501,7 @@ export type CandidateWindowState = typeof CANDIDATE_WINDOW_STATES[number];
 export interface WorkerCandidateWindow {
   state: CandidateWindowState;
   candidate_count: number;
-  candidate_limit: 512;
+  candidate_limit: typeof LEXICAL_CANDIDATE_LIMIT;
 }
 
 export type WorkerQueryPublicField =
@@ -571,7 +576,7 @@ export interface WorkerLexicalExecution {
   returned_count: number;
   result_limit: number;
   retained_candidate_truncation_count: number;
-  candidate_limit: 512;
+  candidate_limit: typeof LEXICAL_CANDIDATE_LIMIT;
   unique_candidate_limit_reached: boolean;
   lane_kinds: WorkerLexicalExecutionAggregate<WorkerLexicalLaneKind>[];
   proof_fields: WorkerLexicalExecutionAggregate<WorkerLexicalProofField>[];
@@ -1456,20 +1461,21 @@ export function isWorkerLexicalExecution(value: unknown): value is WorkerLexical
     || !boundedCount(value.matched_evidence_probe_count, value.evidence_probe_count)
     || !boundedCount(value.prefix_probe_count, 8)
     || !boundedCount(value.prefix_expansion_count, 128)
-    || !boundedCount(value.planned_lane_count, 42)
+    || !boundedCount(value.planned_lane_count, MAX_LEXICAL_LANE_COUNT)
     || !boundedCount(value.executed_lane_count, value.planned_lane_count)
     || !boundedCount(value.zero_observation_lane_count, value.executed_lane_count)
     || !boundedCount(value.saturated_lane_count, value.executed_lane_count)
-    || !boundedCount(value.observation_count, 42 * 256)
+    || !boundedCount(value.observation_count, MAX_LEXICAL_OBSERVATION_COUNT)
     || !boundedCount(value.duplicate_observation_count, value.observation_count)
     || !boundedCount(value.collection_cap_discarded_observation_count, value.observation_count)
-    || !boundedCount(value.unique_candidate_count, 512)
+    || !boundedCount(value.unique_candidate_count, LEXICAL_CANDIDATE_LIMIT)
     || !boundedCount(value.returned_count, MAX_SEARCH_HITS)
     || !boundedCount(value.result_limit, MAX_SEARCH_HITS) || value.result_limit < 1
-    || !boundedCount(value.retained_candidate_truncation_count, 512)
-    || value.candidate_limit !== 512
+    || !boundedCount(value.retained_candidate_truncation_count, LEXICAL_CANDIDATE_LIMIT)
+    || value.candidate_limit !== LEXICAL_CANDIDATE_LIMIT
     || typeof value.unique_candidate_limit_reached !== "boolean"
-    || value.unique_candidate_limit_reached !== (value.unique_candidate_count === 512)
+    || value.unique_candidate_limit_reached
+      !== (value.unique_candidate_count === LEXICAL_CANDIDATE_LIMIT)
     || value.returned_count > value.result_limit
     || value.unique_candidate_count !== value.returned_count + value.retained_candidate_truncation_count
     || value.observation_count !== value.unique_candidate_count
@@ -1510,12 +1516,12 @@ function isLexicalExecutionAggregates(
       || typeof aggregate.key !== "string"
       || !keys.includes(aggregate.key)
       || seen.has(aggregate.key)
-      || !boundedCount(aggregate.planned_lane_count, 42)
+      || !boundedCount(aggregate.planned_lane_count, MAX_LEXICAL_LANE_COUNT)
       || !boundedCount(aggregate.executed_lane_count, aggregate.planned_lane_count)
       || !boundedCount(aggregate.zero_observation_lane_count, aggregate.executed_lane_count)
       || !boundedCount(aggregate.saturated_lane_count, aggregate.executed_lane_count)
-      || !boundedCount(aggregate.observation_count, 42 * 256)
-      || !boundedCount(aggregate.added_unique_count, 512)
+      || !boundedCount(aggregate.observation_count, MAX_LEXICAL_OBSERVATION_COUNT)
+      || !boundedCount(aggregate.added_unique_count, LEXICAL_CANDIDATE_LIMIT)
       || !boundedCount(aggregate.duplicate_observation_count, aggregate.observation_count)
       || !boundedCount(
         aggregate.collection_cap_discarded_observation_count,
@@ -1584,7 +1590,7 @@ function isWorkerCandidateWindow(value: unknown): value is WorkerCandidateWindow
     && CANDIDATE_WINDOW_STATES.includes(value.state as CandidateWindowState)
     && isNonNegativeSafeInteger(value.candidate_count)
     && (value.state !== "candidate_limit_reached" || value.candidate_count > 0)
-    && value.candidate_limit === 512
+    && value.candidate_limit === LEXICAL_CANDIDATE_LIMIT
     && value.candidate_count <= value.candidate_limit;
 }
 
