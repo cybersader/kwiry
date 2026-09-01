@@ -20,7 +20,7 @@ export function renderStatusBarText(statusBar: HTMLElement, text: string): void 
   statusBar.appendText(text.slice(0, match.index));
   statusBar.createSpan({
     cls: "kwiry-status-bar-in-flight-count",
-    text: count,
+    text: count.padStart(2, "0"),
   });
   statusBar.appendText(` in flight${text.slice(match.index + match[0].length)}`);
 }

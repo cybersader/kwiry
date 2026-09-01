@@ -33,7 +33,7 @@ class FakeStatusBar {
 
 describe("renderStatusBarText", () => {
   it.each([
-    ["Kwiry: Reading 4/20 (20%) ·  4 in flight", "4"],
+    ["Kwiry: Reading 4/20 (20%) ·  4 in flight", "04"],
     ["Kwiry: Reading 8/20 (40%) · 16 in flight", "16"],
   ])("isolates the count in a fixed-width span: %s", (text, count) => {
     const statusBar = new FakeStatusBar();
