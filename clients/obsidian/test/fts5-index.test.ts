@@ -20,6 +20,9 @@ import {
 } from "../src/worker/fts5-index";
 import {
   CACHE_SCHEMA_VERSION,
+  LEXICAL_CANDIDATE_LIMIT,
+  MAX_LEXICAL_CANDIDATES_PER_LANE,
+  MAX_LEXICAL_OBSERVATION_COUNT,
   SOURCE_FORMATS,
   type PropertyBag,
   type SourceFormat,
@@ -1230,6 +1233,90 @@ describe("Fts5GenerationIndex", () => {
       candidate_count: 256,
       candidate_limit: 512,
     });
+  });
+
+  it("finishes a same-kind trace after observing beyond the retained-candidate ceiling", () => {
+    const lanes = [
+      { term: "lanternstone", count: MAX_LEXICAL_CANDIDATES_PER_LANE },
+      { term: "meadowglass", count: MAX_LEXICAL_CANDIDATES_PER_LANE },
+      { term: "riverchalk", count: 1 },
+    ];
+    const sources = lanes.flatMap(({ term, count }, laneOrdinal) =>
+      Array.from({ length: count }, (_, sourceOrdinal) => {
+        const suffix = `${laneOrdinal}-${String(sourceOrdinal).padStart(3, "0")}`;
+        return sourceAt(
+          `trace-observation-${suffix}`,
+          `trace-observation-${suffix}.md`,
+          `chunk-trace-observation-${suffix}`,
+          term,
+        );
+      }));
+    index.applySourceChanges(sources, []);
+    const trace = index.beginInternalLexicalTrace(() => 0);
+
+    const result = index.searchWithCandidateWindow({
+      schema_version: 7,
+      profile_id: "lexical-v2",
+      disposition: "ready",
+      max_total_candidates: LEXICAL_CANDIDATE_LIMIT,
+      stages: lanes.map(({ term }, ordinal) => ({
+        ordinal,
+        plan_id: "lexical_all_terms_v3" as const,
+        proof_field: "cross_field" as const,
+        proof_kind: "cross_field_all_terms" as const,
+        match_value: `"${term}"`,
+        max_candidates: MAX_LEXICAL_CANDIDATES_PER_LANE,
+      })),
+    }, 100, trace);
+    const summary = index.finishInternalLexicalTrace(trace);
+
+    expect(result.hits).toHaveLength(100);
+    expect(result.candidate_window).toEqual({
+      state: "candidate_limit_reached",
+      candidate_count: 512,
+      candidate_limit: 512,
+    });
+    expect(summary).toMatchObject({
+      observation_count: 513,
+      unique_candidate_count: 512,
+      collection_cap_discarded_observation_count: 1,
+      returned_count: 100,
+      retained_candidate_truncation_count: 412,
+      candidate_count: 512,
+      result_count: 100,
+      stage_count: 1,
+      stages: [{
+        kind: "lexical_all_terms_v3",
+        input_count: 512,
+        output_count: 512,
+        candidate_count: 513,
+      }],
+    });
+    expect(isInternalLexicalTrace(summary)).toBe(true);
+  });
+
+  it("elides invalid private stages without changing valid public execution", () => {
+    index.replaceSource(source("trace-fallback", "chunk-trace-fallback", "stagefallback"));
+    const trace = index.beginInternalLexicalTrace(() => 0);
+    const hits = index.search(anyPlan("stagefallback"), 20, trace);
+    const firstStage = trace.stages[0];
+    expect(firstStage).toBeDefined();
+    firstStage!.candidate_count = MAX_LEXICAL_OBSERVATION_COUNT + 1;
+
+    const summary = index.finishInternalLexicalTrace(trace);
+
+    expect(hits).toHaveLength(1);
+    expect(summary).toMatchObject({
+      observation_count: 1,
+      unique_candidate_count: 1,
+      returned_count: 1,
+      candidate_count: 1,
+      result_count: 1,
+      stage_count: 0,
+      stages: [],
+    });
+    expect(isInternalLexicalTrace(summary)).toBe(true);
+    expect(index.latestInternalLexicalTrace()).toEqual(summary);
   });
 
   it("keeps exact filename and title candidates in the same metadata score tier at cutoff", () => {

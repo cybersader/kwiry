@@ -35,6 +35,14 @@ describe("search status rail CSS", () => {
     expect(rule(".kwiry-query-help")).toContain("background: transparent");
   });
 
+  it("reserves two rendered digits for the status-bar in-flight count", () => {
+    const count = rule(".kwiry-status-bar-in-flight-count");
+    expect(count).toContain("display: inline-block");
+    expect(count).toContain("min-width: 2ch");
+    expect(count).toContain("font-variant-numeric: tabular-nums");
+    expect(count).toContain("text-align: right");
+  });
+
   it("reserves two status rows instead of changing layout height", () => {
     const rail = rule(".kwiry-status-rail");
     expect(rail).toContain("display: grid");

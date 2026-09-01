@@ -47,6 +47,7 @@ import { createPrivateTools, type PrivateTools } from "./internal/private-tools"
 import { LatestRequestEpoch } from "./latest-request-epoch";
 import { KwirySearchModal } from "./search-modal";
 import { corePolicyFingerprint, enabledSourceFormatList } from "./source-formats";
+import { renderStatusBarText } from "./status-bar-render";
 import { formatStatus } from "./status-format";
 import { SOURCE_FORMATS } from "./worker/protocol";
 import {
@@ -170,7 +171,7 @@ export default class KwiryPlugin extends Plugin {
         }
 
         this.statusBar = this.addStatusBarItem();
-        this.statusBar.setText("kwiry: starting…");
+        this.setStatusBarText("kwiry: starting…");
         this.registerInterval(
           window.setInterval(() => void this.refreshStatus(), STATUS_POLL_MS),
         );
@@ -400,6 +401,11 @@ export default class KwiryPlugin extends Plugin {
     }, () => undefined);
   }
 
+  private setStatusBarText(text: string): void {
+    if (this.statusBar === null) return;
+    renderStatusBarText(this.statusBar, text);
+  }
+
   async activateBackendProfile(): Promise<void> {
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = ++this.activationEpoch;
@@ -409,7 +415,7 @@ export default class KwiryPlugin extends Plugin {
     this.statusUnsubscribe?.();
     this.statusUnsubscribe = null;
     this.activeBackendIdentity = null;
-    this.statusBar?.setText("kwiry: starting…");
+    this.setStatusBarText("kwiry: starting…");
 
     try {
       if (profile === "in_plugin") {
@@ -443,7 +449,7 @@ export default class KwiryPlugin extends Plugin {
         });
         if (this.isCurrent(pluginEpoch, activationEpoch)) {
           this.startupTimeline?.finish("failed", "activation_failed");
-          this.statusBar?.setText("kwiry: backend unavailable");
+          this.setStatusBarText("kwiry: backend unavailable");
         }
       }
     }
@@ -467,12 +473,12 @@ export default class KwiryPlugin extends Plugin {
         || !this.statusRefresh.isCurrent(refreshEpoch)
         || this.activeBackendIdentity?.instanceId !== instanceId) return;
       this.recordBackendStatus(status, pluginEpoch, activationEpoch);
-      this.statusBar.setText(formatStatus(status));
+      this.setStatusBarText(formatStatus(status));
     } catch (error) {
       this.recordCaughtFailure("ui", "poll", error, { pluginEpoch, activationEpoch });
       if (this.isCurrent(pluginEpoch, activationEpoch)
         && this.statusRefresh.isCurrent(refreshEpoch)) {
-        this.statusBar.setText("kwiry: backend unavailable");
+        this.setStatusBarText("kwiry: backend unavailable");
       }
     }
   }
@@ -530,7 +536,7 @@ export default class KwiryPlugin extends Plugin {
         || this.activeBackendIdentity?.instanceId !== backend.identity.instanceId) return;
       this.statusRefresh.invalidate();
       this.recordBackendStatus(status, pluginEpoch, activationEpoch);
-      this.statusBar?.setText(formatStatus(status));
+      this.setStatusBarText(formatStatus(status));
     }) ?? null;
   }
 

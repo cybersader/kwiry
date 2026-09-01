@@ -167,7 +167,14 @@ function stubSource(path: string): string {
           addSettingTab() {}
           addCommand() {}
           addRibbonIcon() {}
-          addStatusBarItem() { return { setText() {} }; }
+          addStatusBarItem() {
+            return {
+              setText() {},
+              empty() {},
+              appendText() {},
+              createSpan() { return {}; },
+            };
+          }
           registerInterval() {}
         }
         export class Notice {

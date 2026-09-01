@@ -11,6 +11,7 @@ import { buildPlugin } from "../esbuild.config.mjs";
 import { buildSyntheticXlsm } from "../scripts/webdriver-release-gate.mjs";
 import {
   CACHE_SCHEMA_VERSION,
+  MAX_LEXICAL_OBSERVATION_COUNT,
   SOURCE_FORMATS,
   WORKER_PROTOCOL_VERSION,
   isWorkerResponse,
@@ -3054,6 +3055,50 @@ describe("exact generated production Worker", () => {
         },
       });
       expect(JSON.stringify(rejected)).not.toMatch(/SELECT|secret_path|executionprobe/u);
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("keeps successful search results when only private trace stages are invalid", async () => {
+    const needle = "const finishedTrace = active.index.finishInternalLexicalTrace(trace);";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `if (query === "stageguard" && trace.stages[0]) trace.stages[0].candidate_count = ${MAX_LEXICAL_OBSERVATION_COUNT + 1};\n    ${needle}`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "trace-fallback",
+        path: "trace-fallback.md",
+        text: "stageguard",
+      });
+      const response = await request(worker, {
+        id: 5,
+        operation: "search",
+        query: "stageguard",
+        limit: 20,
+      });
+
+      expect(response).toMatchObject({
+        ok: true,
+        result: {
+          hits: [{ path: "trace-fallback.md" }],
+          candidate_window: {
+            state: "exhausted",
+            candidate_count: 1,
+            candidate_limit: 512,
+          },
+          lexical_execution: {
+            observation_count: 2,
+            duplicate_observation_count: 1,
+            unique_candidate_count: 1,
+            returned_count: 1,
+          },
+        },
+      });
+      expect(isWorkerResponse(response)).toBe(true);
     } finally {
       await worker.terminate();
     }

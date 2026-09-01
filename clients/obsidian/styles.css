@@ -1,5 +1,12 @@
 /* Kwiry Search — GPL-3.0-only */
 
+.kwiry-status-bar-in-flight-count {
+  display: inline-block;
+  min-width: 2ch;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .kwiry-context-bar {
   display: flex;
   flex-wrap: wrap;

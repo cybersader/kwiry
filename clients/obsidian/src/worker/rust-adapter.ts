@@ -19,6 +19,9 @@ import {
 } from "../source-formats";
 import {
   EXTRACTION_PROFILES,
+  LEXICAL_CANDIDATE_LIMIT,
+  MAX_LEXICAL_CANDIDATES_PER_LANE,
+  MAX_LEXICAL_LANE_COUNT,
   SOURCE_FORMATS,
 } from "./protocol";
 import type {
@@ -213,8 +216,8 @@ export interface LexicalQueryPlan {
     max_prefix_terms: 8;
     max_prefix_expansions_per_term: 16;
     max_prefix_expansion_scan: 256;
-    max_candidates_per_stage: 256;
-    max_total_candidates: 512;
+    max_candidates_per_stage: typeof MAX_LEXICAL_CANDIDATES_PER_LANE;
+    max_total_candidates: typeof LEXICAL_CANDIDATE_LIMIT;
   };
   typo_stage: "disabled";
   support_probes: Array<{
@@ -305,7 +308,7 @@ export interface ExecutionPlan {
   profile_id: "lexical-v1" | "lexical-v2";
   emphasis?: QueryPublicField;
   disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
-  max_total_candidates: 512;
+  max_total_candidates: typeof LEXICAL_CANDIDATE_LIMIT;
   stages: StagePlan[];
 }
 
@@ -722,8 +725,8 @@ const QUERY_BOUNDS = Object.freeze({
   max_prefix_terms: 8,
   max_prefix_expansions_per_term: 16,
   max_prefix_expansion_scan: 256,
-  max_candidates_per_stage: 256,
-  max_total_candidates: 512,
+  max_candidates_per_stage: MAX_LEXICAL_CANDIDATES_PER_LANE,
+  max_total_candidates: LEXICAL_CANDIDATE_LIMIT,
 });
 
 function isPreparedQuery(value: unknown): value is PreparedQuery {
@@ -1006,7 +1009,7 @@ function isEvidenceStages(
       || !isTermIndexes(stage.required_term_indexes, termCount, 128)
       || !isTermIndexes(stage.prefix_term_indexes, termCount, 8)
       || !isPositiveSafeInteger(stage.max_candidates)
-      || stage.max_candidates > 256) {
+      || stage.max_candidates > MAX_LEXICAL_CANDIDATES_PER_LANE) {
       return false;
     }
     previousKind = kinds.indexOf(String(stage.kind));
@@ -1118,9 +1121,9 @@ function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is 
     || value.emphasis !== queryPlan.emphasis
     || (value.disposition !== "explicit_bypass" && value.disposition !== "ready"
       && value.disposition !== "empty_no_evidence")
-    || value.max_total_candidates !== 512
+    || value.max_total_candidates !== LEXICAL_CANDIDATE_LIMIT
     || !Array.isArray(value.stages)
-    || value.stages.length > 42
+    || value.stages.length > MAX_LEXICAL_LANE_COUNT
     || !value.stages.every((stage, index) => isStagePlan(stage, index))) {
     return false;
   }
@@ -1166,11 +1169,11 @@ function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
   }
   if (!matchIds.includes(String(value.plan_id)) || value.exact_value !== undefined) return false;
   if (value.plan_id === "lexical_explicit_v3") {
-    return value.max_candidates === 512
+    return value.max_candidates === LEXICAL_CANDIDATE_LIMIT
       && requiredIdentifiers.length === 0
       && isBoundedString(value.match_value, 16_384);
   }
-  if (value.max_candidates > 256) return false;
+  if (value.max_candidates > MAX_LEXICAL_CANDIDATES_PER_LANE) return false;
   return isBoundedString(value.match_value, 16_384) || requiredIdentifiers.length > 0;
 }
 

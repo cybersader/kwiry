@@ -6,7 +6,9 @@ import { openPlainBlockVfs, type BlockVfsHandle } from "./block-vfs";
 import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "./exact-identifier-token";
 import {
   CACHE_SCHEMA_VERSION,
+  LEXICAL_CANDIDATE_LIMIT,
   MAX_EXPORT_BLOB_BYTES,
+  MAX_LEXICAL_OBSERVATION_COUNT,
   MAX_RECONCILIATION_SOURCES,
   SOURCE_FORMATS,
   emptySourceFormatCounts,
@@ -108,7 +110,7 @@ export interface InternalLexicalTraceHandle {
   resultCount: number;
   resultLimit: number;
   retainedCandidateTruncationCount: number;
-  candidateLimit: 512;
+  candidateLimit: typeof LEXICAL_CANDIDATE_LIMIT;
   uniqueCandidateLimitReached: boolean;
   laneKinds: Map<WorkerLexicalLaneKind, MutableLexicalExecutionAggregate>;
   proofFields: Map<WorkerLexicalProofField, MutableLexicalExecutionAggregate>;
@@ -1224,7 +1226,7 @@ export class Fts5GenerationIndex {
       resultCount: 0,
       resultLimit: 1,
       retainedCandidateTruncationCount: 0,
-      candidateLimit: 512,
+      candidateLimit: LEXICAL_CANDIDATE_LIMIT,
       uniqueCandidateLimitReached: false,
       laneKinds: new Map(),
       proofFields: new Map(),
@@ -1267,9 +1269,22 @@ export class Fts5GenerationIndex {
       result_count: handle.resultCount,
       stages: handle.stages.map((stage) => ({ ...stage })),
     };
-    if (!isInternalLexicalTrace(trace)) throw new Error("internal lexical trace is invalid");
-    this.latestLexicalTrace = trace;
-    return trace;
+    const execution = projectInternalLexicalTrace(trace);
+    if (!isWorkerLexicalExecution(execution)) {
+      throw new Error("internal lexical execution is invalid");
+    }
+    const finishedTrace = isInternalLexicalTrace(trace as unknown)
+      ? trace
+      : {
+          ...trace,
+          optional_duration_ms: Math.min(trace.optional_duration_ms, trace.total_duration_ms),
+          stage_count: 0,
+          candidate_count: execution.unique_candidate_count,
+          result_count: execution.returned_count,
+          stages: [],
+        };
+    this.latestLexicalTrace = finishedTrace;
+    return finishedTrace;
   }
 
   latestInternalLexicalTrace(): InternalLexicalTrace | null {
@@ -1402,7 +1417,7 @@ export class Fts5GenerationIndex {
     this.requireOpen();
     requireActiveTrace(trace);
     requireExecutionPlanIdentity(plan);
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 512) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > LEXICAL_CANDIDATE_LIMIT) {
       throw new RangeError("invalid FTS5 search limit");
     }
     if (trace !== undefined) {
@@ -3594,9 +3609,9 @@ function isInternalLexicalTraceStage(value: unknown): value is InternalLexicalTr
     && typeof stage.mandatory === "boolean"
     && stage.status === "completed"
     && isTraceNumber(stage.duration_ms)
-    && isTraceCount(stage.input_count, 512)
-    && isTraceCount(stage.output_count, 512)
-    && isTraceCount(stage.candidate_count, 512);
+    && isTraceCount(stage.input_count, LEXICAL_CANDIDATE_LIMIT)
+    && isTraceCount(stage.output_count, LEXICAL_CANDIDATE_LIMIT)
+    && isTraceCount(stage.candidate_count, MAX_LEXICAL_OBSERVATION_COUNT);
 }
 
 function isTraceNumber(value: unknown): value is number {
