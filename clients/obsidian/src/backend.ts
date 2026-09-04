@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import type {
+  LexicalMatchQuality,
   SearchMode,
   SearchQueryPolicyFacts,
   SearchRequest,
@@ -127,6 +128,10 @@ export type BackendDiagnosticEvidence<T> =
   | { availability: "available"; value: T }
   | { availability: "unavailable" | "not_applicable" };
 
+export type LexicalMatchQualityFacts =
+  | { availability: "available"; value: LexicalMatchQuality }
+  | { availability: "unavailable" | "not_applicable" };
+
 export interface BackendSourceGenerationFacts extends WorkerSourceGeneration {
   enabledSourceFormats: readonly SourceFormat[] | null;
 }
@@ -141,6 +146,7 @@ export interface SearchExecution {
   requestedMode: SearchMode;
   effectiveMode: SearchMode;
   queryPolicy: SearchQueryPolicyFacts | null;
+  lexicalMatchQuality: LexicalMatchQualityFacts;
   generation: string | null;
   candidateWindow: CandidateWindowFacts;
   diagnostics: SearchDiagnosticFacts;

@@ -80,6 +80,8 @@ See [`design/obsidian-lite.md`](design/obsidian-lite.md) and [`roadmap/desktop-o
 
 Lexical search matches terms, phrases, headings, filenames, aliases, and technical identifiers. Native/OpenClast use Tantivy BM25. The published in-plugin profile uses FTS5 BM25 over project-owned prepared chunks and metadata; raw scores and exact total ordering are not expected to match across engines.
 
+Shared Rust owns the bounded evidence plan and final scorecard across both engines. After all stronger lanes return no candidates, an ordinary fully supported query with at least four useful optional terms may make one bounded exploratory partial-coverage pass: required identifier anchors stay mandatory, every useful optional term is offered as an alternative, and at least one of them must match, rather than enumerating term combinations or sampling a fixed subset. Results selected from that pass are visibly labeled as best-attempt partial matches; mixed standard/partial result windows are labeled separately. Explicit syntax, required identifier anchors, authorization, mode availability, and existing candidate ceilings are not relaxed.
+
 ### Semantic
 
 Semantic search embeds the query and passages locally, then retrieves conceptually similar chunks. It helps when the searcher remembers the idea but not the source's exact vocabulary—for example, relating a plain-language internal-audit question to material about the IIA Three Lines Model.

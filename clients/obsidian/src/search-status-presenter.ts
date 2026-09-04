@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import type { BackendStatus, CandidateWindowFacts } from "./backend";
+import type {
+  BackendStatus,
+  CandidateWindowFacts,
+  LexicalMatchQualityFacts,
+} from "./backend";
 import {
   emptyStateMessage,
   searchErrorEmptyState,
@@ -18,6 +22,7 @@ export type QueryStatusFacts =
     displayedSourceCount: number;
     omittedObservedSourceCount: number;
     candidateWindow: CandidateWindowFacts;
+    lexicalMatchQuality: LexicalMatchQualityFacts;
   }
   | { phase: "error"; code: string; safeMessage: string };
 
@@ -81,9 +86,10 @@ export function presentQueryStatus(facts: QueryStatusFacts): QueryStatusPresenta
         ? `${countedNoun(facts.omittedObservedSourceCount, "observed source")} `
           + "omitted by the source-row limit; "
         : "";
+      const matchQualityPrefix = lexicalMatchQualityPrefix(facts.lexicalMatchQuality);
       return {
         state: "results",
-        text: `${sectionText} — ${sourceDisplayText}${omittedSourceText}${windowText}`,
+        text: `${matchQualityPrefix}${sectionText} — ${sourceDisplayText}${omittedSourceText}${windowText}`,
         busy: false,
       };
     }
@@ -104,6 +110,13 @@ export function presentBackgroundIndex(status: BackendStatus): BackgroundIndexPr
     // `formatIndexProgress`, which is the one place it is written.
     text: `Index · ${text}`,
   };
+}
+
+function lexicalMatchQualityPrefix(facts: LexicalMatchQualityFacts): string {
+  if (facts.availability !== "available") return "";
+  if (facts.value === "partial_only") return "Best-attempt partial matches: ";
+  if (facts.value === "mixed") return "Some partial matches included: ";
+  return "";
 }
 
 function countedNoun(count: number, noun: string): string {

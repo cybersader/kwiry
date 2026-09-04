@@ -191,6 +191,10 @@ export class InPluginLexicalBackend implements SearchBackend {
           scope: result.query_policy.scope,
           emphasis: result.query_policy.emphasis,
         },
+        lexicalMatchQuality: {
+          availability: "available",
+          value: result.lexical_match_quality,
+        },
         generation: result.generation,
         candidateWindow: {
           state: result.candidate_window.state,

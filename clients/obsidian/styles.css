@@ -1,10 +1,27 @@
 /* Kwiry Search — GPL-3.0-only */
 
-.kwiry-status-bar-in-flight-count {
-  display: inline-block;
-  min-width: 2ch;
+.kwiry-status-bar {
+  --kwiry-status-bar-inline-size: min(48ch, 40vw);
+
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 var(--kwiry-status-bar-inline-size);
+  align-items: center;
+  inline-size: var(--kwiry-status-bar-inline-size);
+  min-inline-size: var(--kwiry-status-bar-inline-size);
+  max-inline-size: var(--kwiry-status-bar-inline-size);
+  overflow: hidden;
+}
+
+.kwiry-status-bar__label {
+  display: block;
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
   font-variant-numeric: tabular-nums;
-  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kwiry-context-bar {

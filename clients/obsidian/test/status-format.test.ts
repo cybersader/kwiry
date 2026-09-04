@@ -41,10 +41,7 @@ describe("formatStatus", () => {
     })).toBe("Kwiry: Index unavailable");
   });
 
-  // The Obsidian status bar sits in a row of other plugins' items, so an item
-  // that changes width shoves its neighbours sideways. This is the surface the
-  // padding was missing from while the modal rail already had it.
-  it("keeps the status bar item a stable width as the in-flight count grows", () => {
+  it("omits in-flight counts without changing status text", () => {
     const progress = (inFlight: number) => formatStatus({
       ...base,
       phase: "building",
@@ -58,18 +55,18 @@ describe("formatStatus", () => {
         inFlight,
       },
     });
+    const lines = [0, 4, 9, 16, 128].map(progress);
 
-    expect(progress(9)).toContain("\u20079 in flight");
-    expect(progress(10)).toContain(" 10 in flight");
-    expect(progress(9).length).toBe(progress(10).length);
+    expect(lines).toEqual(Array(lines.length).fill("Kwiry: Reading 42/900 (4%)"));
+    expect(lines.every((line) => !line.includes("in flight"))).toBe(true);
   });
 
   it("reports count and percentage with distinct aggregate activities", () => {
     const cases = [
       ["inventory", "Kwiry: Inventory 42/900 (4%)"],
-      ["read", "Kwiry: Reading 42/900 (4%) ·  4 in flight"],
-      ["prepare", "Kwiry: Preparing 42/900 (4%) ·  4 in flight"],
-      ["apply", "Kwiry: Applying 42/900 (4%) ·  4 in flight"],
+      ["read", "Kwiry: Reading 42/900 (4%)"],
+      ["prepare", "Kwiry: Preparing 42/900 (4%)"],
+      ["apply", "Kwiry: Applying 42/900 (4%)"],
     ] as const;
 
     for (const [activity, expected] of cases) {
@@ -87,6 +84,26 @@ describe("formatStatus", () => {
         },
       })).toBe(expected);
     }
+  });
+
+  it("keeps closed stall wording while omitting the in-flight clause", () => {
+    const line = formatStatus({
+      ...base,
+      phase: "building",
+      searchable: false,
+      dirty: true,
+      progress: {
+        stage: "snapshot",
+        activity: "read",
+        completed: 42,
+        total: 900,
+        inFlight: 128,
+        stallCategory: "source_read_capacity",
+      },
+    });
+
+    expect(line).toBe("Kwiry: Reading 42/900 (4%) · source read capacity reached");
+    expect(line).not.toContain("in flight");
   });
 
   it("reports reconciliation planning, verification, and application honestly", () => {

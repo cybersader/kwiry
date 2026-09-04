@@ -269,11 +269,14 @@ LIMIT ?
 }
 
 export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
-  if (plan.schema_version !== 7
+  if (plan.schema_version !== 9
     || (plan.profile_id !== FTS5_PROFILE_ID && plan.profile_id !== FTS5_COMPAT_PROFILE_ID)
     || plan.max_total_candidates !== LEXICAL_CANDIDATE_LIMIT
     || plan.stages.length > MAX_LEXICAL_LANE_COUNT
-    || plan.stages.some((stage, index) => stage.ordinal !== index)) {
+    || plan.stages.some((stage, index) => stage.ordinal !== index
+      || (stage.condition !== "always" && stage.condition !== "if_no_prior_candidates")
+      || (stage.condition === "if_no_prior_candidates"
+        && stage.plan_id !== "lexical_partial_coverage_v3"))) {
     rejectPlan();
   }
   if (plan.disposition === "empty_no_evidence") {
@@ -347,7 +350,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
 }
 
 export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
-  if (plan.schema_version !== 7) {
+  if (plan.schema_version !== 9) {
     rejectPlan();
   }
   if (plan.plan_id === "identifier_metadata_v3") {

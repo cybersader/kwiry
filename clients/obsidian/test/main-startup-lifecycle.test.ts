@@ -31,6 +31,9 @@ interface LifecycleHarness {
   savedData: unknown[];
   storedData: Record<string, unknown>;
   rebuildResult: "scheduled" | "already_building";
+  statusBarEvents: string[];
+  statusBarText: string;
+  statusBarAttributes: Record<string, string>;
 }
 
 const harness: LifecycleHarness = {
@@ -57,6 +60,9 @@ const harness: LifecycleHarness = {
   savedData: [],
   storedData: {},
   rebuildResult: "scheduled",
+  statusBarEvents: [],
+  statusBarText: "",
+  statusBarAttributes: {},
 };
 
 const MAIN_PATH = fileURLToPath(new URL("../src/main.ts", import.meta.url));
@@ -169,10 +175,20 @@ function stubSource(path: string): string {
           addRibbonIcon() {}
           addStatusBarItem() {
             return {
-              setText() {},
-              empty() {},
-              appendText() {},
-              createSpan() { return {}; },
+              addClass(name) { harness.statusBarEvents.push('class:' + name); },
+              createSpan(options) {
+                harness.statusBarEvents.push('label:' + options.cls);
+                return {
+                  setText(text) {
+                    harness.statusBarText = text;
+                    harness.statusBarEvents.push('text:' + text);
+                  },
+                };
+              },
+              setAttribute(name, value) {
+                harness.statusBarAttributes[name] = value;
+                harness.statusBarEvents.push('attribute:' + name);
+              },
             };
           }
           registerInterval() {}
@@ -353,6 +369,9 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.savedData.length = 0;
     harness.storedData = {};
     harness.rebuildResult = "scheduled";
+    harness.statusBarEvents.length = 0;
+    harness.statusBarText = "";
+    harness.statusBarAttributes = {};
     vi.stubGlobal("__kwiryStartupLifecycleHarness", harness);
     vi.stubGlobal("window", { setInterval: () => 1 });
     vi.stubGlobal("navigator", {
@@ -366,6 +385,24 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("creates stable status geometry before the initial status render", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+
+    await plugin.onload();
+
+    expect(harness.statusBarEvents.slice(0, 3)).toEqual([
+      "class:kwiry-status-bar",
+      "label:kwiry-status-bar__label",
+      "text:kwiry: starting…",
+    ]);
+    expect(harness.statusBarText).toBe("kwiry: starting…");
+    expect(harness.statusBarAttributes).toEqual({
+      title: "kwiry: starting…",
+      "aria-label": "kwiry: starting…",
+    });
   });
 
   it("records production load, layout-ready, and backend startup milestones exactly once", async () => {

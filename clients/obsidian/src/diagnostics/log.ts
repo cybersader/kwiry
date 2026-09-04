@@ -342,6 +342,13 @@ export interface DiagnosticDetails {
   requestedMode?: "lexical" | "semantic" | "hybrid";
   effectiveMode?: "lexical" | "semantic" | "hybrid";
   lexicalProfile?: "none" | "lexical-v1" | "lexical-v2" | "unknown";
+  lexicalMatchQuality?:
+    | "standard_only"
+    | "mixed"
+    | "partial_only"
+    | "none"
+    | "unavailable"
+    | "not_applicable";
   fieldScope?: DiagnosticQueryPublicField;
   fieldEmphasis?: DiagnosticQueryPublicField;
   candidateWindowState?: "exhausted" | "more_available" | "candidate_limit_reached" | "unknown";
@@ -523,8 +530,8 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
 ];
 const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
   "profile", "phase", "stage", "activity", "stallCategory", "liveness", "mode",
-  "requestedMode", "effectiveMode", "lexicalProfile", "fieldScope", "fieldEmphasis",
-  "candidateWindowState", "outcome", "code", "reason", "errorName", "operation",
+  "requestedMode", "effectiveMode", "lexicalProfile", "lexicalMatchQuality", "fieldScope",
+  "fieldEmphasis", "candidateWindowState", "outcome", "code", "reason", "errorName", "operation",
   "subsystem", "generationId", "pathHash", "pluginEpoch", "activationEpoch", "mutationEpoch",
   "count", "limit", "documents", "chunks", "completed", "total", "inFlight", "warningCount",
   "pending",
@@ -586,6 +593,11 @@ const SEARCH_MODE_SET = new Set<"lexical" | "semantic" | "hybrid">([
 ]);
 const LEXICAL_PROFILE_SET = new Set<NonNullable<DiagnosticDetails["lexicalProfile"]>>([
   "none", "lexical-v1", "lexical-v2", "unknown",
+]);
+const LEXICAL_MATCH_QUALITY_SET = new Set<
+  NonNullable<DiagnosticDetails["lexicalMatchQuality"]>
+>([
+  "standard_only", "mixed", "partial_only", "none", "unavailable", "not_applicable",
 ]);
 const QUERY_FIELD_SET = new Set<DiagnosticQueryPublicField>([
   "name", "filename", "title", "alias", "heading", "tag", "body",
@@ -1251,6 +1263,7 @@ function validateSearchDetails(
   if (validated.outcome === "succeeded") {
     if (level === "error"
       || validated.resultCount === undefined
+      || validated.lexicalMatchQuality === undefined
       || validated.sourceGeneration === undefined
       || validated.lexicalExecution === undefined
       || validated.code !== undefined
@@ -1324,6 +1337,8 @@ function validatedDetailValue(key: keyof DiagnosticDetails, value: unknown): unk
     if (typeof value === "string" && SEARCH_MODE_SET.has(value as never)) return value;
   } else if (key === "lexicalProfile") {
     if (typeof value === "string" && LEXICAL_PROFILE_SET.has(value as never)) return value;
+  } else if (key === "lexicalMatchQuality") {
+    if (typeof value === "string" && LEXICAL_MATCH_QUALITY_SET.has(value as never)) return value;
   } else if (key === "fieldScope" || key === "fieldEmphasis") {
     if (typeof value === "string" && QUERY_FIELD_SET.has(value as never)) return value;
   } else if (key === "candidateWindowState") {

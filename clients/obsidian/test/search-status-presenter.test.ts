@@ -66,6 +66,7 @@ describe("presentQueryStatus", () => {
         returnedSectionCount: 1,
         displayedSourceCount: 1,
         omittedObservedSourceCount: 0,
+        lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("exhausted"),
       },
       expected: {
@@ -81,6 +82,7 @@ describe("presentQueryStatus", () => {
         returnedSectionCount: 7,
         displayedSourceCount: 3,
         omittedObservedSourceCount: 0,
+        lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("more_available"),
       },
       expected: {
@@ -96,6 +98,7 @@ describe("presentQueryStatus", () => {
         returnedSectionCount: 20,
         displayedSourceCount: 4,
         omittedObservedSourceCount: 0,
+        lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("candidate_limit_reached"),
       },
       expected: {
@@ -111,6 +114,7 @@ describe("presentQueryStatus", () => {
         returnedSectionCount: 20,
         displayedSourceCount: 4,
         omittedObservedSourceCount: 0,
+        lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("unknown"),
       },
       expected: {
@@ -126,6 +130,7 @@ describe("presentQueryStatus", () => {
         returnedSectionCount: 0,
         displayedSourceCount: 0,
         omittedObservedSourceCount: 0,
+        lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("exhausted"),
       },
       expected: {
@@ -141,6 +146,7 @@ describe("presentQueryStatus", () => {
         returnedSectionCount: 0,
         displayedSourceCount: 0,
         omittedObservedSourceCount: 0,
+        lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("candidate_limit_reached"),
       },
       expected: {
@@ -179,12 +185,32 @@ describe("presentQueryStatus", () => {
     expect(presentQueryStatus(facts)).toEqual(expected);
   });
 
+  it.each([
+    ["partial_only", "Best-attempt partial matches"],
+    ["mixed", "Some partial matches included"],
+  ] as const)("discloses %s result quality without query text", (quality, disclosure) => {
+    const text = presentQueryStatus({
+      phase: "settled",
+      returnedSectionCount: 2,
+      displayedSourceCount: 1,
+      omittedObservedSourceCount: 0,
+      lexicalMatchQuality: { availability: "available", value: quality },
+      candidateWindow: window("candidate_limit_reached"),
+    }).text;
+
+    expect(text).toBe(
+      `${disclosure}: 2 returned sections — 1 source shown; candidate window limit reached.`,
+    );
+    expect(text).not.toContain("private-query-value");
+  });
+
   it("discloses local source-row truncation separately from candidate completeness", () => {
     expect(presentQueryStatus({
       phase: "settled",
       returnedSectionCount: 2,
       displayedSourceCount: 1,
       omittedObservedSourceCount: 1,
+      lexicalMatchQuality: { availability: "available", value: "standard_only" },
       candidateWindow: window("exhausted"),
     })).toEqual({
       state: "results",
@@ -199,6 +225,7 @@ describe("presentQueryStatus", () => {
       returnedSectionCount: 3,
       displayedSourceCount: 2,
       omittedObservedSourceCount: 0,
+      lexicalMatchQuality: { availability: "available", value: "standard_only" },
       candidateWindow: {
         state: "candidate_limit_reached",
         candidateCount: 512,
@@ -231,11 +258,11 @@ describe("presentBackgroundIndex", () => {
       },
     }))).toEqual({
       state: "indexing",
-      text: "Index · Reading 8/10 (80%) ·  2 in flight",
+      text: "Index · Reading 8/10 (80%) · 02 in flight",
     });
   });
 
-  it("reserves two tabular positions for the in-flight count", () => {
+  it("uses canonical two-digit counts without truncating wider values", () => {
     const oneDigit = presentBackgroundIndex(status({
       phase: "building",
       progress: {
@@ -257,8 +284,20 @@ describe("presentBackgroundIndex", () => {
       },
     })).text;
 
-    expect(oneDigit).toContain("·  9 in flight");
+    const threeDigits = presentBackgroundIndex(status({
+      phase: "building",
+      progress: {
+        stage: "snapshot",
+        activity: "prepare",
+        completed: 8,
+        total: 128,
+        inFlight: 128,
+      },
+    })).text;
+
+    expect(oneDigit).toContain("· 09 in flight");
     expect(twoDigits).toContain("· 10 in flight");
+    expect(threeDigits).toContain("· 128 in flight");
     expect(oneDigit.length).toBe(twoDigits.length);
   });
 

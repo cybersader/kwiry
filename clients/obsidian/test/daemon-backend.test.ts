@@ -152,6 +152,7 @@ describe("DaemonBackend", () => {
     const execution = await daemon.search({ q: "match", mode: "hybrid" });
     expect(execution.requestedMode).toBe("hybrid");
     expect(execution.effectiveMode).toBe("hybrid");
+    expect(execution.lexicalMatchQuality).toEqual({ availability: "not_applicable" });
     expect(execution.candidateWindow).toEqual({
       state: "unknown",
       candidateCount: null,
@@ -200,6 +201,39 @@ describe("DaemonBackend", () => {
     });
   });
 
+  it("projects closed lexical match quality from an upgraded daemon", async () => {
+    const daemon = backend(jsonTransport((url) => url.endsWith("/v0/status")
+      ? { status: 200, body: STATUS }
+      : {
+          status: 200,
+          body: { hits: [HIT], next_cursor: null },
+          headers: { "X-Kwiry-Lexical-Match-Quality": "partial_only" },
+        }));
+    await daemon.status();
+
+    const execution = await daemon.search({ q: "match", mode: "lexical" });
+    expect(execution.lexicalMatchQuality).toEqual({
+      availability: "available",
+      value: "partial_only",
+    });
+  });
+
+  it("rejects match quality that contradicts the effective mode", async () => {
+    const daemon = backend(jsonTransport((url) => url.endsWith("/v0/status")
+      ? { status: 200, body: STATUS }
+      : {
+          status: 200,
+          body: { hits: [HIT], next_cursor: null },
+          headers: { "x-kwiry-lexical-match-quality": "not_applicable" },
+        }));
+    await daemon.status();
+
+    await expect(daemon.search({ q: "match", mode: "lexical" })).rejects.toMatchObject({
+      code: "invalid_response",
+      stage: "protocol",
+    });
+  });
+
   it("requires a beta.27 daemon for control-bearing queries without policy headers", async () => {
     const daemon = backend(jsonTransport((url) => url.endsWith("/v0/status")
       ? { status: 200, body: STATUS }
@@ -228,6 +262,7 @@ describe("DaemonBackend", () => {
 
     const execution = await daemon.search({ q: "match", mode: "lexical", limit: 100 });
     expect(execution.response.hits).toHaveLength(100);
+    expect(execution.lexicalMatchQuality).toEqual({ availability: "unavailable" });
     expect(execution.candidateWindow).toEqual({
       state: "unknown",
       candidateCount: null,

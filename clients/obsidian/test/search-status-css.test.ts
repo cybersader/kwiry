@@ -35,12 +35,23 @@ describe("search status rail CSS", () => {
     expect(rule(".kwiry-query-help")).toContain("background: transparent");
   });
 
-  it("reserves two rendered digits for the status-bar in-flight count", () => {
-    const count = rule(".kwiry-status-bar-in-flight-count");
-    expect(count).toContain("display: inline-block");
-    expect(count).toContain("min-width: 2ch");
-    expect(count).toContain("font-variant-numeric: tabular-nums");
-    expect(count).toContain("text-align: right");
+  it("fixes the whole status item geometry and ellipsizes only its label", () => {
+    const root = rule(".kwiry-status-bar");
+    expect(root).toContain("--kwiry-status-bar-inline-size: min(48ch, 40vw)");
+    expect(root).toContain("flex: 0 0 var(--kwiry-status-bar-inline-size)");
+    expect(root).toContain("inline-size: var(--kwiry-status-bar-inline-size)");
+    expect(root).toContain("min-inline-size: var(--kwiry-status-bar-inline-size)");
+    expect(root).toContain("max-inline-size: var(--kwiry-status-bar-inline-size)");
+    expect(root).toContain("overflow: hidden");
+
+    const label = rule(".kwiry-status-bar__label");
+    expect(label).toContain("min-inline-size: 0");
+    expect(label).toContain("overflow: hidden");
+    expect(label).toContain("font-variant-numeric: tabular-nums");
+    expect(label).toContain("text-overflow: ellipsis");
+    expect(label).toContain("white-space: nowrap");
+    expect(styles).not.toContain(".kwiry-status-bar-in-flight-count");
+    expect(root).not.toContain("min-width: 2ch");
   });
 
   it("reserves two status rows instead of changing layout height", () => {

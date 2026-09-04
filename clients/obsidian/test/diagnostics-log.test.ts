@@ -550,6 +550,7 @@ describe("DiagnosticLog", () => {
       event.complete("info", {
         outcome: "succeeded",
         resultCount: 1,
+        lexicalMatchQuality: "partial_only",
         sourceGeneration: sourceGeneration(),
         lexicalExecution: lexicalExecution(),
       });
@@ -562,6 +563,7 @@ describe("DiagnosticLog", () => {
       chunks: 2,
       zeroChunkSources: 0,
     });
+    expect(entry?.details.lexicalMatchQuality).toBe("partial_only");
     expect(entry?.details.lexicalExecution).toMatchObject({
       availability: "available",
       disposition: "ready",
@@ -574,6 +576,7 @@ describe("DiagnosticLog", () => {
       platform: "linux",
       backendProfile: "in_plugin",
     });
+    expect(output).toContain("lexicalMatchQuality=partial_only");
     expect(output).toContain("sourceGeneration=available:1/2/zero=0");
     expect(output).toContain("lexicalExecution=ready:lanes=1/1,candidates=1,returned=1");
     expect(output).not.toMatch(/query|path|sql|match_value|secret/iu);
@@ -593,6 +596,11 @@ describe("DiagnosticLog", () => {
     await expect(log.capture("info", "index.lifecycle", {
       lexicalExecution: inconsistent,
     }, () => undefined)).rejects.toThrow("Invalid diagnostic details");
+    const privateQuality = "private result label";
+    await expect(log.capture("info", "index.lifecycle", {
+      lexicalMatchQuality: privateQuality,
+    } as never, () => undefined)).rejects.toThrow("Invalid diagnostic details");
+    expect(JSON.stringify(log.snapshot())).not.toContain(privateQuality);
   });
 
   it("requires explicit evidence for successful search records", async () => {
@@ -609,6 +617,7 @@ describe("DiagnosticLog", () => {
       event.complete("info", {
         outcome: "succeeded",
         resultCount: 0,
+        lexicalMatchQuality: "unavailable",
         sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
         lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
       });

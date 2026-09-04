@@ -35,8 +35,8 @@ import type {
 
 const ABI_VERSION = 3;
 const SOURCE_SCHEMA_VERSION = 10;
-const QUERY_SCHEMA_VERSION = 8;
-const MATCH_PLAN_SCHEMA_VERSION = 7;
+const QUERY_SCHEMA_VERSION = 10;
+const MATCH_PLAN_SCHEMA_VERSION = 9;
 
 export interface RustIdentity {
   abi_version: 3;
@@ -67,8 +67,8 @@ export interface RustIdentity {
    * admitted after it was written.
    */
   section_link_formats: Record<string, boolean>;
-  lexical_query_plan_schema_version: 8;
-  fts5_match_plan_schema_version: 7;
+  lexical_query_plan_schema_version: 10;
+  fts5_match_plan_schema_version: 9;
   /**
    * The chunking contract the adapter applies. Chunk rows carry it per chunk,
    * but a generation with no chunks still has to name the contract its cached
@@ -175,7 +175,7 @@ export type QueryEvidenceStageKind =
   | "prefix_metadata" | "prefix";
 
 export interface LexicalQueryPlan {
-  schema_version: 8;
+  schema_version: 10;
   profile_id: "lexical-v1" | "lexical-v2";
   field_controls_schema_version: 1;
   query: string;
@@ -229,10 +229,12 @@ export interface LexicalQueryPlan {
   evidence_stages: Array<{
     ordinal: number;
     kind: QueryEvidenceStageKind;
+    condition: "always" | "if_no_prior_candidates";
     field_group: QueryFieldGroup;
     required_term_indexes: number[];
     prefix_term_indexes: number[];
     max_candidates: number;
+    minimum_optional_matches: number;
   }>;
   metadata_probe: {
     query: string;
@@ -243,12 +245,12 @@ export interface LexicalQueryPlan {
 
 export type EvidenceProbePlan =
   | {
-      schema_version: 7;
+      schema_version: 9;
       plan_id: "identifier_metadata_v3";
       match_value: string;
     }
   | {
-      schema_version: 7;
+      schema_version: 9;
       plan_id: "term_support_v3";
       probe_id: number;
       term_index: number;
@@ -295,6 +297,7 @@ export type LexicalV2ProofKind =
 export interface StagePlan {
   ordinal: number;
   plan_id: StagePlanId;
+  condition: "always" | "if_no_prior_candidates";
   proof_field: LexicalV2ProofField;
   proof_kind: LexicalV2ProofKind;
   match_value?: string;
@@ -304,7 +307,7 @@ export interface StagePlan {
 }
 
 export interface ExecutionPlan {
-  schema_version: 7;
+  schema_version: 9;
   profile_id: "lexical-v1" | "lexical-v2";
   emphasis?: QueryPublicField;
   disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
@@ -348,6 +351,7 @@ export interface LexicalV2RankInput {
 export interface FinalizedLexicalV2Rank {
   ordered_candidate_ordinals: number[];
   selected_scores: number[];
+  selected_proof_kinds: LexicalV2ProofKind[];
 }
 
 export type RustAdapterErrorCode =
@@ -505,18 +509,23 @@ export function finalizeLexicalV2RankWithRust(
     "finalize_lexical_v2_rank",
   );
   if (!isRecord(response.result)
-    || !hasExactKeys(response.result, ["ordered_candidate_ordinals", "selected_scores"])
+    || !hasExactKeys(response.result, [
+      "ordered_candidate_ordinals", "selected_scores", "selected_proof_kinds",
+    ])
     || !Array.isArray(response.result.ordered_candidate_ordinals)
     || !Array.isArray(response.result.selected_scores)
+    || !Array.isArray(response.result.selected_proof_kinds)
     || response.result.ordered_candidate_ordinals.length !== input.candidates.length
     || response.result.selected_scores.length !== input.candidates.length
+    || response.result.selected_proof_kinds.length !== input.candidates.length
     || !response.result.ordered_candidate_ordinals.every((ordinal, index, ordinals) =>
       Number.isSafeInteger(ordinal)
       && ordinal >= 0
       && ordinal < input.candidates.length
       && ordinals.indexOf(ordinal) === index)
     || !response.result.selected_scores.every((score) =>
-      typeof score === "number" && Number.isFinite(score))) {
+      typeof score === "number" && Number.isFinite(score))
+    || !response.result.selected_proof_kinds.every(isLexicalV2ProofKind)) {
     throw new RustAdapterError("invalid_response", "Portable Rust returned invalid rank data.");
   }
   return response.result as unknown as FinalizedLexicalV2Rank;
@@ -968,13 +977,11 @@ function isEvidenceStages(
     "prefix",
     "partial_coverage",
   ];
-  const allIndexes = termIntents.map((intent) => intent.index);
   const relaxedIndexes = termIntents
     .filter((intent) => intent.role === "required_identifier_anchor" || intent.support === "useful")
     .map((intent) => intent.index)
     .slice(0, 128);
-  const hasUnsupportedContext = termIntents.some((intent) =>
-    intent.role === "optional_context" && intent.support === "unsupported");
+  const partialCoverage = expectedPartialCoverage(termIntents);
   const hasPrefix = value.some((stage) => isRecord(stage) && stage.kind === "prefix");
   const hasPrefixMetadata = value.some((stage) =>
     isRecord(stage) && stage.kind === "prefix_metadata");
@@ -988,11 +995,7 @@ function isEvidenceStages(
     ...(hasPrefixMetadata ? ["prefix_metadata"] : []),
     "all_terms",
     ...(hasPrefix ? ["prefix"] : []),
-    ...(hasUnsupportedContext
-      && relaxedIndexes.length > 0
-      && JSON.stringify(relaxedIndexes) !== JSON.stringify(allIndexes)
-      ? ["partial_coverage"]
-      : []),
+    ...(partialCoverage === null ? [] : ["partial_coverage"]),
   ];
   const actualKinds: string[] = [];
   let previousKind = -1;
@@ -1000,22 +1003,29 @@ function isEvidenceStages(
     const stage = value[ordinal];
     if (!isRecord(stage)
       || !hasExactKeys(stage, [
-        "ordinal", "kind", "field_group", "required_term_indexes", "prefix_term_indexes",
-        "max_candidates",
+        "ordinal", "kind", "condition", "field_group", "required_term_indexes",
+        "prefix_term_indexes", "max_candidates", "minimum_optional_matches",
       ])
       || stage.ordinal !== ordinal
+      || (stage.condition !== "always" && stage.condition !== "if_no_prior_candidates")
       || !kinds.includes(String(stage.kind))
       || kinds.indexOf(String(stage.kind)) <= previousKind
       || !isTermIndexes(stage.required_term_indexes, termCount, 128)
       || !isTermIndexes(stage.prefix_term_indexes, termCount, 8)
       || !isPositiveSafeInteger(stage.max_candidates)
-      || stage.max_candidates > MAX_LEXICAL_CANDIDATES_PER_LANE) {
+      || stage.max_candidates > MAX_LEXICAL_CANDIDATES_PER_LANE
+      || !isNonNegativeSafeInteger(stage.minimum_optional_matches)) {
       return false;
     }
     previousKind = kinds.indexOf(String(stage.kind));
     actualKinds.push(String(stage.kind));
     const required = stage.required_term_indexes as number[];
     const prefixes = stage.prefix_term_indexes as number[];
+    if (stage.kind !== "partial_coverage" && stage.condition !== "always") return false;
+    // Every stage kind other than the conditional exploratory
+    // PartialCoverage pass uses ordinary conjunctive semantics: nothing else
+    // is allowed to declare a minimum-should-match threshold.
+    if (stage.kind !== "partial_coverage" && stage.minimum_optional_matches !== 0) return false;
     if (stage.kind === "exact_metadata"
       && (stage.field_group !== "exact" || required.length !== 0 || prefixes.length !== 0)) {
       return false;
@@ -1032,11 +1042,18 @@ function isEvidenceStages(
       return false;
     }
     if (stage.kind === "partial_coverage"
-      && (stage.field_group !== "searchable_text"
+      && (partialCoverage === null
+        || stage.field_group !== "searchable_text"
         || required.length === 0
-        || required.length >= termCount
+        // The always-on (unsupported-context) branch stays a strict subset
+        // of every term; the bounded exploratory branch legitimately
+        // includes every remaining term as "at least one" alternatives, so
+        // it alone may reach the full term count.
+        || (required.length >= termCount && partialCoverage.minimumOptionalMatches === 0)
         || prefixes.length !== 0
-        || JSON.stringify(required) !== JSON.stringify(relaxedIndexes))) {
+        || stage.condition !== partialCoverage.condition
+        || stage.minimum_optional_matches !== partialCoverage.minimumOptionalMatches
+        || JSON.stringify(required) !== JSON.stringify(partialCoverage.requiredIndexes))) {
       return false;
     }
     if (stage.kind === "prefix" || stage.kind === "prefix_metadata") {
@@ -1057,6 +1074,51 @@ function isEvidenceStages(
     }
   }
   return JSON.stringify(actualKinds) === JSON.stringify(expectedKinds);
+}
+
+function expectedPartialCoverage(
+  termIntents: LexicalQueryPlan["term_intents"],
+): {
+  condition: "always" | "if_no_prior_candidates";
+  requiredIndexes: number[];
+  minimumOptionalMatches: number;
+} | null {
+  const allIndexes = termIntents.map((intent) => intent.index);
+  const relaxedIndexes = termIntents
+    .filter((intent) => intent.role === "required_identifier_anchor" || intent.support === "useful")
+    .map((intent) => intent.index)
+    .slice(0, 128);
+  const hasUnsupportedContext = termIntents.some((intent) =>
+    intent.role === "optional_context" && intent.support === "unsupported");
+  if (hasUnsupportedContext) {
+    return relaxedIndexes.length > 0
+      && JSON.stringify(relaxedIndexes) !== JSON.stringify(allIndexes)
+      ? { condition: "always", requiredIndexes: relaxedIndexes, minimumOptionalMatches: 0 }
+      : null;
+  }
+
+  const anchors = termIntents
+    .filter((intent) => intent.role === "required_identifier_anchor")
+    .map((intent) => intent.index);
+  const optional = termIntents
+    .filter((intent) => intent.role === "optional_context" && intent.support === "useful")
+    .map((intent) => intent.index);
+  if (optional.length < 4 || anchors.length >= 128) return null;
+
+  // Every useful optional term is offered as an alternative, up to the same
+  // bounded ceiling the always-on relaxation above already respects. The
+  // anchors stay mandatory (enforced independently); this never enumerates
+  // optional combinations, it exposes one flat "at least one of" group.
+  const optionalCapacity = 128 - anchors.length;
+  const includedOptional = new Set(optional.slice(0, optionalCapacity));
+  if (includedOptional.size === 0) return null;
+
+  const requiredIndexes = termIntents
+    .filter((intent) => intent.role === "required_identifier_anchor" || includedOptional.has(intent.index))
+    .map((intent) => intent.index);
+  return requiredIndexes.length > 0
+    ? { condition: "if_no_prior_candidates", requiredIndexes, minimumOptionalMatches: 1 }
+    : null;
 }
 
 function isTermIndexes(value: unknown, termCount: number, maximum: number): boolean {
@@ -1145,10 +1207,11 @@ function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
   if (!isRecord(value)
     || !hasRequiredAndOptionalKeys(
       value,
-      ["ordinal", "plan_id", "proof_field", "proof_kind", "max_candidates"],
+      ["ordinal", "plan_id", "condition", "proof_field", "proof_kind", "max_candidates"],
       ["match_value", "exact_value", "required_identifiers"],
     )
     || value.ordinal !== ordinal
+    || (value.condition !== "always" && value.condition !== "if_no_prior_candidates")
     || !isLexicalV2ProofField(value.proof_field)
     || !isLexicalV2ProofKind(value.proof_kind)
     || !isPositiveSafeInteger(value.max_candidates)) return false;
@@ -1159,6 +1222,8 @@ function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
     || new Set(requiredIdentifiers).size !== requiredIdentifiers.length) {
     return false;
   }
+  if (value.condition === "if_no_prior_candidates"
+    && value.plan_id !== "lexical_partial_coverage_v3") return false;
   const matchIds = [
     "lexical_explicit_v3", "lexical_exact_phrase_v3", "lexical_all_terms_v3",
     "lexical_partial_coverage_v3", "lexical_prefix_metadata_v3", "lexical_prefix_v3",
@@ -1169,7 +1234,8 @@ function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
   }
   if (!matchIds.includes(String(value.plan_id)) || value.exact_value !== undefined) return false;
   if (value.plan_id === "lexical_explicit_v3") {
-    return value.max_candidates === LEXICAL_CANDIDATE_LIMIT
+    return value.condition === "always"
+      && value.max_candidates === LEXICAL_CANDIDATE_LIMIT
       && requiredIdentifiers.length === 0
       && isBoundedString(value.match_value, 16_384);
   }

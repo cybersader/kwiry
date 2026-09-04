@@ -32,7 +32,7 @@ function normalizedInputs(metafile) {
 
 describe("D5C playground Worker isolation", () => {
   it("keeps the primary Worker and production Rust identity byte-identical", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(15);
+    expect(WORKER_PROTOCOL_VERSION).toBe(16);
     expect(CACHE_SCHEMA_VERSION).toBe(12);
     expect(internalBuild.workerSource).toBe(normalBuild.workerSource);
     expect(internalBuild.identities.rust).toEqual(normalBuild.identities.rust);

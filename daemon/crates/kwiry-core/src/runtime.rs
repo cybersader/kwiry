@@ -29,6 +29,7 @@ use crate::model::{
     LexicalSearchRequest, PreparedChunk, ResourceKey, RetrievalMetadata, SearchHit,
 };
 use crate::partition::{GenerationLayout, partition_index_dir};
+use crate::ranking::LexicalMatchQuality;
 #[cfg(feature = "internal-d5c-preview")]
 use crate::ranking::RelevanceProfile;
 #[cfg(feature = "internal-d5c-preview")]
@@ -40,7 +41,10 @@ use crate::reconcile::{
     AuditBudget, ObservationDecision, ObservationPolicy, PartitionScope, ReadReason, ReconcilePlan,
     ReconcileScope, RetentionReason, SourceSignals, plan_observation,
 };
-use crate::search::{PartitionReader, search_partitions, search_reader};
+use crate::search::{
+    LexicalSearchOutcome, PartitionReader, search_partitions_with_quality, search_reader,
+    search_reader_with_quality,
+};
 #[cfg(feature = "internal-d5c-preview")]
 use crate::search::{ProfileExecution, search_partitions_with_profile, search_reader_with_profile};
 use crate::semantic::{
@@ -59,6 +63,7 @@ const WRITER_MEMORY_BYTES: usize = 50_000_000;
 pub struct GenerationSearchResult {
     pub generation: String,
     pub hits: Vec<SearchHit>,
+    pub lexical_match_quality: Option<LexicalMatchQuality>,
 }
 
 #[derive(Clone)]
@@ -141,10 +146,14 @@ impl SearchRuntime {
     ) -> Result<GenerationSearchResult> {
         let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
         match active.as_ref() {
-            ActiveSearchIndex::Desktop(index) => Ok(GenerationSearchResult {
-                generation: index.generation.clone(),
-                hits: index.search(query, limit, filters)?,
-            }),
+            ActiveSearchIndex::Desktop(index) => {
+                let outcome = index.search_with_quality(query, limit, filters)?;
+                Ok(GenerationSearchResult {
+                    generation: index.generation.clone(),
+                    hits: outcome.hits,
+                    lexical_match_quality: Some(outcome.match_quality),
+                })
+            }
             ActiveSearchIndex::OpenClast(_) => Err(Error::Auth(
                 "openclast search requires an explicit authorized resource set".to_owned(),
             )),
@@ -201,10 +210,14 @@ impl SearchRuntime {
             ActiveSearchIndex::Desktop(_) => Err(Error::Auth(
                 "authorized resource search is unavailable in the desktop profile".to_owned(),
             )),
-            ActiveSearchIndex::OpenClast(index) => Ok(GenerationSearchResult {
-                generation: index.generation.clone(),
-                hits: index.search(query, limit, filters, resources)?,
-            }),
+            ActiveSearchIndex::OpenClast(index) => {
+                let outcome = index.search_with_quality(query, limit, filters, resources)?;
+                Ok(GenerationSearchResult {
+                    generation: index.generation.clone(),
+                    hits: outcome.hits,
+                    lexical_match_quality: Some(outcome.match_quality),
+                })
+            }
         }
     }
 
@@ -241,6 +254,7 @@ impl SearchRuntime {
         Ok(GenerationSearchResult {
             generation: active.generation.clone(),
             hits,
+            lexical_match_quality: None,
         })
     }
 
@@ -289,6 +303,7 @@ impl SearchRuntime {
         Ok(GenerationSearchResult {
             generation: active.generation.clone(),
             hits,
+            lexical_match_quality: None,
         })
     }
 
@@ -435,6 +450,7 @@ impl PartitionedSearchIndex {
         Ok(partition)
     }
 
+    #[cfg(any(test, feature = "internal-d5c-preview"))]
     fn search(
         &self,
         query: &str,
@@ -442,6 +458,18 @@ impl PartitionedSearchIndex {
         filters: &SearchFilters,
         resources: &[ResourceKey],
     ) -> Result<Vec<SearchHit>> {
+        Ok(self
+            .search_with_quality(query, limit, filters, resources)?
+            .hits)
+    }
+
+    fn search_with_quality(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+    ) -> Result<LexicalSearchOutcome> {
         let mut selected = Vec::new();
         let mut unique = BTreeSet::new();
         for resource in resources {
@@ -480,7 +508,7 @@ impl PartitionedSearchIndex {
                 resource,
             })
             .collect::<Vec<_>>();
-        search_partitions(&readers, query, limit, filters)
+        search_partitions_with_quality(&readers, query, limit, filters)
     }
 
     #[cfg(feature = "internal-d5c-preview")]
@@ -573,6 +601,22 @@ impl SearchIndex {
 
     fn search(&self, query: &str, limit: usize, filters: &SearchFilters) -> Result<Vec<SearchHit>> {
         search_reader(
+            &self.index,
+            &self.fields,
+            &self.reader,
+            query,
+            limit,
+            filters,
+        )
+    }
+
+    fn search_with_quality(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+    ) -> Result<LexicalSearchOutcome> {
+        search_reader_with_quality(
             &self.index,
             &self.fields,
             &self.reader,
@@ -3091,8 +3135,17 @@ mod tests {
         let data = temporary.path().join("data");
         fs::create_dir(&x).unwrap();
         fs::create_dir(&y).unwrap();
-        fs::write(x.join("allowed.md"), "authorized needle").unwrap();
-        fs::write(y.join("forbidden.md"), "forbidden needle").unwrap();
+        fs::write(
+            x.join("allowed.md"),
+            "authorized needle amberstone birchwood dunefield",
+        )
+        .unwrap();
+        fs::write(x.join("support.md"), "cedarleaf").unwrap();
+        fs::write(
+            y.join("forbidden.md"),
+            "forbidden needle amberstone birchwood cedarleaf dunefield",
+        )
+        .unwrap();
 
         let config = openclast_config(vec![
             VaultRegistration {
@@ -3125,6 +3178,26 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].vault_id, "x");
+
+        let fallback = partitions
+            .search_with_quality(
+                "amberstone birchwood cedarleaf dunefield",
+                20,
+                &SearchFilters::default(),
+                std::slice::from_ref(&resource_x),
+            )
+            .unwrap();
+        assert_eq!(fallback.match_quality, LexicalMatchQuality::PartialOnly);
+        // The bounded exploratory partial pass surfaces every authorized
+        // candidate that carries at least one optional term, not only a
+        // preselected subset: allowed.md (three of the four terms) and
+        // support.md (one term) both come from the authorized resource_x
+        // partition, while forbidden.md's matching terms in resource_y
+        // never surface even though it satisfies more of the query.
+        let fallback_paths: Vec<_> = fallback.hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(fallback_paths, vec!["allowed.md", "support.md"]);
+        assert!(fallback.hits.iter().all(|hit| hit.vault_id == "x"));
+
         assert!(
             partitions
                 .search("needle", 20, &SearchFilters::default(), &[resource_y],)

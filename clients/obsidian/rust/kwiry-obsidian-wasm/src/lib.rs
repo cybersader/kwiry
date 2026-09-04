@@ -16,9 +16,9 @@ use kwiry_core::{
     CHUNKING_VERSION, FORMAT_IDENTITY_SCHEMA_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
     LexicalQueryPlan, LexicalV2Proof, LexicalV2ProofField, LexicalV2ProofKind, LexicalV2RankInput,
     MAX_FILE_BYTES, QueryAssistanceEligibility, QueryEvidenceReport, QueryEvidenceStage,
-    QueryEvidenceStageKind, QueryExecutionDisposition, QueryField, QueryFieldGroup,
-    QueryMatchOperator, QueryPlanKind, QueryPublicField, QueryTermProjection, QueryTermRole,
-    SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
+    QueryEvidenceStageCondition, QueryEvidenceStageKind, QueryExecutionDisposition, QueryField,
+    QueryFieldGroup, QueryMatchOperator, QueryPlanKind, QueryPublicField, QueryTermProjection,
+    QueryTermRole, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
     active_extraction_policy, active_format_identities, extraction_policy_fingerprint,
     lexical_v2_evidence_points, normalize_lexical_value, prepare_lexical_query,
     prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub const ADAPTER_ABI_VERSION: u32 = 3;
-pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 7;
+pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 9;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_LEXICAL_V2_RANK_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "internal-d5c-preview")]
@@ -181,6 +181,7 @@ pub enum Fts5StagePlanId {
 pub struct Fts5StagePlan {
     pub ordinal: u8,
     pub plan_id: Fts5StagePlanId,
+    pub condition: QueryEvidenceStageCondition,
     pub proof_field: LexicalV2ProofField,
     pub proof_kind: LexicalV2ProofKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,6 +214,7 @@ pub struct FinalizedQueryResult {
 pub struct FinalizedLexicalV2RankResult {
     pub ordered_candidate_ordinals: Vec<usize>,
     pub selected_scores: Vec<f32>,
+    pub selected_proof_kinds: Vec<LexicalV2ProofKind>,
 }
 
 #[cfg(feature = "internal-d5c-preview")]
@@ -710,6 +712,7 @@ pub fn finalize_lexical_v2_rank(request_json: &str) -> String {
     };
     let mut ordered_candidate_ordinals = Vec::with_capacity(ranked.len());
     let mut selected_scores = Vec::with_capacity(ranked.len());
+    let mut selected_proof_kinds = Vec::with_capacity(ranked.len());
     for ranked in ranked {
         let identity = (
             ranked.candidate.source,
@@ -727,12 +730,14 @@ pub fn finalize_lexical_v2_rank(request_json: &str) -> String {
         };
         ordered_candidate_ordinals.push(ordinal);
         selected_scores.push(ranked.selected_proof.engine_score);
+        selected_proof_kinds.push(ranked.selected_proof.kind);
     }
     success_response(
         operation,
         FinalizedLexicalV2RankResult {
             ordered_candidate_ordinals,
             selected_scores,
+            selected_proof_kinds,
         },
     )
 }
@@ -1219,6 +1224,7 @@ fn fts5_execution_plan(
                 vec![Fts5StagePlan {
                     ordinal: 0,
                     plan_id: Fts5StagePlanId::LexicalExplicitV3,
+                    condition: QueryEvidenceStageCondition::Always,
                     proof_field: LexicalV2ProofField::CrossField,
                     proof_kind: LexicalV2ProofKind::Exact,
                     match_value: Some(translate_explicit_query(&plan.query_text)?),
@@ -1362,12 +1368,26 @@ fn fts5_stage_plan(
         ),
         QueryEvidenceStageKind::AllTerms => (
             Fts5StagePlanId::LexicalAllTermsV3,
-            scoped_optional_analyzed_terms(plan, stage.field_group, &stage.required_term_indexes)?,
+            scoped_optional_analyzed_terms(
+                plan,
+                stage.field_group,
+                &stage.required_term_indexes,
+                "AND",
+            )?,
             None,
         ),
         QueryEvidenceStageKind::PartialCoverage => (
             Fts5StagePlanId::LexicalPartialCoverageV3,
-            scoped_optional_analyzed_terms(plan, stage.field_group, &stage.required_term_indexes)?,
+            scoped_optional_analyzed_terms(
+                plan,
+                stage.field_group,
+                &stage.required_term_indexes,
+                if stage.minimum_optional_matches > 0 {
+                    "OR"
+                } else {
+                    "AND"
+                },
+            )?,
             None,
         ),
         QueryEvidenceStageKind::PrefixMetadata => (
@@ -1401,6 +1421,7 @@ fn fts5_stage_plan(
     Ok(Fts5StagePlan {
         ordinal: 0,
         plan_id,
+        condition: stage.condition,
         proof_field,
         proof_kind,
         match_value: match_value.map(bounded_match_value).transpose()?,
@@ -1495,7 +1516,7 @@ fn scoped_analyzed_terms(
     group: QueryFieldGroup,
     indexes: &[u16],
 ) -> Result<String, AdapterError> {
-    scoped_optional_analyzed_terms(plan, group, indexes)?.ok_or_else(|| {
+    scoped_optional_analyzed_terms(plan, group, indexes, "AND")?.ok_or_else(|| {
         adapter_error(
             "invalid_query_plan",
             "Analyzed term probe has no analyzed term.",
@@ -1503,10 +1524,20 @@ fn scoped_analyzed_terms(
     })
 }
 
+/// Builds a parenthesized FTS5 MATCH group over the analyzed (non-anchor)
+/// terms in `indexes`, joined by `operator`. Required `ExactIdentifier`
+/// anchors are never included here — they are surfaced separately via
+/// `Fts5StagePlan::required_identifiers` and enforced as a mandatory AND at
+/// bind time, mirroring native Tantivy's MUST clauses. Passing `"AND"`
+/// reproduces the always-on conjunctive lanes (every stage kind other than
+/// the conditional exploratory PartialCoverage pass); passing `"OR"` builds
+/// the bounded exploratory pass's minimum-required=1 alternation, matching
+/// native Tantivy's nested-BooleanQuery SHOULD group.
 fn scoped_optional_analyzed_terms(
     plan: &LexicalQueryPlan,
     group: QueryFieldGroup,
     indexes: &[u16],
+    operator: &str,
 ) -> Result<Option<String>, AdapterError> {
     let terms = indexes
         .iter()
@@ -1526,7 +1557,7 @@ fn scoped_optional_analyzed_terms(
     let fields = fts5_fields(plan, group)?;
     Ok(Some(format!(
         "{{{fields}}} : ({})",
-        match_terms(&terms, "AND")?
+        match_terms(&terms, operator)?
     )))
 }
 
@@ -2085,6 +2116,10 @@ mod tests {
             default["result"]["selected_scores"],
             serde_json::json!([1.0, 9.0])
         );
+        assert_eq!(
+            default["result"]["selected_proof_kinds"],
+            serde_json::json!(["prefix_assisted", "phrase"])
+        );
 
         let emphasized = response(finalize_lexical_v2_rank(&request(input(Some("body")))));
         assert_eq!(emphasized["status"], "ok");
@@ -2095,6 +2130,10 @@ mod tests {
         assert_eq!(
             emphasized["result"]["selected_scores"],
             serde_json::json!([9.0, 1.0])
+        );
+        assert_eq!(
+            emphasized["result"]["selected_proof_kinds"],
+            serde_json::json!(["phrase", "prefix_assisted"])
         );
     }
 
@@ -2462,6 +2501,47 @@ mod tests {
                 .iter()
                 .any(|stage| stage["plan_id"] == "lexical_partial_coverage_v3")
         );
+    }
+
+    #[test]
+    fn fully_supported_long_query_marks_every_partial_lane_as_fallback_only() {
+        let finalized = response(finalize_query(&finalize_request(
+            "amberstone birchwood cedarleaf dunefield",
+            None,
+            &[1, 1, 1, 1],
+            &[vec![], vec![], vec![], vec![]],
+        )));
+        assert_eq!(finalized["status"], "ok");
+        let partial_stage = finalized["result"]["plan"]["evidence_stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["kind"] == "partial_coverage")
+            .expect("partial stage");
+        assert_eq!(partial_stage["condition"], "if_no_prior_candidates");
+        // Every useful optional term is offered as an alternative rather than
+        // a sampled subset, mirroring the native Tantivy and shared-core
+        // behavior exactly.
+        assert_eq!(
+            partial_stage["required_term_indexes"],
+            serde_json::json!([0, 1, 2, 3])
+        );
+        assert_eq!(partial_stage["minimum_optional_matches"], 1);
+
+        let lanes = finalized["result"]["execution_plan"]["stages"]
+            .as_array()
+            .expect("execution lanes");
+        assert!(lanes.iter().any(|stage| {
+            stage["plan_id"] == "lexical_partial_coverage_v3"
+                && stage["condition"] == "if_no_prior_candidates"
+        }));
+        assert!(lanes.iter().all(|stage| {
+            if stage["plan_id"] == "lexical_partial_coverage_v3" {
+                stage["condition"] == "if_no_prior_candidates"
+            } else {
+                stage["condition"] == "always"
+            }
+        }));
     }
 
     #[test]

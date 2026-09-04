@@ -29,6 +29,15 @@ const PLUGIN_ID = "kwiry-search";
 const MAX_DOWNLOAD_BYTES = 160 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const UI_TIMEOUT_MS = 90_000;
+const STATUS_GEOMETRY_VIEWPORT = Object.freeze({ width: 1_920, height: 1_080 });
+const STATUS_GEOMETRY_SAMPLE_COUNT = 5;
+const STATUS_GEOMETRY_TOLERANCE_MILLI_PX = 10;
+const STATUS_GEOMETRY_FAILURE_STAGES = Object.freeze({
+  status_plugin_unavailable: "scenario_status_plugin_unavailable",
+  status_surface_unavailable: "scenario_status_surface_unavailable",
+  status_sibling_bound_exceeded: "scenario_status_sibling_bound_exceeded",
+  status_script_failed: "scenario_status_script_failed",
+});
 const SAFE_ENV_KEYS = new Set([
   "CI", "DISPLAY", "KWIRY_WEBDRIVER_RUNTIME_ASSETS", "LANG", "LC_ALL", "LD_LIBRARY_PATH", "PATH",
   "WAYLAND_DISPLAY", "XAUTHORITY",
@@ -177,10 +186,10 @@ export function buildSyntheticXlsm() {
 
 export function buildEvidence({ candidate, manifest, manifestSha256, observed, cleanup }) {
   return validateWebdriverReleaseEvidence({
-    schema_version: 1,
+    schema_version: 3,
     kind: "kwiry_obsidian_webdriver_release_gate",
     verdict: "SELENIUM_RELEASE_GATE_PASSED",
-    scope: "narrow_real_obsidian_selection_lifecycle",
+    scope: "narrow_real_obsidian_status_geometry_and_selection_lifecycle",
     candidate: {
       version: candidate.version,
       candidate_set_sha256: candidate.candidate_set_sha256,
@@ -218,6 +227,17 @@ export function buildEvidence({ candidate, manifest, manifestSha256, observed, c
       open_file_promise: observed.openFilePromise,
       expected_result_selected: observed.expectedResultSelected,
       vba_payload_search_results: observed.vbaPayloadSearchResults,
+      status_geometry_samples: observed.statusGeometrySamples,
+      status_sibling_count: observed.statusSiblingCount,
+      status_item_geometry_invariant: observed.statusItemGeometryInvariant,
+      status_sibling_geometry_invariant: observed.statusSiblingGeometryInvariant,
+      status_accessible_text_complete: observed.statusAccessibleTextComplete,
+      status_overflow_exercised: observed.statusOverflowExercised,
+      status_in_flight_clause_omitted: observed.statusInFlightClauseOmitted,
+      status_in_flight_only_text_invariant: observed.statusInFlightOnlyTextInvariant,
+      status_viewport_invariant: observed.statusViewportInvariant,
+      status_geometry_max_delta_milli_px: observed.statusGeometryMaxDeltaMilliPx,
+      status_viewport: observed.statusViewport,
     },
     cleanup,
     privacy: {
@@ -770,6 +790,241 @@ async function attachWebdriver({ layout, manifest, cdpPort }) {
   return { driver, webdriverPort: Number(webdriverUrl.port) };
 }
 
+export async function exerciseStatusBarGeometry(driver) {
+  await gateStage(async () => {
+    const browserWindow = driver.manage().window();
+    // A tiling window manager may reject W3C resizing even on the pinned Xvfb
+    // screen. The in-page sweep below separately proves the viewport stayed put.
+    try { await browserWindow.setRect(STATUS_GEOMETRY_VIEWPORT); } catch {}
+  }, "scenario_status_viewport_failed");
+
+  const result = await gateStage(() => driver.executeAsyncScript(`
+    const done = arguments[arguments.length - 1];
+    (async () => {
+      const plugin = window.app?.plugins?.plugins?.[${JSON.stringify(PLUGIN_ID)}];
+      if (!plugin || typeof plugin.refreshStatus !== 'function'
+        || typeof plugin.setStatusBarText !== 'function') throw new Error('status_plugin_unavailable');
+      const backend = await plugin.backendManager.current();
+      const statusBar = plugin.statusBar;
+      const label = statusBar?.querySelector?.('.kwiry-status-bar__label');
+      const parent = statusBar?.parentElement;
+      if (!backend || typeof backend.status !== 'function' || !statusBar || !label || !parent) {
+        throw new Error('status_surface_unavailable');
+      }
+
+      const baseStatus = await backend.status();
+      const samples = [
+        {
+          expected: 'Kwiry: Reading 8/20 (40%)',
+          progress: { stage: 'snapshot', activity: 'read', completed: 8, total: 20, inFlight: 16 },
+          inFlightOnlySample: true,
+          overflow: false,
+        },
+        {
+          expected: 'Kwiry: Reading 8/20 (40%)',
+          progress: { stage: 'snapshot', activity: 'read', completed: 8, total: 20, inFlight: 4 },
+          inFlightOnlySample: true,
+          overflow: false,
+        },
+        {
+          expected: 'Kwiry: Reading 8/20 (40%)',
+          progress: { stage: 'snapshot', activity: 'read', completed: 8, total: 20, inFlight: 0 },
+          inFlightOnlySample: true,
+          overflow: false,
+        },
+        {
+          expected: 'Kwiry: Preparing 8/900 (0%)',
+          progress: { stage: 'snapshot', activity: 'prepare', completed: 8, total: 900, inFlight: 128 },
+          inFlightOnlySample: false,
+          overflow: false,
+        },
+        {
+          expected: 'Kwiry: Applying changes 72/900 (8%) · source read capacity reached',
+          progress: {
+            stage: 'replay', activity: 'apply', subphase: 'applying', completed: 72, total: 900,
+            inFlight: 9, stallCategory: 'source_read_capacity',
+          },
+          overflow: true,
+        },
+      ];
+      const siblings = Array.from(parent.children).filter((element) => element !== statusBar);
+      if (siblings.length > 64) throw new Error('status_sibling_bound_exceeded');
+      const originalLabel = label;
+      const backendHadOwnStatus = Object.prototype.hasOwnProperty.call(backend, 'status');
+      const originalStatus = backend.status;
+      const pluginHadOwnSetter = Object.prototype.hasOwnProperty.call(plugin, 'setStatusBarText');
+      const originalSetStatusBarText = plugin.setStatusBarText;
+      let acceptedText = null;
+      let baseline = null;
+      let siblingBaseline = null;
+      let maxDelta = 0;
+      let itemGeometryInvariant = true;
+      let siblingGeometryInvariant = true;
+      let accessibleTextComplete = true;
+      let overflowExercised = false;
+      let inFlightClauseOmitted = true;
+      const inFlightOnlyTexts = [];
+      const inFlightOnlyValues = [];
+      const tolerance = 0.01;
+      const frame = () => new Promise((resolveFrame) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolveFrame));
+      });
+      await frame();
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      let viewportPinned = Number.isFinite(viewport.width) && viewport.width > 0
+        && Number.isFinite(viewport.height) && viewport.height > 0;
+      const geometry = (element) => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, width: rect.width };
+      };
+      const compare = (actual, expected) => {
+        const delta = Math.max(
+          Math.abs(actual.left - expected.left),
+          Math.abs(actual.right - expected.right),
+          Math.abs(actual.width - expected.width),
+        );
+        maxDelta = Math.max(maxDelta, delta);
+        return delta <= tolerance;
+      };
+
+      plugin.setStatusBarText = function(text) {
+        if (text === acceptedText) originalSetStatusBarText.call(plugin, text);
+      };
+      try {
+        for (const sample of samples) {
+          acceptedText = sample.expected;
+          backend.status = async () => ({
+            ...baseStatus,
+            phase: 'building',
+            liveness: 'alive',
+            searchable: false,
+            dirty: true,
+            rebuilding: false,
+            progress: sample.progress,
+          });
+          await plugin.refreshStatus();
+          await frame();
+          viewportPinned = viewportPinned
+            && window.innerWidth === viewport.width
+            && window.innerHeight === viewport.height;
+
+          const currentLabel = statusBar.querySelector('.kwiry-status-bar__label');
+          const currentText = currentLabel?.textContent ?? null;
+          const currentTitle = statusBar.getAttribute('title');
+          const currentAriaLabel = statusBar.getAttribute('aria-label');
+          accessibleTextComplete = accessibleTextComplete
+            && currentLabel === originalLabel
+            && currentText === sample.expected
+            && currentTitle === sample.expected
+            && currentAriaLabel === sample.expected;
+          inFlightClauseOmitted = inFlightClauseOmitted
+            && !sample.expected.includes('in flight')
+            && !(currentText ?? '').includes('in flight')
+            && !(currentTitle ?? '').includes('in flight')
+            && !(currentAriaLabel ?? '').includes('in flight');
+          if (sample.inFlightOnlySample) {
+            inFlightOnlyTexts.push(JSON.stringify([currentText, currentTitle, currentAriaLabel]));
+            inFlightOnlyValues.push(sample.progress.inFlight);
+          }
+          if (sample.overflow && currentLabel) {
+            overflowExercised = overflowExercised
+              || currentLabel.scrollWidth > currentLabel.clientWidth + tolerance;
+          }
+
+          const current = geometry(statusBar);
+          const siblingCurrent = siblings.map(geometry);
+          if (baseline === null) {
+            baseline = current;
+            siblingBaseline = siblingCurrent;
+          } else {
+            itemGeometryInvariant = compare(current, baseline) && itemGeometryInvariant;
+            siblingGeometryInvariant = siblings.every((element, index) => element.isConnected
+              && compare(siblingCurrent[index], siblingBaseline[index])) && siblingGeometryInvariant;
+          }
+        }
+        const inFlightOnlyTextInvariant = inFlightOnlyTexts.length === 3
+          && new Set(inFlightOnlyTexts).size === 1
+          && [...new Set(inFlightOnlyValues)].sort((left, right) => left - right).join(',') === '0,4,16';
+        return {
+          samples: samples.length,
+          siblingCount: siblings.length,
+          itemGeometryInvariant,
+          siblingGeometryInvariant,
+          accessibleTextComplete,
+          overflowExercised,
+          inFlightClauseOmitted,
+          inFlightOnlyTextInvariant,
+          viewportPinned,
+          maxDeltaMilliPx: Math.ceil(maxDelta * 1_000),
+        };
+      } finally {
+        if (backendHadOwnStatus) backend.status = originalStatus;
+        else delete backend.status;
+        if (pluginHadOwnSetter) plugin.setStatusBarText = originalSetStatusBarText;
+        else delete plugin.setStatusBarText;
+        try { await plugin.refreshStatus(); } catch {}
+      }
+    })().then(done, (error) => {
+      const known = new Set([
+        'status_plugin_unavailable', 'status_surface_unavailable', 'status_sibling_bound_exceeded',
+      ]);
+      const message = typeof error?.message === 'string' ? error.message : '';
+      done({ failure: known.has(message) ? message : 'status_script_failed' });
+    });
+  `), "scenario_status_script_transport_failed");
+
+  if (typeof result === "object" && result !== null && !Array.isArray(result)
+    && Object.keys(result).length === 1 && typeof result.failure === "string") {
+    const stage = STATUS_GEOMETRY_FAILURE_STAGES[result.failure];
+    throw new WebdriverGateError(stage ?? "scenario_status_geometry_failed");
+  }
+  const keys = [
+    "samples", "siblingCount", "itemGeometryInvariant", "siblingGeometryInvariant",
+    "accessibleTextComplete", "overflowExercised", "inFlightClauseOmitted",
+    "inFlightOnlyTextInvariant", "viewportPinned", "maxDeltaMilliPx",
+  ];
+  if (typeof result !== "object" || result === null || Array.isArray(result)
+    || JSON.stringify(Object.keys(result).sort()) !== JSON.stringify([...keys].sort())
+    || result.samples !== STATUS_GEOMETRY_SAMPLE_COUNT
+    || !Number.isInteger(result.siblingCount) || result.siblingCount < 0 || result.siblingCount > 64
+    || !Number.isInteger(result.maxDeltaMilliPx) || result.maxDeltaMilliPx < 0) {
+    throw new WebdriverGateError("scenario_status_geometry_failed");
+  }
+  if (!result.viewportPinned) {
+    throw new WebdriverGateError("scenario_status_viewport_failed");
+  }
+  if (!result.itemGeometryInvariant || !result.siblingGeometryInvariant
+    || result.maxDeltaMilliPx > STATUS_GEOMETRY_TOLERANCE_MILLI_PX) {
+    throw new WebdriverGateError("status_bar_geometry_shifted");
+  }
+  if (!result.accessibleTextComplete) {
+    throw new WebdriverGateError("status_bar_accessibility_failed");
+  }
+  if (!result.inFlightClauseOmitted) {
+    throw new WebdriverGateError("status_bar_in_flight_clause_present");
+  }
+  if (!result.inFlightOnlyTextInvariant) {
+    throw new WebdriverGateError("status_bar_in_flight_text_changed");
+  }
+  if (!result.overflowExercised) {
+    throw new WebdriverGateError("status_bar_overflow_unexercised");
+  }
+
+  return {
+    statusGeometrySamples: result.samples,
+    statusSiblingCount: result.siblingCount,
+    statusItemGeometryInvariant: result.itemGeometryInvariant,
+    statusSiblingGeometryInvariant: result.siblingGeometryInvariant,
+    statusAccessibleTextComplete: result.accessibleTextComplete,
+    statusOverflowExercised: result.overflowExercised,
+    statusInFlightClauseOmitted: result.inFlightClauseOmitted,
+    statusInFlightOnlyTextInvariant: result.inFlightOnlyTextInvariant,
+    statusViewportInvariant: result.viewportPinned,
+    statusGeometryMaxDeltaMilliPx: result.maxDeltaMilliPx,
+    statusViewport: `${STATUS_GEOMETRY_VIEWPORT.width}x${STATUS_GEOMETRY_VIEWPORT.height}`,
+  };
+}
+
 export async function exerciseObsidian({ driver, manifest }) {
   const selenium = await import("selenium-webdriver");
   const { By, Key, until } = selenium;
@@ -832,6 +1087,7 @@ export async function exerciseObsidian({ driver, manifest }) {
       observer.observe(document.body, { childList: true, subtree: true });
     })();
   `), "scenario_notice_observer_failed");
+  const statusGeometry = await exerciseStatusBarGeometry(driver);
   await gateStage(
     () => driver.executeScript("window.focus();"),
     "scenario_window_focus_failed",
@@ -899,6 +1155,7 @@ export async function exerciseObsidian({ driver, manifest }) {
     openFilePromise: observation.promise,
     expectedResultSelected: true,
     vbaPayloadSearchResults: Number(vbaPayloadSearchResults),
+    ...statusGeometry,
     electron: observation.electron,
     chromium: observation.chromium,
     driver: capabilities.get("chrome")?.chromedriverVersion?.split(" ")[0],
@@ -915,6 +1172,33 @@ export function assertObserved(observed, manifest) {
     throw new WebdriverGateError("open_promise_rejected");
   }
   if (!observed.expectedResultSelected) throw new WebdriverGateError("result_not_rendered");
+  if (observed.statusGeometrySamples !== STATUS_GEOMETRY_SAMPLE_COUNT
+    || !Number.isInteger(observed.statusSiblingCount) || observed.statusSiblingCount < 0
+    || observed.statusSiblingCount > 64
+    || observed.statusViewport !== `${STATUS_GEOMETRY_VIEWPORT.width}x${STATUS_GEOMETRY_VIEWPORT.height}`) {
+    throw new WebdriverGateError("scenario_status_geometry_failed");
+  }
+  if (!observed.statusViewportInvariant) {
+    throw new WebdriverGateError("scenario_status_viewport_failed");
+  }
+  if (!observed.statusItemGeometryInvariant || !observed.statusSiblingGeometryInvariant
+    || !Number.isInteger(observed.statusGeometryMaxDeltaMilliPx)
+    || observed.statusGeometryMaxDeltaMilliPx < 0
+    || observed.statusGeometryMaxDeltaMilliPx > STATUS_GEOMETRY_TOLERANCE_MILLI_PX) {
+    throw new WebdriverGateError("status_bar_geometry_shifted");
+  }
+  if (!observed.statusAccessibleTextComplete) {
+    throw new WebdriverGateError("status_bar_accessibility_failed");
+  }
+  if (!observed.statusInFlightClauseOmitted) {
+    throw new WebdriverGateError("status_bar_in_flight_clause_present");
+  }
+  if (!observed.statusInFlightOnlyTextInvariant) {
+    throw new WebdriverGateError("status_bar_in_flight_text_changed");
+  }
+  if (!observed.statusOverflowExercised) {
+    throw new WebdriverGateError("status_bar_overflow_unexercised");
+  }
   if (!observed.modalClosed || observed.openFailureNotices !== 0 || observed.vbaPayloadSearchResults !== 0) {
     throw new WebdriverGateError("result_not_rendered");
   }

@@ -486,7 +486,12 @@ function executionWithHits(
   state: SearchExecution["candidateWindow"]["state"] = "exhausted",
   overrides: Partial<Pick<
     SearchExecution,
-    "generation" | "backend" | "requestedMode" | "effectiveMode" | "queryPolicy"
+    | "generation"
+    | "backend"
+    | "requestedMode"
+    | "effectiveMode"
+    | "queryPolicy"
+    | "lexicalMatchQuality"
   >> = {},
 ): SearchExecution {
   return {
@@ -502,6 +507,10 @@ function executionWithHits(
       lexical_profile: "lexical-v2",
       scope: null,
       emphasis: null,
+    },
+    lexicalMatchQuality: overrides.lexicalMatchQuality ?? {
+      availability: "available",
+      value: hits.length === 0 ? "none" : "standard_only",
     },
     generation: overrides.generation ?? "g1",
     candidateWindow: {
@@ -1038,7 +1047,7 @@ describe("KwirySearchModal status rail", () => {
     });
     await vi.advanceTimersByTimeAsync(400);
 
-    expect(index.textContent).toBe("Index · Reading 4/10 (40%) ·  1 in flight");
+    expect(index.textContent).toBe("Index · Reading 4/10 (40%) · 01 in flight");
     expect(index.attributes.has("aria-live")).toBe(false);
     expect(query.textSetCount).toBe(queryMutations);
     expect(query.textContent).toBe("Type to search your notes.");
@@ -1071,7 +1080,7 @@ describe("KwirySearchModal status rail", () => {
       },
     }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(index.textContent).toBe("Index · Reading 6/10 (60%) ·  1 in flight");
+    expect(index.textContent).toBe("Index · Reading 6/10 (60%) · 01 in flight");
 
     await vi.advanceTimersByTimeAsync(400);
     expect(backend.statusCalls).toBe(2);
@@ -1090,7 +1099,7 @@ describe("KwirySearchModal status rail", () => {
       },
     }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(index.textContent).toBe("Index · Reading 6/10 (60%) ·  1 in flight");
+    expect(index.textContent).toBe("Index · Reading 6/10 (60%) · 01 in flight");
     expect(vi.getTimerCount()).toBe(0);
   });
 

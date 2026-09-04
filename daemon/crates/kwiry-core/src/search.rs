@@ -35,10 +35,10 @@ use crate::model::{LexicalSearchRequest, ResourceKey, SearchHit};
 use crate::query::classify_query;
 use crate::query::{
     LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LexicalQueryPlan, QueryAssistanceEligibility,
-    QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageKind, QueryExecutionDisposition,
-    QueryField, QueryFieldGroup, QueryMatchOperator, QueryMetadataField, QueryMetadataProbe,
-    QueryPlanKind, QueryTermProjection, QueryTermRole, QueryTermSupportObservation,
-    prepare_lexical_query,
+    QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageCondition, QueryEvidenceStageKind,
+    QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryMatchOperator, QueryMetadataField,
+    QueryMetadataProbe, QueryPlanKind, QueryTermProjection, QueryTermRole,
+    QueryTermSupportObservation, prepare_lexical_query,
 };
 #[cfg(feature = "internal-d5c-preview")]
 use crate::ranking::{
@@ -47,8 +47,9 @@ use crate::ranking::{
     RerankInput, SourceSignalObservation, rerank_candidates_with_initial_work,
 };
 use crate::ranking::{
-    LEXICAL_V2_RANK_SCHEMA_VERSION, LexicalV2Candidate, LexicalV2Proof, LexicalV2ProofField,
-    LexicalV2ProofKind, LexicalV2RankInput, MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE, QualifiedSourceId,
+    LEXICAL_V2_RANK_SCHEMA_VERSION, LexicalMatchQuality, LexicalV2Candidate, LexicalV2Proof,
+    LexicalV2ProofField, LexicalV2ProofKind, LexicalV2RankInput,
+    MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE, QualifiedSourceId, lexical_match_quality,
     lexical_v2_evidence_points, rank_lexical_v2,
 };
 use crate::source::tagged_content_role_from_chunk_id;
@@ -93,6 +94,17 @@ pub(crate) fn search_reader(
     limit: usize,
     filters: &SearchFilters,
 ) -> Result<Vec<SearchHit>> {
+    Ok(search_reader_with_quality(index, fields, reader, query_text, limit, filters)?.hits)
+}
+
+pub(crate) fn search_reader_with_quality(
+    index: &Index,
+    fields: &Fields,
+    reader: &IndexReader,
+    query_text: &str,
+    limit: usize,
+    filters: &SearchFilters,
+) -> Result<LexicalSearchOutcome> {
     if query_text.trim().is_empty() {
         return Err(Error::Query("query must not be empty".into()));
     }
@@ -177,6 +189,11 @@ struct NativeSearchContext<'a> {
 struct ResolvedLexicalPlan {
     plan: LexicalQueryPlan,
     prefix_expansions: BTreeMap<u16, Vec<String>>,
+}
+
+pub(crate) struct LexicalSearchOutcome {
+    pub hits: Vec<SearchHit>,
+    pub match_quality: LexicalMatchQuality,
 }
 
 /// The collection length BM25 divides by, summed from the live documents
@@ -293,17 +310,30 @@ impl Bm25StatisticsProvider for AuthorizedStatistics {
     }
 }
 
+#[cfg(feature = "internal-d5c-preview")]
 pub(crate) fn search_partitions(
     partitions: &[PartitionReader<'_>],
     query_text: &str,
     limit: usize,
     filters: &SearchFilters,
 ) -> Result<Vec<SearchHit>> {
+    Ok(search_partitions_with_quality(partitions, query_text, limit, filters)?.hits)
+}
+
+pub(crate) fn search_partitions_with_quality(
+    partitions: &[PartitionReader<'_>],
+    query_text: &str,
+    limit: usize,
+    filters: &SearchFilters,
+) -> Result<LexicalSearchOutcome> {
     if query_text.trim().is_empty() {
         return Err(Error::Query("query must not be empty".into()));
     }
     if partitions.is_empty() {
-        return Ok(Vec::new());
+        return Ok(LexicalSearchOutcome {
+            hits: Vec::new(),
+            match_quality: LexicalMatchQuality::None,
+        });
     }
 
     let mut ordered_partitions: Vec<_> = partitions.iter().collect();
@@ -674,9 +704,12 @@ fn execute_lexical_plan(
     limit: usize,
     filters: &SearchFilters,
     statistics: &dyn Bm25StatisticsProvider,
-) -> Result<Vec<SearchHit>> {
+) -> Result<LexicalSearchOutcome> {
     if limit == 0 {
-        return Ok(Vec::new());
+        return Ok(LexicalSearchOutcome {
+            hits: Vec::new(),
+            match_quality: LexicalMatchQuality::None,
+        });
     }
     resolved
         .plan
@@ -684,9 +717,21 @@ fn execute_lexical_plan(
         .map_err(|error| Error::Query(error.to_string()))?;
 
     match resolved.plan.execution {
-        QueryExecutionDisposition::EmptyNoEvidence => Ok(Vec::new()),
+        QueryExecutionDisposition::EmptyNoEvidence => Ok(LexicalSearchOutcome {
+            hits: Vec::new(),
+            match_quality: LexicalMatchQuality::None,
+        }),
         QueryExecutionDisposition::ExplicitBypass => {
-            execute_explicit(contexts, &resolved.plan, limit, filters, statistics)
+            let hits = execute_explicit(contexts, &resolved.plan, limit, filters, statistics)?;
+            let match_quality = if hits.is_empty() {
+                LexicalMatchQuality::None
+            } else {
+                LexicalMatchQuality::StandardOnly
+            };
+            Ok(LexicalSearchOutcome {
+                hits,
+                match_quality,
+            })
         }
         QueryExecutionDisposition::Ready => {
             execute_lexical_v2(contexts, resolved, limit, filters, statistics)
@@ -745,14 +790,24 @@ fn execute_lexical_v2(
     limit: usize,
     filters: &SearchFilters,
     statistics: &dyn Bm25StatisticsProvider,
-) -> Result<Vec<SearchHit>> {
+) -> Result<LexicalSearchOutcome> {
     let lanes = lexical_v2_lanes(&resolved.plan)?;
     if lanes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(LexicalSearchOutcome {
+            hits: Vec::new(),
+            match_quality: LexicalMatchQuality::None,
+        });
     }
 
     let mut candidates = BTreeMap::<NativeLexicalV2Identity, NativeLexicalV2Hit>::new();
+    let mut fallback_enabled = None;
     for lane in &lanes {
+        if lane.stage.condition == QueryEvidenceStageCondition::IfNoPriorCandidates {
+            let enabled = *fallback_enabled.get_or_insert(candidates.is_empty());
+            if !enabled {
+                continue;
+            }
+        }
         let mut lane_hits = Vec::new();
         for context in contexts {
             let Some(stage_query) = compile_evidence_stage(
@@ -812,6 +867,7 @@ fn execute_lexical_v2(
     let ranked = rank_lexical_v2(&input).map_err(ranking_error)?;
     let mut hits_by_identity = candidates;
     let mut hits = Vec::with_capacity(ranked.len().min(limit));
+    let mut selected_kinds = Vec::with_capacity(ranked.len().min(limit));
     for ranked in ranked.into_iter().take(limit) {
         let identity = NativeLexicalV2Identity {
             source: ranked.candidate.source,
@@ -825,9 +881,13 @@ fn execute_lexical_v2(
             })?
             .hit;
         hit.score = ranked.selected_proof.engine_score;
+        selected_kinds.push(ranked.selected_proof.kind);
         hits.push(hit);
     }
-    Ok(hits)
+    Ok(LexicalSearchOutcome {
+        hits,
+        match_quality: lexical_match_quality(selected_kinds),
+    })
 }
 
 fn lexical_v2_lanes(plan: &LexicalQueryPlan) -> Result<Vec<LexicalV2Lane>> {
@@ -1899,13 +1959,72 @@ fn compile_evidence_stage(
             || Ok(None),
             |query| with_exact_identifier_anchors(fields, plan, query).map(Some),
         ),
-        QueryEvidenceStageKind::AllTerms | QueryEvidenceStageKind::PartialCoverage => {
-            required_terms_query(index, fields, plan, stage)
+        QueryEvidenceStageKind::AllTerms => required_terms_query(index, fields, plan, stage),
+        // `minimum_optional_matches == 0` is the always-on unsupported-context
+        // relaxation: every remaining index is still a hard requirement, so it
+        // compiles exactly like `AllTerms`. `minimum_optional_matches > 0` is
+        // the conditional exploratory pass: anchors stay mandatory but the
+        // optional alternatives only need one match between them.
+        QueryEvidenceStageKind::PartialCoverage if stage.minimum_optional_matches > 0 => {
+            exploratory_partial_query(index, fields, plan, stage)
         }
+        QueryEvidenceStageKind::PartialCoverage => required_terms_query(index, fields, plan, stage),
         QueryEvidenceStageKind::PrefixMetadata | QueryEvidenceStageKind::Prefix => {
             prefix_stage_query(index, fields, plan, stage, prefix_expansions)
         }
     }
+}
+
+/// Compiles a conditional exploratory `PartialCoverage` stage: every
+/// `RequiredIdentifierAnchor` among `stage.required_term_indexes` compiles as
+/// `Occur::Must` exactly like `required_terms_query`, and every
+/// `OptionalContext` term compiles into one nested, `Occur::Should`-only
+/// `BooleanQuery` that is itself added as a single `Occur::Must` clause on
+/// the outer query. A `BooleanQuery` with only `Should` clauses inherently
+/// requires at least one to match, so this is the "SHOULD with
+/// minimum-required=1" semantics without enumerating optional combinations.
+fn exploratory_partial_query(
+    index: &Index,
+    fields: &Fields,
+    plan: &LexicalQueryPlan,
+    stage: &QueryEvidenceStage,
+) -> Result<Option<Box<dyn Query>>> {
+    let mut must_clauses = Vec::new();
+    let mut should_clauses = Vec::new();
+    for term_index in &stage.required_term_indexes {
+        let intent = plan
+            .term_intents
+            .get(*term_index as usize)
+            .ok_or_else(|| Error::Query("evidence stage references an unknown term".to_owned()))?;
+        let query = if intent.projection == QueryTermProjection::ExactIdentifier {
+            identifier_anchor_query(fields, plan, &intent.text)?
+        } else {
+            term_query_for_group(index, fields, plan, stage.field_group, &intent.text)?
+        };
+        let Some(query) = query else {
+            if intent.role == QueryTermRole::RequiredIdentifierAnchor {
+                return Ok(None);
+            }
+            // An optional alternative that cannot be queried at all is
+            // simply dropped from the disjunction; the remaining
+            // alternatives still stand.
+            continue;
+        };
+        if intent.role == QueryTermRole::RequiredIdentifierAnchor {
+            must_clauses.push((Occur::Must, query));
+        } else {
+            should_clauses.push((Occur::Should, query));
+        }
+    }
+    if should_clauses.is_empty() {
+        // Nothing is left to satisfy "at least one optional match".
+        return Ok(None);
+    }
+    must_clauses.push((
+        Occur::Must,
+        Box::new(BooleanQuery::new(should_clauses)) as Box<dyn Query>,
+    ));
+    Ok(Some(Box::new(BooleanQuery::new(must_clauses))))
 }
 
 fn required_terms_query(
@@ -2749,6 +2868,20 @@ mod tests {
         .unwrap()
     }
 
+    fn search_with_quality(data: &Path, query: &str, limit: usize) -> LexicalSearchOutcome {
+        let (index, fields) = open_index(data).unwrap();
+        let reader = index.reader().unwrap();
+        search_reader_with_quality(
+            &index,
+            &fields,
+            &reader,
+            query,
+            limit,
+            &SearchFilters::default(),
+        )
+        .unwrap()
+    }
+
     #[cfg(feature = "internal-d5c-preview")]
     fn d5c_search(
         data: &Path,
@@ -3494,6 +3627,285 @@ mod tests {
         );
         let hits = search(temporary.path(), "prefixab", 20);
         assert!(hits.iter().any(|hit| hit.path == "prefix-evidence.md"));
+    }
+
+    #[test]
+    fn fully_supported_long_query_falls_back_only_after_standard_lanes_are_empty() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let partial_data = temporary.path().join("partial-data");
+        fs::create_dir(&vault).unwrap();
+        // Three of the four optional terms; this is not a preselected
+        // subset winner, it simply happens to overlap more.
+        fs::write(vault.join("target.md"), "amberstone birchwood dunefield").unwrap();
+        // Exactly one of the four optional terms and none of the others: a
+        // non-preselected alternative that the old fixed-subset conjunction
+        // would have dropped outright.
+        fs::write(vault.join("support.md"), "cedarleaf").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault.clone(),
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &partial_data).unwrap();
+
+        let query = "amberstone birchwood cedarleaf dunefield";
+        let (index, fields) = open_index(&partial_data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved = resolve_query_plan(std::slice::from_ref(&context), query).unwrap();
+        let partial = resolved
+            .plan
+            .evidence_stages
+            .iter()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
+            .expect("the long-query fallback stage is planned");
+        assert_eq!(
+            partial.condition,
+            QueryEvidenceStageCondition::IfNoPriorCandidates
+        );
+        // Every useful optional term is offered as an alternative rather than
+        // a sampled subset, and the stage requires at least one of them.
+        assert_eq!(partial.required_term_indexes, [0, 1, 2, 3]);
+        assert_eq!(partial.minimum_optional_matches, 1);
+
+        let fallback = search_with_quality(&partial_data, query, 20);
+        assert_eq!(fallback.match_quality, LexicalMatchQuality::PartialOnly);
+        // Both the non-preselected one-term match and the three-term match
+        // surface; more overlap within the same field ranks above less.
+        assert_eq!(
+            fallback
+                .hits
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            ["target.md", "support.md"]
+        );
+
+        fs::write(
+            vault.join("complete.md"),
+            "amberstone birchwood cedarleaf dunefield",
+        )
+        .unwrap();
+        let complete_data = temporary.path().join("complete-data");
+        build_index(&config, &complete_data).unwrap();
+        let standard = search_with_quality(&complete_data, query, 20);
+        assert_eq!(standard.match_quality, LexicalMatchQuality::StandardOnly);
+        // A standard (all-terms) result suppresses the exploratory fallback
+        // entirely: `target.md` and `support.md` never surface once a
+        // stronger lane has candidates.
+        assert_eq!(
+            standard
+                .hits
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            ["complete.md"]
+        );
+    }
+
+    #[test]
+    fn exploratory_partial_coverage_keeps_identifier_anchors_mandatory() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        // Anchor plus exactly one of the four optional alternatives: the
+        // exploratory pass must accept this.
+        fs::write(vault.join("anchor-with-one.md"), "PROJ-4471 amberglass").unwrap();
+        // All four optional alternatives but no anchor at all: the
+        // exploratory pass must reject this outright, no matter how much
+        // optional overlap it carries.
+        fs::write(
+            vault.join("optional-without-anchor.md"),
+            "amberglass birchtone cedarwisp driftlock",
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let query = "PROJ-4471 amberglass birchtone cedarwisp driftlock";
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved = resolve_query_plan(std::slice::from_ref(&context), query).unwrap();
+        let partial = resolved
+            .plan
+            .evidence_stages
+            .iter()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
+            .expect("the exploratory fallback stage is planned");
+        assert_eq!(partial.minimum_optional_matches, 1);
+
+        let outcome = search_with_quality(&data, query, 20);
+        assert_eq!(outcome.match_quality, LexicalMatchQuality::PartialOnly);
+        assert_eq!(
+            outcome
+                .hits
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            ["anchor-with-one.md"]
+        );
+    }
+
+    #[test]
+    fn metadata_partial_match_outranks_body_only_after_zero_standard_candidates() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        // A one-keyword title match: the reported "a one-keyword
+        // filename/title match surfaces after zero standard candidates"
+        // scenario.
+        fs::write(
+            vault.join("Amberglass-Report.md"),
+            "---\ntitle: Amberglass Report\n---\nUnrelated body prose.",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("body-only.md"),
+            "---\ntitle: Body Only\n---\ncedarwisp appears in the prose only.",
+        )
+        .unwrap();
+        // These only establish document-frequency support for the remaining
+        // two optional terms; no document ever carries all four together,
+        // so no standard lane produces a candidate. Their filenames and
+        // titles deliberately avoid every query term so they cannot pick up
+        // a metadata-field proof of their own and confound the
+        // metadata-vs-body comparison below.
+        fs::write(
+            vault.join("filler-one.md"),
+            "---\ntitle: Filler One\n---\nbirchtone filler prose.",
+        )
+        .unwrap();
+        fs::write(
+            vault.join("filler-two.md"),
+            "---\ntitle: Filler Two\n---\ndriftlock filler prose.",
+        )
+        .unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let query = "amberglass birchtone cedarwisp driftlock";
+        let outcome = search_with_quality(&data, query, 20);
+        assert_eq!(outcome.match_quality, LexicalMatchQuality::PartialOnly);
+        let paths: Vec<_> = outcome.hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(paths.first(), Some(&"Amberglass-Report.md"));
+        let title_rank = paths
+            .iter()
+            .position(|path| *path == "Amberglass-Report.md")
+            .unwrap();
+        let body_rank = paths
+            .iter()
+            .position(|path| *path == "body-only.md")
+            .unwrap();
+        assert!(title_rank < body_rank);
+    }
+
+    #[test]
+    fn unauthorized_standard_candidate_does_not_suppress_authorized_partial_result() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir_all(vault.join("forbidden")).unwrap();
+        fs::create_dir_all(vault.join("allowed")).unwrap();
+        // Would satisfy the standard `AllTerms` lane, but sits outside the
+        // authorized scope and must never even become a candidate.
+        fs::write(
+            vault.join("forbidden/full-match.md"),
+            "amberglass birchtone cedarwisp driftlock",
+        )
+        .unwrap();
+        // Only one of the four optional terms, inside the authorized scope.
+        fs::write(vault.join("allowed/partial-match.md"), "amberglass").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let filters = SearchFilters {
+            path_prefix: Some("allowed/".into()),
+            ..SearchFilters::default()
+        };
+        // Authorization happens before retrieval: the forbidden document's
+        // would-be `AllTerms` match must not count toward "prior candidates"
+        // for the authorized scope, so the exploratory pass still runs and
+        // still surfaces the authorized partial match.
+        let outcome = search_reader_with_quality(
+            &index,
+            &fields,
+            &reader,
+            "amberglass birchtone cedarwisp driftlock",
+            20,
+            &filters,
+        )
+        .unwrap();
+        assert_eq!(outcome.match_quality, LexicalMatchQuality::PartialOnly);
+        assert_eq!(
+            outcome
+                .hits
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            ["allowed/partial-match.md"]
+        );
+    }
+
+    #[test]
+    fn lexical_match_quality_is_none_when_no_visible_result_exists() {
+        let temporary = tempdir().unwrap();
+        build_index(&technical_fixture_config(), temporary.path()).unwrap();
+
+        let outcome =
+            search_with_quality(temporary.path(), "unrepresentedword anotherabsentword", 20);
+        assert!(outcome.hits.is_empty());
+        assert_eq!(outcome.match_quality, LexicalMatchQuality::None);
     }
 
     #[test]
@@ -5049,7 +5461,7 @@ mod tests {
                 );
             }
 
-            let hits = execute_lexical_plan(
+            let outcome = execute_lexical_plan(
                 std::slice::from_ref(&context),
                 &resolved,
                 case.limit,
@@ -5057,6 +5469,7 @@ mod tests {
                 &searcher,
             )
             .unwrap_or_else(|error| panic!("{} failed to execute: {error}", case.id));
+            let hits = outcome.hits;
             let hit_paths: Vec<_> = hits.iter().map(|hit| hit.path.clone()).collect();
             for excluded in &case.excluded_paths {
                 assert!(
@@ -5129,7 +5542,8 @@ mod tests {
                     &SearchFilters::default(),
                     &searcher,
                 )
-                .unwrap();
+                .unwrap()
+                .hits;
                 let identity = |values: &[SearchHit]| {
                     values
                         .iter()

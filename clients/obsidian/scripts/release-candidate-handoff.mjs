@@ -127,7 +127,7 @@ export function validateReleaseCandidateHandoff(value) {
   match(webdriver.sha256, HASH);
   equal(webdriver.kind, "kwiry_obsidian_webdriver_release_gate");
   equal(webdriver.verdict, "SELENIUM_RELEASE_GATE_PASSED");
-  equal(webdriver.scope, "narrow_real_obsidian_selection_lifecycle");
+  equal(webdriver.scope, "narrow_real_obsidian_status_geometry_and_selection_lifecycle");
   match(exact(root.runtime_manifest, ["sha256"]).sha256, HASH);
   const notes = exact(root.release_notes, ["sha256", "bytes"]);
   match(notes.sha256, HASH);

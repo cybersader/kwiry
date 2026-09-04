@@ -17,9 +17,10 @@ use tokio::sync::RwLock;
 use kwiry_core::{
     ApiErrorEnvelope, ApiSearchRequest, ApiSearchResponse, Config, ConnectionDescriptor,
     DaemonState, DaemonStatus, DataRoot, HealthResponse, HostProfile, IndexFreshness,
-    IndexFreshnessBasis, IndexFreshnessState, IndexManager, Manifest, ManifestFileOutcome,
-    ModelStatus, Paths, Principal, ReconcileScope, Scope, SearchMode, SearchRuntime, VaultStatus,
-    bootstrap_desktop, build_index, load_config, write_connection_descriptor,
+    IndexFreshnessBasis, IndexFreshnessState, IndexManager, LexicalMatchQuality, Manifest,
+    ManifestFileOutcome, ModelStatus, Paths, Principal, ReconcileScope, Scope, SearchMode,
+    SearchRuntime, VaultStatus, bootstrap_desktop, build_index, load_config,
+    write_connection_descriptor,
 };
 
 use crate::auth::{AuthState, require_auth};
@@ -31,6 +32,7 @@ use crate::watcher::spawn_watcher;
 const INDEX_FRESHNESS_HEADER: &str = "x-kwiry-index-freshness";
 const GENERATION_HEADER: &str = "x-kwiry-generation";
 const LEXICAL_PROFILE_HEADER: &str = "x-kwiry-lexical-profile";
+const LEXICAL_MATCH_QUALITY_HEADER: &str = "x-kwiry-lexical-match-quality";
 const FIELD_SCOPE_HEADER: &str = "x-kwiry-field-scope";
 const FIELD_EMPHASIS_HEADER: &str = "x-kwiry-field-emphasis";
 
@@ -604,6 +606,11 @@ async fn search(
         LEXICAL_PROFILE_HEADER,
         policy_header_value(lexical_profile)?,
     );
+    let lexical_match_quality = lexical_match_quality_header(mode, result.lexical_match_quality)?;
+    response.headers_mut().insert(
+        LEXICAL_MATCH_QUALITY_HEADER,
+        policy_header_value(lexical_match_quality)?,
+    );
     response.headers_mut().insert(
         FIELD_SCOPE_HEADER,
         policy_header_value(policy.scope.map_or("none", |field| field.as_str()))?,
@@ -613,6 +620,24 @@ async fn search(
         policy_header_value(policy.emphasis.map_or("none", |field| field.as_str()))?,
     );
     Ok(response)
+}
+
+fn lexical_match_quality_header(
+    mode: SearchMode,
+    quality: Option<LexicalMatchQuality>,
+) -> std::result::Result<&'static str, HttpError> {
+    match (mode, quality) {
+        (SearchMode::Lexical, Some(LexicalMatchQuality::StandardOnly)) => Ok("standard_only"),
+        (SearchMode::Lexical, Some(LexicalMatchQuality::Mixed)) => Ok("mixed"),
+        (SearchMode::Lexical, Some(LexicalMatchQuality::PartialOnly)) => Ok("partial_only"),
+        (SearchMode::Lexical, Some(LexicalMatchQuality::None)) => Ok("none"),
+        (SearchMode::Lexical, None) => Err(HttpError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "the lexical match quality was unavailable",
+        )),
+        (SearchMode::Semantic | SearchMode::Hybrid, _) => Ok("not_applicable"),
+    }
 }
 
 fn policy_header_value(value: &str) -> std::result::Result<HeaderValue, HttpError> {
@@ -857,6 +882,35 @@ mod tests {
     }
 
     #[test]
+    fn lexical_match_quality_header_is_closed_and_mode_aware() {
+        fn value(mode: SearchMode, quality: Option<LexicalMatchQuality>) -> &'static str {
+            let Ok(value) = lexical_match_quality_header(mode, quality) else {
+                panic!("valid match quality must map to a header value");
+            };
+            value
+        }
+
+        for (quality, expected) in [
+            (LexicalMatchQuality::StandardOnly, "standard_only"),
+            (LexicalMatchQuality::Mixed, "mixed"),
+            (LexicalMatchQuality::PartialOnly, "partial_only"),
+            (LexicalMatchQuality::None, "none"),
+        ] {
+            assert_eq!(value(SearchMode::Lexical, Some(quality)), expected);
+        }
+        assert_eq!(value(SearchMode::Semantic, None), "not_applicable");
+        assert_eq!(
+            value(SearchMode::Hybrid, Some(LexicalMatchQuality::PartialOnly)),
+            "not_applicable"
+        );
+        let Err(error) = lexical_match_quality_header(SearchMode::Lexical, None) else {
+            panic!("missing lexical quality must fail closed");
+        };
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.body.error.code, "internal_error");
+    }
+
+    #[test]
     fn freshness_tracks_the_generation_and_reconciliation_state() {
         let mut status = DaemonStatus::starting("0.1.0");
         status.generation = Some("generation-a".to_owned());
@@ -1023,6 +1077,13 @@ mod tests {
             response.headers().get(LEXICAL_PROFILE_HEADER).unwrap(),
             "lexical-v2"
         );
+        assert_eq!(
+            response
+                .headers()
+                .get(LEXICAL_MATCH_QUALITY_HEADER)
+                .unwrap(),
+            "standard_only"
+        );
         assert_eq!(response.headers().get(FIELD_SCOPE_HEADER).unwrap(), "none");
         assert_eq!(
             response.headers().get(FIELD_EMPHASIS_HEADER).unwrap(),
@@ -1068,6 +1129,75 @@ mod tests {
                 "vault_id",
             ])
         );
+        manager.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn lexical_search_discloses_partial_only_best_attempts_in_a_header() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("target.md"), "amberstone birchwood dunefield").unwrap();
+        fs::write(vault.join("support.md"), "cedarleaf").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data).unwrap();
+        let runtime = SearchRuntime::new();
+        let manager = IndexManager::open(config, &data, runtime.clone()).unwrap();
+        let generation = runtime.generation().unwrap();
+        let mut status = DaemonStatus::starting("0.1.0");
+        status.state = DaemonState::Ready;
+        status.generation = Some(generation);
+        status.dirty = false;
+        let app = build_router(
+            AppState {
+                profile: HostProfile::Desktop,
+                runtime,
+                status: Arc::new(RwLock::new(status)),
+            },
+            AuthState::desktop("secret".to_owned()),
+            HostProfile::Desktop,
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v0/search")
+                    .header(AUTHORIZATION, "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"q":"amberstone birchwood cedarleaf dunefield","mode":"lexical","limit":20}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(LEXICAL_MATCH_QUALITY_HEADER)
+                .unwrap(),
+            "partial_only"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let response: ApiSearchResponse = serde_json::from_slice(&body).unwrap();
+        // The bounded exploratory partial pass surfaces every candidate that
+        // carries at least one optional term, not only the best-attempt
+        // preselected winner: target.md (three of the four terms) and
+        // support.md (one term) both surface, with more overlap ranking
+        // first.
+        assert_eq!(response.hits.len(), 2);
+        assert_eq!(response.hits[0].path, "target.md");
+        assert_eq!(response.hits[1].path, "support.md");
         manager.shutdown().unwrap();
     }
 
@@ -1299,6 +1429,13 @@ mod tests {
         assert_eq!(
             response.headers().get(LEXICAL_PROFILE_HEADER).unwrap(),
             "lexical-v2"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(LEXICAL_MATCH_QUALITY_HEADER)
+                .unwrap(),
+            "standard_only"
         );
         assert_eq!(response.headers().get(FIELD_SCOPE_HEADER).unwrap(), "none");
         assert_eq!(

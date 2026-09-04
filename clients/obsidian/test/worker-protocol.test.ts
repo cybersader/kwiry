@@ -207,9 +207,9 @@ function source(path = "note.md", vaultId = "active"): SourceInput {
 }
 
 describe("Worker protocol", () => {
-  it("publishes protocol 15, cache schema 12, and the closed nine-format set", () => {
-    // Protocol 15 adds count-only diagnostic evidence without changing cache storage.
-    expect(WORKER_PROTOCOL_VERSION).toBe(15);
+  it("publishes protocol 16, cache schema 12, and the closed nine-format set", () => {
+    // Protocol 16 adds closed lexical match quality without changing cache storage.
+    expect(WORKER_PROTOCOL_VERSION).toBe(16);
     expect(CACHE_SCHEMA_VERSION).toBe(12);
     expect(SOURCE_FORMATS).toEqual([
       "markdown",
@@ -916,7 +916,7 @@ describe("Worker protocol", () => {
     }
   });
 
-  it("accepts only the protocol-15 structured query error vocabulary", () => {
+  it("accepts only the protocol-16 structured query error vocabulary", () => {
     const response = (code: string, failureCause?: string) => ({
       version: WORKER_PROTOCOL_VERSION,
       id: 1,
@@ -1060,6 +1060,7 @@ describe("Worker protocol", () => {
           candidate_count: 1,
           candidate_limit: 512,
         },
+        lexical_match_quality: "standard_only",
         query_policy: {
           profile_id: "lexical-v2",
           query_text: "query",
@@ -1106,6 +1107,9 @@ describe("Worker protocol", () => {
       result: {
         ...result,
         candidate_window: candidateWindow,
+        lexical_match_quality: Array.isArray(result.hits) && result.hits.length > 0
+          ? "standard_only"
+          : "none",
         query_policy: {
           profile_id: "lexical-v2",
           query_text: "query",
@@ -1281,6 +1285,7 @@ describe("Worker protocol", () => {
         generation: "g1",
         hits: [],
         candidate_window: candidateWindow,
+        lexical_match_quality: "none",
         query_policy: {
           profile_id: "lexical-v2",
           query_text: "query",

@@ -12,10 +12,10 @@ const HASH = "a".repeat(64);
 
 function validEvidence() {
   return {
-    schema_version: 1,
+    schema_version: 3,
     kind: "kwiry_obsidian_webdriver_release_gate",
     verdict: "SELENIUM_RELEASE_GATE_PASSED",
-    scope: "narrow_real_obsidian_selection_lifecycle",
+    scope: "narrow_real_obsidian_status_geometry_and_selection_lifecycle",
     candidate: {
       version: "0.6.0-beta.15",
       candidate_set_sha256: HASH,
@@ -53,6 +53,17 @@ function validEvidence() {
       open_file_promise: "resolved",
       expected_result_selected: true,
       vba_payload_search_results: 0,
+      status_geometry_samples: 5,
+      status_sibling_count: 3,
+      status_item_geometry_invariant: true,
+      status_sibling_geometry_invariant: true,
+      status_accessible_text_complete: true,
+      status_overflow_exercised: true,
+      status_in_flight_clause_omitted: true,
+      status_in_flight_only_text_invariant: true,
+      status_viewport_invariant: true,
+      status_geometry_max_delta_milli_px: 0,
+      status_viewport: "1920x1080",
     },
     cleanup: {
       webdriver_quit: true,
@@ -85,6 +96,12 @@ describe("WebDriver release evidence schema", () => {
     ["failed cleanup", (value) => { value.cleanup.private_state_removed = false; }],
     ["stale notice", (value) => { value.scenario.stale_notices = 1; }],
     ["duplicate open", (value) => { value.scenario.open_file_calls = 2; }],
+    ["shifted status item", (value) => { value.scenario.status_item_geometry_invariant = false; }],
+    ["excess geometry delta", (value) => { value.scenario.status_geometry_max_delta_milli_px = 11; }],
+    ["missing status overflow", (value) => { value.scenario.status_overflow_exercised = false; }],
+    ["retained in-flight clause", (value) => { value.scenario.status_in_flight_clause_omitted = false; }],
+    ["in-flight-only text drift", (value) => { value.scenario.status_in_flight_only_text_invariant = false; }],
+    ["unpinned status viewport", (value) => { value.scenario.status_viewport_invariant = false; }],
     ["broad verdict", (value) => { value.verdict = "GO_ACCEPTED"; }],
     ["private path key", (value) => { value.runtime.binary_path = "fixture"; }],
     ["private path value", (value) => { value.runtime.node = ["/", "home", "private"].join("/"); }],
@@ -96,7 +113,7 @@ describe("WebDriver release evidence schema", () => {
 
   it("maps raw failures to a fixed closed stage vocabulary", () => {
     expect(sanitizedGateFailure("open_not_invoked")).toEqual({
-      schema_version: 1,
+      schema_version: 2,
       kind: "kwiry_obsidian_webdriver_release_gate_failure",
       status: "failed",
       failure_stage: "open_not_invoked",
@@ -186,6 +203,11 @@ describe("WebDriver release evidence schema", () => {
     expect(sanitizedGateFailure("scenario_state_setup_failed").failure_stage).toBe("scenario_state_setup_failed");
     expect(sanitizedGateFailure("scenario_open_hook_failed").failure_stage).toBe("scenario_open_hook_failed");
     expect(sanitizedGateFailure("scenario_notice_observer_failed").failure_stage).toBe("scenario_notice_observer_failed");
+    expect(sanitizedGateFailure("scenario_status_viewport_failed").failure_stage).toBe("scenario_status_viewport_failed");
+    expect(sanitizedGateFailure("scenario_status_geometry_failed").failure_stage).toBe("scenario_status_geometry_failed");
+    expect(sanitizedGateFailure("status_bar_geometry_shifted").failure_stage).toBe("status_bar_geometry_shifted");
+    expect(sanitizedGateFailure("status_bar_accessibility_failed").failure_stage).toBe("status_bar_accessibility_failed");
+    expect(sanitizedGateFailure("status_bar_overflow_unexercised").failure_stage).toBe("status_bar_overflow_unexercised");
     expect(sanitizedGateFailure("scenario_search_command_failed").failure_stage).toBe("scenario_search_command_failed");
     expect(sanitizedGateFailure("scenario_window_focus_failed").failure_stage).toBe("scenario_window_focus_failed");
     expect(sanitizedGateFailure("scenario_palette_shortcut_failed").failure_stage).toBe("scenario_palette_shortcut_failed");

@@ -119,10 +119,10 @@ function gate5Evidence() {
 
 function webdriverEvidence(candidate, runtimeManifestSha256) {
   return {
-    schema_version: 1,
+    schema_version: 3,
     kind: "kwiry_obsidian_webdriver_release_gate",
     verdict: "SELENIUM_RELEASE_GATE_PASSED",
-    scope: "narrow_real_obsidian_selection_lifecycle",
+    scope: "narrow_real_obsidian_status_geometry_and_selection_lifecycle",
     candidate: {
       version: candidate.version,
       candidate_set_sha256: candidate.candidate_set_sha256,
@@ -144,6 +144,12 @@ function webdriverEvidence(candidate, runtimeManifestSha256) {
       stale_notices: 0, open_failure_notices: 0, open_file_calls: 1,
       open_file_promise: "resolved", expected_result_selected: true,
       vba_payload_search_results: 0,
+      status_geometry_samples: 5, status_sibling_count: 3,
+      status_item_geometry_invariant: true, status_sibling_geometry_invariant: true,
+      status_accessible_text_complete: true, status_overflow_exercised: true,
+      status_in_flight_clause_omitted: true, status_in_flight_only_text_invariant: true,
+      status_viewport_invariant: true,
+      status_geometry_max_delta_milli_px: 0, status_viewport: "1920x1080",
     },
     cleanup: {
       webdriver_quit: true, obsidian_reaped: true, verified_download_server_closed: true,

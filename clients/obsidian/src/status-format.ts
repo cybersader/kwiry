@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import type { BackendStatus } from "./backend";
-import { formatIndexProgress } from "./index-progress-format";
+import { formatIndexProgressSummary } from "./index-progress-format";
 
 export function formatStatus(status: BackendStatus): string {
-  if (status.progress) return `Kwiry: ${formatIndexProgress(status.progress)}`;
+  if (status.progress) return `Kwiry: ${formatIndexProgressSummary(status.progress)}`;
 
   const partial = status.sourceFormatCounts === undefined
     ? 0

@@ -47,7 +47,10 @@ import { createPrivateTools, type PrivateTools } from "./internal/private-tools"
 import { LatestRequestEpoch } from "./latest-request-epoch";
 import { KwirySearchModal } from "./search-modal";
 import { corePolicyFingerprint, enabledSourceFormatList } from "./source-formats";
-import { renderStatusBarText } from "./status-bar-render";
+import {
+  createStatusBarRenderer,
+  type StatusBarRenderer,
+} from "./status-bar-render";
 import { formatStatus } from "./status-format";
 import { SOURCE_FORMATS } from "./worker/protocol";
 import {
@@ -70,6 +73,7 @@ const VAULT_ACTIVITY_INTERVAL_MS = 5_000;
 export default class KwiryPlugin extends Plugin {
   settings: KwiryPluginSettings = DEFAULT_SETTINGS;
   private statusBar: HTMLElement | null = null;
+  private statusBarRenderer: StatusBarRenderer | null = null;
   private backendManager!: BackendManager;
   private activeBackendIdentity: BackendIdentity | null = null;
   private statusUnsubscribe: (() => void) | null = null;
@@ -171,6 +175,7 @@ export default class KwiryPlugin extends Plugin {
         }
 
         this.statusBar = this.addStatusBarItem();
+        this.statusBarRenderer = createStatusBarRenderer(this.statusBar);
         this.setStatusBarText("kwiry: starting…");
         this.registerInterval(
           window.setInterval(() => void this.refreshStatus(), STATUS_POLL_MS),
@@ -402,8 +407,7 @@ export default class KwiryPlugin extends Plugin {
   }
 
   private setStatusBarText(text: string): void {
-    if (this.statusBar === null) return;
-    renderStatusBarText(this.statusBar, text);
+    this.statusBarRenderer?.render(text);
   }
 
   async activateBackendProfile(): Promise<void> {
