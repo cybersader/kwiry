@@ -101,6 +101,8 @@ Lite UI truthfulness requirements:
 - return `index_building` until an atomic complete generation is ready;
 - distinguish `current`, `reconciling`, `stale`, and `unavailable`; a restored complete generation may be searchable while stale, but must not be labeled ready/current;
 - identify the effective freshness basis (`strict_hash` or `metadata_audit`) and whether a bounded audit remains pending;
+- label visible lexical results derived only from partial-coverage proofs as **Best-attempt partial matches**, and label mixed standard/partial result windows separately; candidate-window completeness and source-row truncation remain independent facts;
+- treat lexical match quality omitted by an older daemon as unavailable rather than implying standard matching, while semantic and hybrid result sets report lexical quality as not applicable;
 - never persist note content, queries, index bytes, source paths, or a bearer token in plugin settings. The machine-local cache store holds opaque versioned disposable derived files outside the vault instead.
 
 ## Active-vault lifecycle
@@ -142,6 +144,14 @@ The open-property projection foundation is published in beta.15. The 2026-08-24 
 - **Configuration:** further named profiles, arbitrary sliders, metadata crossing lexical-v2 text-evidence bands, reset/migration behavior, and broader explanation envelopes remain separately owner-reviewed.
 
 Every admitted signal needs judged queries and reproducible regressions. The accepted controls use fixed versioned internal values rather than user-authored numbers. Zero-result copy is implemented, beta.27 field controls are accepted, and typo assistance remains prototype-only pending performance and visible-limitation evidence.
+
+### Bounded long-query best attempt
+
+For an ordinary assistance-eligible query whose standard lanes collect no candidates, shared Rust may declare one bounded exploratory `partial_coverage` stage when at least four useful optional-context terms are supported. The stage keeps every required identifier anchor mandatory and exposes every useful optional-context term as an alternative, requiring at least one to match (`minimum_optional_matches: 1`); it never enumerates combinations or samples a fixed subset. Native Tantivy compiles the anchors as `MUST` and the optional terms as `SHOULD` with minimum-required-1 (a nested `BooleanQuery`); FTS5 MATCH compiles the required anchors plus a parenthesized `OR` group over the optional terms. OpenClast consumes the same declared condition and term set.
+
+Exact metadata, exact phrase, prefix, and complete all-term lanes remain primary. The fallback decision is made once before the conditional partial stage: any standard candidate suppresses the stage, while activation runs all of its bounded field lanes. Existing partial coverage caused by unsupported optional context remains an always-executed supplemental stage. Explicit syntax, authored phrase/exclusion bypasses, field controls, required identifier anchors, authorization-before-retrieval, per-stage candidate ceilings, and the total retained-candidate ceiling are unchanged.
+
+Lexical match quality is derived from the selected proofs of the visible result window, not from whether a partial stage was planned. The closed values are `standard_only`, `mixed`, `partial_only`, and `none`. The daemon carries the fact in `x-kwiry-lexical-match-quality` without changing the frozen JSON response body; the in-plugin Worker carries it in its versioned protocol. Presentation must disclose `partial_only` as **Best-attempt partial matches** and `mixed` as **Some partial matches included** without exposing query text. Semantic and hybrid final result sets use `not_applicable`; a missing lexical header from an older daemon is `unavailable`.
 
 A narrow real-Obsidian WebDriver proof may verify a named host lifecycle or regression, but it is not owner field, daily-drive, ranking, performance, or distribution acceptance.
 

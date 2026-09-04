@@ -1,11 +1,19 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { KwiryApiError, KwiryClient, type SearchRequest, type Transport } from "../api";
+import {
+  KwiryApiError,
+  KwiryClient,
+  type DaemonLexicalMatchQuality,
+  type SearchMode,
+  type SearchRequest,
+  type Transport,
+} from "../api";
 import {
   type BackendCapabilities,
   type BackendIdentity,
   type BackendStatus,
+  type LexicalMatchQualityFacts,
   type SearchBackend,
   type SearchExecution,
   KwiryBackendError,
@@ -145,6 +153,10 @@ export class DaemonBackend implements SearchBackend {
         requestedMode: request.mode,
         effectiveMode: request.mode,
         queryPolicy: result.queryPolicy,
+        lexicalMatchQuality: daemonLexicalMatchQuality(
+          request.mode,
+          result.lexicalMatchQuality,
+        ),
         generation: status.generation,
         candidateWindow: {
           // The frozen daemon body exposes only positive continuation evidence.
@@ -221,6 +233,35 @@ export class DaemonBackend implements SearchBackend {
       },
     };
   }
+}
+
+function daemonLexicalMatchQuality(
+  mode: SearchMode,
+  quality: DaemonLexicalMatchQuality | null,
+): LexicalMatchQualityFacts {
+  if (mode !== "lexical") {
+    if (quality !== null && quality !== "not_applicable") {
+      throw new KwiryBackendError(
+        "invalid_response",
+        "daemon",
+        "protocol",
+        false,
+        "Daemon returned lexical match quality for a non-lexical result.",
+      );
+    }
+    return { availability: "not_applicable" };
+  }
+  if (quality === null) return { availability: "unavailable" };
+  if (quality === "not_applicable") {
+    throw new KwiryBackendError(
+      "invalid_response",
+      "daemon",
+      "protocol",
+      false,
+      "Daemon omitted lexical match quality for a lexical result.",
+    );
+  }
+  return { availability: "available", value: quality };
 }
 
 function hasLeadingFieldControl(query: string): boolean {

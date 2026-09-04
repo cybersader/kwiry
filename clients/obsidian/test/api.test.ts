@@ -71,6 +71,7 @@ describe("KwiryClient.search", () => {
       "X-Kwiry-Lexical-Profile": "lexical-v2",
       "X-Kwiry-Field-Scope": "name",
       "X-Kwiry-Field-Emphasis": "title",
+      "X-Kwiry-Lexical-Match-Quality": "partial_only",
     });
     await expect(client(transport).searchWithPolicy({
       q: "in:name >title query",
@@ -81,6 +82,7 @@ describe("KwiryClient.search", () => {
         scope: "name",
         emphasis: "title",
       },
+      lexicalMatchQuality: "partial_only",
       response: { hits: [{ chunk_id: "c1" }] },
     });
   });
@@ -94,6 +96,23 @@ describe("KwiryClient.search", () => {
       .catch((caught) => caught);
     expect(error).toBeInstanceOf(KwiryApiError);
     expect(error.code).toBe("invalid_response");
+  });
+
+  it("rejects lexical match-quality values outside the closed header vocabulary", async () => {
+    const { transport } = mockTransport(200, { hits: [], next_cursor: null }, {
+      "x-kwiry-lexical-match-quality": "best_effort",
+    });
+    const error = await client(transport)
+      .searchWithPolicy({ q: "query", mode: "lexical" })
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(KwiryApiError);
+    expect(error.code).toBe("invalid_response");
+  });
+
+  it("leaves lexical match quality unavailable when an older daemon omits the header", async () => {
+    const { transport } = mockTransport(200, { hits: [], next_cursor: null });
+    await expect(client(transport).searchWithPolicy({ q: "query", mode: "lexical" }))
+      .resolves.toMatchObject({ lexicalMatchQuality: null });
   });
 
   it("reads the token provider fresh for every authenticated request", async () => {

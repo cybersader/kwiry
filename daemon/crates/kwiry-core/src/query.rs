@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lexical::{normalize_raw, technical_identifier_spans, technical_identifiers};
 
-pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 8;
+pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 10;
 pub const LEXICAL_V1_PROFILE_ID: &str = "lexical-v1";
 pub const LEXICAL_V2_PROFILE_ID: &str = "lexical-v2";
 pub const FIELD_CONTROLS_SCHEMA_VERSION: u32 = 1;
@@ -13,6 +13,7 @@ pub const MAX_QUERY_TERMS: usize = 128;
 pub const MAX_TERM_SUPPORT_PROBES: usize = 128;
 pub const MAX_EVIDENCE_STAGES: usize = 6;
 pub const MAX_PARTIAL_COVERAGE_TERMS: usize = 128;
+pub const MIN_FALLBACK_OPTIONAL_TERMS: usize = 4;
 pub const MIN_PREFIX_CHARS: usize = 3;
 pub const MAX_PREFIX_TERMS: usize = 8;
 pub const MAX_PREFIX_EXPANSIONS_PER_TERM: usize = 16;
@@ -365,15 +366,31 @@ pub enum QueryEvidenceStageKind {
     PartialCoverage,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryEvidenceStageCondition {
+    Always,
+    IfNoPriorCandidates,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QueryEvidenceStage {
     pub ordinal: u8,
     pub kind: QueryEvidenceStageKind,
+    pub condition: QueryEvidenceStageCondition,
     pub field_group: QueryFieldGroup,
     pub required_term_indexes: Vec<u16>,
     pub prefix_term_indexes: Vec<u16>,
     pub max_candidates: usize,
+    /// Minimum number of `OptionalContext` terms among
+    /// `required_term_indexes` that must match. `0` means every stage member
+    /// is a hard requirement (normal conjunctive semantics, used by every
+    /// stage kind and by the always-on unsupported-context `PartialCoverage`
+    /// stage). A conditional exploratory `PartialCoverage` stage sets this to
+    /// `1`: every `RequiredIdentifierAnchor` in the set stays mandatory, and
+    /// at least one `OptionalContext` term among the rest must also match.
+    pub minimum_optional_matches: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -571,11 +588,8 @@ impl LexicalQueryPlan {
                 self.bounds.max_candidates_per_stage,
             );
         }
-        let has_unsupported_context = self.term_intents.iter().any(|intent| {
-            intent.role == QueryTermRole::OptionalContext
-                && intent.support == QueryTermSupport::Unsupported
-        });
-        let partial_indexes: Vec<_> = self
+        let partial_coverage = partial_coverage_stage(&self.term_intents, &self.bounds);
+        let relaxed_indexes: Vec<_> = self
             .term_intents
             .iter()
             .filter(|intent| {
@@ -590,7 +604,7 @@ impl LexicalQueryPlan {
         // better answer than one that merely mentions those stems in prose.
         // Stages fill the window in order, so this ordering is what makes the
         // precedence real rather than a scoring preference.
-        let prefix_required = prefix_stage_required_indexes(&partial_indexes, &prefix_indexes);
+        let prefix_required = prefix_stage_required_indexes(&relaxed_indexes, &prefix_indexes);
         if !prefix_indexes.is_empty() && !self.field_groups.prefix_metadata.is_empty() {
             push_stage(
                 &mut self.evidence_stages,
@@ -623,15 +637,16 @@ impl LexicalQueryPlan {
                 self.bounds.max_candidates_per_stage,
             );
         }
-        if has_unsupported_context && !partial_indexes.is_empty() && partial_indexes != all_indexes
-        {
-            push_stage(
+        if let Some(partial) = partial_coverage {
+            push_stage_with_condition(
                 &mut self.evidence_stages,
                 QueryEvidenceStageKind::PartialCoverage,
+                partial.condition,
                 QueryFieldGroup::SearchableText,
-                partial_indexes,
+                partial.required_term_indexes,
                 Vec::new(),
                 self.bounds.max_candidates_per_stage,
+                partial.minimum_optional_matches,
             );
         }
 
@@ -1088,10 +1103,7 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
         .take(plan.bounds.max_partial_coverage_terms)
         .map(|intent| intent.index)
         .collect();
-    let has_unsupported_context = plan.term_intents.iter().any(|intent| {
-        intent.role == QueryTermRole::OptionalContext
-            && intent.support == QueryTermSupport::Unsupported
-    });
+    let partial_coverage = partial_coverage_stage(&plan.term_intents, &plan.bounds);
     let has_prefix = plan
         .evidence_stages
         .iter()
@@ -1123,7 +1135,7 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
     if has_prefix {
         expected_kinds.push(QueryEvidenceStageKind::Prefix);
     }
-    if has_unsupported_context && !relaxed_indexes.is_empty() && relaxed_indexes != all_indexes {
+    if partial_coverage.is_some() {
         expected_kinds.push(QueryEvidenceStageKind::PartialCoverage);
     }
     let actual_kinds: Vec<_> = plan
@@ -1148,6 +1160,30 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
             ));
         }
         previous_kind = Some(stage.kind);
+        let expected_condition = if stage.kind == QueryEvidenceStageKind::PartialCoverage {
+            partial_coverage
+                .as_ref()
+                .map_or(QueryEvidenceStageCondition::Always, |partial| {
+                    partial.condition
+                })
+        } else {
+            QueryEvidenceStageCondition::Always
+        };
+        if stage.condition != expected_condition {
+            return Err(invalid_plan(
+                "query evidence stage execution condition is not canonical",
+            ));
+        }
+        // Every stage kind other than the conditional exploratory
+        // `PartialCoverage` pass uses normal conjunctive semantics: nothing
+        // may declare a nonzero optional-match threshold.
+        if stage.kind != QueryEvidenceStageKind::PartialCoverage
+            && stage.minimum_optional_matches != 0
+        {
+            return Err(invalid_plan(
+                "query evidence stage optional-match threshold is not canonical",
+            ));
+        }
         if stage
             .required_term_indexes
             .iter()
@@ -1203,10 +1239,20 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
                 }
             }
             QueryEvidenceStageKind::PartialCoverage => {
+                // A conditional exploratory pass (`minimum_optional_matches`
+                // > 0) legitimately shares its full index set with the
+                // `AllTerms` stage: the meaning differs (at least one
+                // optional term versus every term), so equality with
+                // `all_indexes` is only redundant for the always-on,
+                // normal-conjunctive case.
                 if stage.field_group != QueryFieldGroup::SearchableText
-                    || stage.required_term_indexes != relaxed_indexes
+                    || partial_coverage.as_ref().is_none_or(|partial| {
+                        stage.required_term_indexes != partial.required_term_indexes
+                            || stage.minimum_optional_matches != partial.minimum_optional_matches
+                    })
                     || stage.required_term_indexes.is_empty()
-                    || stage.required_term_indexes == all_indexes
+                    || (stage.minimum_optional_matches == 0
+                        && stage.required_term_indexes == all_indexes)
                     || stage.required_term_indexes.len() > plan.bounds.max_partial_coverage_terms
                     || !stage.prefix_term_indexes.is_empty()
                     || !anchor_indexes
@@ -1249,6 +1295,96 @@ fn validate_stages(plan: &LexicalQueryPlan) -> Result<(), QueryPlanError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PartialCoverageStage {
+    condition: QueryEvidenceStageCondition,
+    required_term_indexes: Vec<u16>,
+    minimum_optional_matches: u32,
+}
+
+/// Returns the one canonical partial-coverage stage, if any.
+///
+/// Unsupported optional context keeps the existing supplemental behavior:
+/// every unsupported `OptionalContext` term is dropped and the remainder
+/// (anchors plus the terms that are still useful) is required conjunctively,
+/// on every query. A fully supported long query instead gets one bounded
+/// exploratory pass that may run only after every stronger lane found no
+/// candidates: every `RequiredIdentifierAnchor` stays mandatory, and every
+/// useful `OptionalContext` term is exposed as an alternative rather than
+/// enumerated into fixed combinations — at least one of them must match.
+fn partial_coverage_stage(
+    term_intents: &[QueryTermIntent],
+    bounds: &QueryBounds,
+) -> Option<PartialCoverageStage> {
+    let all_indexes: Vec<_> = term_intents.iter().map(|intent| intent.index).collect();
+    let relaxed_indexes: Vec<_> = term_intents
+        .iter()
+        .filter(|intent| {
+            intent.role == QueryTermRole::RequiredIdentifierAnchor
+                || intent.support == QueryTermSupport::Useful
+        })
+        .take(bounds.max_partial_coverage_terms)
+        .map(|intent| intent.index)
+        .collect();
+    let has_unsupported_context = term_intents.iter().any(|intent| {
+        intent.role == QueryTermRole::OptionalContext
+            && intent.support == QueryTermSupport::Unsupported
+    });
+    if has_unsupported_context {
+        return (!relaxed_indexes.is_empty() && relaxed_indexes != all_indexes).then_some(
+            PartialCoverageStage {
+                condition: QueryEvidenceStageCondition::Always,
+                required_term_indexes: relaxed_indexes,
+                minimum_optional_matches: 0,
+            },
+        );
+    }
+
+    let anchors: Vec<_> = term_intents
+        .iter()
+        .filter(|intent| intent.role == QueryTermRole::RequiredIdentifierAnchor)
+        .map(|intent| intent.index)
+        .collect();
+    let optional: Vec<_> = term_intents
+        .iter()
+        .filter(|intent| {
+            intent.role == QueryTermRole::OptionalContext
+                && intent.support == QueryTermSupport::Useful
+        })
+        .map(|intent| intent.index)
+        .collect();
+    if optional.len() < MIN_FALLBACK_OPTIONAL_TERMS
+        || anchors.len() >= bounds.max_partial_coverage_terms
+    {
+        return None;
+    }
+
+    // Every useful optional term is offered as an alternative, up to the
+    // same bounded ceiling the always-on relaxation above already respects.
+    // The anchors stay mandatory (enforced independently as `Occur::Must` /
+    // the FTS5 AND prefix); this never enumerates optional combinations, it
+    // exposes one flat "at least one of" group.
+    let optional_capacity = bounds.max_partial_coverage_terms - anchors.len();
+    let included_optional: BTreeSet<_> = optional.iter().copied().take(optional_capacity).collect();
+    if included_optional.is_empty() {
+        return None;
+    }
+
+    let required_term_indexes: Vec<_> = term_intents
+        .iter()
+        .filter(|intent| {
+            intent.role == QueryTermRole::RequiredIdentifierAnchor
+                || included_optional.contains(&intent.index)
+        })
+        .map(|intent| intent.index)
+        .collect();
+    (!required_term_indexes.is_empty()).then_some(PartialCoverageStage {
+        condition: QueryEvidenceStageCondition::IfNoPriorCandidates,
+        required_term_indexes,
+        minimum_optional_matches: 1,
+    })
+}
+
 /// The relaxed requirement of a prefix stage: every term the stage would
 /// otherwise require, minus the ones it expands.
 ///
@@ -1270,13 +1406,38 @@ fn push_stage(
     prefix_term_indexes: Vec<u16>,
     max_candidates: usize,
 ) {
-    stages.push(QueryEvidenceStage {
-        ordinal: stages.len() as u8,
+    push_stage_with_condition(
+        stages,
         kind,
+        QueryEvidenceStageCondition::Always,
         field_group,
         required_term_indexes,
         prefix_term_indexes,
         max_candidates,
+        0,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_stage_with_condition(
+    stages: &mut Vec<QueryEvidenceStage>,
+    kind: QueryEvidenceStageKind,
+    condition: QueryEvidenceStageCondition,
+    field_group: QueryFieldGroup,
+    required_term_indexes: Vec<u16>,
+    prefix_term_indexes: Vec<u16>,
+    max_candidates: usize,
+    minimum_optional_matches: u32,
+) {
+    stages.push(QueryEvidenceStage {
+        ordinal: stages.len() as u8,
+        kind,
+        condition,
+        field_group,
+        required_term_indexes,
+        prefix_term_indexes,
+        max_candidates,
+        minimum_optional_matches,
     });
 }
 
@@ -1604,6 +1765,10 @@ mod tests {
         );
         assert_eq!(finalized.evidence_stages[2].required_term_indexes, [0, 1]);
         assert_eq!(finalized.evidence_stages[3].required_term_indexes, [0]);
+        assert_eq!(
+            finalized.evidence_stages[3].condition,
+            QueryEvidenceStageCondition::Always
+        );
     }
 
     #[test]
@@ -1624,6 +1789,58 @@ mod tests {
             intent.role == QueryTermRole::OptionalContext
                 && intent.support == QueryTermSupport::Useful
         }));
+    }
+
+    #[test]
+    fn long_supported_queries_get_one_bounded_exploratory_partial_pass() {
+        let prepared = prepare_lexical_query("amber cobalt delta ember").unwrap();
+        let report = evidence_report(&prepared, None, &[(3, 0), (4, 0), (5, 0), (6, 0)]);
+        let finalized = prepared.finalize_evidence(report).unwrap();
+        let partial = finalized
+            .evidence_stages
+            .iter()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
+            .unwrap();
+        // Every useful optional term is offered as an alternative, not a
+        // sampled subset: no term is a preselected "winner" and none is
+        // silently dropped.
+        assert_eq!(partial.required_term_indexes, [0, 1, 2, 3]);
+        assert_eq!(partial.minimum_optional_matches, 1);
+        assert_eq!(
+            partial.condition,
+            QueryEvidenceStageCondition::IfNoPriorCandidates
+        );
+
+        let five = (0..5)
+            .map(|index| QueryTermIntent {
+                index,
+                text: "synthetic".to_owned(),
+                role: QueryTermRole::OptionalContext,
+                projection: QueryTermProjection::AnalyzedText,
+                support: QueryTermSupport::Useful,
+            })
+            .collect::<Vec<_>>();
+        let five = partial_coverage_stage(&five, &QueryBounds::lexical_v1()).unwrap();
+        assert_eq!(five.required_term_indexes, [0, 1, 2, 3, 4]);
+        assert_eq!(five.minimum_optional_matches, 1);
+
+        let maximum = (0..MAX_QUERY_TERMS as u16)
+            .map(|index| QueryTermIntent {
+                index,
+                text: "synthetic".to_owned(),
+                role: QueryTermRole::OptionalContext,
+                projection: QueryTermProjection::AnalyzedText,
+                support: QueryTermSupport::Useful,
+            })
+            .collect::<Vec<_>>();
+        let maximum = partial_coverage_stage(&maximum, &QueryBounds::lexical_v1()).unwrap();
+        assert_eq!(maximum.required_term_indexes.len(), MAX_QUERY_TERMS);
+        assert_eq!(maximum.required_term_indexes.first(), Some(&0));
+        assert_eq!(
+            maximum.required_term_indexes.last(),
+            Some(&((MAX_QUERY_TERMS - 1) as u16))
+        );
+        assert_eq!(maximum.minimum_optional_matches, 1);
     }
 
     #[test]
@@ -1657,6 +1874,8 @@ mod tests {
             .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
             .unwrap();
         assert_eq!(partial.required_term_indexes, [0]);
+        assert_eq!(partial.condition, QueryEvidenceStageCondition::Always);
+        assert_eq!(partial.minimum_optional_matches, 0);
 
         let missing_anchor = evidence_report(&prepared, None, &[(0, 4), (9, 0)]);
         let empty = prepared.finalize_evidence(missing_anchor).unwrap();
@@ -2039,7 +2258,7 @@ mod tests {
         let first = serde_json::to_string(&plan).unwrap();
         let second = serde_json::to_string(&plan.clone()).unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("{\"schema_version\":8,\"profile_id\":\"lexical-v2\",\"field_controls_schema_version\":1,\"query\":\"RFC 9110 caching\",\"query_text\":\"RFC 9110 caching\""));
+        assert!(first.starts_with("{\"schema_version\":10,\"profile_id\":\"lexical-v2\",\"field_controls_schema_version\":1,\"query\":\"RFC 9110 caching\",\"query_text\":\"RFC 9110 caching\""));
         let decoded: LexicalQueryPlan = serde_json::from_str(&first).unwrap();
         assert_eq!(serde_json::to_string(&decoded).unwrap(), first);
 
@@ -2087,6 +2306,49 @@ mod tests {
             .unwrap();
         partial.required_term_indexes.clear();
         assert!(relaxed_supported_context.validate().is_err());
+    }
+
+    #[test]
+    fn exact_validation_rejects_invalid_optional_match_threshold() {
+        let prepared = prepare_lexical_query("amber cobalt delta ember").unwrap();
+        let report = evidence_report(&prepared, None, &[(3, 0), (4, 0), (5, 0), (6, 0)]);
+        let finalized = prepared.finalize_evidence(report).unwrap();
+
+        // The canonical exploratory pass requires exactly one optional match;
+        // zeroing it out of a plan that still carries the full optional set
+        // is rejected (and would otherwise be indistinguishable from a
+        // redundant, fully conjunctive duplicate of `AllTerms`).
+        let mut zeroed_partial = finalized.clone();
+        let partial = zeroed_partial
+            .evidence_stages
+            .iter_mut()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
+            .unwrap();
+        partial.minimum_optional_matches = 0;
+        assert!(zeroed_partial.validate().is_err());
+
+        // Any threshold other than the one `partial_coverage_stage` derives
+        // is non-canonical.
+        let mut inflated_partial = finalized.clone();
+        let partial = inflated_partial
+            .evidence_stages
+            .iter_mut()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
+            .unwrap();
+        partial.minimum_optional_matches = 2;
+        assert!(inflated_partial.validate().is_err());
+
+        // Every other stage kind stays normal-conjunctive: a nonzero
+        // threshold leaking onto `AllTerms` (or any non-`PartialCoverage`
+        // stage) is rejected outright.
+        let mut leaked_threshold = finalized;
+        let all_terms = leaked_threshold
+            .evidence_stages
+            .iter_mut()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::AllTerms)
+            .unwrap();
+        all_terms.minimum_optional_matches = 1;
+        assert!(leaked_threshold.validate().is_err());
     }
 
     #[test]

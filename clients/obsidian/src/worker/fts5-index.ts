@@ -35,6 +35,7 @@ import type {
   WorkerLexicalExecution,
   WorkerLexicalExecutionAggregate,
   WorkerLexicalLaneKind,
+  WorkerLexicalMatchQuality,
   WorkerLexicalProofField,
   WorkerSearchHit,
   WorkerSourceGeneration,
@@ -51,6 +52,7 @@ import type {
   ExecutionPlan,
   LexicalV2Candidate,
   LexicalV2Proof,
+  LexicalV2ProofKind,
   QueryEvidenceObservation,
   StagePlan,
   PreparedChunk,
@@ -71,7 +73,7 @@ export type InternalLexicalTraceStageKind =
 export interface InternalLexicalTraceStage {
   kind: InternalLexicalTraceStageKind;
   mandatory: boolean;
-  status: "completed";
+  status: "completed" | "skipped";
   duration_ms: number;
   input_count: number;
   output_count: number;
@@ -134,6 +136,7 @@ export interface Fts5IndexLimits {
 export interface Fts5SearchResult {
   hits: WorkerSearchHit[];
   candidate_window: WorkerCandidateWindow;
+  lexical_match_quality: WorkerLexicalMatchQuality;
 }
 
 export function projectInternalLexicalTrace(trace: InternalLexicalTrace): WorkerLexicalExecution {
@@ -1434,6 +1437,7 @@ export class Fts5GenerationIndex {
           candidate_count: 0,
           candidate_limit: plan.max_total_candidates,
         },
+        lexical_match_quality: "none",
       };
     }
 
@@ -1474,6 +1478,7 @@ export class Fts5GenerationIndex {
           candidate_count: hits.length,
           candidate_limit: plan.max_total_candidates,
         },
+        lexical_match_quality: hits.length === 0 ? "none" : "standard_only",
       };
     }
 
@@ -1483,16 +1488,38 @@ export class Fts5GenerationIndex {
     let candidateLimitReached = false;
     const traceSummaries = new Map<InternalLexicalTraceStageKind, {
       mandatory: boolean;
+      executed: boolean;
       duration: number;
       observed: Set<string>;
       added: Set<string>;
     }>();
+    let fallbackEnabled: boolean | undefined;
 
     for (const stage of plan.stages) {
       const stageLimit = stage.max_candidates;
       const mandatory = stage.plan_id !== "lexical_partial_coverage_v3"
         && stage.plan_id !== "lexical_prefix_metadata_v3"
         && stage.plan_id !== "lexical_prefix_v3";
+      if (stage.condition === "if_no_prior_candidates") {
+        fallbackEnabled ??= hits.length === 0;
+        if (!fallbackEnabled) {
+          if (trace !== undefined) {
+            let summary = traceSummaries.get(stage.plan_id);
+            if (summary === undefined) {
+              summary = {
+                mandatory,
+                executed: false,
+                duration: 0,
+                observed: new Set<string>(),
+                added: new Set<string>(),
+              };
+              traceSummaries.set(stage.plan_id, summary);
+            }
+            recordSkippedLexicalLane(trace, stage);
+          }
+          continue;
+        }
+      }
       const started = trace === undefined ? 0 : checkedClock(trace.clock);
       const bound = bindSearchStage(stage, stageLimit);
       const rows = this.db.selectObjects(bound.sql, bound.bind).map(parseSearchRow);
@@ -1502,6 +1529,7 @@ export class Fts5GenerationIndex {
       if (!mandatory && trace !== undefined) trace.optionalDurationMs += duration;
       let summary: {
         mandatory: boolean;
+        executed: boolean;
         duration: number;
         observed: Set<string>;
         added: Set<string>;
@@ -1511,12 +1539,14 @@ export class Fts5GenerationIndex {
         if (summary === undefined) {
           summary = {
             mandatory,
+            executed: false,
             duration: 0,
             observed: new Set<string>(),
             added: new Set<string>(),
           };
           traceSummaries.set(stage.plan_id, summary);
         }
+        summary.executed = true;
         summary.duration += duration;
       }
       const saturated = rows.length === stageLimit;
@@ -1595,6 +1625,9 @@ export class Fts5GenerationIndex {
       return { ...hit, score };
     });
     const visibleHits = rankedHits.slice(0, limit);
+    const lexicalMatchQuality = lexicalMatchQualityFromProofKinds(
+      ranked.selected_proof_kinds.slice(0, limit),
+    );
     const state: WorkerCandidateWindow["state"] = candidateLimitReached
       ? "candidate_limit_reached"
       : rankedHits.length > limit
@@ -1605,7 +1638,7 @@ export class Fts5GenerationIndex {
         pushTraceStage(trace, {
           kind,
           mandatory: summary.mandatory,
-          status: "completed",
+          status: summary.executed ? "completed" : "skipped",
           duration_ms: summary.duration,
           input_count: plan.max_total_candidates,
           output_count: summary.added.size,
@@ -1624,6 +1657,7 @@ export class Fts5GenerationIndex {
         candidate_count: hits.length,
         candidate_limit: plan.max_total_candidates,
       },
+      lexical_match_quality: lexicalMatchQuality,
     };
   }
 
@@ -3489,6 +3523,46 @@ function pushTraceStage(
   trace.stages.push({ ...stage, duration_ms: roundedMilliseconds(stage.duration_ms) });
 }
 
+function lexicalMatchQualityFromProofKinds(
+  kinds: readonly LexicalV2ProofKind[],
+): WorkerLexicalMatchQuality {
+  let standard = false;
+  let partial = false;
+  for (const kind of kinds) {
+    if (kind === "partial_coverage") partial = true;
+    else standard = true;
+  }
+  if (standard && partial) return "mixed";
+  if (standard) return "standard_only";
+  if (partial) return "partial_only";
+  return "none";
+}
+
+function recordSkippedLexicalLane(
+  trace: InternalLexicalTraceHandle,
+  stage: StagePlan,
+): void {
+  updateSkippedLexicalAggregate(trace.laneKinds, stage.plan_id);
+  updateSkippedLexicalAggregate(trace.proofFields, stage.proof_field);
+}
+
+function updateSkippedLexicalAggregate<
+  K extends WorkerLexicalLaneKind | WorkerLexicalProofField,
+>(aggregates: Map<K, MutableLexicalExecutionAggregate>, key: K): void {
+  const aggregate = aggregates.get(key) ?? {
+    planned_lane_count: 0,
+    executed_lane_count: 0,
+    zero_observation_lane_count: 0,
+    saturated_lane_count: 0,
+    observation_count: 0,
+    added_unique_count: 0,
+    duplicate_observation_count: 0,
+    collection_cap_discarded_observation_count: 0,
+  };
+  aggregate.planned_lane_count += 1;
+  aggregates.set(key, aggregate);
+}
+
 function recordLexicalLane(
   trace: InternalLexicalTraceHandle,
   stage: StagePlan,
@@ -3607,7 +3681,9 @@ function isInternalLexicalTraceStage(value: unknown): value is InternalLexicalTr
   return Object.keys(stage).sort().join("\0") === [...keys].sort().join("\0")
     && kinds.includes(stage.kind as InternalLexicalTraceStageKind)
     && typeof stage.mandatory === "boolean"
-    && stage.status === "completed"
+    && (stage.status === "completed" || stage.status === "skipped")
+    && (stage.status !== "skipped"
+      || (stage.duration_ms === 0 && stage.output_count === 0 && stage.candidate_count === 0))
     && isTraceNumber(stage.duration_ms)
     && isTraceCount(stage.input_count, LEXICAL_CANDIDATE_LIMIT)
     && isTraceCount(stage.output_count, LEXICAL_CANDIDATE_LIMIT)

@@ -99,7 +99,9 @@ Represent ancestor segments and depth; test root/deep priors, archive penalties,
 
 `lexical-v2` is accepted as the default desktop, in-plugin, and OpenClast lexical profile, while `lexical-v1` remains an explicit compatibility identity. The profile uses bounded cross-lane collection and a fixed shared-Rust scorecard so strong source-identity text evidence can outrank body-only evidence. Native and portable hosts must satisfy the same judged partial orders without comparing raw engine scores. Further named profiles, arbitrary sliders, metadata signals crossing text-evidence bands, and broader configuration remain separately owner-reviewed.
 
-Query-assistance status is split: zero-result copy and beta.27 field controls are accepted; typo assistance remains prototype-only pending performance and visible-limitation evidence.
+For a fully supported ordinary query with at least four useful optional-context terms, shared Rust may declare one bounded exploratory partial-coverage pass. It keeps every identifier anchor mandatory, exposes every useful optional-context term as an alternative, and requires at least one of them to match; it runs only after every prior authorized standard lane collected no candidates, and preserves all existing stage/lane/candidate ceilings. Native, in-plugin, and OpenClast execution must consume the same condition and term set. No combinatorial subset search, explicit-syntax relaxation, authorization widening, or silent mode fallback is permitted.
+
+Query-assistance status is split: zero-result copy, beta.27 field controls, and mandatory best-attempt/mixed lexical result disclosure are accepted; typo assistance remains prototype-only pending performance and visible-limitation evidence.
 
 ## D5D — daily drive and distribution
 

@@ -354,6 +354,35 @@ impl LexicalV2ProofKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LexicalMatchQuality {
+    StandardOnly,
+    Mixed,
+    PartialOnly,
+    None,
+}
+
+pub fn lexical_match_quality(
+    selected_kinds: impl IntoIterator<Item = LexicalV2ProofKind>,
+) -> LexicalMatchQuality {
+    let mut standard = false;
+    let mut partial = false;
+    for kind in selected_kinds {
+        if kind == LexicalV2ProofKind::PartialCoverage {
+            partial = true;
+        } else {
+            standard = true;
+        }
+    }
+    match (standard, partial) {
+        (true, true) => LexicalMatchQuality::Mixed,
+        (true, false) => LexicalMatchQuality::StandardOnly,
+        (false, true) => LexicalMatchQuality::PartialOnly,
+        (false, false) => LexicalMatchQuality::None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LexicalV2Proof {
@@ -1634,6 +1663,26 @@ mod tests {
                 engine_ordinal: 0,
             }],
         }
+    }
+
+    #[test]
+    fn lexical_match_quality_is_derived_from_visible_selected_proofs() {
+        assert_eq!(lexical_match_quality([]), LexicalMatchQuality::None);
+        assert_eq!(
+            lexical_match_quality([LexicalV2ProofKind::AllTerms]),
+            LexicalMatchQuality::StandardOnly
+        );
+        assert_eq!(
+            lexical_match_quality([LexicalV2ProofKind::PartialCoverage]),
+            LexicalMatchQuality::PartialOnly
+        );
+        assert_eq!(
+            lexical_match_quality([
+                LexicalV2ProofKind::Phrase,
+                LexicalV2ProofKind::PartialCoverage,
+            ]),
+            LexicalMatchQuality::Mixed
+        );
     }
 
     #[test]

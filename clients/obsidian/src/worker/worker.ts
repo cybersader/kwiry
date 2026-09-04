@@ -1100,6 +1100,7 @@ function search(query: string, limit: number): SearchResult {
       generation: active.id,
       hits: collected.hits,
       candidate_window: collected.candidate_window,
+      lexical_match_quality: collected.lexical_match_quality,
       query_policy: {
         profile_id: finalized.plan.profile_id,
         query_text: finalized.plan.query_text,

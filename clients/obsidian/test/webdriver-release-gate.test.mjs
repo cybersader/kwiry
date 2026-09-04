@@ -25,6 +25,7 @@ import {
   createWebdriverRuntimeTempRoot,
   downloadPinnedArtifact,
   exerciseObsidian,
+  exerciseStatusBarGeometry,
   pinnedInstallerLaunchPath,
   preparePinnedInstaller,
   prepareVerifiedRuntime,
@@ -92,6 +93,17 @@ function observed() {
     openFilePromise: "resolved",
     expectedResultSelected: true,
     vbaPayloadSearchResults: 0,
+    statusGeometrySamples: 5,
+    statusSiblingCount: 3,
+    statusItemGeometryInvariant: true,
+    statusSiblingGeometryInvariant: true,
+    statusAccessibleTextComplete: true,
+    statusOverflowExercised: true,
+    statusInFlightClauseOmitted: true,
+    statusInFlightOnlyTextInvariant: true,
+    statusViewportInvariant: true,
+    statusGeometryMaxDeltaMilliPx: 0,
+    statusViewport: "1920x1080",
     electron: "43.3.0",
     chromium: "150.0.7871.212",
     driver: "150.0.7871.212",
@@ -552,6 +564,104 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     await expect(stage).resolves.toBe("launch_runtime_fatal");
   });
 
+  it("pins the viewport and returns only aggregate passing status geometry", async () => {
+    const requested = [];
+    const driver = {
+      manage: () => ({
+        window: () => ({
+          setRect: async (rect) => { requested.push(rect); },
+          getRect: async () => ({ x: 0, y: 0, width: 1_920, height: 1_080 }),
+        }),
+      }),
+      executeAsyncScript: async () => ({
+        samples: 5,
+        siblingCount: 3,
+        itemGeometryInvariant: true,
+        siblingGeometryInvariant: true,
+        accessibleTextComplete: true,
+        overflowExercised: true,
+        inFlightClauseOmitted: true,
+        inFlightOnlyTextInvariant: true,
+        viewportPinned: true,
+        maxDeltaMilliPx: 0,
+      }),
+    };
+
+    await expect(exerciseStatusBarGeometry(driver)).resolves.toEqual({
+      statusGeometrySamples: 5,
+      statusSiblingCount: 3,
+      statusItemGeometryInvariant: true,
+      statusSiblingGeometryInvariant: true,
+      statusAccessibleTextComplete: true,
+      statusOverflowExercised: true,
+      statusInFlightClauseOmitted: true,
+      statusInFlightOnlyTextInvariant: true,
+      statusViewportInvariant: true,
+      statusGeometryMaxDeltaMilliPx: 0,
+      statusViewport: "1920x1080",
+    });
+    expect(requested).toEqual([{ width: 1_920, height: 1_080 }]);
+  });
+
+  it("fails closed when the WebDriver window manager is unavailable", async () => {
+    const driver = {
+      manage: () => { throw new Error("private webdriver detail"); },
+    };
+
+    await expect(exerciseStatusBarGeometry(driver)).rejects.toThrow(
+      "scenario_status_viewport_failed",
+    );
+  });
+
+  it.each([
+    ["status_plugin_unavailable", "scenario_status_plugin_unavailable"],
+    ["status_surface_unavailable", "scenario_status_surface_unavailable"],
+    ["status_sibling_bound_exceeded", "scenario_status_sibling_bound_exceeded"],
+    ["status_script_failed", "scenario_status_script_failed"],
+  ])("maps the closed %s browser-script failure", async (failure, stage) => {
+    const driver = {
+      manage: () => ({ window: () => ({ setRect: async () => {} }) }),
+      executeAsyncScript: async () => ({ failure }),
+    };
+
+    await expect(exerciseStatusBarGeometry(driver)).rejects.toThrow(stage);
+  });
+
+  it.each([
+    ["item movement", { itemGeometryInvariant: false }, "status_bar_geometry_shifted"],
+    ["sibling movement", { siblingGeometryInvariant: false }, "status_bar_geometry_shifted"],
+    ["pixel movement", { maxDeltaMilliPx: 11 }, "status_bar_geometry_shifted"],
+    ["incomplete accessibility", { accessibleTextComplete: false }, "status_bar_accessibility_failed"],
+    ["retained in-flight clause", { inFlightClauseOmitted: false }, "status_bar_in_flight_clause_present"],
+    ["in-flight-only text drift", { inFlightOnlyTextInvariant: false }, "status_bar_in_flight_text_changed"],
+    ["unexercised overflow", { overflowExercised: false }, "status_bar_overflow_unexercised"],
+    ["unpinned viewport", { viewportPinned: false }, "scenario_status_viewport_failed"],
+  ])("maps %s to a closed status stage", async (_name, changed, stage) => {
+    const driver = {
+      manage: () => ({
+        window: () => ({
+          setRect: async () => {},
+          getRect: async () => ({ x: 0, y: 0, width: 1_920, height: 1_080 }),
+        }),
+      }),
+      executeAsyncScript: async () => ({
+        samples: 5,
+        siblingCount: 3,
+        itemGeometryInvariant: true,
+        siblingGeometryInvariant: true,
+        accessibleTextComplete: true,
+        overflowExercised: true,
+        inFlightClauseOmitted: true,
+        inFlightOnlyTextInvariant: true,
+        viewportPinned: true,
+        maxDeltaMilliPx: 0,
+        ...changed,
+      }),
+    };
+
+    await expect(exerciseStatusBarGeometry(driver)).rejects.toThrow(stage);
+  });
+
   it("maps plugin readiness errors to a fixed scenario stage", async () => {
     const driver = {
       wait: async () => { throw new Error("private webdriver detail"); },
@@ -644,6 +754,24 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
         throw new Error("private webdriver detail");
       },
       executeScript: async () => {},
+      manage: () => ({
+        window: () => ({
+          setRect: async () => {},
+          getRect: async () => ({ x: 0, y: 0, width: 1_920, height: 1_080 }),
+        }),
+      }),
+      executeAsyncScript: async () => ({
+        samples: 5,
+        siblingCount: 0,
+        itemGeometryInvariant: true,
+        siblingGeometryInvariant: true,
+        accessibleTextComplete: true,
+        overflowExercised: true,
+        inFlightClauseOmitted: true,
+        inFlightOnlyTextInvariant: true,
+        viewportPinned: true,
+        maxDeltaMilliPx: 0,
+      }),
       actions: () => actions,
     };
     await expect(exerciseObsidian({ driver, manifest: manifestFixture() }))
@@ -705,6 +833,14 @@ chmod 700 squashfs-root/obsidian squashfs-root/AppRun
     ["missing open", { ...observed(), openFileCalls: 0 }, "open_not_invoked"],
     ["rejected open", { ...observed(), openFilePromise: "rejected" }, "open_promise_rejected"],
     ["unselected expected result", { ...observed(), expectedResultSelected: false }, "result_not_rendered"],
+    ["missing geometry sample", { ...observed(), statusGeometrySamples: 4 }, "scenario_status_geometry_failed"],
+    ["shifted status item", { ...observed(), statusItemGeometryInvariant: false }, "status_bar_geometry_shifted"],
+    ["shifted sibling", { ...observed(), statusSiblingGeometryInvariant: false }, "status_bar_geometry_shifted"],
+    ["incomplete status text", { ...observed(), statusAccessibleTextComplete: false }, "status_bar_accessibility_failed"],
+    ["retained in-flight clause", { ...observed(), statusInFlightClauseOmitted: false }, "status_bar_in_flight_clause_present"],
+    ["in-flight-only text drift", { ...observed(), statusInFlightOnlyTextInvariant: false }, "status_bar_in_flight_text_changed"],
+    ["missing overflow proof", { ...observed(), statusOverflowExercised: false }, "status_bar_overflow_unexercised"],
+    ["unpinned viewport", { ...observed(), statusViewportInvariant: false }, "scenario_status_viewport_failed"],
     ["runtime drift", { ...observed(), electron: "43.2.0" }, "launch_failed"],
   ])("does not accept %s from the real scenario", (_name, changed, code) => {
     expect(() => assertObserved(changed, manifestFixture())).toThrow(code);

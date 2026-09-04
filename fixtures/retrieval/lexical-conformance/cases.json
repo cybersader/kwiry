@@ -261,6 +261,16 @@
       "scope": "allowed",
       "path": "pinnacle-decoy-19.md",
       "markdown": "---\ntitle: Quarry\n---\n\nSynthetic selection decoy zorbetic."
+    },
+    {
+      "scope": "allowed",
+      "path": "fallback-selected.md",
+      "markdown": "# Bounded fallback\namber basalt driftwood"
+    },
+    {
+      "scope": "allowed",
+      "path": "fallback-remaining-support.md",
+      "markdown": "# Remaining support\ncobalt"
     }
   ],
   "generated_documents": [
@@ -343,6 +353,32 @@
       "excluded_paths": [
         "alpha-only.md",
         "beta-only.md"
+      ]
+    },
+    {
+      "id": "fully-supported-long-query-fallback",
+      "query": "amber basalt cobalt driftwood",
+      "scope": "allowed",
+      "limit": 20,
+      "assistance": "eligible",
+      "execution": "ready",
+      "stages": [
+        "exact_metadata",
+        "exact_phrase",
+        "all_terms",
+        "partial_coverage"
+      ],
+      "partial_condition": "if_no_prior_candidates",
+      "anchors": [],
+      "expected_paths": [
+        {
+          "path": "fallback-selected.md",
+          "tier": "partial_coverage"
+        },
+        {
+          "path": "fallback-remaining-support.md",
+          "tier": "partial_coverage"
+        }
       ]
     },
     {

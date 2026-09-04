@@ -119,8 +119,8 @@ if (byName["abi-identity"].abi_version !== 3
   || byName["abi-identity"].extraction_policy.pdf !== "portable"
   || byName["abi-identity"].extraction_policy.html !== "portable"
   || byName["abi-identity"].format_identity_schema_version !== 1
-  || byName["abi-identity"].lexical_query_plan_schema_version !== 8
-  || byName["abi-identity"].fts5_match_plan_schema_version !== 7
+  || byName["abi-identity"].lexical_query_plan_schema_version !== 10
+  || byName["abi-identity"].fts5_match_plan_schema_version !== 9
   // Link behaviour is declared by the backend registry, so the shipped
   // artifact must carry it: a client that decides for itself silently refuses
   // every format admitted later.

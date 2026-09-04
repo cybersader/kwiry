@@ -157,13 +157,13 @@ pub use query::{
     FIELD_CONTROLS_SCHEMA_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION, LEXICAL_V1_PROFILE_ID,
     LEXICAL_V2_PROFILE_ID, LexicalQueryPlan, MAX_CANDIDATES_PER_STAGE, MAX_EVIDENCE_STAGES,
     MAX_PARTIAL_COVERAGE_TERMS, MAX_PREFIX_EXPANSIONS_PER_TERM, MAX_PREFIX_TERMS, MAX_QUERY_BYTES,
-    MAX_QUERY_TERMS, MAX_TERM_SUPPORT_PROBES, MAX_TOTAL_CANDIDATES, MIN_PREFIX_CHARS,
-    QueryAssistanceEligibility, QueryBounds, QueryEvidenceReport, QueryEvidenceStage,
-    QueryEvidenceStageKind, QueryExactIntent, QueryExecutionDisposition, QueryField,
-    QueryFieldGroup, QueryFieldGroups, QueryMatchOperator, QueryMetadataField, QueryMetadataProbe,
-    QueryPhraseIntent, QueryPlanError, QueryPlanKind, QueryPublicField, QueryTermIntent,
-    QueryTermProjection, QueryTermRole, QueryTermSupport, QueryTermSupportObservation,
-    QueryTermSupportProbe, QueryTypoStage, prepare_lexical_query,
+    MAX_QUERY_TERMS, MAX_TERM_SUPPORT_PROBES, MAX_TOTAL_CANDIDATES, MIN_FALLBACK_OPTIONAL_TERMS,
+    MIN_PREFIX_CHARS, QueryAssistanceEligibility, QueryBounds, QueryEvidenceReport,
+    QueryEvidenceStage, QueryEvidenceStageCondition, QueryEvidenceStageKind, QueryExactIntent,
+    QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryFieldGroups, QueryMatchOperator,
+    QueryMetadataField, QueryMetadataProbe, QueryPhraseIntent, QueryPlanError, QueryPlanKind,
+    QueryPublicField, QueryTermIntent, QueryTermProjection, QueryTermRole, QueryTermSupport,
+    QueryTermSupportObservation, QueryTermSupportProbe, QueryTypoStage, prepare_lexical_query,
 };
 #[cfg(feature = "internal-d5c-preview")]
 pub use ranking::{
@@ -182,10 +182,11 @@ pub use ranking::{
 };
 #[cfg(feature = "portable")]
 pub use ranking::{
-    LEXICAL_V2_EMPHASIS_POINTS, LEXICAL_V2_RANK_SCHEMA_VERSION, LexicalV2Candidate, LexicalV2Proof,
-    LexicalV2ProofField, LexicalV2ProofKind, LexicalV2RankInput, LexicalV2RankedCandidate,
-    MAX_LEXICAL_V2_LANES, MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE, MAX_RERANK_CANDIDATES,
-    QualifiedSourceId, RankingError, lexical_v2_evidence_points, rank_lexical_v2,
+    LEXICAL_V2_EMPHASIS_POINTS, LEXICAL_V2_RANK_SCHEMA_VERSION, LexicalMatchQuality,
+    LexicalV2Candidate, LexicalV2Proof, LexicalV2ProofField, LexicalV2ProofKind,
+    LexicalV2RankInput, LexicalV2RankedCandidate, MAX_LEXICAL_V2_LANES,
+    MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE, MAX_RERANK_CANDIDATES, QualifiedSourceId, RankingError,
+    lexical_match_quality, lexical_v2_evidence_points, rank_lexical_v2,
 };
 #[cfg(feature = "internal-d5c-preview")]
 pub use ranking_eval::{

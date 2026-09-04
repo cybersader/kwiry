@@ -90,9 +90,17 @@ export interface SearchResponse {
   next_cursor: string | null;
 }
 
+export type LexicalMatchQuality =
+  | "standard_only"
+  | "mixed"
+  | "partial_only"
+  | "none";
+export type DaemonLexicalMatchQuality = LexicalMatchQuality | "not_applicable";
+
 export interface SearchResponseWithPolicy {
   response: SearchResponse;
   queryPolicy: SearchQueryPolicyFacts | null;
+  lexicalMatchQuality: DaemonLexicalMatchQuality | null;
 }
 
 export interface DaemonModelStatus {
@@ -192,6 +200,7 @@ export class KwiryClient {
     return {
       response: parseSearchResponse(result.body),
       queryPolicy: parseSearchPolicyHeaders(result.headers),
+      lexicalMatchQuality: parseLexicalMatchQualityHeader(result.headers),
     };
   }
 
@@ -289,14 +298,9 @@ function parseSearchResponse(value: unknown): SearchResponse {
 function parseSearchPolicyHeaders(
   headers: Record<string, string>,
 ): SearchQueryPolicyFacts | null {
-  const header = (name: string): string | null => {
-    const entry = Object.entries(headers)
-      .find(([candidate]) => candidate.toLowerCase() === name);
-    return entry?.[1] ?? null;
-  };
-  const profile = header("x-kwiry-lexical-profile");
-  const scope = header("x-kwiry-field-scope");
-  const emphasis = header("x-kwiry-field-emphasis");
+  const profile = responseHeader(headers, "x-kwiry-lexical-profile");
+  const scope = responseHeader(headers, "x-kwiry-field-scope");
+  const emphasis = responseHeader(headers, "x-kwiry-field-emphasis");
   if (profile === null && scope === null && emphasis === null) return null;
   if ((profile !== "none" && profile !== "lexical-v1" && profile !== "lexical-v2")
     || !isSearchPublicFieldOrNone(scope)
@@ -308,6 +312,24 @@ function parseSearchPolicyHeaders(
     scope: scope === "none" ? null : scope,
     emphasis: emphasis === "none" ? null : emphasis,
   };
+}
+
+function parseLexicalMatchQualityHeader(
+  headers: Record<string, string>,
+): DaemonLexicalMatchQuality | null {
+  const value = responseHeader(headers, "x-kwiry-lexical-match-quality");
+  if (value === null) return null;
+  if (value === "standard_only" || value === "mixed" || value === "partial_only"
+    || value === "none" || value === "not_applicable") {
+    return value;
+  }
+  throw invalidResponse("Daemon returned an invalid lexical match-quality header.");
+}
+
+function responseHeader(headers: Record<string, string>, name: string): string | null {
+  const entry = Object.entries(headers)
+    .find(([candidate]) => candidate.toLowerCase() === name);
+  return entry?.[1] ?? null;
 }
 
 function isSearchPublicFieldOrNone(value: string | null): value is SearchPublicField | "none" {

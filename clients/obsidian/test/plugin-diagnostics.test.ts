@@ -33,6 +33,7 @@ describe("PluginDiagnostics", () => {
       event.complete("info", {
         outcome: "succeeded",
         resultCount: 3,
+        lexicalMatchQuality: "standard_only",
         sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
         lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
       });
@@ -41,6 +42,7 @@ describe("PluginDiagnostics", () => {
     const report = diagnostics.format(CONTEXT);
     expect(report).toContain("stored_entries: 1");
     expect(report).toContain("search.lifecycle");
+    expect(report).toContain("lexicalMatchQuality=standard_only");
     expect(report).toContain("resultCount=3");
   });
 

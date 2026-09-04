@@ -15,10 +15,10 @@ export function validateWebdriverReleaseEvidence(value) {
     "schema_version", "kind", "verdict", "scope", "candidate", "runtime_manifest",
     "runtime", "isolation", "scenario", "cleanup", "privacy",
   ]);
-  equal(root.schema_version, 1, "schema_version");
+  equal(root.schema_version, 3, "schema_version");
   equal(root.kind, WEBDRIVER_EVIDENCE_KIND, "kind");
   equal(root.verdict, WEBDRIVER_EVIDENCE_VERDICT, "verdict");
-  equal(root.scope, "narrow_real_obsidian_selection_lifecycle", "scope");
+  equal(root.scope, "narrow_real_obsidian_status_geometry_and_selection_lifecycle", "scope");
 
   const candidate = object(root.candidate, ["version", "candidate_set_sha256", "file_count"]);
   text(candidate.version, SEMVER, "candidate.version");
@@ -52,17 +52,34 @@ export function validateWebdriverReleaseEvidence(value) {
     "synthetic_xlsm", "excel_explicitly_enabled", "command_palette_used",
     "webdriver_input_used", "native_click_used", "modal_closed", "stale_notices",
     "open_failure_notices", "open_file_calls", "open_file_promise", "expected_result_selected",
-    "vba_payload_search_results",
+    "vba_payload_search_results", "status_geometry_samples", "status_sibling_count",
+    "status_item_geometry_invariant", "status_sibling_geometry_invariant",
+    "status_accessible_text_complete", "status_overflow_exercised",
+    "status_in_flight_clause_omitted", "status_in_flight_only_text_invariant",
+    "status_viewport_invariant", "status_geometry_max_delta_milli_px", "status_viewport",
   ]);
   for (const key of [
     "synthetic_xlsm", "excel_explicitly_enabled", "command_palette_used",
     "webdriver_input_used", "native_click_used", "modal_closed", "expected_result_selected",
+    "status_item_geometry_invariant", "status_sibling_geometry_invariant",
+    "status_accessible_text_complete", "status_overflow_exercised",
+    "status_in_flight_clause_omitted", "status_in_flight_only_text_invariant",
+    "status_viewport_invariant",
   ]) requiredTrue(scenario[key], `scenario.${key}`);
   for (const key of ["stale_notices", "open_failure_notices", "vba_payload_search_results"]) {
     equal(scenario[key], 0, `scenario.${key}`);
   }
   equal(scenario.open_file_calls, 1, "scenario.open_file_calls");
   equal(scenario.open_file_promise, "resolved", "scenario.open_file_promise");
+  equal(scenario.status_geometry_samples, 5, "scenario.status_geometry_samples");
+  integer(scenario.status_sibling_count, 0, 64, "scenario.status_sibling_count");
+  integer(
+    scenario.status_geometry_max_delta_milli_px,
+    0,
+    10,
+    "scenario.status_geometry_max_delta_milli_px",
+  );
+  equal(scenario.status_viewport, "1920x1080", "scenario.status_viewport");
 
   const cleanup = object(root.cleanup, [
     "webdriver_quit", "obsidian_reaped", "verified_download_server_closed",
@@ -117,6 +134,12 @@ export function sanitizedGateFailure(code) {
     "scenario_execution_failed", "scenario_plugin_ready_failed", "scenario_command_registration_failed",
     "scenario_leaf_ready_failed", "scenario_instrumentation_failed",
     "scenario_state_setup_failed", "scenario_open_hook_failed", "scenario_notice_observer_failed",
+    "scenario_status_viewport_failed", "scenario_status_geometry_failed",
+    "scenario_status_plugin_unavailable", "scenario_status_surface_unavailable",
+    "scenario_status_sibling_bound_exceeded", "scenario_status_script_failed",
+    "scenario_status_script_transport_failed", "status_bar_geometry_shifted", "status_bar_accessibility_failed",
+    "status_bar_in_flight_clause_present", "status_bar_in_flight_text_changed",
+    "status_bar_overflow_unexercised",
     "scenario_search_command_failed", "scenario_window_focus_failed", "scenario_palette_shortcut_failed",
     "scenario_palette_input_failed", "scenario_command_text_failed", "scenario_command_lookup_failed",
     "scenario_command_click_failed", "scenario_result_lookup_failed", "scenario_result_activation_failed",
@@ -126,7 +149,7 @@ export function sanitizedGateFailure(code) {
     "cleanup_incomplete", "unexpected_failure",
   ]);
   return {
-    schema_version: 1,
+    schema_version: 2,
     kind: "kwiry_obsidian_webdriver_release_gate_failure",
     status: "failed",
     failure_stage: allowed.has(code) ? code : "unexpected_failure",

@@ -255,6 +255,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
             displayedSourceCount: grouped.facts.displayedSourceCount,
             omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
             candidateWindow: grouped.facts.candidateWindow,
+            lexicalMatchQuality: outcome.execution.lexicalMatchQuality,
           })) {
             event.complete("info", {
               outcome: "superseded",
@@ -919,6 +920,9 @@ function searchExecutionDiagnosticDetails(execution: SearchExecution): Diagnosti
     requestedMode: execution.requestedMode,
     effectiveMode: execution.effectiveMode,
     lexicalProfile: execution.queryPolicy?.lexical_profile ?? "unknown",
+    lexicalMatchQuality: execution.lexicalMatchQuality.availability === "available"
+      ? execution.lexicalMatchQuality.value
+      : execution.lexicalMatchQuality.availability,
     ...(execution.queryPolicy?.scope === null || execution.queryPolicy?.scope === undefined
       ? {}
       : { fieldScope: execution.queryPolicy.scope }),

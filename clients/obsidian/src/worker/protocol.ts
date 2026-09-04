@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-export const WORKER_PROTOCOL_VERSION = 15 as const;
+export const WORKER_PROTOCOL_VERSION = 16 as const;
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
@@ -417,8 +417,8 @@ export type WorkerRequest =
 export interface InitializeResult {
   rustAbiVersion: 3;
   sourceSchemaVersion: 10;
-  querySchemaVersion: 8;
-  matchPlanSchemaVersion: 7;
+  querySchemaVersion: 10;
+  matchPlanSchemaVersion: 9;
   sqliteVersion: "3.53.0";
   fts5Enabled: 1;
 }
@@ -504,6 +504,11 @@ export interface WorkerCandidateWindow {
   candidate_limit: typeof LEXICAL_CANDIDATE_LIMIT;
 }
 
+export const WORKER_LEXICAL_MATCH_QUALITIES = [
+  "standard_only", "mixed", "partial_only", "none",
+] as const;
+export type WorkerLexicalMatchQuality = typeof WORKER_LEXICAL_MATCH_QUALITIES[number];
+
 export type WorkerQueryPublicField =
   | "name"
   | "filename"
@@ -586,6 +591,7 @@ export interface SearchResult {
   generation: string;
   hits: WorkerSearchHit[];
   candidate_window: WorkerCandidateWindow;
+  lexical_match_quality: WorkerLexicalMatchQuality;
   query_policy: WorkerQueryPolicy;
   source_generation: WorkerSourceGeneration;
   lexical_execution: WorkerLexicalExecution;
@@ -1153,8 +1159,8 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
     ])
     && value.rustAbiVersion === 3
     && value.sourceSchemaVersion === 10
-    && value.querySchemaVersion === 8
-    && value.matchPlanSchemaVersion === 7
+    && value.querySchemaVersion === 10
+    && value.matchPlanSchemaVersion === 9
     && value.sqliteVersion === "3.53.0"
     && value.fts5Enabled === 1;
 }
@@ -1412,20 +1418,26 @@ export function isStatusResult(value: unknown): value is StatusResult {
 export function isSearchResult(value: unknown): value is SearchResult {
   return isRecord(value)
     && hasExactKeys(value, [
-      "generation", "hits", "candidate_window", "query_policy", "source_generation",
-      "lexical_execution",
+      "generation", "hits", "candidate_window", "lexical_match_quality", "query_policy",
+      "source_generation", "lexical_execution",
     ])
     && isGeneration(value.generation)
     && Array.isArray(value.hits)
     && value.hits.length <= MAX_SEARCH_HITS
     && value.hits.every(isSearchHit)
     && isWorkerCandidateWindow(value.candidate_window)
+    && WORKER_LEXICAL_MATCH_QUALITIES.includes(
+      value.lexical_match_quality as WorkerLexicalMatchQuality,
+    )
     && isWorkerQueryPolicy(value.query_policy)
     && isWorkerSourceGeneration(value.source_generation)
     && isWorkerLexicalExecution(value.lexical_execution)
     && value.candidate_window.candidate_count >= value.hits.length
     && value.lexical_execution.unique_candidate_count === value.candidate_window.candidate_count
     && value.lexical_execution.returned_count === value.hits.length
+    && (value.hits.length === 0
+      ? value.lexical_match_quality === "none"
+      : value.lexical_match_quality !== "none")
     && value.lexical_execution.candidate_limit === value.candidate_window.candidate_limit
     && (value.candidate_window.state !== "more_available"
       || value.candidate_window.candidate_count > value.hits.length);

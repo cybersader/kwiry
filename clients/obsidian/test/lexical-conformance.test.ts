@@ -65,6 +65,7 @@ interface CorpusCase {
   assistance: "explicit_syntax_bypass" | "eligible";
   execution: "explicit_bypass" | "ready" | "empty_no_evidence";
   stages: QueryEvidenceStageKind[];
+  partial_condition?: StagePlan["condition"];
   anchors: string[];
   expected_paths?: ExpectedPath[];
   excluded_paths?: string[];
@@ -158,7 +159,7 @@ function finalizeQueryWithRust(
     operation: "finalize_query",
     query,
     evidence_report: {
-      schema_version: 8,
+      schema_version: 10,
       identifier_probe_matched: evidence.identifier_probe_matched,
       term_support: evidence.term_support,
     },
@@ -262,7 +263,7 @@ function stageKind(stage: StagePlan): QueryEvidenceStageKind | "explicit" {
 
 function singleStagePlan(stage: StagePlan): ExecutionPlan {
   return {
-    schema_version: 7,
+    schema_version: 9,
     profile_id: stage.plan_id === "lexical_explicit_v3" ? "lexical-v1" : "lexical-v2",
     disposition: stage.plan_id === "lexical_explicit_v3" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
@@ -287,17 +288,31 @@ describe("shared lexical-v1 conformance corpus", () => {
         const { observation, finalized } = execute(index, testCase.query);
         expect(finalized.plan.assistance, `${testCase.id} assistance`).toBe(testCase.assistance);
         expect(finalized.plan.execution, `${testCase.id} execution`).toBe(testCase.execution);
-        // The corpus lists the bounded stage envelope. Rust deliberately omits
-        // the partial-coverage relaxation when every probed term has direct
-        // support, because that tier would be redundant rather than broader.
-        const expectedStages = observation.term_support.every((support) =>
-          support.document_frequency > 0)
-          ? testCase.stages.filter((stage) => stage !== "partial_coverage")
-          : testCase.stages;
+        // Most corpus entries list the bounded stage envelope because backend
+        // token support can omit a redundant always-on partial stage. A declared
+        // condition is an exact expectation for the fully supported fallback.
+        const expectedStages = testCase.partial_condition !== undefined
+          ? testCase.stages
+          : observation.term_support.every((support) => support.document_frequency > 0)
+            ? testCase.stages.filter((stage) => stage !== "partial_coverage")
+            : testCase.stages;
         expect(
           finalized.plan.evidence_stages.map((stage) => stage.kind),
           `${testCase.id} stages`,
         ).toEqual(expectedStages);
+        if (testCase.partial_condition !== undefined) {
+          expect(
+            finalized.plan.evidence_stages.find((stage) =>
+              stage.kind === "partial_coverage")?.condition,
+            `${testCase.id} partial condition`,
+          ).toBe(testCase.partial_condition);
+          expect(
+            finalized.execution_plan.stages
+              .filter((stage) => stage.plan_id === "lexical_partial_coverage_v3")
+              .every((stage) => stage.condition === testCase.partial_condition),
+            `${testCase.id} partial lane conditions`,
+          ).toBe(true);
+        }
         expect(
           finalized.plan.term_intents
             .filter((intent) => intent.role === "required_identifier_anchor")

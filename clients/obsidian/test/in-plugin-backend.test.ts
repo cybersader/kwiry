@@ -435,6 +435,9 @@ function fakeSession(options: {
           candidate_count: 0,
           candidate_limit: 512,
         },
+        lexical_match_quality: (result as { hits: unknown[] }).hits.length > 0
+          ? "standard_only"
+          : "none",
         query_policy: {
           profile_id: "lexical-v2",
           query_text: query,
@@ -1257,6 +1260,7 @@ describe("InPluginLexicalBackend", () => {
           candidate_count: 11,
           candidate_limit: 512,
         },
+        lexical_match_quality: "standard_only",
         query_policy: {
           profile_id: "lexical-v2",
           query_text: "match",
@@ -1285,6 +1289,10 @@ describe("InPluginLexicalBackend", () => {
         lexical_profile: "lexical-v2",
         scope: "name",
         emphasis: null,
+      },
+      lexicalMatchQuality: {
+        availability: "available",
+        value: "standard_only",
       },
       generation: "generation-1",
       candidateWindow: {

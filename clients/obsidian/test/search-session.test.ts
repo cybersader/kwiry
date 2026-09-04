@@ -62,6 +62,9 @@ class DeferredBackend implements SearchBackend {
       queryPolicy: mode === "semantic"
         ? { lexical_profile: "none", scope: null, emphasis: null }
         : { lexical_profile: "lexical-v2", scope: null, emphasis: null },
+      lexicalMatchQuality: mode === "lexical"
+        ? { availability: "available", value: "none" }
+        : { availability: "not_applicable" },
       generation: "generation-1",
       candidateWindow: {
         state: "unknown",

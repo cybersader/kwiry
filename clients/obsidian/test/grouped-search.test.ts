@@ -71,6 +71,10 @@ function execution(
       scope: null,
       emphasis: null,
     },
+    lexicalMatchQuality: {
+      availability: "available",
+      value: hits.length === 0 ? "none" : "standard_only",
+    },
     generation: "generation-1",
     candidateWindow,
     diagnostics: {

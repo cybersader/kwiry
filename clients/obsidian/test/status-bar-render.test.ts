@@ -3,55 +3,72 @@
 
 import { describe, expect, it } from "vitest";
 
-import { renderStatusBarText } from "../src/status-bar-render";
+import { createStatusBarRenderer } from "../src/status-bar-render";
 
-interface SpanSegment {
-  cls: string;
-  text: string;
+class FakeLabel {
+  textContent = "";
+  setTextCalls = 0;
+
+  setText(text: string): void {
+    this.textContent = text;
+    this.setTextCalls += 1;
+  }
 }
 
 class FakeStatusBar {
-  segments: Array<string | SpanSegment> = [];
+  readonly classes: string[] = [];
+  readonly attributes = new Map<string, string>();
+  readonly label = new FakeLabel();
+  createSpanCalls = 0;
+  setAttributeCalls = 0;
 
-  setText(text: string): void {
-    this.segments = [text];
+  addClass(name: string): void {
+    this.classes.push(name);
   }
 
-  empty(): void {
-    this.segments = [];
+  createSpan(options: { cls: string }): HTMLSpanElement {
+    expect(options).toEqual({ cls: "kwiry-status-bar__label" });
+    this.createSpanCalls += 1;
+    return this.label as unknown as HTMLSpanElement;
   }
 
-  appendText(text: string): void {
-    this.segments.push(text);
-  }
-
-  createSpan(options: SpanSegment): HTMLSpanElement {
-    this.segments.push(options);
-    return {} as HTMLSpanElement;
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+    this.setAttributeCalls += 1;
   }
 }
 
-describe("renderStatusBarText", () => {
-  it.each([
-    ["Kwiry: Reading 4/20 (20%) ·  4 in flight", "04"],
-    ["Kwiry: Reading 8/20 (40%) · 16 in flight", "16"],
-  ])("isolates the count in a fixed-width span: %s", (text, count) => {
+describe("createStatusBarRenderer", () => {
+  it("reuses one label while complete status text changes", () => {
     const statusBar = new FakeStatusBar();
+    const renderer = createStatusBarRenderer(statusBar as unknown as HTMLElement);
 
-    renderStatusBarText(statusBar as unknown as HTMLElement, text);
+    renderer.render("Kwiry: Reading 8/20 (40%) · 16 in flight");
+    const originalLabel = statusBar.label;
+    renderer.render("Kwiry: Reading 4/20 (20%) · 04 in flight");
 
-    expect(statusBar.segments).toEqual([
-      text.slice(0, text.indexOf("·") + 2),
-      { cls: "kwiry-status-bar-in-flight-count", text: count },
-      " in flight",
-    ]);
+    expect(statusBar.classes).toEqual(["kwiry-status-bar"]);
+    expect(statusBar.createSpanCalls).toBe(1);
+    expect(statusBar.label).toBe(originalLabel);
+    expect(statusBar.label.textContent).toBe("Kwiry: Reading 4/20 (20%) · 04 in flight");
+    expect(statusBar.label.setTextCalls).toBe(2);
+    expect(statusBar.attributes.get("title")).toBe(statusBar.label.textContent);
+    expect(statusBar.attributes.get("aria-label")).toBe(statusBar.label.textContent);
   });
 
-  it("uses ordinary text rendering when there is no in-flight count", () => {
+  it("keeps ordinary text accessible and suppresses duplicate writes", () => {
     const statusBar = new FakeStatusBar();
+    const renderer = createStatusBarRenderer(statusBar as unknown as HTMLElement);
 
-    renderStatusBarText(statusBar as unknown as HTMLElement, "Kwiry: Ready");
+    renderer.render("Kwiry: Ready");
+    renderer.render("Kwiry: Ready");
 
-    expect(statusBar.segments).toEqual(["Kwiry: Ready"]);
+    expect(statusBar.label.textContent).toBe("Kwiry: Ready");
+    expect(statusBar.label.setTextCalls).toBe(1);
+    expect(statusBar.setAttributeCalls).toBe(2);
+    expect(statusBar.attributes).toEqual(new Map([
+      ["title", "Kwiry: Ready"],
+      ["aria-label", "Kwiry: Ready"],
+    ]));
   });
 });

@@ -1,26 +1,27 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-const IN_FLIGHT_COUNT = / ?([0-9]+) in flight/u;
+export interface StatusBarRenderer {
+  render(text: string): void;
+}
 
 /**
- * Renders the in-flight count in its own fixed-width element. Text padding
- * alone is not reliable because Obsidian themes can render a figure space at a
- * different width from their digits.
+ * Creates the status item's stable DOM once, then updates only its text and
+ * accessibility metadata. The root owns layout geometry; the label may
+ * ellipsize visually without discarding the complete status.
  */
-export function renderStatusBarText(statusBar: HTMLElement, text: string): void {
-  const match = IN_FLIGHT_COUNT.exec(text);
-  const count = match?.[1];
-  if (match === null || count === undefined) {
-    statusBar.setText(text);
-    return;
-  }
+export function createStatusBarRenderer(statusBar: HTMLElement): StatusBarRenderer {
+  statusBar.addClass("kwiry-status-bar");
+  const label = statusBar.createSpan({ cls: "kwiry-status-bar__label" });
+  let renderedText: string | null = null;
 
-  statusBar.empty();
-  statusBar.appendText(text.slice(0, match.index));
-  statusBar.createSpan({
-    cls: "kwiry-status-bar-in-flight-count",
-    text: count.padStart(2, "0"),
-  });
-  statusBar.appendText(` in flight${text.slice(match.index + match[0].length)}`);
+  return {
+    render(text: string): void {
+      if (text === renderedText) return;
+      renderedText = text;
+      label.setText(text);
+      statusBar.setAttribute("title", text);
+      statusBar.setAttribute("aria-label", text);
+    },
+  };
 }
