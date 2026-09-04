@@ -256,6 +256,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
             omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
             candidateWindow: grouped.facts.candidateWindow,
             lexicalMatchQuality: outcome.execution.lexicalMatchQuality,
+            sourceWindowSaturated: grouped.facts.sourceWindowSaturated,
           })) {
             event.complete("info", {
               outcome: "superseded",
@@ -263,6 +264,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
               returnedSectionCount,
               displayedSourceCount: grouped.facts.displayedSourceCount,
               omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
+              sourceWindowSaturated: grouped.facts.sourceWindowSaturated,
             });
             return [];
           }
@@ -292,6 +294,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
             returnedSectionCount,
             displayedSourceCount: grouped.facts.displayedSourceCount,
             omittedObservedSourceCount: grouped.facts.omittedObservedSourceCount,
+            sourceWindowSaturated: grouped.facts.sourceWindowSaturated,
           });
           return this.sourceResults(grouped);
         }

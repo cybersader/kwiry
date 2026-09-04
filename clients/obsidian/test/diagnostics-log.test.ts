@@ -603,6 +603,121 @@ describe("DiagnosticLog", () => {
     expect(JSON.stringify(log.snapshot())).not.toContain(privateQuality);
   });
 
+  it("records source-window saturation only when it agrees with the returned section count", async () => {
+    const log = new DiagnosticLog(8, clock(0, 0, 0, 0), clock(0, 1, 2, 3));
+
+    await log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 100,
+        returnedSectionCount: 100,
+        sourceWindowSaturated: true,
+        lexicalMatchQuality: "standard_only",
+        sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
+        lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
+      });
+    });
+    expect(log.snapshot().entries[0]?.details).toMatchObject({
+      returnedSectionCount: 100,
+      sourceWindowSaturated: true,
+    });
+
+    await log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 99,
+        returnedSectionCount: 99,
+        sourceWindowSaturated: false,
+        lexicalMatchQuality: "standard_only",
+        sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
+        lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
+      });
+    });
+    expect(log.snapshot().entries[1]?.details).toMatchObject({
+      returnedSectionCount: 99,
+      sourceWindowSaturated: false,
+    });
+
+    await expect(log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 99,
+        returnedSectionCount: 99,
+        sourceWindowSaturated: true,
+        lexicalMatchQuality: "standard_only",
+        sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
+        lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
+      });
+    })).rejects.toThrow("Invalid search diagnostic details");
+
+    await expect(log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 100,
+        returnedSectionCount: 100,
+        sourceWindowSaturated: false,
+        lexicalMatchQuality: "standard_only",
+        sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
+        lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
+      });
+    })).rejects.toThrow("Invalid search diagnostic details");
+
+    await expect(log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 100,
+        sourceWindowSaturated: true,
+        lexicalMatchQuality: "standard_only",
+        sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
+        lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
+      });
+    })).rejects.toThrow("Invalid search diagnostic details");
+  });
+
+  it("rejects source-window saturation on a failed search record", async () => {
+    const log = new DiagnosticLog(4, clock(0, 0), clock(0, 1));
+    await expect(log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("error", {
+        outcome: "failed",
+        code: "query_execution_failed",
+        returnedSectionCount: 0,
+        sourceWindowSaturated: false,
+      });
+    })).rejects.toThrow("Invalid search diagnostic details");
+  });
+
+  it("keeps source-window saturation independent of source-row omission and candidate-window state", async () => {
+    const log = new DiagnosticLog(4, clock(0), clock(0, 1));
+    await log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {
+      event.complete("info", {
+        outcome: "succeeded",
+        resultCount: 100,
+        returnedSectionCount: 100,
+        sourceWindowSaturated: true,
+        displayedSourceCount: 3,
+        omittedObservedSourceCount: 7,
+        candidateWindowState: "more_available",
+        lexicalMatchQuality: "standard_only",
+        sourceGeneration: UNAVAILABLE_SOURCE_GENERATION,
+        lexicalExecution: UNAVAILABLE_LEXICAL_EXECUTION,
+      });
+    });
+    expect(log.snapshot().entries[0]?.details).toMatchObject({
+      sourceWindowSaturated: true,
+      omittedObservedSourceCount: 7,
+      candidateWindowState: "more_available",
+    });
+
+    const output = formatDiagnosticLog(log, {
+      pluginVersion: "0.2.2",
+      obsidianVersion: "1.8.10",
+      platform: "linux",
+      backendProfile: "in_plugin",
+    });
+    expect(output).toContain("sourceWindowSaturated=true");
+    expect(output).not.toMatch(/query|path|sql|match_value|secret/iu);
+  });
+
   it("requires explicit evidence for successful search records", async () => {
     const log = new DiagnosticLog(4, clock(0), clock(0, 1));
     await expect(log.capture("info", "search.lifecycle", { operation: "search" }, (event) => {

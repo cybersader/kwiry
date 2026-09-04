@@ -802,8 +802,28 @@ fn execute_lexical_v2(
     let mut candidates = BTreeMap::<NativeLexicalV2Identity, NativeLexicalV2Hit>::new();
     let mut fallback_enabled = None;
     for lane in &lanes {
-        if lane.stage.condition == QueryEvidenceStageCondition::IfNoPriorCandidates {
-            let enabled = *fallback_enabled.get_or_insert(candidates.is_empty());
+        // Stop executing later lanes once the unique candidate window is
+        // already full: their results cannot be retained, so running them
+        // would waste retrieval work without changing the outcome.
+        if candidates.len() >= resolved.plan.bounds.max_total_candidates {
+            break;
+        }
+        if lane.stage.condition == QueryEvidenceStageCondition::IfFewerThanMinimumStandardSources {
+            let enabled = *fallback_enabled.get_or_insert_with(|| {
+                // Count distinct authorized standard sources accepted so
+                // far. `candidates` is populated only from prior lanes in
+                // ladder order, all strictly stronger than `PartialCoverage`
+                // (the evidence ladder always places it last), so every
+                // entry here is a "standard" (non-exploratory) source by
+                // construction. Filtering has already run (`filtered_query`
+                // applies `SearchFilters` before retrieval), so unauthorized
+                // chunks never reach `candidates` and cannot inflate this
+                // count. Many chunks from the same source share one
+                // `QualifiedSourceId`, so they count once.
+                let distinct_standard_sources: BTreeSet<&QualifiedSourceId> =
+                    candidates.values().map(|hit| &hit.source).collect();
+                distinct_standard_sources.len() < resolved.plan.bounds.min_standard_sources
+            });
             if !enabled {
                 continue;
             }
@@ -2882,6 +2902,34 @@ mod tests {
         .unwrap()
     }
 
+    /// Calls `execute_lexical_v2` directly, bypassing the public
+    /// `search_reader_with_quality`/`search_index` wrappers' `MAX_RESULTS`
+    /// (100) result-count clamp. That clamp bounds only how many ranked
+    /// hits the public API returns; it is unrelated to and independent of
+    /// `QueryBounds::max_total_candidates` (512), the internal retrieval and
+    /// deduplication window under test here.
+    fn lexical_v2_outcome(data: &Path, query: &str, limit: usize) -> LexicalSearchOutcome {
+        let (index, fields) = open_index(data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved = resolve_query_plan(std::slice::from_ref(&context), query).unwrap();
+        let statistics = AuthorizedStatistics::new(vec![searcher.clone()]);
+        execute_lexical_v2(
+            std::slice::from_ref(&context),
+            &resolved,
+            limit,
+            &SearchFilters::default(),
+            &statistics,
+        )
+        .unwrap()
+    }
+
     #[cfg(feature = "internal-d5c-preview")]
     fn d5c_search(
         data: &Path,
@@ -3630,7 +3678,7 @@ mod tests {
     }
 
     #[test]
-    fn fully_supported_long_query_falls_back_only_after_standard_lanes_are_empty() {
+    fn fully_supported_long_query_gets_exploratory_supplement_while_standard_sources_are_sparse() {
         let temporary = tempdir().unwrap();
         let vault = temporary.path().join("vault");
         let partial_data = temporary.path().join("partial-data");
@@ -3671,7 +3719,7 @@ mod tests {
             .expect("the long-query fallback stage is planned");
         assert_eq!(
             partial.condition,
-            QueryEvidenceStageCondition::IfNoPriorCandidates
+            QueryEvidenceStageCondition::IfFewerThanMinimumStandardSources
         );
         // Every useful optional term is offered as an alternative rather than
         // a sampled subset, and the stage requires at least one of them.
@@ -3699,18 +3747,214 @@ mod tests {
         let complete_data = temporary.path().join("complete-data");
         build_index(&config, &complete_data).unwrap();
         let standard = search_with_quality(&complete_data, query, 20);
-        assert_eq!(standard.match_quality, LexicalMatchQuality::StandardOnly);
-        // A standard (all-terms) result suppresses the exploratory fallback
-        // entirely: `target.md` and `support.md` never surface once a
-        // stronger lane has candidates.
+        // A single standard (all-terms) source is far below the fixed
+        // 20-distinct-source threshold, so the exploratory pass stays
+        // active rather than being suppressed: the sparse-source condition
+        // only closes once standard coverage is actually rich, not on the
+        // first hit. `target.md` and `support.md` still surface alongside
+        // `complete.md`, and the mix of standard and partial proofs makes
+        // the overall match quality `Mixed`.
+        assert_eq!(standard.match_quality, LexicalMatchQuality::Mixed);
+        // Standard proofs still rank first; among the exploratory partial
+        // matches, more optional-term overlap still ranks above less.
         assert_eq!(
             standard
                 .hits
                 .iter()
                 .map(|hit| hit.path.as_str())
                 .collect::<Vec<_>>(),
-            ["complete.md"]
+            ["complete.md", "target.md", "support.md"]
         );
+    }
+
+    #[test]
+    fn sparse_standard_source_threshold_activates_below_twenty_and_suppresses_at_twenty() {
+        let temporary = tempdir().unwrap();
+        let query = "amberstone birchwood cedarleaf dunefield";
+        let partial_only_name = "solo-cedarleaf.md";
+
+        let build = |standard_count: usize| -> PathBuf {
+            let vault = temporary.path().join(format!("vault-{standard_count}"));
+            let data = temporary.path().join(format!("data-{standard_count}"));
+            fs::create_dir(&vault).unwrap();
+            for index in 0..standard_count {
+                fs::write(
+                    vault.join(format!("standard-{index:03}.md")),
+                    "amberstone birchwood cedarleaf dunefield",
+                )
+                .unwrap();
+            }
+            // Only one of the four optional terms: never satisfies the
+            // standard AllTerms lane, only the exploratory PartialCoverage
+            // lane.
+            fs::write(vault.join(partial_only_name), "cedarleaf").unwrap();
+            let config = Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            };
+            build_index(&config, &data).unwrap();
+            data
+        };
+
+        // 19 distinct standard sources: below the fixed threshold of 20, so
+        // native execution latches exploration on and the partial-only
+        // document surfaces.
+        let below_data = build(19);
+        let below = search_with_quality(&below_data, query, 30);
+        assert_eq!(below.match_quality, LexicalMatchQuality::Mixed);
+        assert!(
+            below.hits.iter().any(|hit| hit.path == partial_only_name),
+            "expected the exploratory partial match to surface with 19 standard sources"
+        );
+
+        // 20 distinct standard sources: at the fixed threshold, so native
+        // execution latches exploration off and the partial-only document
+        // never surfaces.
+        let at_data = build(20);
+        let at = search_with_quality(&at_data, query, 30);
+        assert_eq!(at.match_quality, LexicalMatchQuality::StandardOnly);
+        assert!(
+            !at.hits.iter().any(|hit| hit.path == partial_only_name),
+            "expected the exploratory partial match to be suppressed at 20 standard sources"
+        );
+        assert_eq!(at.hits.len(), 20);
+    }
+
+    #[test]
+    fn many_chunks_from_one_source_still_count_as_a_single_standard_source() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+
+        // One file, many headings: each heading becomes its own chunk and
+        // its own standard AllTerms candidate, but every chunk shares the
+        // same source. Twenty-five raw candidate rows must still count as
+        // one distinct source, far below the fixed threshold of 20.
+        let mut many_chunks = String::new();
+        for index in 0..25 {
+            many_chunks.push_str(&format!(
+                "# Section-{index:03}\namberstone birchwood cedarleaf dunefield\n"
+            ));
+        }
+        fs::write(vault.join("many-chunks.md"), many_chunks).unwrap();
+        // Only one of the four optional terms, in an unrelated single-chunk
+        // file: never satisfies the standard AllTerms lane, only the
+        // exploratory PartialCoverage lane.
+        fs::write(vault.join("solo-cedarleaf.md"), "cedarleaf").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let outcome = search_with_quality(&data, "amberstone birchwood cedarleaf dunefield", 40);
+        let many_chunk_hits = outcome
+            .hits
+            .iter()
+            .filter(|hit| hit.path == "many-chunks.md")
+            .count();
+        assert_eq!(
+            many_chunk_hits, 25,
+            "expected all 25 heading chunks to surface as standard candidates"
+        );
+        // Twenty-five raw candidates from one distinct source stay far
+        // below the 20-source threshold, so exploration is still active and
+        // the partial-only document still surfaces alongside them.
+        assert_eq!(outcome.match_quality, LexicalMatchQuality::Mixed);
+        assert!(
+            outcome
+                .hits
+                .iter()
+                .any(|hit| hit.path == "solo-cedarleaf.md"),
+            "expected the exploratory partial match to surface: many chunks from one source must count once"
+        );
+    }
+
+    #[test]
+    fn native_retrieval_stops_after_512_unique_candidates_and_skips_later_lanes() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let first_data = temporary.path().join("first-data");
+        let second_data = temporary.path().join("second-data");
+        fs::create_dir(&vault).unwrap();
+
+        // Two genuinely disjoint 256-document groups, each independently
+        // capped at the per-lane limit of 256: one group matches only
+        // through the Title field lane, the other only through the Body
+        // field lane. Together they exactly fill the 512-candidate window.
+        for index in 0..256 {
+            fs::write(
+                vault.join(format!("title-match-{index:03}.md")),
+                "---\ntitle: amberstone birchwood cedarleaf dunefield\n---\nquietmarker fillertext neutralpadding",
+            )
+            .unwrap();
+        }
+        for index in 0..256 {
+            fs::write(
+                vault.join(format!("body-match-{index:03}.md")),
+                "amberstone birchwood cedarleaf dunefield",
+            )
+            .unwrap();
+        }
+        // A single optional term, reachable only through the weaker
+        // exploratory PartialCoverage lane, which runs after every AllTerms
+        // field lane in the evidence ladder. Once the 512-candidate window
+        // is already full, this lane must never execute, so this document
+        // must never surface.
+        fs::write(vault.join("should-never-surface.md"), "cedarleaf").unwrap();
+
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &first_data).unwrap();
+        build_index(&config, &second_data).unwrap();
+
+        let query = "amberstone birchwood cedarleaf dunefield";
+        // Call `execute_lexical_v2` directly (via `lexical_v2_outcome`) with
+        // a limit well above 512: the public API's separate 100-result
+        // clamp would otherwise hide whether the internal window actually
+        // closed at exactly 512, rather than continuing to grow or
+        // undercounting.
+        let first = lexical_v2_outcome(&first_data, query, 600);
+        let rebuilt = lexical_v2_outcome(&second_data, query, 600);
+        assert_eq!(first.match_quality, LexicalMatchQuality::StandardOnly);
+        assert_eq!(first.hits.len(), 512);
+        let unique_paths: BTreeSet<&str> = first.hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(unique_paths.len(), 512);
+        assert!(
+            !first
+                .hits
+                .iter()
+                .any(|hit| hit.path == "should-never-surface.md"),
+            "the exploratory lane's candidate must not be retained once the 512-candidate window is full"
+        );
+        // Deterministic across independent rebuilds: the same 512 unique
+        // candidates, in the same order.
+        let identity = |outcome: &LexicalSearchOutcome| {
+            outcome
+                .hits
+                .iter()
+                .map(|hit| (hit.chunk_id.clone(), hit.path.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(identity(&first), identity(&rebuilt));
     }
 
     #[test]

@@ -68,6 +68,7 @@ describe("presentQueryStatus", () => {
         omittedObservedSourceCount: 0,
         lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("exhausted"),
+        sourceWindowSaturated: false,
       },
       expected: {
         state: "results",
@@ -84,6 +85,7 @@ describe("presentQueryStatus", () => {
         omittedObservedSourceCount: 0,
         lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("more_available"),
+        sourceWindowSaturated: false,
       },
       expected: {
         state: "results",
@@ -100,6 +102,7 @@ describe("presentQueryStatus", () => {
         omittedObservedSourceCount: 0,
         lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("candidate_limit_reached"),
+        sourceWindowSaturated: false,
       },
       expected: {
         state: "results",
@@ -116,6 +119,7 @@ describe("presentQueryStatus", () => {
         omittedObservedSourceCount: 0,
         lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("unknown"),
+        sourceWindowSaturated: false,
       },
       expected: {
         state: "results",
@@ -132,6 +136,7 @@ describe("presentQueryStatus", () => {
         omittedObservedSourceCount: 0,
         lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("exhausted"),
+        sourceWindowSaturated: false,
       },
       expected: {
         state: "no-match",
@@ -148,6 +153,7 @@ describe("presentQueryStatus", () => {
         omittedObservedSourceCount: 0,
         lexicalMatchQuality: { availability: "available", value: "standard_only" },
         candidateWindow: window("candidate_limit_reached"),
+        sourceWindowSaturated: false,
       },
       expected: {
         state: "no-match",
@@ -196,6 +202,7 @@ describe("presentQueryStatus", () => {
       omittedObservedSourceCount: 0,
       lexicalMatchQuality: { availability: "available", value: quality },
       candidateWindow: window("candidate_limit_reached"),
+      sourceWindowSaturated: false,
     }).text;
 
     expect(text).toBe(
@@ -212,6 +219,7 @@ describe("presentQueryStatus", () => {
       omittedObservedSourceCount: 1,
       lexicalMatchQuality: { availability: "available", value: "standard_only" },
       candidateWindow: window("exhausted"),
+      sourceWindowSaturated: false,
     })).toEqual({
       state: "results",
       text: "2 returned sections — 1 source shown; 1 observed source omitted by the source-row limit; search window complete.",
@@ -231,12 +239,107 @@ describe("presentQueryStatus", () => {
         candidateCount: 512,
         candidateLimit: 512,
       },
+      sourceWindowSaturated: false,
     };
 
     expect(presentQueryStatus(facts).text).toBe(
       "3 returned sections — 2 sources shown; candidate window limit reached.",
     );
   });
+
+  it("warns that additional sources may be unobserved when the discovery window is saturated", () => {
+    expect(presentQueryStatus({
+      phase: "settled",
+      returnedSectionCount: 100,
+      displayedSourceCount: 5,
+      omittedObservedSourceCount: 0,
+      lexicalMatchQuality: { availability: "available", value: "standard_only" },
+      candidateWindow: window("exhausted"),
+      sourceWindowSaturated: true,
+    })).toEqual({
+      state: "results",
+      text: "100 returned sections — 5 sources shown; "
+        + "additional sources may be unobserved beyond the search window; search window complete.",
+      busy: false,
+    });
+  });
+
+  it("keeps the source-window-saturation warning query-free", () => {
+    const text = presentQueryStatus({
+      phase: "settled",
+      returnedSectionCount: 100,
+      displayedSourceCount: 5,
+      omittedObservedSourceCount: 0,
+      lexicalMatchQuality: { availability: "available", value: "standard_only" },
+      candidateWindow: window("more_available"),
+      sourceWindowSaturated: true,
+    }).text;
+
+    expect(text).toContain("additional sources may be unobserved");
+    expect(text).not.toContain("private-query-value");
+  });
+
+  it("composes the saturation warning independently from source-row omission and candidate state", () => {
+    const both = presentQueryStatus({
+      phase: "settled",
+      returnedSectionCount: 100,
+      displayedSourceCount: 3,
+      omittedObservedSourceCount: 4,
+      lexicalMatchQuality: { availability: "available", value: "standard_only" },
+      candidateWindow: window("candidate_limit_reached"),
+      sourceWindowSaturated: true,
+    }).text;
+
+    expect(both).toBe(
+      "100 returned sections — 3 sources shown; "
+      + "4 observed sources omitted by the source-row limit; "
+      + "additional sources may be unobserved beyond the search window; "
+      + "candidate window limit reached.",
+    );
+
+    const saturatedWithoutOmission = presentQueryStatus({
+      phase: "settled",
+      returnedSectionCount: 100,
+      displayedSourceCount: 100,
+      omittedObservedSourceCount: 0,
+      lexicalMatchQuality: { availability: "available", value: "standard_only" },
+      candidateWindow: window("exhausted"),
+      sourceWindowSaturated: true,
+    }).text;
+    expect(saturatedWithoutOmission).not.toContain("omitted by the source-row limit");
+    expect(saturatedWithoutOmission).toContain("additional sources may be unobserved");
+
+    const omissionWithoutSaturation = presentQueryStatus({
+      phase: "settled",
+      returnedSectionCount: 4,
+      displayedSourceCount: 1,
+      omittedObservedSourceCount: 1,
+      lexicalMatchQuality: { availability: "available", value: "standard_only" },
+      candidateWindow: window("exhausted"),
+      sourceWindowSaturated: false,
+    }).text;
+    expect(omissionWithoutSaturation).toContain("omitted by the source-row limit");
+    expect(omissionWithoutSaturation).not.toContain("additional sources may be unobserved");
+  });
+
+  it.each([99, 100])(
+    "treats %s returned sections as the exact source-window-saturation boundary",
+    (returnedSectionCount) => {
+      const text = presentQueryStatus({
+        phase: "settled",
+        returnedSectionCount,
+        displayedSourceCount: 1,
+        omittedObservedSourceCount: 0,
+        lexicalMatchQuality: { availability: "available", value: "standard_only" },
+        candidateWindow: window("exhausted"),
+        sourceWindowSaturated: returnedSectionCount === 100,
+      }).text;
+
+      expect(text.includes("additional sources may be unobserved")).toBe(
+        returnedSectionCount === 100,
+      );
+    },
+  );
 });
 
 describe("presentBackgroundIndex", () => {

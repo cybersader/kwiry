@@ -23,6 +23,7 @@ import {
   LEXICAL_CANDIDATE_LIMIT,
   MAX_LEXICAL_CANDIDATES_PER_LANE,
   MAX_LEXICAL_OBSERVATION_COUNT,
+  MIN_STANDARD_SOURCES,
   SOURCE_FORMATS,
   type PropertyBag,
   type SourceFormat,
@@ -223,10 +224,11 @@ const matchPlan = (
     | "lexical_partial_coverage_v3" | "lexical_prefix_v3",
   matchValue: string,
 ) => ({
-  schema_version: 9 as const,
+  schema_version: 10 as const,
   profile_id: planId === "lexical_explicit_v3" ? "lexical-v1" as const : "lexical-v2" as const,
   disposition: planId === "lexical_explicit_v3" ? "explicit_bypass" as const : "ready" as const,
   max_total_candidates: 512 as const,
+  min_standard_sources: 20 as const,
   stages: [{
     ordinal: 0,
     plan_id: planId,
@@ -252,7 +254,7 @@ describe("Fts5GenerationIndex", () => {
     expect(index.documents).toBe(1);
     expect(index.chunks).toBe(1);
     expect(index.observeQuery([{
-      schema_version: 9,
+      schema_version: 10,
       plan_id: "identifier_metadata_v3",
       match_value: "{filename stem aliases title heading_text} : (\"quasar\")",
     }]).identifier_probe_matched).toBe(true);
@@ -635,7 +637,7 @@ describe("Fts5GenerationIndex", () => {
     index.applySourceChanges([gamma, beta, alpha], []);
 
     expect(index.observeQuery([{
-      schema_version: 9,
+      schema_version: 10,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -648,10 +650,11 @@ describe("Fts5GenerationIndex", () => {
     }]).term_support[0]?.document_frequency).toBe(1);
 
     const combined = index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_all_terms_v3",
@@ -666,10 +669,11 @@ describe("Fts5GenerationIndex", () => {
     expect(combined.map((hit) => hit.chunk_id)).toEqual(["chunk-beta"]);
 
     const identifierOnly = index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_partial_coverage_v3",
@@ -766,10 +770,11 @@ describe("Fts5GenerationIndex", () => {
 
     for (const exactValue of prepared.chunks[0]!.technical_identifiers) {
       const hits = index.search({
-        schema_version: 9,
+        schema_version: 10,
         profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
+        min_standard_sources: 20,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
@@ -788,10 +793,11 @@ describe("Fts5GenerationIndex", () => {
     index.replaceSource(source("exact", "chunk-exact", "ordinary body", "Quasar Guide"));
     index.replaceSource(source("phrase", "chunk-phrase", "quasar guide quasar guide quasar guide"));
     const hits = index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [
         {
           ordinal: 0,
@@ -850,10 +856,11 @@ describe("Fts5GenerationIndex", () => {
     ));
 
     const hits = index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_exact_metadata_v3",
@@ -879,10 +886,11 @@ describe("Fts5GenerationIndex", () => {
     ));
 
     const hits = index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_exact_metadata_v3",
@@ -917,10 +925,11 @@ describe("Fts5GenerationIndex", () => {
       expect(db.selectValue("SELECT count(*) FROM source_exact_aliases")).toBe(1);
       expect(db.selectValue("SELECT count(*) FROM chunk_exact_identifier_fts_docsize")).toBe(1);
       const exactPlan = (value: string) => ({
-        schema_version: 9 as const,
+        schema_version: 10 as const,
         profile_id: "lexical-v2" as const,
         disposition: "ready" as const,
         max_total_candidates: 512 as const,
+        min_standard_sources: 20 as const,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3" as const,
@@ -1024,10 +1033,11 @@ describe("Fts5GenerationIndex", () => {
     index.replaceSource(source("needle-exact", "chunk-needle-exact", "ordinary body", "Needle Signal"));
 
     const hits = index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_exact_metadata_v3",
@@ -1061,10 +1071,11 @@ describe("Fts5GenerationIndex", () => {
     }
 
     const plan = {
-      schema_version: 9 as const,
+      schema_version: 10 as const,
       profile_id: "lexical-v2" as const,
       disposition: "ready" as const,
       max_total_candidates: 512 as const,
+      min_standard_sources: 20 as const,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_prefix_metadata_v3" as const,
@@ -1126,7 +1137,7 @@ describe("Fts5GenerationIndex", () => {
     expect(summary.stages.every((stage) => stage.mandatory)).toBe(false);
   });
 
-  it("skips fallback-only partial lanes after a standard candidate is collected", () => {
+  it("supplements a standard hit with the exploratory partial lane while standard sources are sparse", () => {
     index.replaceSource(sourceAt(
       "complete",
       "complete.md",
@@ -1142,10 +1153,11 @@ describe("Fts5GenerationIndex", () => {
       "Partial",
     ));
     const plan = {
-      schema_version: 9 as const,
+      schema_version: 10 as const,
       profile_id: "lexical-v2" as const,
       disposition: "ready" as const,
       max_total_candidates: 512 as const,
+      min_standard_sources: 20 as const,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_all_terms_v3" as const,
@@ -1157,7 +1169,7 @@ describe("Fts5GenerationIndex", () => {
       }, {
         ordinal: 1,
         plan_id: "lexical_partial_coverage_v3" as const,
-        condition: "if_no_prior_candidates" as const,
+        condition: "if_fewer_than_minimum_standard_sources" as const,
         proof_field: "cross_field" as const,
         proof_kind: "partial_coverage" as const,
         match_value: "\"birchwood\"",
@@ -1168,12 +1180,90 @@ describe("Fts5GenerationIndex", () => {
     const result = index.searchWithCandidateWindow(plan, 20, trace);
     const summary = index.finishInternalLexicalTrace(trace);
 
-    expect(result.hits.map((hit) => hit.chunk_id)).toEqual(["chunk-complete"]);
+    // A single standard source is far below the fixed 20-source threshold,
+    // so the exploratory lane stays active rather than being suppressed by
+    // the first standard hit: `chunk-partial` still surfaces alongside
+    // `chunk-complete`, and the mix of standard and partial proofs makes
+    // the overall match quality `mixed`.
+    expect(result.hits.map((hit) => hit.chunk_id)).toEqual(["chunk-complete", "chunk-partial"]);
+    expect(result.lexical_match_quality).toBe("mixed");
+    expect(summary).toMatchObject({
+      planned_lane_count: 2,
+      executed_lane_count: 2,
+      unique_candidate_count: 2,
+    });
+    expect(summary.stages).toEqual([
+      expect.objectContaining({
+        kind: "lexical_all_terms_v3",
+        status: "completed",
+        output_count: 1,
+        candidate_count: 1,
+      }),
+      expect.objectContaining({
+        kind: "lexical_partial_coverage_v3",
+        status: "completed",
+        duration_ms: 0,
+        output_count: 1,
+        candidate_count: 2,
+      }),
+    ]);
+  });
+
+  it("suppresses the exploratory partial lane once standard sources reach the fixed threshold", () => {
+    for (let value = 0; value < 20; value += 1) {
+      const suffix = String(value).padStart(2, "0");
+      index.replaceSource(sourceAt(
+        `standard-${suffix}`,
+        `standard-${suffix}.md`,
+        `chunk-standard-${suffix}`,
+        "amberstone birchwood",
+        `Standard ${suffix}`,
+      ));
+    }
+    index.replaceSource(sourceAt(
+      "partial",
+      "partial.md",
+      "chunk-partial",
+      "birchwood",
+      "Partial",
+    ));
+    const plan = {
+      schema_version: 10 as const,
+      profile_id: "lexical-v2" as const,
+      disposition: "ready" as const,
+      max_total_candidates: 512 as const,
+      min_standard_sources: 20 as const,
+      stages: [{
+        ordinal: 0,
+        plan_id: "lexical_all_terms_v3" as const,
+        condition: "always" as const,
+        proof_field: "cross_field" as const,
+        proof_kind: "cross_field_all_terms" as const,
+        match_value: "\"amberstone\"",
+        max_candidates: 256,
+      }, {
+        ordinal: 1,
+        plan_id: "lexical_partial_coverage_v3" as const,
+        condition: "if_fewer_than_minimum_standard_sources" as const,
+        proof_field: "cross_field" as const,
+        proof_kind: "partial_coverage" as const,
+        match_value: "\"birchwood\"",
+        max_candidates: 256,
+      }],
+    };
+    const trace = index.beginInternalLexicalTrace(() => 0);
+    const result = index.searchWithCandidateWindow(plan, 30, trace);
+    const summary = index.finishInternalLexicalTrace(trace);
+
+    // Exactly 20 distinct standard sources meets the fixed threshold, so the
+    // exploratory lane is latched off: `chunk-partial` never surfaces.
+    expect(result.hits.map((hit) => hit.chunk_id)).not.toContain("chunk-partial");
+    expect(result.hits).toHaveLength(20);
     expect(result.lexical_match_quality).toBe("standard_only");
     expect(summary).toMatchObject({
       planned_lane_count: 2,
       executed_lane_count: 1,
-      unique_candidate_count: 1,
+      unique_candidate_count: 20,
     });
     expect(summary.stages).toEqual([
       expect.objectContaining({ kind: "lexical_all_terms_v3", status: "completed" }),
@@ -1203,10 +1293,11 @@ describe("Fts5GenerationIndex", () => {
       "Birchwood",
     ));
     const plan = {
-      schema_version: 9 as const,
+      schema_version: 10 as const,
       profile_id: "lexical-v2" as const,
       disposition: "ready" as const,
       max_total_candidates: 512 as const,
+      min_standard_sources: 20 as const,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_all_terms_v3" as const,
@@ -1218,7 +1309,7 @@ describe("Fts5GenerationIndex", () => {
       }, {
         ordinal: 1,
         plan_id: "lexical_partial_coverage_v3" as const,
-        condition: "if_no_prior_candidates" as const,
+        condition: "if_fewer_than_minimum_standard_sources" as const,
         proof_field: "body" as const,
         proof_kind: "partial_coverage" as const,
         match_value: "{content} : \"amberstone\"",
@@ -1226,7 +1317,7 @@ describe("Fts5GenerationIndex", () => {
       }, {
         ordinal: 2,
         plan_id: "lexical_partial_coverage_v3" as const,
-        condition: "if_no_prior_candidates" as const,
+        condition: "if_fewer_than_minimum_standard_sources" as const,
         proof_field: "title" as const,
         proof_kind: "partial_coverage" as const,
         match_value: "{title} : \"birchwood\"",
@@ -1274,10 +1365,11 @@ describe("Fts5GenerationIndex", () => {
     }
 
     const plan = {
-      schema_version: 9 as const,
+      schema_version: 10 as const,
       profile_id: "lexical-v2" as const,
       disposition: "ready" as const,
       max_total_candidates: 512 as const,
+      min_standard_sources: 20 as const,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_prefix_metadata_v3" as const,
@@ -1347,7 +1439,7 @@ describe("Fts5GenerationIndex", () => {
     });
   });
 
-  it("closes at the unchanged 256-per-stage and 512-total candidate ceilings", () => {
+  it("reports an unknown window when a lane saturates its per-stage cap below the 512-total ceiling", () => {
     for (let value = 0; value < 256; value += 1) {
       const suffix = String(value).padStart(3, "0");
       index.replaceSource(sourceAt(
@@ -1367,24 +1459,31 @@ describe("Fts5GenerationIndex", () => {
     };
 
     const result = index.searchWithCandidateWindow({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [
         { ...stage, ordinal: 0 },
         { ...stage, ordinal: 1 },
       ],
     }, 512);
     expect(result.hits).toHaveLength(256);
+    // Both identical lanes saturate their own 256-row per-stage cap, but the
+    // second lane rediscovers only duplicates, so the unique-candidate
+    // window closes at 256, well below the 512-total ceiling. A saturated
+    // lane below the total cap cannot claim the window is full (it might
+    // simply be exhausted), so the state is `unknown` rather than a false
+    // `candidate_limit_reached`.
     expect(result.candidate_window).toEqual({
-      state: "candidate_limit_reached",
+      state: "unknown",
       candidate_count: 256,
       candidate_limit: 512,
     });
   });
 
-  it("finishes a same-kind trace after observing beyond the retained-candidate ceiling", () => {
+  it("finishes a same-kind trace, skipping a later same-kind lane once the candidate window is already full", () => {
     const lanes = [
       { term: "lanternstone", count: MAX_LEXICAL_CANDIDATES_PER_LANE },
       { term: "meadowglass", count: MAX_LEXICAL_CANDIDATES_PER_LANE },
@@ -1404,10 +1503,11 @@ describe("Fts5GenerationIndex", () => {
     const trace = index.beginInternalLexicalTrace(() => 0);
 
     const result = index.searchWithCandidateWindow({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: LEXICAL_CANDIDATE_LIMIT,
+      min_standard_sources: MIN_STANDARD_SOURCES,
       stages: lanes.map(({ term }, ordinal) => ({
         ordinal,
         plan_id: "lexical_all_terms_v3" as const,
@@ -1426,10 +1526,16 @@ describe("Fts5GenerationIndex", () => {
       candidate_count: 512,
       candidate_limit: 512,
     });
+    // The first two lanes (lanternstone, meadowglass) already fill the
+    // 512-unique window exactly. The third lane (riverchalk) shares the
+    // same kind, but its SQL must never run: the window-full check now
+    // skips a later lane's retrieval entirely rather than executing it and
+    // discarding every row, so `riverchalk`'s single candidate is never
+    // observed at all.
     expect(summary).toMatchObject({
-      observation_count: 513,
+      observation_count: 512,
       unique_candidate_count: 512,
-      collection_cap_discarded_observation_count: 1,
+      collection_cap_discarded_observation_count: 0,
       returned_count: 100,
       retained_candidate_truncation_count: 412,
       candidate_count: 512,
@@ -1439,9 +1545,105 @@ describe("Fts5GenerationIndex", () => {
         kind: "lexical_all_terms_v3",
         input_count: 512,
         output_count: 512,
-        candidate_count: 513,
+        candidate_count: 512,
       }],
     });
+    expect(isInternalLexicalTrace(summary)).toBe(true);
+  });
+
+  it("records a later, differently-kinded lane as skipped once the candidate window is already full", () => {
+    const lanes = [
+      { term: "lanternstone", count: MAX_LEXICAL_CANDIDATES_PER_LANE },
+      { term: "meadowglass", count: MAX_LEXICAL_CANDIDATES_PER_LANE },
+    ];
+    const sources = lanes.flatMap(({ term, count }, laneOrdinal) =>
+      Array.from({ length: count }, (_, sourceOrdinal) => {
+        const suffix = `${laneOrdinal}-${String(sourceOrdinal).padStart(3, "0")}`;
+        return sourceAt(
+          `window-full-${suffix}`,
+          `window-full-${suffix}.md`,
+          `chunk-window-full-${suffix}`,
+          term,
+        );
+      }));
+    // An unrelated document reachable only through the trailing prefix
+    // lane: it must never surface, because that lane's SQL must never run
+    // once the 512-unique window is already full.
+    sources.push(sourceAt(
+      "should-never-surface",
+      "should-never-surface.md",
+      "chunk-should-never-surface",
+      "cedarcrest",
+    ));
+    index.applySourceChanges(sources, []);
+    const trace = index.beginInternalLexicalTrace(() => 0);
+
+    const result = index.searchWithCandidateWindow({
+      schema_version: 10,
+      profile_id: "lexical-v2",
+      disposition: "ready",
+      max_total_candidates: LEXICAL_CANDIDATE_LIMIT,
+      min_standard_sources: MIN_STANDARD_SOURCES,
+      stages: [
+        ...lanes.map(({ term }, ordinal) => ({
+          ordinal,
+          plan_id: "lexical_all_terms_v3" as const,
+          condition: "always" as const,
+          proof_field: "cross_field" as const,
+          proof_kind: "cross_field_all_terms" as const,
+          match_value: `"${term}"`,
+          max_candidates: MAX_LEXICAL_CANDIDATES_PER_LANE,
+        })),
+        {
+          ordinal: 2,
+          plan_id: "lexical_prefix_v3" as const,
+          condition: "always" as const,
+          proof_field: "cross_field" as const,
+          proof_kind: "prefix_assisted" as const,
+          match_value: "\"cedarcrest\"",
+          max_candidates: MAX_LEXICAL_CANDIDATES_PER_LANE,
+        },
+      ],
+    }, 100, trace);
+    const summary = index.finishInternalLexicalTrace(trace);
+
+    expect(result.hits.map((hit) => hit.chunk_id))
+      .not.toContain("chunk-should-never-surface");
+    expect(result.hits).toHaveLength(100);
+    expect(result.candidate_window).toEqual({
+      state: "candidate_limit_reached",
+      candidate_count: 512,
+      candidate_limit: 512,
+    });
+    // The third lane is a genuinely different kind from the first two, so
+    // it gets its own trace entry: `planned` still counts it, but `executed`
+    // does not, and its retrieval SQL never ran (observed/candidate counts
+    // stay at zero) rather than running only to discard every row.
+    expect(summary).toMatchObject({
+      planned_lane_count: 3,
+      executed_lane_count: 2,
+      unique_candidate_count: 512,
+      collection_cap_discarded_observation_count: 0,
+      returned_count: 100,
+      retained_candidate_truncation_count: 412,
+      stage_count: 2,
+    });
+    expect(summary.stages).toEqual([
+      expect.objectContaining({
+        kind: "lexical_all_terms_v3",
+        status: "completed",
+        output_count: 512,
+        candidate_count: 512,
+      }),
+      expect.objectContaining({
+        kind: "lexical_prefix_v3",
+        mandatory: false,
+        status: "skipped",
+        duration_ms: 0,
+        output_count: 0,
+        candidate_count: 0,
+      }),
+    ]);
     expect(isInternalLexicalTrace(summary)).toBe(true);
   });
 
@@ -1490,10 +1692,11 @@ describe("Fts5GenerationIndex", () => {
 
     const trace = index.beginInternalLexicalTrace(() => 0);
     const hits = index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_exact_metadata_v3",
@@ -1557,10 +1760,11 @@ describe("Fts5GenerationIndex", () => {
   it("returns no rows for a typed no-evidence execution plan", () => {
     index.replaceSource(source("alpha", "chunk-a", "popular common document"));
     expect(index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [],
     }, 20)).toEqual([]);
   });
@@ -1576,7 +1780,7 @@ describe("Fts5GenerationIndex", () => {
       { tags: ["tag-only-nebula"] },
     ));
     const observed = index.observeQuery([{
-      schema_version: 9,
+      schema_version: 10,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -1601,7 +1805,7 @@ describe("Fts5GenerationIndex", () => {
     const values = [0, 1, 2, 3, 4, 5, 6, 7];
     const trace = index.beginInternalLexicalTrace(() => values.shift() ?? 7);
     index.observeQuery([{
-      schema_version: 9,
+      schema_version: 10,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -1654,7 +1858,7 @@ describe("Fts5GenerationIndex", () => {
     const values = [0, 0, 10_000, 10_000, 20_000, 20_000];
     const trace = index.beginInternalLexicalTrace(() => values.shift() ?? 20_000);
     const evidence = index.observeQuery([{
-      schema_version: 9,
+      schema_version: 10,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -1666,10 +1870,11 @@ describe("Fts5GenerationIndex", () => {
       max_prefix_term_bytes: 96,
     }], trace);
     const hits = index.search({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "lexical-v2",
       disposition: "ready",
       max_total_candidates: 512,
+      min_standard_sources: 20,
       stages: [{
         ordinal: 0,
         plan_id: "lexical_prefix_v3",
@@ -2359,10 +2564,11 @@ describe("Fts5GenerationIndex", () => {
         restored.close();
       }
       expect(scoped.search({
-        schema_version: 9,
+        schema_version: 10,
         profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
+        min_standard_sources: 20,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
@@ -3034,10 +3240,11 @@ describe("Fts5GenerationIndex", () => {
     const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
     try {
       const hits = restored.search({
-        schema_version: 9,
+        schema_version: 10,
         profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
+        min_standard_sources: 20,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
@@ -3070,10 +3277,11 @@ describe("Fts5GenerationIndex", () => {
     const restored = openRestoredFts5Generation(sqlite, index.exportImage(sqlite), 1);
     try {
       const hits = restored.search({
-        schema_version: 9,
+        schema_version: 10,
         profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
+        min_standard_sources: 20,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",
@@ -3269,10 +3477,11 @@ describe("Fts5GenerationIndex", () => {
     const restored = openRestoredFts5Generation(sqlite, authored, 1);
     try {
       expect(restored.search({
-        schema_version: 9,
+        schema_version: 10,
         profile_id: "lexical-v2",
         disposition: "ready",
         max_total_candidates: 512,
+        min_standard_sources: 20,
         stages: [{
           ordinal: 0,
           plan_id: "lexical_exact_metadata_v3",

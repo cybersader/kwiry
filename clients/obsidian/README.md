@@ -19,7 +19,9 @@ Published scope:
 - HTML canonical titles use the normal title/display lane without becoming authored properties or body text; latent descriptions, chrome, and hidden text remain searchable, with no URL dereference, embedded-resource read, locator, or section-link navigation;
 - one active FTS5 generation, optionally accelerated by a validated disposable cache outside the vault on machine-local storage;
 - lexical mode only, with no semantic/hybrid fallback;
-- one shared-Rust-owned bounded exploratory partial pass for long ordinary queries, run only after every stronger lexical lane returns no candidates, keeping required identifier anchors mandatory while offering every useful optional term as an alternative (at least one must match), with partial or mixed result quality disclosed in the search status;
+- one shared-Rust-owned bounded exploratory partial pass for long ordinary queries, activated when prior authorized standard lanes reach fewer than 20 distinct sources, keeping required identifier anchors mandatory while offering every useful optional term as an alternative (at least one must match), with partial or mixed result quality disclosed in the search status;
+- a 100 ms trailing-edge typeahead scheduler with at most one active backend request and one replaceable latest pending request, preventing obsolete synchronous Worker searches from accumulating;
+- retrieval stops after the fixed 512-unique-candidate window fills, and when the fixed 100-section source-discovery response window comes back full, the query-free search status discloses that additional sources may be unobserved beyond that window, independent of both the source-row limit's exact omission count and candidate-window completeness;
 - explicit backend selection rather than automatic daemon failover;
 - active-vault create/modify/delete/rename reconciliation;
 - explicit `strict_hash` or metadata-audit freshness behavior with stale/reconciling disclosure;

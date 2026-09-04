@@ -34,6 +34,7 @@ export interface GroupedSearchResult {
     omittedObservedSourceCount: number;
     sourceLimit: number;
     candidateWindow: CandidateWindowFacts;
+    sourceWindowSaturated: boolean;
   };
 }
 
@@ -114,16 +115,25 @@ export function groupSearchExecution(
   const groups = observedGroups.slice(0, sourceLimit);
   const observedSourceCount = observedGroups.length;
   const displayedSourceCount = groups.length;
+  const returnedSectionCount = execution.response.hits.length;
 
   return {
     groups,
     facts: {
-      returnedSectionCount: execution.response.hits.length,
+      returnedSectionCount,
       observedSourceCount,
       displayedSourceCount,
       omittedObservedSourceCount: observedSourceCount - displayedSourceCount,
       sourceLimit,
       candidateWindow: execution.candidateWindow,
+      // Closed fact, independent from both the source-row limit (an exact,
+      // locally-known omission count) and candidateWindow (the backend's
+      // own scan-completeness signal). This one is derived purely from
+      // whether the fixed 100-section discovery window itself came back
+      // full: at 100 returned sections, sources ranked below the window are
+      // structurally impossible to have observed, so their existence is
+      // unknown rather than absent. Below 100, every ranked source was seen.
+      sourceWindowSaturated: returnedSectionCount === GROUPED_SEARCH_HIT_LIMIT,
     },
   };
 }

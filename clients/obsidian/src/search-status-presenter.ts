@@ -23,6 +23,7 @@ export type QueryStatusFacts =
     omittedObservedSourceCount: number;
     candidateWindow: CandidateWindowFacts;
     lexicalMatchQuality: LexicalMatchQualityFacts;
+    sourceWindowSaturated: boolean;
   }
   | { phase: "error"; code: string; safeMessage: string };
 
@@ -86,10 +87,20 @@ export function presentQueryStatus(facts: QueryStatusFacts): QueryStatusPresenta
         ? `${countedNoun(facts.omittedObservedSourceCount, "observed source")} `
           + "omitted by the source-row limit; "
         : "";
+      // Independent from `omittedSourceText` (an exact, locally-known count of
+      // observed sources the source-row limit dropped) and from `windowText`
+      // (the backend's own candidate-scan completeness). This warns instead
+      // that the fixed section-discovery window itself came back full, so
+      // sources ranked below it were never observed at all — their existence
+      // is unknown, not counted as zero.
+      const sourceWindowSaturationText = facts.sourceWindowSaturated
+        ? "additional sources may be unobserved beyond the search window; "
+        : "";
       const matchQualityPrefix = lexicalMatchQualityPrefix(facts.lexicalMatchQuality);
       return {
         state: "results",
-        text: `${matchQualityPrefix}${sectionText} — ${sourceDisplayText}${omittedSourceText}${windowText}`,
+        text: `${matchQualityPrefix}${sectionText} — `
+          + `${sourceDisplayText}${omittedSourceText}${sourceWindowSaturationText}${windowText}`,
         busy: false,
       };
     }

@@ -368,7 +368,7 @@
         "all_terms",
         "partial_coverage"
       ],
-      "partial_condition": "if_no_prior_candidates",
+      "partial_condition": "if_fewer_than_minimum_standard_sources",
       "anchors": [],
       "expected_paths": [
         {

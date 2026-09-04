@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lexical::{normalize_raw, technical_identifier_spans, technical_identifiers};
 
-pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 10;
+pub const LEXICAL_QUERY_PLAN_SCHEMA_VERSION: u32 = 11;
 pub const LEXICAL_V1_PROFILE_ID: &str = "lexical-v1";
 pub const LEXICAL_V2_PROFILE_ID: &str = "lexical-v2";
 pub const FIELD_CONTROLS_SCHEMA_VERSION: u32 = 1;
@@ -25,6 +25,13 @@ pub const MAX_PREFIX_EXPANSIONS_PER_TERM: usize = 16;
 pub const MAX_PREFIX_EXPANSION_SCAN: usize = 256;
 pub const MAX_CANDIDATES_PER_STAGE: usize = 256;
 pub const MAX_TOTAL_CANDIDATES: usize = 512;
+/// The number of distinct authorized standard sources at or above which the
+/// conditional exploratory `PartialCoverage` pass is suppressed. Below this
+/// count, exploration activates to supplement a sparse standard result set;
+/// at or above it, the standard evidence ladder is judged rich enough on its
+/// own. Many chunks from the same source count once: this counts distinct
+/// sources, not candidate rows.
+pub const MIN_STANDARD_SOURCES: usize = 20;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -277,6 +284,10 @@ pub struct QueryBounds {
     pub max_prefix_expansion_scan: usize,
     pub max_candidates_per_stage: usize,
     pub max_total_candidates: usize,
+    /// Carries `MIN_STANDARD_SOURCES` so native execution (and any parity
+    /// projection of it) reads the sparse-source threshold from the
+    /// Rust-authored plan rather than duplicating the constant.
+    pub min_standard_sources: usize,
 }
 
 impl QueryBounds {
@@ -293,6 +304,7 @@ impl QueryBounds {
             max_prefix_expansion_scan: MAX_PREFIX_EXPANSION_SCAN,
             max_candidates_per_stage: MAX_CANDIDATES_PER_STAGE,
             max_total_candidates: MAX_TOTAL_CANDIDATES,
+            min_standard_sources: MIN_STANDARD_SOURCES,
         }
     }
 }
@@ -370,7 +382,15 @@ pub enum QueryEvidenceStageKind {
 #[serde(rename_all = "snake_case")]
 pub enum QueryEvidenceStageCondition {
     Always,
-    IfNoPriorCandidates,
+    /// Native execution latches this decision once, before the first
+    /// conditional lane runs, from the count of distinct authorized standard
+    /// sources accepted so far: fewer than `QueryBounds::min_standard_sources`
+    /// activates every bounded exploratory lane this condition guards; at or
+    /// above it, they are all suppressed. A closed, source-oriented
+    /// replacement for the previous zero-candidate gate, which suppressed
+    /// exploration on the first standard hit even when that hit was one
+    /// source among a vault of thousands.
+    IfFewerThanMinimumStandardSources,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1308,10 +1328,12 @@ struct PartialCoverageStage {
 /// every unsupported `OptionalContext` term is dropped and the remainder
 /// (anchors plus the terms that are still useful) is required conjunctively,
 /// on every query. A fully supported long query instead gets one bounded
-/// exploratory pass that may run only after every stronger lane found no
-/// candidates: every `RequiredIdentifierAnchor` stays mandatory, and every
-/// useful `OptionalContext` term is exposed as an alternative rather than
-/// enumerated into fixed combinations — at least one of them must match.
+/// exploratory pass that may run only while the standard evidence ladder has
+/// gathered fewer than `QueryBounds::min_standard_sources` distinct
+/// authorized sources: every `RequiredIdentifierAnchor` stays mandatory, and
+/// every useful `OptionalContext` term is exposed as an alternative rather
+/// than enumerated into fixed combinations — at least one of them must
+/// match.
 fn partial_coverage_stage(
     term_intents: &[QueryTermIntent],
     bounds: &QueryBounds,
@@ -1379,7 +1401,7 @@ fn partial_coverage_stage(
         .map(|intent| intent.index)
         .collect();
     (!required_term_indexes.is_empty()).then_some(PartialCoverageStage {
-        condition: QueryEvidenceStageCondition::IfNoPriorCandidates,
+        condition: QueryEvidenceStageCondition::IfFewerThanMinimumStandardSources,
         required_term_indexes,
         minimum_optional_matches: 1,
     })
@@ -1808,7 +1830,7 @@ mod tests {
         assert_eq!(partial.minimum_optional_matches, 1);
         assert_eq!(
             partial.condition,
-            QueryEvidenceStageCondition::IfNoPriorCandidates
+            QueryEvidenceStageCondition::IfFewerThanMinimumStandardSources
         );
 
         let five = (0..5)
@@ -2258,7 +2280,7 @@ mod tests {
         let first = serde_json::to_string(&plan).unwrap();
         let second = serde_json::to_string(&plan.clone()).unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("{\"schema_version\":10,\"profile_id\":\"lexical-v2\",\"field_controls_schema_version\":1,\"query\":\"RFC 9110 caching\",\"query_text\":\"RFC 9110 caching\""));
+        assert!(first.starts_with("{\"schema_version\":11,\"profile_id\":\"lexical-v2\",\"field_controls_schema_version\":1,\"query\":\"RFC 9110 caching\",\"query_text\":\"RFC 9110 caching\""));
         let decoded: LexicalQueryPlan = serde_json::from_str(&first).unwrap();
         assert_eq!(serde_json::to_string(&decoded).unwrap(), first);
 
@@ -2349,6 +2371,36 @@ mod tests {
             .unwrap();
         all_terms.minimum_optional_matches = 1;
         assert!(leaked_threshold.validate().is_err());
+    }
+
+    #[test]
+    fn exact_validation_rejects_invalid_condition_and_threshold_combinations() {
+        let prepared = prepare_lexical_query("amber cobalt delta ember").unwrap();
+        let report = evidence_report(&prepared, None, &[(3, 0), (4, 0), (5, 0), (6, 0)]);
+        let finalized = prepared.finalize_evidence(report).unwrap();
+
+        // The sparse-source threshold is Rust-owned and fixed: a plan that
+        // disagrees with `QueryBounds::lexical_v1()` on
+        // `min_standard_sources` (higher, lower, or zero) is not canonical.
+        let mut tampered_threshold = finalized.clone();
+        tampered_threshold.bounds.min_standard_sources = MIN_STANDARD_SOURCES + 1;
+        assert!(tampered_threshold.validate().is_err());
+
+        let mut zeroed_threshold = finalized.clone();
+        zeroed_threshold.bounds.min_standard_sources = 0;
+        assert!(zeroed_threshold.validate().is_err());
+
+        // The conditional exploratory stage must carry the closed
+        // sparse-source condition, not the legacy always-on shape or any
+        // other condition value.
+        let mut relaxed_condition = finalized;
+        let partial = relaxed_condition
+            .evidence_stages
+            .iter_mut()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
+            .unwrap();
+        partial.condition = QueryEvidenceStageCondition::Always;
+        assert!(relaxed_condition.validate().is_err());
     }
 
     #[test]
