@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "./exact-identifier-token";
-import { LEXICAL_CANDIDATE_LIMIT, MAX_LEXICAL_LANE_COUNT } from "./protocol";
+import { LEXICAL_CANDIDATE_LIMIT, MAX_LEXICAL_LANE_COUNT, MIN_STANDARD_SOURCES } from "./protocol";
 import type { EvidenceProbePlan, ExecutionPlan, StagePlan } from "./rust-adapter";
 
 export const FTS5_PROFILE_ID = "lexical-v2" as const;
@@ -269,13 +269,15 @@ LIMIT ?
 }
 
 export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
-  if (plan.schema_version !== 9
+  if (plan.schema_version !== 10
     || (plan.profile_id !== FTS5_PROFILE_ID && plan.profile_id !== FTS5_COMPAT_PROFILE_ID)
     || plan.max_total_candidates !== LEXICAL_CANDIDATE_LIMIT
+    || plan.min_standard_sources !== MIN_STANDARD_SOURCES
     || plan.stages.length > MAX_LEXICAL_LANE_COUNT
     || plan.stages.some((stage, index) => stage.ordinal !== index
-      || (stage.condition !== "always" && stage.condition !== "if_no_prior_candidates")
-      || (stage.condition === "if_no_prior_candidates"
+      || (stage.condition !== "always"
+        && stage.condition !== "if_fewer_than_minimum_standard_sources")
+      || (stage.condition === "if_fewer_than_minimum_standard_sources"
         && stage.plan_id !== "lexical_partial_coverage_v3"))) {
     rejectPlan();
   }
@@ -350,7 +352,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
 }
 
 export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
-  if (plan.schema_version !== 9) {
+  if (plan.schema_version !== 10) {
     rejectPlan();
   }
   if (plan.plan_id === "identifier_metadata_v3") {

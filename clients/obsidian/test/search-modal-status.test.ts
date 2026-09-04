@@ -654,6 +654,15 @@ function keyboard(
   }) as unknown as KeyboardEvent;
 }
 
+const SEARCH_DEBOUNCE_MS = 100;
+
+async function dispatchPendingSearch(backend: DeferredBackend): Promise<Deferred<SearchExecution>> {
+  await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+  const search = backend.searches.at(-1);
+  if (!search) throw new Error("Expected the debounced search to dispatch");
+  return search;
+}
+
 async function settleInputSearch(
   modal: SearchModalLike,
   backend: DeferredBackend,
@@ -662,7 +671,8 @@ async function settleInputSearch(
 ): Promise<void> {
   modal.inputEl.value = query;
   modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-  backend.searches.at(-1)!.resolve(result);
+  const search = await dispatchPendingSearch(backend);
+  search.resolve(result);
   await modal.flushSuggestions();
 }
 
@@ -705,7 +715,7 @@ describe("KwirySearchModal status rail", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(query.classList.contains("is-animation-ready")).toBe(true);
 
-    backend.searches[0]!.resolve(execution(1, "exhausted"));
+    (await dispatchPendingSearch(backend)).resolve(execution(1, "exhausted"));
     await expect(pending).resolves.toHaveLength(1);
     expect(query.textContent).toBe("1 returned section — 1 source shown; search window complete.");
     expect(query.classList.contains("is-animation-ready")).toBe(false);
@@ -782,7 +792,7 @@ describe("KwirySearchModal status rail", () => {
     expect(controls?.classList.contains("has-controls")).toBe(false);
 
     const pending = modal.getSuggestions("in:name >title Vendor7 meeting");
-    backend.searches[0]!.resolve(executionWithHits(
+    (await dispatchPendingSearch(backend)).resolve(executionWithHits(
       [hit("chunk-control", "Vendor7.md")],
       "exhausted",
       {
@@ -806,7 +816,7 @@ describe("KwirySearchModal status rail", () => {
 
     const ordinary = modal.getSuggestions("Vendor7 meeting");
     expect(controls?.children).toEqual([]);
-    backend.searches[1]!.resolve(executionWithHits([], "exhausted", {
+    (await dispatchPendingSearch(backend)).resolve(executionWithHits([], "exhausted", {
       queryPolicy: {
         lexical_profile: "lexical-v2",
         scope: null,
@@ -834,22 +844,36 @@ describe("KwirySearchModal status rail", () => {
     const { query } = modalElements(modal);
 
     const pending = modal.getSuggestions("candidate truth");
-    backend.searches[0]!.resolve(execution(1, state));
+    (await dispatchPendingSearch(backend)).resolve(execution(1, state));
     await expect(pending).resolves.toHaveLength(1);
 
     expect(query.textContent).toBe(`1 returned section — 1 source shown; ${disclosure}`);
     modal.onClose();
   });
 
-  it("does not let a stale request replace the current request status or controls", async () => {
+  it("does not let an active stale request replace the latest request status or controls", async () => {
     const backend = new DeferredBackend();
     const modal = createModal(backend);
     const { query } = modalElements(modal);
     const controls = findByClass(modal.contentEl, "kwiry-query-controls");
 
     const older = modal.getSuggestions("older");
+    const olderSearch = await dispatchPendingSearch(backend);
     const newer = modal.getSuggestions("newer");
-    backend.searches[1]!.resolve(executionWithHits(
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+
+    olderSearch.resolve(executionWithHits([], "exhausted", {
+      queryPolicy: {
+        lexical_profile: "lexical-v2",
+        scope: "name",
+        emphasis: null,
+      },
+    }));
+    await expect(older).resolves.toEqual([]);
+
+    const newerSearch = backend.searches[1];
+    if (!newerSearch) throw new Error("Expected the latest pending search to dispatch");
+    newerSearch.resolve(executionWithHits(
       Array.from({ length: 7 }, (_, index) => hit(`new-${index}`, `New-${index}.md`)),
       "more_available",
       {
@@ -863,17 +887,6 @@ describe("KwirySearchModal status rail", () => {
     await expect(newer).resolves.toHaveLength(7);
     expect(query.textContent).toBe("7 returned sections — 7 sources shown; more candidates are available.");
     expect(controls?.children.map((child) => child.textContent)).toEqual(["Prefer · Body"]);
-
-    backend.searches[0]!.resolve(executionWithHits([], "exhausted", {
-      queryPolicy: {
-        lexical_profile: "lexical-v2",
-        scope: "name",
-        emphasis: null,
-      },
-    }));
-    await expect(older).resolves.toEqual([]);
-    expect(query.textContent).toBe("7 returned sections — 7 sources shown; more candidates are available.");
-    expect(controls?.children.map((child) => child.textContent)).toEqual(["Prefer · Body"]);
     modal.onClose();
   });
 
@@ -883,7 +896,7 @@ describe("KwirySearchModal status rail", () => {
     const { query } = modalElements(modal);
 
     const pending = modal.getSuggestions("grouped counts");
-    backend.searches[0]!.resolve(executionWithHits([
+    (await dispatchPendingSearch(backend)).resolve(executionWithHits([
       hit("a-1", "A.md", ["One"]),
       hit("b-1", "B.md"),
       hit("a-2", "A.md", ["Two"]),
@@ -908,12 +921,68 @@ describe("KwirySearchModal status rail", () => {
 
     for (const rawQuery of rawQueries) {
       const pending = modal.getSuggestions(rawQuery);
-      backend.searches.at(-1)!.resolve(execution(0, "exhausted"));
+      (await dispatchPendingSearch(backend)).resolve(execution(0, "exhausted"));
       await expect(pending).resolves.toEqual([]);
       expect(query.textContent).toBe("No matches — search window complete.");
       expect(query.textContent.length).toBeLessThan(64);
       expect(query.textContent).not.toContain(rawQuery);
     }
+    modal.onClose();
+  });
+
+  it.each([99, 100])(
+    "treats %s returned sections as the exact source-window-saturation boundary at the modal seam",
+    async (resultCount) => {
+      const backend = new DeferredBackend();
+      const modal = createModal(backend, status(), plugin({ resultLimit: 100 }));
+      const { query } = modalElements(modal);
+
+      const pending = modal.getSuggestions("boundary sources");
+      (await dispatchPendingSearch(backend)).resolve(execution(resultCount, "exhausted"));
+      await expect(pending).resolves.toHaveLength(resultCount);
+
+      expect(query.textContent.includes("additional sources may be unobserved")).toBe(
+        resultCount === 100,
+      );
+      modal.onClose();
+    },
+  );
+
+  it("discloses source-window saturation independently from source-row truncation", async () => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend, status(), plugin({ resultLimit: 2 }));
+    const { query } = modalElements(modal);
+
+    await settleInputSearch(modal, backend, "saturated and truncated", execution(100, "exhausted"));
+
+    expect(modal.suggestions).toHaveLength(2);
+    expect(query.textContent).toBe(
+      "100 returned sections — 2 sources shown; "
+      + "98 observed sources omitted by the source-row limit; "
+      + "additional sources may be unobserved beyond the search window; "
+      + "search window complete.",
+    );
+    modal.onClose();
+  });
+
+  it.each([
+    { state: "exhausted", disclosure: "search window complete." },
+    { state: "more_available", disclosure: "more candidates are available." },
+    { state: "candidate_limit_reached", disclosure: "candidate window limit reached." },
+    { state: "unknown", disclosure: "window completeness is unknown." },
+  ] as const)("discloses source-window saturation independently from $state candidate-window state", async ({
+    state,
+    disclosure,
+  }) => {
+    const backend = new DeferredBackend();
+    const modal = createModal(backend, status(), plugin({ resultLimit: 100 }));
+    const { query } = modalElements(modal);
+
+    await settleInputSearch(modal, backend, "saturated candidates", execution(100, state));
+
+    expect(query.textContent).toBe(
+      `100 returned sections — 100 sources shown; additional sources may be unobserved beyond the search window; ${disclosure}`,
+    );
     modal.onClose();
   });
 
@@ -943,7 +1012,7 @@ describe("KwirySearchModal status rail", () => {
     const { query } = modalElements(modal);
 
     const pending = modal.getSuggestions("private field-control query");
-    backend.searches[0]!.reject(new searchModalModule.KwiryBackendError(
+    (await dispatchPendingSearch(backend)).reject(new searchModalModule.KwiryBackendError(
       code,
       profile,
       "query",
@@ -972,7 +1041,7 @@ describe("KwirySearchModal status rail", () => {
     modal.inputEl.value = "retained query";
 
     const blocked = modal.getSuggestions(modal.inputEl.value);
-    backend.searches[0]!.reject(new searchModalModule.KwiryBackendError(
+    (await dispatchPendingSearch(backend)).reject(new searchModalModule.KwiryBackendError(
       "index_building",
       "in_plugin",
       "index",
@@ -1011,7 +1080,7 @@ describe("KwirySearchModal status rail", () => {
     modal.inputEl.value = "temporary query";
 
     const blocked = modal.getSuggestions(modal.inputEl.value);
-    backend.searches[0]!.reject(new searchModalModule.KwiryBackendError(
+    (await dispatchPendingSearch(backend)).reject(new searchModalModule.KwiryBackendError(
       "index_building",
       "in_plugin",
       "index",
@@ -1113,8 +1182,8 @@ describe("KwirySearchModal status rail", () => {
     await vi.advanceTimersByTimeAsync(searchModalModule.SEARCH_STATUS_ANIMATION_DELAY_MS);
     expect(query.classList.contains("is-animation-ready")).toBe(false);
 
-    backend.searches[0]!.resolve(execution(1, "exhausted"));
     await expect(pending).resolves.toEqual([]);
+    expect(backend.searches).toEqual([]);
     expect(query.textContent).toBe("Searching…");
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -1345,7 +1414,7 @@ describe("KwirySearchModal grouped interactions", () => {
     modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
     expect(controls?.children).toEqual([]);
     expect(controls?.classList.contains("has-controls")).toBe(false);
-    backend.searches.at(-1)!.resolve(executionWithHits([
+    (await dispatchPendingSearch(backend)).resolve(executionWithHits([
       hit("b1", "B.md", ["B1"]),
       hit("b2", "B.md", ["B2"]),
     ], "exhausted", {
@@ -1366,7 +1435,7 @@ describe("KwirySearchModal grouped interactions", () => {
     modal.triggerScope([], "Tab", keyboard("Tab"));
     expect(controls?.children).toEqual([]);
     expect(controls?.classList.contains("has-controls")).toBe(false);
-    backend.searches.at(-1)!.resolve(executionWithHits(
+    (await dispatchPendingSearch(backend)).resolve(executionWithHits(
       [hit("c1", "C.md", ["C1"]), hit("c2", "C.md", ["C2"])],
       "exhausted",
       { requestedMode: "semantic", effectiveMode: "semantic", generation: "g2" },
@@ -1548,12 +1617,13 @@ describe("KwirySearchModal grouped interactions", () => {
 
     (backend.identity as { instanceId: string }).instanceId = "in-plugin-2";
     modal.triggerScope(["Ctrl"], "h", keyboard("h", { ctrlKey: true }));
+    const replacementSearch = await dispatchPendingSearch(backend);
     const replacementOrigin = {
       profile: "in_plugin" as const,
       backendInstanceId: "in-plugin-2",
       vaultId: "active-vault",
     };
-    backend.searches.at(-1)!.resolve(executionWithHits(
+    replacementSearch.resolve(executionWithHits(
       [hit("b1", "B.md", ["B1"], { origin: replacementOrigin })],
       "exhausted",
       {
@@ -1576,32 +1646,33 @@ describe("KwirySearchModal grouped interactions", () => {
     modal.onClose();
   });
 
-  it("does not let an older input response erase a newer grouped projection", async () => {
+  it("does not let an older active input response erase a newer grouped projection", async () => {
     const backend = new DeferredBackend();
     const modal = createModal(backend);
 
     modal.inputEl.value = "older";
     modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    const olderSearch = await dispatchPendingSearch(backend);
+
     modal.inputEl.value = "newer";
     modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
 
-    backend.searches[1]!.resolve(executionWithHits([
-      hit("new-1", "New.md", ["New 1"]),
-      hit("new-2", "New.md", ["New 2"]),
-    ], "exhausted", { generation: "g3" }));
-    await modal.flushSuggestions();
-    expect(modal.suggestions).toHaveLength(1);
-    expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
-      "New.md",
-    );
-
-    backend.searches[0]!.resolve(executionWithHits(
+    olderSearch.resolve(executionWithHits(
       [hit("old", "Old.md", ["Old"])],
       "exhausted",
       { generation: "g9" },
     ));
     await Promise.resolve();
     await Promise.resolve();
+
+    const newerSearch = backend.searches[1];
+    if (!newerSearch) throw new Error("Expected the newer input search to dispatch");
+    newerSearch.resolve(executionWithHits([
+      hit("new-1", "New.md", ["New 1"]),
+      hit("new-2", "New.md", ["New 2"]),
+    ], "exhausted", { generation: "g3" }));
+    await modal.flushSuggestions();
     expect(modal.suggestions).toHaveLength(1);
     expect(findByClass(renderedRows(modal)[0]!, "kwiry-result-meta")?.textContent).toBe(
       "New.md",

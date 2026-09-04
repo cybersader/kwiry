@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "../src/worker/exact-identifier-token";
+import { MIN_STANDARD_SOURCES } from "../src/worker/protocol";
 import {
   bindEvidenceProbe,
   bindSearchStage,
@@ -73,7 +74,7 @@ describe("fixed FTS5 query binder", () => {
 
   it("uses separate fixed support and bounded prefix statements", () => {
     const bound = bindEvidenceProbe({
-      schema_version: 9,
+      schema_version: 10,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -99,7 +100,7 @@ describe("fixed FTS5 query binder", () => {
 
   it("binds encoded exact identifier probes and hard intersections through dedicated FTS", () => {
     const probe = bindEvidenceProbe({
-      schema_version: 9,
+      schema_version: 10,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
@@ -158,17 +159,30 @@ describe("fixed FTS5 query binder", () => {
 
   it("rejects unknown plan identities, profiles, schemas, and invalid limits", () => {
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 2 as 9,
+      schema_version: 2 as 10,
       profile_id: "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
+      min_standard_sources: MIN_STANDARD_SOURCES,
       stages: [],
     })).toThrow(QueryPlanRejectedError);
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 9,
+      schema_version: 10,
       profile_id: "unknown" as "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
+      min_standard_sources: MIN_STANDARD_SOURCES,
+      stages: [],
+    })).toThrow(QueryPlanRejectedError);
+    // The Rust adapter authors the sparse-source threshold, so a plan
+    // carrying any other value is a drifted adapter, not a TypeScript policy
+    // choice, and must be rejected the same as a schema mismatch.
+    expect(() => requireExecutionPlanIdentity({
+      schema_version: 10,
+      profile_id: "lexical-v1",
+      disposition: "empty_no_evidence",
+      max_total_candidates: 512,
+      min_standard_sources: (MIN_STANDARD_SOURCES - 1) as typeof MIN_STANDARD_SOURCES,
       stages: [],
     })).toThrow(QueryPlanRejectedError);
     expect(() => bindSearchStage({

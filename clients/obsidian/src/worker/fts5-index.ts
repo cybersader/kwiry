@@ -1485,7 +1485,7 @@ export class Fts5GenerationIndex {
     const hits: SearchCandidate[] = [];
     const proofs: LexicalV2Proof[][] = [];
     const candidateByIdentity = new Map<string, number>();
-    let candidateLimitReached = false;
+    let anyLaneSaturated = false;
     const traceSummaries = new Map<InternalLexicalTraceStageKind, {
       mandatory: boolean;
       executed: boolean;
@@ -1495,30 +1495,44 @@ export class Fts5GenerationIndex {
     }>();
     let fallbackEnabled: boolean | undefined;
 
+    const skipLane = (stage: StagePlan, mandatory: boolean): void => {
+      if (trace === undefined) return;
+      let summary = traceSummaries.get(stage.plan_id);
+      if (summary === undefined) {
+        summary = {
+          mandatory,
+          executed: false,
+          duration: 0,
+          observed: new Set<string>(),
+          added: new Set<string>(),
+        };
+        traceSummaries.set(stage.plan_id, summary);
+      }
+      recordSkippedLexicalLane(trace, stage);
+    };
+
     for (const stage of plan.stages) {
       const stageLimit = stage.max_candidates;
       const mandatory = stage.plan_id !== "lexical_partial_coverage_v3"
         && stage.plan_id !== "lexical_prefix_metadata_v3"
         && stage.plan_id !== "lexical_prefix_v3";
-      if (stage.condition === "if_no_prior_candidates") {
-        fallbackEnabled ??= hits.length === 0;
+      if (stage.condition === "if_fewer_than_minimum_standard_sources") {
+        // Latched once against the distinct standard (non-exploratory) source
+        // keys observed so far: this conditional lane always plans last, so
+        // every prior hit at this point came from an unconditional lane.
+        fallbackEnabled ??=
+          new Set(hits.map((hit) => hit.source_key)).size < plan.min_standard_sources;
         if (!fallbackEnabled) {
-          if (trace !== undefined) {
-            let summary = traceSummaries.get(stage.plan_id);
-            if (summary === undefined) {
-              summary = {
-                mandatory,
-                executed: false,
-                duration: 0,
-                observed: new Set<string>(),
-                added: new Set<string>(),
-              };
-              traceSummaries.set(stage.plan_id, summary);
-            }
-            recordSkippedLexicalLane(trace, stage);
-          }
+          skipLane(stage, mandatory);
           continue;
         }
+      }
+      // Once the unique candidate window is already full, no further lane's
+      // retrieval query can retain anything: skip its SQL entirely rather
+      // than run it only to discard every row.
+      if (hits.length === plan.max_total_candidates) {
+        skipLane(stage, mandatory);
+        continue;
       }
       const started = trace === undefined ? 0 : checkedClock(trace.clock);
       const bound = bindSearchStage(stage, stageLimit);
@@ -1550,7 +1564,7 @@ export class Fts5GenerationIndex {
         summary.duration += duration;
       }
       const saturated = rows.length === stageLimit;
-      candidateLimitReached ||= saturated;
+      anyLaneSaturated ||= saturated;
       let stageAddedUniqueCount = 0;
       let stageDuplicateObservationCount = 0;
       let stageCollectionCapDiscardedObservationCount = 0;
@@ -1628,11 +1642,18 @@ export class Fts5GenerationIndex {
     const lexicalMatchQuality = lexicalMatchQualityFromProofKinds(
       ranked.selected_proof_kinds.slice(0, limit),
     );
+    // `candidate_limit_reached` is true only when the 512-unique window is
+    // actually full. A single lane saturating its own 256-row cap below that
+    // total cannot claim the window is full, but also cannot claim there are
+    // no more matches, so it reports `unknown` instead of a false positive.
+    const candidateLimitReached = hits.length === plan.max_total_candidates;
     const state: WorkerCandidateWindow["state"] = candidateLimitReached
       ? "candidate_limit_reached"
-      : rankedHits.length > limit
-        ? "more_available"
-        : "exhausted";
+      : anyLaneSaturated
+        ? "unknown"
+        : rankedHits.length > limit
+          ? "more_available"
+          : "exhausted";
     if (trace !== undefined) {
       for (const [kind, summary] of traceSummaries) {
         pushTraceStage(trace, {

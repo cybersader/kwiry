@@ -44,7 +44,7 @@ enum FixtureCase {
     },
     DaemonStatus {
         name: String,
-        status: DaemonStatus,
+        status: Box<DaemonStatus>,
     },
 }
 
@@ -108,7 +108,7 @@ fn execute_case(case: FixtureCase) -> FixtureOutput {
         FixtureCase::DaemonStatus { name, status } => FixtureOutput {
             name,
             result: FixtureResult::DaemonStatus {
-                daemon_status: status,
+                daemon_status: *status,
             },
         },
     }

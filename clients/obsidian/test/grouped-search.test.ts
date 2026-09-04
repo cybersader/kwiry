@@ -357,6 +357,7 @@ describe("groupSearchExecution", () => {
         omittedObservedSourceCount: 0,
         sourceLimit: 1,
         candidateWindow,
+        sourceWindowSaturated: false,
       },
     });
 
@@ -374,4 +375,61 @@ describe("groupSearchExecution", () => {
       expect(() => groupSearchExecution(execution([]), sourceLimit)).toThrow(RangeError);
     },
   );
+
+  describe("sourceWindowSaturated", () => {
+    it("stays closed at 99 returned sections, one short of the fixed discovery window", () => {
+      const hits = Array.from({ length: 99 }, (_, index) =>
+        hit(`A${index + 1}`, `note-${index}.md`, { score: 99 - index }));
+
+      const grouped = groupSearchExecution(execution(hits), 100);
+
+      expect(grouped.facts.returnedSectionCount).toBe(99);
+      expect(grouped.facts.sourceWindowSaturated).toBe(false);
+    });
+
+    it("opens at exactly 100 returned sections, the fixed discovery window boundary", () => {
+      const hits = Array.from({ length: 100 }, (_, index) =>
+        hit(`A${index + 1}`, `note-${index}.md`, { score: 100 - index }));
+
+      const grouped = groupSearchExecution(execution(hits), 100);
+
+      expect(grouped.facts.returnedSectionCount).toBe(100);
+      expect(grouped.facts.sourceWindowSaturated).toBe(true);
+    });
+
+    it("stays independent of exact source-row omission and candidate-window state", () => {
+      const saturatedHits = Array.from({ length: 100 }, (_, index) =>
+        hit(`A${index + 1}`, `note-${index}.md`, { score: 100 - index }));
+      const candidateWindow: CandidateWindowFacts = {
+        state: "exhausted",
+        candidateCount: 100,
+        candidateLimit: 512,
+      };
+
+      // A tight source-row limit still reports its own exact omission count,
+      // unaffected by window saturation, and vice versa.
+      const truncated = groupSearchExecution(execution(saturatedHits, candidateWindow), 2);
+      expect(truncated.facts).toMatchObject({
+        sourceWindowSaturated: true,
+        omittedObservedSourceCount: 98,
+      });
+
+      const untruncated = groupSearchExecution(execution(saturatedHits, candidateWindow), 100);
+      expect(untruncated.facts).toMatchObject({
+        sourceWindowSaturated: true,
+        omittedObservedSourceCount: 0,
+      });
+
+      // Candidate-window completeness is passed through unchanged by
+      // whichever backend signal produced it, independent of saturation.
+      for (const state of ["exhausted", "more_available", "candidate_limit_reached", "unknown"] as const) {
+        const notSaturated = groupSearchExecution(
+          execution([hit("only", "single.md")], { state, candidateCount: 1, candidateLimit: 512 }),
+          100,
+        );
+        expect(notSaturated.facts.sourceWindowSaturated).toBe(false);
+        expect(notSaturated.facts.candidateWindow.state).toBe(state);
+      }
+    });
+  });
 });

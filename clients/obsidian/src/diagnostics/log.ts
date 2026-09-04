@@ -8,6 +8,11 @@ export const DEFAULT_DIAGNOSTIC_CAPACITY = 512;
 
 const MAX_DIAGNOSTIC_CAPACITY = 10_000;
 const MAX_DETAIL_FIELDS = 48;
+// Mirrors the fixed source-discovery response window grouping uses
+// (`GROUPED_SEARCH_HIT_LIMIT` in grouped-search.ts). Diagnostics stays
+// independent of that module, so the bound is restated here rather than
+// imported.
+const SOURCE_DISCOVERY_WINDOW_LIMIT = 100;
 
 export type DiagnosticLevel = "debug" | "info" | "warn" | "error";
 
@@ -398,6 +403,13 @@ export interface DiagnosticDetails {
   returnedSectionCount?: number;
   displayedSourceCount?: number;
   omittedObservedSourceCount?: number;
+  /// Closed fact: the fixed 100-section source-discovery window came back
+  /// full for this search. Independent of `omittedObservedSourceCount` (an
+  /// exact, locally-known truncation by the source-row limit) and of
+  /// `candidateWindowState` (the backend's own candidate-scan completeness).
+  /// A saturated window means sources ranked below it were never observed,
+  /// not that none exist.
+  sourceWindowSaturated?: boolean;
   annotationRejectedCount?: number;
   sourceGeneration?: DiagnosticSourceGeneration;
   lexicalExecution?: DiagnosticLexicalExecution;
@@ -538,7 +550,8 @@ const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
   "sourcesEnumerated", "sourcesRead", "sourcesSkipped", "sourcesOversized", "sourcesFailed",
   "bytesRead", "batchCount", "upserts", "removals", "renames", "rescans", "resurrected",
   "resultCount", "candidateCount", "candidateLimit", "returnedSectionCount",
-  "displayedSourceCount", "omittedObservedSourceCount", "annotationRejectedCount",
+  "displayedSourceCount", "omittedObservedSourceCount", "sourceWindowSaturated",
+  "annotationRejectedCount",
   "sourceGeneration", "lexicalExecution", "cacheBytes", "failureCause",
   "pluginLoadCompleteMs", "layoutReadyMs", "firstProgressMs", "firstCacheSearchableMs",
   "fullyCurrentMs", "retryable",
@@ -559,6 +572,7 @@ const NULLABLE_NUMERIC_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
 ]);
 const BOOLEAN_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "retryable", "recoverable", "searchable", "dirty", "rebuilding", "cacheHit", "recovery",
+  "sourceWindowSaturated",
 ]);
 const STARTUP_DETAIL_KEYS = new Set<keyof DiagnosticDetails>([
   "profile", "outcome", "reason", "pluginEpoch", "activationEpoch", "pluginLoadCompleteMs",
@@ -1260,6 +1274,15 @@ function validateSearchDetails(
   level: DiagnosticLevel,
   validated: Readonly<DiagnosticDetails>,
 ): void {
+  // `sourceWindowSaturated` is a closed fact derived from a single other
+  // field (`returnedSectionCount` against the fixed 100-section discovery
+  // window), so it cannot be recorded on its own or drift from that count.
+  if (validated.sourceWindowSaturated !== undefined
+    && (validated.returnedSectionCount === undefined
+      || validated.sourceWindowSaturated
+        !== (validated.returnedSectionCount >= SOURCE_DISCOVERY_WINDOW_LIMIT))) {
+    throw new TypeError("Invalid search diagnostic details");
+  }
   if (validated.outcome === "succeeded") {
     if (level === "error"
       || validated.resultCount === undefined
@@ -1277,7 +1300,8 @@ function validateSearchDetails(
     return;
   }
   if (validated.outcome === "failed") {
-    if (level !== "error" || validated.code === undefined || validated.resultCount !== undefined) {
+    if (level !== "error" || validated.code === undefined || validated.resultCount !== undefined
+      || validated.sourceWindowSaturated !== undefined) {
       throw new TypeError("Invalid search diagnostic details");
     }
     return;

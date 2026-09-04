@@ -22,6 +22,7 @@ import {
   LEXICAL_CANDIDATE_LIMIT,
   MAX_LEXICAL_CANDIDATES_PER_LANE,
   MAX_LEXICAL_LANE_COUNT,
+  MIN_STANDARD_SOURCES,
   SOURCE_FORMATS,
 } from "./protocol";
 import type {
@@ -35,8 +36,8 @@ import type {
 
 const ABI_VERSION = 3;
 const SOURCE_SCHEMA_VERSION = 10;
-const QUERY_SCHEMA_VERSION = 10;
-const MATCH_PLAN_SCHEMA_VERSION = 9;
+const QUERY_SCHEMA_VERSION = 11;
+const MATCH_PLAN_SCHEMA_VERSION = 10;
 
 export interface RustIdentity {
   abi_version: 3;
@@ -67,8 +68,8 @@ export interface RustIdentity {
    * admitted after it was written.
    */
   section_link_formats: Record<string, boolean>;
-  lexical_query_plan_schema_version: 10;
-  fts5_match_plan_schema_version: 9;
+  lexical_query_plan_schema_version: 11;
+  fts5_match_plan_schema_version: 10;
   /**
    * The chunking contract the adapter applies. Chunk rows carry it per chunk,
    * but a generation with no chunks still has to name the contract its cached
@@ -175,7 +176,7 @@ export type QueryEvidenceStageKind =
   | "prefix_metadata" | "prefix";
 
 export interface LexicalQueryPlan {
-  schema_version: 10;
+  schema_version: 11;
   profile_id: "lexical-v1" | "lexical-v2";
   field_controls_schema_version: 1;
   query: string;
@@ -218,6 +219,7 @@ export interface LexicalQueryPlan {
     max_prefix_expansion_scan: 256;
     max_candidates_per_stage: typeof MAX_LEXICAL_CANDIDATES_PER_LANE;
     max_total_candidates: typeof LEXICAL_CANDIDATE_LIMIT;
+    min_standard_sources: typeof MIN_STANDARD_SOURCES;
   };
   typo_stage: "disabled";
   support_probes: Array<{
@@ -229,7 +231,7 @@ export interface LexicalQueryPlan {
   evidence_stages: Array<{
     ordinal: number;
     kind: QueryEvidenceStageKind;
-    condition: "always" | "if_no_prior_candidates";
+    condition: "always" | "if_fewer_than_minimum_standard_sources";
     field_group: QueryFieldGroup;
     required_term_indexes: number[];
     prefix_term_indexes: number[];
@@ -245,12 +247,12 @@ export interface LexicalQueryPlan {
 
 export type EvidenceProbePlan =
   | {
-      schema_version: 9;
+      schema_version: 10;
       plan_id: "identifier_metadata_v3";
       match_value: string;
     }
   | {
-      schema_version: 9;
+      schema_version: 10;
       plan_id: "term_support_v3";
       probe_id: number;
       term_index: number;
@@ -297,7 +299,7 @@ export type LexicalV2ProofKind =
 export interface StagePlan {
   ordinal: number;
   plan_id: StagePlanId;
-  condition: "always" | "if_no_prior_candidates";
+  condition: "always" | "if_fewer_than_minimum_standard_sources";
   proof_field: LexicalV2ProofField;
   proof_kind: LexicalV2ProofKind;
   match_value?: string;
@@ -307,11 +309,12 @@ export interface StagePlan {
 }
 
 export interface ExecutionPlan {
-  schema_version: 9;
+  schema_version: 10;
   profile_id: "lexical-v1" | "lexical-v2";
   emphasis?: QueryPublicField;
   disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
   max_total_candidates: typeof LEXICAL_CANDIDATE_LIMIT;
+  min_standard_sources: typeof MIN_STANDARD_SOURCES;
   stages: StagePlan[];
 }
 
@@ -736,6 +739,7 @@ const QUERY_BOUNDS = Object.freeze({
   max_prefix_expansion_scan: 256,
   max_candidates_per_stage: MAX_LEXICAL_CANDIDATES_PER_LANE,
   max_total_candidates: LEXICAL_CANDIDATE_LIMIT,
+  min_standard_sources: MIN_STANDARD_SOURCES,
 });
 
 function isPreparedQuery(value: unknown): value is PreparedQuery {
@@ -1007,7 +1011,7 @@ function isEvidenceStages(
         "prefix_term_indexes", "max_candidates", "minimum_optional_matches",
       ])
       || stage.ordinal !== ordinal
-      || (stage.condition !== "always" && stage.condition !== "if_no_prior_candidates")
+      || (stage.condition !== "always" && stage.condition !== "if_fewer_than_minimum_standard_sources")
       || !kinds.includes(String(stage.kind))
       || kinds.indexOf(String(stage.kind)) <= previousKind
       || !isTermIndexes(stage.required_term_indexes, termCount, 128)
@@ -1079,7 +1083,7 @@ function isEvidenceStages(
 function expectedPartialCoverage(
   termIntents: LexicalQueryPlan["term_intents"],
 ): {
-  condition: "always" | "if_no_prior_candidates";
+  condition: "always" | "if_fewer_than_minimum_standard_sources";
   requiredIndexes: number[];
   minimumOptionalMatches: number;
 } | null {
@@ -1117,7 +1121,7 @@ function expectedPartialCoverage(
     .filter((intent) => intent.role === "required_identifier_anchor" || includedOptional.has(intent.index))
     .map((intent) => intent.index);
   return requiredIndexes.length > 0
-    ? { condition: "if_no_prior_candidates", requiredIndexes, minimumOptionalMatches: 1 }
+    ? { condition: "if_fewer_than_minimum_standard_sources", requiredIndexes, minimumOptionalMatches: 1 }
     : null;
 }
 
@@ -1176,7 +1180,8 @@ function isEvidenceProbePlan(value: unknown): value is EvidenceProbePlan {
 function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is ExecutionPlan {
   if (!isRecord(value)
     || !hasRequiredAndOptionalKeys(value, [
-      "schema_version", "profile_id", "disposition", "max_total_candidates", "stages",
+      "schema_version", "profile_id", "disposition", "max_total_candidates",
+      "min_standard_sources", "stages",
     ], ["emphasis"])
     || value.schema_version !== MATCH_PLAN_SCHEMA_VERSION
     || value.profile_id !== queryPlan.profile_id
@@ -1184,6 +1189,7 @@ function isExecutionPlan(value: unknown, queryPlan: LexicalQueryPlan): value is 
     || (value.disposition !== "explicit_bypass" && value.disposition !== "ready"
       && value.disposition !== "empty_no_evidence")
     || value.max_total_candidates !== LEXICAL_CANDIDATE_LIMIT
+    || value.min_standard_sources !== MIN_STANDARD_SOURCES
     || !Array.isArray(value.stages)
     || value.stages.length > MAX_LEXICAL_LANE_COUNT
     || !value.stages.every((stage, index) => isStagePlan(stage, index))) {
@@ -1211,7 +1217,7 @@ function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
       ["match_value", "exact_value", "required_identifiers"],
     )
     || value.ordinal !== ordinal
-    || (value.condition !== "always" && value.condition !== "if_no_prior_candidates")
+    || (value.condition !== "always" && value.condition !== "if_fewer_than_minimum_standard_sources")
     || !isLexicalV2ProofField(value.proof_field)
     || !isLexicalV2ProofKind(value.proof_kind)
     || !isPositiveSafeInteger(value.max_candidates)) return false;
@@ -1222,7 +1228,7 @@ function isStagePlan(value: unknown, ordinal: number): value is StagePlan {
     || new Set(requiredIdentifiers).size !== requiredIdentifiers.length) {
     return false;
   }
-  if (value.condition === "if_no_prior_candidates"
+  if (value.condition === "if_fewer_than_minimum_standard_sources"
     && value.plan_id !== "lexical_partial_coverage_v3") return false;
   const matchIds = [
     "lexical_explicit_v3", "lexical_exact_phrase_v3", "lexical_all_terms_v3",

@@ -16,6 +16,13 @@ export const MAX_LEXICAL_CANDIDATES_PER_LANE = 256 as const;
 export const MAX_LEXICAL_OBSERVATION_COUNT =
   MAX_LEXICAL_LANE_COUNT * MAX_LEXICAL_CANDIDATES_PER_LANE;
 export const LEXICAL_CANDIDATE_LIMIT = 512 as const;
+/**
+ * The distinct standard-source floor below which the bounded exploratory
+ * partial-coverage lane activates. Mirrors `kwiry_core::query::MIN_STANDARD_SOURCES`;
+ * the Rust adapter authors this value into every execution plan rather than
+ * letting TypeScript invent its own policy.
+ */
+export const MIN_STANDARD_SOURCES = 20 as const;
 export const MAX_RECONCILIATION_SOURCES = 200_000;
 export const MAX_RECONCILIATION_PLAN_PATHS = MAX_RECONCILIATION_SOURCES * 2;
 export const SOURCE_QUARANTINE_WARNING_CODE = "source_rejected" as const;
@@ -417,8 +424,8 @@ export type WorkerRequest =
 export interface InitializeResult {
   rustAbiVersion: 3;
   sourceSchemaVersion: 10;
-  querySchemaVersion: 10;
-  matchPlanSchemaVersion: 9;
+  querySchemaVersion: 11;
+  matchPlanSchemaVersion: 10;
   sqliteVersion: "3.53.0";
   fts5Enabled: 1;
 }
@@ -1159,8 +1166,8 @@ export function isInitializeResult(value: unknown): value is InitializeResult {
     ])
     && value.rustAbiVersion === 3
     && value.sourceSchemaVersion === 10
-    && value.querySchemaVersion === 10
-    && value.matchPlanSchemaVersion === 9
+    && value.querySchemaVersion === 11
+    && value.matchPlanSchemaVersion === 10
     && value.sqliteVersion === "3.53.0"
     && value.fts5Enabled === 1;
 }

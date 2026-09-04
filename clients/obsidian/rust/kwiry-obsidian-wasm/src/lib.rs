@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub const ADAPTER_ABI_VERSION: u32 = 3;
-pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 9;
+pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 10;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_LEXICAL_V2_RANK_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "internal-d5c-preview")]
@@ -201,6 +201,7 @@ pub struct Fts5ExecutionPlan {
     pub emphasis: Option<QueryPublicField>,
     pub disposition: Fts5ExecutionDisposition,
     pub max_total_candidates: usize,
+    pub min_standard_sources: usize,
     pub stages: Vec<Fts5StagePlan>,
 }
 
@@ -1254,6 +1255,7 @@ fn fts5_execution_plan(
         emphasis: plan.emphasis,
         disposition,
         max_total_candidates: plan.bounds.max_total_candidates,
+        min_standard_sources: plan.bounds.min_standard_sources,
         stages,
     })
 }
@@ -2518,7 +2520,10 @@ mod tests {
             .iter()
             .find(|stage| stage["kind"] == "partial_coverage")
             .expect("partial stage");
-        assert_eq!(partial_stage["condition"], "if_no_prior_candidates");
+        assert_eq!(
+            partial_stage["condition"],
+            "if_fewer_than_minimum_standard_sources"
+        );
         // Every useful optional term is offered as an alternative rather than
         // a sampled subset, mirroring the native Tantivy and shared-core
         // behavior exactly.
@@ -2528,16 +2533,24 @@ mod tests {
         );
         assert_eq!(partial_stage["minimum_optional_matches"], 1);
 
+        // The FTS5 execution plan carries the Rust-authored sparse-source
+        // threshold verbatim: TypeScript reads this value rather than
+        // hardcoding its own copy of the policy.
+        assert_eq!(
+            finalized["result"]["execution_plan"]["min_standard_sources"],
+            20
+        );
+
         let lanes = finalized["result"]["execution_plan"]["stages"]
             .as_array()
             .expect("execution lanes");
         assert!(lanes.iter().any(|stage| {
             stage["plan_id"] == "lexical_partial_coverage_v3"
-                && stage["condition"] == "if_no_prior_candidates"
+                && stage["condition"] == "if_fewer_than_minimum_standard_sources"
         }));
         assert!(lanes.iter().all(|stage| {
             if stage["plan_id"] == "lexical_partial_coverage_v3" {
-                stage["condition"] == "if_no_prior_candidates"
+                stage["condition"] == "if_fewer_than_minimum_standard_sources"
             } else {
                 stage["condition"] == "always"
             }

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { MIN_STANDARD_SOURCES } from "../src/worker/protocol";
 import {
   openFts5Generation,
   type Fts5GenerationIndex,
@@ -159,7 +160,7 @@ function finalizeQueryWithRust(
     operation: "finalize_query",
     query,
     evidence_report: {
-      schema_version: 10,
+      schema_version: 11,
       identifier_probe_matched: evidence.identifier_probe_matched,
       term_support: evidence.term_support,
     },
@@ -263,10 +264,11 @@ function stageKind(stage: StagePlan): QueryEvidenceStageKind | "explicit" {
 
 function singleStagePlan(stage: StagePlan): ExecutionPlan {
   return {
-    schema_version: 9,
+    schema_version: 10,
     profile_id: stage.plan_id === "lexical_explicit_v3" ? "lexical-v1" : "lexical-v2",
     disposition: stage.plan_id === "lexical_explicit_v3" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
+    min_standard_sources: MIN_STANDARD_SOURCES,
     stages: [{ ...stage, ordinal: 0 }],
   };
 }
