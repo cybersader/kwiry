@@ -1,20 +1,25 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
 #[path = "support/format_matrix_fixtures.rs"]
 mod format_matrix_fixtures;
 
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::Path;
+#[cfg(feature = "native")]
+use std::{fs, path::Path};
 
-use format_matrix_fixtures::{
-    RawFormatFixture, STANDARD_PATH, format_matrix_fixtures, standard_markdown,
+use format_matrix_fixtures::{RawFormatFixture, format_matrix_fixtures};
+#[cfg(feature = "native")]
+use format_matrix_fixtures::{STANDARD_PATH, standard_markdown};
+#[cfg(feature = "native")]
+use kwiry_core::{
+    Config, LexicalSearchRequest, SearchHit, VaultRegistration, build_index, search_index,
 };
 use kwiry_core::{
-    Config, ExtractionCoverage, LexicalSearchRequest, SearchHit, SourceDescriptor, SourceFormat,
-    SourceLocator, SourcePreparationKind, VaultRegistration, build_index, prepare_source_buffer,
-    search_index,
+    ExtractionCoverage, SourceDescriptor, SourceFormat, SourceLocator, SourcePreparationKind,
+    prepare_source_buffer,
 };
+#[cfg(feature = "native")]
 use tempfile::tempdir;
 
 const VAULT_ID: &str = "format-matrix-vault";
@@ -144,6 +149,7 @@ fn compact_raw_fixtures_prepare_all_supported_formats_without_invented_metadata(
     }
 }
 
+#[cfg(feature = "native")]
 #[test]
 fn native_sparse_prefix_fallback_admits_each_real_format_below_a_standard_three_term_hit() {
     let temporary = tempdir().expect("temporary matrix root");
@@ -190,6 +196,7 @@ fn assert_plain_chunks(chunks: &[kwiry_core::PreparedChunk]) {
     assert!(chunks.iter().all(|chunk| chunk.source_locator.is_none()));
 }
 
+#[cfg(feature = "native")]
 fn write_vault(vault: &Path) {
     for fixture in format_matrix_fixtures() {
         let path = vault.join(fixture.path);
@@ -203,6 +210,7 @@ fn write_vault(vault: &Path) {
     fs::write(standard, standard_markdown()).expect("write standard source");
 }
 
+#[cfg(feature = "native")]
 type HitIdentity = (
     String,
     String,
@@ -212,6 +220,7 @@ type HitIdentity = (
     Option<SourceLocator>,
 );
 
+#[cfg(feature = "native")]
 fn assert_matrix_searches(data: &Path) -> Vec<(String, Vec<HitIdentity>)> {
     let mut results = Vec::new();
     for fixture in format_matrix_fixtures() {
@@ -265,6 +274,7 @@ fn assert_matrix_searches(data: &Path) -> Vec<(String, Vec<HitIdentity>)> {
     results
 }
 
+#[cfg(feature = "native")]
 fn search(data: &Path, query: &str) -> Vec<SearchHit> {
     search_index(
         data,
@@ -277,6 +287,7 @@ fn search(data: &Path, query: &str) -> Vec<SearchHit> {
     .expect("search format matrix")
 }
 
+#[cfg(feature = "native")]
 fn assert_search_metadata(format: SourceFormat, hits: &[&SearchHit]) {
     match format {
         SourceFormat::Pdf => assert!(hits.iter().all(|hit| {
@@ -306,6 +317,7 @@ fn assert_search_metadata(format: SourceFormat, hits: &[&SearchHit]) {
     }
 }
 
+#[cfg(feature = "native")]
 fn hit_identity(hit: &SearchHit) -> HitIdentity {
     (
         hit.chunk_id.clone(),
