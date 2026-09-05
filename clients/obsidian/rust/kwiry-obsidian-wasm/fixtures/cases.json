@@ -102,7 +102,7 @@
       "operation": "finalize_query",
       "query": "dungeons and dragons",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -152,7 +152,7 @@
       "operation": "finalize_query",
       "query": "IIA 2 line",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -202,7 +202,7 @@
       "operation": "finalize_query",
       "query": "iia 2 line",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": true,
         "term_support": [
           {
@@ -252,7 +252,7 @@
       "operation": "finalize_query",
       "query": "title:\"IIA guide\" OR content:cache*",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": []
       },
@@ -267,7 +267,7 @@
       "operation": "finalize_query",
       "query": "title:notes OR '); DROP TABLE chunks; --",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": []
       },
@@ -282,7 +282,7 @@
       "operation": "finalize_query",
       "query": "quasar",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -310,7 +310,7 @@
       "operation": "finalize_query",
       "query": "quasar",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -341,7 +341,7 @@
       "operation": "finalize_query",
       "query": "orchard adop",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -353,7 +353,7 @@
           {
             "probe_id": 1,
             "term_index": 1,
-            "document_frequency": 0,
+            "document_frequency": 1,
             "prefix_expansions": 1
           }
         ]
@@ -436,7 +436,7 @@
       "operation": "finalize_query",
       "query": "re\u0301su*",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": []
       },
@@ -451,7 +451,7 @@
       "operation": "finalize_query",
       "query": "RFC 9110",
       "evidence_report": {
-        "schema_version": 11,
+        "schema_version": 12,
         "identifier_probe_matched": null,
         "term_support": [
           {
@@ -469,6 +469,88 @@
           "terms": []
         }
       ]
+    }
+  },
+  {
+    "operation": "finalize_lexical_v2_rank",
+    "name": "rank-schema-two-standard-first",
+    "request": {
+      "abi_version": 3,
+      "operation": "finalize_lexical_v2_rank",
+      "input": {
+        "schema_version": 2,
+        "profile_id": "lexical-v2",
+        "lane_count": 2,
+        "emphasis": "title",
+        "candidates": [
+          {
+            "source": {
+              "authorization_scope": "fixture",
+              "source_key": "partial"
+            },
+            "chunk_id": "partial-chunk",
+            "path": "partial.md",
+            "proofs": [
+              {
+                "field": "title",
+                "kind": "partial_coverage",
+                "lane_ordinal": 1,
+                "engine_score": 9.0,
+                "engine_ordinal": 0
+              }
+            ]
+          },
+          {
+            "source": {
+              "authorization_scope": "fixture",
+              "source_key": "standard"
+            },
+            "chunk_id": "standard-chunk",
+            "path": "standard.md",
+            "proofs": [
+              {
+                "field": "cross_field",
+                "kind": "cross_field_all_terms",
+                "lane_ordinal": 0,
+                "engine_score": 1.0,
+                "engine_ordinal": 0
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "operation": "finalize_lexical_v2_rank",
+    "name": "rank-schema-one-rejected",
+    "request": {
+      "abi_version": 3,
+      "operation": "finalize_lexical_v2_rank",
+      "input": {
+        "schema_version": 1,
+        "profile_id": "lexical-v2",
+        "lane_count": 1,
+        "candidates": [
+          {
+            "source": {
+              "authorization_scope": "fixture",
+              "source_key": "stale"
+            },
+            "chunk_id": "stale-chunk",
+            "path": "stale.md",
+            "proofs": [
+              {
+                "field": "body",
+                "kind": "all_terms",
+                "lane_ordinal": 0,
+                "engine_score": 1.0,
+                "engine_ordinal": 0
+              }
+            ]
+          }
+        ]
+      }
     }
   }
 ]

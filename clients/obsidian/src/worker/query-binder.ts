@@ -3,7 +3,7 @@
 
 import { encodeExactIdentifierMatch, encodeExactIdentifierToken } from "./exact-identifier-token";
 import { LEXICAL_CANDIDATE_LIMIT, MAX_LEXICAL_LANE_COUNT, MIN_STANDARD_SOURCES } from "./protocol";
-import type { EvidenceProbePlan, ExecutionPlan, StagePlan } from "./rust-adapter";
+import type { EvidenceProbePlan, ExecutionPlan, QueryField, StagePlan } from "./rust-adapter";
 
 export const FTS5_PROFILE_ID = "lexical-v2" as const;
 export const FTS5_COMPAT_PROFILE_ID = "lexical-v1" as const;
@@ -145,7 +145,7 @@ FROM (
       term,
       max(col IN ('filename', 'stem', 'aliases', 'title')) AS in_metadata
     FROM chunks_fts_vocab
-    WHERE col IN ('filename', 'stem', 'aliases', 'title', 'heading_text', 'tags', 'content')
+    WHERE col IN (?, ?, ?, ?, ?, ?, ?)
       AND term LIKE ? ESCAPE '\\'
       AND length(CAST(term AS blob)) <= ?
     GROUP BY term
@@ -157,6 +157,38 @@ FROM (
 )
 ORDER BY term ASC
 `;
+
+type PrefixProbeField = Exclude<QueryField, "content_identifiers">;
+
+const PREFIX_VOCAB_COLUMN_BY_FIELD: Readonly<Record<PrefixProbeField, string>> = Object.freeze({
+  filename: "filename",
+  stem: "stem",
+  aliases: "aliases",
+  title: "title",
+  heading: "heading_text",
+  tags: "tags",
+  content: "content",
+});
+const UNUSED_PREFIX_VOCAB_COLUMN = "__kwiry_unused_prefix_field__";
+const PREFIX_VOCAB_FIELD_SLOTS = 7;
+type PrefixVocabColumnBindings = [string, string, string, string, string, string, string];
+
+function boundPrefixVocabColumns(value: unknown): PrefixVocabColumnBindings {
+  if (!Array.isArray(value) || value.length > PREFIX_VOCAB_FIELD_SLOTS) rejectPlan();
+  const fields = value as unknown[];
+  const seen = new Set<string>();
+  const columns = fields.map((field) => {
+    if (typeof field !== "string"
+      || !Object.prototype.hasOwnProperty.call(PREFIX_VOCAB_COLUMN_BY_FIELD, field)
+      || seen.has(field)) {
+      rejectPlan();
+    }
+    seen.add(field);
+    return PREFIX_VOCAB_COLUMN_BY_FIELD[field as PrefixProbeField];
+  });
+  while (columns.length < PREFIX_VOCAB_FIELD_SLOTS) columns.push(UNUSED_PREFIX_VOCAB_COLUMN);
+  return columns as PrefixVocabColumnBindings;
+}
 
 const MATCH_STAGE_IDS = new Set<StagePlan["plan_id"]>([
   "lexical_explicit_v3",
@@ -179,7 +211,10 @@ export interface BoundExistsProbe {
 
 export interface BoundPrefixProbe {
   sql: string;
-  bind: readonly [string, number, number, number];
+  bind: readonly [
+    string, string, string, string, string, string, string,
+    string, number, number, number,
+  ];
 }
 
 export interface BoundEvidenceProbe {
@@ -269,7 +304,7 @@ LIMIT ?
 }
 
 export function requireExecutionPlanIdentity(plan: ExecutionPlan): void {
-  if (plan.schema_version !== 10
+  if (plan.schema_version !== 11
     || (plan.profile_id !== FTS5_PROFILE_ID && plan.profile_id !== FTS5_COMPAT_PROFILE_ID)
     || plan.max_total_candidates !== LEXICAL_CANDIDATE_LIMIT
     || plan.min_standard_sources !== MIN_STANDARD_SOURCES
@@ -352,7 +387,7 @@ export function bindSearchStage(stage: StagePlan, limit: number): BoundSearchSta
 }
 
 export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
-  if (plan.schema_version !== 10) {
+  if (plan.schema_version !== 11) {
     rejectPlan();
   }
   if (plan.plan_id === "identifier_metadata_v3") {
@@ -372,12 +407,22 @@ export function bindEvidenceProbe(plan: EvidenceProbePlan): BoundEvidenceProbe {
   const hasMatch = isOpaqueValue(plan.match_value, 16_384);
   const hasIdentifier = isOpaqueUnicodeScalarValue(plan.exact_identifier, 4_096);
   if (hasMatch === hasIdentifier) rejectPlan();
+  const prefixColumns = boundPrefixVocabColumns(plan.prefix_fields);
+  const prefixFieldCount = Array.isArray(plan.prefix_fields) ? plan.prefix_fields.length : 0;
+  const hasPrefix = plan.prefix_pattern !== null;
+  const hasPrefixStem = plan.prefix_stem !== null
+    && isOpaqueUnicodeScalarValue(plan.prefix_stem, 4_096);
+  if (hasPrefix !== hasPrefixStem
+    || (hasPrefix ? prefixFieldCount === 0 : prefixFieldCount !== 0)) {
+    rejectPlan();
+  }
   const prefix = plan.prefix_pattern === null
     ? null
     : hasMatch && isOpaqueValue(plan.prefix_pattern, 4_096)
       ? {
           sql: PREFIX_EXPANSIONS_SQL,
           bind: [
+            ...prefixColumns,
             plan.prefix_pattern,
             plan.max_prefix_term_bytes,
             plan.max_prefix_expansion_scan,

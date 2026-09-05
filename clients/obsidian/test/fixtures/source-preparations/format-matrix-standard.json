@@ -1,0 +1,49 @@
+{
+  "schema_version": 10,
+  "source_key": "789b00b5ee545ec741da8f08635a60d83730b1e33ecf7a350f1d5d12155e1896",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/standard-source.md",
+  "format": "markdown",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "2f19e24b8cf507857f941b74186189cb5f62c2665c084786eb44a7fec224befe",
+  "byte_length": 194,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "standard-source.md",
+    "stem": "standard-source",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "standard-source.md",
+    "stem": "standard-source",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {},
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "0d1a26906131fa4d2458cb34cfc3f12c41df92e457fed58c44c0491e1c9f2c42",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/standard-source.md",
+        "heading_path": [
+          "Standard source"
+        ],
+        "content": "# Standard source\n\namber cedar marker\nbirch delta inlet\ncobalt elm lantern\nforest garden grove\nharbor island orchard\njuniper kestrel prairie\nlake maple quartz\nmeadow north river\noak pine summit",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "2f19e24b8cf507857f941b74186189cb5f62c2665c084786eb44a7fec224befe",
+        "chunking_version": 2
+      },
+      "heading_text": "Standard source",
+      "normalized_heading": "standard source",
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

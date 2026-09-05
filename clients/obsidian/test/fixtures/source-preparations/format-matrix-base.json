@@ -1,0 +1,103 @@
+{
+  "schema_version": 10,
+  "source_key": "82a8395a44aa8be3adf8947e1923614c06cf84d627c6667d1f8b7401669c95f5",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/cobaltview-elmbridge.base",
+  "format": "base",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "0f3ffc57c3f207fbdab8091433ab56f150c7c241dc224e20e7abdf8b9a9ca304",
+  "byte_length": 63,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "cobaltview-elmbridge.base",
+    "stem": "cobaltview-elmbridge",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "cobaltview-elmbridge.base",
+    "stem": "cobaltview-elmbridge",
+    "aliases": [],
+    "title": "compact base"
+  },
+  "frontmatter": {
+    "base": {
+      "type": "map",
+      "value": {
+        "title": {
+          "type": "string",
+          "value": "Compact Base"
+        },
+        "views": {
+          "type": "sequence",
+          "value": [
+            {
+              "type": "map",
+              "value": {
+                "name": {
+                  "type": "string",
+                  "value": "Inventory"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "table"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "title": {
+      "type": "string",
+      "value": "Compact Base"
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "a2dac02765dec25a4594ae7ea8ffeb356ff96960f1bebfb250a8cc0c15c2d3c0",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/cobaltview-elmbridge.base",
+        "heading_path": [],
+        "content": "title: Compact Base",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "0f3ffc57c3f207fbdab8091433ab56f150c7c241dc224e20e7abdf8b9a9ca304",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "0c8c881053cbe1f3a042ad3e9864685a65a3b66c84f3ca08abe5e9c037463a4b",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/cobaltview-elmbridge.base",
+        "heading_path": [
+          "Inventory"
+        ],
+        "content": "name: Inventory\ntype: table",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "0f3ffc57c3f207fbdab8091433ab56f150c7c241dc224e20e7abdf8b9a9ca304",
+        "chunking_version": 2
+      },
+      "heading_text": "Inventory",
+      "normalized_heading": "inventory",
+      "technical_identifiers": [],
+      "source_locator": {
+        "kind": "base_view",
+        "view": "Inventory"
+      }
+    }
+  ],
+  "kind": "indexed"
+}

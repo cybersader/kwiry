@@ -970,8 +970,13 @@ fn lexical_v2_lanes(plan: &LexicalQueryPlan) -> Result<Vec<LexicalV2Lane>> {
             engine_score: 0.0,
             engine_ordinal: 0,
         };
-        lexical_v2_evidence_points(&right_proof, plan.emphasis)
-            .cmp(&lexical_v2_evidence_points(&left_proof, plan.emphasis))
+        left.kind
+            .is_partial()
+            .cmp(&right.kind.is_partial())
+            .then_with(|| {
+                lexical_v2_evidence_points(&right_proof, plan.emphasis)
+                    .cmp(&lexical_v2_evidence_points(&left_proof, plan.emphasis))
+            })
             .then_with(|| left.stage.ordinal.cmp(&right.stage.ordinal))
             .then_with(|| left.field.cmp(&right.field))
     });
@@ -1986,7 +1991,7 @@ fn compile_evidence_stage(
         // the conditional exploratory pass: anchors stay mandatory but the
         // optional alternatives only need one match between them.
         QueryEvidenceStageKind::PartialCoverage if stage.minimum_optional_matches > 0 => {
-            exploratory_partial_query(index, fields, plan, stage)
+            exploratory_partial_query(index, fields, plan, stage, prefix_expansions)
         }
         QueryEvidenceStageKind::PartialCoverage => required_terms_query(index, fields, plan, stage),
         QueryEvidenceStageKind::PrefixMetadata | QueryEvidenceStageKind::Prefix => {
@@ -2008,6 +2013,7 @@ fn exploratory_partial_query(
     fields: &Fields,
     plan: &LexicalQueryPlan,
     stage: &QueryEvidenceStage,
+    prefix_expansions: &BTreeMap<u16, Vec<String>>,
 ) -> Result<Option<Box<dyn Query>>> {
     let mut must_clauses = Vec::new();
     let mut should_clauses = Vec::new();
@@ -2035,6 +2041,27 @@ fn exploratory_partial_query(
         } else {
             should_clauses.push((Occur::Should, query));
         }
+    }
+    for term_index in &stage.prefix_term_indexes {
+        let expansions = prefix_expansions.get(term_index).ok_or_else(|| {
+            Error::Query("partial stage is missing its bounded expansions".to_owned())
+        })?;
+        let bindings = field_bindings(
+            fields,
+            declared_fields(plan, stage.field_group),
+            QueryFieldGroup::Prefix,
+        );
+        let mut alternatives = Vec::new();
+        for expansion in expansions {
+            alternatives.extend(term_alternatives(&bindings, expansion));
+        }
+        if alternatives.is_empty() {
+            continue;
+        }
+        should_clauses.push((
+            Occur::Should,
+            Box::new(DisjunctionMaxQuery::new(alternatives)) as Box<dyn Query>,
+        ));
     }
     if should_clauses.is_empty() {
         // Nothing is left to satisfy "at least one optional match".
@@ -3223,6 +3250,7 @@ mod tests {
                 QueryEvidenceStageKind::ExactMetadata,
                 QueryEvidenceStageKind::ExactPhrase,
                 QueryEvidenceStageKind::AllTerms,
+                QueryEvidenceStageKind::PartialCoverage,
             ]
         );
         assert!(
@@ -3825,6 +3853,58 @@ mod tests {
     }
 
     #[test]
+    fn emphasized_partial_lanes_wait_for_all_standard_sources_before_gating() {
+        let temporary = tempdir().unwrap();
+        let partial_name = "partial-target.md";
+        let query = ">title amber cedar marker";
+
+        let build = |standard_count: usize| -> PathBuf {
+            let vault = temporary
+                .path()
+                .join(format!("emphasis-vault-{standard_count}"));
+            let data = temporary
+                .path()
+                .join(format!("emphasis-data-{standard_count}"));
+            fs::create_dir(&vault).unwrap();
+            for index in 0..standard_count {
+                fs::write(
+                    vault.join(format!("standard-{index:03}.md")),
+                    "---\ntags: [cedar]\n---\n# Amber\nmarker",
+                )
+                .unwrap();
+            }
+            fs::write(
+                vault.join(partial_name),
+                "---\ntitle: Amberfield\n---\nUnrelated synthetic body.",
+            )
+            .unwrap();
+            build_index(
+                &Config {
+                    vaults: vec![VaultRegistration {
+                        id: "fixture".into(),
+                        path: vault,
+                        room: None,
+                    }],
+                    ..Config::default()
+                },
+                &data,
+            )
+            .unwrap();
+            data
+        };
+
+        let below = search_with_quality(&build(19), query, 30);
+        assert_eq!(below.match_quality, LexicalMatchQuality::Mixed);
+        assert!(below.hits.iter().any(|hit| hit.path == partial_name));
+        assert_ne!(below.hits[0].path, partial_name);
+
+        let at = search_with_quality(&build(20), query, 30);
+        assert_eq!(at.match_quality, LexicalMatchQuality::StandardOnly);
+        assert_eq!(at.hits.len(), 20);
+        assert!(at.hits.iter().all(|hit| hit.path != partial_name));
+    }
+
+    #[test]
     fn many_chunks_from_one_source_still_count_as_a_single_standard_source() {
         let temporary = tempdir().unwrap();
         let vault = temporary.path().join("vault");
@@ -4282,12 +4362,128 @@ mod tests {
                 QueryEvidenceStageKind::PrefixMetadata,
                 QueryEvidenceStageKind::AllTerms,
                 QueryEvidenceStageKind::Prefix,
+                QueryEvidenceStageKind::PartialCoverage,
             ]
         );
 
         let hits = search(&data, "zorb quar", 8);
         assert_eq!(hits[0].path, "Zorbification-Quarries.md");
         assert_eq!(hits[1].path, "random-ops.md");
+    }
+
+    #[test]
+    fn sparse_three_term_search_adds_prefix_aware_metadata_partial_results() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(
+            vault.join("zorbification-quarries.md"),
+            "---\ntitle: Zorbification Quarries\n---\nRecurring synthetic notes.",
+        )
+        .unwrap();
+        fs::write(vault.join("complete-decoy.md"), "zorb quar lattice").unwrap();
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved =
+            resolve_query_plan(std::slice::from_ref(&context), "zorb quar lattice").unwrap();
+        let partial = resolved
+            .plan
+            .evidence_stages
+            .iter()
+            .find(|stage| stage.kind == QueryEvidenceStageKind::PartialCoverage)
+            .expect("sparse fallback is planned");
+        assert_eq!(partial.prefix_term_indexes, [0, 1]);
+        assert_eq!(partial.required_term_indexes, [2]);
+
+        let outcome = search_with_quality(&data, "zorb quar lattice", 20);
+        assert_eq!(outcome.match_quality, LexicalMatchQuality::Mixed);
+        assert_eq!(outcome.hits[0].path, "complete-decoy.md");
+        assert!(
+            outcome
+                .hits
+                .iter()
+                .any(|hit| hit.path == "zorbification-quarries.md")
+        );
+    }
+
+    #[test]
+    fn scoped_prefix_vocabulary_ignores_out_of_scope_metadata_terms() {
+        let temporary = tempdir().unwrap();
+        let vault = temporary.path().join("vault");
+        let data = temporary.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("standard.md"), "# Standard\nember cobalt marker").unwrap();
+        fs::write(vault.join("target.md"), "# Target\nemberzz").unwrap();
+        for index in 0..16 {
+            fs::write(
+                vault.join(format!("decoy-{index:02}.md")),
+                format!("---\ntitle: Embertitle{index:02}\n---\n# Decoy\nneutral body"),
+            )
+            .unwrap();
+        }
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "fixture".into(),
+                    path: vault,
+                    room: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+
+        let (index, fields) = open_index(&data).unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let context = NativeSearchContext {
+            index: &index,
+            fields: &fields,
+            searcher: &searcher,
+            resource: None,
+        };
+        let resolved = resolve_query_plan(
+            std::slice::from_ref(&context),
+            "in:body ember cobalt marker",
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.prefix_expansions.get(&0).unwrap(),
+            &["ember".to_owned(), "emberzz".to_owned()]
+        );
+
+        let outcome = search_with_quality(&data, "in:body ember cobalt marker", 100);
+        assert_eq!(outcome.match_quality, LexicalMatchQuality::Mixed);
+        assert_eq!(outcome.hits[0].path, "standard.md");
+        assert!(outcome.hits.iter().any(|hit| hit.path == "target.md"));
+        assert!(
+            outcome
+                .hits
+                .iter()
+                .all(|hit| !hit.path.starts_with("decoy-"))
+        );
     }
 
     /// An abbreviation stays expandable even once its exact form exists.
@@ -4688,7 +4884,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_terms_require_all_supported_evidence_and_relax_only_unknown_filler() {
+    fn ordinary_terms_try_standard_evidence_before_bounded_partial_coverage() {
         let temporary = tempdir().unwrap();
         let vault = temporary.path().join("vault");
         let data = temporary.path().join("data");
@@ -4730,7 +4926,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(all_supported.is_empty());
+        assert_eq!(all_supported.len(), 2);
+        assert_eq!(
+            all_supported
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["dragons.md", "dungeons.md"])
+        );
 
         let relaxed = search_index(
             &data,
@@ -5361,16 +5564,27 @@ mod tests {
             &SearchFilters::default(),
         );
         assert_eq!(hierarchy[0].path, "reference/canonical.md");
-        assert_eq!(hierarchy.last().unwrap().path, "archive/real.md");
+        let archive_position = hierarchy
+            .iter()
+            .position(|hit| hit.path == "archive/real.md")
+            .unwrap();
+        for path in [
+            "reference/canonical.md",
+            "reference-old/lookalike.md",
+            "archive-old/lookalike.md",
+        ] {
+            assert!(
+                hierarchy.iter().position(|hit| hit.path == path).unwrap() < archive_position,
+                "{path} must remain above the archive-demoted standard match",
+            );
+        }
         assert!(
-            hierarchy
-                .iter()
-                .position(|hit| hit.path == "archive-old/lookalike.md")
-                .unwrap()
+            archive_position
                 < hierarchy
                     .iter()
-                    .position(|hit| hit.path == "archive/real.md")
-                    .unwrap()
+                    .position(|hit| hit.path == "notes/strong-text.md")
+                    .unwrap(),
+            "the archive-demoted standard match must remain above partial coverage",
         );
 
         let fanout = d5c_search(

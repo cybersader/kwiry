@@ -36,8 +36,9 @@ import type {
 
 const ABI_VERSION = 3;
 const SOURCE_SCHEMA_VERSION = 10;
-const QUERY_SCHEMA_VERSION = 11;
-const MATCH_PLAN_SCHEMA_VERSION = 10;
+const QUERY_SCHEMA_VERSION = 12;
+const MATCH_PLAN_SCHEMA_VERSION = 11;
+export const LEXICAL_V2_RANK_SCHEMA_VERSION = 2;
 
 export interface RustIdentity {
   abi_version: 3;
@@ -68,8 +69,9 @@ export interface RustIdentity {
    * admitted after it was written.
    */
   section_link_formats: Record<string, boolean>;
-  lexical_query_plan_schema_version: 11;
-  fts5_match_plan_schema_version: 10;
+  lexical_query_plan_schema_version: 12;
+  fts5_match_plan_schema_version: 11;
+  lexical_v2_rank_schema_version: typeof LEXICAL_V2_RANK_SCHEMA_VERSION;
   /**
    * The chunking contract the adapter applies. Chunk rows carry it per chunk,
    * but a generation with no chunks still has to name the contract its cached
@@ -176,7 +178,7 @@ export type QueryEvidenceStageKind =
   | "prefix_metadata" | "prefix";
 
 export interface LexicalQueryPlan {
-  schema_version: 11;
+  schema_version: 12;
   profile_id: "lexical-v1" | "lexical-v2";
   field_controls_schema_version: 1;
   query: string;
@@ -247,18 +249,20 @@ export interface LexicalQueryPlan {
 
 export type EvidenceProbePlan =
   | {
-      schema_version: 10;
+      schema_version: 11;
       plan_id: "identifier_metadata_v3";
       match_value: string;
     }
   | {
-      schema_version: 10;
+      schema_version: 11;
       plan_id: "term_support_v3";
       probe_id: number;
       term_index: number;
       match_value?: string;
       exact_identifier?: string;
       prefix_pattern: string | null;
+      /** Rust-declared FTS vocabulary fields, empty when no prefix probe exists. */
+      prefix_fields: Array<Exclude<QueryField, "content_identifiers">>;
       /** The analyzed stem `prefix_pattern` expands, or null when it does not. */
       prefix_stem: string | null;
       max_prefix_expansions: 16;
@@ -309,7 +313,7 @@ export interface StagePlan {
 }
 
 export interface ExecutionPlan {
-  schema_version: 10;
+  schema_version: 11;
   profile_id: "lexical-v1" | "lexical-v2";
   emphasis?: QueryPublicField;
   disposition: "explicit_bypass" | "ready" | "empty_no_evidence";
@@ -344,7 +348,7 @@ export interface LexicalV2Candidate {
 }
 
 export interface LexicalV2RankInput {
-  schema_version: 1;
+  schema_version: typeof LEXICAL_V2_RANK_SCHEMA_VERSION;
   profile_id: "lexical-v2";
   lane_count: number;
   emphasis?: QueryPublicField;
@@ -685,6 +689,7 @@ function isRustIdentity(value: unknown): value is RustIdentity {
       "section_link_formats",
       "lexical_query_plan_schema_version",
       "fts5_match_plan_schema_version",
+      "lexical_v2_rank_schema_version",
       "chunking_version",
       "max_request_bytes",
       "max_source_buffer_bytes",
@@ -704,6 +709,7 @@ function isRustIdentity(value: unknown): value is RustIdentity {
     && mirrorsCompiledSectionLinkFormats(value.section_link_formats)
     && value.lexical_query_plan_schema_version === QUERY_SCHEMA_VERSION
     && value.fts5_match_plan_schema_version === MATCH_PLAN_SCHEMA_VERSION
+    && value.lexical_v2_rank_schema_version === LEXICAL_V2_RANK_SCHEMA_VERSION
     && isNonNegativeSafeInteger(value.chunking_version)
     && isPositiveSafeInteger(value.max_request_bytes)
     && isPositiveSafeInteger(value.max_source_buffer_bytes)
@@ -769,6 +775,9 @@ function probesMatchPlan(probes: EvidenceProbePlan[], plan: LexicalQueryPlan): b
       && actual.probe_id === probe.probe_id
       && actual.term_index === probe.term_index
       && intent !== undefined
+      && JSON.stringify(actual.prefix_fields) === JSON.stringify(
+        actual.prefix_pattern === null ? [] : plan.field_groups.prefix,
+      )
       && (intent.projection === "exact_identifier"
         ? actual.exact_identifier === intent.text
           && actual.match_value === undefined
@@ -985,8 +994,14 @@ function isEvidenceStages(
     .filter((intent) => intent.role === "required_identifier_anchor" || intent.support === "useful")
     .map((intent) => intent.index)
     .slice(0, 128);
-  const partialCoverage = expectedPartialCoverage(termIntents);
-  const hasPrefix = value.some((stage) => isRecord(stage) && stage.kind === "prefix");
+  const canonicalPrefixStage = value.find((stage) =>
+    isRecord(stage) && stage.kind === "prefix");
+  const canonicalPrefixIndexes = isRecord(canonicalPrefixStage)
+      && isTermIndexes(canonicalPrefixStage.prefix_term_indexes, termCount, 8)
+    ? canonicalPrefixStage.prefix_term_indexes as number[]
+    : [];
+  const partialCoverage = expectedPartialCoverage(termIntents, canonicalPrefixIndexes);
+  const hasPrefix = canonicalPrefixStage !== undefined;
   const hasPrefixMetadata = value.some((stage) =>
     isRecord(stage) && stage.kind === "prefix_metadata");
   if (hasPrefixMetadata !== (hasPrefix && hasPrefixMetadataFields)) return false;
@@ -1048,16 +1063,17 @@ function isEvidenceStages(
     if (stage.kind === "partial_coverage"
       && (partialCoverage === null
         || stage.field_group !== "searchable_text"
-        || required.length === 0
+        || (required.length === 0 && prefixes.length === 0)
         // The always-on (unsupported-context) branch stays a strict subset
-        // of every term; the bounded exploratory branch legitimately
-        // includes every remaining term as "at least one" alternatives, so
-        // it alone may reach the full term count.
+        // of every term; the bounded exploratory branch may expose every
+        // remaining term across exact and prefix alternatives.
         || (required.length >= termCount && partialCoverage.minimumOptionalMatches === 0)
-        || prefixes.length !== 0
+        || required.length + prefixes.length > 128
+        || required.some((index) => prefixes.includes(index))
         || stage.condition !== partialCoverage.condition
         || stage.minimum_optional_matches !== partialCoverage.minimumOptionalMatches
-        || JSON.stringify(required) !== JSON.stringify(partialCoverage.requiredIndexes))) {
+        || JSON.stringify(required) !== JSON.stringify(partialCoverage.requiredIndexes)
+        || JSON.stringify(prefixes) !== JSON.stringify(partialCoverage.prefixIndexes))) {
       return false;
     }
     if (stage.kind === "prefix" || stage.kind === "prefix_metadata") {
@@ -1066,6 +1082,7 @@ function isEvidenceStages(
       const expectedRequired = relaxedIndexes.filter((index) => !prefixes.includes(index));
       if (stage.field_group !== (stage.kind === "prefix" ? "prefix" : "prefix_metadata")
         || prefixes.length === 0
+        || JSON.stringify(prefixes) !== JSON.stringify(canonicalPrefixIndexes)
         || JSON.stringify(required) !== JSON.stringify(expectedRequired)
         || prefixes.some((index) => {
           const intent = termIntents[index];
@@ -1082,9 +1099,11 @@ function isEvidenceStages(
 
 function expectedPartialCoverage(
   termIntents: LexicalQueryPlan["term_intents"],
+  prefixIndexes: readonly number[],
 ): {
   condition: "always" | "if_fewer_than_minimum_standard_sources";
   requiredIndexes: number[];
+  prefixIndexes: number[];
   minimumOptionalMatches: number;
 } | null {
   const allIndexes = termIntents.map((intent) => intent.index);
@@ -1097,7 +1116,12 @@ function expectedPartialCoverage(
   if (hasUnsupportedContext) {
     return relaxedIndexes.length > 0
       && JSON.stringify(relaxedIndexes) !== JSON.stringify(allIndexes)
-      ? { condition: "always", requiredIndexes: relaxedIndexes, minimumOptionalMatches: 0 }
+      ? {
+          condition: "always",
+          requiredIndexes: relaxedIndexes,
+          prefixIndexes: [],
+          minimumOptionalMatches: 0,
+        }
       : null;
   }
 
@@ -1107,21 +1131,29 @@ function expectedPartialCoverage(
   const optional = termIntents
     .filter((intent) => intent.role === "optional_context" && intent.support === "useful")
     .map((intent) => intent.index);
-  if (optional.length < 4 || anchors.length >= 128) return null;
+  if (optional.length < 2 || anchors.length >= 128) return null;
 
   // Every useful optional term is offered as an alternative, up to the same
-  // bounded ceiling the always-on relaxation above already respects. The
-  // anchors stay mandatory (enforced independently); this never enumerates
-  // optional combinations, it exposes one flat "at least one of" group.
+  // bounded ceiling the always-on relaxation above already respects. Terms
+  // with canonical bounded expansions use exactly that one expansion group;
+  // all other optional terms keep their analyzed exact form. Anchors stay
+  // mandatory, and no optional combinations are enumerated.
   const optionalCapacity = 128 - anchors.length;
   const includedOptional = new Set(optional.slice(0, optionalCapacity));
   if (includedOptional.size === 0) return null;
-
+  const includedPrefixes = prefixIndexes.filter((index) => includedOptional.has(index));
+  const includedPrefixSet = new Set(includedPrefixes);
   const requiredIndexes = termIntents
-    .filter((intent) => intent.role === "required_identifier_anchor" || includedOptional.has(intent.index))
+    .filter((intent) => intent.role === "required_identifier_anchor"
+      || (includedOptional.has(intent.index) && !includedPrefixSet.has(intent.index)))
     .map((intent) => intent.index);
-  return requiredIndexes.length > 0
-    ? { condition: "if_fewer_than_minimum_standard_sources", requiredIndexes, minimumOptionalMatches: 1 }
+  return requiredIndexes.length > 0 || includedPrefixes.length > 0
+    ? {
+        condition: "if_fewer_than_minimum_standard_sources",
+        requiredIndexes,
+        prefixIndexes: includedPrefixes,
+        minimumOptionalMatches: 1,
+      }
     : null;
 }
 
@@ -1154,7 +1186,7 @@ function isEvidenceProbePlan(value: unknown): value is EvidenceProbePlan {
   if (value.plan_id !== "term_support_v3"
     || !hasRequiredAndOptionalKeys(value, [
       "plan_id", "schema_version", "probe_id", "term_index", "prefix_pattern",
-      "prefix_stem", "max_prefix_expansions", "max_prefix_expansion_scan",
+      "prefix_fields", "prefix_stem", "max_prefix_expansions", "max_prefix_expansion_scan",
       "max_prefix_term_bytes",
     ], ["match_value", "exact_identifier"])
     || isNonNegativeSafeInteger(value.probe_id) === false
@@ -1162,6 +1194,12 @@ function isEvidenceProbePlan(value: unknown): value is EvidenceProbePlan {
     || isNonNegativeSafeInteger(value.term_index) === false
     || value.term_index >= 128
     || (value.prefix_pattern !== null && !isBoundedString(value.prefix_pattern, 4_096))
+    || !Array.isArray(value.prefix_fields)
+    || value.prefix_fields.length > SEARCHABLE_FIELDS.length
+    || value.prefix_fields.some((field, index, fields) =>
+      !SEARCHABLE_FIELDS.includes(field as typeof SEARCHABLE_FIELDS[number])
+      || fields.indexOf(field) !== index)
+    || (value.prefix_pattern === null) !== (value.prefix_fields.length === 0)
     // The stem travels with the pattern and only with the pattern.
     || (value.prefix_pattern === null) !== (value.prefix_stem === null)
     || (value.prefix_stem !== null && !isBoundedString(value.prefix_stem, 4_096))

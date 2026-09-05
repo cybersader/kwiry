@@ -2005,8 +2005,9 @@ describe("exact generated production Worker", () => {
         result: {
           rustAbiVersion: 3,
           sourceSchemaVersion: 10,
-          querySchemaVersion: 11,
-          matchPlanSchemaVersion: 10,
+          querySchemaVersion: 12,
+          matchPlanSchemaVersion: 11,
+          rankSchemaVersion: 2,
           sqliteVersion: "3.53.0",
           fts5Enabled: 1,
         },
@@ -2168,11 +2169,13 @@ describe("exact generated production Worker", () => {
       expect(gallery.result.hits[0].excerpt.length).toBeGreaterThan(0);
       expect(gallery.result.hits[0].excerpt.length).toBeLessThanOrEqual(240);
 
-      await expect(request(worker, {
+      const configuration = await request(worker, {
         id: 6, operation: "search", query: "file.inFolder", limit: 20,
-      })).resolves.toMatchObject({
-        ok: true,
-        result: { hits: [{ path: "project-dashboard.base", locator: null }] },
+      });
+      expect(configuration).toMatchObject({ ok: true });
+      expect(configuration.result.hits[0]).toMatchObject({
+        path: "project-dashboard.base",
+        locator: null,
       });
       await expect(request(worker, { id: 7, operation: "status" })).resolves.toMatchObject({
         ok: true,
@@ -2407,14 +2410,17 @@ describe("exact generated production Worker", () => {
           ok: true,
           result: { generation: "canvas-restored", documents: 3, chunks: 13 },
         });
-        await expect(request(restoredWorker, {
+        const restoredSearch = await request(restoredWorker, {
           id: 3, operation: "search", query: "Research Cluster", limit: 20,
-        })).resolves.toMatchObject({
+        });
+        expect(restoredSearch).toMatchObject({
           ok: true,
-          result: {
-            generation: "canvas-restored",
-            hits: [{ path: "research-board.canvas", format: "canvas", locator: null }],
-          },
+          result: { generation: "canvas-restored" },
+        });
+        expect(restoredSearch.result.hits[0]).toMatchObject({
+          path: "research-board.canvas",
+          format: "canvas",
+          locator: null,
         });
       } finally {
         await restoredWorker.terminate();
@@ -2877,6 +2883,94 @@ describe("exact generated production Worker", () => {
     }
   }, 120_000);
 
+  it("refuses malformed or noncanonical Rust-declared prefix probe fields", async () => {
+    const needle = "function isPreparedQuery(value) {";
+    const mutations = [
+      'probe.prefix_fields = ["title"];',
+      "delete probe.prefix_fields;",
+      'probe.prefix_fields = ["content", "content"];',
+      'probe.prefix_fields = ["content_identifiers"];',
+      'probe.unexpected_field = "content";',
+    ];
+    for (const [index, mutation] of mutations.entries()) {
+      const injected = guardWorkerSource.replace(
+        needle,
+        `${needle}\n  if (value?.plan?.query === "in:body ember cobalt marker") { const probe = value.probes?.find((candidate) => candidate.prefix_pattern !== null); if (probe) { ${mutation} } }`,
+      );
+      expect(injected).not.toBe(guardWorkerSource);
+      const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+      try {
+        await buildActiveGeneration(worker, {
+          generation: `prefix-field-validator-${index}`,
+          path: "body-scope.md",
+          text: "ember cobalt marker",
+        });
+        await expect(request(worker, {
+          id: 5,
+          operation: "search",
+          query: "in:body ember cobalt marker",
+          limit: 20,
+        })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
+      } finally {
+        await worker.terminate();
+      }
+    }
+  }, 120_000);
+
+  it("rejects stale query and FTS5 execution schemas at their exact boundaries", async () => {
+    const cases = [{
+      query: "schemaqueryprobe",
+      needle: "function isPreparedQuery(value) {",
+      mutation: "value.plan.schema_version = 11;",
+    }, {
+      query: "schemaexecutionprobe",
+      needle: "function isFinalizedQuery(value) {",
+      mutation: "value.execution_plan.schema_version = 10;",
+    }];
+    for (const testCase of cases) {
+      const injected = guardWorkerSource.replace(
+        testCase.needle,
+        `${testCase.needle}\n  if (value?.plan?.query === "${testCase.query}") ${testCase.mutation}`,
+      );
+      expect(injected).not.toBe(guardWorkerSource);
+      const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+      try {
+        await buildActiveGeneration(worker, {
+          generation: `stale-${testCase.query}`,
+          path: `${testCase.query}.md`,
+          text: testCase.query,
+        });
+        await expect(request(worker, {
+          id: 5, operation: "search", query: testCase.query, limit: 20,
+        })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
+      } finally {
+        await worker.terminate();
+      }
+    }
+  }, 120_000);
+
+  it("rejects stale lexical-v2 rank schema at the Rust boundary", async () => {
+    const needle = "function finalizeLexicalV2RankWithRust(input) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  input.schema_version = 1;`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await buildActiveGeneration(worker, {
+        generation: "stale-rank-schema",
+        path: "rank-schema.md",
+        text: "zorb quarry",
+      });
+      await expect(request(worker, {
+        id: 5, operation: "search", query: "zorb quarry", limit: 20,
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
   it("refuses a finalized execution plan corrupted across the exact validator boundary", async () => {
     const needle = "function isFinalizedQuery(value) {";
     const injected = guardWorkerSource.replace(
@@ -2955,6 +3049,35 @@ describe("exact generated production Worker", () => {
       await request(worker, { id: 4, operation: "commit_build", generation: "prefix-pair" });
       await expect(request(worker, {
         id: 5, operation: "search", query: "orchard adop", limit: 8,
+      })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+
+  it("refuses drift between canonical prefix and partial term subsets", async () => {
+    const needle = "function isFinalizedQuery(value) {";
+    const injected = guardWorkerSource.replace(
+      needle,
+      `${needle}\n  if (value?.plan?.query === "zorb quar lattice") { const partial = value.plan.evidence_stages.find((stage) => stage.kind === "partial_coverage"); if (partial?.prefix_term_indexes?.length > 0) { const moved = partial.prefix_term_indexes.pop(); partial.required_term_indexes = [...partial.required_term_indexes, moved].sort((left, right) => left - right); } }`,
+    );
+    expect(injected).not.toBe(guardWorkerSource);
+    const worker = new Worker(nodeWorkerSource(injected), { eval: true });
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "prefix-subsets" });
+      await request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "prefix-subsets",
+        sources: [
+          source("complete.md", "# Complete\nzorb quar lattice"),
+          source("target.md", "---\ntitle: Zorbification Quarries\n---\nSynthetic target"),
+        ],
+      });
+      await request(worker, { id: 4, operation: "commit_build", generation: "prefix-subsets" });
+      await expect(request(worker, {
+        id: 5, operation: "search", query: "zorb quar lattice", limit: 20,
       })).resolves.toMatchObject({ ok: false, error: { code: "invalid_query_plan" } });
     } finally {
       await worker.terminate();

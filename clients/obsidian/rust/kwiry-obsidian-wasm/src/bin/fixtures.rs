@@ -4,7 +4,9 @@ use std::{env, fs, process};
 
 #[cfg(feature = "internal-docx-extractor")]
 use kwiry_obsidian_wasm::internal_docx_extract;
-use kwiry_obsidian_wasm::{abi_identity, finalize_query, prepare_query, prepare_source};
+use kwiry_obsidian_wasm::{
+    abi_identity, finalize_lexical_v2_rank, finalize_query, prepare_query, prepare_source,
+};
 #[cfg(feature = "internal-d5c-preview")]
 use kwiry_obsidian_wasm::{finalize_d5c_preview, internal_d5c_evaluate, prepare_d5c_preview};
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,10 @@ enum FixtureCase {
         request: Value,
     },
     FinalizeQuery {
+        name: String,
+        request: Value,
+    },
+    FinalizeLexicalV2Rank {
         name: String,
         request: Value,
     },
@@ -148,6 +154,9 @@ fn execute_adapter(case: FixtureCase) -> (String, String) {
         FixtureCase::PrepareQuery { name, request } => (name, prepare_query(&request.to_string())),
         FixtureCase::FinalizeQuery { name, request } => {
             (name, finalize_query(&request.to_string()))
+        }
+        FixtureCase::FinalizeLexicalV2Rank { name, request } => {
+            (name, finalize_lexical_v2_rank(&request.to_string()))
         }
         #[cfg(feature = "internal-docx-extractor")]
         FixtureCase::InternalDocxExtract {

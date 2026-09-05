@@ -1,0 +1,74 @@
+{
+  "schema_version": 10,
+  "source_key": "fc314d940eee657cdf7af9e812bc4f63638c06820c6100f28d91a4f414bf7041",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/meadowstone-northway.xlsx",
+  "format": "excel",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "67d61df5fc2594a3556941e28b0ef224338d983ca1258e9cc62be80d49b2477d",
+  "byte_length": 1859,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "meadowstone-northway.xlsx",
+    "stem": "meadowstone-northway",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "meadowstone-northway.xlsx",
+    "stem": "meadowstone-northway",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {},
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "06095b2113fbbcc20d25f5e9be1523085e13eb9aeca1cc5f1cf294e86edca13a",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/meadowstone-northway.xlsx",
+        "heading_path": [
+          "Ledger"
+        ],
+        "content": "Ledger",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "67d61df5fc2594a3556941e28b0ef224338d983ca1258e9cc62be80d49b2477d",
+        "chunking_version": 2
+      },
+      "heading_text": "Ledger",
+      "normalized_heading": "ledger",
+      "technical_identifiers": []
+    },
+    {
+      "chunk": {
+        "chunk_id": "2fc7ee97e8c464913e275bb373f1a4e377a83d230d684d8618cbae3a2cb7c83f",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/meadowstone-northway.xlsx",
+        "heading_path": [
+          "Ledger"
+        ],
+        "content": "Compact neutral spreadsheet body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "67d61df5fc2594a3556941e28b0ef224338d983ca1258e9cc62be80d49b2477d",
+        "chunking_version": 2
+      },
+      "heading_text": "Ledger",
+      "normalized_heading": "ledger",
+      "technical_identifiers": [],
+      "source_locator": {
+        "kind": "excel_cell",
+        "sheet": "Ledger",
+        "cell": "A1"
+      }
+    }
+  ],
+  "kind": "indexed"
+}

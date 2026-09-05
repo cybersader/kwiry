@@ -33,7 +33,9 @@ const rustRankBridge = vi.hoisted(() => ({
 }));
 
 vi.mock("../src/worker/rust-adapter", () => ({
+  LEXICAL_V2_RANK_SCHEMA_VERSION: 2,
   finalizeLexicalV2RankWithRust: (input: LexicalV2RankInput): FinalizedLexicalV2Rank => {
+    if (input.schema_version !== 2) throw new Error("unexpected lexical-v2 rank schema");
     if (rustRankBridge.finalize === null) throw new Error("portable Rust rank bridge is not ready");
     return rustRankBridge.finalize(input);
   },
@@ -160,7 +162,7 @@ function finalizeQueryWithRust(
     operation: "finalize_query",
     query,
     evidence_report: {
-      schema_version: 11,
+      schema_version: 12,
       identifier_probe_matched: evidence.identifier_probe_matched,
       term_support: evidence.term_support,
     },
@@ -264,7 +266,7 @@ function stageKind(stage: StagePlan): QueryEvidenceStageKind | "explicit" {
 
 function singleStagePlan(stage: StagePlan): ExecutionPlan {
   return {
-    schema_version: 10,
+    schema_version: 11,
     profile_id: stage.plan_id === "lexical_explicit_v3" ? "lexical-v1" : "lexical-v2",
     disposition: stage.plan_id === "lexical_explicit_v3" ? "explicit_bypass" : "ready",
     max_total_candidates: 512,
@@ -330,6 +332,10 @@ describe("shared lexical-v1 conformance corpus", () => {
 
         const hits = index.search(finalized.execution_plan, testCase.limit);
         const hitPaths = hits.map((hit) => hit.path);
+        if (testCase.id === "sparse-three-term-prefix-aware-partial") {
+          expect(index.searchWithCandidateWindow(finalized.execution_plan, testCase.limit)
+            .lexical_match_quality).toBe("mixed");
+        }
         for (const excluded of testCase.excluded_paths ?? []) {
           expect(hitPaths, `${testCase.id} excluded ${excluded}`).not.toContain(excluded);
         }
@@ -375,8 +381,10 @@ describe("shared lexical-v1 conformance corpus", () => {
         .map((hit) => hit.path)).toContain("scope-allowed.md");
 
       const combinedResult = execute(combined, testCase!.query);
-      expect(combinedResult.finalized.plan.evidence_stages.map((stage) => stage.kind))
-        .not.toContain("partial_coverage");
+      const combinedPartial = combinedResult.finalized.plan.evidence_stages.find((stage) =>
+        stage.kind === "partial_coverage");
+      expect(combinedPartial?.condition)
+        .toBe("if_fewer_than_minimum_standard_sources");
       expect(combined.search(combinedResult.finalized.execution_plan, testCase!.limit)
         .map((hit) => hit.path)).toContain("scope-forbidden.md");
 
@@ -448,6 +456,83 @@ describe("shared lexical-v1 conformance corpus", () => {
     } finally {
       index.close();
     }
+  });
+
+  it("keeps portable prefix vocabulary discovery inside the Rust-declared body scope", () => {
+    const index = openFts5Generation(sqlite, undefined, "active-vault");
+    try {
+      index.replaceSource(prepareDocument({
+        scope: "body-scope",
+        path: "standard.md",
+        markdown: "# Standard\nember cobalt marker",
+      }));
+      index.replaceSource(prepareDocument({
+        scope: "body-scope",
+        path: "target.md",
+        markdown: "# Target\nemberzz",
+      }));
+      for (let value = 0; value < 16; value += 1) {
+        index.replaceSource(prepareDocument({
+          scope: "body-scope",
+          path: `decoy-${String(value).padStart(2, "0")}.md`,
+          markdown: `---\ntitle: Embertitle${String(value).padStart(2, "0")}\n---\n# Decoy\nneutral body`,
+        }));
+      }
+
+      const { observation, finalized } = execute(index, "in:body ember cobalt marker");
+      expect(observation.prefix_expansions[0]?.terms).toEqual(["ember", "emberzz"]);
+      const result = index.searchWithCandidateWindow(finalized.execution_plan, 100);
+      expect(result.lexical_match_quality).toBe("mixed");
+      expect(result.hits[0]?.path).toBe("standard.md");
+      expect(result.hits.map((hit) => hit.path)).toContain("target.md");
+      expect(result.hits.every((hit) => !hit.path.startsWith("decoy-"))).toBe(true);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("gates emphasized portable partial lanes on all distinct standard sources", () => {
+    const search = (standardSources: number) => {
+      const index = openFts5Generation(sqlite, undefined, "active-vault");
+      try {
+        for (let value = 0; value < standardSources; value += 1) {
+          index.replaceSource(prepareDocument({
+            scope: "emphasis-gate",
+            path: `standard-${String(value).padStart(2, "0")}.md`,
+            markdown: "---\ntitle: Cedar\n---\n# Marker\namber",
+          }));
+        }
+        index.replaceSource(prepareDocument({
+          scope: "emphasis-gate",
+          path: "partial-target.md",
+          markdown: "---\ntitle: Amberfield\n---\n# Target\nneutral body",
+        }));
+        const { finalized } = execute(index, ">title amber cedar marker");
+        const lanes = finalized.execution_plan.stages;
+        const firstPartial = lanes.findIndex((stage) =>
+          stage.plan_id === "lexical_partial_coverage_v3");
+        expect(firstPartial).toBeGreaterThan(0);
+        expect(lanes.slice(0, firstPartial).every((stage) =>
+          stage.plan_id !== "lexical_partial_coverage_v3")).toBe(true);
+        expect(lanes.slice(firstPartial).every((stage) =>
+          stage.plan_id === "lexical_partial_coverage_v3")).toBe(true);
+        return index.searchWithCandidateWindow(finalized.execution_plan, 100);
+      } finally {
+        index.close();
+      }
+    };
+
+    const sparse = search(19);
+    expect(sparse.lexical_match_quality).toBe("mixed");
+    expect(sparse.hits).toHaveLength(20);
+    expect(sparse.hits.at(-1)?.path).toBe("partial-target.md");
+    expect(sparse.hits.slice(0, 19).every((hit) => hit.path.startsWith("standard-")))
+      .toBe(true);
+
+    const threshold = search(20);
+    expect(threshold.lexical_match_quality).toBe("standard_only");
+    expect(threshold.hits).toHaveLength(20);
+    expect(threshold.hits.every((hit) => hit.path.startsWith("standard-"))).toBe(true);
   });
 
   it("enforces the shared byte, term, prefix, stage, and candidate bounds", () => {

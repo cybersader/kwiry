@@ -41,7 +41,10 @@ import type {
   WorkerSourceGeneration,
 } from "./protocol";
 import { isPreparedPropertyBag } from "./source-defect";
-import { finalizeLexicalV2RankWithRust } from "./rust-adapter";
+import {
+  LEXICAL_V2_RANK_SCHEMA_VERSION,
+  finalizeLexicalV2RankWithRust,
+} from "./rust-adapter";
 import {
   bindEvidenceProbe,
   bindSearchStage,
@@ -1624,7 +1627,7 @@ export class Fts5GenerationIndex {
       proofs: proofs[index] ?? [],
     }));
     const ranked = finalizeLexicalV2RankWithRust({
-      schema_version: 1,
+      schema_version: LEXICAL_V2_RANK_SCHEMA_VERSION,
       profile_id: "lexical-v2",
       lane_count: plan.stages.length,
       ...(plan.emphasis === undefined ? {} : { emphasis: plan.emphasis }),

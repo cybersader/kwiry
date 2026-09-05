@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use kwiry_core::{
-    ApiSearchRequest, DaemonStatus, LexicalQueryPlan, SourceDescriptor, SourcePreparation,
-    prepare_lexical_query, prepare_source_buffer,
+    ApiSearchRequest, DaemonStatus, LexicalQueryPlan, LexicalV2RankInput, LexicalV2RankedCandidate,
+    SourceDescriptor, SourcePreparation, prepare_lexical_query, prepare_source_buffer,
+    rank_lexical_v2,
 };
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,10 @@ enum FixtureCase {
         name: String,
         status: Box<DaemonStatus>,
     },
+    RankLexicalV2 {
+        name: String,
+        input: LexicalV2RankInput,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -58,11 +63,25 @@ struct FixtureOutput {
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum FixtureResult {
-    PreparedSource { preparation: SourcePreparation },
-    PreparedQuery { plan: LexicalQueryPlan },
-    ApiRequest { request: ApiSearchRequest },
-    DaemonStatus { daemon_status: DaemonStatus },
-    Error { code: String, message: String },
+    PreparedSource {
+        preparation: SourcePreparation,
+    },
+    PreparedQuery {
+        plan: LexicalQueryPlan,
+    },
+    ApiRequest {
+        request: ApiSearchRequest,
+    },
+    DaemonStatus {
+        daemon_status: DaemonStatus,
+    },
+    RankedLexicalV2 {
+        ranked: Vec<LexicalV2RankedCandidate>,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 fn execute_case(case: FixtureCase) -> FixtureOutput {
@@ -111,6 +130,16 @@ fn execute_case(case: FixtureCase) -> FixtureOutput {
                 daemon_status: *status,
             },
         },
+        FixtureCase::RankLexicalV2 { name, input } => {
+            let result = match rank_lexical_v2(&input) {
+                Ok(ranked) => FixtureResult::RankedLexicalV2 { ranked },
+                Err(error) => FixtureResult::Error {
+                    code: error.code,
+                    message: error.message,
+                },
+            };
+            FixtureOutput { name, result }
+        }
     }
 }
 

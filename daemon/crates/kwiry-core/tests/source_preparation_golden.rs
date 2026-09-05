@@ -6,6 +6,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "support/format_matrix_fixtures.rs"]
+mod format_matrix_fixtures;
+
+use format_matrix_fixtures::{STANDARD_PATH, format_matrix_fixtures, standard_markdown};
 use kwiry_core::{
     Frontmatter, PropertyValue, SourceDescriptor, SourceFormat, SourcePreparation,
     SourcePreparationKind, prepare_source_buffer,
@@ -19,7 +23,7 @@ const PROPERTY_ARRAY_COUNT: usize = 1_200;
 const PROPERTY_MAP_DEPTH: usize = 32;
 const BASE_SOURCE: &str = include_str!("fixtures/base/well-formed.base");
 const CANVAS_SOURCE: &str = include_str!("fixtures/canvas/well-formed.canvas");
-const FIXTURE_COUNT: usize = 16;
+const FIXTURE_COUNT: usize = 26;
 
 struct Fixture {
     file_name: &'static str,
@@ -55,7 +59,7 @@ fn writes_real_source_preparation_goldens() {
 }
 
 fn fixtures() -> Vec<Fixture> {
-    vec![
+    let mut fixtures = vec![
         prepare(
             "01-thousands-of-wikilinks.json",
             "Golden/Thousands of Wikilinks.md",
@@ -154,7 +158,39 @@ fn fixtures() -> Vec<Fixture> {
             Some("fixture-room"),
             SourceFormat::Canvas,
         ),
-    ]
+    ];
+    fixtures.extend(format_matrix_fixtures().into_iter().map(|fixture| {
+        assert_eq!(fixture.query.split_whitespace().count(), 3);
+        prepare_format_bytes(
+            matrix_file_name(fixture.format),
+            fixture.path,
+            fixture.bytes,
+            Some("fixture-room"),
+            fixture.format,
+        )
+    }));
+    fixtures.push(prepare_format_bytes(
+        "format-matrix-standard.json",
+        STANDARD_PATH,
+        standard_markdown(),
+        Some("fixture-room"),
+        SourceFormat::Markdown,
+    ));
+    fixtures
+}
+
+fn matrix_file_name(format: SourceFormat) -> &'static str {
+    match format {
+        SourceFormat::Markdown => "format-matrix-markdown.json",
+        SourceFormat::Text => "format-matrix-text.json",
+        SourceFormat::Base => "format-matrix-base.json",
+        SourceFormat::Canvas => "format-matrix-canvas.json",
+        SourceFormat::Docx => "format-matrix-docx.json",
+        SourceFormat::Pdf => "format-matrix-pdf.json",
+        SourceFormat::Excalidraw => "format-matrix-excalidraw.json",
+        SourceFormat::Excel => "format-matrix-excel.json",
+        SourceFormat::Html => "format-matrix-html.json",
+    }
 }
 
 fn prepare(file_name: &'static str, path: &str, source: String, room: Option<&str>) -> Fixture {
@@ -168,7 +204,16 @@ fn prepare_format(
     room: Option<&str>,
     format: SourceFormat,
 ) -> Fixture {
-    let bytes = source.as_bytes();
+    prepare_format_bytes(file_name, path, source.into_bytes(), room, format)
+}
+
+fn prepare_format_bytes(
+    file_name: &'static str,
+    path: &str,
+    bytes: Vec<u8>,
+    room: Option<&str>,
+    format: SourceFormat,
+) -> Fixture {
     let descriptor = SourceDescriptor {
         vault_id: "golden-vault".to_owned(),
         room: room.map(str::to_owned),
@@ -178,7 +223,7 @@ fn prepare_format(
         mtime: 1_785_253_671_659,
         mtime_nanos: 1_785_253_671_659_123_456,
     };
-    let preparation = prepare_source_buffer(&descriptor, bytes).expect("prepare golden source");
+    let preparation = prepare_source_buffer(&descriptor, &bytes).expect("prepare golden source");
     Fixture {
         file_name,
         preparation,
@@ -543,6 +588,17 @@ fn assert_adversarial_shape(fixture: &Fixture) {
                 first_edge.get("id"),
                 Some(&PropertyValue::String("aaaaaaaaaaaaaaaa".to_owned()))
             );
+        }
+        name if name.starts_with("format-matrix-") => {
+            assert_eq!(
+                fixture.preparation.schema_version,
+                kwiry_core::SOURCE_PREPARATION_SCHEMA_VERSION
+            );
+            assert_eq!(
+                fixture.preparation.coverage,
+                kwiry_core::ExtractionCoverage::IndexedComplete
+            );
+            assert!(!fixture.preparation.chunks.is_empty());
         }
         _ => unreachable!("every fixture has an adversarial shape assertion"),
     }

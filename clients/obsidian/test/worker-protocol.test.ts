@@ -23,6 +23,7 @@ import {
   emptySourceFormatCounts,
   emptySourceFormatTally,
   type SourceInput,
+  isInitializeResult,
   isWorkerLexicalExecution,
   isWorkerResponse,
   parseWorkerRequest,
@@ -222,6 +223,22 @@ describe("Worker protocol", () => {
       "excel",
       "html",
     ]);
+  });
+
+  it("accepts only the fresh Rust query, FTS5 plan, and lexical rank identities", () => {
+    const fresh = {
+      rustAbiVersion: 3,
+      sourceSchemaVersion: 10,
+      querySchemaVersion: 12,
+      matchPlanSchemaVersion: 11,
+      rankSchemaVersion: 2,
+      sqliteVersion: "3.53.0",
+      fts5Enabled: 1,
+    };
+    expect(isInitializeResult(fresh)).toBe(true);
+    expect(isInitializeResult({ ...fresh, querySchemaVersion: 11 })).toBe(false);
+    expect(isInitializeResult({ ...fresh, matchPlanSchemaVersion: 10 })).toBe(false);
+    expect(isInitializeResult({ ...fresh, rankSchemaVersion: 1 })).toBe(false);
   });
 
   it("requires initialize to declare a sorted, duplicate-free enabled format set", () => {

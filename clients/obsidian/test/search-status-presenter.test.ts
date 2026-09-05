@@ -9,6 +9,7 @@ import {
   presentQueryStatus,
   type QueryStatusFacts,
 } from "../src/search-status-presenter";
+import { emptySourceFormatCounts } from "../src/worker/protocol";
 
 function window(state: CandidateWindowFacts["state"]): CandidateWindowFacts {
   return {
@@ -404,16 +405,21 @@ describe("presentBackgroundIndex", () => {
     expect(oneDigit.length).toBe(twoDigits.length);
   });
 
-  it("keeps aggregate omissions visible without exposing paths", () => {
+  it("calls non-Markdown aggregate omissions sources without exposing paths", () => {
+    const counts = emptySourceFormatCounts();
+    counts.pdf.quarantined = 1;
+    counts.excel.unreadable = 2;
     const presentation = presentBackgroundIndex(status({
       phase: "degraded",
+      sourceFormatCounts: counts,
       quarantinedSources: 1,
       unreadableSources: 2,
     }));
     expect(presentation).toEqual({
       state: "attention",
-      text: "Index · 3 notes may be missing from search (1 quarantined, 2 unreadable)",
+      text: "Index · 3 sources may be missing from search (1 quarantined, 2 unreadable)",
     });
+    expect(presentation.text).not.toContain("notes");
     expect(presentation.text).not.toContain("/");
   });
 });

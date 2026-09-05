@@ -1,0 +1,47 @@
+{
+  "schema_version": 10,
+  "source_key": "003e4941b86bf373c4b606fa327e16c99790537935422d2bf4c746d1ca8b5c5f",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/birchstone-deltafield.txt",
+  "format": "text",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "0996f8c8cb9aedb8c9d7d33d734f12716aad44e58d1e91fbfd236ca6e9bcf763",
+  "byte_length": 33,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "birchstone-deltafield.txt",
+    "stem": "birchstone-deltafield",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "birchstone-deltafield.txt",
+    "stem": "birchstone-deltafield",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {},
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "cc2922080765a57e146242de9a0cd152e377eb000464b82384f6197bf2cfc4ce",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/birchstone-deltafield.txt",
+        "heading_path": [],
+        "content": "Compact neutral plain-text body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "0996f8c8cb9aedb8c9d7d33d734f12716aad44e58d1e91fbfd236ca6e9bcf763",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

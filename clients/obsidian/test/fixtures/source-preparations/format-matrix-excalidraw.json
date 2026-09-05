@@ -1,0 +1,83 @@
+{
+  "schema_version": 10,
+  "source_key": "6728b9843a16f31e4cccd835c459e79d5214b4cec64031dbfd0651d798f9b9fd",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/lakewood-maplefield.excalidraw",
+  "format": "excalidraw",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "60ec427da7350d0353f6105670763c784766744fd482e2467285d7c48fb798b0",
+  "byte_length": 196,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "lakewood-maplefield.excalidraw",
+    "stem": "lakewood-maplefield",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "lakewood-maplefield.excalidraw",
+    "stem": "lakewood-maplefield",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {
+    "excalidraw": {
+      "type": "map",
+      "value": {
+        "appState": {
+          "type": "map",
+          "value": {}
+        },
+        "elements": {
+          "type": "sequence",
+          "value": [
+            {
+              "type": "map",
+              "value": {
+                "id": {
+                  "type": "string",
+                  "value": "text00000000001"
+                },
+                "type": {
+                  "type": "string",
+                  "value": "text"
+                }
+              }
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "value": "excalidraw"
+        },
+        "version": {
+          "type": "i64",
+          "value": "2"
+        }
+      }
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "22895f7ed76be0e984571a88b56af3ac44cb78bc1cf779d4ed22b1f452166d0c",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/lakewood-maplefield.excalidraw",
+        "heading_path": [],
+        "content": "Compact neutral drawing body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "60ec427da7350d0353f6105670763c784766744fd482e2467285d7c48fb798b0",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

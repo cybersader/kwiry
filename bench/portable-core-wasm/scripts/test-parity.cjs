@@ -152,7 +152,7 @@ assert.equal(get("invalid-relative-path").status, "error");
 assert.equal(get("oversized-source").preparation.kind, "skipped");
 assert.equal(get("underreported-source-length").status, "error");
 assert.equal(get("overreported-source-length").status, "error");
-assert.equal(get("ordinary-query").plan.schema_version, 11);
+assert.equal(get("ordinary-query").plan.schema_version, 12);
 assert.equal(get("metadata-probe-unmatched").plan.kind, "ordinary");
 assert.equal(get("metadata-probe-unmatched").plan.match_operator, "any");
 assert.equal(get("metadata-probe-matched").plan.kind, "identifier");
@@ -165,6 +165,16 @@ assert.equal(get("explicit-query").plan.match_operator, "explicit");
 assert.deepEqual(get("explicit-query").plan.terms, []);
 assert.match(get("sql-looking-query").plan.query, /DROP TABLE/);
 assert.equal(get("empty-query").status, "error");
+assert.deepEqual(
+  get("rank-schema-two-standard-first").ranked.map((entry) => entry.candidate.path),
+  ["standard.md", "partial.md"],
+);
+assert.deepEqual(
+  get("rank-schema-two-standard-first").ranked.map((entry) => entry.selected_proof.kind),
+  ["cross_field_all_terms", "partial_coverage"],
+);
+assert.equal(get("rank-schema-one-rejected").status, "error");
+assert.equal(get("rank-schema-one-rejected").code, "invalid_rerank_input");
 assert.equal(get("portable-api-request").request.mode, "lexical");
 assert.equal(get("portable-api-request").request.filters.vault_id, "fixture");
 const zeroCoverageCounts = {
@@ -199,7 +209,7 @@ assert.equal(
   typeof get("markdown-frontmatter-links-identifiers").preparation.mtime_nanos,
   "string",
 );
-assert.equal(cases.size, 27);
+assert.equal(cases.size, 29);
 
 process.stdout.write(JSON.stringify({
   status: "pass",

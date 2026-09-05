@@ -168,7 +168,7 @@ describe("formatStatus", () => {
       sourceFormatCounts: counts,
       quarantinedSources: 1,
       unreadableSources: 1,
-    })).toBe("Kwiry: Ready · 3 sources partial · 2 sources incomplete");
+    })).toBe("Kwiry: Ready · 3 partial-extraction sources · 2 sources incomplete");
   });
 
   it("never exposes old profile, question-mark, or verbose issue copy", () => {

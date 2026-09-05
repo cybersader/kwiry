@@ -127,7 +127,7 @@ describe("progressLine", () => {
       unreadableSources: 1,
       quarantineValidatorFields: ["chunks_contents"],
     })).toBe(
-      "3 notes may be missing from search (2 quarantined, 1 unreadable)",
+      "3 sources may be missing from search (2 quarantined, 1 unreadable)",
     );
   });
 
@@ -138,7 +138,7 @@ describe("progressLine", () => {
       unreadableSources: 0,
       quarantineValidatorFields: ["mtime_nanos"],
     })).toBe(
-      "Reading 7/10 (70%) · 02 in flight · 1 note may be missing from search (1 quarantined)",
+      "Reading 7/10 (70%) · 02 in flight · 1 source may be missing from search (1 quarantined)",
     );
   });
 });

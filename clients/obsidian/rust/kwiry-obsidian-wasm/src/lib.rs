@@ -14,15 +14,15 @@ use kwiry_core::{
 };
 use kwiry_core::{
     CHUNKING_VERSION, FORMAT_IDENTITY_SCHEMA_VERSION, LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
-    LexicalQueryPlan, LexicalV2Proof, LexicalV2ProofField, LexicalV2ProofKind, LexicalV2RankInput,
-    MAX_FILE_BYTES, QueryAssistanceEligibility, QueryEvidenceReport, QueryEvidenceStage,
-    QueryEvidenceStageCondition, QueryEvidenceStageKind, QueryExecutionDisposition, QueryField,
-    QueryFieldGroup, QueryMatchOperator, QueryPlanKind, QueryPublicField, QueryTermProjection,
-    QueryTermRole, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor, SourcePreparation,
-    active_extraction_policy, active_format_identities, extraction_policy_fingerprint,
-    lexical_v2_evidence_points, normalize_lexical_value, prepare_lexical_query,
-    prepare_oversized_source as prepare_oversized_source_descriptor, prepare_source_buffer,
-    rank_lexical_v2,
+    LEXICAL_V2_RANK_SCHEMA_VERSION, LexicalQueryPlan, LexicalV2Proof, LexicalV2ProofField,
+    LexicalV2ProofKind, LexicalV2RankInput, MAX_FILE_BYTES, QueryAssistanceEligibility,
+    QueryEvidenceReport, QueryEvidenceStage, QueryEvidenceStageCondition, QueryEvidenceStageKind,
+    QueryExecutionDisposition, QueryField, QueryFieldGroup, QueryMatchOperator, QueryPlanKind,
+    QueryPublicField, QueryTermProjection, QueryTermRole, SOURCE_PREPARATION_SCHEMA_VERSION,
+    SourceDescriptor, SourcePreparation, active_extraction_policy, active_format_identities,
+    extraction_policy_fingerprint, lexical_v2_evidence_points, normalize_lexical_value,
+    prepare_lexical_query, prepare_oversized_source as prepare_oversized_source_descriptor,
+    prepare_source_buffer, rank_lexical_v2,
 };
 #[cfg(feature = "internal-docx-extractor")]
 use kwiry_core::{ExtractionScope, extract_candidate_outcome};
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 pub const ADAPTER_ABI_VERSION: u32 = 3;
-pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 10;
+pub const FTS5_MATCH_PLAN_SCHEMA_VERSION: u32 = 11;
 pub const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_LEXICAL_V2_RANK_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "internal-d5c-preview")]
@@ -103,6 +103,7 @@ pub struct AbiIdentity {
     pub section_link_formats: std::collections::BTreeMap<kwiry_core::SourceFormat, bool>,
     pub lexical_query_plan_schema_version: u32,
     pub fts5_match_plan_schema_version: u32,
+    pub lexical_v2_rank_schema_version: u32,
     /// The chunker the adapter will actually apply. Chunk rows carry it too,
     /// but a generation with no chunks still has to be able to name the
     /// chunking contract its cached image was produced under.
@@ -139,6 +140,9 @@ pub enum Fts5EvidenceProbePlan {
         #[serde(skip_serializing_if = "Option::is_none")]
         exact_identifier: Option<String>,
         prefix_pattern: Option<String>,
+        /// The Rust-declared FTS vocabulary columns the prefix pattern may scan.
+        /// This is empty when no prefix pattern is declared.
+        prefix_fields: Vec<QueryField>,
         /// The analyzed stem the pattern expands, sent verbatim so the host
         /// can tell a genuine completion from the stem repeating itself
         /// without having to unescape the LIKE pattern.
@@ -495,6 +499,7 @@ pub fn abi_identity() -> String {
             .collect(),
         lexical_query_plan_schema_version: LEXICAL_QUERY_PLAN_SCHEMA_VERSION,
         fts5_match_plan_schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
+        lexical_v2_rank_schema_version: LEXICAL_V2_RANK_SCHEMA_VERSION,
         chunking_version: CHUNKING_VERSION,
         max_request_bytes: MAX_ADAPTER_REQUEST_BYTES,
         max_source_buffer_bytes: MAX_SOURCE_BUFFER_BYTES,
@@ -1112,6 +1117,10 @@ fn evidence_probe_plans(
             && probe_index < plan.bounds.max_prefix_terms)
             .then(|| prefix_pattern(&probe.term, plan.bounds.min_prefix_chars))
             .flatten();
+        let prefix_fields = prefix_pattern
+            .as_ref()
+            .map(|_| plan.field_groups.prefix.clone())
+            .unwrap_or_default();
         probes.push(Fts5EvidenceProbePlan::TermSupportV3 {
             schema_version: FTS5_MATCH_PLAN_SCHEMA_VERSION,
             probe_id: probe.probe_id,
@@ -1120,6 +1129,7 @@ fn evidence_probe_plans(
             exact_identifier,
             prefix_stem: prefix_pattern.as_ref().map(|_| probe.term.clone()),
             prefix_pattern,
+            prefix_fields,
             max_prefix_expansions: plan.bounds.max_prefix_expansions_per_term,
             max_prefix_expansion_scan: plan.bounds.max_prefix_expansion_scan,
             max_prefix_term_bytes: MAX_PREFIX_TERM_BYTES,
@@ -1330,8 +1340,13 @@ fn fts5_lexical_v2_lanes(
             engine_score: 0.0,
             engine_ordinal: 0,
         };
-        lexical_v2_evidence_points(&right_proof, plan.emphasis)
-            .cmp(&lexical_v2_evidence_points(&left_proof, plan.emphasis))
+        left.proof_kind
+            .is_partial()
+            .cmp(&right.proof_kind.is_partial())
+            .then_with(|| {
+                lexical_v2_evidence_points(&right_proof, plan.emphasis)
+                    .cmp(&lexical_v2_evidence_points(&left_proof, plan.emphasis))
+            })
             .then_with(|| left_stage.cmp(right_stage))
             .then_with(|| left.proof_field.cmp(&right.proof_field))
     });
@@ -1380,16 +1395,16 @@ fn fts5_stage_plan(
         ),
         QueryEvidenceStageKind::PartialCoverage => (
             Fts5StagePlanId::LexicalPartialCoverageV3,
-            scoped_optional_analyzed_terms(
-                plan,
-                stage.field_group,
-                &stage.required_term_indexes,
-                if stage.minimum_optional_matches > 0 {
-                    "OR"
-                } else {
-                    "AND"
-                },
-            )?,
+            if stage.minimum_optional_matches > 0 {
+                Some(scoped_partial_terms(plan, stage, prefix_expansions)?)
+            } else {
+                scoped_optional_analyzed_terms(
+                    plan,
+                    stage.field_group,
+                    &stage.required_term_indexes,
+                    "AND",
+                )?
+            },
             None,
         ),
         QueryEvidenceStageKind::PrefixMetadata => (
@@ -1561,6 +1576,81 @@ fn scoped_optional_analyzed_terms(
         "{{{fields}}} : ({})",
         match_terms(&terms, operator)?
     )))
+}
+
+/// Builds the conditional exploratory MATCH value without inventing any new
+/// term combinations. Analyzed identifier anchors remain mandatory, useful
+/// non-prefix optional terms are individual alternatives, and every bounded
+/// prefix expansion set is one alternative group. Exact-identifier anchors
+/// stay outside this value in `required_identifiers`.
+fn scoped_partial_terms(
+    plan: &LexicalQueryPlan,
+    stage: &QueryEvidenceStage,
+    expansions: &BTreeMap<u16, Vec<String>>,
+) -> Result<String, AdapterError> {
+    let mut mandatory = Vec::new();
+    let mut optional = Vec::new();
+    for index in &stage.required_term_indexes {
+        let intent = plan.term_intents.get(*index as usize).ok_or_else(|| {
+            adapter_error("invalid_query_plan", "Unknown partial-coverage term index.")
+        })?;
+        if intent.projection != QueryTermProjection::AnalyzedText {
+            continue;
+        }
+        let clause = quote_fts_phrase(&intent.text);
+        if intent.role == QueryTermRole::RequiredIdentifierAnchor {
+            mandatory.push(clause);
+        } else {
+            optional.push(clause);
+        }
+    }
+    for index in &stage.prefix_term_indexes {
+        let intent = plan.term_intents.get(*index as usize).ok_or_else(|| {
+            adapter_error("invalid_query_plan", "Unknown partial prefix term index.")
+        })?;
+        if intent.role != QueryTermRole::OptionalContext
+            || intent.projection != QueryTermProjection::AnalyzedText
+        {
+            return Err(adapter_error(
+                "invalid_query_plan",
+                "Partial prefix term is not expandable optional context.",
+            ));
+        }
+        let values = expansions.get(index).ok_or_else(|| {
+            adapter_error(
+                "invalid_query_plan",
+                "Partial stage has no bounded expansions.",
+            )
+        })?;
+        if values.is_empty() || values.len() > plan.bounds.max_prefix_expansions_per_term {
+            return Err(adapter_error(
+                "invalid_query_plan",
+                "Partial stage expansion set is invalid.",
+            ));
+        }
+        optional.push(format!(
+            "({})",
+            values
+                .iter()
+                .map(|value| quote_fts_phrase(value))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        ));
+    }
+    if optional.is_empty() {
+        return Err(adapter_error(
+            "invalid_query_plan",
+            "Exploratory partial stage has no optional alternatives.",
+        ));
+    }
+    let expression = if mandatory.is_empty() {
+        optional.join(" OR ")
+    } else {
+        mandatory.push(format!("({})", optional.join(" OR ")));
+        mandatory.join(" AND ")
+    };
+    let fields = fts5_fields(plan, stage.field_group)?;
+    Ok(format!("{{{fields}}} : ({expression})"))
 }
 
 fn exact_identifier_requirements(plan: &LexicalQueryPlan) -> Vec<String> {
@@ -2055,13 +2145,17 @@ mod tests {
             identity["fts5_match_plan_schema_version"],
             FTS5_MATCH_PLAN_SCHEMA_VERSION
         );
+        assert_eq!(
+            identity["lexical_v2_rank_schema_version"],
+            LEXICAL_V2_RANK_SCHEMA_VERSION
+        );
     }
 
     #[test]
     fn lexical_v2_rank_operation_applies_shared_field_evidence_and_emphasis() {
         let input = |emphasis: Option<&str>| {
             let mut input = serde_json::json!({
-                "schema_version": 1,
+                "schema_version": LEXICAL_V2_RANK_SCHEMA_VERSION,
                 "profile_id": "lexical-v2",
                 "lane_count": 2,
                 "candidates": [{
@@ -2107,6 +2201,12 @@ mod tests {
             })
             .to_string()
         };
+
+        let mut stale = input(None);
+        stale["schema_version"] = serde_json::json!(1);
+        let stale = response(finalize_lexical_v2_rank(&request(stale)));
+        assert_eq!(stale["status"], "error");
+        assert_eq!(stale["error"]["code"], "invalid_rerank_input");
 
         let default = response(finalize_lexical_v2_rank(&request(input(None))));
         assert_eq!(default["status"], "ok");
@@ -2185,7 +2285,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            4
+            5
         );
 
         let source_a = serde_json::json!({
@@ -2317,7 +2417,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            4
+            5
         );
     }
 
@@ -2452,7 +2552,7 @@ mod tests {
         let mixed = response(finalize_query(&finalize_request(
             "orchard adop",
             None,
-            &[1, 0],
+            &[1, 1],
             &[vec![], vec!["adoption"]],
         )));
         assert_eq!(
@@ -2487,6 +2587,8 @@ mod tests {
         assert!(mixed_stages.iter().any(|stage| {
             stage["plan_id"] == "lexical_partial_coverage_v3"
                 && stage["proof_field"] == "cross_field"
+                && stage["match_value"]
+                    == "{filename stem aliases title heading_text tags content} : (\"orchard\" OR (\"adoption\"))"
         }));
 
         let identifier = response(finalize_query(&finalize_request(
@@ -2554,6 +2656,97 @@ mod tests {
             } else {
                 stage["condition"] == "always"
             }
+        }));
+    }
+
+    #[test]
+    fn emphasized_execution_keeps_every_standard_lane_before_partial_lanes() {
+        let finalized = response(finalize_query(&finalize_request(
+            ">title amber cedar marker",
+            None,
+            &[1, 1, 1],
+            &[vec![], vec![], vec![]],
+        )));
+        assert_eq!(finalized["status"], "ok");
+        let lanes = finalized["result"]["execution_plan"]["stages"]
+            .as_array()
+            .expect("execution lanes");
+        let first_partial = lanes
+            .iter()
+            .position(|stage| stage["plan_id"] == "lexical_partial_coverage_v3")
+            .expect("partial lane");
+        assert!(
+            lanes[..first_partial]
+                .iter()
+                .all(|stage| stage["plan_id"] != "lexical_partial_coverage_v3")
+        );
+        assert!(
+            lanes[first_partial..]
+                .iter()
+                .all(|stage| stage["plan_id"] == "lexical_partial_coverage_v3")
+        );
+        let cross_field_standard = lanes
+            .iter()
+            .position(|stage| {
+                stage["plan_id"] == "lexical_all_terms_v3" && stage["proof_field"] == "cross_field"
+            })
+            .expect("cross-field standard lane");
+        let emphasized_partial = lanes
+            .iter()
+            .position(|stage| {
+                stage["plan_id"] == "lexical_partial_coverage_v3" && stage["proof_field"] == "title"
+            })
+            .expect("emphasized partial lane");
+        assert!(cross_field_standard < emphasized_partial);
+    }
+
+    #[test]
+    fn body_scoped_prefix_probes_declare_only_the_body_vocabulary_field() {
+        let prepared = response(prepare_query(&query_request("in:body ember cobalt marker")));
+        assert_eq!(prepared["status"], "ok");
+        let probes = prepared["result"]["probes"]
+            .as_array()
+            .expect("evidence probes");
+        assert!(!probes.is_empty());
+        assert!(probes.iter().all(|probe| {
+            probe["plan_id"] == "term_support_v3"
+                && probe["prefix_pattern"].is_string()
+                && probe["prefix_fields"] == serde_json::json!(["content"])
+        }));
+    }
+
+    #[test]
+    fn prefix_aware_partial_match_keeps_analyzed_anchors_mandatory() {
+        let finalized = response(finalize_query(&finalize_request(
+            "ZORB 2 amber cobalt",
+            None,
+            &[1, 1, 1, 1],
+            &[vec![], vec![], vec![], vec!["cobaltite"]],
+        )));
+        assert_eq!(finalized["status"], "ok");
+        let partial = finalized["result"]["plan"]["evidence_stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["kind"] == "partial_coverage")
+            .expect("partial stage");
+        assert_eq!(
+            partial["required_term_indexes"],
+            serde_json::json!([0, 1, 2])
+        );
+        assert_eq!(partial["prefix_term_indexes"], serde_json::json!([3]));
+        assert_eq!(
+            partial["condition"],
+            "if_fewer_than_minimum_standard_sources"
+        );
+        let lanes = finalized["result"]["execution_plan"]["stages"]
+            .as_array()
+            .expect("execution lanes");
+        assert!(lanes.iter().any(|stage| {
+            stage["plan_id"] == "lexical_partial_coverage_v3"
+                && stage["proof_field"] == "title"
+                && stage["match_value"]
+                    == "{title} : (\"zorb\" AND \"2\" AND (\"amber\" OR (\"cobaltite\")))"
         }));
     }
 
@@ -2631,6 +2824,11 @@ mod tests {
                 .iter()
                 .any(|stage| stage["plan_id"] == "lexical_all_terms_v3")
         );
+        assert!(
+            stages
+                .iter()
+                .all(|stage| stage["plan_id"] != "lexical_partial_coverage_v3")
+        );
 
         let prepared = response(prepare_query(&query_request(
             "aaa bbb ccc ddd eee fff ggg hhh iii",
@@ -2642,7 +2840,17 @@ mod tests {
             256
         );
         assert!(prepared["result"]["probes"][7]["prefix_pattern"].is_string());
+        assert_eq!(
+            prepared["result"]["probes"][7]["prefix_fields"],
+            serde_json::json!([
+                "filename", "stem", "aliases", "title", "heading", "tags", "content"
+            ])
+        );
         assert!(prepared["result"]["probes"][8]["prefix_pattern"].is_null());
+        assert_eq!(
+            prepared["result"]["probes"][8]["prefix_fields"],
+            serde_json::json!([])
+        );
 
         let oversized = format!("quasar{}", "x".repeat(MAX_PREFIX_TERM_BYTES));
         let rejected = response(finalize_query(&finalize_request(
@@ -2762,6 +2970,7 @@ mod tests {
             assert_eq!(probe["exact_identifier"], identifier, "{query}");
             assert!(probe.get("match_value").is_none(), "{query}");
             assert!(probe["prefix_pattern"].is_null(), "{query}");
+            assert_eq!(probe["prefix_fields"], serde_json::json!([]), "{query}");
 
             let finalized = response(finalize_query(&finalize_request(
                 query,
