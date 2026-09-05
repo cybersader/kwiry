@@ -25,6 +25,16 @@ const expectedFixtureNames = [
   "14-property-key-and-scalar-edges.json",
   "15-base-project-dashboard.json",
   "16-canvas-research-board.json",
+  "format-matrix-base.json",
+  "format-matrix-canvas.json",
+  "format-matrix-docx.json",
+  "format-matrix-excalidraw.json",
+  "format-matrix-excel.json",
+  "format-matrix-html.json",
+  "format-matrix-markdown.json",
+  "format-matrix-pdf.json",
+  "format-matrix-standard.json",
+  "format-matrix-text.json",
 ] as const;
 
 const fixtureDirectory = fileURLToPath(

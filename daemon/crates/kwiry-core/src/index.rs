@@ -1459,7 +1459,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(configuration.len(), 1);
+        // Outcome-gated partial coverage can add another view from this source,
+        // but the complete configuration match must remain first.
+        assert!(!configuration.is_empty());
         assert_eq!(configuration[0].format, SourceFormat::Base);
         assert_eq!(configuration[0].locator, None);
     }

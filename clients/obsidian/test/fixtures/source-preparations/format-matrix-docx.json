@@ -1,0 +1,47 @@
+{
+  "schema_version": 10,
+  "source_key": "1014d252dd55fc7c258fa472977be1689ef6fe49855e9a02a948333e8c4be8c4",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/harborstone-islandway.docx",
+  "format": "docx",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "d14cad761bbb2590e4a0b61e37dd14a356464a75e88eed54391d23108602edf2",
+  "byte_length": 982,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "harborstone-islandway.docx",
+    "stem": "harborstone-islandway",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "harborstone-islandway.docx",
+    "stem": "harborstone-islandway",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {},
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "bc4bde865175ec1c15cb9b5c5178629200e5fb86c8abe56e27806b71d3045cc0",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/harborstone-islandway.docx",
+        "heading_path": [],
+        "content": "Compact neutral document body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "d14cad761bbb2590e4a0b61e37dd14a356464a75e88eed54391d23108602edf2",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

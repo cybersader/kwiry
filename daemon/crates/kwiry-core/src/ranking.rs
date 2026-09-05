@@ -27,7 +27,7 @@ pub const MAX_RERANK_CANDIDATES: usize = crate::query::MAX_TOTAL_CANDIDATES;
 pub const MAX_RERANK_SOURCE_OBSERVATIONS: usize = MAX_RERANK_CANDIDATES;
 pub const MAX_PROPERTY_VALUES_PER_SOURCE_OBSERVATION: usize = 256;
 pub const MAX_RANKING_WORK_UNITS: usize = 65_536;
-pub const LEXICAL_V2_RANK_SCHEMA_VERSION: u32 = 1;
+pub const LEXICAL_V2_RANK_SCHEMA_VERSION: u32 = 2;
 pub const MAX_LEXICAL_V2_PROOFS_PER_CANDIDATE: usize = 32;
 pub const MAX_LEXICAL_V2_LANES: usize = 42;
 pub const LEXICAL_V2_EMPHASIS_POINTS: i32 = 10;
@@ -343,6 +343,10 @@ pub enum LexicalV2ProofKind {
 }
 
 impl LexicalV2ProofKind {
+    pub fn is_partial(self) -> bool {
+        self == Self::PartialCoverage
+    }
+
     fn points(self) -> i32 {
         match self {
             Self::Exact => 60,
@@ -441,9 +445,11 @@ pub fn rank_lexical_v2(
         });
     }
     ranked.sort_by(|left, right| {
-        right
-            .evidence_points
-            .cmp(&left.evidence_points)
+        left.selected_proof
+            .kind
+            .is_partial()
+            .cmp(&right.selected_proof.kind.is_partial())
+            .then_with(|| right.evidence_points.cmp(&left.evidence_points))
             .then_with(|| left.selected_proof.kind.cmp(&right.selected_proof.kind))
             .then_with(|| left.selected_proof.field.cmp(&right.selected_proof.field))
             .then_with(|| {
@@ -538,8 +544,13 @@ fn compare_lexical_v2_proofs(
     right: &LexicalV2Proof,
     emphasis: Option<QueryPublicField>,
 ) -> Ordering {
-    lexical_v2_evidence_points(right, emphasis)
-        .cmp(&lexical_v2_evidence_points(left, emphasis))
+    left.kind
+        .is_partial()
+        .cmp(&right.kind.is_partial())
+        .then_with(|| {
+            lexical_v2_evidence_points(right, emphasis)
+                .cmp(&lexical_v2_evidence_points(left, emphasis))
+        })
         .then_with(|| left.kind.cmp(&right.kind))
         .then_with(|| left.field.cmp(&right.field))
         .then_with(|| {
@@ -1777,6 +1788,72 @@ mod tests {
     }
 
     #[test]
+    fn standard_proofs_remain_above_emphasized_partial_proofs() {
+        let mut mixed = lexical_v2_candidate(
+            "mixed",
+            "mixed.md",
+            LexicalV2ProofField::CrossField,
+            LexicalV2ProofKind::CrossFieldAllTerms,
+            0,
+            1.0,
+        );
+        mixed.proofs.push(LexicalV2Proof {
+            field: LexicalV2ProofField::Title,
+            kind: LexicalV2ProofKind::PartialCoverage,
+            lane_ordinal: 1,
+            engine_score: 9.0,
+            engine_ordinal: 0,
+        });
+        let input = LexicalV2RankInput {
+            schema_version: LEXICAL_V2_RANK_SCHEMA_VERSION,
+            profile_id: LEXICAL_V2_PROFILE_ID.to_owned(),
+            lane_count: 2,
+            emphasis: Some(QueryPublicField::Title),
+            candidates: vec![
+                lexical_v2_candidate(
+                    "partial",
+                    "partial.md",
+                    LexicalV2ProofField::Title,
+                    LexicalV2ProofKind::PartialCoverage,
+                    1,
+                    9.0,
+                ),
+                lexical_v2_candidate(
+                    "standard",
+                    "standard.md",
+                    LexicalV2ProofField::CrossField,
+                    LexicalV2ProofKind::CrossFieldAllTerms,
+                    0,
+                    1.0,
+                ),
+                mixed,
+            ],
+        };
+
+        let ranked = rank_lexical_v2(&input).unwrap();
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|entry| entry.candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            ["mixed.md", "standard.md", "partial.md"]
+        );
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|entry| entry.selected_proof.kind)
+                .collect::<Vec<_>>(),
+            [
+                LexicalV2ProofKind::CrossFieldAllTerms,
+                LexicalV2ProofKind::CrossFieldAllTerms,
+                LexicalV2ProofKind::PartialCoverage,
+            ]
+        );
+        assert_eq!(ranked[0].evidence_points, 25);
+        assert_eq!(ranked[2].evidence_points, 35);
+    }
+
+    #[test]
     fn lexical_v2_rank_input_fails_closed_on_bounds_and_duplicate_identity() {
         let candidate = lexical_v2_candidate(
             "one",
@@ -1786,6 +1863,18 @@ mod tests {
             0,
             1.0,
         );
+        let stale = LexicalV2RankInput {
+            schema_version: 1,
+            profile_id: LEXICAL_V2_PROFILE_ID.to_owned(),
+            lane_count: 1,
+            emphasis: None,
+            candidates: vec![candidate.clone()],
+        };
+        assert_eq!(
+            rank_lexical_v2(&stale).unwrap_err().code,
+            "invalid_rerank_input"
+        );
+
         let duplicate = LexicalV2RankInput {
             schema_version: LEXICAL_V2_RANK_SCHEMA_VERSION,
             profile_id: LEXICAL_V2_PROFILE_ID.to_owned(),

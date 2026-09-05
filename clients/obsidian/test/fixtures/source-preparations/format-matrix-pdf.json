@@ -1,0 +1,51 @@
+{
+  "schema_version": 10,
+  "source_key": "5f3b0b37cc06bb4a34aacd208a916cfcc20e299c7564aac052001db1e62646e9",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/juniperfield-kestrelway.pdf",
+  "format": "pdf",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "f071e8e9ed1949736f3dc33e7435e76386802df6ee300a9e5da07d26d1f77f15",
+  "byte_length": 641,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "juniperfield-kestrelway.pdf",
+    "stem": "juniperfield-kestrelway",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "juniperfield-kestrelway.pdf",
+    "stem": "juniperfield-kestrelway",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {},
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "04e2213e1eeff746faee4ca79c7cd9eba7174a0726d51e3fe57b18afd0c32774",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/juniperfield-kestrelway.pdf",
+        "heading_path": [],
+        "content": "Compact neutral PDF body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "f071e8e9ed1949736f3dc33e7435e76386802df6ee300a9e5da07d26d1f77f15",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": [],
+      "source_locator": {
+        "kind": "pdf_page",
+        "page": 1
+      }
+    }
+  ],
+  "kind": "indexed"
+}

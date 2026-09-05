@@ -73,13 +73,19 @@ describe("fixed FTS5 query binder", () => {
   });
 
   it("uses separate fixed support and bounded prefix statements", () => {
+    expect(() => bindEvidenceProbe({
+      schema_version: 10 as 11,
+      plan_id: "identifier_metadata_v3",
+      match_value: "{title} : \"query\"",
+    })).toThrow(QueryPlanRejectedError);
     const bound = bindEvidenceProbe({
-      schema_version: 10,
+      schema_version: 11,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
       match_value: "{title} : \"query\"",
       prefix_pattern: "que%",
+      prefix_fields: ["title"],
       prefix_stem: "que",
       max_prefix_expansions: 16,
       max_prefix_expansion_scan: 256,
@@ -90,22 +96,44 @@ describe("fixed FTS5 query binder", () => {
     expect(bound.prefix?.sql).toContain("chunks_fts_vocab");
     // A bounded alphabetical scan window feeds the selection ordering, which
     // then keeps the expansion budget itself.
-    expect(bound.prefix?.bind).toEqual(["que%", 96, 256, 16]);
+    const unused = "__kwiry_unused_prefix_field__";
+    expect(bound.prefix?.bind).toEqual([
+      "title", unused, unused, unused, unused, unused, unused,
+      "que%", 96, 256, 16,
+    ]);
     expect(bound.prefix?.sql).toContain("in_metadata DESC");
     expect(bound.prefix?.sql).toContain("length(CAST(term AS blob)) ASC");
-    // The scanned columns match the native prefix field group, tags included.
+    expect(bound.prefix?.sql).toContain("WHERE col IN (?, ?, ?, ?, ?, ?, ?)");
     expect(bound.prefix?.sql)
-      .toContain("'filename', 'stem', 'aliases', 'title', 'heading_text', 'tags', 'content'");
+      .not.toContain("'filename', 'stem', 'aliases', 'title', 'heading_text', 'tags', 'content'");
+
+    const body = bindEvidenceProbe({
+      schema_version: 11,
+      plan_id: "term_support_v3",
+      probe_id: 1,
+      term_index: 1,
+      match_value: "{content} : \"ember\"",
+      prefix_pattern: "emb%",
+      prefix_fields: ["content"],
+      prefix_stem: "emb",
+      max_prefix_expansions: 16,
+      max_prefix_expansion_scan: 256,
+      max_prefix_term_bytes: 96,
+    });
+    expect(body.prefix?.bind.slice(0, 7)).toEqual([
+      "content", unused, unused, unused, unused, unused, unused,
+    ]);
   });
 
   it("binds encoded exact identifier probes and hard intersections through dedicated FTS", () => {
     const probe = bindEvidenceProbe({
-      schema_version: 10,
+      schema_version: 11,
       plan_id: "term_support_v3",
       probe_id: 0,
       term_index: 0,
       exact_identifier: "rfc 9110",
       prefix_pattern: null,
+      prefix_fields: [],
       prefix_stem: null,
       max_prefix_expansions: 16,
       max_prefix_expansion_scan: 256,
@@ -157,9 +185,17 @@ describe("fixed FTS5 query binder", () => {
     expect(identifierOnly.bind).toEqual([encodeExactIdentifierToken("rfc 9110"), 20]);
   });
 
-  it("rejects unknown plan identities, profiles, schemas, and invalid limits", () => {
+  it("accepts only the fresh execution schema and rejects invalid plan identities", () => {
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 2 as 10,
+      schema_version: 11,
+      profile_id: "lexical-v1",
+      disposition: "empty_no_evidence",
+      max_total_candidates: 512,
+      min_standard_sources: MIN_STANDARD_SOURCES,
+      stages: [],
+    })).not.toThrow();
+    expect(() => requireExecutionPlanIdentity({
+      schema_version: 10 as 11,
       profile_id: "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
@@ -167,7 +203,15 @@ describe("fixed FTS5 query binder", () => {
       stages: [],
     })).toThrow(QueryPlanRejectedError);
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 10,
+      schema_version: 2 as 11,
+      profile_id: "lexical-v1",
+      disposition: "empty_no_evidence",
+      max_total_candidates: 512,
+      min_standard_sources: MIN_STANDARD_SOURCES,
+      stages: [],
+    })).toThrow(QueryPlanRejectedError);
+    expect(() => requireExecutionPlanIdentity({
+      schema_version: 11,
       profile_id: "unknown" as "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,
@@ -178,7 +222,7 @@ describe("fixed FTS5 query binder", () => {
     // carrying any other value is a drifted adapter, not a TypeScript policy
     // choice, and must be rejected the same as a schema mismatch.
     expect(() => requireExecutionPlanIdentity({
-      schema_version: 10,
+      schema_version: 11,
       profile_id: "lexical-v1",
       disposition: "empty_no_evidence",
       max_total_candidates: 512,

@@ -1,0 +1,95 @@
+{
+  "schema_version": 10,
+  "source_key": "c90931060a9401ee9b89dd2780f97d21732fb74d7bc902569bd00b295368168d",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/forestline-gardenway.canvas",
+  "format": "canvas",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "e51b1a7c3d21150fae1710c865b8d6f3f94b374d0a8be0c58da4bd4955d7f5a3",
+  "byte_length": 137,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "forestline-gardenway.canvas",
+    "stem": "forestline-gardenway",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "forestline-gardenway.canvas",
+    "stem": "forestline-gardenway",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {
+    "canvas": {
+      "type": "map",
+      "value": {
+        "edges": {
+          "type": "sequence",
+          "value": []
+        },
+        "nodes": {
+          "type": "sequence",
+          "value": [
+            {
+              "type": "map",
+              "value": {
+                "height": {
+                  "type": "i64",
+                  "value": "180"
+                },
+                "id": {
+                  "type": "string",
+                  "value": "1111111111111111"
+                },
+                "text": {
+                  "type": "string",
+                  "value": "Compact neutral canvas body."
+                },
+                "type": {
+                  "type": "string",
+                  "value": "text"
+                },
+                "width": {
+                  "type": "i64",
+                  "value": "320"
+                },
+                "x": {
+                  "type": "i64",
+                  "value": "0"
+                },
+                "y": {
+                  "type": "i64",
+                  "value": "0"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "a2654391013121942520e6b4cddd7b2862683a4e409c29315c3490bf34ec6d5a",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/forestline-gardenway.canvas",
+        "heading_path": [],
+        "content": "Compact neutral canvas body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "e51b1a7c3d21150fae1710c865b8d6f3f94b374d0a8be0c58da4bd4955d7f5a3",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

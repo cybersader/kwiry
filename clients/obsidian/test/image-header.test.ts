@@ -8,6 +8,7 @@ import { openFts5Generation, type SQLiteApi } from "../src/worker/fts5-index";
 import { validateSQLiteImage } from "../src/worker/image-header";
 
 vi.mock("../src/worker/rust-adapter", () => ({
+  LEXICAL_V2_RANK_SCHEMA_VERSION: 2,
   finalizeLexicalV2RankWithRust: () => {
     throw new Error("image-header tests do not execute lexical ranking");
   },

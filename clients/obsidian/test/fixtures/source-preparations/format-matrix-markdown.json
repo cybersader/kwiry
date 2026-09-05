@@ -1,0 +1,49 @@
+{
+  "schema_version": 10,
+  "source_key": "fa373f8cd647d626cfaef4494897805b1579c27c5e3cdf9d97db79f7853fb034",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/amberfield-cedarway.md",
+  "format": "markdown",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "7cc612233deb88983d36263adc51d07ae004061500cc14e715ac3ff14f953af6",
+  "byte_length": 42,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "amberfield-cedarway.md",
+    "stem": "amberfield-cedarway",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "amberfield-cedarway.md",
+    "stem": "amberfield-cedarway",
+    "aliases": [],
+    "title": null
+  },
+  "frontmatter": {},
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "00a5ba63032b3310122db86e2e6550221fec6741c38f401a94115894775136f6",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/amberfield-cedarway.md",
+        "heading_path": [
+          "Fixture"
+        ],
+        "content": "# Fixture\n\nCompact neutral Markdown body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "7cc612233deb88983d36263adc51d07ae004061500cc14e715ac3ff14f953af6",
+        "chunking_version": 2
+      },
+      "heading_text": "Fixture",
+      "normalized_heading": "fixture",
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

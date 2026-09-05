@@ -270,6 +270,7 @@ describe("WorkerRpcClient", () => {
         sourceSchemaVersion: 2,
         querySchemaVersion: 3,
         matchPlanSchemaVersion: 2,
+        rankSchemaVersion: 1,
         sqliteVersion: "3.53.0",
         fts5Enabled: 1,
       },

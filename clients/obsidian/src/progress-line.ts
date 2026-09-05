@@ -26,10 +26,10 @@ function omissionLine(status: BackendStatus): string | null {
   const unreadable = status.unreadableSources ?? 0;
   const total = quarantined + unreadable;
   if (total === 0) return null;
-  const note = total === 1 ? "note may be" : "notes may be";
+  const source = total === 1 ? "source may be" : "sources may be";
   const kinds = [
     quarantined === 0 ? null : `${quarantined} quarantined`,
     unreadable === 0 ? null : `${unreadable} unreadable`,
   ].filter((kind): kind is string => kind !== null).join(", ");
-  return `${total} ${note} missing from search (${kinds})`;
+  return `${total} ${source} missing from search (${kinds})`;
 }

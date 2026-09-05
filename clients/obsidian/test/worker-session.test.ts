@@ -64,8 +64,9 @@ function resultFor(message: WorkerRequest): WorkerResult {
       return {
         rustAbiVersion: 3,
         sourceSchemaVersion: 10,
-        querySchemaVersion: 11,
-        matchPlanSchemaVersion: 10,
+        querySchemaVersion: 12,
+        matchPlanSchemaVersion: 11,
+        rankSchemaVersion: 2,
         sqliteVersion: "3.53.0",
         fts5Enabled: 1,
       };

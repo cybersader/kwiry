@@ -14,7 +14,9 @@ export function formatStatus(status: BackendStatus): string {
   const omitted = (status.quarantinedSources ?? 0) + (status.unreadableSources ?? 0);
   if (status.searchable) {
     const details: string[] = [];
-    if (partial > 0) details.push(`${partial} source${partial === 1 ? "" : "s"} partial`);
+    if (partial > 0) {
+      details.push(`${partial} partial-extraction source${partial === 1 ? "" : "s"}`);
+    }
     if (omitted > 0) details.push(`${omitted} source${omitted === 1 ? "" : "s"} incomplete`);
     if (details.length > 0) return `Kwiry: Ready · ${details.join(" · ")}`;
     return status.dirty ? "Kwiry: Ready · Updating" : "Kwiry: Ready";

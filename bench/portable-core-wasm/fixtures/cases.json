@@ -458,5 +458,79 @@
       "model": null,
       "vaults": []
     }
+  },
+  {
+    "operation": "rank_lexical_v2",
+    "name": "rank-schema-two-standard-first",
+    "input": {
+      "schema_version": 2,
+      "profile_id": "lexical-v2",
+      "lane_count": 2,
+      "emphasis": "title",
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "fixture",
+            "source_key": "partial"
+          },
+          "chunk_id": "partial-chunk",
+          "path": "partial.md",
+          "proofs": [
+            {
+              "field": "title",
+              "kind": "partial_coverage",
+              "lane_ordinal": 1,
+              "engine_score": 9.0,
+              "engine_ordinal": 0
+            }
+          ]
+        },
+        {
+          "source": {
+            "authorization_scope": "fixture",
+            "source_key": "standard"
+          },
+          "chunk_id": "standard-chunk",
+          "path": "standard.md",
+          "proofs": [
+            {
+              "field": "cross_field",
+              "kind": "cross_field_all_terms",
+              "lane_ordinal": 0,
+              "engine_score": 1.0,
+              "engine_ordinal": 0
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "operation": "rank_lexical_v2",
+    "name": "rank-schema-one-rejected",
+    "input": {
+      "schema_version": 1,
+      "profile_id": "lexical-v2",
+      "lane_count": 1,
+      "candidates": [
+        {
+          "source": {
+            "authorization_scope": "fixture",
+            "source_key": "stale"
+          },
+          "chunk_id": "stale-chunk",
+          "path": "stale.md",
+          "proofs": [
+            {
+              "field": "body",
+              "kind": "all_terms",
+              "lane_ordinal": 0,
+              "engine_score": 1.0,
+              "engine_ordinal": 0
+            }
+          ]
+        }
+      ]
+    }
   }
 ]

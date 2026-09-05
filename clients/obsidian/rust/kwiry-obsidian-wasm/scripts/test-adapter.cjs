@@ -89,6 +89,9 @@ const wasmOutput = cases.map((fixture) => {
     case "finalize_query":
       output = adapter.finalize_query(JSON.stringify(fixture.request));
       break;
+    case "finalize_lexical_v2_rank":
+      output = adapter.finalize_lexical_v2_rank(JSON.stringify(fixture.request));
+      break;
     default:
       throw new Error("unknown fixture operation");
   }
@@ -119,8 +122,9 @@ if (byName["abi-identity"].abi_version !== 3
   || byName["abi-identity"].extraction_policy.pdf !== "portable"
   || byName["abi-identity"].extraction_policy.html !== "portable"
   || byName["abi-identity"].format_identity_schema_version !== 1
-  || byName["abi-identity"].lexical_query_plan_schema_version !== 11
-  || byName["abi-identity"].fts5_match_plan_schema_version !== 10
+  || byName["abi-identity"].lexical_query_plan_schema_version !== 12
+  || byName["abi-identity"].fts5_match_plan_schema_version !== 11
+  || byName["abi-identity"].lexical_v2_rank_schema_version !== 2
   // Link behaviour is declared by the backend registry, so the shipped
   // artifact must carry it: a client that decides for itself silently refuses
   // every format admitted later.
@@ -168,6 +172,11 @@ if (byName["abi-identity"].abi_version !== 3
   || !byName["prefix-before-partial"].result.execution_plan.stages.some((stage) =>
     stage.plan_id === "lexical_prefix_v3"
       && stage.match_value === "{content} : (\"orchard\" AND (\"adoption\"))")
+  || !byName["prefix-before-partial"].result.execution_plan.stages.some((stage) =>
+    stage.plan_id === "lexical_partial_coverage_v3"
+      && stage.proof_field === "cross_field"
+      && stage.match_value
+        === "{filename stem aliases title heading_text tags content} : (\"orchard\" OR (\"adoption\"))")
   || byName["numeric-field-explicit"].result.plan.kind !== "explicit"
   || byName["natural-question"].result.plan.kind !== "ordinary"
   || byName["natural-parenthetical"].result.plan.kind !== "ordinary"
@@ -177,6 +186,11 @@ if (byName["abi-identity"].abi_version !== 3
   || byName["rfc-exact-identifier"].result.plan.terms[0] !== "rfc 9110"
   || byName["rfc-exact-identifier"].result.execution_plan.stages[0].required_identifiers[0]
     !== "rfc 9110"
+  || JSON.stringify(byName["rank-schema-two-standard-first"].result.ordered_candidate_ordinals)
+    !== JSON.stringify([1, 0])
+  || JSON.stringify(byName["rank-schema-two-standard-first"].result.selected_proof_kinds)
+    !== JSON.stringify(["cross_field_all_terms", "partial_coverage"])
+  || byName["rank-schema-one-rejected"].error.code !== "invalid_rerank_input"
   || byName["inert-sql-looking-query"].error.code !== "explicit_query_unsupported"
   || JSON.stringify(byName["inert-sql-looking-query"]).includes("DROP TABLE")
   || byName["invalid-source-envelope"].error.code !== "invalid_request"

@@ -254,6 +254,7 @@ async function initialize(
       sourceSchemaVersion: rustIdentity.source_preparation_schema_version,
       querySchemaVersion: rustIdentity.lexical_query_plan_schema_version,
       matchPlanSchemaVersion: rustIdentity.fts5_match_plan_schema_version,
+      rankSchemaVersion: rustIdentity.lexical_v2_rank_schema_version,
       sqliteVersion: "3.53.0",
       fts5Enabled: 1,
     };

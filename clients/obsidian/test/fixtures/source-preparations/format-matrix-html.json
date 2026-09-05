@@ -1,0 +1,50 @@
+{
+  "schema_version": 10,
+  "source_key": "af983098df71f9cab681080dd1335051704276d1a07cceb1ef3223f9df8c521d",
+  "vault_id": "golden-vault",
+  "room": "fixture-room",
+  "path": "Format Matrix/oakfield-pineway.html",
+  "format": "html",
+  "extraction_profile": "portable",
+  "coverage": "indexed-complete",
+  "content_hash": "b8e3bc70d07a1180a8e78b20237b2fe1ee6989696588b7443c5aa9a1df27c5cb",
+  "byte_length": 114,
+  "mtime": 1785253671659,
+  "mtime_nanos": "1785253671659123456",
+  "retrieval": {
+    "filename": "oakfield-pineway.html",
+    "stem": "oakfield-pineway",
+    "aliases": []
+  },
+  "normalized_exact": {
+    "filename": "oakfield-pineway.html",
+    "stem": "oakfield-pineway",
+    "aliases": [],
+    "title": "compact html"
+  },
+  "frontmatter": {},
+  "canonical_frontmatter": {
+    "title": "Compact HTML"
+  },
+  "chunks": [
+    {
+      "chunk": {
+        "chunk_id": "16ed07b3aaad6540bac779b79da86b54c150ed929dce61fcfae041f7b70b53b4",
+        "vault_id": "golden-vault",
+        "room": "fixture-room",
+        "path": "Format Matrix/oakfield-pineway.html",
+        "heading_path": [],
+        "content": "Compact neutral HTML body.",
+        "frontmatter": {},
+        "links_out": [],
+        "mtime": 1785253671659,
+        "content_hash": "b8e3bc70d07a1180a8e78b20237b2fe1ee6989696588b7443c5aa9a1df27c5cb",
+        "chunking_version": 2
+      },
+      "heading_text": "",
+      "normalized_heading": null,
+      "technical_identifiers": []
+    }
+  ],
+  "kind": "indexed"
+}

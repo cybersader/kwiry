@@ -133,18 +133,24 @@ describe("Worker source quarantine", () => {
         ok: true,
         result: { documents: 2, chunks: 2, quarantined_sources: 1 },
       });
-      await expect(request(worker, {
+      // Hyphenated two-term queries may append conditional partial alternatives;
+      // the surviving complete match must remain first.
+      const alphaSearch = await request(worker, {
         id: 5,
         operation: "search",
         query: "searchable-alpha",
         limit: 20,
-      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "alpha.md" }] } });
-      await expect(request(worker, {
+      });
+      expect(alphaSearch).toMatchObject({ ok: true });
+      expect(alphaSearch.result.hits[0]).toMatchObject({ path: "alpha.md" });
+      const betaSearch = await request(worker, {
         id: 6,
         operation: "search",
         query: "searchable-beta",
         limit: 20,
-      })).resolves.toMatchObject({ ok: true, result: { hits: [{ path: "beta.md" }] } });
+      });
+      expect(betaSearch).toMatchObject({ ok: true });
+      expect(betaSearch.result.hits[0]).toMatchObject({ path: "beta.md" });
 
       await expect(request(worker, {
         id: 7,
@@ -178,15 +184,17 @@ describe("Worker source quarantine", () => {
           quarantine_fields: [],
         },
       });
-      await expect(request(worker, {
+      const recoveredSearch = await request(worker, {
         id: 9,
         operation: "search",
         query: "now-searchable",
         limit: 20,
-      })).resolves.toMatchObject({
-        ok: true,
-        result: { generation: "recovered", hits: [{ path: "reject-once.md" }] },
       });
+      expect(recoveredSearch).toMatchObject({
+        ok: true,
+        result: { generation: "recovered" },
+      });
+      expect(recoveredSearch.result.hits[0]).toMatchObject({ path: "reject-once.md" });
     } finally {
       await worker.terminate();
     }

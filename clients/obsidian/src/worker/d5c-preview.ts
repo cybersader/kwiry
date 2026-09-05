@@ -328,7 +328,7 @@ function singleStagePlan(
   limit: number,
 ): ExecutionPlan {
   return {
-    schema_version: 10,
+    schema_version: 11,
     profile_id: plan.profile_id,
     ...(plan.emphasis === undefined ? {} : { emphasis: plan.emphasis }),
     disposition: plan.disposition === "explicit_bypass" ? "explicit_bypass" : "ready",

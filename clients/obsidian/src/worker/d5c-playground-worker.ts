@@ -345,6 +345,7 @@ function parseRustIdentity(source: string): {
   abi_version: 3;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
+  lexical_v2_rank_schema_version: 2;
 } {
   let value: unknown;
   try {
@@ -356,6 +357,7 @@ function parseRustIdentity(source: string): {
     || value.abi_version !== 3
     || value.adapter !== "kwiry-obsidian-wasm"
     || !isBoundedString(value.adapter_version, 64)
+    || value.lexical_v2_rank_schema_version !== 2
     || !Array.isArray(value.operations)
     || JSON.stringify(value.operations) !== JSON.stringify([
       "prepare_source",
