@@ -5564,16 +5564,27 @@ mod tests {
             &SearchFilters::default(),
         );
         assert_eq!(hierarchy[0].path, "reference/canonical.md");
-        assert_eq!(hierarchy.last().unwrap().path, "archive/real.md");
+        let archive_position = hierarchy
+            .iter()
+            .position(|hit| hit.path == "archive/real.md")
+            .unwrap();
+        for path in [
+            "reference/canonical.md",
+            "reference-old/lookalike.md",
+            "archive-old/lookalike.md",
+        ] {
+            assert!(
+                hierarchy.iter().position(|hit| hit.path == path).unwrap() < archive_position,
+                "{path} must remain above the archive-demoted standard match",
+            );
+        }
         assert!(
-            hierarchy
-                .iter()
-                .position(|hit| hit.path == "archive-old/lookalike.md")
-                .unwrap()
+            archive_position
                 < hierarchy
                     .iter()
-                    .position(|hit| hit.path == "archive/real.md")
-                    .unwrap()
+                    .position(|hit| hit.path == "notes/strong-text.md")
+                    .unwrap(),
+            "the archive-demoted standard match must remain above partial coverage",
         );
 
         let fanout = d5c_search(
