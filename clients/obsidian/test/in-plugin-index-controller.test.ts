@@ -1620,6 +1620,410 @@ describe("InPluginIndexController", () => {
     },
   );
 
+  it.each(["event", "timer", "deletion", "recreation"] as const)(
+    "freshness regression: repays aborted subtree reconciliation through %s recovery",
+    async (recovery) => {
+      vi.useFakeTimers();
+      const source = new FakeSource();
+      source.set("orchard/old.md", "pear tree");
+      source.set("orchard/deleted.md", "plum tree");
+      source.set("locked.md", "garden ledger");
+      const worker = new FakeCacheWorker();
+      const store = new FakeCacheStore({ kind: "miss", reason: "absent" });
+      const { controller, statuses, failures } = harness(source, worker, {
+        maxStableReadAttempts: 1,
+      }, { openStore: async () => ({ kind: "available", store }) });
+      try {
+        controller.start();
+        await controller.whenIdle();
+        source.records.delete("orchard/old.md");
+        source.records.delete("orchard/deleted.md");
+        source.set("grove/renamed.md", "pear tree");
+        source.set("grove/nested/new.txt", "apricot tree");
+        source.remainingReadFailures.set("locked.md", 99);
+        source.emit({ kind: "rescan" });
+        await controller.whenIdle();
+        expect(worker.activePaths).toEqual(new Set([
+          "orchard/old.md", "orchard/deleted.md", "locked.md",
+        ]));
+        expect(statuses.at(-1)).toMatchObject({ searchable: true, dirty: true, stage: "degraded" });
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(worker.exportCalls).toEqual([]);
+        expect(store.puts).toEqual([]);
+
+        source.remainingReadFailures.set("locked.md", 0);
+        if (recovery === "deletion") {
+          source.records.delete("locked.md");
+          source.emit({ kind: "remove", path: "locked.md" });
+        } else if (recovery === "recreation") {
+          source.records.delete("locked.md");
+          source.emit({ kind: "remove", path: "locked.md" });
+          source.set("locked.md", "new garden ledger", 2);
+          source.emit({ kind: "upsert", path: "locked.md" });
+        } else if (recovery === "event") {
+          source.set("locked.md", "new garden ledger", 2);
+          source.emit({ kind: "upsert", path: "locked.md" });
+        } else {
+          await vi.advanceTimersByTimeAsync(3_000);
+        }
+        await controller.whenIdle();
+        expect([...worker.activePaths].sort()).toEqual([
+          "grove/nested/new.txt", "grove/renamed.md",
+          ...(recovery === "deletion" ? [] : ["locked.md"]),
+        ]);
+        expect(statuses.at(-1)).toMatchObject({ stage: "ready", dirty: false, unreadableSources: 0 });
+        expect(failures).toEqual([]);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(store.puts).toHaveLength(1);
+        expect(store.puts[0]!.generationId).toBe(worker.activeGeneration);
+      } finally {
+        controller.dispose();
+        await controller.whenDisposed();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("freshness regression: deferred full passes back off persistent and changing failure paths", async () => {
+    vi.useFakeTimers();
+    const source = new FakeSource();
+    source.set("a.md", "alpha");
+    source.set("b.md", "beta");
+    source.set("c.md", "gamma");
+    const { controller, worker, statuses } = harness(source, new FakeWorker(), { maxStableReadAttempts: 1 });
+    try {
+      controller.start();
+      await controller.whenIdle();
+      source.set("grove/new.md", "apricot");
+      source.remainingReadFailures.set("a.md", 99);
+      source.emit({ kind: "rescan" });
+      await controller.whenIdle();
+      expect(source.readAttempts.get("a.md")).toBe(2);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await controller.whenIdle();
+      expect(source.readAttempts.get("a.md")).toBe(3);
+      expect(source.readAttempts.get("c.md")).toBe(3); // retry the inventory, not just a.md
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(source.readAttempts.get("a.md")).toBe(3);
+      source.remainingReadFailures.set("a.md", 0);
+      source.remainingReadFailures.set("b.md", 99);
+      await vi.advanceTimersByTimeAsync(1);
+      await controller.whenIdle();
+      expect(worker.activePaths.has("grove/new.md")).toBe(false);
+      expect(statuses.at(-1)?.dirty).toBe(true);
+      const begins = worker.calls.filter((call) => call.startsWith("begin:")).length;
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(worker.calls.filter((call) => call.startsWith("begin:"))).toHaveLength(begins);
+      source.remainingReadFailures.set("b.md", 0);
+      await vi.advanceTimersByTimeAsync(1);
+      await controller.whenIdle();
+      expect(worker.activePaths).toEqual(new Set(source.records.keys()));
+      expect(statuses.at(-1)).toMatchObject({ dirty: false, unreadableSources: 0 });
+      controller.dispose();
+      await controller.whenDisposed();
+      const attempts = [...source.readAttempts.values()];
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect([...source.readAttempts.values()]).toEqual(attempts);
+    } finally {
+      controller.dispose();
+      await controller.whenDisposed();
+      vi.useRealTimers();
+    }
+  });
+
+  it("freshness regression: permanent full-pass failure backs off and disposal cancels debt retries", async () => {
+    vi.useFakeTimers();
+    const source = new FakeSource();
+    source.set("healthy.md", "garden");
+    source.set("locked.md", "ledger");
+    const { controller, worker, statuses } = harness(source, new FakeWorker(), { maxStableReadAttempts: 1 });
+    try {
+      controller.start();
+      await controller.whenIdle();
+      source.set("grove/new.md", "apricot");
+      source.remainingReadFailures.set("locked.md", 99);
+      source.emit({ kind: "rescan" });
+      await controller.whenIdle();
+      for (const [delay, attempts] of [[5_000, 3], [10_000, 4], [20_000, 5]]) {
+        await vi.advanceTimersByTimeAsync(delay! - 1);
+        expect(source.readAttempts.get("locked.md")).toBe(attempts! - 1);
+        await vi.advanceTimersByTimeAsync(1);
+        await controller.whenIdle();
+        expect(source.readAttempts.get("locked.md")).toBe(attempts);
+        expect(worker.activePaths).toEqual(new Set(["healthy.md", "locked.md"]));
+        expect(statuses.at(-1)).toMatchObject({ searchable: true, dirty: true, stage: "degraded" });
+      }
+      controller.dispose();
+      await controller.whenDisposed();
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(source.readAttempts.get("locked.md")).toBe(5);
+      expect(worker.stagingGeneration).toBeNull();
+    } finally {
+      controller.dispose();
+      await controller.whenDisposed();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["cold begin", "cold commit", "warm restore", "warm reconciliation", "replacement commit"] as const)(
+    "freshness regression: preserves authoritative events at the %s barrier",
+    async (barrier) => {
+      const source = new FakeSource();
+      source.set("orchard/old.md", "pear tree");
+      const worker = new FakeCacheWorker();
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      const wrap = async <T>(operation: () => Promise<T>): Promise<T> => {
+        entered.resolve();
+        await release.promise;
+        return operation();
+      };
+      let armed = barrier !== "replacement commit";
+      if (barrier === "cold begin") {
+        const original = worker.beginBuild.bind(worker);
+        worker.beginBuild = async (generation) => {
+          if (armed) { armed = false; return wrap(() => original(generation)); }
+          return original(generation);
+        };
+      } else if (barrier === "warm restore" || barrier === "warm reconciliation") {
+        worker.restoredLedger.set("orchard/old.md", {
+          path: "orchard/old.md", byte_length: 9, mtime_nanos: "1000000", indexable: true,
+        });
+        if (barrier === "warm restore") {
+          const original = worker.restoreGeneration.bind(worker);
+          worker.restoreGeneration = async (hit) => wrap(() => original(hit));
+        } else {
+          const original = worker.planReconciliation.bind(worker);
+          worker.planReconciliation = async (generation, vaultId, current) => wrap(() => original(generation, vaultId, current));
+        }
+      } else {
+        const original = worker.commitBuild.bind(worker);
+        worker.commitBuild = async (generation) => {
+          if (armed) { armed = false; return wrap(() => original(generation)); }
+          return original(generation);
+        };
+      }
+      const store = new FakeCacheStore(barrier.startsWith("warm") ? cacheHit() : { kind: "miss", reason: "absent" });
+      const { controller, statuses, failures } = harness(source, worker, {}, {
+        openStore: async () => ({ kind: "available", store }),
+      });
+      try {
+        controller.start();
+        if (barrier === "replacement commit") {
+          await controller.whenIdle();
+          armed = true;
+          source.emit({ kind: "rescan" });
+        }
+        await entered.promise;
+        const staleGeneration = worker.stagingGeneration;
+        source.records.delete("orchard/old.md");
+        source.set("grove/nested/new.md", "apricot tree");
+        source.emit({ kind: "rescan" });
+        source.emit({ kind: "upsert", path: "grove/nested/new.md" });
+        const afterEvent = statuses.length;
+        release.resolve();
+        await controller.whenIdle();
+        expect(worker.activePaths).toEqual(new Set(["grove/nested/new.md"]));
+        expect(worker.stagingGeneration).toBeNull();
+        expect(failures).toEqual([]);
+        expect(statuses.at(-1)).toMatchObject({ stage: "ready", dirty: false });
+        const stalePublished = statuses.slice(afterEvent).filter((entry) => entry.generation === staleGeneration);
+        if (barrier.includes("commit")) {
+          expect(stalePublished.length).toBeGreaterThan(0);
+          expect(stalePublished.every((entry) => entry.dirty)).toBe(true);
+        }
+      } finally {
+        release.resolve();
+        controller.dispose();
+        await controller.whenDisposed();
+      }
+    },
+  );
+
+  it("freshness regression: a thrown replacement keeps full-pass debt until explicit recovery", async () => {
+    const source = new FakeSource();
+    source.set("orchard/old.md", "pear tree");
+    const worker = new FakeCacheWorker();
+    const { controller, statuses, failures } = harness(source, worker);
+    try {
+      controller.start();
+      await controller.whenIdle();
+      source.records.delete("orchard/old.md");
+      source.set("grove/new.md", "apricot tree");
+      const original = worker.commitBuild.bind(worker);
+      worker.commitBuild = vi.fn().mockRejectedValueOnce(new Error("synthetic publication failure"))
+        .mockImplementation(original);
+      source.emit({ kind: "rescan" });
+      await controller.whenIdle();
+      expect(worker.activePaths).toEqual(new Set(["orchard/old.md"]));
+      expect(statuses.at(-1)).toMatchObject({ searchable: true, dirty: true, issue: "index_update_failed" });
+      expect(failures).toHaveLength(1);
+      expect((controller as unknown as { rescanRequested: boolean }).rescanRequested).toBe(true);
+      controller.requestRebuild();
+      await controller.whenIdle();
+      expect(worker.activePaths).toEqual(new Set(["grove/new.md"]));
+      expect(statuses.at(-1)).toMatchObject({ dirty: false });
+    } finally {
+      controller.dispose();
+      await controller.whenDisposed();
+    }
+  });
+
+  it.each(["healed", "deleted"] as const)(
+    "freshness regression: review historical %s omission cannot defeat sustained full-pass backoff",
+    async (kind) => {
+      vi.useFakeTimers();
+      const source = new FakeSource();
+      source.set("a.md", "pear");
+      source.set("b.md", "plum");
+      source.set("c.md", "fig");
+      const { controller, worker, statuses } = harness(source, new FakeWorker(), { maxStableReadAttempts: 1 });
+      try {
+        controller.start();
+        await controller.whenIdle();
+        source.set("grove/new.md", "apricot");
+        source.remainingReadFailures.set("a.md", 99);
+        source.emit({ kind: "rescan" });
+        await controller.whenIdle();
+        source.remainingReadFailures.set("a.md", 0);
+        if (kind === "deleted") source.records.delete("a.md");
+        source.remainingReadFailures.set("b.md", 99);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await controller.whenIdle();
+        const firstB = source.readAttempts.get("b.md")!;
+        for (const [delay, expectedAttempts] of [[5_000, firstB + 1], [10_000, firstB + 2], [20_000, firstB + 3]]) {
+          await vi.advanceTimersByTimeAsync(delay! - 1);
+          expect(source.readAttempts.get("b.md")).toBe(expectedAttempts! - 1);
+          await vi.advanceTimersByTimeAsync(1);
+          await controller.whenIdle();
+          expect(source.readAttempts.get("b.md")).toBe(expectedAttempts);
+          expect(worker.activePaths).toEqual(new Set(["a.md", "b.md", "c.md"]));
+          expect(statuses.at(-1)).toMatchObject({ searchable: true, dirty: true });
+        }
+        source.remainingReadFailures.set("b.md", 0);
+        await vi.advanceTimersByTimeAsync(39_999);
+        expect(source.readAttempts.get("b.md")).toBe(firstB + 3);
+        await vi.advanceTimersByTimeAsync(1);
+        await controller.whenIdle();
+        expect(worker.activePaths).toEqual(new Set(source.records.keys()));
+        expect(statuses.at(-1)).toMatchObject({ stage: "ready", dirty: false, unreadableSources: 0 });
+        const reads = [...source.readAttempts];
+        await vi.advanceTimersByTimeAsync(300_000);
+        expect([...source.readAttempts]).toEqual(reads);
+      } finally {
+        controller.dispose();
+        await controller.whenDisposed();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["represented", "superseding rescan", "superseding path"] as const)(
+    "freshness regression: review valid checkpoint acknowledges only its %s inventory cut",
+    async (timing) => {
+      const source = new FakeSource();
+      source.set("a.md", "pear");
+      source.set("b.md", "plum");
+      const worker = new FakeCheckpointWorker();
+      worker.restoredLedger.set("a.md", {
+        path: "a.md", byte_length: 4, mtime_nanos: "1000000", indexable: true, content_hash: await sha256Text("pear"),
+      });
+      const store = new FakeCheckpointStore(
+        { kind: "miss", reason: "absent" }, checkpointHit(), null,
+        () => source.emit({ kind: "rescan" }),
+      );
+      const { controller, statuses, failures } = harness(source, worker, {}, {
+        openStore: async () => ({ kind: "available", store }),
+      });
+      let postCutGeneration: string | null = null;
+      if (timing !== "represented") {
+        const original = worker.commitBuild.bind(worker);
+        worker.commitBuild = async (generation) => {
+          if (postCutGeneration === null) {
+            postCutGeneration = generation;
+            source.set("grove/nested/new.md", "apricot");
+            source.emit(timing === "superseding rescan"
+              ? { kind: "rescan" }
+              : { kind: "upsert", path: "grove/nested/new.md" });
+          }
+          return original(generation);
+        };
+      }
+      try {
+        controller.start();
+        await controller.whenIdle();
+        expect(failures).toEqual([]);
+        expect(worker.checkpointRestoreCalls).toBe(1);
+        expect(store.checkpointDiscards).toEqual(["completed"]);
+        expect(worker.activePaths).toEqual(new Set(source.records.keys()));
+        if (timing === "represented") {
+          expect(worker.calls.filter((call) => call.startsWith("begin:"))).toEqual([]);
+          expect(worker.calls.filter((call) => call.startsWith("commit:"))).toEqual(["commit:checkpoint-generation"]);
+          expect([...source.readAttempts]).toEqual([["a.md", 1], ["b.md", 1]]);
+        } else {
+          const postCutStatuses = statuses.filter((entry) => entry.generation === postCutGeneration);
+          expect(postCutStatuses.length).toBeGreaterThan(0);
+          expect(postCutStatuses.every((entry) => entry.dirty)).toBe(true);
+          expect(worker.activePaths.has("grove/nested/new.md")).toBe(true);
+          expect(worker.calls.filter((call) => call.startsWith("begin:"))).toHaveLength(timing === "superseding rescan" ? 1 : 0);
+        }
+        expect(statuses.at(-1)).toMatchObject({ stage: "ready", dirty: false });
+      } finally {
+        controller.dispose();
+        await controller.whenDisposed();
+      }
+    },
+  );
+
+  it.each(["enabled", "disabled", "superseded"] as const)(
+    "freshness regression: review represented presnapshot rescan preserves only %s cold preview permission",
+    async (permission) => {
+      const source = new FakeSource();
+      source.set("a.md", "pear");
+      source.set("b.md", "plum");
+      const worker = new FakeWorker();
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      const original = worker.beginBuild.bind(worker);
+      worker.beginBuild = async (generation) => {
+        entered.resolve();
+        await release.promise;
+        return original(generation);
+      };
+      const { controller, statuses } = harness(source, worker, {
+        maxBatchSources: 1, maxConcurrentReads: 1,
+      }, undefined, permission !== "disabled");
+      let mutationStatus = -1;
+      if (permission === "superseded") {
+        source.onRead = (path) => {
+          if (path !== "b.md" || mutationStatus >= 0) return;
+          source.set("c.md", "fig");
+          source.emit({ kind: "upsert", path: "c.md" });
+          mutationStatus = statuses.length - 1;
+        };
+      }
+      try {
+        controller.start();
+        await entered.promise;
+        source.emit({ kind: "rescan" });
+        release.resolve();
+        await controller.whenIdle();
+        const revisions = [...new Set(statuses.flatMap((entry) => entry.initialColdPreview
+          ? [entry.initialColdPreview.revision] : []))];
+        expect(revisions).toEqual(permission === "disabled" ? [] : permission === "superseded" ? [1] : [1, 2]);
+        if (permission === "superseded") {
+          expect(mutationStatus).toBeGreaterThanOrEqual(0);
+          expect(statuses.slice(mutationStatus).every((entry) => entry.initialColdPreview === undefined)).toBe(true);
+        }
+        expect(statuses.at(-1)).toMatchObject({ stage: "ready", dirty: false });
+      } finally {
+        release.resolve();
+        controller.dispose();
+        await controller.whenDisposed();
+      }
+    },
+  );
+
   it("processes an ordinary modify after a source-local replacement abort", async () => {
     const source = new FakeSource();
     source.set("a.md", "a");

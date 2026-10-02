@@ -217,7 +217,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   async getSuggestions(query: string): Promise<ModalResult[]> {
     if (this.localProjectionRefresh) {
       this.localProjectionRefresh = false;
-      const localResults = this.projectedResults(query);
+      const localResults = this.heldProjectionResults(query);
       if (localResults) return localResults;
     }
 
@@ -484,15 +484,22 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
 
   private projectedResults(query: string): ModalResult[] | null {
     const projection = this.settledProjection;
-    if (
-      !projection
+    if (!projection
+      || (this.backend.identity.profile === "daemon"
+        && (!this.lastSearchable || this.latestStatusGeneration === null))
+      || projection.generation !== this.latestStatusGeneration) return null;
+    return this.heldProjectionResults(query);
+  }
+
+  private heldProjectionResults(query: string): ModalResult[] | null {
+    // Source/section navigation only rearranges held evidence. Unavailable status
+    // must not turn that presentation action into a backend request or erase the
+    // reconnect evidence. Opening still requires projectedResults currentness.
+    const projection = this.settledProjection;
+    if (!projection
       || projection.query !== query
       || projection.mode !== this.mode
-      || projection.backendInstanceId !== this.backend.identity.instanceId
-      || projection.generation !== this.latestStatusGeneration
-    ) {
-      return null;
-    }
+      || projection.backendInstanceId !== this.backend.identity.instanceId) return null;
     if (this.resultView.kind === "sources") return this.sourceResults(projection.grouped);
     const group = findSourceGroup(projection.grouped, this.resultView.source);
     if (!group) return null;
@@ -749,9 +756,13 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
 
   private reconcileStatusGeneration(status: BackendStatus): void {
     if (status.identity.instanceId !== this.backend.identity.instanceId) return;
-    const previousGeneration = this.latestStatusGeneration;
     this.latestStatusGeneration = status.generation;
-    if (status.generation === previousGeneration) return;
+    // Unknown/unavailable status is not a new published generation. Keep the
+    // settled evidence for reconnect comparison, but do not authorize selection
+    // or refresh while its currentness cannot be established.
+    if (status.generation === null || !status.searchable) return;
+    // A request can settle behind a status already observed while it was active.
+    // Even an unchanged poll must compare that newly settled projection.
 
     const projection = this.settledProjection;
     if (

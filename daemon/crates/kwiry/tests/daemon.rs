@@ -155,6 +155,67 @@ fn daemon_watches_files_reloads_config_and_reconciles_offline_changes() {
 }
 
 #[test]
+fn daemon_watches_populated_subtree_lifecycle() {
+    let temporary = tempdir().unwrap();
+    let config = temporary.path().join("config.toml");
+    let data = temporary.path().join("data");
+    let vault = temporary.path().join("vault");
+    let incoming = temporary.path().join("incoming");
+    fs::create_dir(&vault).unwrap();
+    fs::write(vault.join("anchor.md"), "# Anchor\nanchorreadytoken").unwrap();
+    vault_add(&config, &data, "orchard", &vault);
+    let daemon = Daemon::start(&config, &data);
+    let token = fs::read_to_string(config.with_extension("token"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    wait_for(|| status(&daemon.address, &token).state == DaemonState::Ready);
+    assert_eq!(search(&daemon.address, &token, "anchorreadytoken").len(), 1);
+
+    // Populate outside the watched root, then deliver the subtree in one move.
+    // Each eight-second assertion must converge before the 60-second safety pass.
+    fs::create_dir_all(incoming.join("nested/deeper")).unwrap();
+    fs::write(incoming.join("first.md"), "# First\norchardimporttoken").unwrap();
+    fs::write(
+        incoming.join("nested/deeper/second.md"),
+        "# Second\norchardimporttoken",
+    )
+    .unwrap();
+    fs::rename(&incoming, vault.join("grove")).unwrap();
+    let paths = |query: &str| {
+        let mut paths = search(&daemon.address, &token, query)
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    };
+    wait_for(|| paths("orchardimporttoken") == ["grove/first.md", "grove/nested/deeper/second.md"]);
+    fs::rename(vault.join("grove"), vault.join("orchard")).unwrap();
+    wait_for(|| {
+        paths("orchardimporttoken") == ["orchard/first.md", "orchard/nested/deeper/second.md"]
+    });
+    fs::remove_dir_all(vault.join("orchard")).unwrap();
+    wait_for(|| paths("orchardimporttoken").is_empty());
+    fs::create_dir_all(vault.join("orchard/nested/deeper")).unwrap();
+    fs::write(
+        vault.join("orchard/first.md"),
+        "# Fresh first\norchardrebuilttoken",
+    )
+    .unwrap();
+    fs::write(
+        vault.join("orchard/nested/deeper/second.md"),
+        "# Fresh second\norchardrebuilttoken",
+    )
+    .unwrap();
+    wait_for(|| {
+        paths("orchardrebuilttoken") == ["orchard/first.md", "orchard/nested/deeper/second.md"]
+            && paths("orchardimporttoken").is_empty()
+    });
+    daemon.stop();
+}
+
+#[test]
 fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
     let temporary = tempdir().unwrap();
     let config_path = temporary.path().join("config.toml");
@@ -276,7 +337,10 @@ fn request(
     body: Option<&str>,
 ) -> (u16, String) {
     let body = body.unwrap_or_default();
-    let mut stream = TcpStream::connect(address).unwrap();
+    let timeout = Duration::from_secs(2);
+    let mut stream = TcpStream::connect_timeout(&address.parse().unwrap(), timeout).unwrap();
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    stream.set_write_timeout(Some(timeout)).unwrap();
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

@@ -9,6 +9,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { buildPlugin } from "../esbuild.config.mjs";
 import { buildSyntheticXlsm } from "../scripts/webdriver-release-gate.mjs";
+import { buildStoredZip, parseStoredZip } from "../scripts/stored-zip.mjs";
+import { InPluginIndexController } from "../src/backends/in-plugin-index-controller";
+import { classifySourcePath } from "../src/source-formats";
 import {
   CACHE_SCHEMA_VERSION,
   MAX_LEXICAL_OBSERVATION_COUNT,
@@ -151,6 +154,123 @@ function sourceBytesWithFormat(path, format, bytes) {
       mtime_nanos: "1000001",
     },
     bytes,
+  };
+}
+
+// Raw fixtures, not SourcePreparation output. DOCX/PDF use the minimal native
+// format-matrix package shapes; Excel reuses the existing synthetic XLSM builder.
+function freshnessFormatBytes(format, term) {
+  const utf8 = (text) => Buffer.from(text, "utf8");
+  switch (format) {
+    case "markdown": return utf8(`# Orchard\n${term}`);
+    case "text": return utf8(`Orchard ${term}`);
+    case "base": return utf8(`views:\n  - type: table\n    name: ${term}\n`);
+    case "canvas": return utf8(JSON.stringify({
+      nodes: [{ id: "1111111111111111", type: "text", x: 0, y: 0, width: 320, height: 180, text: term }], edges: [],
+    }));
+    case "excalidraw": return utf8(JSON.stringify({
+      type: "excalidraw", version: 2,
+      elements: [{ id: "text00000000001", type: "text", originalText: term, text: term }], appState: {}, files: {},
+    }));
+    case "html": return utf8(`<!doctype html><html><body><p>${term}</p></body></html>`);
+    case "excel": return buildStoredZip(parseStoredZip(buildSyntheticXlsm()).map((entry) => ({
+      name: entry.name,
+      bytes: entry.name === "xl/sharedStrings.xml"
+        ? utf8(entry.bytes.toString("utf8").replace("macro boundary", term)) : entry.bytes,
+    })));
+    case "docx": return buildStoredZip([
+      { name: "[Content_Types].xml", bytes: utf8('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>') },
+      { name: "_rels/.rels", bytes: utf8('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>') },
+      { name: "word/document.xml", bytes: utf8(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${term}</w:t></w:r></w:p></w:body></w:document>`) },
+    ]);
+    case "pdf": {
+      const content = `BT /F1 12 Tf 1 0 0 1 72 700 Tm (${term}) Tj ET`;
+      const objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+      ];
+      let text = "%PDF-1.7\n";
+      const offsets = objects.map((object, index) => {
+        const offset = text.length;
+        text += `${index + 1} 0 obj\n${object}\nendobj\n`;
+        return offset;
+      });
+      const xref = text.length;
+      text += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+      for (const offset of offsets) text += `${String(offset).padStart(10, "0")} 00000 n \n`;
+      return utf8(`${text}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+    }
+    default: throw new Error(`missing raw lifecycle fixture: ${format}`);
+  }
+}
+
+function freshnessWorkerPort(worker) {
+  let id = 0;
+  let staging = null;
+  let maximumStaging = 0;
+  const call = async (message) => {
+    const response = await request(worker, { ...message, id: ++id });
+    expect(response.ok, JSON.stringify(response.error)).toBe(true);
+    return response.result;
+  };
+  return {
+    call,
+    get maximumStaging() { return maximumStaging; },
+    initialize: (vaultId, policy, formats) => call({
+      operation: "initialize", vault_id: vaultId, source_policy_hash: policy, enabled_source_formats: formats,
+    }),
+    beginBuild: async (generation) => {
+      expect(staging).toBeNull();
+      staging = generation;
+      maximumStaging = Math.max(maximumStaging, 1);
+      return call({ operation: "begin_build", generation });
+    },
+    addSourceBatch: (generation, sources) => call({ operation: "add_source_batch", generation, sources }),
+    applySourceChanges: (generation, nextGeneration, upserts, removals) => call({
+      operation: "apply_source_changes", generation, next_generation: nextGeneration, upserts, removals,
+    }),
+    commitBuild: async (generation) => {
+      const result = await call({ operation: "commit_build", generation });
+      staging = null;
+      return result;
+    },
+    abortBuild: async (generation) => {
+      const result = await call({ operation: "abort_build", generation });
+      staging = null;
+      return result;
+    },
+  };
+}
+
+function freshnessSourceMap() {
+  const records = new Map();
+  const failing = new Set();
+  let listener = null;
+  return {
+    records, failing,
+    subscribe: (callback) => { listener = callback; return () => { listener = null; }; },
+    emit: (event) => listener?.(event),
+    listSourcePaths: () => [...records.keys()].filter((path) => classifySourcePath(path) !== null),
+    inspectSource: (path) => {
+      const format = classifySourcePath(path);
+      return records.has(path) && format !== null
+        ? { kind: "candidate", path, format, size: records.get(path).byteLength, mtime: 1 }
+        : { kind: "missing", path };
+    },
+    readSource: async (inspection) => {
+      if (failing.has(inspection.path)) throw new Error("synthetic unreadable source");
+      const bytes = records.get(inspection.path);
+      if (!bytes) return { kind: "missing", path: inspection.path };
+      if (bytes.byteLength !== inspection.size) return { kind: "stale", path: inspection.path };
+      const input = sourceBytesWithFormat(inspection.path, inspection.format, bytes);
+      input.descriptor.mtime = Math.floor(inspection.mtime / 1_000);
+      input.descriptor.mtime_nanos = (BigInt(inspection.mtime) * 1_000_000n).toString();
+      return { kind: "source", source: input };
+    },
+    readExcerptText: async (path) => ({ kind: "missing", path }),
   };
 }
 
@@ -1997,6 +2117,103 @@ describe("restored cache generation", () => {
 });
 
 describe("exact generated production Worker", () => {
+  it("freshness regression: raw-format controller lifecycle preserves old search until complete subtree recovery", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    const port = freshnessWorkerPort(worker);
+    const active = freshnessSourceMap();
+    const formats = [
+      ["markdown", "md"], ["text", "txt"], ["base", "base"], ["canvas", "canvas"],
+      ["docx", "docx"], ["pdf", "pdf"], ["excalidraw", "excalidraw"], ["excel", "xlsm"], ["html", "html"],
+    ];
+    expect(formats.map(([format]) => format).sort()).toEqual([...SOURCE_FORMATS].sort());
+    const pathsFor = (root) => formats.map(([format, extension]) => `${root}/nested/${format}.${extension}`).sort();
+    const populate = (root, term, emit = true) => {
+      for (const [format, extension] of formats) {
+        const path = `${root}/nested/${format}.${extension}`;
+        active.records.set(path, freshnessFormatBytes(format, term));
+        if (emit) active.emit({ kind: "upsert", path });
+      }
+    };
+    const searchPaths = async (query) => {
+      const result = await port.call({ operation: "search", query, limit: 20 });
+      return [...new Set(result.hits.map((hit) => hit.path))].sort();
+    };
+    const statuses = [];
+    const failures = [];
+    let generation = 0;
+    const controller = new InPluginIndexController({
+      source: active, worker: port, nextGeneration: () => `freshness-${++generation}`,
+      enabledSourceFormats: [...SOURCE_FORMATS],
+      limits: { maxStableReadAttempts: 1 },
+      onStatus: (entry) => statuses.push(entry), onFailure: (error) => failures.push(error),
+    });
+    try {
+      controller.start();
+      await controller.whenIdle();
+      populate("grove", "bloomtoken");
+      active.records.set("ledger.md", Buffer.from("garden ledger"));
+      active.emit({ kind: "upsert", path: "ledger.md" });
+      await controller.whenIdle();
+      expect(await searchPaths("bloomtoken")).toEqual(pathsFor("grove"));
+
+      for (const path of pathsFor("grove")) active.records.delete(path);
+      populate("orchard", "bloomtoken", false);
+      active.failing.add("ledger.md");
+      active.emit({ kind: "rescan" });
+      await controller.whenIdle();
+      expect(statuses.at(-1)).toMatchObject({ stage: "degraded", dirty: true, searchable: true });
+      expect(await searchPaths("bloomtoken")).toEqual(pathsFor("grove"));
+      active.failing.clear();
+      active.emit({ kind: "upsert", path: "ledger.md" });
+      await controller.whenIdle();
+      expect(await searchPaths("bloomtoken")).toEqual(pathsFor("orchard"));
+      expect(statuses.at(-1)).toMatchObject({ stage: "ready", dirty: false, unreadableSources: 0 });
+
+      // Per-file removal/recreation, all formats through actual raw extraction.
+      for (const path of pathsFor("orchard")) {
+        active.records.delete(path);
+        active.emit({ kind: "remove", path });
+      }
+      await controller.whenIdle();
+      expect(await searchPaths("bloomtoken")).toEqual([]);
+      populate("orchard", "harvesttoken");
+      await controller.whenIdle();
+      expect(await searchPaths("harvesttoken")).toEqual(pathsFor("orchard"));
+      expect(await searchPaths("bloomtoken")).toEqual([]);
+
+      // Supported -> unsupported -> supported admission, retaining raw text.
+      const supported = "orchard/nested/text.txt";
+      const unsupported = "orchard/nested/text.png";
+      const bytes = active.records.get(supported);
+      active.records.delete(supported);
+      active.records.set(unsupported, bytes);
+      active.emit({ kind: "remove", path: supported });
+      await controller.whenIdle();
+      expect(await searchPaths("harvesttoken")).toEqual(pathsFor("orchard").filter((path) => path !== supported));
+      active.records.delete(unsupported);
+      active.records.set(supported, bytes);
+      active.emit({ kind: "upsert", path: supported });
+      await controller.whenIdle();
+      expect(await searchPaths("harvesttoken")).toEqual(pathsFor("orchard"));
+
+      for (const path of pathsFor("orchard")) active.records.delete(path);
+      populate("meadow", "harvesttoken", false);
+      active.emit({ kind: "rescan" });
+      await controller.whenIdle();
+      expect(await searchPaths("harvesttoken")).toEqual(pathsFor("meadow"));
+      for (const path of pathsFor("meadow")) active.records.delete(path);
+      active.emit({ kind: "rescan" });
+      await controller.whenIdle();
+      expect(await searchPaths("harvesttoken")).toEqual([]);
+      expect(port.maximumStaging).toBe(1);
+      expect(failures).toEqual([]);
+    } finally {
+      controller.dispose();
+      await controller.whenDisposed();
+      try { await port.call({ operation: "dispose" }); } finally { await worker.terminate(); }
+    }
+  }, 120_000);
+
   it("initializes both WASM runtimes and publishes only complete generations", async () => {
     const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
     try {

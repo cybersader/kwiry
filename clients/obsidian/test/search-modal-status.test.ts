@@ -1524,6 +1524,321 @@ describe("KwirySearchModal grouped interactions", () => {
     modal.onClose();
   });
 
+  it.each(["hits", "zero hits"] as const)(
+    "freshness regression: unchanged daemon status refreshes a late stale projection with %s",
+    async (resultKind) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      const pluginHarness = plugin({ activeBackend: daemon });
+      pluginHarness.instance.settings.daemonCurrentVaultId = "active-vault";
+      const modal = createModal(backend, status({ identity: daemon, generation: "g1" }), pluginHarness);
+      try {
+        modal.inputEl.value = "apricot";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        backend.statusValue = status({ identity: daemon, generation: "g2" });
+        await vi.advanceTimersByTimeAsync(300);
+        expect(backend.requests).toHaveLength(1);
+        const oldHit = hit("old", "Orchard.md", [], {
+          origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+        });
+        backend.searches[0]!.resolve(executionWithHits(
+          resultKind === "hits" ? [oldHit] : [], "unknown", { backend: daemon, generation: "g1" },
+        ));
+        await modal.flushSuggestions();
+        const staleSelection = modal.suggestions[0];
+        await vi.advanceTimersByTimeAsync(500);
+        expect(backend.requests).toHaveLength(2);
+        expect(backend.requests[1]).toEqual(backend.requests[0]);
+        backend.statusValue = status({ identity: daemon, generation: "g3" });
+        await vi.advanceTimersByTimeAsync(800);
+        expect(backend.requests).toHaveLength(2); // no parallel refresh
+        backend.searches[1]!.resolve(executionWithHits([oldHit], "unknown", { backend: daemon, generation: "g3" }));
+        await modal.flushSuggestions();
+        await vi.advanceTimersByTimeAsync(1_200);
+        expect(backend.requests).toHaveLength(2); // current projection settles once
+        if (staleSelection) {
+          modal.selectSuggestion(staleSelection, keyboard("Enter"));
+          expect(pluginHarness.openFile).not.toHaveBeenCalled();
+        }
+      } finally {
+        modal.onClose();
+      }
+      await vi.advanceTimersByTimeAsync(800);
+      expect(backend.requests).toHaveLength(2);
+    },
+  );
+
+  it("freshness regression: generation refresh keeps only the latest typing and cannot repopulate after close", async () => {
+    const daemon: BackendIdentity = {
+      profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+    };
+    const backend = new DeferredBackend(daemon);
+    const modal = createModal(backend, status({ identity: daemon }));
+    try {
+      await settleInputSearch(modal, backend, "apricot", executionWithHits([], "unknown", { backend: daemon }));
+      backend.statusValue = status({ identity: daemon, generation: "g2" });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(backend.requests).toHaveLength(2);
+      for (const [query, generation] of [["pear", "g3"], ["plum", "g4"], ["fig", "g5"]]) {
+        modal.inputEl.value = query!;
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        backend.statusValue = status({ identity: daemon, generation });
+        await vi.advanceTimersByTimeAsync(400);
+        expect(backend.requests).toHaveLength(2);
+      }
+      backend.searches[1]!.resolve(executionWithHits([], "unknown", { backend: daemon, generation: "g2" }));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(backend.requests).toHaveLength(3);
+      expect(backend.requests[2]?.q).toBe("fig");
+      modal.onClose();
+      backend.searches[2]!.resolve(executionWithHits([hit("late", "Grove.md")], "unknown", {
+        backend: daemon, generation: "g5",
+      }));
+      await modal.flushSuggestions();
+      await vi.advanceTimersByTimeAsync(1_200);
+      expect(modal.suggestions).toEqual([]);
+      expect(renderedRows(modal)).toEqual([]);
+      expect(backend.requests).toHaveLength(3);
+    } finally {
+      modal.onClose();
+    }
+  });
+
+  it.each([["hits", "g1"], ["hits", "g2"], ["zero", "g1"], ["zero", "g2"]] as const)(
+    "freshness regression: review reconnect retains or refreshes late %s projection at %s",
+    async (kind, reconnect) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      backend.statusValue = status({ identity: daemon, generation: "g1" });
+      const modal = createModal(backend, backend.statusValue, plugin({ activeBackend: daemon }));
+      const projection = () => (modal as unknown as {
+        settledProjection: { generation: string | null } | null;
+      }).settledProjection;
+      const hits = kind === "hits" ? [hit("pear", "Grove.md", [], {
+        origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+      })] : [];
+      try {
+        modal.inputEl.value = "apricot";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        backend.statusValue = status({
+          identity: daemon, phase: "unavailable", generation: null, searchable: false, liveness: "unreachable",
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        backend.searches[0]!.resolve(executionWithHits(hits, "unknown", { backend: daemon, generation: "g1" }));
+        await modal.flushSuggestions();
+        await vi.advanceTimersByTimeAsync(400); // identical unavailable status after settlement
+        expect(backend.requests).toHaveLength(1);
+        expect(findByClass(modal.contentEl, "kwiry-backend-state")?.textContent).toBe("Daemon unavailable");
+        backend.statusValue = status({ identity: daemon, generation: reconnect });
+        await vi.advanceTimersByTimeAsync(800);
+        // A known same generation can reuse its honest projection; a new one must refresh.
+        if (reconnect === "g1") {
+          expect(projection()?.generation).toBe("g1");
+          expect(backend.requests).toHaveLength(1);
+        } else {
+          expect(backend.requests).toHaveLength(2);
+          backend.searches[1]!.resolve(executionWithHits(hits, "unknown", { backend: daemon, generation: "g2" }));
+          await modal.flushSuggestions();
+          expect(projection()?.generation).toBe("g2");
+        }
+        expect(renderedRows(modal)).toHaveLength(kind === "hits" ? 1 : 0);
+        await vi.advanceTimersByTimeAsync(1_200);
+        expect(backend.requests).toHaveLength(reconnect === "g1" ? 1 : 2);
+      } finally {
+        modal.onClose();
+      }
+    },
+  );
+
+  it.each([null, "g1"] as const)(
+    "freshness regression: review unknown or unavailable status %s does not authorize stale selection",
+    async (generation) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      const pluginHarness = plugin({ activeBackend: daemon });
+      pluginHarness.instance.settings.daemonCurrentVaultId = "active-vault";
+      const modal = createModal(backend, status({ identity: daemon }), pluginHarness);
+      try {
+        await settleInputSearch(modal, backend, "apricot", executionWithHits([hit("pear", "Grove.md", [], {
+          origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+        })], "unknown", { backend: daemon }));
+        const selection = modal.suggestions[0]!;
+        backend.statusValue = status({
+          identity: daemon, generation,
+          ...(generation === null ? {} : { phase: "unavailable", searchable: false, liveness: "unreachable" }),
+        });
+        await vi.advanceTimersByTimeAsync(400);
+        expect(backend.requests).toHaveLength(1); // unknown is not an observed new published generation
+        modal.selectSuggestion(selection, keyboard("Enter"));
+        expect(pluginHarness.openFile).not.toHaveBeenCalled();
+        expect(notices).toContain("Kwiry: these search results are out of date. Wait for the refreshed results.");
+      } finally {
+        modal.onClose();
+      }
+    },
+  );
+
+  it.each([["sources", "g1"], ["sections", "g1"], ["sources", "g2"], ["sections", "g2"]] as const)(
+    "freshness regression: outage navigation from %s retains reconnect evidence at %s",
+    async (level, reconnect) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      backend.statusValue = status({ identity: daemon, generation: "g1" });
+      const pluginHarness = plugin({ activeBackend: daemon });
+      pluginHarness.instance.settings.daemonCurrentVaultId = "active-vault";
+      const modal = createModal(backend, backend.statusValue, pluginHarness);
+      const hits = ["First", "Second"].map((heading) => hit(heading, "Grove.md", [heading], {
+        origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+      }));
+      const projection = () => (modal as unknown as {
+        settledProjection: { query: string; generation: string | null } | null;
+      }).settledProjection;
+      const toggle = async () => {
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await modal.flushSuggestions();
+      };
+      try {
+        await settleInputSearch(modal, backend, "apricot", executionWithHits(hits, "unknown", {
+          backend: daemon, generation: "g1",
+        }));
+        if (level === "sections") {
+          await toggle();
+          expect(renderedRows(modal)).toHaveLength(2);
+        }
+        backend.statusValue = status({
+          identity: daemon, phase: "unavailable", generation: null, searchable: false, liveness: "unreachable",
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        if (backend.requests.length > 1) {
+          backend.searches[1]!.reject(new searchModalModule.KwiryBackendError(
+            "daemon_unreachable", "daemon", "transport", true, "Daemon unavailable.",
+          ));
+        }
+        await modal.flushSuggestions();
+        expect(backend.requests).toHaveLength(1); // local navigation must not query an unavailable daemon
+        expect(projection()).toMatchObject({ query: "apricot", generation: "g1" });
+        expect(renderedRows(modal)).toHaveLength(level === "sources" ? 2 : 1);
+        expect(findByClass(modal.contentEl, "kwiry-backend-state")?.textContent).toBe("Daemon unavailable");
+
+        for (let index = 0; index < 3; index += 1) await toggle();
+        modal.triggerScope(["Ctrl"], "h", keyboard("h", { ctrlKey: true }));
+        await modal.flushSuggestions();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(renderedRows(modal)).toHaveLength(1);
+        expect(renderedRows(modal)[0]?.classList.contains("kwiry-source-result")).toBe(true);
+        expect(backend.requests).toHaveLength(1);
+        // Background open uses the normal selection guard but leaves this modal
+        // alive so reconnect behavior is verified on the exact same projection.
+        modal.selectSuggestion(modal.suggestions[0]!, keyboard("o", { ctrlKey: true }));
+        await Promise.resolve();
+        expect(pluginHarness.openFile).not.toHaveBeenCalled();
+        expect(notices).toContain("Kwiry: these search results are out of date. Wait for the refreshed results.");
+        expect(modal.closed).toBe(false);
+        expect(projection()?.generation).toBe("g1");
+
+        backend.statusValue = status({ identity: daemon, generation: reconnect });
+        await vi.advanceTimersByTimeAsync(800);
+        if (reconnect === "g2") {
+          expect(backend.requests).toHaveLength(2);
+          backend.searches[1]!.resolve(executionWithHits(hits, "unknown", { backend: daemon, generation: "g2" }));
+          await modal.flushSuggestions();
+        }
+        expect(projection()?.generation).toBe(reconnect);
+        expect(renderedRows(modal)).toHaveLength(1);
+        const requestCount = reconnect === "g1" ? 1 : 2;
+        expect(backend.requests).toHaveLength(requestCount);
+        modal.onClose();
+        await vi.advanceTimersByTimeAsync(1_200);
+        expect(backend.requests).toHaveLength(requestCount);
+        expect(projection()).toBeNull();
+      } finally {
+        modal.onClose();
+      }
+    },
+  );
+
+  it.each(["query", "mode"] as const)(
+    "freshness regression: outage %s changes keep latest pending epochs instead of reusing held rows",
+    async (change) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      const modal = createModal(backend, status({
+        identity: daemon,
+        capabilities: { supportedModes: ["lexical", "semantic"], sourceScope: "active_vault", manualRebuild: true },
+      }));
+      const result = (query: string, mode: "lexical" | "semantic" = "lexical") => executionWithHits([
+        hit(query, `${query}.md`, [], {
+          origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+        }),
+      ], "unknown", { backend: daemon, generation: "g1", requestedMode: mode, effectiveMode: mode });
+      try {
+        await settleInputSearch(modal, backend, "apricot", result("apricot"));
+        backend.statusValue = status({
+          identity: daemon, phase: "unavailable", generation: null, searchable: false, liveness: "unreachable",
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        if (change === "mode") {
+          modal.triggerScope([], "Tab", keyboard("Tab"));
+        } else {
+          modal.inputEl.value = "pear";
+          modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        await vi.advanceTimersByTimeAsync(100);
+        expect(backend.requests).toHaveLength(2);
+        expect(backend.requests[1]?.mode).toBe(change === "mode" ? "semantic" : "lexical");
+        modal.inputEl.value = "fig";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        if (change === "mode") modal.triggerScope([], "Tab", keyboard("Tab"));
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(backend.requests).toHaveLength(2); // only the active request, latest pending replaces intermediates
+        backend.searches[1]!.resolve(result(change === "mode" ? "apricot" : "pear", change === "mode" ? "semantic" : "lexical"));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(backend.requests).toHaveLength(3);
+        expect(backend.requests[2]).toMatchObject({ q: "fig", mode: "lexical" });
+        backend.searches[2]!.resolve(result("fig"));
+        await modal.flushSuggestions();
+        expect(modal.suggestions).toHaveLength(1);
+        const projection = (modal as unknown as {
+          settledProjection: { query: string; mode: string } | null;
+        }).settledProjection;
+        expect(projection).toMatchObject({ query: "fig", mode: "lexical" });
+        expect(renderedRows(modal)[0]?.children[0]?.children[0]?.textContent).toBe("Title fig.md");
+
+        modal.inputEl.value = "grape";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(backend.requests).toHaveLength(4);
+        modal.inputEl.value = "melon";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        modal.onClose();
+        backend.searches[3]!.resolve(result("grape"));
+        await modal.flushSuggestions();
+        await vi.advanceTimersByTimeAsync(1_200);
+        expect(backend.requests).toHaveLength(4);
+        expect(modal.suggestions).toEqual([]);
+        expect(renderedRows(modal)).toEqual([]);
+      } finally {
+        modal.onClose();
+      }
+    },
+  );
+
   it("does not adopt a daemon execution generation over newer status", async () => {
     const daemon: BackendIdentity = {
       profile: "daemon",

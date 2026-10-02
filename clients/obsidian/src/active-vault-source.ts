@@ -253,7 +253,11 @@ export class ObsidianActiveVaultSource implements ActiveVaultSource {
     file: TAbstractFile,
     listener: (event: VaultSourceEvent) => void,
   ): void {
-    if (isFile(file) && this.enabledFormat(file.path) !== null) {
+    if (!isFile(file)) {
+      listener({ kind: "rescan" });
+      return;
+    }
+    if (this.enabledFormat(file.path) !== null) {
       listener({ kind: "upsert", path: file.path });
     }
   }
