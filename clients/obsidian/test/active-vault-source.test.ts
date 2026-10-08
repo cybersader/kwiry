@@ -11,6 +11,8 @@ import {
   ObsidianActiveVaultSource,
   type VaultSourceEvent,
 } from "../src/active-vault-source";
+import { InPluginIndexController, type IndexCounts, type IndexWorkerPort } from "../src/backends/in-plugin-index-controller";
+import { emptySourceFormatCounts } from "../src/worker/protocol";
 import {
   DEFAULT_ENABLED_SOURCE_FORMATS,
   type EnabledSourceFormats,
@@ -290,7 +292,113 @@ describe("ObsidianActiveVaultSource", () => {
     expect(events).toEqual([{ kind: "upsert", path: "report.docx" }]);
   });
 
-  it("maps file events to immutable path intents and rescans folder delete or rename", () => {
+  it.each(["folder", "children", "both", "burst", "empty"] as const)(
+    "freshness regression: source bridge converges populated folder %s notifications",
+    async (delivery) => {
+      const fake = new FakeVault();
+      const active = source(fake);
+      let paths = new Set<string>();
+      let staging: Set<string> | null = null;
+      let activeGeneration = "";
+      let maximumStaging = 0;
+      const counts = (generation: string, current: Set<string>): IndexCounts => ({
+        generation, documents: current.size, chunks: current.size,
+        zero_chunk_sources: 0, quarantined_sources: 0, quarantine_fields: [],
+        source_format_counts: emptySourceFormatCounts(), database_bytes: 0, database_byte_limit: 1_000_000,
+      });
+      const worker: IndexWorkerPort = {
+        initialize: async () => undefined,
+        beginBuild: async (generation) => {
+          expect(staging).toBeNull();
+          staging = new Set();
+          maximumStaging = Math.max(maximumStaging, 1);
+          return counts(generation, staging);
+        },
+        addSourceBatch: async (generation, sources) => {
+          for (const item of sources) staging!.add(item.descriptor.path);
+          return counts(generation, staging!);
+        },
+        applySourceChanges: async (generation, next, upserts, removals) => {
+          const current = next === null ? staging! : paths;
+          for (const item of removals) current.delete(item.path);
+          for (const item of upserts) current.add(item.descriptor.path);
+          if (next !== null) activeGeneration = next;
+          return counts(next ?? generation, current);
+        },
+        commitBuild: async (generation) => {
+          paths = staging!;
+          staging = null;
+          activeGeneration = generation;
+          return counts(generation, paths);
+        },
+        abortBuild: async () => { staging = null; return counts(activeGeneration, paths); },
+      };
+      let generation = 0;
+      const controller = new InPluginIndexController({
+        source: active, worker, nextGeneration: () => `bridge-${++generation}`,
+        onStatus: () => undefined, onFailure: (error) => { throw error; },
+      });
+      try {
+        controller.start();
+        await controller.whenIdle();
+        if (delivery !== "empty") {
+          for (const path of ["grove/a.md", "grove/nested/b.txt", "grove/hidden.pdf", "grove/ignored.png"]) {
+            const bytes = new TextEncoder().encode("apricot garden");
+            fake.files.set(path, file(path, bytes.length, 1));
+            fake.contents.set(path, bytes);
+          }
+        }
+        if (delivery !== "children") fake.emit("create", folder("grove"));
+        if (delivery === "children" || delivery === "both" || delivery === "burst") {
+          for (const entry of fake.files.values()) fake.emit("create", entry);
+        }
+        if (delivery === "burst") {
+          for (let index = 0; index < 20; index += 1) {
+            fake.emit("create", folder("grove/nested"));
+            fake.emit("modify", fake.files.get("grove/a.md"));
+          }
+        }
+        await controller.whenIdle();
+        expect([...paths].sort()).toEqual(delivery === "empty" ? [] : ["grove/a.md", "grove/nested/b.txt"]);
+        expect(maximumStaging).toBe(1);
+        if (delivery === "empty") expect(generation).toBe(2);
+        if (delivery === "both") {
+          const admitted = fake.files.get("grove/a.md")!;
+          fake.files.delete(admitted.path);
+          const excluded = file("grove/a.png", admitted.stat.size, admitted.stat.mtime);
+          fake.files.set(excluded.path, excluded);
+          fake.emit("rename", excluded, admitted.path);
+          await controller.whenIdle();
+          expect([...paths]).toEqual(["grove/nested/b.txt"]);
+          fake.files.delete(excluded.path);
+          fake.files.set(admitted.path, admitted);
+          fake.emit("rename", admitted, excluded.path);
+          await controller.whenIdle();
+          expect([...paths].sort()).toEqual(["grove/a.md", "grove/nested/b.txt"]);
+        }
+        if (delivery !== "empty") {
+          fake.files.clear();
+          for (const oldPath of ["grove/a.md", "grove/nested/b.txt"]) {
+            const path = oldPath.replace("grove/", "orchard/");
+            fake.files.set(path, file(path, 14, 1));
+            fake.contents.set(path, new TextEncoder().encode("apricot garden"));
+          }
+          fake.emit("rename", folder("orchard"), "grove");
+          await controller.whenIdle();
+          expect([...paths].sort()).toEqual(["orchard/a.md", "orchard/nested/b.txt"]);
+          fake.files.clear();
+          fake.emit("delete", folder("orchard"));
+          await controller.whenIdle();
+          expect([...paths]).toEqual([]);
+        }
+      } finally {
+        controller.dispose();
+        await controller.whenDisposed();
+      }
+    },
+  );
+
+  it("freshness regression: maps file events and rescans folder create delete or rename", () => {
     const fake = new FakeVault();
     const events: VaultSourceEvent[] = [];
     source(fake).subscribe((event) => events.push(event));
@@ -312,6 +420,7 @@ describe("ObsidianActiveVaultSource", () => {
       { kind: "remove", path: "renamed.base" },
       { kind: "upsert", path: "added.txt" },
       { kind: "remove", path: "added.txt" },
+      { kind: "rescan" },
       { kind: "rescan" },
       { kind: "rescan" },
     ]);

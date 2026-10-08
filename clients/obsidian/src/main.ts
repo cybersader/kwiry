@@ -62,6 +62,7 @@ import {
 import { KwirySettingTab } from "./settings-tab";
 
 const STATUS_POLL_MS = 30_000;
+const HOVER_LINK_SOURCE = "kwiry-search";
 
 const obsidianTransport: Transport = async ({ url, method, headers, body }) => {
   const response = await requestUrl({ url, method, headers, body, throw: false });
@@ -72,6 +73,8 @@ const VAULT_ACTIVITY_INTERVAL_MS = 5_000;
 
 export default class KwiryPlugin extends Plugin {
   settings: KwiryPluginSettings = DEFAULT_SETTINGS;
+  hoverPreviewSource: string | null = null;
+  private readonly backendInvalidationCallbacks = new Set<() => void>();
   private statusBar: HTMLElement | null = null;
   private statusBarRenderer: StatusBarRenderer | null = null;
   private backendManager!: BackendManager;
@@ -158,6 +161,14 @@ export default class KwiryPlugin extends Plugin {
           },
         }, this.diagnostics);
 
+        // Older hosts keep search usable without native Page Preview support.
+        if (typeof this.registerHoverLinkSource === "function") {
+          this.registerHoverLinkSource(HOVER_LINK_SOURCE, {
+            display: this.manifest.name,
+            defaultMod: true,
+          });
+          this.hoverPreviewSource = HOVER_LINK_SOURCE;
+        }
         this.addSettingTab(new KwirySettingTab(this.app, this));
         this.privateTools.register();
         this.addCommand({
@@ -207,7 +218,9 @@ export default class KwiryPlugin extends Plugin {
     this.statusRefresh.invalidate();
     this.statusUnsubscribe?.();
     this.statusUnsubscribe = null;
-    this.activeBackendIdentity = null;
+    this.setActiveBackendIdentity(null);
+    this.backendInvalidationCallbacks.clear();
+    this.hoverPreviewSource = null;
     this.lastDiagnosticStatus = "";
     this.privateTools.dispose();
     const disposal = this.backendManager?.dispose();
@@ -418,7 +431,7 @@ export default class KwiryPlugin extends Plugin {
     this.statusRefresh.invalidate();
     this.statusUnsubscribe?.();
     this.statusUnsubscribe = null;
-    this.activeBackendIdentity = null;
+    this.setActiveBackendIdentity(null);
     this.setStatusBarText("kwiry: starting…");
 
     try {
@@ -461,6 +474,19 @@ export default class KwiryPlugin extends Plugin {
 
   getActiveBackendIdentity(): BackendIdentity | null {
     return this.activeBackendIdentity;
+  }
+
+  onBackendInvalidated(callback: () => void): () => void {
+    this.backendInvalidationCallbacks.add(callback);
+    return () => { this.backendInvalidationCallbacks.delete(callback); };
+  }
+
+  private setActiveBackendIdentity(identity: BackendIdentity | null): void {
+    const changed = this.activeBackendIdentity?.instanceId !== identity?.instanceId;
+    this.activeBackendIdentity = identity;
+    if (changed) {
+      for (const callback of this.backendInvalidationCallbacks) callback();
+    }
   }
 
   async refreshStatus(
@@ -532,7 +558,7 @@ export default class KwiryPlugin extends Plugin {
     pluginEpoch: number,
     activationEpoch: number,
   ): void {
-    this.activeBackendIdentity = backend.identity;
+    this.setActiveBackendIdentity(backend.identity);
     this.lastDiagnosticStatus = "";
     this.statusUnsubscribe?.();
     this.statusUnsubscribe = backend.subscribeStatus?.((status) => {

@@ -8,6 +8,7 @@ import { build, type Plugin as EsbuildPlugin } from "esbuild";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface LifecycleHarness {
+  hoverSources: Array<{ id: string; display: string; defaultMod: boolean }>;
   layoutReady: (() => void) | null;
   startupObserver: ((observation: unknown) => void) | null;
   statusListener: ((status: unknown) => void) | null;
@@ -37,6 +38,7 @@ interface LifecycleHarness {
 }
 
 const harness: LifecycleHarness = {
+  hoverSources: [],
   layoutReady: null,
   startupObserver: null,
   statusListener: null,
@@ -160,7 +162,8 @@ function stubSource(path: string): string {
               onLayoutReady(callback) { harness.layoutReady = callback; },
             },
           };
-          manifest = { version: "0.5.2" };
+          manifest = { version: "0.5.2", name: "Kwiry Search" };
+          registerHoverLinkSource(id, info) { harness.hoverSources.push({ id, ...info }); }
           async loadData() {
             return {
               backendProfile: "in_plugin",
@@ -346,6 +349,7 @@ function stubSource(path: string): string {
 
 describe("KwiryPlugin startup lifecycle wiring", () => {
   beforeEach(() => {
+    harness.hoverSources.length = 0;
     harness.layoutReady = null;
     harness.startupObserver = null;
     harness.statusListener = null;
@@ -385,6 +389,43 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("hover preview: registers the native source with Mod required by default", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+    expect(harness.hoverSources).toEqual([{ id: "kwiry-search", display: "Kwiry Search", defaultMod: true }]);
+    expect(Reflect.get(plugin, "hoverPreviewSource")).toBe("kwiry-search");
+  });
+
+  it("hover preview: missing public registration disables previews, not startup", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    Reflect.set(plugin, "registerHoverLinkSource", undefined);
+    await plugin.onload();
+    expect(harness.hoverSources).toEqual([]);
+    expect(Reflect.get(plugin, "hoverPreviewSource")).toBeNull();
+    expect(harness.layoutReady).toEqual(expect.any(Function));
+    expect(harness.notices).toEqual([]);
+  });
+
+  it("hover preview: backend replacement notifies promptly and callback disposal is effective", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.backendInitializations).toBe(1));
+    const register = Reflect.get(plugin, "onBackendInvalidated") as (callback: () => void) => () => void;
+    expect(register).toEqual(expect.any(Function));
+    const invalidated = vi.fn();
+    const dispose = register.call(plugin, invalidated);
+    await plugin.onSourcePolicyChanged();
+    expect(invalidated).toHaveBeenCalled();
+    dispose();
+    invalidated.mockClear();
+    await plugin.onSourcePolicyChanged();
+    expect(invalidated).not.toHaveBeenCalled();
   });
 
   it("creates stable status geometry before the initial status render", async () => {

@@ -306,6 +306,9 @@ interface UnreadableSourceRecord {
   cause: UnreadableVaultSourceCause;
   failureCount: number;
   nextRetryAt: number;
+  // Historical omission evidence stays visible until full publication, but a
+  // completed failed pass can prove that this path no longer triggers retries.
+  retryEligible: boolean;
   retryQueued: boolean;
 }
 
@@ -383,8 +386,11 @@ export class InPluginIndexController {
   private cacheSearchableObserved = false;
   private rebuildRequested = false;
   private replacementBuildInProgress = false;
+  // Authoritative debt survives an aborted candidate. Only rebuildRequested or
+  // pending paths make it runnable; debt alone must not spin the mutation loop.
   private rescanRequested = false;
   private rescanSequence = 0;
+  private replacementUnreadableHistory = new Map<string, UnreadableSourceRecord>();
   private eventSequence = 0;
   private mutationEpoch = 0;
   private readEpoch = 0;
@@ -488,6 +494,8 @@ export class InPluginIndexController {
 
     this.blocked = false;
     this.rebuildRequested = true;
+    this.rescanRequested = true;
+    this.rescanSequence = this.eventSequence;
     this.mutationEpoch += 1;
     this.stallCategory = null;
     this.inFlight = 0;
@@ -657,7 +665,6 @@ export class InPluginIndexController {
         this.queueRename(event.oldPath, event.path);
         break;
       case "rescan":
-        this.rescanSequence = sequence;
         this.requestAuthoritativeRescan();
         break;
     }
@@ -733,6 +740,8 @@ export class InPluginIndexController {
     this.pendingRenames.clear();
     this.blocked = false;
     this.rescanRequested = true;
+    this.rescanSequence = this.eventSequence;
+    this.rebuildRequested = true;
     this.clearInitialColdPreview();
   }
 
@@ -744,7 +753,6 @@ export class InPluginIndexController {
     }
     if (paths.size <= this.limits.maxPendingPaths) return;
     this.requestAuthoritativeRescan();
-    this.rescanSequence = this.eventSequence;
   }
 
   private scheduleWork(): void {
@@ -783,7 +791,6 @@ export class InPluginIndexController {
       if (this.activeGeneration === null || this.rebuildRequested || this.rescanRequested) {
         const rebuilding = this.activeGeneration !== null;
         this.rebuildRequested = false;
-        this.rescanRequested = false;
         await this.buildGeneration(rebuilding);
       } else if (this.hasPendingChanges()) {
         await this.flushActiveChanges();
@@ -811,7 +818,6 @@ export class InPluginIndexController {
   private hasMutationWork(): boolean {
     return this.activeGeneration === null
       || this.rebuildRequested
-      || this.rescanRequested
       || this.hasPendingChanges();
   }
 
@@ -1166,6 +1172,7 @@ export class InPluginIndexController {
 
     counts = await worker.commitBuild(generation);
     this.requireActive();
+    this.acknowledgeCommittedSnapshot(snapshot.cut);
     this.setActiveCounts(counts);
     this.candidateGeneration = null;
     this.initialBuildProgress = null;
@@ -1175,7 +1182,7 @@ export class InPluginIndexController {
     this.stallCategory = null;
     this.cacheIssue = null;
     this.partialReuse = null;
-    this.emit(this.hasPendingChanges() ? "replay" : "ready");
+    this.emit(this.hasMutationWork() ? "replay" : "ready");
     await this.discardInitialBuildCheckpoint("completed", null);
     if (this.cacheIssue === "checkpoint_discard_failed") this.emit("ready");
   }
@@ -1584,7 +1591,6 @@ export class InPluginIndexController {
     // An event invalidated the pass-wide evidence. A fresh authoritative snapshot
     // is safer than publishing decisions made against two different vault states.
     this.requestAuthoritativeRescan();
-    this.rescanSequence = this.eventSequence;
   }
 
   private async applyReconciliationChange(
@@ -1614,6 +1620,9 @@ export class InPluginIndexController {
     const generation = this.allocateFreshGeneration();
     this.candidateGeneration = generation;
     const activeOmissions = rebuilding ? this.captureSourceOmissions() : null;
+    this.replacementUnreadableHistory = new Map(
+      activeOmissions?.unreadableSources.map(({ path, record }) => [path, record]) ?? [],
+    );
     let began = false;
     this.replacementBuildInProgress = rebuilding;
     this.clearSourceOmissions();
@@ -1629,6 +1638,9 @@ export class InPluginIndexController {
       this.syncWorkerQuarantines(counts);
 
       const snapshot = this.captureSnapshot();
+      // A request received during beginBuild is represented by this inventory.
+      // A later request must still supersede it, including during commitBuild.
+      if (this.rescanSequence <= snapshot.cut) this.rebuildRequested = false;
       // Publish the authoritative inventory denominator before source reads begin.
       // This is the first meaningful cold-build progress signal, including for an
       // empty vault; acknowledged completion still advances only after Worker RPCs.
@@ -1656,7 +1668,7 @@ export class InPluginIndexController {
         snapshot.entries.map((entry, ordinal) => ({ entry, ordinal })),
       );
 
-      if (this.rescanRequested) {
+      if (this.rescanSequence > snapshot.cut) {
         this.clearInitialColdPreview();
         await this.worker.abortBuild(generation);
         this.initialBuildProgress = null;
@@ -1673,7 +1685,7 @@ export class InPluginIndexController {
         counts = await this.applyPendingChanges(generation, null, counts);
         this.syncWorkerQuarantines(counts);
         if (this.initialBuildProgress) this.initialBuildProgress.counts = counts;
-        if (this.rescanRequested) {
+        if (this.rescanSequence > snapshot.cut) {
           this.clearInitialColdPreview();
           await this.worker.abortBuild(generation);
           this.initialBuildProgress = null;
@@ -1697,7 +1709,7 @@ export class InPluginIndexController {
         await this.worker.abortBuild(generation);
         this.requireActive();
         if (activeOmissions) {
-          this.restoreSourceOmissions(activeOmissions, unreadableEvidence);
+          this.restoreSourceOmissions(activeOmissions, unreadableEvidence, true);
         }
         // Source-local unreadability leaves the active generation intact. Keep the
         // controller schedulable so a later vault event or delayed retry can heal it.
@@ -1711,6 +1723,7 @@ export class InPluginIndexController {
       this.clearInitialColdPreview();
       counts = await this.worker.commitBuild(generation);
       this.requireActive();
+      this.acknowledgeCommittedSnapshot(snapshot.cut);
       this.setActiveCounts(counts);
       this.candidateGeneration = null;
       this.initialBuildProgress = null;
@@ -1719,7 +1732,7 @@ export class InPluginIndexController {
       this.inFlight = 0;
       this.stallCategory = null;
       this.replacementBuildInProgress = false;
-      this.emit(this.hasPendingChanges() ? "replay" : "ready");
+      this.emit(this.hasMutationWork() ? "replay" : "ready");
       if (!rebuilding) {
         await this.discardInitialBuildCheckpoint("completed", null);
         if (this.cacheIssue === "checkpoint_discard_failed") this.emit("ready");
@@ -1748,7 +1761,17 @@ export class InPluginIndexController {
       this.initialBuildProgress = null;
       this.replacementBuildInProgress = false;
       throw failure;
+    } finally {
+      this.replacementUnreadableHistory.clear();
     }
+  }
+
+  private acknowledgeCommittedSnapshot(cut: number): void {
+    // Both fresh and resumed builds publish a fully reconciled inventory. Repay
+    // only its represented cut, preserving requests and path events during commit.
+    if (this.rescanSequence > cut) return;
+    this.rescanRequested = false;
+    this.rebuildRequested = false;
   }
 
   private captureSnapshot(): Snapshot {
@@ -1791,7 +1814,8 @@ export class InPluginIndexController {
     this.pendingUpserts.clear();
     this.pendingRemovals.clear();
     this.pendingRenames.clear();
-    if (this.rescanRequested && this.rescanSequence <= cut) this.rescanRequested = false;
+    // Consuming path intents does not discharge a full-pass obligation. An
+    // unreadable candidate can abort after this acknowledgement.
     return { entries, cut };
   }
 
@@ -2455,6 +2479,7 @@ export class InPluginIndexController {
   private restoreSourceOmissions(
     omissions: SourceOmissions,
     unreadableEvidence: ReadonlyArray<SourceOmissions["unreadableSources"][number]> = [],
+    completedInventory = false,
   ): void {
     this.sourceFormatCounts = cloneSourceFormatCounts(omissions.sourceFormatCounts);
     this.zeroChunkSources = omissions.zeroChunkSources;
@@ -2465,8 +2490,21 @@ export class InPluginIndexController {
     }
     this.cancelUnreadableRetryTimer();
     this.unreadableSources.clear();
+    const now = Date.now();
+    const currentlyUnreadable = new Set(unreadableEvidence.map(({ path }) => path));
     for (const { path, record } of [...omissions.unreadableSources, ...unreadableEvidence]) {
-      this.unreadableSources.set(path, { ...record, retryQueued: false });
+      this.unreadableSources.set(path, {
+        ...record,
+        // Only a fully probed pass may retire healed/deleted retry triggers. Keep
+        // their historical warning without shortening another path's backoff.
+        retryEligible: completedInventory ? currentlyUnreadable.has(path) : record.retryEligible,
+        // A healed/deleted old omission is retained until full publication. Its
+        // expired deadline is not permission to loop every millisecond meanwhile.
+        nextRetryAt: record.nextRetryAt > now
+          ? record.nextRetryAt
+          : now + this.unreadableRetryDelay(record.failureCount),
+        retryQueued: false,
+      });
     }
     this.syncActiveOmissionsFromCurrent();
   }
@@ -2480,18 +2518,22 @@ export class InPluginIndexController {
     this.unreadableSources.clear();
   }
 
-  private markSourceUnreadable(path: string, cause: UnreadableVaultSourceCause): void {
-    const previous = this.unreadableSources.get(path);
-    const failureCount = (previous?.failureCount ?? 0) + 1;
-    const exponent = Math.min(failureCount - 1, 16);
-    const delayMs = Math.min(
-      INITIAL_UNREADABLE_RETRY_MS * (2 ** exponent),
+  private unreadableRetryDelay(failureCount: number): number {
+    return Math.min(
+      INITIAL_UNREADABLE_RETRY_MS * (2 ** Math.min(failureCount - 1, 16)),
       MAX_UNREADABLE_RETRY_MS,
     );
+  }
+
+  private markSourceUnreadable(path: string, cause: UnreadableVaultSourceCause): void {
+    const previous = this.unreadableSources.get(path) ?? this.replacementUnreadableHistory.get(path);
+    const failureCount = (previous?.failureCount ?? 0) + 1;
+    const delayMs = this.unreadableRetryDelay(failureCount);
     this.unreadableSources.set(path, {
       cause,
       failureCount,
       nextRetryAt: Date.now() + delayMs,
+      retryEligible: true,
       retryQueued: false,
     });
     this.cancelUnreadableRetryTimer();
@@ -2522,10 +2564,9 @@ export class InPluginIndexController {
       || this.activeGeneration === null
       || this.candidateGeneration !== null
       || this.replacementBuildInProgress
-      || this.rebuildRequested
-      || this.rescanRequested) return;
+      || this.rebuildRequested) return;
     const eligible = [...this.unreadableSources.values()]
-      .filter((record) => !record.retryQueued);
+      .filter((record) => record.retryEligible && !record.retryQueued);
     if (eligible.length === 0) return;
     const nextRetryAt = Math.min(...eligible.map((record) => record.nextRetryAt));
     const delayMs = Math.max(1, nextRetryAt - Date.now());
@@ -2541,14 +2582,13 @@ export class InPluginIndexController {
       || this.activeGeneration === null
       || this.candidateGeneration !== null
       || this.replacementBuildInProgress
-      || this.rebuildRequested
-      || this.rescanRequested) {
+      || this.rebuildRequested) {
       this.scheduleUnreadableRetry();
       return;
     }
     const now = Date.now();
     const due = [...this.unreadableSources.entries()]
-      .filter(([, record]) => !record.retryQueued && record.nextRetryAt <= now)
+      .filter(([, record]) => record.retryEligible && !record.retryQueued && record.nextRetryAt <= now)
       .sort(([leftPath, left], [rightPath, right]) => (
         left.nextRetryAt - right.nextRetryAt || comparePaths(leftPath, rightPath)
       ));
@@ -2595,7 +2635,8 @@ export class InPluginIndexController {
       || this.total === null
       || this.hasPendingChanges()
       || this.rebuildRequested
-      || this.rescanRequested
+      || this.initialBuildProgress === null
+      || this.rescanSequence > this.initialBuildProgress.snapshot.cut
       || this.disposed) {
       this.initialColdPreview = null;
       return;

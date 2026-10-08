@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
@@ -54,6 +55,17 @@ class FakeElement {
   focusCount = 0;
   readonly dispatchedEvents: Event[] = [];
   private readonly listeners = new Map<string, Array<(event: Event) => void>>();
+  connectedRoot = false;
+
+  get parentElement(): FakeElement | null { return this.parent; }
+  get isConnected(): boolean { return this.connectedRoot || (this.parent?.isConnected ?? false); }
+  contains(node: unknown): boolean {
+    return node === this || this.children.some((child) => child.contains(node));
+  }
+  removeEventListener(type: string, listener: (event: Event) => void): void {
+    const listeners = this.listeners.get(type) ?? [];
+    this.listeners.set(type, listeners.filter((candidate) => candidate !== listener));
+  }
 
   constructor(className?: string) {
     if (className) this.classList.add(...className.split(/\s+/u));
@@ -102,8 +114,18 @@ class FakeElement {
   }
 
   empty(): void {
+    for (const child of this.children) child.parent = null;
     this.children.splice(0);
     this.textContent = "";
+  }
+
+  remove(): void {
+    if (this.parent) {
+      const index = this.parent.children.indexOf(this);
+      if (index >= 0) this.parent.children.splice(index, 1);
+      this.parent = null;
+    }
+    this.connectedRoot = false;
   }
 
   setAttribute(name: string, value: string): void {
@@ -134,7 +156,9 @@ class FakeElement {
 
   dispatchEvent(event: Event): boolean {
     this.dispatchedEvents.push(event);
+    if (event.target === null) Object.defineProperty(event, "target", { value: this });
     for (const listener of this.listeners.get(event.type) ?? []) listener(event);
+    if (event.bubbles) this.parent?.dispatchEvent(event);
     return true;
   }
 }
@@ -168,12 +192,13 @@ class FakeSuggestModal<T> {
 
   constructor(app: unknown) {
     this.app = app;
+    this.contentEl.connectedRoot = true;
     this.inputEl.addEventListener("input", () => {
       this.suggestionUpdate = Promise.resolve(this.getSuggestions(this.inputEl.value)).then(
         (suggestions) => {
           this.suggestions = suggestions;
           this.activeIndex = 0;
-          this.resultContainerEl.children.splice(0);
+          this.resultContainerEl.empty();
           for (const suggestion of suggestions) {
             const row = this.resultContainerEl.createDiv();
             this.renderSuggestion(suggestion, row as unknown as HTMLElement);
@@ -240,6 +265,32 @@ class FakeSuggestModal<T> {
   onClose(): void {
     this.closed = true;
   }
+}
+
+class FakeComponent {
+  readonly children = new Set<FakeComponent>();
+  private callbacks: Array<() => void> = [];
+  private loaded = true;
+  addChild<T extends FakeComponent>(child: T): T { this.children.add(child); return child; }
+  removeChild<T extends FakeComponent>(child: T): T {
+    this.children.delete(child);
+    child.unload();
+    return child;
+  }
+  register(callback: () => void): void { this.callbacks.push(callback); }
+  registerDomEvent(el: FakeElement, type: string, callback: (event: Event) => void): void {
+    el.addEventListener(type, callback);
+    this.register(() => el.removeEventListener(type, callback));
+  }
+  unload(): void {
+    if (!this.loaded) return;
+    this.loaded = false;
+    this.onunload();
+    for (const child of this.children) child.unload();
+    this.children.clear();
+    for (const callback of this.callbacks.splice(0)) callback();
+  }
+  onunload(): void {}
 }
 
 const notices: string[] = [];
@@ -309,6 +360,7 @@ let searchModalModule: SearchModalModule;
 beforeAll(async () => {
   Object.assign(globalThis, {
     __kwirySearchModalHarness: {
+      Component: FakeComponent,
       SuggestModal: FakeSuggestModal,
       Notice: FakeNotice,
       TFile: FakeTFile,
@@ -359,6 +411,7 @@ function obsidianStubPlugin(): EsbuildPlugin {
           loader: "js",
           contents: `
             const harness = globalThis.__kwirySearchModalHarness;
+            export const Component = harness.Component;
             export const SuggestModal = harness.SuggestModal;
             export const Notice = harness.Notice;
             export const TFile = harness.TFile;
@@ -541,6 +594,7 @@ function execution(
 
 function plugin(options: {
   activeEditor?: unknown;
+  hoverPreviewSource?: string | null;
   activeBackend?: BackendIdentity | null;
   resultLimit?: number;
   /**
@@ -562,7 +616,10 @@ function plugin(options: {
   const generateMarkdownLink = vi.fn(
     (_file: FakeTFile, _sourcePath: string, subpath?: string) => `[[target${subpath ?? ""}]]`,
   );
-  const activeBackend = options.activeBackend === undefined
+  const trigger = vi.fn();
+  const owner = new FakeComponent();
+  const invalidations = new Set<() => void>();
+  let activeBackend = options.activeBackend === undefined
     ? {
       profile: "in_plugin" as const,
       instanceId: "in-plugin-1",
@@ -571,8 +628,15 @@ function plugin(options: {
     }
     : options.activeBackend;
   const instance = {
+    hoverPreviewSource: options.hoverPreviewSource === undefined ? "kwiry-search" : options.hoverPreviewSource,
+    addChild: owner.addChild.bind(owner),
+    removeChild: owner.removeChild.bind(owner),
+    onBackendInvalidated: (callback: () => void) => {
+      invalidations.add(callback);
+      return () => invalidations.delete(callback);
+    },
     app: {
-      workspace: { activeEditor: options.activeEditor ?? null, getLeaf },
+      workspace: { activeEditor: options.activeEditor ?? null, getLeaf, trigger },
       vault: { getAbstractFileByPath },
       fileManager: { generateMarkdownLink },
     },
@@ -602,6 +666,13 @@ function plugin(options: {
   };
   return {
     instance,
+    trigger,
+    owner,
+    invalidations,
+    replaceBackend: (identity: BackendIdentity | null) => {
+      activeBackend = identity;
+      for (const callback of invalidations) callback();
+    },
     openFile,
     getLeaf,
     getAbstractFileByPath,
@@ -691,6 +762,298 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+// This fake boundary observes requests, not native popup/modifier behavior.
+function hover(row: FakeElement, relatedTarget: FakeElement | null = null, type = "mouseover"): Event {
+  const event = new Event(type, { bubbles: true });
+  Object.defineProperties(event, {
+    relatedTarget: { value: relatedTarget },
+    ctrlKey: { value: false },
+    metaKey: { value: false },
+  });
+  row.dispatchEvent(event);
+  return event;
+}
+
+function requestedPopover(host: ReturnType<typeof plugin>) {
+  const payload = host.trigger.mock.calls.at(-1)?.[1] as {
+    hoverParent: { hoverPopover: { unload(): void; hoverEl: FakeElement } | null };
+  };
+  expect(payload).toBeDefined();
+  const root = new FakeElement();
+  root.connectedRoot = true;
+  const popup = { unload: vi.fn(), hoverEl: root.createDiv({ cls: "popover hover-popover" }) };
+  payload.hoverParent.hoverPopover = popup;
+  return popup;
+}
+
+describe("hover preview:", () => {
+  it("marks asynchronously assigned owned popovers, never the row or unrelated popovers", async () => {
+    const backend = new DeferredBackend();
+    const host = plugin();
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([hit("preview", "Preview.md")]));
+    const row = renderedRows(modal)[0]!;
+    hover(row);
+    const unrelated = new FakeElement("popover hover-popover");
+    let popup: ReturnType<typeof requestedPopover> | undefined;
+    window.setTimeout(() => { popup = requestedPopover(host); }, 200);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(popup!.hoverEl.classList.contains("kwiry-search-hover-popover")).toBe(true);
+    expect(popup!.hoverEl.classList.contains("hover-popover")).toBe(true);
+    expect(unrelated.classList.contains("kwiry-search-hover-popover")).toBe(false);
+    expect(row.classList.contains("kwiry-search-hover-popover")).toBe(false);
+    expect(modal.contentEl.classList.contains("kwiry-search-hover-popover")).toBe(false);
+    modal.onClose();
+  });
+
+  it("scopes modal-layer styling to the owned popup marker with a fallback", async () => {
+    const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+    expect(css).toMatch(/\.hover-popover\.kwiry-search-hover-popover\s*\{\s*z-index:\s*calc\(var\(--layer-modal,\s*50\)\s*\+\s*1\);\s*\}/u);
+    expect(css).not.toMatch(/(?:^|\n)\s*(?:\.hover-popover|\.modal-container|\.modal-bg)\s*\{/u);
+  });
+
+  it.each(["backend", "unload"])("unloads then removes only its owned element on %s", async (reason) => {
+    const backend = new DeferredBackend();
+    const host = plugin();
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([hit("preview", "Preview.md")]));
+    hover(renderedRows(modal)[0]!);
+    const popup = requestedPopover(host);
+    const unrelated = popup.hoverEl.parent!.createDiv({ cls: "popover hover-popover" });
+    popup.unload.mockImplementation(() => { expect(popup.hoverEl.isConnected).toBe(true); });
+    if (reason === "backend") host.replaceBackend(null);
+    else host.owner.unload();
+    expect(popup.unload).toHaveBeenCalledTimes(1);
+    expect(popup.hoverEl.isConnected).toBe(false);
+    expect(unrelated.isConnected).toBe(true);
+    expect(unrelated.classList.contains("kwiry-search-hover-popover")).toBe(false);
+    modal.onClose();
+    host.owner.unload();
+    expect(popup.unload).toHaveBeenCalledTimes(1);
+    expect(unrelated.isConnected).toBe(true);
+  });
+
+  it("tolerates null and repeated disposal without touching another popup", async () => {
+    const backend = new DeferredBackend();
+    const host = plugin();
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([hit("preview", "Preview.md")]));
+    hover(renderedRows(modal)[0]!);
+    const parent = host.trigger.mock.calls.at(-1)![1].hoverParent;
+    const unrelated = new FakeElement("popover hover-popover");
+    unrelated.connectedRoot = true;
+    parent.hoverPopover = null;
+    parent.hoverPopover = null;
+    host.replaceBackend(null);
+    modal.onClose();
+    modal.onClose();
+    host.owner.unload();
+    parent.hoverPopover = null;
+    expect(parent.hoverPopover).toBeNull();
+    expect(unrelated.isConnected).toBe(true);
+    expect(notices).toEqual([]);
+  });
+
+  it.each(["close", "unload"])("rejects a native assignment arriving after owner %s", async (reason) => {
+    const backend = new DeferredBackend();
+    const host = plugin();
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([hit("preview", "Preview.md")]));
+    hover(renderedRows(modal)[0]!);
+    const parent = host.trigger.mock.calls.at(-1)![1].hoverParent;
+    if (reason === "close") modal.onClose();
+    else host.owner.unload();
+    const root = new FakeElement();
+    root.connectedRoot = true;
+    const unrelated = root.createDiv({ cls: "popover hover-popover" });
+    const late = { unload: vi.fn(), hoverEl: root.createDiv({ cls: "popover hover-popover" }) };
+    late.unload.mockImplementation(() => { expect(late.hoverEl.isConnected).toBe(true); });
+    window.setTimeout(() => { parent.hoverPopover = late; }, 200);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(parent.hoverPopover).toBeNull();
+    expect(late.unload).toHaveBeenCalledTimes(1);
+    expect(late.hoverEl.isConnected).toBe(false);
+    expect(late.hoverEl.classList.contains("kwiry-search-hover-popover")).toBe(false);
+    expect(unrelated.isConnected).toBe(true);
+    parent.hoverPopover = null;
+    modal.onClose();
+    host.owner.unload();
+    expect(late.unload).toHaveBeenCalledTimes(1);
+    expect(backend.requests).toHaveLength(1);
+    expect(host.openFile).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+  });
+
+  it.each([
+    ["Notes/Preview.md", "markdown", ["Heading"], null],
+    ["Documents/Preview.pdf", "pdf", [], { kind: "pdf_page", page: 3 }],
+    ["Sheets/Preview.xlsx", "excel", [], { kind: "excel_cell", sheet: "Preview", cell: "B2" }],
+    ["Preview.base", "base", [], { kind: "base_view", view: "Cards" }],
+  ] as const)("dispatches whole-file source and section requests for %s without side effects", async (path, format, headings, locator) => {
+    const backend = new DeferredBackend();
+    const host = plugin();
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([
+      hit("preview", path, [...headings], { format, locator }),
+    ]));
+    const row = renderedRows(modal)[0]!;
+    const event = hover(row.children[0]!);
+    expect(host.trigger).toHaveBeenCalledExactlyOnceWith("hover-link", {
+      event, source: "kwiry-search", hoverParent: expect.any(FakeComponent),
+      targetEl: row, linktext: path, sourcePath: "",
+    });
+    const popup = requestedPopover(host);
+    // Movement among descendants is not another entry and cannot dismiss it.
+    hover(row.children[1]!, row.children[0]!);
+    hover(row.children[0]!, row.children[1]!, "mouseout");
+    expect(host.trigger).toHaveBeenCalledTimes(1);
+    expect(popup.unload).not.toHaveBeenCalled();
+    modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+    await modal.flushSuggestions();
+    expect(popup.unload).toHaveBeenCalledTimes(1);
+    const section = renderedRows(modal)[0]!;
+    hover(section);
+    expect(host.trigger.mock.calls.at(-1)?.[1]).toMatchObject({ targetEl: section, linktext: path, sourcePath: "" });
+    expect(backend.requests).toHaveLength(1);
+    expect(host.openFile).not.toHaveBeenCalled();
+    expect(host.getLeaf).not.toHaveBeenCalled();
+    expect(host.generateMarkdownLink).not.toHaveBeenCalled();
+    expect(modal.activeIndex).toBe(0);
+    expect(modal.closed).toBe(false);
+    expect(modal.inputEl.focusCount).toBe(0);
+    expect(notices).toEqual([]);
+    modal.onClose();
+  });
+
+  it.each([
+    ["traversal", "../Preview.md", "markdown"],
+    ["absolute", "/Preview.md", "markdown"],
+    ["format mismatch", "Preview.pdf", "markdown"],
+    ["link fragment", "Preview.md#Heading", "markdown"],
+  ] as const)("silently refuses %s without weakening selection notices", async (_name, path, format) => {
+    const backend = new DeferredBackend();
+    const host = plugin();
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([hit("preview", path, [], { format })]));
+    hover(renderedRows(modal)[0]!);
+    expect(host.trigger).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+    modal.selectSuggestion(modal.suggestions[0], keyboard("Enter"));
+    expect(notices).toEqual(["Kwiry: This result does not contain a safe vault-relative path for its source format."]);
+  });
+
+  it.each(["missing", "folder", "foreign vault", "unmapped daemon", "foreign daemon"])("silently refuses %s", async (reason) => {
+    const daemon = reason.includes("daemon");
+    const identity: BackendIdentity = daemon
+      ? { profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "mapped" }
+      : status().identity;
+    const backend = new DeferredBackend(identity);
+    const currentStatus = status({ identity });
+    backend.statusValue = currentStatus;
+    const host = plugin({ activeBackend: identity });
+    if (reason === "missing") host.getAbstractFileByPath.mockReturnValue(null as unknown as FakeTFile);
+    if (reason === "folder") host.getAbstractFileByPath.mockReturnValue({ path: "Preview.md" } as FakeTFile);
+    if (reason === "foreign daemon") host.instance.settings.daemonCurrentVaultId = "mapped";
+    const vaultId = daemon ? "foreign" : reason === "foreign vault" ? "foreign" : "active-vault";
+    const modal = createModal(backend, currentStatus, host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([
+      hit("preview", "Preview.md", [], { vault_id: vaultId, origin: { profile: identity.profile, backendInstanceId: identity.instanceId, vaultId } }),
+    ], "exhausted", { backend: identity }));
+    hover(renderedRows(modal)[0]!);
+    expect(host.trigger).not.toHaveBeenCalled();
+    expect(host.openFile).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+    modal.onClose();
+  });
+
+  it.each(["query", "mode", "generation", "unknown", "unsearchable", "backend", "inactive backend", "rerender", "close", "selection close", "unload"])("tears down on %s and rejects obsolete rows", async (reason) => {
+    const identity: BackendIdentity = { profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "mapped" };
+    const currentStatus = status({ identity, capabilities: { supportedModes: ["lexical", "hybrid"], sourceScope: "registered_trees", manualRebuild: false } });
+    const backend = new DeferredBackend(identity);
+    backend.statusValue = currentStatus;
+    const host = plugin({ activeBackend: identity });
+    host.instance.settings.daemonCurrentVaultId = "mapped";
+    const modal = createModal(backend, currentStatus, host);
+    const result = hit("preview", "Preview.md", ["Heading"], { vault_id: "mapped", origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "mapped" } });
+    await settleInputSearch(modal, backend, "preview", executionWithHits([result], "exhausted", { backend: identity }));
+    const row = renderedRows(modal)[0]!;
+    hover(row);
+    const popup = requestedPopover(host);
+    if (reason === "query") {
+      modal.inputEl.value = "changed";
+      modal.inputEl.dispatchEvent(new Event("input"));
+    } else if (reason === "mode") {
+      findByClass(modal.contentEl, "kwiry-mode-segments")!.children[1]!.dispatchEvent(new Event("click"));
+    } else if (["generation", "unknown", "unsearchable"].includes(reason)) {
+      backend.statusValue = { ...currentStatus, generation: reason === "unknown" ? null : reason === "generation" ? "g2" : "g1", searchable: reason !== "unsearchable" };
+      await vi.advanceTimersByTimeAsync(400);
+      if (reason !== "generation") expect(renderedRows(modal)).toContain(row);
+    } else if (reason === "backend" || reason === "inactive backend") {
+      host.replaceBackend(reason === "backend" ? { ...identity, instanceId: "daemon-2" } : null);
+    } else if (reason === "rerender") {
+      modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+      await modal.flushSuggestions();
+    } else if (reason === "unload") host.owner.unload();
+    else if (reason === "selection close") modal.selectSuggestion(modal.suggestions[0], keyboard("Enter"));
+    else modal.onClose();
+    expect(popup.unload).toHaveBeenCalledTimes(1);
+    host.trigger.mockClear();
+    hover(row);
+    expect(host.trigger).not.toHaveBeenCalled();
+    if (reason === "selection close") expect(host.openFile).toHaveBeenCalledTimes(1);
+    else expect(host.openFile).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+    modal.onClose();
+    host.owner.unload();
+    expect(popup.unload).toHaveBeenCalledTimes(1);
+    expect(host.owner.children.size).toBe(0);
+    expect(host.invalidations.size).toBe(0);
+  });
+
+  it("ignores unassociated and detached rows even while the held result is current", async () => {
+    const backend = new DeferredBackend();
+    const host = plugin();
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([hit("preview", "Preview.md")]));
+    hover(modal.resultContainerEl.createDiv());
+    const row = renderedRows(modal)[0]!;
+    modal.resultContainerEl.empty();
+    modal.resultContainerEl.dispatchEvent(hover(row));
+    expect(host.trigger).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+    modal.onClose();
+  });
+
+  it("preserves movement into the native popover, then dismisses on ordinary row exit", async () => {
+    const backend = new DeferredBackend();
+    const host = plugin();
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([hit("preview", "Preview.md")]));
+    const row = renderedRows(modal)[0]!;
+    hover(row);
+    const popup = requestedPopover(host);
+    hover(row, popup.hoverEl.createDiv(), "mouseout");
+    expect(popup.unload).not.toHaveBeenCalled();
+    hover(row);
+    hover(row, null, "mouseout");
+    expect(popup.unload).toHaveBeenCalledTimes(1);
+    modal.onClose();
+  });
+
+  it.each([null, "kwiry-search"])("is harmless with unsupported registration or no native event listener (%s)", async (source) => {
+    const backend = new DeferredBackend();
+    const host = plugin({ hoverPreviewSource: source });
+    const modal = createModal(backend, status(), host);
+    await settleInputSearch(modal, backend, "preview", executionWithHits([hit("preview", "Preview.md")]));
+    hover(renderedRows(modal)[0]!);
+    expect(host.trigger).toHaveBeenCalledTimes(source === null ? 0 : 1);
+    expect(notices).toEqual([]);
+    expect(backend.requests).toHaveLength(1);
+    modal.onClose();
+    expect(host.owner.children.size).toBe(0);
+  });
 });
 
 describe("KwirySearchModal status rail", () => {
@@ -1523,6 +1886,321 @@ describe("KwirySearchModal grouped interactions", () => {
     );
     modal.onClose();
   });
+
+  it.each(["hits", "zero hits"] as const)(
+    "freshness regression: unchanged daemon status refreshes a late stale projection with %s",
+    async (resultKind) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      const pluginHarness = plugin({ activeBackend: daemon });
+      pluginHarness.instance.settings.daemonCurrentVaultId = "active-vault";
+      const modal = createModal(backend, status({ identity: daemon, generation: "g1" }), pluginHarness);
+      try {
+        modal.inputEl.value = "apricot";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        backend.statusValue = status({ identity: daemon, generation: "g2" });
+        await vi.advanceTimersByTimeAsync(300);
+        expect(backend.requests).toHaveLength(1);
+        const oldHit = hit("old", "Orchard.md", [], {
+          origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+        });
+        backend.searches[0]!.resolve(executionWithHits(
+          resultKind === "hits" ? [oldHit] : [], "unknown", { backend: daemon, generation: "g1" },
+        ));
+        await modal.flushSuggestions();
+        const staleSelection = modal.suggestions[0];
+        await vi.advanceTimersByTimeAsync(500);
+        expect(backend.requests).toHaveLength(2);
+        expect(backend.requests[1]).toEqual(backend.requests[0]);
+        backend.statusValue = status({ identity: daemon, generation: "g3" });
+        await vi.advanceTimersByTimeAsync(800);
+        expect(backend.requests).toHaveLength(2); // no parallel refresh
+        backend.searches[1]!.resolve(executionWithHits([oldHit], "unknown", { backend: daemon, generation: "g3" }));
+        await modal.flushSuggestions();
+        await vi.advanceTimersByTimeAsync(1_200);
+        expect(backend.requests).toHaveLength(2); // current projection settles once
+        if (staleSelection) {
+          modal.selectSuggestion(staleSelection, keyboard("Enter"));
+          expect(pluginHarness.openFile).not.toHaveBeenCalled();
+        }
+      } finally {
+        modal.onClose();
+      }
+      await vi.advanceTimersByTimeAsync(800);
+      expect(backend.requests).toHaveLength(2);
+    },
+  );
+
+  it("freshness regression: generation refresh keeps only the latest typing and cannot repopulate after close", async () => {
+    const daemon: BackendIdentity = {
+      profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+    };
+    const backend = new DeferredBackend(daemon);
+    const modal = createModal(backend, status({ identity: daemon }));
+    try {
+      await settleInputSearch(modal, backend, "apricot", executionWithHits([], "unknown", { backend: daemon }));
+      backend.statusValue = status({ identity: daemon, generation: "g2" });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(backend.requests).toHaveLength(2);
+      for (const [query, generation] of [["pear", "g3"], ["plum", "g4"], ["fig", "g5"]]) {
+        modal.inputEl.value = query!;
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        backend.statusValue = status({ identity: daemon, generation });
+        await vi.advanceTimersByTimeAsync(400);
+        expect(backend.requests).toHaveLength(2);
+      }
+      backend.searches[1]!.resolve(executionWithHits([], "unknown", { backend: daemon, generation: "g2" }));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(backend.requests).toHaveLength(3);
+      expect(backend.requests[2]?.q).toBe("fig");
+      modal.onClose();
+      backend.searches[2]!.resolve(executionWithHits([hit("late", "Grove.md")], "unknown", {
+        backend: daemon, generation: "g5",
+      }));
+      await modal.flushSuggestions();
+      await vi.advanceTimersByTimeAsync(1_200);
+      expect(modal.suggestions).toEqual([]);
+      expect(renderedRows(modal)).toEqual([]);
+      expect(backend.requests).toHaveLength(3);
+    } finally {
+      modal.onClose();
+    }
+  });
+
+  it.each([["hits", "g1"], ["hits", "g2"], ["zero", "g1"], ["zero", "g2"]] as const)(
+    "freshness regression: review reconnect retains or refreshes late %s projection at %s",
+    async (kind, reconnect) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      backend.statusValue = status({ identity: daemon, generation: "g1" });
+      const modal = createModal(backend, backend.statusValue, plugin({ activeBackend: daemon }));
+      const projection = () => (modal as unknown as {
+        settledProjection: { generation: string | null } | null;
+      }).settledProjection;
+      const hits = kind === "hits" ? [hit("pear", "Grove.md", [], {
+        origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+      })] : [];
+      try {
+        modal.inputEl.value = "apricot";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        backend.statusValue = status({
+          identity: daemon, phase: "unavailable", generation: null, searchable: false, liveness: "unreachable",
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        backend.searches[0]!.resolve(executionWithHits(hits, "unknown", { backend: daemon, generation: "g1" }));
+        await modal.flushSuggestions();
+        await vi.advanceTimersByTimeAsync(400); // identical unavailable status after settlement
+        expect(backend.requests).toHaveLength(1);
+        expect(findByClass(modal.contentEl, "kwiry-backend-state")?.textContent).toBe("Daemon unavailable");
+        backend.statusValue = status({ identity: daemon, generation: reconnect });
+        await vi.advanceTimersByTimeAsync(800);
+        // A known same generation can reuse its honest projection; a new one must refresh.
+        if (reconnect === "g1") {
+          expect(projection()?.generation).toBe("g1");
+          expect(backend.requests).toHaveLength(1);
+        } else {
+          expect(backend.requests).toHaveLength(2);
+          backend.searches[1]!.resolve(executionWithHits(hits, "unknown", { backend: daemon, generation: "g2" }));
+          await modal.flushSuggestions();
+          expect(projection()?.generation).toBe("g2");
+        }
+        expect(renderedRows(modal)).toHaveLength(kind === "hits" ? 1 : 0);
+        await vi.advanceTimersByTimeAsync(1_200);
+        expect(backend.requests).toHaveLength(reconnect === "g1" ? 1 : 2);
+      } finally {
+        modal.onClose();
+      }
+    },
+  );
+
+  it.each([null, "g1"] as const)(
+    "freshness regression: review unknown or unavailable status %s does not authorize stale selection",
+    async (generation) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      const pluginHarness = plugin({ activeBackend: daemon });
+      pluginHarness.instance.settings.daemonCurrentVaultId = "active-vault";
+      const modal = createModal(backend, status({ identity: daemon }), pluginHarness);
+      try {
+        await settleInputSearch(modal, backend, "apricot", executionWithHits([hit("pear", "Grove.md", [], {
+          origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+        })], "unknown", { backend: daemon }));
+        const selection = modal.suggestions[0]!;
+        backend.statusValue = status({
+          identity: daemon, generation,
+          ...(generation === null ? {} : { phase: "unavailable", searchable: false, liveness: "unreachable" }),
+        });
+        await vi.advanceTimersByTimeAsync(400);
+        expect(backend.requests).toHaveLength(1); // unknown is not an observed new published generation
+        modal.selectSuggestion(selection, keyboard("Enter"));
+        expect(pluginHarness.openFile).not.toHaveBeenCalled();
+        expect(notices).toContain("Kwiry: these search results are out of date. Wait for the refreshed results.");
+      } finally {
+        modal.onClose();
+      }
+    },
+  );
+
+  it.each([["sources", "g1"], ["sections", "g1"], ["sources", "g2"], ["sections", "g2"]] as const)(
+    "freshness regression: outage navigation from %s retains reconnect evidence at %s",
+    async (level, reconnect) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      backend.statusValue = status({ identity: daemon, generation: "g1" });
+      const pluginHarness = plugin({ activeBackend: daemon });
+      pluginHarness.instance.settings.daemonCurrentVaultId = "active-vault";
+      const modal = createModal(backend, backend.statusValue, pluginHarness);
+      const hits = ["First", "Second"].map((heading) => hit(heading, "Grove.md", [heading], {
+        origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+      }));
+      const projection = () => (modal as unknown as {
+        settledProjection: { query: string; generation: string | null } | null;
+      }).settledProjection;
+      const toggle = async () => {
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await modal.flushSuggestions();
+      };
+      try {
+        await settleInputSearch(modal, backend, "apricot", executionWithHits(hits, "unknown", {
+          backend: daemon, generation: "g1",
+        }));
+        if (level === "sections") {
+          await toggle();
+          expect(renderedRows(modal)).toHaveLength(2);
+        }
+        backend.statusValue = status({
+          identity: daemon, phase: "unavailable", generation: null, searchable: false, liveness: "unreachable",
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        if (backend.requests.length > 1) {
+          backend.searches[1]!.reject(new searchModalModule.KwiryBackendError(
+            "daemon_unreachable", "daemon", "transport", true, "Daemon unavailable.",
+          ));
+        }
+        await modal.flushSuggestions();
+        expect(backend.requests).toHaveLength(1); // local navigation must not query an unavailable daemon
+        expect(projection()).toMatchObject({ query: "apricot", generation: "g1" });
+        expect(renderedRows(modal)).toHaveLength(level === "sources" ? 2 : 1);
+        expect(findByClass(modal.contentEl, "kwiry-backend-state")?.textContent).toBe("Daemon unavailable");
+
+        for (let index = 0; index < 3; index += 1) await toggle();
+        modal.triggerScope(["Ctrl"], "h", keyboard("h", { ctrlKey: true }));
+        await modal.flushSuggestions();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(renderedRows(modal)).toHaveLength(1);
+        expect(renderedRows(modal)[0]?.classList.contains("kwiry-source-result")).toBe(true);
+        expect(backend.requests).toHaveLength(1);
+        // Background open uses the normal selection guard but leaves this modal
+        // alive so reconnect behavior is verified on the exact same projection.
+        modal.selectSuggestion(modal.suggestions[0]!, keyboard("o", { ctrlKey: true }));
+        await Promise.resolve();
+        expect(pluginHarness.openFile).not.toHaveBeenCalled();
+        expect(notices).toContain("Kwiry: these search results are out of date. Wait for the refreshed results.");
+        expect(modal.closed).toBe(false);
+        expect(projection()?.generation).toBe("g1");
+
+        backend.statusValue = status({ identity: daemon, generation: reconnect });
+        await vi.advanceTimersByTimeAsync(800);
+        if (reconnect === "g2") {
+          expect(backend.requests).toHaveLength(2);
+          backend.searches[1]!.resolve(executionWithHits(hits, "unknown", { backend: daemon, generation: "g2" }));
+          await modal.flushSuggestions();
+        }
+        expect(projection()?.generation).toBe(reconnect);
+        expect(renderedRows(modal)).toHaveLength(1);
+        const requestCount = reconnect === "g1" ? 1 : 2;
+        expect(backend.requests).toHaveLength(requestCount);
+        modal.onClose();
+        await vi.advanceTimersByTimeAsync(1_200);
+        expect(backend.requests).toHaveLength(requestCount);
+        expect(projection()).toBeNull();
+      } finally {
+        modal.onClose();
+      }
+    },
+  );
+
+  it.each(["query", "mode"] as const)(
+    "freshness regression: outage %s changes keep latest pending epochs instead of reusing held rows",
+    async (change) => {
+      const daemon: BackendIdentity = {
+        profile: "daemon", instanceId: "daemon-1", label: "Daemon", boundVaultId: "active-vault",
+      };
+      const backend = new DeferredBackend(daemon);
+      const modal = createModal(backend, status({
+        identity: daemon,
+        capabilities: { supportedModes: ["lexical", "semantic"], sourceScope: "active_vault", manualRebuild: true },
+      }));
+      const result = (query: string, mode: "lexical" | "semantic" = "lexical") => executionWithHits([
+        hit(query, `${query}.md`, [], {
+          origin: { profile: "daemon", backendInstanceId: "daemon-1", vaultId: "active-vault" },
+        }),
+      ], "unknown", { backend: daemon, generation: "g1", requestedMode: mode, effectiveMode: mode });
+      try {
+        await settleInputSearch(modal, backend, "apricot", result("apricot"));
+        backend.statusValue = status({
+          identity: daemon, phase: "unavailable", generation: null, searchable: false, liveness: "unreachable",
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        if (change === "mode") {
+          modal.triggerScope([], "Tab", keyboard("Tab"));
+        } else {
+          modal.inputEl.value = "pear";
+          modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        await vi.advanceTimersByTimeAsync(100);
+        expect(backend.requests).toHaveLength(2);
+        expect(backend.requests[1]?.mode).toBe(change === "mode" ? "semantic" : "lexical");
+        modal.inputEl.value = "fig";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        if (change === "mode") modal.triggerScope([], "Tab", keyboard("Tab"));
+        modal.triggerScope(["Ctrl"], "l", keyboard("l", { ctrlKey: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(backend.requests).toHaveLength(2); // only the active request, latest pending replaces intermediates
+        backend.searches[1]!.resolve(result(change === "mode" ? "apricot" : "pear", change === "mode" ? "semantic" : "lexical"));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(backend.requests).toHaveLength(3);
+        expect(backend.requests[2]).toMatchObject({ q: "fig", mode: "lexical" });
+        backend.searches[2]!.resolve(result("fig"));
+        await modal.flushSuggestions();
+        expect(modal.suggestions).toHaveLength(1);
+        const projection = (modal as unknown as {
+          settledProjection: { query: string; mode: string } | null;
+        }).settledProjection;
+        expect(projection).toMatchObject({ query: "fig", mode: "lexical" });
+        expect(renderedRows(modal)[0]?.children[0]?.children[0]?.textContent).toBe("Title fig.md");
+
+        modal.inputEl.value = "grape";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(backend.requests).toHaveLength(4);
+        modal.inputEl.value = "melon";
+        modal.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(100);
+        modal.onClose();
+        backend.searches[3]!.resolve(result("grape"));
+        await modal.flushSuggestions();
+        await vi.advanceTimersByTimeAsync(1_200);
+        expect(backend.requests).toHaveLength(4);
+        expect(modal.suggestions).toEqual([]);
+        expect(renderedRows(modal)).toEqual([]);
+      } finally {
+        modal.onClose();
+      }
+    },
+  );
 
   it("does not adopt a daemon execution generation over newer status", async () => {
     const daemon: BackendIdentity = {

@@ -492,7 +492,7 @@ export function buildPinnedObsidianArgs(configDir) {
   ];
 }
 
-async function launchPinnedObsidian({ layout, manifest }) {
+export async function launchPinnedObsidian({ layout, manifest }) {
   const Launcher = (await import("obsidian-launcher")).default;
   const launcher = new Launcher({
     cacheDir: layout.cache,
@@ -769,7 +769,7 @@ export async function awaitRuntimeProcessExitStage(proc) {
   return classifyRuntimeProcessExit(proc);
 }
 
-async function attachWebdriver({ layout, manifest, cdpPort }) {
+export async function attachWebdriver({ layout, manifest, cdpPort }) {
   const chrome = await import("selenium-webdriver/chrome.js");
   const service = new chrome.ServiceBuilder(layout.driver)
     .setLoopback(true)
@@ -1204,7 +1204,7 @@ export function assertObserved(observed, manifest) {
   }
 }
 
-async function preparePrivateLayout(privateRoot) {
+export async function preparePrivateLayout(privateRoot) {
   const layout = {
     root: privateRoot,
     home: resolve(privateRoot, "home"),
@@ -1246,7 +1246,7 @@ export async function prepareVault(vault, candidate) {
   await writeFile(resolve(vault, XLSM_PATH), buildSyntheticXlsm());
 }
 
-function isolatedEnvironment(layout, runtimeTempRoot) {
+export function isolatedEnvironment(layout, runtimeTempRoot) {
   const env = {};
   for (const key of SAFE_ENV_KEYS) if (process.env[key]) env[key] = process.env[key];
   return {
@@ -1272,7 +1272,7 @@ async function extractChromedriver(archivePath, output) {
   await writeFile(output, drivers[0].bytes, { flag: "wx", mode: 0o700 });
 }
 
-async function waitForCdpPort(configDir, proc) {
+export async function waitForCdpPort(configDir, proc) {
   const path = resolve(configDir, "DevToolsActivePort");
   const deadline = Date.now() + UI_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -1293,7 +1293,7 @@ function isLoopbackPort(port) {
   return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
-async function reapProcess(proc) {
+export async function reapProcess(proc) {
   if (proc.exitCode !== null) return;
   try { process.kill(-proc.pid, "SIGTERM"); } catch {}
   await Promise.race([
@@ -1310,7 +1310,7 @@ async function reapProcess(proc) {
   if (proc.exitCode === null) throw new WebdriverGateError("cleanup_incomplete");
 }
 
-async function verifyPortsClosed(ports) {
+export async function verifyPortsClosed(ports) {
   for (const port of new Set(ports.filter(isLoopbackPort))) {
     if (await canConnectLoopback(port)) return false;
   }

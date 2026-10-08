@@ -4,7 +4,8 @@
 // Modal UX (keyboard flow and result-row structure) is informed by Omnisearch
 // (https://github.com/scambier/obsidian-omnisearch), GPL-3.0.
 
-import { Notice, Platform, SuggestModal, TFile } from "obsidian";
+import { Component, Notice, Platform, SuggestModal, TFile } from "obsidian";
+import type { HoverParent, HoverPopover } from "obsidian";
 import type { SearchMode, SearchQueryPolicyFacts } from "./api";
 import type {
   BackendSearchHit,
@@ -136,6 +137,31 @@ function openedViewType(leaf: { view?: unknown }): string | null {
   return typeof type === "string" ? type : null;
 }
 
+class ResultHoverParent extends Component implements HoverParent {
+  private popover: HoverPopover | null = null;
+  private disposed = false;
+
+  get hoverPopover(): HoverPopover | null {
+    return this.popover;
+  }
+
+  set hoverPopover(popover: HoverPopover | null) {
+    // Page Preview assigns asynchronously, after connecting the native element.
+    // Only our public parent receives this marker; other popovers stay native.
+    if (this.disposed && popover) {
+      popover.unload();
+      popover.hoverEl.remove();
+      return;
+    }
+    this.popover = popover;
+    popover?.hoverEl.classList.add("kwiry-search-hover-popover");
+  }
+
+  onunload(): void {
+    this.disposed = true;
+  }
+}
+
 export class KwirySearchModal extends SuggestModal<ModalResult> {
   private readonly session: SearchSessionController;
   private mode: SearchMode;
@@ -164,6 +190,9 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private localProjectionRefresh = false;
   private selectionTransactionActive = false;
   private restorationTimer: number | null = null;
+  private readonly hoverRows = new WeakMap<HTMLElement, ModalResult>();
+  private hoverParent: ResultHoverParent | null = null;
+  private hoveredRow: HTMLElement | null = null;
 
   constructor(
     private readonly plugin: KwiryPlugin,
@@ -190,6 +219,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     this.emptyStateText = "";
     this.createContextBar(status);
     this.createStatusRail(status);
+    this.registerHoverPreview();
     this.setInstructions(
       SEARCH_SHORTCUT_BINDINGS
         .filter(({ instruction }) => instruction !== false)
@@ -217,7 +247,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   async getSuggestions(query: string): Promise<ModalResult[]> {
     if (this.localProjectionRefresh) {
       this.localProjectionRefresh = false;
-      const localResults = this.projectedResults(query);
+      const localResults = this.heldProjectionResults(query);
       if (localResults) return localResults;
     }
 
@@ -335,7 +365,81 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
     });
   }
 
+  private registerHoverPreview(): void {
+    if (!this.plugin.hoverPreviewSource) return;
+    const parent = this.plugin.addChild(new ResultHoverParent());
+    this.hoverParent = parent;
+    parent.register(() => {
+      this.clearHoverPreview();
+      this.hoverParent = null;
+    });
+    parent.register(this.plugin.onBackendInvalidated(() => this.clearHoverPreview()));
+    parent.registerDomEvent(this.resultContainerEl, "mouseover", (event) => {
+      const row = this.hoverRowForTarget(event.target);
+      if (!row || row === this.hoverRowForTarget(event.relatedTarget)) return;
+      this.requestHoverPreview(row, event);
+    });
+    parent.registerDomEvent(this.resultContainerEl, "mouseout", (event) => {
+      const row = this.hoverRowForTarget(event.target);
+      if (!row || row !== this.hoveredRow
+        || row === this.hoverRowForTarget(event.relatedTarget)) return;
+      // The host owns pointer movement from its anchor into the popover.
+      if (parent.hoverPopover?.hoverEl.contains(event.relatedTarget as Node | null)) return;
+      this.clearHoverPreview();
+    });
+    // Clear immediately on typing, including before an asynchronous search settles.
+    parent.registerDomEvent(this.inputEl, "input", () => this.clearHoverPreview());
+  }
+
+  private hoverRowForTarget(target: EventTarget | null): HTMLElement | null {
+    let element = target as HTMLElement | null;
+    while (element && element !== this.resultContainerEl) {
+      if (this.hoverRows.has(element)) return element;
+      element = element.parentElement;
+    }
+    return null;
+  }
+
+  private requestHoverPreview(row: HTMLElement, event: MouseEvent): void {
+    const parent = this.hoverParent;
+    const source = this.plugin.hoverPreviewSource;
+    const result = this.hoverRows.get(row);
+    if (!parent || !source || !result
+      || !row.isConnected || !this.resultContainerEl.contains(row)) return;
+    const validated = this.validatedResult(result, "source", "silent");
+    if (!validated) {
+      this.clearHoverPreview();
+      return;
+    }
+    if (this.hoveredRow !== row) this.clearHoverPreview();
+    this.hoveredRow = row;
+    // Standard native hover-link shape. Page Preview owns delay and the user's
+    // source modifier preference; even an unmodified mouseover is only a request.
+    this.app.workspace.trigger("hover-link", {
+      event,
+      source,
+      hoverParent: parent,
+      targetEl: row,
+      linktext: validated.file.path,
+      sourcePath: "",
+    });
+  }
+
+  private clearHoverPreview(): void {
+    this.hoveredRow = null;
+    const popover = this.hoverParent?.hoverPopover;
+    if (!popover) return;
+    this.hoverParent!.hoverPopover = null;
+    popover.unload();
+    // Unloading native content alone leaves a shell when the pointer is still.
+    // Explicit invalidation owns this one element, not other Page Preview UI.
+    popover.hoverEl.remove();
+  }
+
   renderSuggestion(result: ModalResult, el: HTMLElement): void {
+    // Every local/host redraw retires the previous native anchor.
+    this.clearHoverPreview();
+    this.hoverRows.set(el, result);
     const hit = this.hitForResult(result);
     el.addClass("kwiry-result");
     el.addClass(result.kind === "source" ? "kwiry-source-result" : "kwiry-section-result");
@@ -478,21 +582,29 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   private refreshLocalProjection(): void {
+    this.clearHoverPreview();
     this.localProjectionRefresh = true;
     this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
   private projectedResults(query: string): ModalResult[] | null {
     const projection = this.settledProjection;
-    if (
-      !projection
+    if (!projection
+      || (this.backend.identity.profile === "daemon"
+        && (!this.lastSearchable || this.latestStatusGeneration === null))
+      || projection.generation !== this.latestStatusGeneration) return null;
+    return this.heldProjectionResults(query);
+  }
+
+  private heldProjectionResults(query: string): ModalResult[] | null {
+    // Source/section navigation only rearranges held evidence. Unavailable status
+    // must not turn that presentation action into a backend request or erase the
+    // reconnect evidence. Opening still requires projectedResults currentness.
+    const projection = this.settledProjection;
+    if (!projection
       || projection.query !== query
       || projection.mode !== this.mode
-      || projection.backendInstanceId !== this.backend.identity.instanceId
-      || projection.generation !== this.latestStatusGeneration
-    ) {
-      return null;
-    }
+      || projection.backendInstanceId !== this.backend.identity.instanceId) return null;
     if (this.resultView.kind === "sources") return this.sourceResults(projection.grouped);
     const group = findSourceGroup(projection.grouped, this.resultView.source);
     if (!group) return null;
@@ -524,6 +636,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   private invalidateProjection(): void {
+    this.clearHoverPreview();
     this.clearRestorationTimer();
     this.settledProjection = null;
     this.resultView = { kind: "sources" };
@@ -593,15 +706,19 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   private validatedResult(
     result: ModalResult,
     intent: OpenNavigationIntent,
+    feedback: "notice" | "silent" = "notice",
   ): { file: TFile; target: OpenTarget } | null {
+    const notice = (message: string): void => {
+      if (feedback === "notice") new Notice(message);
+    };
     const hit = this.hitForResult(result);
     if (!this.isCurrentProjectedResult(result)) {
-      new Notice("Kwiry: these search results are out of date. Wait for the refreshed results.");
+      notice("Kwiry: these search results are out of date. Wait for the refreshed results.");
       return null;
     }
     const activeBackend = this.plugin.getActiveBackendIdentity();
     if (!activeBackend) {
-      new Notice("Kwiry: the search backend is no longer active.");
+      notice("Kwiry: the search backend is no longer active.");
       return null;
     }
     const decision = validateOpenResult(
@@ -611,12 +728,12 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
       intent,
     );
     if (!decision.ok) {
-      new Notice(`Kwiry: ${decision.safeMessage}`);
+      notice(`Kwiry: ${decision.safeMessage}`);
       return null;
     }
     const file = this.app.vault.getAbstractFileByPath(decision.path);
     if (!(file instanceof TFile)) {
-      new Notice("Kwiry: this result is not present in the current vault.");
+      notice("Kwiry: this result is not present in the current vault.");
       return null;
     }
     const target: OpenTarget = { path: decision.path };
@@ -626,6 +743,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   onClose(): void {
+    // Selection closes before onChooseSuggestion and bypasses invalidation, but
+    // its native preview and listeners must still be retired now.
+    this.clearHoverPreview();
+    if (this.hoverParent) this.plugin.removeChild(this.hoverParent);
     this.activeRequestEpoch = ++this.requestEpoch;
     this.progressEpoch += 1;
     if (this.selectionTransactionActive) {
@@ -682,6 +803,7 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
           profile: this.backend.identity.profile,
         });
       }
+      this.clearHoverPreview();
       // A failed status poll is not worth surfacing here: the search path
       // already reports backend errors through the notice.
     } finally {
@@ -730,6 +852,10 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
   }
 
   private renderProgress(status: BackendStatus): void {
+    if (!status.searchable || status.generation === null
+      || status.identity.instanceId !== this.backend.identity.instanceId) {
+      this.clearHoverPreview();
+    }
     const becameSearchable = !this.lastSearchable && status.searchable;
     this.lastSearchable = status.searchable;
     this.reconcileStatusGeneration(status);
@@ -749,9 +875,13 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
 
   private reconcileStatusGeneration(status: BackendStatus): void {
     if (status.identity.instanceId !== this.backend.identity.instanceId) return;
-    const previousGeneration = this.latestStatusGeneration;
     this.latestStatusGeneration = status.generation;
-    if (status.generation === previousGeneration) return;
+    // Unknown/unavailable status is not a new published generation. Keep the
+    // settled evidence for reconnect comparison, but do not authorize selection
+    // or refresh while its currentness cannot be established.
+    if (status.generation === null || !status.searchable) return;
+    // A request can settle behind a status already observed while it was active.
+    // Even an unchanged poll must compare that newly settled projection.
 
     const projection = this.settledProjection;
     if (
