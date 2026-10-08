@@ -54,6 +54,8 @@ BRAT installs `main.js`, `manifest.json`, and `styles.css` from each versioned G
 3. For Daemon, start `kwiry serve`, configure the literal-loopback URL and token path, and map the current vault for local open actions.
 4. Run **Kwiry Search: Search notes**. `Tab` cycles only modes supported by the selected profile. `Enter` opens a grouped source generally; `Ctrl+L` toggles between Sources and that source's already returned sections, where `Enter` opens the exact selected heading, view, or PDF page. `Ctrl+H` remains a compatibility return to Sources, and `Ctrl+Enter` opens the selected target in a new tab.
 
+File previews use Obsidian's core **Page preview** plugin. Enable it, then hold `Ctrl` (Windows/Linux) or `Cmd` (macOS) while hovering a source or section row; native Page preview preferences can override the modifier requirement for Kwiry Search. Both row types request the whole file, not a heading, PDF page, or sheet; supported preview formats depend on Obsidian.
+
 In-plugin · Lexical builds, restores, and reconciles the current vault locally. Daemon results may include registered trees outside the current vault; those results remain searchable but show a factual notice instead of opening locally.
 
 ## Development

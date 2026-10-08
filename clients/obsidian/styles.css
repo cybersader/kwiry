@@ -1,5 +1,10 @@
 /* Kwiry Search — GPL-3.0-only */
 
+/* Native Page Preview stays above the search modal only for our owned popup. */
+.hover-popover.kwiry-search-hover-popover {
+  z-index: calc(var(--layer-modal, 50) + 1);
+}
+
 .kwiry-status-bar {
   --kwiry-status-bar-inline-size: min(48ch, 40vw);
 
