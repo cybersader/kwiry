@@ -4,7 +4,9 @@ IG-1 connects an OpenClast control plane to a Kwiry sidecar without giving brows
 
 ## Status
 
-The Kwiry-side capability, profile, partition, and authorized-BM25 enforcement checkpoint is committed. The companion OpenClast gateway and real-process two-user/two-room witness are implemented and verified in the sibling project's pending review work; owner acceptance and publication remain pending. This page is the integration/operator target, not a claim that the complete cross-repository path is released today.
+The Kwiry-side capability, profile, partition, and authorized-BM25 enforcement checkpoint is committed. The companion OpenClast gateway, its separate search signing key, and the real-process two-user/two-room witness are **not yet implemented**. The separate search key is a credential-boundary change in OpenClast that awaits an owner decision and independent review before it is built. OpenClast also does not yet expose a per-room source revision; it is a recorded OpenClast requirement without build authorization. Owner acceptance and publication remain pending.
+
+This page describes the integration/operator **target**. The gateway, key-generation, configuration, and witness sections below are the proposed interface, not shipped OpenClast behavior.
 
 ```text
 authenticated OpenClast request
@@ -28,7 +30,7 @@ This checkpoint serves **lexical search only**. Governed semantic/hybrid search,
 
 ## Generate separate keys
 
-The companion OpenClast integration's multi-user key script is expected to generate independent session and Kwiry-search pairs:
+A future companion OpenClast multi-user key script is proposed to generate independent session and Kwiry-search pairs:
 
 ```bash
 cd deploy/multi-user
@@ -109,7 +111,9 @@ The current implementation checkpoint includes crash-consistent candidate public
 
 ## Configure OpenClast companion integration
 
-Once the companion changes are committed, set the internal endpoint, trust tuple, separate private key, and explicit resolver-room mapping:
+> **Not agreed.** The default integration seam the two projects discussed is Kwiry as a capability-discovered provider behind OpenClast's existing agent `search` tool, not a new OpenClast HTTP route. Under that seam the provider is a second enforcement point: it verifies the signed capability (key ID, audience, action, resource) and the room partition before retrieval, discloses which engine answered, and never falls back to another engine on error or denial. Typed result locations remain an open requirement. Deployment wiring (endpoint, timeout, TTL, result limit) may use environment variables. Room-to-resource mapping is entitlement policy, so it likely moves to audited OpenClast admin configuration keyed by a stable host namespace rather than a per-user alias. Private search-key distribution awaits the credential-boundary review and is not settled.
+
+Once the companion changes exist, the proposed configuration sets the internal endpoint, trust tuple, separate private key, and explicit resolver-room mapping:
 
 ```dotenv
 OPENCLAST_KWIRY_URL=http://kwiry:32189
@@ -126,7 +130,7 @@ OPENCLAST_KWIRY_TIMEOUT_MS=10000
 
 `OPENCLAST_KWIRY_RESOURCE_MAP` is not an entitlement source. OpenClast first resolves the caller's current grants, then intersects the resulting rooms with this operator map. Unknown rooms are omitted; zero mapped resources returns `403`.
 
-Clients call OpenClast:
+Under this unagreed proposal, clients would call an OpenClast gateway route:
 
 ```http
 POST /api/knowledge/search
@@ -140,7 +144,7 @@ Content-Type: application/json
 }
 ```
 
-The gateway requires explicit `mode: "lexical"`, re-resolves grants on every request, mints a short-lived internal capability, and proxies the safe Kwiry response. The approved durability follow-on also forwards only the safe freshness/generation response headers; it never exposes index paths, global counts, or the internal capability.
+The proposed gateway requires explicit `mode: "lexical"`, re-resolves grants on every request, mints a short-lived internal capability, and proxies the safe Kwiry response. It would also forward only the safe freshness/generation response headers; it never exposes index paths, global counts, or the internal capability.
 
 ## Audit and privacy
 
@@ -170,9 +174,9 @@ The gateway and Kwiry enforcement logs do **not** record:
 
 ## Verification
 
-The committed Kwiry repository tests cover capability key/claim validation, profile separation, no desktop credential artifacts, exact resource partitions, and authorized-only BM25 statistics. The sibling integration tests cover live grant resolution, gateway token non-disclosure, audit privacy, and the gated real-process two-user/two-room witness. Passing both establishes implementation verification, not owner acceptance.
+The committed Kwiry repository tests cover capability key/claim validation, profile separation, no desktop credential artifacts, exact resource partitions, and authorized-only BM25 statistics. A hermetic Kwiry-side check with synthetic room snapshots and a local test signer exercised cross-room denial, invalid-token refusal, `mode_unavailable`, snapshot deletion, and restart persistence; it is not cross-repository evidence. Companion integration tests for live grant resolution, gateway token non-disclosure, audit privacy, and the real-process two-user/two-room witness do not exist yet. Passing tests establishes implementation verification, not owner acceptance.
 
-Run the cross-repository witness against a built Kwiry binary:
+The proposed cross-repository witness, once the companion test exists, would run against a built Kwiry binary:
 
 ```bash
 KWIRY_BIN=/path/to/kwiry \
