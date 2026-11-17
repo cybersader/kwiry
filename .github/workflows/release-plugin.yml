@@ -14,7 +14,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: obsidian-release-candidate-${{ inputs.tag }}
@@ -22,6 +21,9 @@ concurrency:
 
 jobs:
   candidate:
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     defaults:
@@ -39,7 +41,7 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/${default_branch}"
           trusted_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${default_branch}" --jq '.sha')
           test "$GITHUB_SHA" = "$trusted_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
@@ -76,17 +78,17 @@ jobs:
           test "$(jq -r '.head_sha' <<<"$run")" = "$tag_commit"
           printf 'TAG_COMMIT=%s\n' "$tag_commit" >> "$GITHUB_ENV"
           printf 'CI_RUN_ATTEMPT=%s\n' "$(jq -r '.run_attempt' <<<"$run")" >> "$GITHUB_ENV"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.23.1
           cache: npm
           cache-dependency-path: clients/obsidian/package-lock.json
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1.95.0 (installer)
         with:
           toolchain: 1.95.0
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
           shared-key: obsidian-wasm
@@ -98,12 +100,16 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all -- --check
-          cargo clippy --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml
-          cargo check --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --target wasm32-unknown-unknown
+          cargo clippy --locked --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml
+          cargo check --locked --manifest-path rust/kwiry-obsidian-wasm/Cargo.toml --target wasm32-unknown-unknown
           npm test --prefix rust/kwiry-obsidian-wasm
       - name: Verify plugin and deterministic evidence
         run: npm run verify
+      - name: Verify plugin version and release tag
+        env:
+          VERSION_TAG: ${{ inputs.tag }}
+        run: npm run check:versions
       - name: Prepare exact candidate package
         run: |
           set -euo pipefail
@@ -236,7 +242,7 @@ jobs:
             "$GITHUB_RUN_ATTEMPT"
           npm run validate:release:handoff -- .tmp/release-handoff
       - name: Upload exact validated candidate handoff
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kwiry-obsidian-validated-candidate-${{ inputs.tag }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: clients/obsidian/.tmp/release-handoff/

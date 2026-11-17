@@ -1,0 +1,73 @@
+name: Build and attest tagged Obsidian plugin
+
+# This proves tag-origin bytes; publication still requires the existing real-host
+# candidate gate and protected exact-byte handoff. This workflow cannot publish.
+on:
+  push:
+    tags: ["[0-9]*.[0-9]*.[0-9]*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  provenance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: clients/obsidian
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.1"
+          cache: npm
+          cache-dependency-path: clients/obsidian/package-lock.json
+      - name: Verify tag and plugin version sources
+        env:
+          VERSION_TAG: ${{ github.ref_name }}
+        run: npm run check:versions
+      - uses: dtolnay/rust-toolchain@1961bfc0c4a8bf07e0a0c98e1e2459c642ea70a0 # v1.95.0
+        with:
+          toolchain: 1.95.0
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: clients/obsidian/rust/kwiry-obsidian-wasm
+          shared-key: obsidian-wasm
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Frozen plugin install
+        run: npm ci
+      - name: Build tagged plugin
+        run: npm run build
+      - name: Verify runtime assets
+        run: test -s main.js && test -s manifest.json && test -s styles.css
+      - name: Attest tag-built runtime assets
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            clients/obsidian/main.js
+            clients/obsidian/manifest.json
+            clients/obsidian/styles.css
+      - name: Retain attested runtime assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kwiry-obsidian-tagged-runtime-${{ github.ref_name }}
+          path: |
+            clients/obsidian/main.js
+            clients/obsidian/manifest.json
+            clients/obsidian/styles.css
+          retention-days: 14
+          if-no-files-found: error

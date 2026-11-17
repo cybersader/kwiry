@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directories:
+      - /daemon
+      - /clients/obsidian/rust/kwiry-obsidian-wasm
+      - /bench/portable-core-wasm
+      - /bench/tantivy-wasm
+      - /bench/embedding
+      - /bench/vector
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directories:
+      - /clients/obsidian
+      - /bench/fts5-wasm
+      - /bench/fts5-wasm-obsidian-probe
+      - /tools/kwiry-fixtures
+    schedule:
+      interval: weekly

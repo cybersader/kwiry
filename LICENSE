@@ -1,0 +1,12 @@
+Kwiry licensing
+
+Unless a path contains its own license notice, repository content outside
+clients/obsidian/ is dual-licensed under the MIT License OR the Apache License,
+Version 2.0, at your option. The full texts are in LICENSE-MIT and LICENSE-APACHE.
+
+The Obsidian plugin in clients/obsidian/ is GPL-3.0-only; its full license text is
+clients/obsidian/LICENSE. Compatibility probes that bundle GPL-covered plugin
+code carry their own license. See README.md's repository map and the license
+notices in each package for the applicable terms.
+
+This index does not change the existing license of any file or dependency.

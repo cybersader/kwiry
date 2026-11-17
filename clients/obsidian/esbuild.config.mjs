@@ -100,6 +100,7 @@ function prepareRustAdapter(variant) {
   const rustPackage = mkdtempSync(resolve(packageParent, "build-"));
   const buildArgs = [
     "build",
+    "--locked",
     "--manifest-path",
     rustManifest,
     "--target-dir",
