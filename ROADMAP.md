@@ -104,15 +104,19 @@ D5B is independent of IG-1 acceptance. Gates 1–4 are owner-accepted GO, and be
 
 The binding rules are in [`CONTRACT.md`](CONTRACT.md).
 
-### IG-1 — governed lexical OpenClast gateway — Kwiry enforcement implemented; companion integration pending
+### IG-1 — governed lexical OpenClast gateway — Foundation owner-accepted (2026-11-17); production enablement not yet authorized
 
 - The committed Kwiry checkpoint verifies short-lived lexical-only capabilities, opens only request-authorized resource partitions, and computes BM25 statistics only from those partitions.
 - The companion OpenClast gateway must resolve live grants on every request, mint capabilities with a separate search key, and keep the internal capability and Kwiry address server-side.
-- Full IG-1 implementation and owner review remain pending until the companion OpenClast changes and real two-user/two-room witness are committed and verified together.
+- The synthetic two-user/two-room connected witness passed against OpenClast's engine-neutral search seam: live per-call scope, authorized-only partition access proved by an internal observer (absent from shipped builds), authorized-only BM25 equal to physical baselines, named provider errors with no fallback, credential privacy, and identical behavior between shipped and observer builds.
+- Room lifecycle is covered: explicitly enrolled random opaque room IDs, automatic audited retirement on room removal or replacement for every enrolled provider, fresh IDs on recreation with no inherited index, and a fail-closed migration from the earlier layout that never reactivates a retired room.
+- A signed resource without a searchable partition refuses the whole request (`503 resource_unavailable`), never a partial answer.
+- The owner accepted the foundation on 2026-11-17, conditional on OpenClast's resource identity being an engine-neutral primitive rather than Kwiry-specific wiring; that condition was verified. This acceptance does not authorize production enablement, real-content indexing, or in-flight revocation guarantees.
+- Follow-up: Kwiry's governed host profile is named `openclast`; it is a generic governed profile with OpenClast as its first issuer and should be renamed compatibly.
 
 See [`docs/openclast-ig1.md`](docs/openclast-ig1.md).
 
-### IG-2 — governed semantic and hybrid retrieval — Planned next
+### IG-2 — governed semantic and hybrid retrieval — Next; planning with OpenClast
 
 - Authorized vector candidate generation through physical partitions or an equivalently strong mandatory rowset boundary.
 - Authorized-only semantic ranking and hybrid fusion.
@@ -179,9 +183,9 @@ These tracks continue across the numbered gates:
 
 The D5B Tantivy-WASM checkpoint completed as a technical **NO-GO** for the normal incremental writer. The owner then selected official FTS5-WASM: Gate 1 is verified GO, the owner accepted the isolated one-file installed Obsidian/frozen-BRAT Gate 2 as GO, portable Rust Gate 3 is owner-accepted GO, and backend-neutral production integration Gate 4 is owner-accepted GO after the complete automated and installed disposable-vault witness. This remains independent of the OpenClast profile.
 
-The current enterprise owner checkpoint remains the **IG-1 foundation**. Acceptance means the enterprise lexical authorization model is suitable as the base for governed semantic/hybrid and read-only MCP work; it does **not** mean lexical-only enterprise search is the end state.
+The **IG-1 foundation** was owner-accepted on 2026-11-17. Acceptance means the enterprise lexical authorization model is suitable as the base for governed semantic/hybrid and read-only MCP work; it does **not** mean lexical-only enterprise search is the end state.
 
-Before beginning the next governed enterprise gate, confirm:
+The acceptance confirmed:
 
 1. the OpenClast/Kwiry authority split and exact resource model remain correct;
 2. request-authorized partition opening and authorized-only BM25 satisfy the intended security oracle;
