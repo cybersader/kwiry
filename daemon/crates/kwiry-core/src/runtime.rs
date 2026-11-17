@@ -487,8 +487,11 @@ impl PartitionedSearchIndex {
             {
                 continue;
             }
+            // A signed resource without a partition is refused before any
+            // partition opens: answering from the rest would silently
+            // understate coverage (CONTRACT: no silent skip).
             let Some(index_dir) = self.partition_dirs.get(resource) else {
-                continue;
+                return Err(Error::ResourceUnavailable);
             };
             selected.push((resource, index_dir));
         }
@@ -542,8 +545,11 @@ impl PartitionedSearchIndex {
             {
                 continue;
             }
+            // A signed resource without a partition is refused before any
+            // partition opens: answering from the rest would silently
+            // understate coverage (CONTRACT: no silent skip).
             let Some(index_dir) = self.partition_dirs.get(resource) else {
-                continue;
+                return Err(Error::ResourceUnavailable);
             };
             selected.push((resource, index_dir));
         }
@@ -3205,6 +3211,78 @@ mod tests {
         );
     }
 
+    /// Previously indexed content is withheld when the search either finds
+    /// nothing or refuses because the resource has no partition. Any other
+    /// error is a test failure, never evidence of withholding.
+    fn withheld(result: Result<Vec<SearchHit>>) -> bool {
+        match result {
+            Ok(hits) => hits.is_empty(),
+            Err(Error::ResourceUnavailable) => true,
+            Err(error) => panic!("unexpected search error: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn openclast_refuses_a_signed_resource_without_a_partition() {
+        let temporary = tempdir().unwrap();
+        let x = temporary.path().join("x");
+        let data = temporary.path().join("data");
+        fs::create_dir(&x).unwrap();
+        fs::write(x.join("allowed.md"), "authorized needle").unwrap();
+        let config = openclast_config(vec![VaultRegistration {
+            id: "x".into(),
+            path: x,
+            room: Some("room-x".into()),
+        }]);
+        build_index(&config, &data).unwrap();
+        let active = DataRoot::new(&data).active().unwrap().unwrap();
+        let resource_x = config.resource_key(&config.vaults[0]).unwrap();
+        let unindexed = ResourceKey {
+            room_id: "room-not-indexed".into(),
+            ..resource_x.clone()
+        };
+        let partitions = PartitionedSearchIndex::open(&active).unwrap();
+
+        // Signed but unindexed: refuse the whole request, never answer from
+        // the remaining resources as if coverage were complete.
+        for resources in [
+            vec![unindexed.clone()],
+            vec![resource_x.clone(), unindexed.clone()],
+        ] {
+            let Err(error) =
+                partitions.search_with_quality("needle", 20, &SearchFilters::default(), &resources)
+            else {
+                panic!("an unindexed signed resource must be refused");
+            };
+            assert!(matches!(error, Error::ResourceUnavailable), "{error:?}");
+            assert!(
+                !error.to_string().contains("room-not-indexed"),
+                "refusal must not name the resource"
+            );
+        }
+
+        // A caller filter that narrows away every signed resource is a
+        // deliberate narrowing, not missing coverage: still an empty success.
+        let narrowed = partitions
+            .search_with_quality(
+                "needle",
+                20,
+                &SearchFilters {
+                    room: Some("room-elsewhere".into()),
+                    ..SearchFilters::default()
+                },
+                std::slice::from_ref(&resource_x),
+            )
+            .unwrap();
+        assert!(narrowed.hits.is_empty());
+
+        // The available resource alone still answers normally.
+        let hits = partitions
+            .search("needle", 20, &SearchFilters::default(), &[resource_x])
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn authorized_partition_readers_are_cached_for_the_generation() {
@@ -3349,17 +3427,12 @@ mod tests {
             IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
         manager.reconcile(new_config).unwrap();
 
-        assert!(
-            runtime
-                .search_authorized(
-                    "reclassifiedterm",
-                    20,
-                    &SearchFilters::default(),
-                    &[old_resource],
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "reclassifiedterm",
+            20,
+            &SearchFilters::default(),
+            &[old_resource],
+        )));
         assert_eq!(
             runtime
                 .search_authorized(
@@ -3398,12 +3471,12 @@ mod tests {
             IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
         manager.reconcile(new_config).unwrap();
 
-        assert!(
-            runtime
-                .search_authorized("tenantterm", 20, &SearchFilters::default(), &[old_resource],)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "tenantterm",
+            20,
+            &SearchFilters::default(),
+            &[old_resource],
+        )));
         assert_eq!(
             runtime
                 .search_authorized("tenantterm", 20, &SearchFilters::default(), &[new_resource],)
@@ -3464,17 +3537,12 @@ mod tests {
         let runtime = SearchRuntime::new();
         let mut manager =
             IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
-        assert!(
-            runtime
-                .search_authorized(
-                    "retryterm",
-                    20,
-                    &SearchFilters::default(),
-                    std::slice::from_ref(&new_resource),
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "retryterm",
+            20,
+            &SearchFilters::default(),
+            std::slice::from_ref(&new_resource),
+        )));
         for query in ["duplicateterm", "deletedterm"] {
             assert_eq!(
                 runtime
@@ -3492,17 +3560,12 @@ mod tests {
 
         manager.reconcile(new_config.clone()).unwrap();
         for query in ["retryterm", "duplicateterm", "deletedterm"] {
-            assert!(
-                runtime
-                    .search_authorized(
-                        query,
-                        20,
-                        &SearchFilters::default(),
-                        std::slice::from_ref(&old_resource),
-                    )
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(withheld(runtime.search_authorized(
+                query,
+                20,
+                &SearchFilters::default(),
+                std::slice::from_ref(&old_resource),
+            )));
         }
         for query in ["retryterm", "duplicateterm"] {
             assert_eq!(
@@ -3518,17 +3581,12 @@ mod tests {
                 1
             );
         }
-        assert!(
-            runtime
-                .search_authorized(
-                    "deletedterm",
-                    20,
-                    &SearchFilters::default(),
-                    std::slice::from_ref(&new_resource),
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "deletedterm",
+            20,
+            &SearchFilters::default(),
+            std::slice::from_ref(&new_resource),
+        )));
         assert_eq!(manager.manifest().files.len(), 2);
         assert!(
             manager
@@ -3555,17 +3613,12 @@ mod tests {
                 1
             );
         }
-        assert!(
-            runtime
-                .search_authorized(
-                    "deletedterm",
-                    20,
-                    &SearchFilters::default(),
-                    &[new_resource],
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "deletedterm",
+            20,
+            &SearchFilters::default(),
+            &[new_resource],
+        )));
         manager.shutdown().unwrap();
     }
 
@@ -3735,28 +3788,18 @@ mod tests {
         let report = manager.reconcile(new_config.clone()).unwrap();
 
         assert_eq!(report.unavailable_vaults, ["fixture"]);
-        assert!(
-            runtime
-                .search_authorized(
-                    "withheldterm",
-                    20,
-                    &SearchFilters::default(),
-                    &[old_resource],
-                )
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            runtime
-                .search_authorized(
-                    "withheldterm",
-                    20,
-                    &SearchFilters::default(),
-                    std::slice::from_ref(&new_resource),
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "withheldterm",
+            20,
+            &SearchFilters::default(),
+            &[old_resource],
+        )));
+        assert!(withheld(runtime.search_authorized(
+            "withheldterm",
+            20,
+            &SearchFilters::default(),
+            std::slice::from_ref(&new_resource),
+        )));
 
         fs::rename(&offline_path, &vault_path).unwrap();
         manager.reconcile(new_config).unwrap();
@@ -3801,47 +3844,32 @@ mod tests {
             IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
         let report = manager.reconcile(new_config.clone()).unwrap();
         assert_eq!(report.unavailable_vaults, ["fixture"]);
-        assert!(
-            runtime
-                .search_authorized(
-                    "oldpathterm",
-                    20,
-                    &SearchFilters::default(),
-                    std::slice::from_ref(&resource),
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "oldpathterm",
+            20,
+            &SearchFilters::default(),
+            std::slice::from_ref(&resource),
+        )));
         manager.shutdown().unwrap();
 
         let runtime = SearchRuntime::new();
         let mut manager =
             IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
-        assert!(
-            runtime
-                .search_authorized(
-                    "oldpathterm",
-                    20,
-                    &SearchFilters::default(),
-                    std::slice::from_ref(&resource),
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "oldpathterm",
+            20,
+            &SearchFilters::default(),
+            std::slice::from_ref(&resource),
+        )));
         fs::create_dir(&new_path).unwrap();
         fs::write(new_path.join("note.md"), "newpathterm").unwrap();
         manager.reconcile(new_config).unwrap();
-        assert!(
-            runtime
-                .search_authorized(
-                    "oldpathterm",
-                    20,
-                    &SearchFilters::default(),
-                    std::slice::from_ref(&resource),
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "oldpathterm",
+            20,
+            &SearchFilters::default(),
+            std::slice::from_ref(&resource),
+        )));
         assert_eq!(
             runtime
                 .search_authorized("newpathterm", 20, &SearchFilters::default(), &[resource],)
@@ -3886,17 +3914,12 @@ mod tests {
         manager.reconcile(removed_config.clone()).unwrap();
         assert!(manager.manifest().files.is_empty());
         for resource in [&old_resource, &new_resource] {
-            assert!(
-                runtime
-                    .search_authorized(
-                        "removedwithheldterm",
-                        20,
-                        &SearchFilters::default(),
-                        std::slice::from_ref(resource),
-                    )
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(withheld(runtime.search_authorized(
+                "removedwithheldterm",
+                20,
+                &SearchFilters::default(),
+                std::slice::from_ref(resource),
+            )));
         }
         manager.shutdown().unwrap();
 
@@ -3906,17 +3929,12 @@ mod tests {
         manager.reconcile(removed_config).unwrap();
         assert!(manager.manifest().files.is_empty());
         for resource in [old_resource, new_resource] {
-            assert!(
-                runtime
-                    .search_authorized(
-                        "removedwithheldterm",
-                        20,
-                        &SearchFilters::default(),
-                        &[resource],
-                    )
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(withheld(runtime.search_authorized(
+                "removedwithheldterm",
+                20,
+                &SearchFilters::default(),
+                &[resource],
+            )));
         }
         manager.shutdown().unwrap();
     }
@@ -3956,17 +3974,12 @@ mod tests {
             IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
         manager.reconcile(new_config).unwrap();
 
-        assert!(
-            runtime
-                .search_authorized(
-                    "removedterm",
-                    20,
-                    &SearchFilters::default(),
-                    &[removed_resource],
-                )
-                .unwrap()
-                .is_empty()
-        );
+        assert!(withheld(runtime.search_authorized(
+            "removedterm",
+            20,
+            &SearchFilters::default(),
+            &[removed_resource],
+        )));
         manager.shutdown().unwrap();
     }
 

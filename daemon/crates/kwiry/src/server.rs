@@ -687,6 +687,11 @@ fn map_core_error(error: kwiry_core::Error) -> HttpError {
         kwiry_core::Error::SemanticUnavailable(message) => {
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "mode_unavailable", message)
         }
+        kwiry_core::Error::ResourceUnavailable => HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "resource_unavailable",
+            "an authorized resource is not available for search",
+        ),
         _ => HttpError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
@@ -879,6 +884,14 @@ mod tests {
             runtime: SearchRuntime::new(),
             status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
         }
+    }
+
+    #[test]
+    fn unavailable_authorized_resource_is_an_explicit_nonrevealing_503() {
+        let error = map_core_error(kwiry_core::Error::ResourceUnavailable);
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.error.code, "resource_unavailable");
+        assert!(!error.body.error.message.contains("room"));
     }
 
     #[test]
