@@ -8,7 +8,7 @@
     "install-into": "node scripts/install-into-vault.mjs"
   },
   "devDependencies": {
-    "esbuild": "0.25.12",
+    "esbuild": "0.28.2",
     "obsidian": "1.7.2",
     "typescript": "5.9.3"
   }
