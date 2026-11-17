@@ -98,7 +98,8 @@ Lite UI truthfulness requirements:
 - show **In-plugin · Lexical**;
 - do not cycle to semantic or hybrid;
 - return `mode_unavailable` for unsupported requests;
-- return `index_building` until an atomic complete generation is ready;
+- return `index_building` until an atomic complete generation is ready, but only while a build can still finish on its own: once the build or its Worker has failed terminally, return that failure (for example `worker_failed` or `index_build_failed`), not retryable, with the manual rebuild action, and report `worker_recovering` while a bounded automatic retry is pending;
+- detect a stalled Worker by lack of progress, not by wall-clock duration: the Worker reports boot steps and prepared sources, and a slow machine that keeps reporting is not killed for being slow;
 - distinguish `current`, `reconciling`, `stale`, and `unavailable`; a restored complete generation may be searchable while stale, but must not be labeled ready/current;
 - identify the effective freshness basis (`strict_hash` or `metadata_audit`) and whether a bounded audit remains pending;
 - label visible lexical results derived only from partial-coverage proofs as **Best-attempt partial matches**, and label mixed standard/partial result windows separately; candidate-window completeness and source-row truncation remain independent facts;

@@ -497,6 +497,28 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     });
   });
 
+  it("treats a status poll before layout-ready activation as starting, not as a failure", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+    expect(harness.backendInitializations).toBe(0);
+
+    // A slow layout on a large vault lets the 30 s status interval fire before
+    // any backend is bound. The field report logged that tick as an
+    // internal_error; nothing had failed.
+    const refreshStatus = Reflect.get(plugin, "refreshStatus") as () => Promise<void>;
+    await refreshStatus.call(plugin);
+    expect(harness.statusBarText).toBe("kwiry: starting…");
+
+    await plugin.copyDiagnostics();
+    const report = harness.clipboardWrites.at(-1) ?? "";
+    expect(report).not.toMatch(/failure\.caught[^\n]*operation=poll/u);
+
+    // Once a backend is bound, a genuine poll failure is still reported.
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.backendInitializations).toBe(1));
+  });
+
   it("records production load, layout-ready, and backend startup milestones exactly once", async () => {
     const KwiryPlugin = await loadProductionPlugin();
     const plugin = new KwiryPlugin();

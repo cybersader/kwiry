@@ -515,6 +515,14 @@ export default class KwiryPlugin extends Plugin {
       this.recordBackendStatus(status, pluginEpoch, activationEpoch);
       this.setStatusBarText(formatStatus(status));
     } catch (error) {
+      // The status interval starts at load, but the backend is bound only after
+      // layout-ready activation, which on a large vault can come well after the
+      // first tick. Until then "no backend selected" is the expected state, the
+      // status bar already says "starting", and logging it as an internal error
+      // only adds a false fault to field reports.
+      if (this.activeBackendIdentity === null
+        && error instanceof KwiryBackendError
+        && error.code === "backend_not_selected") return;
       this.recordCaughtFailure("ui", "poll", error, { pluginEpoch, activationEpoch });
       if (this.isCurrent(pluginEpoch, activationEpoch)
         && this.statusRefresh.isCurrent(refreshEpoch)) {

@@ -44,6 +44,7 @@ import {
   MAX_EXPORT_BLOB_BYTES,
   SOURCE_FORMATS,
   SOURCE_QUARANTINE_WARNING_CODE,
+  WORKER_PROGRESS_KIND,
   WORKER_PROTOCOL_VERSION,
   type BuildResult,
   type DisposeResult,
@@ -62,6 +63,7 @@ import {
   type StatusResult,
   type WorkerError,
   type WorkerOperation,
+  type WorkerProgressNotice,
   type WorkerRequest,
   type WorkerResponse,
   emptySourceFormatCounts,
@@ -123,6 +125,9 @@ let stagingPreviewEligible = false;
 let stagingRevision = 0;
 const usedGenerations = new Set<string>();
 let lastRequestId = 0;
+// The production request currently being dispatched, if any. Progress notices
+// name it so the host can re-arm its no-progress watchdog; nothing else reads it.
+let progressRequest: { id: number; operation: WorkerOperation } | null = null;
 let guards: GuardCounters | null = null;
 // Declared by the Rust adapter at initialize. A generation with no chunks
 // still has to be able to name the chunking contract its image was built
@@ -183,9 +188,16 @@ async function initialize(
   state = "initializing";
   try {
     guards = installGuards();
+    // Each boot step is reported as it completes. On a contended desktop the
+    // whole boot can take far longer than one step, and a host watchdog that
+    // sees steps completing must not kill a Worker for being slow.
+    reportProgress();
     await verifyArtifact(sqliteWasmBytes, SQLITE_WASM_SIZE, SQLITE_WASM_SHA256);
+    reportProgress();
     await verifyArtifact(rustWasmBytes, RUST_WASM_SIZE, RUST_WASM_SHA256);
+    reportProgress();
     const rustIdentity = initializeRustAdapter();
+    reportProgress();
     declaredChunkingVersion = rustIdentity.chunking_version;
     initializedVaultId = vaultId;
     initializedSourcePolicyHash = sourcePolicyHash;
@@ -212,6 +224,7 @@ async function initialize(
     } finally {
       console.warn = originalWarn;
     }
+    reportProgress();
     if (unexpectedWarnings !== 0 || !sqlite) {
       throw fixedWorkerError(
         "sqlite_init_failed",
@@ -317,6 +330,7 @@ async function addSourceBatch(
   try {
     const prepared = await prepareSourceBatch(sources);
     target.index.applySourceChanges(prepared.preparations, []);
+    reportProgress();
     updateQuarantinedSources(target, sources, [], prepared.quarantined);
     if (stagingIsInitialCold) {
       stagingRevision += 1;
@@ -1332,6 +1346,10 @@ async function prepareSourceBatch(sources: readonly SourceUpsert[]): Promise<Pre
       preparations.push(await quarantinedPreparation(source));
       quarantined.set(identity, defectField);
     }
+    // One prepared source is one unit of progress. Extraction is synchronous,
+    // so a batch of slow sources (large PDFs on a slow disk) reports each one
+    // rather than going silent for the whole batch.
+    reportProgress();
   }
   return { preparations, quarantined };
 }
@@ -1544,6 +1562,26 @@ async function dispatchOwner(
   }
 }
 
+/**
+ * Posts a liveness notice for the request being dispatched. Best effort: a
+ * notice that cannot be posted only means the host watchdog is not re-armed,
+ * which is the pre-existing behaviour, never a reason to fail the request.
+ */
+function reportProgress(): void {
+  const current = progressRequest;
+  if (current === null) return;
+  try {
+    scope.postMessage({
+      version: WORKER_PROTOCOL_VERSION,
+      kind: WORKER_PROGRESS_KIND,
+      request_id: current.id,
+      operation: current.operation,
+    } satisfies WorkerProgressNotice);
+  } catch {
+    // See above.
+  }
+}
+
 async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
   if (await handleInternalD5cPreviewMessage(event.data)) return;
   if (await handleInternalPrototypeMessage(event.data)) return;
@@ -1561,6 +1599,10 @@ async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
     };
   } else {
     try {
+      if (!__KWIRY_D5C_OWNER_WORKER__) {
+        const production = parsed as WorkerRequest;
+        progressRequest = { id: production.id, operation: production.operation };
+      }
       const result = __KWIRY_D5C_OWNER_WORKER__
         ? await dispatchOwner(parsed as D5cOwnerWorkerRequest)
         : await dispatchProduction(parsed as WorkerRequest);
@@ -1588,6 +1630,9 @@ async function handleMessage(event: MessageEvent<unknown>): Promise<void> {
       };
     }
   }
+  // No progress may follow a response: the host treats a notice for a settled
+  // request as a protocol violation.
+  progressRequest = null;
   // Posting is itself fallible — the transfer list is the realistic source, and
   // a buffer that cannot be transferred raises DataCloneError. Left to
   // propagate, that throw escapes `handleMessage` entirely and rejects the

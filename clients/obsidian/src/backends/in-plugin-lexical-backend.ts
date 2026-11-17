@@ -55,7 +55,20 @@ export interface InPluginLexicalBackendOptions {
   onDiagnosticFailure?: (classification: FailureClassification) => void;
   onStartupObservation?: (observation: InPluginBackendStartupObservation) => void;
   onVaultActivity?: (activity: VaultActivityReport) => void;
+  /// Delay before each automatic Worker recovery, in order. Its length is the
+  /// recovery bound: once every entry is spent the backend stops in an explicit
+  /// terminal state that only a manual rebuild leaves.
+  recoveryDelaysMs?: readonly number[];
 }
+
+/// Bounded automatic recovery from an uncertain Worker failure (timeout, crash).
+/// The first retry is immediate because one transient fault is common; later
+/// retries back off so a machine that is briefly overloaded (a large vault still
+/// loading after startup) has time to settle instead of failing the same way
+/// twice in a minute.
+export const DEFAULT_RECOVERY_DELAYS_MS: readonly number[] = Object.freeze([0, 15_000, 60_000]);
+export const REBUILD_ACTION_TEXT =
+  "Run \u201cRebuild in-plugin lexical index\u201d from the command palette to try again.";
 
 const CAPABILITIES = {
   supportedModes: ["lexical"] as const,
@@ -85,6 +98,8 @@ export class InPluginLexicalBackend implements SearchBackend {
   private disposed = false;
   private recovering = false;
   private automaticRecoveries = 0;
+  private readonly recoveryDelaysMs: readonly number[];
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private firstProgressObserved = false;
 
   constructor(options: InPluginLexicalBackendOptions) {
@@ -106,6 +121,10 @@ export class InPluginLexicalBackend implements SearchBackend {
     this.onDiagnosticFailure = options.onDiagnosticFailure ?? (() => undefined);
     this.onStartupObservation = options.onStartupObservation ?? (() => undefined);
     this.onVaultActivity = options.onVaultActivity;
+    this.recoveryDelaysMs = [...(options.recoveryDelaysMs ?? DEFAULT_RECOVERY_DELAYS_MS)];
+    if (this.recoveryDelaysMs.some((delay) => !Number.isSafeInteger(delay) || delay < 0)) {
+      throw new Error("recovery delays must be non-negative integers");
+    }
     this.cachedStatus = baseStatus(this.identity);
   }
 
@@ -137,6 +156,11 @@ export class InPluginLexicalBackend implements SearchBackend {
   async rebuild(): Promise<BackendRebuildResult> {
     this.requireActive();
     this.automaticRecoveries = 0;
+    if (this.recoveryTimer !== null) {
+      // An explicit request outranks a pending backoff: start now.
+      this.startController(true);
+      return "scheduled";
+    }
     if (!this.controller) {
       this.startController(false);
       return "scheduled";
@@ -157,15 +181,7 @@ export class InPluginLexicalBackend implements SearchBackend {
     }
 
     const status = this.cachedStatus;
-    if (!status.searchable) {
-      throw new KwiryBackendError(
-        "index_building",
-        "in_plugin",
-        "index",
-        true,
-        "In-plugin lexical index is still building.",
-      );
-    }
+    if (!status.searchable) throw notSearchableError(status);
 
     const session = this.session;
     const epoch = this.epoch;
@@ -246,6 +262,7 @@ export class InPluginLexicalBackend implements SearchBackend {
     if (this.disposed) return;
     this.disposed = true;
     this.epoch += 1;
+    this.cancelRecoveryTimer();
     const controller = this.controller;
     this.controller = null;
     const session = this.session;
@@ -272,6 +289,7 @@ export class InPluginLexicalBackend implements SearchBackend {
 
   private startController(recovering: boolean): void {
     this.requireActive();
+    this.cancelRecoveryTimer();
     this.stopCurrentSession();
     const epoch = ++this.epoch;
     this.recovering = recovering;
@@ -355,7 +373,11 @@ export class InPluginLexicalBackend implements SearchBackend {
     } catch {
       this.stopCurrentSession();
       this.recovering = false;
-      this.publish(unavailableStatus(this.identity, "worker_failed", "In-plugin search Worker failed."));
+      this.publish(unavailableStatus(
+        this.identity,
+        "worker_failed",
+        `In-plugin search Worker could not start. ${REBUILD_ACTION_TEXT}`,
+      ));
       try {
         this.onStartupObservation({
           kind: "terminal",
@@ -370,18 +392,47 @@ export class InPluginLexicalBackend implements SearchBackend {
 
   private handleUncertainWorkerFailure(): void {
     if (this.disposed) return;
-    if (this.automaticRecoveries >= 1) {
+    const attempt = this.automaticRecoveries;
+    const delayMs = this.recoveryDelaysMs[attempt];
+    if (delayMs === undefined) {
+      this.cancelRecoveryTimer();
       this.stopCurrentSession();
       this.recovering = false;
       this.publish(unavailableStatus(
         this.identity,
         "worker_failed",
-        "In-plugin search Worker failed.",
+        `In-plugin search Worker stopped responding after ${attempt + 1} attempts. `
+          + REBUILD_ACTION_TEXT,
       ));
       return;
     }
     this.automaticRecoveries += 1;
-    this.startController(true);
+    if (delayMs === 0) {
+      this.startController(true);
+      return;
+    }
+    // Stop the failed Worker now, but leave starting its replacement to the
+    // timer. A new epoch makes every late callback from the old one inert.
+    this.stopCurrentSession();
+    this.epoch += 1;
+    this.recovering = true;
+    this.publish(recoveringStatus(
+      this.identity,
+      `In-plugin search Worker stopped responding; retrying in ${Math.ceil(delayMs / 1_000)} s `
+        + `(retry ${attempt + 1} of ${this.recoveryDelaysMs.length}).`,
+    ));
+    this.cancelRecoveryTimer();
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      if (this.disposed) return;
+      this.startController(true);
+    }, delayMs);
+  }
+
+  private cancelRecoveryTimer(): void {
+    if (this.recoveryTimer === null) return;
+    clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
   }
 
   private stopCurrentSession(): void {
@@ -730,17 +781,57 @@ function baseStatus(identity: BackendIdentity): BackendStatus {
   };
 }
 
-function recoveringStatus(identity: BackendIdentity): BackendStatus {
+function recoveringStatus(
+  identity: BackendIdentity,
+  safeMessage = "In-plugin search Worker is recovering.",
+): BackendStatus {
   return {
     ...baseStatus(identity),
     phase: "building",
     liveness: "alive",
     issue: {
       code: "worker_recovering",
-      safeMessage: "In-plugin search Worker is recovering.",
+      safeMessage,
       recoverable: true,
     },
   };
+}
+
+/**
+ * The error a search receives while no generation is searchable. It states the
+ * backend's real condition: `index_building` only while a build can still
+ * finish on its own. A terminal state (the Worker gave up, or the build failed
+ * and nothing will retry it) is reported as that failure, not retryable, with
+ * the one action that leaves it; telling the user to wait would be false.
+ */
+function notSearchableError(status: BackendStatus): KwiryBackendError {
+  if (status.phase === "unavailable") {
+    const code = status.issue?.code ?? "index_build_failed";
+    const message = status.issue?.safeMessage ?? "The in-plugin lexical index could not be built.";
+    return new KwiryBackendError(
+      code,
+      "in_plugin",
+      code === "worker_failed" ? "lifecycle" : "index",
+      false,
+      message.includes(REBUILD_ACTION_TEXT) ? message : `${message} ${REBUILD_ACTION_TEXT}`,
+    );
+  }
+  if (status.issue?.code === "worker_recovering") {
+    return new KwiryBackendError(
+      "worker_recovering",
+      "in_plugin",
+      "lifecycle",
+      true,
+      status.issue.safeMessage,
+    );
+  }
+  return new KwiryBackendError(
+    "index_building",
+    "in_plugin",
+    "index",
+    true,
+    "In-plugin lexical index is still building.",
+  );
 }
 
 function unavailableStatus(

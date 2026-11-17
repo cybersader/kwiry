@@ -463,6 +463,7 @@ function backend(
   sessions: InPluginWorkerSession[],
   cache?: ConstructorParameters<typeof InPluginLexicalBackend>[0]["cache"],
   onStartupObservation?: ConstructorParameters<typeof InPluginLexicalBackend>[0]["onStartupObservation"],
+  recoveryDelaysMs?: readonly number[],
 ): InPluginLexicalBackend {
   let generation = 0;
   return new InPluginLexicalBackend({
@@ -479,6 +480,7 @@ function backend(
     yieldControl: () => Promise.resolve(),
     ...(cache ? { cache: { ...cache, sourcePolicyHash: SOURCE_POLICY_HASH } } : {}),
     ...(onStartupObservation ? { onStartupObservation } : {}),
+    ...(recoveryDelaysMs ? { recoveryDelaysMs } : {}),
   });
 }
 
@@ -562,7 +564,7 @@ describe("InPluginLexicalBackend", () => {
     expect(session.beginBuild).toHaveBeenCalledTimes(1);
   });
 
-  it("publishes a path-free timeout stall while pre-ready search stays index_building", async () => {
+  it("publishes a path-free timeout stall and search reports that terminal failure", async () => {
     const source = new FakeSource();
     source.set("private-looking-name.md", "body");
     source.readSource = vi.fn(async () => ({
@@ -590,10 +592,18 @@ describe("InPluginLexicalBackend", () => {
     });
     const status = await inPlugin.status();
     expect(JSON.stringify(status)).not.toContain("private-looking-name.md");
-    await expect(inPlugin.search({ q: "query", mode: "lexical" })).rejects.toMatchObject({
-      code: "index_building",
-      safeMessage: "In-plugin lexical index is still building.",
+    // Nothing will retry a failed build on its own, so "still building" would be
+    // a false promise. The search states the failure and the way out of it.
+    const rejected = await inPlugin.search({ q: "query", mode: "lexical" })
+      .catch((error: unknown) => error);
+    expect(rejected).toMatchObject({
+      code: "vault_read_failed",
+      stage: "index",
+      retryable: false,
+      safeMessage: "The active vault could not be read completely. "
+        + "Run \u201cRebuild in-plugin lexical index\u201d from the command palette to try again.",
     });
+    expect(JSON.stringify(rejected)).not.toContain("private-looking-name.md");
   });
 
   it("publishes quarantined counts and validator fields as a degraded searchable status", async () => {
@@ -1106,7 +1116,7 @@ describe("InPluginLexicalBackend", () => {
     }
   });
 
-  it("replaces the Worker once for uncertain final export failure and stops after a repeat", async () => {
+  it("replaces the Worker for uncertain final export failure and stops once retries are spent", async () => {
     vi.useFakeTimers();
     try {
       const source = new FakeSource();
@@ -1123,7 +1133,7 @@ describe("InPluginLexicalBackend", () => {
       const inPlugin = backend(source, [failed, repeated], {
         openStore: async () => ({ kind: "available", store }),
         idleExportMs: 10_000,
-      });
+      }, undefined, [0]);
 
       await inPlugin.initialize();
       await vi.waitFor(() => expect(failed.commitBuild).toHaveBeenCalledTimes(1));
@@ -1146,7 +1156,8 @@ describe("InPluginLexicalBackend", () => {
           searchable: false,
           issue: {
             code: "worker_failed",
-            safeMessage: "In-plugin search Worker failed.",
+            safeMessage: "In-plugin search Worker stopped responding after 2 attempts. "
+              + "Run \u201cRebuild in-plugin lexical index\u201d from the command palette to try again.",
           },
         });
       });
@@ -1928,5 +1939,228 @@ describe("InPluginLexicalBackend", () => {
     expect(source.unsubscriptions).toBe(1);
     expect(session.forceDispose).toHaveBeenCalledTimes(1);
     await expect(inPlugin.status()).resolves.toMatchObject({ phase: "disposed" });
+  });
+});
+
+/// A Worker whose cold boot never answers in time: the shape of the field
+/// failure, where a contended desktop timed out `initialize` on every attempt.
+function stalledBootSession(): InPluginWorkerSession {
+  return fakeSession({
+    initialize: async () => {
+      throw new WorkerRpcError({
+        code: "timeout",
+        stage: "lifecycle",
+        message: "In-plugin search Worker timed out.",
+        retryable: true,
+      });
+    },
+  });
+}
+
+async function flushTimers(): Promise<void> {
+  for (let turn = 0; turn < 20; turn += 1) await vi.advanceTimersByTimeAsync(0);
+}
+
+const REBUILD_ACTION = "Run \u201cRebuild in-plugin lexical index\u201d from the command palette to try again.";
+
+describe("InPluginLexicalBackend bounded Worker recovery", () => {
+  it("retries a stalled Worker with backoff, then stops in an explicit terminal state", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("note.md", "body");
+      const sessions = [
+        stalledBootSession(),
+        stalledBootSession(),
+        stalledBootSession(),
+        stalledBootSession(),
+      ];
+      const created = [...sessions];
+      const inPlugin = backend(source, sessions);
+
+      await inPlugin.initialize();
+      await flushTimers();
+      // The immediate retry also failed; the second retry waits instead of
+      // hammering a machine that is still overloaded.
+      expect(created[1]!.initialize).toHaveBeenCalledTimes(1);
+      expect(created[2]!.initialize).not.toHaveBeenCalled();
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "building",
+        searchable: false,
+        issue: {
+          code: "worker_recovering",
+          safeMessage: "In-plugin search Worker stopped responding; retrying in 15 s (retry 2 of 3).",
+        },
+      });
+      await expect(inPlugin.search({ q: "query", mode: "lexical" })).rejects.toMatchObject({
+        code: "worker_recovering",
+        retryable: true,
+      });
+
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(created[2]!.initialize).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await flushTimers();
+      expect(created[2]!.initialize).toHaveBeenCalledTimes(1);
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        issue: {
+          code: "worker_recovering",
+          safeMessage: "In-plugin search Worker stopped responding; retrying in 60 s (retry 3 of 3).",
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushTimers();
+      expect(created[3]!.initialize).toHaveBeenCalledTimes(1);
+      for (const session of created) expect(session.forceDispose).toHaveBeenCalled();
+
+      const terminal = await inPlugin.status();
+      expect(terminal).toMatchObject({
+        phase: "unavailable",
+        liveness: "terminated",
+        searchable: false,
+        issue: {
+          code: "worker_failed",
+          safeMessage: `In-plugin search Worker stopped responding after 4 attempts. ${REBUILD_ACTION}`,
+          recoverable: true,
+        },
+      });
+
+      // The field symptom: hours of "index_building, retryable" after the
+      // Worker had already been given up on. Search must say what happened.
+      const rejected = await inPlugin.search({ q: "query", mode: "lexical" })
+        .catch((error: unknown) => error);
+      expect(rejected).toMatchObject({
+        code: "worker_failed",
+        stage: "lifecycle",
+        retryable: false,
+        safeMessage: `In-plugin search Worker stopped responding after 4 attempts. ${REBUILD_ACTION}`,
+      });
+
+      // Nothing restarts on its own after the terminal state.
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await expect(inPlugin.status()).resolves.toMatchObject({ phase: "unavailable" });
+      await inPlugin.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("becomes searchable when a backed-off retry finds the machine settled", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("note.md", "body");
+      const inPlugin = backend(source, [stalledBootSession(), stalledBootSession(), fakeSession()]);
+
+      await inPlugin.initialize();
+      await flushTimers();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await flushTimers();
+
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "ready",
+        searchable: true,
+      });
+      await expect(inPlugin.search({ q: "query", mode: "lexical" })).resolves.toMatchObject({
+        effectiveMode: "lexical",
+      });
+      await inPlugin.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets a manual rebuild leave the terminal state", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("note.md", "body");
+      const inPlugin = backend(
+        source,
+        [stalledBootSession(), stalledBootSession(), fakeSession()],
+        undefined,
+        undefined,
+        [0],
+      );
+
+      await inPlugin.initialize();
+      await flushTimers();
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "unavailable",
+        issue: { code: "worker_failed" },
+      });
+
+      await expect(inPlugin.rebuild()).resolves.toBe("scheduled");
+      await flushTimers();
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        phase: "ready",
+        searchable: true,
+      });
+      await inPlugin.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts a manual rebuild at once instead of waiting out a pending backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      source.set("note.md", "body");
+      const replacement = fakeSession();
+      const inPlugin = backend(
+        source,
+        [stalledBootSession(), stalledBootSession(), replacement],
+        undefined,
+        undefined,
+        [0, 60_000],
+      );
+
+      await inPlugin.initialize();
+      await flushTimers();
+      await expect(inPlugin.status()).resolves.toMatchObject({
+        issue: { code: "worker_recovering" },
+      });
+
+      await expect(inPlugin.rebuild()).resolves.toBe("scheduled");
+      await flushTimers();
+      expect(replacement.initialize).toHaveBeenCalledTimes(1);
+      await expect(inPlugin.status()).resolves.toMatchObject({ phase: "ready", searchable: true });
+
+      // The cancelled backoff must not later replace the healthy Worker.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flushTimers();
+      expect(replacement.forceDispose).not.toHaveBeenCalled();
+      await inPlugin.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending backoff on dispose", async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      const unused = fakeSession();
+      const inPlugin = backend(
+        source,
+        [stalledBootSession(), stalledBootSession(), unused],
+        undefined,
+        undefined,
+        [0, 15_000],
+      );
+
+      await inPlugin.initialize();
+      await flushTimers();
+      await inPlugin.dispose();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await flushTimers();
+
+      expect(unused.initialize).not.toHaveBeenCalled();
+      await expect(inPlugin.status()).resolves.toMatchObject({ phase: "disposed" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

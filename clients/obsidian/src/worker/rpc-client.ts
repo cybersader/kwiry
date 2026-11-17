@@ -3,9 +3,11 @@
 
 import {
   MAX_PENDING_REQUESTS,
+  WORKER_MAX_REQUEST_DURATION_MS,
   WORKER_PROTOCOL_VERSION,
   WORKER_REQUEST_TIMEOUT_MS,
   fixedWorkerError,
+  isWorkerProgressNotice,
   type WorkerError,
 } from "./protocol";
 
@@ -51,7 +53,11 @@ interface PendingRequest {
   expectedGeneration: string | null;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
+  /** Re-armed by every Worker progress notice: the no-progress watchdog. */
   timeout: ReturnType<typeof setTimeout>;
+  /** Never re-armed: bounds a request that reports progress but never ends. */
+  ceiling: ReturnType<typeof setTimeout>;
+  idleTimeoutMs: number;
 }
 
 export class WorkerRpcError extends Error {
@@ -90,6 +96,10 @@ export class WorkerRpcClient {
   private terminalError: Error | null = null;
 
   private readonly onMessage = (event: MessageEvent<unknown>): void => {
+    if (isWorkerProgressNotice(event.data)) {
+      this.observeProgress(event.data.request_id, event.data.operation);
+      return;
+    }
     const responseId = positiveResponseId(event.data);
     const pending = responseId === null ? undefined : this.pending.get(responseId);
     const extension = pending?.command.operation === this.extension?.operation
@@ -140,6 +150,7 @@ export class WorkerRpcClient {
     }
 
     clearTimeout(pending.timeout);
+    clearTimeout(pending.ceiling);
     this.pending.delete(response.id);
     if (response.ok) pending.resolve(response.result);
     else pending.reject(new WorkerRpcError(response.error!));
@@ -159,6 +170,7 @@ export class WorkerRpcClient {
     private readonly protocol: WorkerRpcProtocol,
     private readonly timeoutMs = WORKER_REQUEST_TIMEOUT_MS,
     private readonly extension: WorkerRpcExtension | null = null,
+    private readonly maxDurationMs = WORKER_MAX_REQUEST_DURATION_MS,
   ) {
     worker.addEventListener("message", this.onMessage);
     worker.addEventListener("error", this.onWorkerFailure);
@@ -220,14 +232,6 @@ export class WorkerRpcClient {
       ...command,
     };
     return new Promise<unknown>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.poison(new WorkerRpcError(fixedWorkerError(
-          "timeout",
-          "lifecycle",
-          "In-plugin search Worker timed out.",
-          true,
-        )));
-      }, timeoutMs);
       this.pending.set(id, {
         command,
         expectedGeneration: isExtension
@@ -235,7 +239,9 @@ export class WorkerRpcClient {
           : this.protocol.expectedGeneration(command),
         resolve,
         reject,
-        timeout,
+        timeout: setTimeout(() => this.timeOut(), timeoutMs),
+        ceiling: setTimeout(() => this.timeOut(), Math.max(timeoutMs, this.maxDurationMs)),
+        idleTimeoutMs: timeoutMs,
       });
       try {
         const transfer = this.protocol.transferList(command);
@@ -261,6 +267,39 @@ export class WorkerRpcClient {
     this.poison(error);
   }
 
+  /**
+   * A progress notice proves the Worker's serialized queue is still advancing.
+   * Every pending request is waiting on that queue, so each one's no-progress
+   * window restarts; each remains bounded by its own fixed ceiling. A notice
+   * that names no pending request is a protocol violation like an uncorrelated
+   * response, because the Worker only reports progress before it responds.
+   */
+  private observeProgress(requestId: number, operation: string): void {
+    const named = this.pending.get(requestId);
+    if (!named || named.command.operation !== operation) {
+      this.poison(new WorkerRpcError(fixedWorkerError(
+        "invalid_request",
+        "protocol",
+        "Worker reported progress for an uncorrelated request.",
+        false,
+      )));
+      return;
+    }
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.timeout = setTimeout(() => this.timeOut(), pending.idleTimeoutMs);
+    }
+  }
+
+  private timeOut(): void {
+    this.poison(new WorkerRpcError(fixedWorkerError(
+      "timeout",
+      "lifecycle",
+      "In-plugin search Worker timed out.",
+      true,
+    )));
+  }
+
   private poison(error: Error): void {
     if (this.stopped) return;
     this.stopped = true;
@@ -274,6 +313,7 @@ export class WorkerRpcClient {
   private failAll(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
+      clearTimeout(pending.ceiling);
       pending.reject(error);
     }
     this.pending.clear();

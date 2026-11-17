@@ -17,6 +17,7 @@ import {
   MAX_LEXICAL_OBSERVATION_COUNT,
   SOURCE_FORMATS,
   WORKER_PROTOCOL_VERSION,
+  isWorkerProgressNotice,
   isWorkerResponse,
 } from "../src/worker/protocol";
 
@@ -4324,6 +4325,52 @@ describe("exact generated production Worker", () => {
         ok: false,
         error: { code: "invalid_request" },
       });
+    } finally {
+      await worker.terminate();
+    }
+  }, 120_000);
+});
+
+describe("Worker progress notices", () => {
+  it("reports each boot step and each prepared source before responding, never after", async () => {
+    const worker = new Worker(nodeWorkerSource(workerSource), { eval: true });
+    const messages = [];
+    worker.on("message", (message) => messages.push(message));
+    try {
+      await request(worker, { id: 1, operation: "initialize", vault_id: "active-vault" });
+      await request(worker, { id: 2, operation: "begin_build", generation: "g1" });
+      await expect(request(worker, {
+        id: 3,
+        operation: "add_source_batch",
+        generation: "g1",
+        sources: [
+          source("alpha.md", "first synthetic note"),
+          source("beta.md", "second synthetic note"),
+          source("gamma.md", "third synthetic note"),
+        ],
+      })).resolves.toMatchObject({ ok: true, result: { documents: 3 } });
+      await request(worker, { id: 4, operation: "dispose" });
+
+      const notices = messages.filter((message) => message?.kind === "progress");
+      for (const notice of notices) expect(isWorkerProgressNotice(notice)).toBe(true);
+      // Every notice precedes the response it belongs to: the host refuses a
+      // notice for a request that has already settled.
+      for (const notice of notices) {
+        const noticeAt = messages.indexOf(notice);
+        const responseAt = messages.findIndex((message) => message?.id === notice.request_id);
+        expect(responseAt).toBeGreaterThan(noticeAt);
+      }
+      const forRequest = (id, operation) => notices.filter((notice) => (
+        notice.request_id === id && notice.operation === operation
+      )).length;
+      // Five boot steps report as they complete, so a slow boot is not silent.
+      expect(forRequest(1, "initialize")).toBeGreaterThanOrEqual(5);
+      expect(forRequest(2, "begin_build")).toBe(0);
+      // One notice per prepared source, plus one for the index write.
+      expect(forRequest(3, "add_source_batch")).toBeGreaterThanOrEqual(4);
+      expect(forRequest(4, "dispose")).toBe(0);
+      // A notice carries no source identity.
+      expect(JSON.stringify(notices)).not.toMatch(/alpha|beta|gamma|synthetic/u);
     } finally {
       await worker.terminate();
     }
