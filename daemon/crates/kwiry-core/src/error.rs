@@ -34,6 +34,11 @@ pub enum Error {
     Semantic(String),
     #[error("semantic search is unavailable: {0}")]
     SemanticUnavailable(String),
+    /// An authorized resource has no searchable partition. Answering from the
+    /// remaining resources would silently claim coverage the request lacks,
+    /// so the whole request is refused. Deliberately names no resource.
+    #[error("an authorized resource is unavailable")]
+    ResourceUnavailable,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
