@@ -1,6 +1,6 @@
 # IG-2A design — governed semantic and hybrid retrieval
 
-Status: **design, revision 5, independent review pending.** Nothing here is implemented or approved. This page expands [IG-2](governed-semantic-hybrid.md) and is bound by [`CONTRACT.md`](../../CONTRACT.md), which this design does not edit. The amendments it needs are in [§13](#13-contract-amendment-package-a1a7). Room lifecycle follows the frozen OpenClast Holdings wire contract (§5). What remains to ask of OpenClast is in [§14](#14-openclast-seam-asks).
+Status: **design, revision 6, independent review pending.** Nothing here is implemented or approved. This page expands [IG-2](governed-semantic-hybrid.md) and is bound by [`CONTRACT.md`](../../CONTRACT.md), which this design does not edit. The amendments it needs are in [§13](#13-contract-amendment-package-a1a7). Room lifecycle follows the frozen OpenClast Holdings wire contract (§5). What remains to ask of OpenClast is in [§14](#14-openclast-seam-asks).
 
 ## Revision history
 
@@ -10,9 +10,24 @@ Status: **design, revision 5, independent review pending.** Nothing here is impl
 | 2 | `b70c902d` | NO-SHIP, converging. |
 | 3 | `82f53cb4` | NO-SHIP. Closed: timeout vs leases, retirement vs admitted builder, manifests, reuse identity, permanent tombstones, failed-purge startup, effective vs signed set, superseded freshness, A2 issuer/TTL retention, A3, and A4 encoding with desktop branching. |
 | 4 | `59280048` | NO-SHIP. Architecture sound; most F1–F16 closed. Open: R4-1 (cached reader blocks doom), R4-2 (held-tuple queries inconsistent), R4-3 (unsent completion unrecoverable), R4-4 (no revoked/purge-pending state), R4-5 (no executor reservation), R4-6 (A7 overclaims), R4-7 (rollback rule contradicts itself). |
-| 5 | this page | Replaces the bespoke custody seam (§5, §14) with Kwiry as a consumer of the owner-approved, frozen Holdings contract (`Holdings.List`, `Obligation.Report`). Closes R4-1 to R4-7. Storage, scheduler and query path are unchanged except for R4-1 (§4.3) and R4-5 (§4.4). P-a and P-b are unchanged. |
+| 5 | `a69b1e6e` | Replaced the bespoke custody seam (§5, §14) with Kwiry as a consumer of the owner-approved, frozen Holdings contract. Review: NO-SHIP. Confirmed closed: R4-1, R4-2, R4-4, R4-5, R4-6 and R4-7. R4-3's recovery depends on the reporting fixes F5-1 and F5-2. Open: F5-1 to F5-9, all in the consumer state machine; the architecture is kept. |
+| 6 | this page | Keeps the revision-5 architecture and the frozen contract. Fixes F5-1 to F5-9 in the consumer state machine, and consumes HW §14 amendments D (release instructions), E (holder status) and F (raw-restore guard). Outside the lifecycle, only §4.3 (withholding, writer lock position), §4.5 (startup order), §4.10 (two-part recovery) and §6.1 (step 3a) change. P-a and P-b are unchanged. |
 
 §16 lists the properties that are closed in the design but can only be proven by tests.
+
+| Fifth-review item | Resolution | Where |
+|---|---|---|
+| F5-1 Retry acks fail verification; convergence acks carry another key | Every attempt's `{jti, sha256(JWS)}` is committed before sending and survives restart. **Replay receipts** must match the key, an attempt digest, the holding, the obligation and the state. **Convergence receipts** (`state_regression`, `already_complete`) bind to holder, holding and obligation, raise the floor, and are never presented as receipts for Kwiry's own claims | §5.2, §5.6 |
+| F5-2 Holder-state updates race; clearing the outbox loses the floor | One serialized leaf writer with per-field monotone merges and whole-state commits. Per-obligation floors are raised in the same commit that clears the pending entry, after the receipt is durable | §5.2, §5.6, §4.3 |
+| F5-3 Unknown resources can never return to service | Withheld (reversible, objects stay `live`, cache-only eviction) is separate from revoked. Only an obligation, GC of unreferenced active-resource objects, or an executed release revokes | §4.3, §5.3, §5.5 |
+| F5-4 Completion can see a half-applied classification | Class, leases, layout, withheld map and unattributed inventory change together under one `class_rev`. The apply is one publisher transaction, and completion is validated and durably enqueued inside a serialized report transaction that aborts if `class_rev` moved | §5.3, §5.6 |
+| F5-5 Migration recovery runs before holder state | Startup: load and validate holder state; inspect migration read-only; narrowing-only actions; bind; first list; then every build, publish or delete action | §4.5, §4.10 |
+| F5-6 Reset broadens trust on first use | Trust on first use only when holder state and data are both lost. Corruption or identity mismatch fails closed. State-only loss fails closed until an audited `recover-state` | §5.2, A6 |
+| F5-7 Undetected authority rollback | HW §14 F's guard maps `503 authority_epoch_mismatch` to unreachable, with a distinct alert. A supported restore needs an explicit `accept-epoch`. The 60 s claim excludes exactly the F residual (raw restore plus record loss), with an operational restriction | §5.3, §5.4, §10, A6, R10 |
+| F5-8 Early relist behind the model and admission gates; jitter beyond 300 s | The trigger moves to gate step 3a, before the model and permit gates. The interval is drawn from `[0.8, 1.0] × relist_seconds` | §5.3, §6.1 |
+| F5-9 The idempotency key includes itself | The key is derived from a frozen JCS business body that excludes `jti`, `iat`, `exp` and `idempotency_key`, with domain separation per report type | §5.6 |
+| HW §14 D Release instructions | Manifests are bound by report key and attempt digests. A release deletes only the intersection with the current unattributed set; a mismatch deletes nothing; an unknown `kind` is skipped | §5.5 |
+| HW §14 E Holder status | Sent on reset, on manifest change, after a release, and daily while non-zero, at most once per 60 s, using the same attempt and ack machinery | §5.5, §5.6 |
 
 | Fourth-review item | Resolution | Where |
 |---|---|---|
@@ -107,7 +122,7 @@ Each comes with a recommendation, or with a default the owner can override.
 3. **Refuse rather than serve stale vectors** when a room's vectors lag its text. *Recommendation: refuse for IG-2A.*
 4. **Pay the RAM for a dedicated query embedder.** It is a prerequisite for HTTP. *Recommendation: yes; measure in S8.*
 5. **Reject non-room filters** for semantic and hybrid in IG-2A, before embedding and before any store opens. *Recommendation: yes.*
-6. **(P-a, default) Lifecycle authority stays with OpenClast.** Obligations, retirement and completion records live at the authority (§5.1). As the frozen contract requires, Kwiry keeps only refusal state outside the data root: a high-water mark and grow-only tombstones. That state never authorizes serving, building or deleting (§5.2). *Override only if the owner wants Kwiry to keep its own record.*
+6. **(P-a, default) Lifecycle authority stays with OpenClast.** Obligations, retirement and completion records live at the authority (§5.1). As the frozen contract requires, Kwiry keeps only refusal and reporting state outside the data root: a high-water mark, grow-only tombstones, per-obligation accepted floors and a write-ahead report outbox. That state never authorizes serving, building or deleting (§5.2). *Override only if the owner wants Kwiry to keep its own record.*
 7. **(P-b, default) A failed purge quarantines only the obligated resource.** Healthy rooms and lexical search stay online (§5.6). *Override only if the owner prefers a fail-stop.*
 
 ## 3. What exists today
@@ -213,7 +228,7 @@ The actor never needs that token, so there is no cycle. The builder releases the
 
 An obligation revokes retrieval first, without waiting (§5.6). It then closes the gate and waits for the admitted count to drain while holding nothing. An admitted builder's attach is refused by publisher revalidation, because the resource is now tombstoned.
 
-**Lock order:** actor serialization → L2 → L3. No lock is acquired while holding a later one, and no wait happens while holding L2 or L3.
+**Lock order:** actor serialization → L2 → L3. The holder-state writer (§5.2) is a leaf outside this order: the actor may wait for its durable reply, but it never takes L2 or L3 and never waits on anything except its own I/O. No lock is acquired while holding a later one, and no wait happens while holding L2 or L3.
 
 **Linearized pin-and-lease (F1).** `pin_and_lease(E, class)` is one critical section under L3:
 
@@ -234,11 +249,13 @@ If any object is `revoked` or `doomed`, nothing is leased. The call releases L3 
 
   L3 is then released and the detached reader is dropped outside it, which closes its files and mappings and decrements the cache-handle count. An initialization still in progress keeps its marker. When it finishes, it sees `revoked`, discards the reader it opened, and never installs it.
 
-  Two things revoke an object:
-  - a publisher transaction that drops the object's resource from the layout (an obligation, §5.6);
-  - an object that **no** generation (layout or withheld) and no build root references any longer (GC, §4.5).
+  Only three things revoke an object:
+  - a publisher transaction that drops an **obligated or retired** resource from the layout (§5.3, §5.6);
+  - an object that **no** generation (layout or withheld) and no build root references any longer (GC, §4.5);
+  - an executed `quarantine_release` that targets it (§5.5).
 
-  Lapse and unknown never revoke: their objects stay referenced.
+  Lapse, unknown and tombstoned-unlisted never revoke. Their objects stay `live` and referenced (F5-3).
+- **Cache-only eviction (withholding, F5-3).** When a resource moves to the withheld map, its objects' cells are detached under L3 and their readers dropped outside it, exactly as in revocation, **but the object stays `live`**. A later re-initialization is allowed once the resource is servable again. Withholding therefore frees memory without making the object deletable, and reversal needs no rebuild.
 - **Deletable** (`revoked → doomed`, the claim). Under L3, an object may be claimed only if **all** of these hold:
   - its state is `revoked`;
   - its lease count, cache-handle count, external-handle count and init-in-progress count are all zero;
@@ -334,13 +351,27 @@ Everything else under `objects/`, `staging/` and `generations/` is garbage. So i
 - **Attributed to an unknown or tombstoned-unlisted resource, or unattributable:** moved to `quarantine/` and entered in the ledger. It is **never deleted** except by a `quarantine_release` (§5.5).
 - **Before the first list applies after startup:** nothing is deleted. Only tombstone revocation runs.
 
-**At startup**, before the listener binds:
-1. run migration recovery (§4.10);
-2. load holder state (§5.2);
-3. revoke every tombstoned resource through the publisher, and write `rollback.json` if tombstones exist;
-4. resume valid resumable staging as build roots (§11.2).
+**At startup (F5-5).** Nothing that lists, classifies, builds, publishes a new object or deletes runs before holder identity and state are loaded and the first list applies. The order is:
 
-The listener then binds. Requests refuse `resource_unavailable` until the first list applies (§5.3). Classification-dependent GC and purges run after it.
+1. **Load and validate** the configuration (§5.1), `holder.json`, the key and `holder-state.json`, and apply the §5.2 loss table. A fail-closed row stops here: nothing below runs.
+2. **Acquire** the `DataRootLock`, then start the holder-state writer and the publisher actor.
+3. **Inspect migration state, read-only** (§4.10). Read the markers and pointers and choose the recovery-matrix row. A fail-closed row stops here.
+4. **Narrowing-only actions**, which need no list:
+   - marker-only roll-forward (`switching` + v3 → `published`);
+   - write `rollback.json` and delete `current.v2.json` if tombstones exist;
+   - one publisher transaction that drops every tombstoned resource from the v3 layout and revokes its objects.
+
+   Nothing is built or deleted.
+5. **Bind the listener.** Every governed request refuses `resource_unavailable`.
+6. **First list**, then apply (§5.3).
+7. **Recovery actions**, now classified by the list:
+   - the matrix's build, resume, discard and confirmation actions;
+   - staging resume as build roots, only for resources listed active and leased (§11.2);
+   - GC;
+   - obligations;
+   - releases.
+
+The `kwiry index` process follows the same order. It cannot run beside the daemon, because both take the `DataRootLock`.
 
 **Periodically, and after every publication**, the same rules apply. Generation records are deleted only through publisher transactions.
 
@@ -451,7 +482,10 @@ Elapsed time also depends on contention from queries and reconciliation. That is
 6. Write `upgrade.json = { state: "published" }`.
 7. **Confirmation.** `kwiry gc --confirm-upgrade`, or the first successful serve after a configured grace period, deletes the v2 trees, `current.v2.json` and `upgrade.json`. Before deletion, any v2 partition of an unknown or unattributable resource is moved to quarantine (§4.5). Confirmation also closes the fast-rollback window.
 
-**Recovery matrix.** The MRCB applies this at startup, before holder-state load and tombstone revocation (§4.5):
+**Recovery matrix.** The MRCB **inspects** this at startup step 3 (§4.5), after holder state is loaded and before any list. The *Recovery* column is executed in two parts:
+- fail-closed refusals and marker-only roll-forward run at inspection;
+- every action that builds, discards objects, resumes, publishes a new object or deletes waits for startup step 7, after the first list has classified what is held (F5-5).
+
 
 | `upgrade.json` | `current.json` points to | Meaning | Recovery |
 |---|---|---|---|
@@ -495,10 +529,14 @@ Elapsed time also depends on contention from queries and reconciliation. That is
 
 ## 5. Holder lifecycle: Kwiry as a `Holdings` consumer
 
-Revision 5 drops Kwiry's bespoke custody query, `custody-cache.json` and its state-equality table. Kwiry now consumes the engine-neutral lifecycle contract that the owner approved and OpenClast froze on 2026-11-17. Kwiry is one **holder** of kind `engine`. It pulls a signed, complete list of what it holds (`Holdings.List`) and reports purge progress (`Obligation.Report`). The authority owns every obligation. Kwiry keeps only refusal state, and that state can never widen access.
+Kwiry consumes the engine-neutral lifecycle contract that the owner approved and OpenClast froze on 2026-11-17. Kwiry is one **holder** of kind `engine`. It pulls a signed, complete list of what it holds (`Holdings.List`), reports purge progress (`Obligation.Report`), and reports its holder-wide quarantine (`holders/status`). The authority owns every obligation and every release decision. Kwiry keeps only refusal state, and that state can never widen access. Revision 6 keeps that architecture and the contract, and corrects the consumer state machine (round-5 findings F5-1 to F5-9).
 
 **Binding inputs:**
-- **The contract:** *OpenClast Holdings wire contract*, FROZEN 2026-11-17, `.workspace/kwiry-integration/HOLDINGS-WIRE.md` in the OpenClast workspace. Below it is cited as **HW §n**. HW §13 holds Kwiry's agreed answers and amendments A–C. This page restates nothing the contract owns; it defines only Kwiry's consumer behaviour.
+- **The contract:** *OpenClast Holdings wire contract*, FROZEN 2026-11-17, `.workspace/kwiry-integration/HOLDINGS-WIRE.md` in the OpenClast workspace. It is cited as **HW §n**.
+  - HW §13 holds Kwiry's answers and amendments A–C.
+  - HW §14 holds amendments 2: **D** (`quarantine_release` instructions), **E** (holder status report), **F** (raw-restore guard) and the confirmations of Kwiry's questions Q3–Q8.
+  
+  This page restates nothing the contract owns. It defines only Kwiry's consumer behaviour.
 - **Owner decisions Q1–Q6 (2026-11-17):**
   - Q1: pull a signed list; nudges come later (S5).
   - Q2: one generic Holding record.
@@ -509,70 +547,104 @@ Revision 5 drops Kwiry's bespoke custody query, `custody-cache.json` and its sta
 
 ### 5.1 Role, scope and what stays at the authority
 
-- **(b), unchanged and mandatory.** OpenClast mints capabilities only for enrolled, active, random IDs. A retired ID is never minted.
-- **Authority-owned (P-a):** holdings, phases, obligations, deadlines, escalation, completion records and receipts. An obligation exists at the authority until it is `complete`, whether or not Kwiry remembers it. That is what closes R4-3.
+- **(b), unchanged and mandatory.** OpenClast mints capabilities only for enrolled, active, random IDs. A retired ID is never minted. Under HW §14 F, a suspected authority rollback also stops minting.
+- **Authority-owned (P-a):** holdings, phases, obligations, deadlines, escalation, completion records, release decisions and receipts. An obligation exists at the authority until it is `complete`, whether or not Kwiry remembers it (R4-3).
 - **Kwiry-owned:**
   - its holder key;
-  - a durable holder-state file: high-water, grow-only tombstones and a write-ahead report outbox (§5.2);
-  - in-memory leases;
+  - a durable holder-state file (§5.2): high-water, grow-only tombstones, per-obligation floors, the write-ahead report outbox and release progress;
+  - quarantine manifests;
+  - in-memory leases and classification;
   - the data root.
   
-  Tombstones and the high-water only ever **refuse**. Nothing local authorizes serving, building or deleting.
-- **Mapping.** A list item's `resource` is `{kind: "room", id: <room_id>}`, where `room_id` is the holder-scoped `random-128-v1` ID Kwiry already uses (HW §3.3). Kwiry's resource tuple `{tenant_id, vault_id, room_id}` comes from operator configuration. The list confirms `room_id` only:
-  - Configuration validation refuses two configured tuples with the same `room_id` under one holder, and refuses tuples with more than one `tenant_id` under one holder, because a holder is bound to one provider id-space (HW §2.1; §14.2 Q5).
+  Tombstones, floors and the high-water only ever **refuse**. Nothing local authorizes serving, building or deleting.
+- **Mapping.** A list item's `resource` is `{kind: "room", id: <room_id>}`, where `room_id` is the holder-scoped `random-128-v1` ID Kwiry already uses (HW §3.3). Kwiry's resource tuple `{tenant_id, vault_id, room_id}` comes from operator configuration. The list confirms `room_id` only.
+  - Configuration validation refuses two configured tuples with the same `room_id` under one holder. It also refuses tuples with more than one `tenant_id` under one holder, because enrollment is per tenant (HW §14 Q5).
   - A capability's tuple must still match a mapped tuple exactly (§6.1). A mis-bound tenant or vault therefore fails closed; it never widens access.
 - **Holder granularity (HW §13):** one holder per data root. One holder has one key, one holder-state file and one high-water mark. Replicas use separate data roots and are separate holders, each with its own obligations. A room counts as purged only when every holder's obligation for it is complete.
-- **Slice scope.** Kwiry implements HW S1 in release unit L. HW S2 (epoch chain, tombstone merge) is a later Kwiry slice. Until then, any epoch change fails closed (§5.3).
+- **Slice scope.** Kwiry implements HW S1, including amendments D, E and F, in release unit L. HW S2 (epoch chain, tombstone merge) is a later Kwiry slice. Until then, any epoch change fails closed, and only an explicit operator acceptance moves past it (§5.4).
 
 ### 5.2 Holder identity and durable holder state
 
-**Location.** Holder state lives in a holder directory **next to the operator configuration, never inside the disposable data root** (HW §13). Every file is `0600` and the directory is `0700`:
+**Location.** Holder state lives in a holder directory **next to the operator configuration, never inside the disposable data root** (HW §13). Every file is `0600` and the directory is `0700`. Nothing in it names a resource, except the tombstone set, which the contract requires.
 
 ```text
 <config-dir>/holder/
-  holder.key          # Ed25519 (preferred) or ES256 private JWK; never leaves the host
-  holder.json         # { holder_id, lifecycle_base_url, enrolled_jkt, pinned lc-* JWKS, initialized_at }
-  holder-state.json   # durable, fsynced; below
-  receipts/<obligation_id>.json   # final-scan records and verified acks (no resource IDs)
+  holder.key            # Ed25519 (preferred) or ES256 private JWK; never leaves the host
+  holder.json           # { holder_id, lifecycle_base_url, enrolled_jkt, pinned lc-* JWKS, initialized_at }
+  holder-state.json     # durable, fsynced; below
+  receipts/<key>.json   # verified acks and final-scan records, by idempotency key (no resource IDs)
+  manifests/<key>.json  # quarantine manifest bound to a report (§5.5); unit IDs only
 ```
 
 **Enrollment.**
 - `kwiry holder init` creates the key and an empty `holder-state.json`, then prints the public JWK.
-- The OpenClast admin enrolls it with `enroll-holder --kind engine` (HW §2.1) and returns the `holder_id` and the lifecycle JWKS. Kwiry pins both in `holder.json`.
+- The OpenClast admin enrolls it per tenant with `enroll-holder --kind engine` (HW §2.1) and returns the `holder_id` and the lifecycle JWKS. Kwiry pins both in `holder.json`.
 - Key rotation is HW §2.1's overlap-window admin action.
 - A lost key cannot sign, so every list fails. Leases then lapse, data is withheld and nothing is deleted until the key is re-enrolled.
 
-**`holder-state.json`** (schema 1) holds exactly:
+**`holder-state.json`** (schema 2) holds exactly the following fields. Each field has a **monotone merge rule**, and no other change is possible:
 
-| Field | Purpose |
-|---|---|
-| `holder_id` | Must equal `holder.json`; on mismatch, fail closed |
-| `high_water` | `{epoch, seq}` of the last applied list, or `null` before first contact |
-| `tombstones` | Grow-only set of `{resource_id, holding_id}` ever seen `terminating` or `retired` (HW §3.4 rule 6) |
-| `outbox` | Per open obligation: the highest-state report **written before it is sent**: its state, its idempotency key and its canonical claims minus `jti`, `iat` and `exp` (§5.6) |
-| `quarantine_releases_applied` | IDs of `quarantine_release` items already executed (§5.5; shape pending, §14.2) |
+| Field | Content | Merge rule |
+|---|---|---|
+| `holder_id` | must equal `holder.json` | immutable |
+| `high_water` | `{epoch, seq}` of the last applied list, or `null` before first contact | within an epoch, only a higher or equal `seq` from an applied list. The epoch changes only through first contact, trust on first use (§5.2) or operator epoch acceptance (§5.4) |
+| `tombstones` | `{resource_id, holding_id}` ever seen `terminating` or `retired` (HW §3.4 rule 6) | set union only |
+| `floors` | per obligation: highest state the authority **accepted**, plus its receipt key | maximum only. Raised in the same commit that clears a pending report, after its receipt file is durable |
+| `pending` | per obligation: at most one unacknowledged report: state, idempotency key, canonical business body, `superseded` keys | a new pending entry requires a state strictly higher than the floor and at least the existing pending state. An equal state is allowed only for a counts update, at most once per 300 s (§5.6). A superseded entry's key moves to `superseded`. The entry is cleared only when the floor reaches its state |
+| `attempts` | per idempotency key, held or superseded: `{jti, sha256(compact JWS)}` for every send attempt | append only, **committed before that attempt is sent**. Pruned with the key once the floor or a newer status ack covers it |
+| `status` | the pending or last acknowledged holder status report (§5.5) | replaced only by a newer status report |
+| `instructions` | per `instruction_id`: `executing` (with its target unit set), `done` or `mismatch` | forward only: `executing → done`, `executing → mismatch`. `done` and `mismatch` are final |
+| `accepted_epochs` | epoch IDs an operator explicitly accepted (§5.4) | set union only |
 
-**Write rule.** Write to a temporary file, fsync it, rename it, then fsync the directory. A failed write aborts whatever depends on it. In particular:
-- no list is applied unless its tombstones and high-water are durable first;
-- no report is sent unless its outbox entry is durable first.
+**One serialized writer (F5-2).** A single **holder-state writer** task owns every file in the holder directory. Nothing else reads, modifies and writes them.
+- **How it works.** Callers send it typed mutations: `apply_list`, `accept_epoch`, `put_pending`, `append_attempt`, `record_ack`, `put_status`, `put_manifest`, `instruction_*`. The writer:
+  - applies each mutation to its authoritative in-memory copy under the merge rule above, rejecting a mutation that the rule forbids;
+  - writes the **whole merged state** (temporary file, fsync, rename, fsync the directory);
+  - only then answers the caller.
+- **Batching.** Mutations may be batched into one commit, and none is answered before its commit is durable. A whole-file replace can therefore never drop a tombstone, a floor or an attempt.
+- **Receipts and manifests** are written by the same writer, each before the state commit that refers to it.
+- **Failure.** A failed commit fails the caller's operation, and the in-memory copy rolls back to the last durable state.
+- **Lock position.** The writer is a **leaf**. It waits only on its own I/O and calls nothing. The publisher actor may wait on it inside a transaction (§4.3, §5.3). Nothing waits on the publisher while it holds a writer reply.
 
-**Loss and reset (HW §13, accepted).**
-- `holder-state.json` is created at `holder init`. A **missing, unreadable or mismatched** file afterwards is a reset.
-- On reset, Kwiry:
-  - raises the `holder_state_reset` alert;
-  - moves any unreadable file aside, keeping it;
-  - sends `high_water: null`;
-  - trusts the first verified, nonce-bound list at whatever epoch it carries (trust on first use).
-- Accepted residual: if the authority is restored at the same moment, it is detected only by HW S2's off-store epoch record.
-- **Losing only the data root is not a reset.** Tombstones and the high-water survive, and Kwiry rebuilds from the next list (§5.6).
+**Loss, corruption and reset (F5-6).** The contract accepts trust on first use only when **both** holder state and data are lost (HW §13). Revision 6 enforces exactly that.
 
-### 5.3 Listing and applying a list
+*Data root lost* means the configured data-root directory is absent, or contains none of the following:
+- `current.json`;
+- any generation record, object or staging build;
+- any quarantine entry;
+- any layout-v2 tree.
+
+| `holder.json` | `holder-state.json` | Data root | Outcome |
+|---|---|---|---|
+| absent or invalid | any | any | **Fail closed.** Not enrolled: refuse to start the governed profile |
+| valid | unreadable, schema-invalid, or `holder_id` mismatch | any | **Fail closed.** Raise `holder_state_corrupt` or `holder_identity_mismatch`. Nothing is listed, served, built or deleted. The file is left untouched for the operator |
+| valid | absent | **lost** | **Trust on first use.** Create a fresh state, raise `holder_state_reset`, send `high_water: null`, and accept the first verified, nonce-bound list at its epoch. The first status report carries `holder_state: "reset"` (HW §14 E) |
+| valid | absent | **intact** | **Fail closed.** Raise `holder_state_missing`. Nothing is listed, served, built or deleted until the operator recovers (below) |
+| valid | `high_water: null` (never contacted) | any | First contact: no alert |
+
+**Operator recovery when only holder state is lost** (`kwiry holder recover-state`, audited). The operator chooses one of two paths:
+1. **Restore the holder directory from the operator's own backup.**
+   - Checks: `holder_id` matches; the restored high-water's epoch is the authority's current epoch; and the first list afterwards passes the normal high-water rule against the restored mark.
+   - **Stated limit:** tombstones added after the backup are lost. An obligation still listed is re-learned from the list. A room whose obligation completed more than 30 days after the backup and has since dropped off the list is protected only by the authority's own retirement record. So holder-directory backups should be more recent than 30 days.
+2. **Discard the data root**, making it the both-lost case, then proceed by trust on first use.
+
+There is no path that applies trust on first use while data is intact.
+
+**Losing only the data root is not a reset.** Tombstones, floors and the high-water survive. Kwiry rebuilds from the next list, and open obligations complete against the empty root (§5.6).
+
+### 5.3 Listing, classifying and applying
 
 **When Kwiry lists:**
-- **At startup**, after migration recovery (§4.10). The listener binds, but every governed request refuses `resource_unavailable` until the first list applies. Leases are not persisted, so a restart never serves on a previous process's lease.
-- **Every `relist_seconds`** from the last applied list (engines: 300), with ±10 % jitter. Failures back off exponentially and never exceed HW §7's start rate.
+- **At startup**, after holder state is loaded and before any recovery action (§4.5). The listener binds, but every governed request refuses `resource_unavailable` until the first list applies. Leases are not persisted, so a restart never serves on a previous process's lease.
+- **Periodically.** Each interval is drawn uniformly from `[0.8, 1.0] × relist_seconds` (engines: 240–300 s). The jitter **never exceeds** `relist_seconds` (F5-8).
+  - A failed list is retried from 10 s with exponential backoff, capped at `relist_seconds / 2`, within HW §7's start rate.
+  - Leases are unaffected by retries and simply run down.
 - **Before every rebuild** (`kwiry index`, an embedding-identity change, the upgrade). The list must start after the rebuild was requested.
-- **Early, per amendment B.** A capability that names a `room_id` absent from the current list triggers one relist. At most one is in flight, at most one every 5 s, and the triggers coalesce. The request itself refuses `resource_unavailable` at once and does not wait. Tombstoned IDs never trigger a relist.
+- **Early, per amendment B (F5-8).** A capability whose signed set `S` names a `room_id` absent from the current list triggers one relist.
+  - **Where it fires:** at gate step 3a (§6.1), right after capability verification and input validation. That is **before** the model gate, permit admission and any lease, so a request refused later by those gates still triggers it.
+  - **Bounds:** at most one in flight and at most one every 5 s; triggers coalesce.
+  - The request itself is never made to wait. It continues through the normal gate order and refuses with `resource_unavailable` at step 6 at the latest.
+  - Tombstoned IDs never trigger a relist.
 - **On a `410 list_expired`**, Kwiry discards every page and relists from `cursor: null` with a fresh nonce. After 5 consecutive `410`s it backs off and raises `lifecycle_list_livelock` (HW §3.7).
 
 **Request.** Each request is a holder-signed request object (HW §2.2, §3.1):
@@ -580,51 +652,84 @@ Revision 5 drops Kwiry's bespoke custody query, `custody-cache.json` and its sta
 - the stored `high_water`;
 - `page_size: 500`.
 
-**Verification.** Each page goes through the HW §3.8 checklist in order, failing closed. The whole list then must pass the HW §3.7 consistency rules. Kwiry adds three item checks:
-- every `resource.kind` is `room`;
-- no `resource.id` appears twice in one list;
-- the item's phase and obligation form a permitted combination (HW §3.3).
+**Verification.** Each page goes through the HW §3.8 checklist in order, failing closed. The whole list must then pass the HW §3.7 consistency rules. Kwiry adds these checks:
+- every item's `resource.kind` is `room`;
+- no `resource.id` appears twice in one list (HW §14 Q6);
+- the item's phase and obligation form a permitted combination (HW §3.3);
+- `instructions[]` appears **only on page 0** (HW §14 D).
 
-Any failure discards the entire list and raises `lifecycle_list_invalid`. The previous state stays, and its leases keep running down.
+A failure discards the entire list and raises `lifecycle_list_invalid`. The previous state stays, and its leases keep running down. Instruction entries are not items: an entry with an unknown `kind` is skipped and logged once per `instruction_id`, and never fails the list.
 
-**High-water (HW §3.7), enforced by Kwiry:**
+**High-water and epoch (HW §3.7, §14 Q4, §14 F):**
 
-| Received `rev` versus stored high-water | Action |
+| Received | Action |
 |---|---|
-| `high_water` is `null` (first contact or reset) | Accept |
-| Same epoch, `seq ≥ hw.seq` | Accept; set `hw = rev` as part of the apply |
+| `high_water` is `null` (first contact, or trust on first use under §5.2) | Accept |
+| Same epoch, `seq ≥ hw.seq` | Accept; the apply sets `hw = rev` |
 | Same epoch, `seq < hw.seq` | **Regression.** Reject, raise `lifecycle_regressed`, keep the previous state, and cite this list in no report |
-| Different epoch | **S1: reject** with `unexpected_epoch` and an alert. Leases run down. HW S2 later accepts only a verified chain |
+| Different epoch, not in `accepted_epochs` | **Reject** with `unexpected_epoch` and an alert. Leases run down. A supported authority restore mints a new epoch, so it lands here (HW §14 Q4). Recovery is §5.4's operator acceptance |
+| Different epoch, in `accepted_epochs` | Accept as a new baseline: `hw = rev`; tombstones are kept and win |
+| `503 authority_epoch_mismatch` (HW §14 F) | Treat as **authority unreachable**: leases run down, nothing is deleted, and Kwiry raises the distinct alert `authority_rollback_suspected` (§5.4) |
 
-Equal `seq` with different bytes is not an error. `state_digest` covers `list_id` and `nonce`, so it differs on every list by design. Kwiry never compares digests. It echoes them only in `list_ref`.
+Kwiry never compares `state_digest` values. They cover `list_id` and `nonce`, so they differ on every list by design. Kwiry only echoes them in `list_ref`.
 
-**Classification.** The list is the holder's **complete** projection at `rev` (HW §3.4). Every resource Kwiry holds therefore has exactly one class, computed from the list alone. No status is ever request-dependent, which closes R4-2. "Holds" means any of these names the `room_id`: configuration, a layout, the withheld set, an object descriptor, a staging journal, a quarantine ledger entry, or a layout-v2 tree.
+**Classification.** The list is the holder's **complete** projection at `rev` (HW §3.4). Every resource Kwiry holds therefore has exactly one class, computed from the list alone (R4-2). "Holds" means the `room_id` appears in any of these:
+- configuration;
+- the layout or the withheld map;
+- an object descriptor;
+- a staging journal;
+- a quarantine ledger entry;
+- a layout-v2 tree.
 
-| Class | Condition | Serving | Building | Data |
-|---|---|---|---|---|
-| **active** | listed `active`, not tombstoned | until its lease deadline (§5.4) | allowed while leased and configured | kept |
-| **lapsed** | listed `active` earlier, lease deadline passed, no newer list | refused | paused | kept in place |
-| **obligated** | listed `terminating` (any obligation state), or `retired` with `escalated` | refused now | cancelled | purged under the obligation (§5.6) |
-| **retired-complete** | listed `retired` with `complete` | refused | never | if any artifact remains: purge, then report again (HW §3.4 rule 4) |
-| **tombstoned-unlisted** | in the tombstone set, absent from the list | refused forever | never | **withheld**; counted as unattributed (HW §3.3 retention) |
-| **unknown** | not in the list, not tombstoned | refused | never | **withheld**; counted as unattributed (§5.5) |
+| Class | Condition | Serving | Building | Objects | Data |
+|---|---|---|---|---|---|
+| **active** | listed `active`, not tombstoned | until the lease deadline (§5.4) | allowed while leased and configured | `live`, in the layout | kept |
+| **lapsed** | listed `active` earlier, lease deadline passed, no newer list | refused | paused | `live`, in the layout | kept in place |
+| **obligated** | listed `terminating` (any obligation state), or `retired` with `escalated` (HW §14 Q8) | refused now | cancelled | **revoked** (§4.3) | purged under the obligation (§5.6) |
+| **retired-complete** | listed `retired` with `complete` | refused | never | revoked if any remain | if any artifact remains: purge, then report again (HW §3.4 rule 4) |
+| **tombstoned-unlisted** | tombstoned and absent from the list | refused forever | never | **`live`, withheld** | kept; counted as unattributed |
+| **unknown** | not listed, not tombstoned | refused | never | **`live`, withheld** | kept; counted as unattributed (§5.5) |
 
-A tombstoned ID listed `active` is a `tombstone_conflict` alert. It stays refused (HW H13). In HW S2 it also goes into a merge request.
+**Withheld is reversible; revoked is not (F5-3).**
+- *Withholding* moves a resource's mapping from the layout to the generation record's withheld map. It removes serving eligibility and drops cached readers through the cache-only eviction of §4.3, but the objects stay `live`.
+- A later list that shows the resource `active` moves the mapping back in one publisher transaction, without a rebuild.
+- Only an obligation, GC of unreferenced objects of an active resource, or an executed release ever **revokes** (§4.3).
 
-**Atomic apply.** One apply is one ordered sequence. Each step completes before the next:
+A tombstoned ID listed `active` raises a `tombstone_conflict` alert and stays refused (HW H13). In HW S2 it also goes into a merge request.
 
-1. Add every `terminating` or `retired` ID to the tombstones, and set the high-water to `rev`. Write both durably (§5.2).
-2. Submit one publisher transaction (§4.3). Its layout drops every obligated, retired, tombstoned and unknown resource. Unknown resources' objects move to the generation record's **withheld** map: they stay referenced, so GC keeps them, but they are never servable. The same transaction swaps the in-memory lease table under L3, so `pin_and_lease` sees the new leases and the new layout in one snapshot.
-3. Under L3, revoke the objects of every resource dropped in step 2 (§4.3). Revocation evicts cached readers unconditionally.
-4. Rebuild the obligation work queue from the list's obligations, and the unattributed count from the classes above.
+**Classification snapshot and `class_rev` (F5-4).** Kwiry keeps one in-memory **classification snapshot**, and every lifecycle decision reads it. Everything in it changes together, in one L3 swap, and carries one monotone counter, `class_rev`. The snapshot holds:
+- the per-resource class;
+- the lease table;
+- the layout pointer;
+- the withheld map;
+- the **unattributed inventory**: the set of unattributed unit IDs, its count and its `quarantine_manifest_digest` (§5.5).
+
+Every change to any of these is a publisher transaction that increments `class_rev`. That covers:
+- a list apply;
+- a withheld ↔ layout move;
+- a quarantine move;
+- a release execution;
+- a purge deletion that changes the attributed inventory.
+
+There is no moment when a resource is withheld but the count still excludes it.
+
+**Atomic apply: one publisher transaction.** After the list verifies (network I/O happens outside the actor), Kwiry submits one transaction. Inside it the actor:
+1. Calls the holder-state writer with `apply_list`: tombstones ∪ new terminating and retired IDs, `hw = rev`. If this commit adds the first tombstone ever, the transaction then writes `rollback.json` and deletes `current.v2.json` (§4.10). The holder-state commit and those markers are all durable before step 2.
+2. Builds and publishes the generation record:
+   - the layout keeps active and lapsed resources;
+   - the withheld map gains unknown and tombstoned-unlisted resources;
+   - obligated and retired resources are dropped.
+3. Under L3, swaps the pointer, lease table, classes and unattributed inventory together, and increments `class_rev`.
+4. Under L3, revokes the objects of every **obligated or retired** resource dropped in step 2. Withheld resources only lose their cached readers. Their objects stay `live` (§4.3).
+5. Rebuilds the obligation work queue and the instruction queue from the list. Execution happens outside the transaction (§5.5, §5.6).
 
 A crash after step 1 leaves the tombstones durable. Startup then revokes those resources before serving (§4.5), so the safe direction always wins.
 
-### 5.4 Serving rule and leases
+### 5.4 Serving, leases and authority rollback
 
 A resource `r` in `E` is **servable** only while all of these hold:
 - it is configured;
-- it is mapped in the active layout;
+- it is mapped in the layout of the current snapshot, not merely withheld;
 - it is not tombstoned;
 - it is listed `active` in the last applied list;
 - `now` is before its **lease deadline**.
@@ -633,110 +738,179 @@ A resource `r` in `E` is **servable** only while all of these hold:
 
 **Lease deadline:** the earlier of the item's `quarantine_after`, judged by the wall clock, and `t_recv + (quarantine_after − iat)`, judged by the **monotonic** clock from when the page verified. A wall-clock step on Kwiry's host therefore cannot extend serving. HW H17's ±120 s skew applies only to the wall-clock comparison.
 
-**Lapse (Q4).** At the deadline, `r` refuses with `resource_unavailable` and its A4 freshness becomes `unavailable`. Builds and publications for `r` pause. **Nothing is deleted or moved.** The next verified list that shows `r` active with a later `quarantine_after` restores serving without a rebuild. Lapse is per item (HW §13). If the authority stays unreachable, every room lapses within 15 minutes of its last renewal, lexical serving included. This replaces revision 4's "keep serving during an outage" rule, deliberately (§12, R6).
+**Lapse (Q4).** At the deadline, `r` refuses with `resource_unavailable` and its A4 freshness becomes `unavailable`. Builds and publications for `r` pause. **Nothing is deleted, moved or revoked.** The next verified list that shows `r` active with a later `quarantine_after` restores serving without a rebuild. Lapse is per item (HW §13). If the authority stays unreachable, every room lapses within 15 minutes of its last renewal, lexical serving included (§12, R6).
 
-**Stale-authority window.** Two facts bound the window:
-- OpenClast never mints a capability for a retired ID (b), and a `terminating` item's `quarantine_after` is already past.
-- So once a list carrying the retirement applies, the room stops at once.
+**Unreachable, refused or suspected-rollback authority.** These responses all get the same treatment: leases keep running down, nothing is deleted, nothing is reclassified, and retries back off. Each raises its own alert.
 
-Before that list arrives, the room can still serve two kinds of capability:
-- those minted before the retirement, which live at most the capability TTL (60 s);
-- and nothing else, because no new ones are minted.
+| Response | Alert |
+|---|---|
+| Network failure, `429`, `503 lifecycle_unavailable` | `lifecycle_unreachable` |
+| `503 authority_epoch_mismatch` | `authority_rollback_suspected` (distinct, because a human must run the restore runbook) |
+| `401 invalid_holder_proof` | `lifecycle_unauthorized` (no retry until the operator acts) |
 
-The window is therefore at most the capability TTL, whether or not the authority is reachable. OpenClast's fail-closed post-check is the user-facing control (§14, ask 6). A list or nudge only shortens the window. The lease is not a revocation bound; it bounds how long Kwiry serves **without any authority contact**.
+**Operator epoch acceptance (HW §14 Q4).** After a supported restore, the authority's runbook acknowledges each holder. On Kwiry's side, the operator then runs `kwiry holder accept-epoch <ep_…>`, which is audited and names the exact epoch.
+- The writer adds that epoch to `accepted_epochs`.
+- The next verified list of that epoch becomes the new baseline. Tombstones are kept and still win, so a room this holder saw retired cannot be revived by the restore.
+- Retirements that the restore erased and that this holder never saw are lost at the authority. Kwiry cannot recover them; that is the restore's own information loss.
+- There is no wildcard acceptance, and no acceptance for a same-epoch regression.
 
-### 5.5 Unknown data, quarantine and release (amendment C)
+**Stale-authority window (qualified for F5-7).** OpenClast never mints a capability for a retired ID, and a `terminating` item's `quarantine_after` is already past. So once a list carrying the retirement applies, the room stops at once. Before that, only capabilities minted before the retirement can name it, and those live at most the capability TTL (60 s).
 
-- **Kwiry never deletes data it cannot attribute to a listed obligation** (HW §3.4 rule 5). Neither lease expiry, nor authority errors, nor regression, nor reset, nor being unknown authorizes deletion.
+> **The 60 s bound holds unless the authority's history is rolled back without detection.**
+
+| Restore situation | Detection | Effect on Kwiry |
+|---|---|---|
+| Supported restore | New epoch (HW §14 Q4) | Kwiry refuses with `unexpected_epoch`; leases lapse; no stale serving |
+| Raw restore while the authority's **off-store high-water record** is intact | The authority enters `authority_rollback_suspected` (HW §14 F) and stops minting and the search seam | Kwiry sees `503 authority_epoch_mismatch` and treats it as unreachable; no stale serving beyond the TTL |
+| **Residual until HW S2:** raw restore **and** loss of the off-store record together | Undetected | Example: the holder last saw seq 90, missed a retirement at seq 100, and the authority is raw-restored to seq 90. Kwiry accepts the equal `seq`, holds no tombstone for the room, and keeps serving it. The restored authority can also mint fresh capabilities for it. The exposure is unbounded until the retirement is re-applied |
+
+Kwiry cannot detect that residual alone. The **operational restriction** for the governed profile is therefore:
+- the authority's off-store high-water record lives on storage separate from, and never restored with, the state backup;
+- raw restores are unsupported;
+- restores run only through the tooling that mints the epoch.
+
+HW S2's signed epoch chain removes the residual. The lease is not a revocation bound; it bounds how long Kwiry serves **without any authority contact**.
+
+### 5.5 Unknown data, quarantine, releases and status reports
+
+- **Kwiry never deletes data it cannot attribute to a listed obligation or an executed release** (HW §3.4 rule 5). Lease expiry, authority errors, regression, rollback suspicion and reset never authorize deletion.
 - **Withheld vs. quarantined.**
-  - *Withheld* data stays where it is and is referenced by the generation record's withheld map. That covers unknown and tombstoned-unlisted resources whose objects are intact.
-  - *Quarantined* data has been moved into `quarantine/<random>/` and recorded in `quarantine/ledger.json`, the data-root quarantine ledger: entry name, attributed `room_id` if readable, and a monotone ledger sequence. That covers artifacts that are unreadable, failed to delete, or come from garbage GC could not attribute (§4.5).
+  - *Withheld* data stays where it is, `live`, mapped in the withheld map. That covers unknown and tombstoned-unlisted resources whose objects are intact.
+  - *Quarantined* data has been revoked, drained and renamed into `quarantine/<random>/`, then recorded in `quarantine/ledger.json`. That covers unreadable artifacts, failed deletions, and garbage that GC could not attribute (§4.5).
   
-  Neither kind is ever leased, opened, built from or served.
-- **Units.** A unit is one artifact directory: an object, a staging build, a quarantine entry, or one resource's partition in a layout-v2 tree. The authority checks only zero versus non-zero (HW §4.1).
-- **`quarantined_unattributed`** is holder-wide (HW §4.1). It counts:
-  - every withheld unit of an unknown or tombstoned-unlisted resource;
-  - every quarantine entry that is not attributed to a currently listed obligation.
-- While it is above zero, Kwiry never reports `complete` for **any** obligation (HW §4.1, H1).
-- **How it clears:**
-  1. a later list classifies the resource. If it is active, the data returns to the layout without a rebuild. If it is obligated, it is purged under that obligation.
-  2. Otherwise a human-authorized `quarantine_release` arrives in a verified list.
-- **Executing a release.** Kwiry deletes **exactly** the set it held when the release was issued. That set is the ledger and withheld entries counted in the report the release cites. Kwiry then fsyncs the parents, records the release ID in `quarantine_releases_applied`, and reports the new count. The item's wire shape is not yet in HW §3.2/§3.3, so this behaviour waits on §14.2 Q1. Until it is specified, a list carrying any unrecognized element is rejected whole.
-- **Operator actions are outside the holder.** An operator who deletes the whole data root, as the contract's disposability rule (CONTRACT §1.1) permits, has not been overridden by Kwiry. The next lists rebuild active rooms, and open obligations complete against an empty root (§5.6).
+  Neither kind is ever leased, opened for a request, built from or served.
+- **Units.** A unit is one artifact with a random ID: an object ID, a staging build ID, a quarantine entry name, or a `(v2-tree, partition)` pair. Units carry no resource ID. The authority checks only zero versus non-zero (HW §4.1).
+- **Unattributed inventory.** This is the holder-wide set of unit IDs that are withheld (unknown or tombstoned-unlisted) or quarantined but not attributed to a currently listed obligation. Its size is `quarantined_unattributed` (HW §4.1). It belongs to the classification snapshot, so every report reads a consistent value (§5.3). While it is non-empty, Kwiry never reports `complete` for any obligation (HW §4.1, H1).
+- **`quarantine_manifest_digest` (HW §14 D).** `qm1.` + base64url(SHA-256(`"kwiry-quarantine-manifest/v1"` ‖ 0x00 ‖ JCS(`{"holder_id", "count", "units": [sorted unit IDs]}`))). It is computed from the snapshot's inventory, and an empty set has a defined digest.
+  - **Durable manifest.** Before the first send of any report that carries the digest, the writer durably stores `manifests/<idempotency_key>.json`: the digest, count, unit IDs and `class_rev`.
+  - **Lookup.** A manifest is found through any recorded attempt digest of that key (§5.2 `attempts`) or through its ack's `report_digest`.
+  - **Retention.** Kept for every accepted report of the last 30 days and for any manifest bound by a listed instruction.
+- **How unattributed data clears:**
+  1. a later list classifies the resource. If it is active, the data returns to the layout. If it is obligated, it is purged.
+  2. Otherwise a human-authorized `quarantine_release` instruction arrives (HW §14 D).
+- **Executing a release** (one instruction per run, idempotent):
+  1. **Bind.** Look up the manifest whose report has digest `bound_report_digest`. If none is retained, or its count ≠ `approved_count`, record `mismatch` (final). Raise `release_binding_mismatch`, delete **nothing**, and send a fresh status report so a human can approve the current manifest.
+  2. **Target.** In one publisher transaction, compute the **intersection** of the manifest's units and the snapshot's current unattributed inventory. Units that have since been reclassified, as active or obligated, are excluded. Write `instructions[id] = executing{target}` through the writer before anything is touched.
+  3. **Delete.** Revoke the targeted objects (§4.3), drain, claim, delete and fsync parents. Then remove deleted entries from the inventory in a `class_rev` transaction. Failures go back into quarantine and stay counted.
+  4. **Finish.** Mark the instruction `done` through the writer, then send a status report with the new count and digest. The instruction stays listed until the authority accepts that report (HW §14 D). A re-listed `done` instruction only re-sends the status report.
+  
+  A crash during step 3 resumes from the durable `executing` target.
+- **Holder status report (HW §14 E).** `POST /api/lifecycle/v1/holders/status` carries `list_ref`, `idempotency_key`, `quarantined_unattributed`, `quarantine_manifest_digest` and `holder_state`. It is sent:
+  - after the first list following a trust-on-first-use reset, with `holder_state: "reset"`;
+  - whenever the unattributed inventory's digest changes;
+  - after a release or a release mismatch;
+  - at least daily while the count is non-zero.
+  
+  Sends are coalesced to at most one per 60 s. Status reports use the same write-ahead, attempt and ack machinery as obligation reports (§5.6), but have no monotone state. A newer status report supersedes an unacknowledged older one, and both keys stay verifiable until one is acknowledged. A status report never touches an obligation.
+- **Operator actions are outside the holder.** An operator who deletes the whole data root, as CONTRACT §1.1's disposability permits, has not been overridden by Kwiry. The next lists rebuild active rooms, and open obligations complete against the empty root (§5.6). Holder state stays.
 
 ### 5.6 Obligations: revoke, purge and report
 
-Kwiry keeps no local history of what it owes. The work queue is rebuilt from every applied list's obligations, and the tombstones keep those IDs refused forever. Recovery therefore works when the last local reference to a room has gone: after a crash, after config removal, or after losing the whole data root. The authority's obligation stays listed until `complete`, so Kwiry re-learns it and re-checks absence. This closes R4-3.
+Kwiry keeps no local history of what it owes. The obligation queue is rebuilt from every applied list, and the tombstones keep those IDs refused forever. Recovery therefore works after a crash, after removing the room from configuration, or after losing the whole data root (R4-3).
 
 **Per obligation** (each step idempotent and crash-safe):
 
-0. **Close the fast-rollback window** (§4.10). The window closes when the first tombstone becomes durable. Immediately afterwards, and before the step-2 publication, Kwiry writes `rollback.json`, deletes `current.v2.json` and fsyncs both. If startup finds tombstones but no `rollback.json`, it writes the marker before doing anything else.
-1. **Tombstone.** Done durably by the apply (§5.3, step 1).
-2. **Revoke retrieval.** Done by the apply's publication and L3 revocation (§5.3, steps 2–3; §4.3):
+0. **Close the fast-rollback window** (§4.10). The window closes when the first tombstone becomes durable, in step 1 of the apply transaction (§5.3).
+1. **Tombstone.** Done durably by the apply.
+2. **Revoke retrieval.** Done by the apply's publication and L3 revocation (§5.3 steps 2–4; §4.3):
    - new pins cannot lease the resource's objects;
-   - cached readers are evicted and their handles dropped;
+   - cached readers are detached and dropped;
    - in-flight requests refuse at their end-of-request check.
    
    **Revocation never waits for any drain.**
-3. **Report `revoked`** once steps 1–2 are durable, unless `max(outbox state, last_accepted)` is already at least `revoked`. This is the "retrieval revoked, purge pending" state R4-4 asked for, and it is sent **before** any drain.
+3. **Report `revoked`** once steps 1–2 are durable, if the send rules below allow it. This is the "retrieval revoked, purge pending" state (R4-4), sent **before** any drain.
 4. **Drain**, waiting outside every lock:
-   - set the resource's admission gate to `closing`;
+   - set the admission gate to `closing`;
    - cancel queued units and stop a running unit at its next yield;
-   - wait for the admitted count to reach zero, then set the gate to `closed`;
+   - wait for admitted operations to reach zero, then set the gate to `closed`;
    - wait for each revoked object's lease, handle and init counts to reach zero (§4.3).
    
-   A builder that was already admitted cannot republish, because the publisher refuses tombstoned resources in every transaction.
+   An admitted builder cannot republish, because the publisher refuses tombstoned resources.
 5. **Delete.** Claim `revoked → doomed` and delete:
    - the resource's objects and staging;
    - the generation records naming it (through the publisher);
    - its layout-v2 partitions;
    - its attributed quarantine entries.
    
-   Fsync every parent directory. An artifact that cannot be deleted is renamed into quarantine and attributed. Deletion retries with backoff. Healthy resources and lexical search stay online (P-b).
+   Fsync every parent. An artifact that cannot be deleted is renamed into quarantine and stays attributed. Inventory changes are `class_rev` transactions. Deletion retries with backoff. Healthy resources and lexical search stay online (P-b).
 6. **Durability barrier and final scan.**
    - **Barrier, run fresh on every pass** (including after a restart): fsync `objects/`, `staging/`, `generations/`, `quarantine/` and the data root.
    - **Scan:** check every §5.7 location and confirm that no process file descriptor refers to a deleted path (`/proc/self/fd`).
-   - **Record:** write a canonical JSON final-scan record to `receipts/<obligation_id>.json`. It holds `holder_id`, `obligation_id`, the scanned location names, `found`, `fd_refs`, `barrier_ok`, `scanned_at` and `binary_version`, and no resource ID.
-7. **Report** the state computed below.
+   - **Record:** the final-scan record holds `holder_id`, `obligation_id`, the scanned location names, `found`, `fd_refs`, `barrier_ok`, `scanned_at`, `binary_version` and the snapshot `class_rev` it validated against. It contains no resource ID.
+7. **Validate and enqueue (F5-4).** The pass reads the snapshot at `class_rev = r` and computes the state (table below). It then submits a **report transaction** to the publisher actor, which is serialized with every apply. The actor:
+   - re-checks that `class_rev` is still `r`, that the obligation is still listed with the same state class, and, for `complete`, that the inventory is still empty;
+   - if anything changed, aborts, and the pass repeats steps 6–7 against the new snapshot;
+   - otherwise has the writer durably store the final-scan record, the manifest and the `pending` entry, using the snapshot's `list_ref`, **before** the transaction ends.
+   
+   Sending happens afterwards, outside the actor.
 
-**State machine (Kwiry's mapping of HW §4):**
+**State machine** (Kwiry's mapping of HW §4):
 
-| State | Kwiry sends it when | Counts |
+| State | Kwiry sends it when | Counts and fields |
 |---|---|---|
 | `revoked` | steps 1–2 are durable; drain or deletion may still be pending | `units_remaining` = artifacts not yet deleted |
-| `incomplete` | a purge pass has run steps 4–6 and either `units_remaining > 0` (deletion failure, quarantined attributed artifact, a parent fsync or barrier failure since the last deletion) or `units_remaining == 0` with `quarantined_unattributed > 0` | as measured on that pass |
-| `complete` | `units_remaining == 0`, the barrier succeeded **after** the last deletion, the final scan found nothing, no fd refers to a deleted path, **and** `quarantined_unattributed == 0` | `method: "logical_delete"`, `completed_at`, `evidence: {kind: "witness-digest", digest: "sha256:" + SHA-256(final-scan record bytes)}` |
+| `incomplete` | a purge pass has run steps 4–6 and either `units_remaining > 0`, or `units_remaining == 0` with `quarantined_unattributed > 0`. Remaining units include a deletion failure, a quarantined attributed artifact, and a parent fsync or barrier failure since the last deletion | as measured against snapshot `r` |
+| `complete` | `units_remaining == 0`, the barrier succeeded **after** the last deletion, the final scan found nothing, no fd refers to a deleted path, **and** the snapshot inventory is empty, all validated at enqueue | `method: "logical_delete"`, `completed_at`, `evidence: {kind: "witness-digest", digest: "sha256:" + SHA-256(final-scan record bytes)}` |
 
-- **Coverage.** Drain pending stays `revoked`. A successful unlink whose parent fsync failed counts as a remaining unit until a later barrier succeeds. Unknown attribution is the holder-wide count. Every R4-4 case therefore has exactly one state.
-- **Monotonicity (HW §4.4).** Kwiry sends a state only if it is at least `max(outbox state, last_accepted.state)`.
-  - A strictly higher state, or the same state with changed counts (at most once per relist interval), gets a new report.
-  - A lower computed state sends nothing new. If the outbox holds an unacknowledged higher report, Kwiry resends exactly that report, which describes a true past state stamped with its `completed_at`.
-- **Idempotency key.** `ik_` + base64url(SHA-256(`"kwiry-report/v1"` ‖ 0x00 ‖ JCS(claims minus `jti`, `iat`, `exp`)))[0..43].
-  - It is stable for a given body, and every retry is byte-identical apart from `jti`, `iat` and `exp`. So a lost ack yields the original ack (HW H10).
-  - A changed body gets a new key, so `409 idempotency_conflict` can only mean a bug.
-  - Keys carry no IDs.
-- **Write-ahead.** The outbox entry is fsynced before the first send. It is cleared only by a verified ack at or above its state. A crash between write and send therefore resends; it never sends lower (HW H11).
-- **`list_ref`** is the list Kwiry acted on. It is never a regressed or rejected list (HW H3). A list ref stays valid across restarts, because `list_tag` is stateless. On `409 stale_list_ref`, Kwiry relists and re-reports under the new ref, which means a new key with the same state.
-- **Acks.**
-  - **Verification:** `typ`, `lc-*` key, `aud`, `sub`, `idempotency_key`, `report_digest` (equal to SHA-256 of the exact JWS sent), `accepted_state`, and `receipt_label: "confirmed"`.
-  - **Storage:** the ack is stored in `receipts/` as the durable receipt. Kwiry never describes a `logical_delete` as anything stronger than "confirmed".
-- **Error handling** (HW §4.5):
+Every report also carries `counts.quarantined_unattributed` and `quarantine_manifest_digest` from snapshot `r` (HW §14 D).
+
+**Send rules (HW §4.4, §14 Q3; F5-2).**
+- **The floor** for an obligation is `max(floors[o], list.last_accepted.state)`. Monotonicity is measured against the **accepted** state, and a refused report counts as never sent (HW §14 Q3).
+- **A new state** may be enqueued only if it is strictly higher than both the floor and any pending state.
+- **Same-state updates.** The same state with changed counts is allowed at most once per 300 s per obligation (HW §14 Q7). It replaces the pending entry, and the old key moves to `superseded`.
+- **While a report is pending,** Kwiry only retries it or supersedes it with a higher state. It never sends anything lower.
+- **Clearing.** The pending entry and its floor change in the **same** writer commit, after the receipt file is durable. So the floor never drops between an ack and the next list that reflects it.
+
+**Idempotency key (F5-9).** `ik_` + base64url(SHA-256(`"kwiry-report-key/v1"` ‖ 0x00 ‖ B))[0..43], where `B` is the **frozen canonical business body**: RFC 8785 JCS of exactly these claims:
+- `iss`, `sub`, `aud`, `htu`;
+- `obligation_id`, `holding_id`, `state`;
+- `list_ref`, `counts`, `quarantine_manifest_digest`;
+- `method`, `completed_at`, `evidence` and `operator`, when present.
+
+`B` excludes `jti`, `iat`, `exp` **and `idempotency_key` itself**. An absent optional claim is omitted, never `null`.
+
+Status reports use `"kwiry-status-key/v1"` over `iss`, `sub`, `aud`, `htu`, `list_ref`, `quarantined_unattributed`, `quarantine_manifest_digest` and `holder_state`. Adding a business claim requires a new domain-separation version. Keys carry no resource ID.
+
+**Send attempts and ack verification (F5-1).** Every attempt is a fresh compact JWS: new `jti`, `iat` and `exp`, with the business body unchanged. The writer appends `{jti, sha256(JWS)}` to `attempts[key]` **before** the attempt is sent, so the set of digests the authority could have accepted survives a restart.
+
+Each ack must first pass common checks:
+- JWS with `typ` `openclast-obligation-ack+jwt` (or `openclast-holder-status-ack+jwt` for a status report);
+- `kid` in the pinned `lc-*` set and a valid signature;
+- exact `iss`, `aud = openclast-lifecycle:<own holder_id>` and `sub = own holder_id`.
+
+It then takes exactly one of two paths:
+
+| Path | Applies to | Binds to | Effect |
+|---|---|---|---|
+| **Replay receipt** (Kwiry's own report was accepted) | a `200` answering one of Kwiry's keys | `idempotency_key` equals a pending or superseded key; `report_digest` is in `attempts[key]`; `holding_id` and `obligation_id` equal that key's body; `accepted_state` equals its state | Store the ack as the receipt for that key. Raise the floor to `accepted_state`. Clear pending if the floor now reaches it |
+| **Convergence receipt** (the authority reports its own state) | `409 state_regression` (the ack in the body), and `200 already_complete` (the original ack, which may carry **another** key) | `holding_id` and `obligation_id` equal the obligation Kwiry reported; `obligation_state` and `phase` form a valid HW §4.2 pair. **No** `idempotency_key` or `report_digest` match is required or claimed | Store it as a convergence receipt, never as a receipt for Kwiry's own claims. Raise the floor to its `accepted_state`. Clear pending if covered |
+
+- **Status acks** use the replay path, with no obligation binding.
+- **Anything else** is rejected and raises `ack_unverifiable`. Kwiry keeps the pending entry and retries later. A signed ack matching neither path stops that obligation's reporting and raises an alert.
+- **Receipt labels.** Every stored receipt must say `receipt_label: "confirmed"`. Kwiry never describes a `logical_delete` as anything stronger.
+
+**Error handling** (HW §4.5, §14):
 
 | Response | Kwiry's action |
 |---|---|
-| `409 state_regression` | Adopt the ack in the body |
-| `409 complete_refused_unattributed` | Recompute and alert. A refused `complete` is treated as not accepted (§14.2 Q3) |
+| `409 state_regression` | Convergence path |
+| `200 already_complete` | Convergence path |
+| `409 complete_refused_unattributed` | Treat as **never sent**: drop the pending entry, recompute, and alert (HW §14 Q3) |
+| `409 stale_list_ref` | Treat as never sent; relist, then re-enqueue under the new `list_ref` |
 | `404 obligation_not_found` | Relist |
-| `401` | Stop and raise `lifecycle_unauthorized` |
+| `409 idempotency_conflict` | Treat as a bug: alert and stop that obligation |
+| `401` | `lifecycle_unauthorized` |
 | `403 holder_not_authorized` | Refuse every held resource and alert |
-| `429`, `503` or a network failure | Back off; leases keep running |
+| `503 authority_epoch_mismatch` | Treat as unreachable and raise `authority_rollback_suspected` (§5.4) |
+| `429`, other `503`s, network failure | Back off; the pending entry and its attempts stay |
 
-  Report traffic stays within HW §7's 10/s per holder.
-- **Logs and events.** Kwiry's operator logs and observer events carry `holding_id`, `obligation_id`, states and counts. A resource appears only as a per-process keyed digest (§10). Kwiry never logs `resource.id`, nonces, `state_digest`, `list_tag`, cursors, JWS bodies or evidence digests (HW §8).
+Report traffic stays within HW §7's 10/s per holder.
 
-**Tests (S3).** The reference fake authority and the `lifecycle-vectors.v1.json` golden vectors (HW §9) run in Kwiry CI. Two sets of tests:
+**Logs and events.** Kwiry's operator logs and observer events carry `holding_id`, `obligation_id`, `instruction_id`, states and counts. A resource appears only as a per-process keyed digest (§10). Kwiry never logs `resource.id`, nonces, `state_digest`, `list_tag`, cursors, JWS bodies, manifest digests or evidence digests (HW §8).
 
-*HW H1–H17 holder oracle*, using built binaries and synthetic rooms only:
+**Tests (S3).** The reference fake authority and the `lifecycle-vectors.v1.json` golden vectors (HW §9) run in Kwiry CI, extended for amendments D, E and F.
+
+*HW H1–H17 holder oracle* (H14 and H15 are S2), using built binaries and synthetic rooms only:
 - H1–H2: mixed list and unattributed quarantine;
 - H3–H4: regression, nonce mismatch and replay;
 - H5–H6: `typ` and `aud` swaps, including Kwiry's own capability verifier refusing every lifecycle artefact and the reverse (HW §2.5);
@@ -744,23 +918,47 @@ Kwiry keeps no local history of what it owes. The work queue is rebuilt from eve
 - H8–H9: `410` on page 2 and malformed pagination;
 - H10: a lost ack;
 - H11: a restart mid-purge;
-- H12: holder state wiped;
+- H12: holder state and data both wiped;
 - H13: a tombstoned ID re-listed active;
 - H16: report content;
 - H17: lease timing.
 
-*Kwiry-specific tests:*
-- a crash after each of steps 0–7;
-- a crash between the holder-state write and the publication;
-- data root deleted with holder state intact, so the open obligation completes against the empty root;
-- holder state deleted with the data root intact, giving `holder_state_reset`, trust on first use, and unknowns withheld rather than deleted;
-- an early relist bounded to one in flight and one per 5 s, with the request refused rather than waiting;
-- a monotonic-versus-wall-clock lease with the wall clock stepped backwards;
-- unlink succeeds but the parent fsync fails, giving `incomplete` and then `complete` after a later barrier;
-- R4-1's idle-cached-reader drain (§4.3);
-- a paused admitted builder whose attach the publisher refuses after the tombstone;
-- recreation under a fresh ID, which inherits nothing;
-- the rollback-window tests (§4.10).
+*Revision-6 tests:*
+- **F5-1:**
+  - the fake accepts attempt A, drops the ack, and Kwiry restarts and sends attempt B. The fake answers with A's byte-identical ack, which verifies through `attempts`;
+  - `already_complete` carrying another key and `state_regression` each verify on the convergence path;
+  - an ack for another obligation is rejected.
+- **F5-2:**
+  - a list apply and an ack commit race under an injected scheduler, with no lost tombstone, floor or attempt;
+  - a crash between the receipt write and the floor commit never lowers the floor;
+  - an ack is cleared, then an older list still showing an earlier `last_accepted` arrives, and nothing lower is sent.
+- **F5-3:** unknown X is withheld, then re-listed active. X serves again with its original objects `live` and no rebuild.
+- **F5-4:**
+  - an apply that newly withholds X is interleaved, by test hook, with B's completion pass. `complete` is never enqueued against the stale inventory, and the pass retries;
+  - the same holds for a quarantine move.
+- **F5-5:** every startup ordering in §4.5, including an upgrade marker present while holder state is corrupt, results in no list, build, publish or delete.
+- **F5-6:** every row of the §5.2 loss table, and both `recover-state` paths.
+- **F5-7 and F:**
+  - a new epoch gives `unexpected_epoch`, then `accept-epoch` makes it the baseline while tombstones still win;
+  - `503 authority_epoch_mismatch` gives lapse, no deletion and `authority_rollback_suspected`.
+- **F5-8:**
+  - the early relist fires for a semantic request refused at the model gate and for one refused `busy`;
+  - over many cycles, no relist interval exceeds `relist_seconds`.
+- **F5-9:** key vectors with and without optional claims; `idempotency_key` is excluded.
+- **D:**
+  - a release deletes exactly the intersection;
+  - a reclassified unit survives;
+  - a digest or count mismatch deletes nothing and sends a status report;
+  - a crash mid-release resumes;
+  - an unknown `kind` is skipped.
+- **E:** a reset sends `holder_state: "reset"`; the 60 s coalescing holds.
+- **Carried over from revision 5:**
+  - a crash after each step 0–7;
+  - unlink succeeds but the parent fsync fails;
+  - the R4-1 idle-reader drain;
+  - a paused admitted builder;
+  - recreation under a fresh ID;
+  - the rollback-window tests (§4.10).
 
 ### 5.7 Allowed residual after `complete`
 
@@ -780,7 +978,7 @@ Kwiry keeps no local history of what it owes. The work queue is rebuilt from eve
 
 - **The holder directory (§5.2).** The contract requires it.
   - The tombstone set keeps the retired `room_id` and `holding_id` forever. Both are random 128-bit identifiers with no label.
-  - `receipts/` keeps the final-scan record and the ack by `obligation_id`, with no resource ID.
+  - `receipts/` and `manifests/` keep acks, final-scan records and unit-ID manifests by idempotency key, with no resource ID.
 - the operator-owned configuration file;
 - external log sinks, where resources appear only as per-process keyed digests;
 - storage-medium remanence: `logical_delete` is unlink plus fsync, not sanitization (HW amendment A; Q6);
@@ -795,9 +993,10 @@ The **signed set** `S` is the capability's resources. The **effective set** is `
 1. **Verify the capability.** The verified context keeps `exp`, the exact action, `jti`, resources and `max_limit` (A2). The action must match the route and the mode (§7.5).
 2. **Require `mode`** in the openclast profile. The D2 default is applied at the seam.
 3. **Validate** the query, controls and filters. Non-room filters are refused here for semantic and hybrid, before any embedding or open.
+   - **3a. Early-relist trigger (F5-8).** If `S` names a `room_id` absent from the current list and not tombstoned, schedule the bounded early relist (§5.3). This never waits, and it fires before the model gate and permit admission, so a request refused there still triggers it.
 4. **Semantic and hybrid only (F6):** the model must be loaded with the expected `embedding_identity`, otherwise `mode_unavailable`. **Lexical never consults the model.**
 5. **Acquire a permit** from the mode's pool (§4.4).
-6. **The worker calls `pin_and_lease(E, class)`** (§4.3). Every resource in `E` must be mapped and servable: listed active, within its lease and not tombstoned (§5.4). Otherwise the call refuses with `resource_unavailable`, and an unlisted `room_id` triggers the early relist (§5.3).
+6. **The worker calls `pin_and_lease(E, class)`** (§4.3). Every resource in `E` must be mapped and servable: listed active, within its lease and not tombstoned (§5.4). Otherwise the call refuses with `resource_unavailable`. The early relist was already triggered at step 3a.
 7. **Semantic and hybrid only:** every resource in `E` must be `ready`, otherwise `semantic_not_ready`.
 8. **Execute** with checkpoints. Any failure refuses the whole call.
 
@@ -925,7 +1124,12 @@ Unchanged and confirmed by both reviews: no cross-file content reaches chunk tex
 
 **Separate disclosed residual (A7).** Queueing delay, `busy` and `deadline_exceeded` are a shared-service timing and availability residual. They may depend on other workloads, including other users' request rates and the data-dependent cost of their requests, and therefore indirectly on the size or contents of rooms the caller cannot see. They expose no room identifiers or content fields and never change a successful result. Lexical admission and execution threads are reserved apart from semantic ones (§4.4), so stalled semantic work cannot take lexical threads. CPU, memory and I/O remain shared.
 
-**Bounded stale-authority window (§5.4).** An already-issued capability for a just-retired room can be served until it expires: at most the 60 s TTL, before the list carrying the retirement applies. The OpenClast post-check is the fail-closed control for users. The 15-minute lease bounds how long Kwiry serves without any authority contact; it is not a revocation bound.
+**Bounded stale-authority window (§5.4).** An already-issued capability for a just-retired room can be served until it expires: at most the 60 s TTL, before the list carrying the retirement applies.
+- **Exception: an undetected authority rollback.** That is a raw restore *together with* loss of the authority's off-store high-water record (HW §14 F), and it remains a residual until HW S2. In that case a retirement the holder never saw can disappear, and exposure is unbounded.
+- **Detected rollbacks fail closed:** a supported restore mints a new epoch, and a raw restore with an intact record makes the authority refuse with `authority_epoch_mismatch`.
+- **Operational restriction:** the off-store record is never stored or restored with the state backup, and raw restores are unsupported.
+
+The OpenClast post-check is the fail-closed control for users. The 15-minute lease bounds how long Kwiry serves without any authority contact; it is not a revocation bound.
 
 | Channel | Response |
 |---|---|
@@ -933,7 +1137,7 @@ Unchanged and confirmed by both reviews: no cross-file content reaches chunk tex
 | Service load | Disclosed under A7, which may reflect other workloads' data-dependent cost. Separate lexical and semantic pools, each with FIFO admission and a dedicated executor. |
 | Query embedder | A dedicated instance is required before HTTP. It is necessary but not sufficient. Still shared: CPU and SMT siblings, memory bandwidth and last-level cache, page cache and disk I/O, the blocking pool, the allocator, and the query-model queue. These are documented residuals. Builders run at lower OS priority. |
 | Lifetime and retirement | Linearized pin-and-lease, unconditional revocation separate from the doom claim, a single publisher, admission gates and handle drain. Retiring B never breaks A. |
-| Holdings list and report | Server-to-server, holder-signed. Triggered by startup, `relist_seconds`, rebuilds and capability arrival (one in flight, at most one per 5 s). Users never see a list or receipt, and an early relist never makes a request wait. |
+| Holdings list, reports and status | Server-to-server, holder-signed. Lists are triggered by startup, a jittered interval of at most `relist_seconds`, rebuilds and capability arrival (gate step 3a; one in flight, at most one per 5 s). Status reports go out at most once per 60 s. Users never see a list or receipt, and an early relist never makes a request wait. |
 | Caches | None: no query-embedding, result or fusion cache. |
 | Counts and errors | Byte-equal to the baseline, **except** the load-dependent `busy` and `deadline_exceeded` outcomes (A7) and lifecycle `resource_unavailable` caused by a lapsed lease. Fixed messages over `E` or `S` only. |
 | Headers | A4 authorized-view digest and per-resource freshness. Class L ignores vectors. Desktop is unchanged. |
@@ -987,6 +1191,8 @@ The owner decided on **fair sharing**. Round-robin is this design's **recommenda
   - the header value changes once;
   - governed rooms are served only while listed `active` under a **15-minute lease**. If OpenClast is unreachable, governed search, **lexical included**, stops for each room within 15 minutes of its last renewal, and resumes on the next verified list. Nothing is deleted;
   - after a restart, nothing is served until the first list applies;
+  - corrupt or mismatched holder state, or missing holder state with intact data, stops governed serving until the operator recovers;
+  - after a supported OpenClast restore (new epoch), governed serving stops until the operator accepts the new epoch on each Kwiry holder;
   - unlisted (unknown) rooms are withheld, never built and never deleted;
   - obligations purge and are reported with signed receipts;
   - the fast-rollback window closes at the first durable tombstone or at upgrade confirmation;
@@ -1006,7 +1212,7 @@ Desktop keeps its current headers, freshness and behaviour in every slice. Deskt
 | **S1a — scoped lexical headers (A4), transitional identity (F15)** | `X-Kwiry-Generation: v1-<hex>` over a **transitional per-resource revision**: SHA-256 over the resource's complete manifest entries, every persisted field of each `ManifestFile` (including `mtime_nanos`, `byte_length`, `content_hash`, `format_identity`, `extraction_profile`, `registration_fingerprint`, `chunk_count`, `coverage`, `outcome` and `warning`), canonically serialized in `source_key` order, plus the manifest-level versions (manifest, index format, chunking, preparation, format-identity schema). All length prefixes are u64-LE. Indexed and queryable `mtime` therefore changes the identity. Adds per-resource freshness and an explicit profile branch. | shipped | invariance under forbidden publish, reconcile and watcher events; **an mtime-range query (`mtime:[a TO b]`) across an mtime-only rebuild changes both results and identity consistently**; desktop header regression including `resources: []`; IG-1 witness re-run |
 | **S1b — verified context; A2 phase 1 (F8)** | The context keeps `exp` and the action; a repeated `vault_id` is refused; subject and actor are dropped from `Principal` and logs. **Two bounded verification branches:** (1) **workload shape** — `sub` on the workload allowlist, no `actor` or `subject_revision`; (2) **legacy shape**, accepted only while `legacy_identity_accept_until` (configuration) is in the future — `sub` and `actor` must be present, distinct and non-empty as today, are validated, then discarded and never stored or logged. User subjects are **never** added to the allowlist. All existing issuer, audience, TTL, `kid` and algorithm checks apply to both branches. | shipped | both shapes accepted before the cutoff; legacy shape refused after it; user subject not on the allowlist refused in the workload shape; no subject or actor in logs or context |
 | **S2 — objects, publisher, leases, migration (lexical)** | §4.1–§4.5, §4.10; worker-owned leases; deadlines; separate capacity pools with dedicated executors (R4-5); revoke/doom split with reader-cell detachment (R4-1); header switches to `v2-<hex>`. | `governed-lifecycle-v3` | F1 interleaving; publisher serialization; recursive-sync crash injection with nested index files; migration matrix with the post-switch barrier; idle-reader revoke-then-drain on both the retirement and GC paths; controlled stall test and executor separation; desktop regression; IG-1 W1–W13f |
-| **S3 — Holdings consumer, purge, reporting (lexical)** | §5 in full: holder key and holder state; list, verify and atomic apply; high-water and `unexpected_epoch`; leases; withheld and quarantined data; obligation state machine; outbox; acks; `rejectLifecycleArtefact` in Kwiry's capability verifier (HW §2.5). `quarantine_release` waits on §14.2 Q1. | `governed-lifecycle-v3`; CI needs the HW §9 reference fake authority and golden vectors | HW H1–H13, H16, H17 and every §5.6 Kwiry-specific test; rollback-window tests (§4.10); purge witness over §5.7 |
+| **S3 — Holdings consumer, purge, reporting (lexical)** | §5 in full: holder key; serialized holder-state writer and the loss table; list, verify and the atomic apply transaction with `class_rev`; high-water, `unexpected_epoch`, `accept-epoch` and `authority_epoch_mismatch`; leases; withheld vs. revoked; quarantine manifests; releases (HW §14 D); holder status reports (HW §14 E); obligation state machine with validated enqueue, attempts, floors and both ack paths; `rejectLifecycleArtefact` in Kwiry's capability verifier (HW §2.5) | `governed-lifecycle-v3`; CI needs the HW §9 reference fake authority and golden vectors, extended for D, E and F | HW H1–H13, H16, H17 and every §5.6 revision-6 test; startup-order tests (§4.5); rollback-window tests (§4.10); purge witness over §5.7 |
 | **Release unit L** | Removes `governed-lifecycle-v3`. **This release is the MRCB.** | owner checkpoint | full IG-1 witness on the release build; Holdings, lease, obligation and purge witness rows against a deployed OpenClast S1 authority |
 | **S4 — vector object store** | Plain table, scan, descriptor; cross-file test | internal | rowid independence, boundary ties, ±0.0, non-finite values, no sidecar files |
 | **S5 — builder and scheduler** | §4.7–§4.9, §11.2 | internal | inventory failures; reuse identity; paused-builder admission; reused-room fairness; resume; embed barrier; measurements |
@@ -1029,9 +1235,9 @@ Dependencies:
 - S1a and S1b need A4 and A2.
 - Release unit L needs:
   - A6 and A7;
-  - OpenClast Holdings **S1** deployed **before** that release: list, report, lifecycle JWKS, holder enrollment and lease policy (§14 ask 9);
+  - OpenClast Holdings **S1**, including amendments D, E and F, deployed **before** that release: list (with `instructions[]`), report, holder status, lifecycle JWKS, holder enrollment and lease policy, the off-store high-water guard, and the epoch-minting restore tooling (§14 ask 9);
   - the HW §9 reference fake and golden vectors for CI;
-  - answers to the §14.2 questions marked *blocking L*.
+  - answers to the open §14.2 questions marked *blocking L*.
   
   HW S2 (epoch chain, merge) is **not** needed for L; Kwiry fails closed on `unexpected_epoch` until a later Kwiry slice consumes it. Watch nudges (HW S5) are not needed.
 - S8 needs A1, A3 and S6.
@@ -1049,7 +1255,7 @@ The existing events gain the following, and the invariant stays zero lease, open
 - `fusion` (list lengths only);
 - `cancel_checkpoint`;
 - `end_recheck_ok` and `end_recheck_refused`;
-- lifecycle events (counts and holding or obligation IDs only, never `resource.id`): `list_applied` (rev seq, item counts by class), `list_rejected` (reason code), `lease_lapsed`, `object_revoked`, `object_doomed`, `report_sent` and `report_acked` (state), `holder_state_reset`.
+- lifecycle events (counts and holding or obligation IDs only, never `resource.id`): `list_applied` (rev seq, item counts by class), `list_rejected` (reason code), `lease_lapsed`, `object_revoked`, `object_doomed`, `report_sent` and `report_acked` (state, receipt path), `status_sent`, `release_executed` and `release_mismatch` (`instruction_id`, counts), `holder_state_reset`, `authority_rollback_suspected`.
 
 ### 12.2 Witness mapping
 
@@ -1062,7 +1268,7 @@ The mapping is by theme until OpenClast shares its V1–V16 numbers.
 | **Readiness under forbidden load (owner decision)** | Instance 1: pending room A plus a large forbidden resource that sorts before A. Instance 2: only A. **Assert** exact equality once A is ready on both. **Record** time-to-ready as advisory only. | new |
 | Mid-request retirement, timeout, disconnect | Forbidden room B retired at each barrier while A's request succeeds exactly. A's own room retired → `resource_unavailable`. Timeout and disconnect → bounded refusal, leases released on worker acknowledgement. | W8, W13a |
 | Retirement purge | The fake authority lists B `terminating`. Kwiry tombstones B, revokes it, and reports `revoked` before drain. The data root is then inspected at **every §5.7 location: generation records, layouts and withheld maps, `current.json`, object descriptors, lexical manifest shards, staging journals, quarantine and its ledger, upgrade and rollback records, layout-v2 trees and manifests, legacy `semantic/`, and open file descriptors.** No artifact names or contains B. Every remaining object's resource is listed active or withheld. `complete` is sent only after the barrier and a clean scan, with `method: logical_delete` and the evidence digest. Crash-injected and deletion-failure runs report `incomplete`, then `complete`, and keep healthy rooms and lexical served. *(Ownership and artifacts are checked, not chunk IDs, which omit the room.)* | W13a–W13f |
-| Holdings consumer | HW H1–H13, H16 and H17 against the reference fake. Unknown rooms withheld, never deleted. `quarantined_unattributed > 0` blocks `complete`. Regression refused. `unexpected_epoch` refused. Authority unreachable → every room lapses within 15 minutes with no bytes deleted. A capability for an unlisted room → one early relist and an immediate `resource_unavailable`. Holder state wiped → `holder_state_reset` and trust on first use. Data root wiped → the open obligation completes against the empty root. Stale-authority window bounded by capability TTL. | new |
+| Holdings consumer | HW H1–H13, H16 and H17 against the reference fake, plus the revision-6 tests (§5.6): ack verification after a restart, writer races, withheld reversal, validated completion, startup order, the loss table, epoch acceptance, `authority_epoch_mismatch`, releases and status reports. Unknown rooms withheld, never deleted. `quarantined_unattributed > 0` blocks `complete`. Regression refused. `unexpected_epoch` refused. Authority unreachable → every room lapses within 15 minutes with no bytes deleted. A capability for an unlisted room → one early relist and an immediate `resource_unavailable`. Holder state and data both wiped → `holder_state_reset` and trust on first use. Holder state alone missing or corrupt → fail closed. Data root wiped → the open obligation completes against the empty root. Stale-authority window bounded by capability TTL. | new |
 | Idle reader at revocation (R4-1) | Cached reader present when B is revoked: revocation succeeds, the reader is dropped, the claim waits for all counts, deletion follows; the same on the GC path | W13 family |
 | Capacity isolation (A7) | Semantic workers stalled at the embedding barrier; lexical requests on another room still get a lexical thread and succeed within budget; semantic requests return `busy` or `deadline_exceeded`. Latency is recorded, not asserted. | new |
 | Rollback window | First durable tombstone → `rollback.json`; deletion failure → crash → attempted fast rollback: refused; the retired room is never rebuilt; an unsupported rollback is detected on the next MRCB start | W13f |
@@ -1127,20 +1333,30 @@ Semantic and hybrid results are exactly invariant to forbidden resources. Readin
 
 - **Authority.** OpenClast is the authority on holdings, phases and obligations, through the Holdings wire contract frozen 2026-11-17.
   - Kwiry serves and builds a resource only while its latest verified, nonce-bound list shows it `active` and its lease (15 minutes, Q4) has not lapsed.
-  - Kwiry never applies a list with a lower `seq` in the same epoch. Until it consumes the epoch chain, it never applies a list from a different epoch.
+  - Kwiry never applies a list with a lower `seq` in the same epoch. Until it consumes the epoch chain, it applies a list from a different epoch only after an operator explicitly accepts that exact epoch. Tombstones still win.
+  - `503 authority_epoch_mismatch` is treated like an unreachable authority: leases run down, nothing is deleted, and Kwiry raises a distinct alert.
 - **Delete only under an obligation or a human-authorized release.**
-  - Lease expiry, unknown data, authority errors, regression and holder-state reset never authorize deletion.
-  - Unknown data is withheld or quarantined and counted.
+  - Lease expiry, unknown data, authority errors, regression, rollback suspicion and holder-state reset never authorize deletion.
+  - Unknown data is withheld (reversible, objects stay live) or quarantined, and counted.
+  - A release deletes only the intersection of the bound manifest and the current unattributed set.
+  - Kwiry reports its holder-wide unattributed count and manifest digest in every report and in holder status reports.
 - **Three reported states,** each sent with idempotent, signed `Obligation.Report` claims and never regressing:
   - **revoked:** no new pin can use the resource, its cached readers are evicted, and in-flight requests are refused at their end-of-request check. Sent before any drain.
   - **incomplete:** retrieval is revoked, but artifacts remain on disk or in quarantine, or holder-wide unattributed data exists.
-  - **complete:** every data-root artifact of the resource is unlinked, every parent directory is durably synced in a barrier after the last deletion, no lease or reader handle remains, a final scan is clean, and holder-wide unattributed data is zero.
+  - **complete:** every data-root artifact of the resource is unlinked, every parent directory is durably synced in a barrier after the last deletion, no lease or reader handle remains, a final scan is clean, and holder-wide unattributed data is zero in the same classification revision. That revision is validated when the report is durably enqueued.
 - **Receipts.**
   - The method is `logical_delete` (unlink plus fsync, not sanitization). Kwiry retries until it receives a signed ack labelled `"confirmed"` (Q6).
+  - Every send attempt is durably recorded before it is sent, so the authority's original ack verifies after a restart.
+  - Convergence acks raise Kwiry's floor but are never presented as receipts for Kwiry's own claims.
   - Failed artifacts are quarantined, only the obligated resource is affected, and the report says `incomplete`.
-- **Clarification of §1.1.** The data root stays disposable: deleting it never widens access, and open obligations complete against the empty root. **Holder state is not index data.** The holder key, the high-water mark, the grow-only tombstones and the report outbox live outside the data root, are durable, and can only refuse. Losing holder state causes trust in the first verified list plus a `holder_state_reset` alert. That is an accepted residual: an authority restore at the same moment is caught only by OpenClast's later epoch chain. Rebuild converges given the same files and the same list.
+- **Clarification of §1.1.** The data root stays disposable: deleting it never widens access, and open obligations complete against the empty root. **Holder state is not index data.** The holder key, high-water mark, grow-only tombstones, floors, outbox and release progress live outside the data root. They are written by one serialized writer with monotone merges, and they can only refuse.
+  - Trust on first use applies **only** when holder state and data are both lost, and it raises `holder_state_reset`.
+  - Corrupt or mismatched holder state fails closed.
+  - Missing holder state with intact data fails closed until an audited operator recovery runs.
+  
+  Rebuild converges given the same files and the same list.
 - **Rollback.** Pre-custody rollback is supported only inside the fast-rollback window. The window closes at upgrade confirmation or the first durable tombstone. While the old binary runs, A6 is suspended. After the window closes, deployments must pin the MRCB; Kwiry detects a violation but cannot prevent it. The purge guarantee holds only while binaries at or above the MRCB operate the data root.
-- **Stale-authority window.** An already-issued capability for a just-retired room can be served until it expires, at most the capability TTL.
+- **Stale-authority window.** An already-issued capability for a just-retired room can be served until it expires, at most the capability TTL. **The exception is an undetected authority rollback:** a raw restore together with loss of OpenClast's off-store high-water record, a residual until the signed epoch chain. The governed profile therefore requires that record to be stored and restored separately from state backups, and forbids raw restores.
 - **Scope.** Purge is file unlinking, not cryptographic erasure. Crypto-erase is a later slice (Q6).
 
 ### A7 — shared-service timing and availability residual (new; corrected in revision 5)
@@ -1175,22 +1391,27 @@ Revision 4's asks 1–4 (custody query, canonical state, custody credentials, pu
 
 ### 14.2 Questions on the frozen contract
 
-Kwiry cannot consume these points as written. They are questions, not edits; Kwiry has not changed any OpenClast file. *Blocking L* means Kwiry needs the answer before release unit L can claim the related path.
+Revision 5 asked eight questions. OpenClast answered all of them in HW §14 (amendments 2), and revision 6 consumes those answers. Kwiry has not edited any OpenClast file.
 
-1. **`quarantine_release` has no wire shape** (*blocking L* for the release path). Amendment C says a signed release item is "carried in the next list". But HW §3.2/§3.3 define no field for it, and §3.3 makes any other element a malformed list. Kwiry needs:
-   - its location, for example a top-level `quarantine_releases` array;
-   - its fields;
-   - whether `state_digest` and `list_tag` cover it;
-   - **how it binds to "the set held when issued".** Kwiry proposes binding to the `report_digest` of the holder Report whose `quarantined_unattributed` count the human approved, plus that count, so Kwiry can resolve the exact set from its ledger.
+| # | Question (revision 5) | Answer (HW §14) | Consumed in |
+|---|---|---|---|
+| 1 | `quarantine_release` had no wire shape | **Answered, D:** an `instructions[]` entry on page 0, `{instruction_id, kind, bound_report_digest, approved_count, issued_seq}`; every report carries `quarantine_manifest_digest`; a mismatch means `release_binding_mismatch` and nothing deleted; an unknown `kind` is skipped | §5.3, §5.5 |
+| 2 | Unattributed quarantine with no open obligation | **Answered, E:** `POST /holders/status` with a signed ack, at most 1 per 60 s | §5.5 |
+| 3 | A refused `complete` and monotonicity | **Confirmed:** monotonicity is against the last accepted state, and a refused report counts as never sent | §5.6 |
+| 4 | S1 behaviour after an authority restore | **Changed:** a supported restore mints a new epoch, and holders refuse with `unexpected_epoch`; recovery is a runbook admin step. **Added, F:** an off-store high-water guard makes a raw restore return `503 authority_epoch_mismatch` and stop minting. The residual (raw restore plus record loss) remains until S2 | §5.3, §5.4, §10, A6 |
+| 5 | One id-space per data root | **Confirmed:** enrollment is per tenant, and cross-tenant holdings are refused | §5.1 |
+| 6 | Duplicate `resource.id` in one list | **Confirmed:** never emitted | §5.3 |
+| 7 | Count-only report updates | **Confirmed:** at most one per obligation per 300 s | §5.6 |
+| 8 | `retired` with `escalated` | **Confirmed:** handle like `terminating` | §5.3 |
 
-   Until then, Kwiry rejects any list carrying an unrecognized element (§5.5).
-2. **Unattributed quarantine with no open obligation** (*blocking L*). `quarantined_unattributed` travels only inside an `Obligation.Report`, which needs an `obligation_id`. A holder that holds unknown data but has no open obligation cannot tell the authority. The operator then never learns a release is needed, and the count after a release cannot be reported. Is a holder-level status report planned? Or how should Kwiry surface this?
-3. **A refused `complete` and monotonicity.** HW §4.4 says a holder must never send a lower state than one it already sent. HW §4.5 tells a holder refused with `complete_refused_unattributed` to report `incomplete`. Kwiry treats a refused report as **not sent** for monotonicity. Please confirm.
-4. **S1 behaviour after an authority restore.** In S1, a restore keeps the epoch and rolls `seq` back. Every engine holder then rejects every list as a regression until `seq` passes its old high-water, and all governed rooms lapse within 15 minutes. Is that the intended S1 outcome, and what is the operator procedure? Kwiry will not add a local override that accepts a regression, and resetting holder state would discard tombstones.
-5. **One id-space per data root.** HW §2.1 binds an engine holder to one provider id-space, and HW §13 has one holder per data root. Kwiry will therefore refuse configuration that mixes `tenant_id`s, or that repeats a `room_id`, under one holder. Please confirm that a provider id-space never spans tenants. Otherwise, say how a multi-tenant data root enrolls.
-6. **Duplicate `resource.id` within one list.** Kwiry rejects a list that names the same `resource.id` under two holdings, reading DECISION-230 as giving every re-enrolment a new ID. Please confirm the authority never emits that.
-7. **Count-only report updates.** Each accepted report is one rewrite of the governance store (HW §10). Kwiry sends a same-state report with changed counts at most once per obligation per `relist_seconds`. Please confirm that is acceptable, or give a lower bound.
-8. **`retired` with `escalated`.** Kwiry treats this combination like `terminating`: purge, report, and let `complete` close it. Please confirm.
+**Still open in revision 6.** These are small wire details that the amendments leave unstated. Kwiry's assumption is written beside each, and the design works under it. *Blocking L* means the release-unit-L implementation needs the confirmation.
+
+1. **Status request `typ` and status ack claims** (*blocking L*). HW §2.4's registry has no request `typ` for `/holders/status`, and E names only the ack `typ`. Kwiry assumes:
+   - a request `typ` of `openclast-holder-status+jwt` with the §2.2 claims;
+   - an ack carrying `iss`, `aud`, `sub`, `jti`, `iat`, `idempotency_key`, `report_digest` (SHA-256 of the exact request JWS), `rev` and `receipt_label`, by analogy with HW §4.3.
+2. **How `release_binding_mismatch` reaches the authority** (*blocking L*). D names the refusal, but no route or field carries it. Kwiry assumes it raises a local alert, records the instruction as `mismatch`, and sends a fresh status report with its current manifest digest. The instruction stays listed, so a human can issue a new release bound to that report. Please confirm, or add a field.
+3. **`bound_report_digest` encoding.** Kwiry assumes it equals the accepted report's `report_digest` (HW §4.3: SHA-256 of the exact compact JWS, `sha256:` prefix), for both status and obligation reports.
+4. **Holder-side epoch acknowledgement.** HW §14 Q4's runbook acknowledges each holder. Kwiry adds a holder-local, audited `kwiry holder accept-epoch <ep_…>` (§5.4). Please confirm the runbook names this step, so an operator does not stop at the authority-side acknowledgement.
 
 ### 14.3 Remaining seam asks
 
@@ -1215,7 +1436,7 @@ Kwiry cannot consume these points as written. They are questions, not edits; Kwi
    - Confirm that lifecycle audit events follow HW §8: no `resource.id`, nonces, digests, tags or JWS bodies.
 9. **Release order.**
    - Before Kwiry release unit L (the MRCB), the following are deployed:
-     - Holdings **S1**: list, report, lifecycle JWKS, holder enrollment with the engine lease policy, and the obligation-creation reconcile;
+     - Holdings **S1** with amendments D, E and F: list with `instructions[]`, report, holder status, lifecycle JWKS, holder enrollment with the engine lease policy, the obligation-creation reconcile, the off-store high-water guard, and epoch-minting restore tooling;
      - the HW §9 reference fake authority and golden vectors;
      - the issuer's ability to emit both capability shapes.
    - HW S2 and S5 are not prerequisites for L.
@@ -1234,12 +1455,20 @@ Kwiry cannot consume these points as written. They are questions, not edits; Kwi
 - **R6 — Authority dependency (Q4).** Governed serving, lexical included, depends on reaching OpenClast:
   - an outage stops each room within 15 minutes of its last renewal;
   - a restart serves nothing until the first list applies;
-  - a holder key that is lost or revoked darkens every room until re-enrollment.
+  - a holder key that is lost or revoked darkens every room until re-enrollment;
+  - corrupt holder state, or missing holder state with intact data, darkens every room until the operator recovers;
+  - `authority_rollback_suspected` darkens every room until OpenClast's restore runbook runs.
 
-  Nothing is deleted in any of these cases. Release unit L needs Holdings S1 deployed first.
-- **R10 — S1 epoch and restore handling.** Until Kwiry consumes the epoch chain, any epoch change, and in S1 any restore-driven `seq` regression, refuses every list and darkens governed search (§14.2 Q4). The epoch chain (HW S2) stays high priority.
-- **R11 — Unattributed data blocks completion holder-wide.** One unknown room's withheld data keeps every obligation at this holder short of `complete` until a list classifies it or a human releases it. The release wire shape and the no-obligation reporting path are open (§14.2 Q1–Q2).
-- **R12 — Holder state is durable and outside the data root.** Losing it causes trust in the first list plus an alert. An authority restore at the same moment would be missed until HW S2.
+  Nothing is deleted in any of these cases. Release unit L needs Holdings S1, with D, E and F, deployed first.
+- **R10 — Restore handling and the residual.**
+  - A supported restore mints a new epoch. Every Kwiry holder goes dark until an operator runs `accept-epoch`.
+  - A raw restore with OpenClast's off-store record intact is detected as `authority_epoch_mismatch`.
+  - **A raw restore together with loss of that record is undetected until HW S2.** A retirement the holder never saw can disappear and be served without bound (§5.4).
+  - Mitigation is operational: keep the record apart from backups, and use only the restore tooling. The epoch chain (HW S2) stays high priority.
+- **R11 — Unattributed data blocks completion holder-wide.** One unknown room's withheld data keeps every obligation at this holder short of `complete` until a list classifies it or a human releases it (HW §14 D). Status reports (HW §14 E) make the count visible with or without an open obligation.
+- **R12 — Holder state is durable and outside the data root.**
+  - Trust on first use applies only when holder state and data are both lost. Otherwise loss or corruption fails closed until an audited operator recovery runs.
+  - Restoring the holder directory from an old backup loses newer tombstones. Rooms whose obligations have since dropped off the list are then protected only by the authority's record, so holder-directory backups should be more recent than 30 days.
 - **R7 — Observer not on `main`.** This blocks S9.
 - **R8 — Existing IG-1 leaks.** S1a and S1b fix them regardless.
 - **R9 — Cross-repository sequencing.** Release unit L and the A2 cutover depend on OpenClast delivery and its security review.
@@ -1265,8 +1494,8 @@ The design contract for these properties is closed above. Whether an implementat
 | Migration recovery | §4.10 marker protocol and recovery matrix | S2/S3 crash barrier after the pointer switch; every matrix row; the rollback-combination test |
 | Lifetime linearization | §4.3 pin-and-lease under L3; unconditional revocation separate from the doom claim; handle drain | S2 F1 interleaving; idle-reader revoke-then-drain on retirement and GC paths; init-races-revoke; lock tracker |
 | Publisher serialization | §4.3 single actor; no waits inside transactions | S2 concurrent-publisher test |
-| Obligation purge and reporting | §5.6 state machine, write-ahead outbox, barrier and final scan; §5.7 residual | S3 crash injection at steps 0–7; unlink-then-fsync failure; lost acks (H10); restart mid-purge (H11); data-root loss; holder-state loss (H12) |
-| Holdings consumption | §5.3 verification, atomic apply, high-water and classification; §5.4 leases | HW §9 golden vectors and reference fake: H1–H9, H13, H16, H17; monotonic-clock lease; early-relist bound |
+| Obligation purge and reporting | §5.6 state machine, validated enqueue against `class_rev`, write-ahead attempts, floors, both ack paths, barrier and final scan; §5.7 residual | S3 crash injection at steps 0–7; lost ack with a post-restart retry; convergence acks; writer races; stale-inventory interleaving; unlink-then-fsync failure; H10–H12 |
+| Holdings consumption | §5.2 writer and loss table; §5.3 verification, apply transaction, high-water, epochs and classification; §5.4 leases and rollback handling; §5.5 releases and status | HW §9 golden vectors and reference fake extended for D, E and F: H1–H9, H13, H16, H17; withheld reversal; startup order; loss table; `accept-epoch`; `authority_epoch_mismatch`; release intersection and mismatch; jitter bound; key vectors |
 | Scheduler fairness | §4.9 bounded accounting turns and stated assumptions | S5 reused-room interleaving test, plus measurements (§11.3) |
 | Capacity isolation | §4.4 separate FIFO pools with dedicated executors; permits and threads held until worker exit | S8 controlled stall test (lexical gets a thread and completes within budget); executor-separation assertion |
 | Physical-baseline equality | §7 merge and RRF rules over `E` | S7 two-instance tests and the S9 witness rows, including readiness under forbidden load |
