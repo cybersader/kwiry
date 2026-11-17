@@ -20,7 +20,8 @@ on:
         required: true
         type: string
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: obsidian-release-publish-${{ inputs.tag }}
@@ -110,6 +111,7 @@ jobs:
     permissions:
       contents: write
       actions: read
+      attestations: read
     steps:
       - name: Re-resolve protected release tag
         env:
@@ -230,6 +232,21 @@ jobs:
               raise SystemExit("release notes identity invalid")
           pathlib.Path("publish-assets.txt").write_text("\n".join(str(root / "release-assets" / name) for name in expected_assets) + "\n")
           PY
+      - name: Require tag-origin provenance for the exact tested runtime bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          TAG_COMMIT: ${{ needs.authorize.outputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          for asset in main.js manifest.json styles.css; do
+            gh attestation verify "handoff/release-assets/$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-plugin-provenance.yml" \
+              --source-ref "refs/tags/$RELEASE_TAG" \
+              --source-digest "$TAG_COMMIT" \
+              --deny-self-hosted-runners
+          done
       - name: Create draft release from exact tested bytes
         env:
           GH_TOKEN: ${{ github.token }}

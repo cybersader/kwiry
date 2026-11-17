@@ -34,17 +34,24 @@
     "verify": "npm run typecheck && npm test && npm run verify:d5c:licenses && npm run verify:docx:licenses && npm run verify:mit:notices && npm run corpus:smoke && npm run build && npm run test-vault:smoke && npm run evidence",
     "verify:mit:notices": "node scripts/verify-mit-notices.mjs",
     "regenerate:d5c:licenses": "node scripts/validate-d5c-rust-licenses.mjs regenerate",
-    "regenerate:docx:licenses": "node scripts/validate-d5c-rust-licenses.mjs regenerate docx"
+    "regenerate:docx:licenses": "node scripts/validate-d5c-rust-licenses.mjs regenerate docx",
+    "lint": "eslint .",
+    "lint:prune": "eslint . --prune-suppressions",
+    "check:versions": "node scripts/check-obsidian-version.mjs",
+    "check": "npm run lint && npm run typecheck && npm test && npm run check:versions"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "builtin-modules": "^4.0.0",
     "esbuild": "^0.25.0",
+    "eslint": "9.39.5",
+    "eslint-plugin-obsidianmd": "0.6.0",
     "obsidian": "^1.7.2",
     "obsidian-launcher": "3.1.1",
     "selenium-webdriver": "4.39.0",
     "tslib": "^2.8.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "8.62.0",
     "vitest": "^3.2.7"
   },
   "dependencies": {
