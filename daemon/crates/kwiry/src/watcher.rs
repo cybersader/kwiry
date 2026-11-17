@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{RwLock, mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -135,6 +136,12 @@ fn classify_event(
     if event.need_rescan() {
         return EventEffect::Rescan(RescanCause::BackendRescan);
     }
+    if is_read_only_access(&event.kind) {
+        // Opening, reading, or closing without writing cannot change bytes.
+        // Treating them as changes made reconciliation's own source reads
+        // re-dirty the corpus, so freshness never settled to current.
+        return EventEffect::Touched(Vec::new());
+    }
     if event.paths.iter().any(|path| path == config_path) {
         return EventEffect::ConfigChanged;
     }
@@ -156,6 +163,24 @@ fn classify_event(
         }
     }
     EventEffect::Touched(touched)
+}
+
+/// Access notifications that cannot have changed file contents.
+///
+/// Opening never changes bytes: inotify reports every `IN_OPEN` as
+/// `Open(Any)`, and truncation or writes after an open arrive as their own
+/// modify or close-after-write events. Read and close-without-write are
+/// likewise inert. A close-after-write still counts as a change (some
+/// backends report the completed write only that way), as does a close of
+/// unknown mode or any unclassified access.
+fn is_read_only_access(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Access(AccessKind::Read | AccessKind::Open(_)) => true,
+        EventKind::Access(AccessKind::Close(mode)) => {
+            matches!(mode, AccessMode::Read | AccessMode::Execute)
+        }
+        _ => false,
+    }
 }
 
 /// Must match `walk.rs` exactly: forward-slash join of UTF-8 components.
@@ -531,6 +556,66 @@ mod tests {
                 ("outer".to_owned(), "a/from.md".to_owned()),
                 ("outer".to_owned(), "inner/to.md".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn classify_event_ignores_read_only_access_inside_roots_and_on_config() {
+        let read_only = [
+            AccessKind::Read,
+            // inotify reports every IN_OPEN as Open(Any), including the
+            // daemon's own reconciliation reads.
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Open(AccessMode::Read),
+            AccessKind::Open(AccessMode::Write),
+            AccessKind::Open(AccessMode::Execute),
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Close(AccessMode::Execute),
+        ];
+        for kind in read_only {
+            let note = Event::new(EventKind::Access(kind))
+                .add_path(PathBuf::from("/vaults/outer/note.md"));
+            assert_eq!(
+                classify_event(&Ok(note), &roots(), &config_path()),
+                EventEffect::Touched(Vec::new()),
+                "{kind:?} on a source must not dirty the corpus"
+            );
+            let config = Event::new(EventKind::Access(kind)).add_path(config_path());
+            assert_eq!(
+                classify_event(&Ok(config), &roots(), &config_path()),
+                EventEffect::Touched(Vec::new()),
+                "{kind:?} on the config must not trigger a reload"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_event_keeps_write_and_unknown_access_as_changes() {
+        let changing = [
+            AccessKind::Close(AccessMode::Write),
+            AccessKind::Close(AccessMode::Any),
+            AccessKind::Close(AccessMode::Other),
+            AccessKind::Any,
+            AccessKind::Other,
+        ];
+        for kind in changing {
+            let event = Event::new(EventKind::Access(kind))
+                .add_path(PathBuf::from("/vaults/outer/note.md"));
+            assert_eq!(
+                classify_event(&Ok(event), &roots(), &config_path()),
+                EventEffect::Touched(vec![("outer".into(), "note.md".into())]),
+                "{kind:?} must still be treated as a possible change"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_event_read_access_never_suppresses_backend_rescan() {
+        let mut event = Event::new(EventKind::Access(AccessKind::Read));
+        event = event.set_flag(Flag::Rescan);
+        assert_eq!(
+            classify_event(&Ok(event), &roots(), &config_path()),
+            EventEffect::Rescan(RescanCause::BackendRescan)
         );
     }
 
