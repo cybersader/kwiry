@@ -1,55 +1,151 @@
 # IG-2A design — governed semantic and hybrid retrieval
 
-Status: **design, owner review pending.** Nothing here is implemented or approved. This page expands [IG-2](governed-semantic-hybrid.md) and is bound by [`CONTRACT.md`](../../CONTRACT.md), which this design does not edit. The contract amendments it needs are listed in [§11](#11-contract-amendments-needed).
+Status: **design, revision 2, owner review pending.** Nothing here is implemented or approved. This page expands [IG-2](governed-semantic-hybrid.md) and is bound by [`CONTRACT.md`](../../CONTRACT.md), which this design does not edit. The contract amendments it needs are listed in [§12](#12-contract-amendment-package-a1a6).
+
+Revision 2 answers an independent read-only review of revision 1 (`1442e668`). The review rated the design NO-SHIP for implementation readiness. It judged the core approach sound and confirmed the code claims. Every finding maps to a section here:
+
+| Finding | Where it is resolved |
+|---|---|
+| 1. A pinned generation does not keep its files alive | §4.1–§4.3: independently leased immutable partition objects, barrier tests |
+| 2. Purge protocol is neither durable nor idempotent | §4.8: retirement journal, revoked vs purge-completed, crash recovery; A6 |
+| 3. Queue order changes authorized errors | §4.7 fair scheduler; the stated limit in A5 and §9; new witness in §11.2 |
+| 4. Slice order breaks lexical isolation | §11: scoped headers and capability context ship first; everything else behind a non-default build gate until enablement |
+| 5. Map-wide lexical reader mutex | §4.3: per-resource init cells; test in S2 |
+| 6. Descriptive-only embedding identity; history-dependent batching | §4.5: artifact-hash fingerprint, canonical order, fixed batches, whole-source reuse, mandatory real-ONNX gate |
+| 7. Coverage integrity; silent `zip` truncation | §4.6: exact inventory validation before attach |
+| A2 / A3 / A4 / witness / recommendation corrections | §12, §5.3, §6.5, §11.2, §2 |
+
+Owner research request, scheduling and work units: [§10](#10-research-indexing-order-and-work-units-options-not-decisions).
 
 ## 1. The idea in one paragraph
 
-Semantic search in the governed (`openclast`) profile works exactly like IG-1 lexical search already does: **every room gets its own physical vector store, and a request opens only the stores of the rooms it is signed for.** Each room's vectors live inside that room's partition directory in the same immutable generation as its lexical index, so the two can never disagree. A query embeds the question once, does an exact nearest-neighbour scan inside each authorized room, and merges the per-room lists with a fixed, rowid-independent sort, distance first and then chunk ID. Hybrid fuses that list with the IG-1 authorized lexical list using RRF (`k = 60`). Forbidden rooms are never opened, so they cannot change what a user sees. The acceptance test is the same as IG-1's: results must be byte-equal to a separate instance that holds only the authorized rooms. If any authorized room is not ready, or either hybrid leg fails, the whole request is refused. Kwiry never returns a partial answer and never silently switches mode.
+Governed semantic search follows the IG-1 lexical model. **Every room has its own immutable stores — one lexical, one vector — and a request leases and opens only the stores of the rooms it is signed for.** A vector store is derived from exactly one lexical store and records that store's identity, so the two can never describe different states of a room. A query embeds the question once, runs an exact nearest-neighbour scan inside each authorized room, and merges the per-room lists. The merge sorts by distance, then chunk ID, independent of rowids. Hybrid fuses that list with the IG-1 authorized lexical list using RRF (`k = 60`). Forbidden rooms are never opened. Forbidden-room retirement cannot invalidate an authorized request's stores. The results a user receives are byte-equal to those of a separate instance that holds only the authorized rooms. **Stated limit:** that equality covers results, not timing. How soon a room becomes semantically searchable depends on shared server load, including indexing work for rooms the caller cannot see.
 
-## 2. Decisions the owner needs to make
+## 2. Decisions
 
-These are the only calls that gate building. Each has a recommendation. The detail behind each is in the section named.
+### 2.1 Recorded owner decisions (not reopened)
 
-1. **Approve the contract amendment set ([§11](#11-contract-amendments-needed)).** The frozen contract currently forbids semantic and hybrid search in the governed profile. It also defaults `mode` to `hybrid` and requires every capability to name a subject and an actor. Owner decisions D2 (default lexical) and D4 (no user IDs at the engine) conflict with the last two. *Recommendation: approve A1–A4 as one amendment. Building can start before approval, but mounting the HTTP surface cannot.*
-2. **When a room's vectors lag behind its text, refuse or serve stale?** *Recommendation: refuse with `semantic_not_ready` for that request.* Serving older vectors would mix two versions of the room, which no physical baseline can reproduce. Lexical search stays available throughout ([§5](#5-readiness-errors-and-http-mapping)).
-3. **Spend extra memory on a dedicated query embedder?** Today one shared model serves both indexing and queries. A user's query can therefore wait behind embedding work for a room they cannot see, and the delay reveals that room's activity. *Recommendation: yes, one extra model instance for queries only (on the order of a few hundred MiB RSS; to be measured in S6). Residual CPU contention is accepted and documented ([§9](#9-side-channel-review)).*
-4. **Reject non-room filters (`path_prefix`, `tags`, `frontmatter_equals`) for semantic and hybrid in IG-2A?** Applying them after the vector scan would be a post-filter, which the seam forbids. Applying them before the scan, as a pre-filter, is a separate piece of work. *Recommendation: reject explicitly with `501 filter_unavailable` now. Add pre-scan filtering later as S8.*
+- **D1–D4 (2026-11-17).**
+  - D1: retrieval mode is selectable per request, and an unavailable mode is an explicit error.
+  - D2: the default mode is lexical.
+  - D3: the audit records only a keyed query fingerprint, never query text.
+  - D4: no user IDs reach the engine, not even pseudonymous ones. Caches are keyed only by the authorized-set digest, or there are none.
+- **Semantic readiness scheduling (2026-11-17).** A **fair, shared indexing scheduler** with an explicitly stated limit:
+  - results are exactly invariant to the forbidden corpus;
+  - how soon a room becomes searchable may depend on server load, including load from rooms the caller cannot see.
+  
+  This design never claims unconditional forbidden-corpus invariance. The limit is written into A5 and the threat model (§9).
+- **Engineering choices, fixed by the brief:**
+  - physical per-resource partitions;
+  - exact KNN;
+  - deterministic merge;
+  - candidate caps applied only after the authorization boundary;
+  - any later ANN must re-prove baseline equality before it is adopted;
+  - the existing whole-corpus desktop KNN path stays desktop-only.
 
-Already decided and not reopened here: D1–D4 (2026-11-17), physical per-resource partitions, exact KNN, caps applied after the authorization boundary, and the OpenClast `retrieval` seam position.
+### 2.2 Remaining owner decisions
+
+Each comes with a recommendation.
+
+1. **Approve the amendment package A1–A6 (§12).**
+   - A1: semantic and hybrid in the governed profile, with an explicit mode.
+   - A2: capabilities name a workload, never a person.
+   - A3: a readiness probe scoped to the caller's own rooms.
+   - A4: generation and freshness headers that describe only the caller's rooms.
+   - A5: the readiness-timing limit.
+   - A6: what "purged" means and when Kwiry may say it.
+   
+   *A2 and A4 also change the existing lexical endpoint, so they ship first (§11).*
+2. **Change IG-1's on-disk layout to independently leased per-room objects (§4.1).** This is what lets retiring room B never break an in-flight request for room A. It needs a one-time rebuild of disposable indexes and a re-run of the IG-1 witness rows. *Recommendation: yes.*
+3. **When a room's vectors lag its text, refuse rather than serve the previous version.** A coherent stale answer is possible: an older snapshot whose lexical and vector stores agree. Serving it would mean keeping and leasing older per-room objects, which fights the purge guarantee and needs its own staleness disclosure. *Recommendation: refuse for IG-2A and revisit later.*
+4. **Pay the RAM for a dedicated query embedder.** It is now a prerequisite for enabling HTTP (§11). It removes the worst timing channel, but not all of them (§9). *Recommendation: yes. Measure the cost in S7.*
+5. **Reject non-room filters (`path_prefix`, `tags`, `frontmatter_equals`) for semantic and hybrid in IG-2A.** Reject them before embedding and before any store opens. Pre-scan filtering is a later slice. *Recommendation: yes.*
+6. **Keep a minimal tombstone for every retired room forever, and refuse to re-index that exact resource.** OpenClast already issues fresh IDs on recreation, so a re-appearing tuple can only be a configuration error. *Recommendation: yes. The tombstone holds only the partition ID digest and the purge state.*
 
 ## 3. What exists today, and why it cannot be reused
 
-Read from `origin/main` (`74551c1`):
+Read from `origin/main` at `74551c1` and confirmed by the independent review:
 
-- **Desktop vectors are one mutable store outside generations.** `install_semantic` opens `<data-dir>/semantic/semantic.db` (`kwiry/src/server.rs`). `DesktopIndexManager::reconcile` mutates it in place after each lexical publish. The vectors are not versioned with the generation they describe, and the store holds the whole corpus. That is the "whole-corpus candidate generation" which the contract §5 prohibits for governed use.
-- **The governed path has no semantic leg.** `OpenClastIndexManager::reconcile` passes `semantic: None`. `require_desktop_index` returns `SemanticUnavailable` for the openclast profile, and `serve --semantic` is rejected in openclast mode.
-- **Desktop KNN ties depend on rowids.** `SemanticStore::search` uses vec0 `MATCH … AND k = ?` and then sorts by `distance, chunk_id`. Which rows vec0 returns *at the k boundary* when distances tie depends on its internal chunk and rowid layout, and that layout depends on insert history. An instance built fresh and one updated over time can return different sets.
-- **Desktop hydration drops silently.** `hydrate_ordered` returns only the candidates it finds and skips the rest. That is acceptable on desktop but forbidden by the seam rule "any post-filter rejection refuses the whole call".
-- **The desktop vec0 column declares no `distance_metric`**, so sqlite-vec uses L2. With L2-normalized vectors the ordering matches cosine. However, desktop reports `1 − distance` as "cosine similarity", which is not what it is. This is a desktop labelling defect to verify separately. It does not affect IG-2A ordering.
-- **What carries over unchanged:** `EmbeddingProfile` and its fingerprint, `embedding_text`, `embedding_source_identity`, `rrf_fuse_traced` (BTreeMap accumulation, `total_cmp`, then `chunk_id`), `PartitionedSearchIndex`'s lazy authorized opening, `validate_document_resource`, and the IG-1 authorized lexical-v2 path (`search_partitions_with_quality`).
+- **Desktop vectors live in one mutable store outside the generations.** It is `<data-dir>/semantic/semantic.db`, mutated in place after each lexical publish and holding the whole corpus. Contract §5 prohibits that pattern for governed use.
+- **The governed path has no semantic leg.** `OpenClastIndexManager::reconcile` passes `semantic: None`, and openclast mode rejects `serve --semantic`.
+- **Desktop KNN ties depend on insert history.** vec0 `MATCH … k = ?` picks among equal distances at the k boundary according to its internal rowid and chunk layout.
+- **Desktop hydration drops silently.** `hydrate_ordered` skips candidates it cannot find.
+- **`embed_and_replace_source` zips chunk IDs with vectors.** A short embedder output therefore truncates silently.
+- **`EmbeddingProfile::fingerprint()` is descriptive.** It hashes names and settings, not the model, tokenizer or configuration bytes actually loaded.
+- **One map-wide mutex covers IG-1 partition readers.** `PartitionedSearchIndex::authorized_reader` holds it while opening a cold partition, so a cold open of room B blocks room A.
+- **Snapshot file lifetime is not protected.** A request pins a generation with `ArcSwap::load_full()`, but that keeps only the in-memory struct alive. `prune_generations` can delete the directory before the request lazily opens a partition. Today that surfaces as `index_building`. Under IG-2A, retirement-driven pruning would turn it into an authorized-request failure caused by a forbidden room.
+- **Existing IG-1 leaks:**
+  - `X-Kwiry-Generation` is global and embeds a nanosecond timestamp.
+  - `X-Kwiry-Index-Freshness` reads daemon-wide `rebuilding` and `dirty` flags.
+  - Logs record `sha256(subject)` (unkeyed) and `actor` in plain text.
+- **The verified request context drops claims.** `Principal` keeps neither `exp` nor the exact action, which collapses to `Scope::Search`. Any expiry or action recheck therefore needs new plumbing.
+- **Chunk IDs hash `vault_id` and path but not the room.** A reclassified vault can reuse chunk IDs under a new resource, so retirement tests must reason about resources and artifacts, not chunk IDs.
+- **What carries over unchanged:**
+  - `embedding_text`;
+  - `embedding_source_identity`;
+  - `rrf_fuse_traced` (BTreeMap accumulation, `total_cmp`, `chunk_id` tie-break);
+  - `validate_document_resource`;
+  - the IG-1 authorized lexical-v2 path.
 
-## 4. On-disk layout and lifecycle
+## 4. Storage, lifetime and indexing
 
-### 4.1 Layout
+### 4.1 Independently leased immutable partition objects
+
+IG-1 copies a whole generation directory per publish, with every partition inside it. IG-2A replaces this with **per-partition immutable objects** referenced by small generation records:
 
 ```text
 <data-dir>/
   current.json
   generations/<generation-id>/
     manifest.json
-    layout.json                       # layout_version 3 (was 2)
-    partitions/<partition_id>/
-      index/                          # Tantivy, unchanged from IG-1
-      vectors/
-        vectors.json                  # descriptor (below)
-        vectors.sqlite                # write-once, opened read-only + immutable
-  vector-staging/<partition_id>/      # off-lock build area; purged with the partition
-  models/                             # model weights only; never corpus data
+    layout.json             # layout_version 3: resource → { lexical_object, vector_object? }
+  objects/<partition_id>/
+    lex-<object_id>/        # Tantivy index for one resource, immutable once published
+    vec-<object_id>/        # vectors.sqlite + vectors.json, immutable once published
+  staging/<partition_id>/   # in-progress builds for that resource only
+  retirements/<partition_id>.json
+  models/                   # model artifacts only; never corpus data
 ```
 
-`partition_id` is the existing IG-1 `sha256("kwiry-resource-v1" ‖ len-prefixed tenant ‖ vault ‖ room)`. The openclast profile never creates `<data-dir>/semantic/`. A test asserts that the directory is absent.
+- `object_id` is a fresh random identifier assigned when the object is published. The object's descriptor records its content digest. IDs are never reused.
+- A publish writes only the objects whose content changed, then writes a new generation record that references objects. Unchanged rooms are referenced, never copied. This also removes the copy cost noted in revision 1.
+- Objects never change after publication. Readers open vector stores as `file:…?mode=ro&immutable=1`, so SQLite creates no journal, WAL or SHM file.
+- The openclast profile never creates `<data-dir>/semantic/`.
 
-`vectors.sqlite` holds one plain table. It deliberately does not use vec0, so that scan order and storage layout cannot affect results:
+### 4.2 What a generation means now
+
+A generation is an atomic, immutable **mapping from resources to objects**, plus the manifest. `current.json` names the active generation, exactly as today. Prior generations are retained for crash recovery (`RETAINED_GENERATIONS`). Retaining a generation keeps its objects referenced, except objects of retired resources (§4.8).
+
+### 4.3 Lifetime protocol: leases
+
+**Rule: an object may be deleted only when no retained generation references it and no lease holds it.** Retirement is the one exception to the first condition; the second always applies.
+
+- **Lease registry.** An in-process registry maps object ID to lease count, guarded by one short mutex that is never held across I/O.
+- **Pin and lease, atomically.** Under the registry mutex, a request:
+  1. loads the active generation;
+  2. selects the signed resources that survive vault/room narrowing;
+  3. takes a lease on exactly those resources' lexical objects, plus their vector objects for semantic and hybrid;
+  4. releases the mutex.
+  
+  The lease set depends only on the request's own resources. A forbidden room's objects are never leased by this request.
+- **Deleters respect leases.** Pruning and retirement check the registry under the same mutex. A leased object is marked *doomed* rather than deleted. The last lease release deletes it, fsyncs and records the result. A doomed object can never be leased again.
+- **Opening.** Readers open after the lease is taken, outside every global lock. Retiring room B therefore cannot invalidate any open room A has pending, because A's objects are never doomed by B's retirement.
+- **Bounded lease time.** Kwiry enforces a hard per-request deadline: the capability's remaining lifetime, capped at a configurable maximum (default 30 s). A request past its deadline is refused and its leases are released, so purge completion is bounded.
+- **Lexical reader cache (review finding 5).** The cache maps object ID to a **per-object init cell**. The global map lock is held only to find or insert the cell. The open itself runs inside that one cell, outside the map lock. A failed open leaves the cell empty for a retry. The cache sits behind leases: a cached reader is reused only while its object is leased by the current request. Doomed objects drop their cells.
+
+**Barrier tests (S2), injected through test-only hooks at four points: *pin*, *embed*, *open* and *hydrate*.** At each barrier, while request A waits:
+
+- retire forbidden room B;
+- run ordinary retention pruning;
+- publish a new generation that changes room A.
+
+In every case A completes byte-equal to its pinned snapshot. B's retirement proceeds without waiting for A. A's objects are deleted only after A releases them, and only if they are no longer referenced.
+
+A separate test blocks room B's reader init and asserts that A's cached access to its own room completes.
+
+### 4.4 Vector objects and readiness
+
+`vec-<object_id>/vectors.sqlite` holds one plain table. vec0 is not used, so that layout and rowids cannot affect results:
 
 ```sql
 CREATE TABLE vectors (
@@ -60,269 +156,460 @@ CREATE TABLE vectors (
 ) WITHOUT ROWID;
 ```
 
-The file is written once with `journal_mode=DELETE`, then fsynced and closed. Readers open it as `file:…?mode=ro&immutable=1`. That creates no `-wal`, `-shm` or `-journal` file inside an immutable generation, and leaves no stray copy that a purge could miss.
-
 `vectors.json`:
 
 ```jsonc
 {
   "vector_schema_version": 1,
   "partition_id": "<hex>",
-  "embedding_fingerprint": "<EmbeddingProfile::fingerprint()>",
-  "embedding_input_version": 1,          // embedding_text() shape; bump on any change
-  "distance": "l2_normalized",           // see §6.2
-  "content_digest": "<hex>",             // §4.2
-  "chunk_count": 1234,
-  "vectors_sha256": "<hex of vectors.sqlite>"
+  "lexical_object_id": "<id>",       // the exact lexical object these vectors derive from
+  "embedding_identity": "<hex>",     // §4.5
+  "inventory_digest": "<hex>",       // §4.6, computed from validated rows
+  "chunk_count": 1234,               // computed from validated rows
+  "vectors_sha256": "<hex>"
 }
 ```
 
-### 4.2 Readiness is computed, not stored
+**Readiness** of a resource in the pinned generation is computed per request from immutable inputs. A resource is `ready` only if:
 
-At generation install, `PartitionedSearchIndex::open` computes a readiness map for each partition. It is immutable for the life of the generation. A partition is **semantic-ready** only if all of the following hold:
+- the layout maps it to a vector object;
+- that object's `lexical_object_id` equals the layout's lexical object for the same resource;
+- `embedding_identity` equals the loaded query embedder's identity.
 
-1. `vectors.json` parses, its `vector_schema_version` and `embedding_input_version` are supported, and `partition_id` matches;
-2. `embedding_fingerprint` equals the loaded model's fingerprint;
-3. `content_digest` equals the digest recomputed from **this generation's** `manifest.json` for that resource. The digest is SHA-256 over the sorted `(source_key, embedding_source_identity, sorted chunk_ids)` of every indexed source in the partition, with domain separation and length prefixes;
-4. `chunk_count` equals the manifest's chunk count for the resource.
+Otherwise it is `pending` (no matching vector object yet) or `unavailable` (no model, or the build failed under this identity). Only `ready` is served. Full inventory validation happens once, before attach (§4.6). It is not repeated per request.
 
-Steps 3–4 tie the vectors to the exact lexical content in the same generation, so the two can never describe different states of a room. Reading the descriptor is O(1). Recomputing the digest from the already-loaded manifest is O(sources), with no file I/O on the vectors. `vectors_sha256` is checked by the builder at attach time, not on every open.
+### 4.5 Embedding identity and canonical batching (review finding 6)
 
-States per partition: `ready`, `pending` (descriptor missing or stale against the current content), `unavailable` (model not loaded, or build failed for this fingerprint). Only `ready` serves.
+`embedding_identity` is a SHA-256, with domain separation and length prefixes, over three groups:
 
-### 4.3 Build and attach, kept off the writer lock
+- **Artifacts:** the bytes of `model.onnx`, `tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json` and `config.json` as actually loaded. Kwiry hashes the files fastembed opens from `models/` and refuses to start the semantic path if any is missing.
+- **Preprocessing:**
+  - `embedding_input_version` (the `embedding_text` shape);
+  - query and passage prefixes;
+  - truncation length (512);
+  - pooling (CLS);
+  - L2 normalization;
+  - `vector_schema_version`;
+  - distance (`l2_normalized`).
+- **Execution policy:**
+  - fastembed and ONNX Runtime versions;
+  - execution provider (CPU only);
+  - fixed intra-op and inter-op thread counts;
+  - graph optimization level;
+  - batch size `B = 8`;
+  - padding policy (pad to the longest item in the batch).
 
-Lexical publication never waits for vectors. That is contract §1 failure isolation and the vertical-3 rule "semantic failures must never degrade lexical".
+Changing any of these makes every vector object non-ready. Lexical search is unaffected.
 
-1. A lexical reconcile publishes generation *G* exactly as IG-1 does. Unchanged partitions carry their `vectors/` directory forward. Changed partitions come out `pending`, because their content digest moved.
-2. A background **vector builder** takes `pending` partitions in `ResourceKey` order. Order affects only latency, never results. For each one it:
-   - reads chunk text from *G*'s **lexical partition** (stored `content` and `heading_path`) and computes `embedding_text(heading_path, content)`. The vectors therefore describe exactly what *G* indexed, and the source tree is not re-read;
-   - reuses vectors from the partition's previous `vectors.sqlite` where `(chunk_id, source_identity)` is unchanged, and embeds the rest;
-   - **batches per source only.** A fastembed batch never spans two sources, so a chunk's vector depends only on its own file's chunk texts. A forbidden or neighbouring file cannot change padding or batch composition (see risk R1);
-   - rejects any non-finite component and any vector with the wrong dimension count, then writes `vector-staging/<pid>/<content_digest>.sqlite`.
-3. **Attach** is a short critical section under the existing writer lock. It creates a candidate from the active generation. For each staged partition whose `content_digest` still matches the candidate's manifest, it hard-links the staged file into `partitions/<pid>/vectors/` and writes `vectors.json`. Then it publishes. A staged file whose digest no longer matches is discarded and the partition is rebuilt from it next round, reusing its vectors.
-4. **Candidate copies hard-link immutable vector files** instead of copying them. `copy_tree_contents` currently copies every byte, which at 384 × 4 B per chunk is about 150 MiB per 100k chunks per publish. This is safe because vector files are never modified in place. If hard-linking fails (for example across devices), the code falls back to a copy.
+**Canonical order and batching.** Batch composition must be a function of the source alone. It must not depend on segment order, reuse history or other sources.
 
-A crash at any step leaves either the previous complete generation or a `pending` partition. Abandoned staging is removed at startup, just like `.staging-*` generations today.
+- Chunks of one source are ordered by `chunk_id` bytewise ascending. No chunk ordinal is stored, and Tantivy segment order is not canonical.
+- Batches are consecutive groups of `B` in that order, with the last one possibly short. A batch never spans two sources.
+- Reuse works per source, never per chunk. A source's rows are reused only if its `(source_key, source_identity)` and the `embedding_identity` are unchanged, and then all of its rows are reused. Otherwise the whole source is re-embedded in canonical batches. A partially reused source cannot change any chunk's batch neighbours.
 
-### 4.4 Model fingerprint
+**Mandatory gate (S5) using real ONNX, not the hash embedder.** Vectors must be bitwise identical, and semantic and hybrid results byte-equal, across:
 
-The model is fixed for the life of the process. A fingerprint change means a restart with a different model, profile, `embedding_input_version`, distance kind or schema. That change makes every partition `pending` while lexical stays served, and the builder then rebuilds all partitions with no reuse, because reuse is keyed by fingerprint. Vectors from different fingerprints never coexist inside one generation, and readiness checks the fingerprint on every request path. Status and logs report the fingerprint, never vectors.
+- fresh processes;
+- a fresh build in a clean target directory;
+- incremental rebuild after edits elsewhere in the room;
+- the reuse path versus a full re-embed;
+- builds that permute source discovery order.
 
-### 4.5 Retirement purge
+If the gate fails, the fallback is batch size 1, re-gated. If that also fails, the baseline proof is re-scoped with the owner before any HTTP enablement.
 
-IG-1 already drops a removed or reclassified room's partition from the next layout (the W13 rows). IG-2A adds one rule: **a retired partition's vectors must not survive anywhere Kwiry can reach.**
+### 4.6 Building and coverage integrity (review finding 7)
 
-- When a publish removes a partition, the publish **immediately prunes every older retained generation that still contains it**. This overrides `RETAINED_GENERATIONS = 3` for that case. It also deletes `vector-staging/<pid>/`.
-- No other copies exist. The embedder holds no passage text after a batch. There is no query or result cache. `models/` holds weights only.
-- A request already running against the old generation keeps its open file descriptors (POSIX unlink semantics). Its result is then refused by the end-of-request check in [§7](#7-hydration-time-resource-re-check).
-- Recreating a room under a new opaque room ID gives a new `partition_id` and an empty `pending` state. Nothing is inherited.
-- **Limit:** purge means the files are unlinked from every live, retained and staging path. It is not cryptographic erasure of the storage medium. Per-partition keys with crypto-shredding would be a separate, later decision (Q5).
+The builder reads chunk text from the **lexical object** it is deriving from (stored `content`, `heading_path`, `chunk_id` and `source_key`). The vectors therefore describe exactly what that object indexes, and the source tree is not re-read.
+
+The expected inventory is the set of `(chunk_id, source_key)` pairs stored in that lexical object. Each source key is paired with `source_identity` computed from the manifest's `content_hash` and `format`. The manifest's per-source `chunk_count` must match the lexical object's per-source count.
+
+**Exactly one embedding per expected chunk.** The embedder must return exactly as many vectors as the texts it was given. The `zip` is replaced by a length-checked pairing. A mismatch fails the whole source, and therefore the whole partition build.
+
+**Validation before attach**, against the staged `vectors.sqlite`:
+
+- the set of `(chunk_id, source_key, source_identity)` equals the expected inventory exactly;
+- there is no missing, duplicate or unexpected row, and no row associated with the wrong source;
+- every vector has the declared dimension count and finite components.
+
+`chunk_count`, `inventory_digest` and `vectors_sha256` are then **derived from the validated rows**, never from the descriptor or from counters. Any failure discards the staged object and leaves the resource `pending`, or `unavailable` after repeated failure. The cause is recorded as a closed category.
+
+**Attach** runs under the writer lock and is short:
+
+- the layout must still map the resource to the same lexical object, and the resource must not be tombstoned;
+- the staged directory is renamed into `objects/<partition_id>/vec-<new_id>/` and fsynced;
+- a new generation record is published.
+
+A stale build (the lexical object moved on meanwhile) is discarded. Its rows remain eligible for whole-source reuse in the next build, because they are keyed by `source_identity`.
+
+### 4.7 Fair shared scheduler (owner decision; review finding 3)
+
+Revision 1 drained a queue ordered by `ResourceKey`. A large forbidden room that sorted early would therefore change when room A stopped returning `semantic_not_ready`. That was an unstated, unbounded dependency. Revision 2 adopts the owner-decided policy:
+
+- **Fairness.** Pending resources sit in a round-robin rotation. Each turn runs one **bounded work unit** (§10.2) for the resource at the head, then moves it to the tail. New and changed resources join at the tail. No resource is ever ordered by its key, size or demand.
+- **Per-resource work bound.** A resource needing `u` units becomes ready after at most `u` rounds. Each round costs at most `P × U_max`, where `P` is the number of pending resources and `U_max` is the work-unit bound. Nothing else changes when it becomes ready.
+- **What stays exact.** Results never depend on the scheduler. A resource serves only when its vector object matches its lexical object, and that content is a pure function of the room.
+- **What is load-dependent (the stated limit).** When room A stops returning `semantic_not_ready` depends on `P` and on how long other resources stay pending, including rooms the caller cannot see. This is written plainly in A5 and §9. It is not described as invariance.
+- **No load-dependent result changes.** Lexical search is unaffected by the scheduler. Semantic and hybrid either serve exact results or refuse.
+
+### 4.8 Retirement and durable purge (review finding 2)
+
+Two states are distinct and reported separately:
+
+- **Retrieval revoked:** no new request can lease the resource's objects.
+- **Purge completed:** every artifact of the resource is unlinked, the deletions are durable, and no lease remains.
+
+**Protocol.** Each step is idempotent and journaled in `retirements/<partition_id>.json`. The journal is written atomically and fsynced, as are its parent directories.
+
+1. **Record.** Write `{state: "revoking"}`. From this point the resource is **tombstoned**:
+   - the builder must not create staging for it;
+   - attach refuses it;
+   - the scheduler drops its queued work units;
+   - a running unit for it is cancelled cooperatively at the next batch boundary.
+   
+   Builder steps that create staging (`create`, `append`, `rename`) take the per-resource build lock and re-check the tombstone under it, so staging cannot be re-created after step 3.
+2. **Revoke.** Publish a generation whose layout omits the resource. New requests can no longer lease its objects. In-flight requests that hold leases are refused by the end-of-request check (§7). Set `{state: "revoked"}`.
+3. **Remove.** Doom every object under `objects/<partition_id>/`, including objects still referenced by retained generations. Delete `staging/<partition_id>/` and any staging candidate for this resource. Retained generation records that reference the resource keep only a reference. They are never served for it, and crash-recovery fallback treats the resource as retired there too.
+4. **Drain and sync.** Once leases drain (bounded by the request deadline), unlink every doomed object. Fsync each parent directory. Then re-scan `objects/<partition_id>/` and `staging/<partition_id>/` to confirm they are absent.
+5. **Complete.** Write `{state: "purged"}` and fsync. The journal shrinks to the minimal tombstone (decision 6).
+
+**Failure.** Any deletion or fsync error leaves the state at `revoked` with a closed `purge_failed` category. Purge completion is never claimed. Retries back off. The condition shows in logs and the operator's retirement state, never in user-facing errors.
+
+**Restart.** Before binding the listener, startup reads `retirements/` and resumes any state other than `purged` from its recorded step. It also deletes staging and objects belonging to tombstoned resources. Startup never serves while an earlier retirement is incomplete, which also covers a crash between publish and prune.
+
+**Tests (S2, S4, crash-injected and interleaved):**
+
+- a crash after each step 1–5;
+- retirement while the builder is mid-unit, mid-validation or mid-attach for the same resource;
+- an attach racing retirement;
+- retirement while a lease on the resource is held;
+- a deletion failure (permission fault injected), which stays `revoked` and never reports purged;
+- restart recovery before serving;
+- re-adding a tombstoned tuple, which is refused;
+- recreation under fresh IDs, which inherits nothing.
 
 ## 5. Readiness, errors and HTTP mapping
 
 ### 5.1 Request gate order
 
-The order is fixed. Every check depends only on the request and its signed resources.
+The order is fixed. Steps 1–6 depend only on the request and its signed resources. No store opens and no embedding runs before step 6 completes.
 
-1. Capability verification (unchanged). Then the **action must equal the requested mode** ([§6.5](#65-capability-binding-and-effective-mode)).
-2. `mode` must be present in the openclast profile (D2: the default is chosen at the OpenClast seam, not inferred by Kwiry).
-3. Query and control validation. The existing lexical-v2 rules in contract §10d.6 still apply: hybrid accepts `>field` and rejects `in:`, and semantic rejects every lexical control. Non-room filters are rejected for semantic and hybrid (decision 4).
-4. Model loaded? If not, `mode_unavailable`.
-5. Pin the active generation with one `load_full()`. Every authorized resource left after vault/room narrowing must have a partition, otherwise `resource_unavailable`. This is IG-1 behaviour.
-6. Every such resource must be semantic-`ready`, otherwise `semantic_not_ready`. **No partition is opened before steps 5–6 pass for all of them.**
-7. Execute. Any failure refuses the whole call.
+1. Capability verification. The verified request context keeps `exp`, the exact action, `jti`, resources and `max_limit` (A2). On `/search`, the action must equal the requested mode (§6.5).
+2. `mode` is required in the openclast profile. D2's default is applied at the OpenClast seam.
+3. Validation of query, controls and filters:
+   - lexical-v2 control rules from contract §10d.6 still apply;
+   - **non-room filters are rejected for semantic and hybrid here, before embedding and before any open.**
+4. Model loaded, with the expected `embedding_identity`? If not, `mode_unavailable`.
+5. Pin and lease (§4.3). Every signed resource left after narrowing must be mapped in the layout, otherwise `resource_unavailable` (IG-1 behaviour).
+6. Every such resource must be semantic-`ready` (§4.4), otherwise `semantic_not_ready`. Leases are released.
+7. Execute: embed, then open, scan and hydrate. Any failure refuses the whole call.
 
 ### 5.2 Taxonomy
 
 | Condition | Kwiry `code` | HTTP | OpenClast seam (peer-reported) |
 |---|---|---|---|
-| Model not loaded, build lacks `semantic-onnx`, or semantic disabled in config | `mode_unavailable` | 501 | passed through as `mode_unavailable` |
-| `mode` omitted in openclast profile | `invalid_request` | 400 | seam supplies the D2 default before dispatch |
-| Capability action ≠ requested mode | `forbidden` | 403 | gateway defect; `search_provider_violation` |
+| No model, wrong identity, build without `semantic-onnx`, semantic disabled | `mode_unavailable` | 501 | passed through |
+| `mode` omitted (openclast profile) | `invalid_request` | 400 | seam applies the D2 default first |
+| `/search` action ≠ requested mode; identity-bearing legacy claims; subject not on the allowlist | `forbidden` / `unauthorized` | 403 / 401 | gateway defect → `search_provider_violation` |
 | Non-room filter with semantic or hybrid | `filter_unavailable` (new) | 501 | explicit refusal |
 | Lexical control not allowed for the mode | existing `invalid_query` family | 400 | explicit refusal |
 | Cursor supplied | `cursor_unavailable` | 501 | `ranked_unpageable` |
-| Signed resource has no partition, or retired mid-request (§7) | `resource_unavailable` | 503 | `search_provider_failed`, no partial re-query |
-| Authorized partition `pending` or `unavailable` | `semantic_not_ready` (new) | 503 | per-room disclosure before dispatch (§5.3) |
-| Query embedding or vector read fails at run time, either leg | `semantic_failed` (new) | 503 | hybrid with one leg down refuses |
+| Signed resource unmapped, or retired mid-request (§7) | `resource_unavailable` | 503 | `search_provider_failed`, no partial re-query |
+| Signed resource `pending` or `unavailable` | `semantic_not_ready` (new) | 503 | per-room disclosure before dispatch (§5.3) |
+| Embedding or scan failure in either leg | `semantic_failed` (new) | 503 | one hybrid leg down → refuse |
 | Hydration integrity failure (§7) | `internal_error` (fixed message) | 500 | refuse |
-| Capability expired before the response is assembled | `unauthorized` | 401 | re-mint |
+| Deadline or capability `exp` passed before the response | `unauthorized` | 401 | re-mint |
 | No generation yet | `index_building` | 503 | unchanged |
 
-All messages are fixed strings. None contains a path, partition ID, count, query fragment or engine error text. The frozen envelope `{ "error": { "code", "message" } }` is unchanged.
+Messages are fixed strings. None contains a path, an object or partition ID, a count, query text or engine text. The envelope `{ "error": { "code", "message" } }` is unchanged.
 
-### 5.3 Disclosing per-room readiness before dispatch
-
-The seam needs to tell a user *which* of their rooms are not semantic-ready before it dispatches. The frozen error envelope has no field for that. **Recommended: a capability-protected scoped readiness probe** (amendment A3):
+### 5.3 Scoped readiness probe (A3)
 
 ```http
-POST /v0/readiness            # capability action: "readiness"; same resource set
-200 { "resources": [ { "vault_id": "...", "lexical": "ready", "semantic": "ready|pending|unavailable" } ],
-      "embedding_fingerprint": "<hex>" }
+POST /v0/readiness              # capability action "readiness"; only valid on this route
+200 {
+  "resources": [
+    { "tenant_id": "...", "vault_id": "...", "room_id": "...",
+      "lexical": "ready|unavailable",
+      "semantic": "ready|pending|unavailable" }
+  ],
+  "embedding_identity": "<hex>"
+}
 ```
 
-The probe returns only the signed resources, as closed enums, with no counts and no timestamps. OpenClast probes, discloses, and then dispatches. Search still re-checks readiness at step 6, so a race between probe and search is resolved by refusal, not by a partial answer. The fallback, if A3 is declined, is that `semantic_not_ready` stays undifferentiated and OpenClast discloses "one or more rooms not ready".
+- Returns exactly the signed resource tuples, sorted by `(tenant_id, vault_id, room_id)` bytewise.
+- Values are closed enums only. There are no counts, progress values, queue positions or timestamps, because progress would expose scheduler state across rooms more finely than A5 accepts.
+- OpenClast probes, discloses not-ready rooms, then dispatches. `/search` still re-checks at step 6, so any race resolves to a refusal.
+- If A3 is declined, `semantic_not_ready` stays undifferentiated.
 
-The desktop `/v0/status` is unchanged. The openclast profile still mounts no `status` endpoint.
+The openclast profile still mounts no `/v0/status`.
 
 ## 6. Query path and determinism rules
 
-### 6.1 Semantic (`mode: "semantic"`)
+### 6.1 Semantic
 
 ```text
-gate (§5.1) → embed query once (query embedder, BGE query prefix)
-→ for each authorized ready partition P (sorted by ResourceKey):
-     open P/vectors.sqlite read-only+immutable (per request; no connection cache)
+gate (§5.1) → embed query once (dedicated query embedder, BGE query prefix)
+→ for each leased ready resource (sorted by ResourceKey):
+     open its vec object read-only + immutable (per request; no connection cache)
      SELECT chunk_id, vec_distance_l2(embedding, :q) AS d
        FROM vectors ORDER BY d, chunk_id LIMIT :C
-→ global merge: concat, sort by (d, chunk_id), truncate to C
-→ strict hydration per partition (§7) → truncate to limit → response
+→ global merge: concatenate, sort by (d, chunk_id), truncate to C
+→ strict hydration (§7) → truncate to limit
 ```
 
-- `C = 100` (the existing `HYBRID_CANDIDATES`; `limit ≤ 100`). The cap is applied **only after** authorization has chosen the partitions, both per partition (`LIMIT C`) and globally. Every element of the global top-C is in its own partition's top-C, so merging per-partition top-C lists gives exactly the global top-C of the union. That union equals what a physical baseline holding only those rooms would compute.
-- The scan is exact: every vector in every authorized partition is scored. Work is O(Σ authorized chunks × dimensions). Forbidden partitions cost nothing.
-- Distances come from sqlite-vec's scalar function, an imported algorithm (contract invariant 6). Kwiry implements no distance math itself.
+- `C = 100` (`limit ≤ 100`). The cap applies only after authorization has chosen the resources, both per resource and globally. Every element of the global top-C lies in its own resource's top-C, so the merge equals the top-C of the union. That is exactly what an authorized-only physical baseline computes.
+- Every vector of every leased resource is scored. Work is O(Σ authorized chunks × dimensions).
+- Distances come from sqlite-vec's scalar function (an imported algorithm, contract invariant 6).
 
 ### 6.2 Float and tie rules
 
-- **Write:** reject a vector with any NaN or ±∞ component, or with the wrong dimension count. The partition stays `pending` and the failure is logged as a closed category.
-- **Query:** reject a non-finite query vector with `semantic_failed`.
-- **Distance:** `vec_distance_l2` over L2-normalized vectors, which gives the same ordering as cosine. The f32 result is widened exactly to SQLite REAL (f64).
-- **Signed zero:** canonicalize `-0.0` to `+0.0` before any Rust-side comparison, because SQLite already treats them as equal.
-- **Order:** within SQLite, `ORDER BY d, chunk_id` (REAL, then BINARY-collated TEXT). In the Rust merge, `d` by `f64::total_cmp` on the canonicalized values, then `chunk_id` bytewise ascending. NaN cannot reach either sort.
-- **Chunk IDs are unique across partitions**, because the hash input includes `vault_id` and each vault maps to exactly one resource. The tie-break is therefore a total order.
-- **Scores returned:** semantic `score = 1.0 − d` as f32, labelled "semantic distance score", not cosine. Ordering never reads the f32 value.
-- **Byte equality is promised for the same binary, model artifact and CPU feature set.** The witness runs the governed instance and the baseline instance on one host. Equality across different SIMD paths is not promised.
+- **Writes:** non-finite components and wrong dimension counts are refused at build validation (§4.6).
+- **Query:** a non-finite query vector returns `semantic_failed`.
+- **Distance:** L2 over normalized vectors, which orders the same as cosine. The f32 result widens exactly to SQLite REAL.
+- **Signed zero:** `-0.0` is canonicalized to `+0.0` before Rust comparisons. SQLite already treats them as equal.
+- **Order:** SQLite sorts by `ORDER BY d, chunk_id` (REAL, then BINARY TEXT). The Rust merge sorts by `total_cmp` on canonical `d`, then `chunk_id` bytewise. NaN cannot reach either sort.
+- **Chunk IDs are unique across resources within one generation**, because they hash `vault_id` and each vault maps to one resource. The tie-break is therefore total.
+- **Scores:** `score = 1.0 − d` as f32, described as a semantic distance score. Ordering never reads it.
+- **Scope of byte equality:** promised for the same binary, artifacts (`embedding_identity`) and CPU feature set. The witness runs both instances on one host.
 
-### 6.3 Hybrid (`mode: "hybrid"`)
+### 6.3 Hybrid
 
 ```text
-gate → lexical leg: IG-1 search_partitions_with_quality over the same authorized
-       partitions, limit C, lexical-v2 with optional >field emphasis
+gate → lexical leg: IG-1 authorized lexical-v2 over the same leased resources, limit C
      → semantic leg: §6.1 list (top C) over the stripped query text
-     → rrf_fuse_traced(lexical_ids, semantic_ids, k = 60)
+     → rrf_fuse_traced(lexical_ids, semantic_ids, k = 60.0)
      → strict hydration → truncate to limit
 ```
 
-- **RRF constants:** `k = 60.0` (f64). Rank is 1-based within each authorized list. Each contribution is `1.0 / (k + rank)`. The fused value is the lexical contribution plus the semantic contribution, always added in that order. The sort is fused descending by `total_cmp`, then `chunk_id` ascending. `score` is that f64 cast to f32 after ordering.
-- **Both legs run on the one pinned generation.** If either leg errors, or the semantic leg is not ready, the request refuses. There is no fallback to a single leg (seam: one hybrid leg down → refuse).
-- The lexical leg's ranking is already proven equal to the authorized-only baseline by IG-1 (W5). Fusion is a pure function of the two authorized lists, so it inherits that equality.
+- Ranks are 1-based. Each contribution is `1.0 / (60.0 + rank)` in f64, summed lexical-then-semantic. Ordering is fused descending by `total_cmp`, then `chunk_id` ascending. Scores are cast to f32 after ordering.
+- Both legs use the same pinned and leased objects. Any leg failure, or a non-ready resource, refuses the request.
+- The lexical leg is already proven baseline-equal by IG-1 (W5). Fusion is a pure function of the two authorized lists.
 
 ### 6.4 Excerpts
 
-Each hit is hydrated and excerpted **from its own partition's searcher**. The `SnippetGenerator` term statistics are therefore those of that partition only, which is the same partition the baseline instance has. No aggregated snippet generator ever spans partitions. A hit is one passage from one file.
+Each hit is hydrated and excerpted from its own resource's lexical object and searcher. Snippet statistics are therefore those of that resource alone, which the baseline instance shares. A hit is one passage from one file.
 
-### 6.5 Capability binding and effective mode
+### 6.5 Capability actions and effective mode
 
-- `actions` becomes exactly one of `search:lexical`, `search:semantic` or `search:hybrid`, and it must equal the request `mode`. A lexical capability can never run a semantic scan.
-- Success responses add `X-Kwiry-Effective-Mode: <mode>`, which always equals the requested mode because nothing falls back. The OpenClast provider echoes it and raises `search_provider_violation` on a mismatch.
-- Kwiry returns the existing hit schema (`chunk_id`, `score`, `excerpt`, …) to the **server-side gateway only**. The seam rule "no scores, no chunk IDs out" is enforced by the OpenClast provider, which strips them. Removing them inside Kwiry would change the frozen hit schema (see Q6).
+- **On `/v0/search`**, `actions` must be exactly one of `search:lexical`, `search:semantic` or `search:hybrid`, equal to the request mode.
+- **On `/v0/readiness`**, `actions` must be exactly `["readiness"]`.
+- A capability is valid on one route only. Search actions are refused on the readiness route and vice versa.
+- Successful searches return `X-Kwiry-Effective-Mode: <mode>`. The OpenClast provider echoes it, and a mismatch raises `search_provider_violation`.
+- Kwiry still returns the frozen hit schema (with `chunk_id` and `score`) to the server-side gateway only. The OpenClast provider strips scores and chunk IDs at the seam (Q2).
 
 ## 7. Hydration-time resource re-check
 
-Desktop hydration skips candidates it cannot find. Governed hydration instead **refuses**:
+1. Candidates stay grouped by the resource that produced them. Lexical hits map back through `vault_id` to the request's resource set; A2 rejects capabilities that repeat a `vault_id`, which makes that mapping a function. Each candidate is looked up only in its own resource's leased lexical object.
+2. The stored `(vault_id, room)` must equal that resource (`validate_document_resource`). The resource must belong to **this request's** leased set. The check runs against request-scoped state, never shared state.
+3. **Every candidate must hydrate.** A missing candidate is an integrity failure (`500 internal_error`, whole call). Nothing is dropped. Vector objects are validated against their exact lexical object (§4.6), so this indicates a bug, not a user condition.
+4. **End-of-request check.** Before responding, Kwiry confirms three things:
+   - every leased resource is still mapped in the *then-active* layout and not tombstoned, otherwise `503 resource_unavailable`;
+   - the verified context's `exp` has not passed, otherwise `401`;
+   - the request deadline has not passed, otherwise `401`.
+   
+   `exp` arrives through the capability-context slice (S1b), which precedes this check (§11).
+5. OpenClast performs the grant-level second check after the response and returns `search_authorization_changed` on any narrowing. Kwiry cannot see grants and never emits that code. Mid-request grant revocation remains OpenClast's responsibility until IG-4 epochs.
 
-1. Candidates stay grouped by the partition that produced them. Lexical hits map back through `vault_id` to the request's resource set, which is a function because §6.5 rejects capabilities that repeat a `vault_id`. Hydration looks up each chunk **only in its own partition**, never by global chunk ID.
-2. The stored `(vault_id, room)` of each document must equal the partition's resource (`validate_document_resource`, as IG-1 does). That resource must be a member of **this request's** effective authorized set, checked again at hydration against the request-scoped set rather than any shared state.
-3. Every candidate must hydrate. A candidate missing from its own partition in the pinned generation is an integrity failure: `500 internal_error`, whole call. Nothing is dropped. Because the vectors and the lexical index belong to the same generation and are bound by `content_digest`, this should never happen. If it does, it is a bug, not a user-visible partial answer.
-4. **End-of-request check (Kwiry's half of "authority checked twice"):** before responding, Kwiry confirms that every searched resource is still in the *then-active* layout, and that the capability's `exp` has not passed. A room retired or reclassified mid-request gives `503 resource_unavailable`, and an expired capability gives `401`. OpenClast performs the second, grant-level check after the response and returns `search_authorization_changed` on any narrowing. Kwiry cannot see grants and does not emit that code.
+## 8. Cross-file content check
 
-Mid-request *grant* revocation is OpenClast's responsibility. Kwiry's capability is fixed for the request and lives at most 60 s. IG-4 epochs remain the later, stronger mechanism.
+Unchanged from revision 1 and confirmed by the review: **no cross-file content reaches chunk text, embedding input or excerpts.**
 
-## 8. Cross-file content check (seam: one passage, one file)
+- Markdown sections are slices of the file's own body. `![[embed]]` and `[[link]]` stay literal.
+- `links_out` is `STORED` only: never indexed, embedded or excerpted.
+- No backlinks are computed.
+- The Canvas extractor emits a file node's path string and never the target's content.
+- Excalidraw and HTML forbid dereferencing (contract §10a.3, §10c.3).
+- `embedding_text` is the file's own `heading_path` plus the chunk's own `content`.
 
-Result of reading the code: **today's chunker and embedding input include no cross-file content.**
+No fix is needed. S3 adds the regression test: an embed and link fixture produces literal text only, and its vectors are bitwise identical whether the target exists in a forbidden room, an authorized room or nowhere.
 
-- Markdown sections are byte slices of the file's own body between heading offsets (`formats/markdown.rs`). `![[embed]]` and `[[link]]` remain literal text, and nothing resolves or dereferences them.
-- `links_out` (`links.rs`) is a regex over the file's own text. It is `STORED` only (`index.rs`): it is never indexed, never embedded and never used in excerpts. No backlink computation exists anywhere in the crate.
-- `embedding_text` = the file's own `heading_path` joined by ` > `, plus the chunk's own `content`. Frontmatter, aliases and `links_out` are not included.
-- The Canvas extractor emits a file node's **path string** (the canvas's own authored reference) and never reads the target. The contract already forbids dereferencing for Excalidraw (§10a.3) and HTML (§10c.3). DOCX, PDF and Excel read only their own package.
-- Excerpts come from the hit's own stored `content`.
+## 9. Threat model and side channels
 
-**No fix needed.** S2 adds a regression test (§10). A note containing `![[forbidden-room-note]]` and `[[forbidden-room-note]]` must produce chunk text, embedding input and excerpt that contain only the literal link text. Its vector must be bit-identical whether the target exists in a forbidden room, exists in an authorized room, or is absent. Any future link-resolution feature must keep resolution out of chunk text and embedding input, or bump `embedding_input_version` with its own review.
+**Guarantee.** For a fixed binary, embedding identity and CPU feature set, the hits, order, truncation, coverage and scores returned for a request equal those of a physical instance holding only the request's authorized resources. Adding, removing or mutating forbidden resources does not change them.
 
-## 9. Side-channel review
+**Stated limit (owner decision, 2026-11-17; amendment A5).** *When* a resource first answers semantic or hybrid requests, rather than refusing with `semantic_not_ready`, depends on shared indexing load. That includes work for resources the caller cannot see. A caller who watches when its own rooms become ready can therefore learn coarse facts about concurrent indexing elsewhere, such as how many rooms are pending and for roughly how long. Kwiry bounds this with a fair scheduler and bounded work units (§4.7). It does not eliminate it. Results never vary; only readiness timing does.
 
-| Channel | Finding | Design response |
+| Channel | Finding | Response |
 |---|---|---|
-| **Scan cost** | Work is O(authorized chunks); forbidden partitions are never opened. | Bounded by construction. Latency reveals only the size of the caller's own rooms, which the caller can already read. |
-| **Shared embedder** | Today one mutex-serialized model serves indexing and queries. Embedding a forbidden room delays the query, which leaks that room's write activity and volume. | Dedicated query embedder (decision 3). The builder runs at lower priority. Remaining CPU and memory-bandwidth contention is documented as an accepted residual, as IG-1 reconcile already is. |
-| **Warm vs cold** | IG-1 lexical readers are cached per resource, so first-open latency shows whether someone else recently searched that room. | Vector files are opened per request (no connection cache). Lexical reader caching is unchanged. It leaks only co-user activity on a room the caller can read, and it is documented. OS page-cache warmth is a host-level residual. |
-| **Caches** | D4 allows caches keyed only by the authorized-set digest, or none. | **None in IG-2A.** No query-embedding cache, no result cache, no fused-list cache. Staged vectors are keyed by content digest, are not user-related, and are purged with the room. |
-| **Counts** | Hits ≤ `limit`. No totals, no candidate counts. | Byte-equal to the baseline, including truncation. `X-Kwiry-Lexical-Match-Quality` is `not_applicable` for semantic and hybrid (existing behaviour). |
-| **Errors** | Gate order and messages are fixed (§5). | `semantic_not_ready` and `resource_unavailable` are computed over signed resources only. The readiness probe returns signed resources only. |
-| **Generation header** *(existing IG-1 issue, made worse by IG-2A)* | `X-Kwiry-Generation` is a global ID that embeds a nanosecond timestamp and changes when *any* room changes, including forbidden ones. Vector attach publishes add more such changes. | A4: in the openclast profile, return an **authorized view digest** instead. It is computed over the pinned generation's `(partition_id, lexical content digest, vector descriptor digest)` for the signed resources only, so it changes only when authorized content changes. |
-| **Freshness header** *(existing IG-1 issue)* | `X-Kwiry-Index-Freshness` reads the daemon-wide `rebuilding` and `dirty` flags, so it reveals reconciliation of forbidden rooms. | A4: compute freshness over the signed resources only, using per-partition state. |
-| **Logs** *(existing; conflicts with D4)* | `server.rs` logs `subject = sha256(subject)`, which is unkeyed and dictionary-reversible, and logs `actor` in plain text. | Remove both. Log only `jti`, mode, resource count, outcome code and latency bucket. Never log query text, its fingerprint, embeddings, distances or chunk IDs. The D3 keyed query fingerprint belongs to OpenClast's audit, not Kwiry's. |
-| **Purge residue** | Retained generations and staging could keep a retired room's vectors. | §4.5: immediate prune and staging purge. A test scans the data root after retirement. |
+| **Readiness timing** | Depends on shared indexing load (above). | Accepted under A5; fair round-robin with bounded units; probe exposes enums only; advisory time-to-ready witness (§11.2). |
+| **Scan cost** | O(authorized chunks); forbidden objects are never leased or opened. | Bounded by construction. |
+| **Query embedder** | Revision 1's shared model put queries behind indexing of forbidden rooms. | A dedicated query embedder is a prerequisite for HTTP enablement. It is **necessary but not sufficient.** Still shared: CPU cores and SMT siblings, memory bandwidth and last-level cache, OS page cache and disk I/O, the Tokio blocking pool, the allocator, and the single query model itself (one queue across all concurrent users, so co-user query load is visible as latency). These are accepted, documented residuals. Builder threads run at lower OS priority. |
+| **Reader init** | A map-wide mutex let a cold forbidden open block room A. | Per-object init cells (§4.3) with a test. |
+| **Lifetime** | Pruning or retirement could break an authorized request mid-flight. | Leases (§4.3) with barrier tests. |
+| **Warm vs cold** | Cached lexical readers reveal recent co-user activity in a room the caller can read. | Documented. Vector objects open per request. Page-cache warmth is a host residual. |
+| **Caches** | D4 allows authorized-set-digest keys, or none. | **None.** No query-embedding, result or fused-list cache. |
+| **Counts** | Hits ≤ `limit`; no totals. | Byte-equal to baseline, including truncation. |
+| **Errors** | Fixed gate order over signed resources only. | Fixed messages. The probe returns signed tuples only. |
+| **Generation header** (existing) | Global ID with an embedded timestamp. | A4: authorized-view digest, per mode. Vector publication never changes the lexical view. |
+| **Freshness header** (existing) | Daemon-wide state. | A4: per-resource state over signed resources. |
+| **Logs** (existing; D4) | Unkeyed subject hash and plain-text actor. | Removed (S1b). Logs carry `jti`, mode, resource count, outcome code and latency bucket only. Never query text or its fingerprint, query vectors, distances or chunk IDs. |
+| **Purge residue** | Off-lock builds and crashes could leave retired vectors behind. | §4.8 protocol: tombstone, journal, recovery before serving. |
 
-## 10. Slices
+## 10. Research: indexing order and work units (options, not decisions)
 
-Each slice is a small PR with its own tests, reviewed at the owner checkpoint. S2–S4 change only core code that nothing mounts. Nothing is reachable over HTTP before S5, and S5 needs the amendment.
+The owner asked for near-term optimization research. This section lists options and tradeoffs. It **decides nothing beyond the owner's 2026-11-17 decision** (a fair shared scheduler with the stated limit). For each option, the question is whether it adds a new cross-room channel beyond A5's.
 
-| Slice | Content | Tests (new) |
+### 10.1 Which rooms to index first
+
+| Policy | Benefit | Cost | New cross-room channel? |
+|---|---|---|---|
+| **Round-robin (owner baseline)** | Simple; worst-case time-to-ready is bounded by `u × P × U_max` | Small rooms wait behind many concurrently pending rooms | Only A5's: readiness time reflects how many rooms are pending (`P`) and for how long. It does not reveal their identity or what anyone searched. |
+| **Smallest-first** (fewest remaining units) | Small and new rooms become ready fast; best mean time-to-ready | Large rooms can starve under churn; needs an aging bound | **Yes.** A's wait now depends on the *sizes* of other pending rooms relative to A's, which leaks a size ordering. Aging reduces starvation, not the leak. |
+| **Recently requested / demand-driven** | Indexes what people actually use | Needs per-room demand state; complex | **Yes, the strongest.** A's wait shifts when *other users search other rooms*, which reveals search activity in rooms the caller cannot see. Demand state is also a new store of user activity (not identities, but timing). Restricting demand to the caller's own rooms still lets others' demand delay A. |
+| **New-enrollment priority** | A freshly enrolled room is useful sooner | Bursty enrollments starve others | **Yes, mild.** A slows exactly when another room is enrolled, which reveals enrollment events. Granting new rooms a bounded share (for example, one slot in every k) rather than strict priority limits both starvation and the signal's strength. |
+| **Weighted / deficit round-robin by units** | Same fairness as round-robin, independent of unit-size variance | Slightly more bookkeeping | Same as round-robin. |
+
+**Recommended default for the first slice:** plain round-robin over pending resources, one bounded work unit per turn, new and changed resources joining at the tail. No demand signal and no size ordering. This keeps the cross-room channel exactly at A5's stated limit. Revisit smallest-first with aging, or a bounded-share enrollment boost, only with measurements and an explicit owner amendment to A5. Demand-driven priority would need its own threat review.
+
+### 10.2 Bounded, resumable work units
+
+Goal: no single room monopolizes the builder, and progress survives restarts.
+
+- **Unit** = a contiguous run of canonical batches (§4.5), up to `U_max` chunks (initial proposal 256, measured in S4). It stays inside one resource and never splits a batch. Small sources are grouped whole into units. A source larger than `U_max` (a long PDF, say) is split **at batch boundaries in canonical order**, so batch composition, and therefore every vector, is identical to an unsplit run.
+- **Whole-source reuse is unchanged.** Reused sources cost no embedding units, only a copy.
+- **Resumability.** Each unit appends its rows to `staging/<partition_id>/<lexical_object_id>/vectors.sqlite` in one transaction. It also records `(source_key, source_identity, first_batch, last_batch)` in a build journal in the same transaction. After a restart the builder re-validates the journal against the current lexical object and `embedding_identity`, then continues from the next unit. Any mismatch discards the staging. Staging is subject to tombstones and purge (§4.8).
+- **Cooperative cancellation** at batch boundaries for retirement, superseded lexical objects or shutdown.
+- **Channel analysis.** A forbidden room's size affects A only through the number of rounds in which it holds a turn. That is A5's stated limit, nothing more. Bounding `U_max` caps how long any single turn can delay A.
+
+### 10.3 What needs measurement (S4 and S7)
+
+- Passage-embedding throughput (chunks per second) on the declared reference hardware, with the fixed thread policy from §4.5.
+- Unit duration distribution at `U_max` ∈ {128, 256, 512}.
+- Time-to-ready versus pending-room count `P` and room size.
+- Query latency (p50, p99) under full builder load, with and without the dedicated query embedder.
+- RSS of the builder and query embedders together.
+- Staging I/O and fsync cost per unit.
+- Resume overhead after a forced kill.
+- Exact-scan latency for plain-table `vec_distance_l2` at 25k, 100k and 256-resource fan-in.
+
+## 11. Slices
+
+**Isolation rule:** every intermediate release keeps the existing lexical endpoint's isolation. Two conditions enforce it:
+
+- The lexical-surface fixes (A4 headers, A2 context and logs, reader init cells) ship **before** any vector object can be published.
+- **Everything that builds, publishes or serves vectors is compiled only under a non-default Cargo feature, `governed-semantic-internal`.** The feature is excluded from default and release feature sets, as the internal witness observer is. Release binaries cannot publish vector objects or change any lexical header until the enablement slice, an owner checkpoint, removes the gate.
+
+| Slice | Content | Gate | Tests |
+|---|---|---|---|
+| **S0 — amendment** | A1–A6 text (docs only, owner-approved). | — | — |
+| **S1a — scoped lexical headers (A4)** | Authorized-view generation digest and per-resource freshness on the existing lexical endpoint. | shipped | headers unchanged under forbidden-room publish, reconcile and watcher events; IG-1 witness re-run |
+| **S1b — verified capability context (A2)** | Workload-subject allowlist; refusal of identity-bearing claims; context keeps `exp` and the exact action; repeated `vault_id` refused; subject and actor removed from logs; coordinated OpenClast claim transition. | shipped | allowlist on and off; legacy `actor` and `subject_revision` → 401; `exp` and action present in the context; captured logs contain no subject, actor or query |
+| **S2 — partition objects, leases, retirement journal (lexical)** | §4.1–§4.3 and §4.8 for lexical objects; per-object reader init cells; layout v3; one-time rebuild. | shipped | barrier tests at pin, open and hydrate; B's blocked init does not block A's cached access; retirement crash injection; deletion-failure honesty; restart recovery; IG-1 W1–W13f re-run |
+| **S3 — vector object store** | Plain-table store, read-only immutable open, deterministic scan, descriptor; cross-file regression test. | internal | rowid independence; ties at the `LIMIT` boundary; ±0.0; non-finite refused; no sidecar files; cross-file fixture |
+| **S4 — builder and fair scheduler** | Round-robin scheduler, bounded resumable units, canonical batches, whole-source reuse, exact inventory validation, attach, tombstone checks, `embedding_identity` from artifact hashes. | internal | short embedder output fails; same count with wrong IDs fails; duplicate, unexpected and mis-associated rows fail; resume after kill; retirement interleaved at unit, validation and attach; lexical publish unaffected by embedder faults; barrier test at *embed*; §10.3 measurements |
+| **S5 — real-ONNX determinism gate** | §4.5 gate; batch-size-1 fallback path. | internal (mandatory before S7) | fresh process, fresh build, incremental, reuse versus full, permuted discovery |
+| **S6 — governed query path (core)** | §5–§7: gate order, merge, RRF, strict hydration, end-of-request check (uses S1b's `exp`). | internal | **physical baseline**: instance A (rooms 1–4) versus instance B (authorized rooms 1–2), byte-equal for semantic and hybrid; forbidden add, remove and mutate invariance; two-user asymmetric fixture; equal-distance fan-in; 256-resource bound; missing candidate refuses; filter rejected before embed or open (observer-free assertion via a test hook); one-leg failure refuses |
+| **S7 — query embedder, HTTP, probe** | Dedicated query embedder; `/search` semantic and hybrid; `/readiness` (A3); taxonomy and headers. | internal | one server test per §5.2 row; probe returns exact tuples only; action scoped per route; latency-under-load measurement |
+| **S8 — observer and witness** | §11.1–§11.2 on the internal build. | internal + observer | shipped and observer builds share a functional digest |
+| **S9 — enablement** | Removes the `governed-semantic-internal` gate after owner review of S0–S8 evidence. | owner checkpoint | full witness re-run on release build |
+| **S10 — later** | Pre-scan filter rowsets inside authorized resources. | — | baseline equality with filters |
+
+Dependencies:
+
+- S8 needs the internal witness observer, which today lives only on the unmerged `feat/ig1-witness-observer` branch (`5ee249e`).
+- S1a and S1b need A4 and A2 approved.
+- S7 needs A1 and A3.
+- S9 needs every amendment.
+
+### 11.1 Observer events (feature-gated)
+
+The existing per-resource vocabulary (`selected`, `reader_*`, `scoring`, `hydrate_*`) gains:
+
+- `lease_acquired`, `lease_released`;
+- `vector_gate_ready`, `vector_gate_refused`;
+- `vector_open`, `vector_scan`, `vector_refused`;
+- `query_embed` (no resource);
+- `fusion` (list lengths only);
+- `end_recheck_ok`, `end_recheck_refused`.
+
+The invariant is unchanged: zero lease, open or scan events for any excluded resource.
+
+### 11.2 Witness mapping
+
+OpenClast's V-row numbers are not in this repository, so the mapping is by theme. Numbers get pinned when OpenClast shares its V1–V16 table.
+
+| Theme | Kwiry evidence | Extends |
 |---|---|---|
-| **S1 — amendment** | Contract text for A1–A4 (docs only, owner-approved). | — |
-| **S2 — partition vector store** | `vector_partition.rs`: write-once plain-table store, read-only immutable open, exact scan `ORDER BY d, chunk_id LIMIT C`, non-finite and dimension rejection, `vectors.json` descriptor, content digest. Cross-file regression test (§8). | identical results under permuted insert order (rowid independence); ties straddling the `LIMIT` boundary; ±0.0; NaN/∞ refused; immutable open creates no sidecar files; descriptor mismatch (fingerprint, digest, count, versions) → not ready; embed-link note vectors identical across target presence |
-| **S3 — generation integration and builder** | `layout_version` 3; readiness map at open; hard-link carry; off-lock builder with per-source batches and reuse; attach-publish; startup staging cleanup; retirement purge with immediate prune; openclast config `[semantic] enabled`. | lexical publish proceeds when the embedder faults (fake failing embedder); `pending → ready` transitions per partition (room B stays ready while room A changes); fingerprint change → all pending, lexical served; crash between stage and attach → no servable partial; retirement → no file under the data root contains the retired `partition_id` or its chunk IDs; recreation inherits nothing; per-source batching gives vectors identical to single-source embedding; carried vector files are hard links |
-| **S4 — governed query path (core)** | `search_authorized_semantic` and `search_authorized_hybrid` on `PartitionedSearchIndex`: pinned generation, gate steps 5–7, merge, RRF, strict hydration, end-of-request check. | **physical baseline:** instance A (rooms 1–4) vs instance B (only the authorized rooms 1–2), byte-equal hits, order, truncation, scores and coverage for semantic and hybrid; forbidden add/remove/mutate on A leaves results unchanged; two-user asymmetric fixture; cross-partition fan-in with engineered equal distances; 256-resource fan-in bound; missing candidate → refuse, not drop; resource mismatch → refuse; a pending partition → refuse before any vector file opens; one-leg failure → refuse; desktop results unchanged |
-| **S5 — capability and HTTP** | action-per-mode; explicit mode required; repeated `vault_id` in a capability → 403; new codes and mapping; `X-Kwiry-Effective-Mode`; drop subject/actor from logs (coordinated claim transition, A2); remove the openclast `--semantic` rejection; readiness probe (A3). | one server test per §5.2 row; captured logs contain no query text, subject or actor; the probe returns only signed resources; a lexical capability cannot run semantic |
-| **S6 — side-channel hardening** | dedicated query embedder; authorized-view generation and freshness headers (A4); RSS measurement. | headers unchanged under forbidden-room publish and reconcile; query latency unaffected by a forbidden-room embedding storm (bounded statistical check, documented residual) |
-| **S7 — observer and witness** | Extend the internal observer (§10.1) and the connected witness rows (§10.2). | shipped and observer builds produce the same functional digest across all rows |
-| **S8 — later** | pre-scan filter rowset inside an authorized partition (`path_prefix`, tags, frontmatter). | baseline equality with filters |
+| Two-user vector and hybrid | Asymmetric two-user, two-room semantic and hybrid requests; the observer shows leases and opens only on signed resources | W2, W8 |
+| Forbidden-partition invariance | Byte-equal hits, order, truncation, scores and coverage against an authorized-only physical instance, unchanged under forbidden add, remove or mutate | W5 |
+| **Readiness under forbidden load (new; owner decision)** | **Two instances. Instance 1 holds pending room A plus a large forbidden resource that sorts *before* A by `ResourceKey`. Instance 2 holds only A. Once A is ready on both, results must be exactly equal (assertion). Time-to-ready on each instance is recorded as advisory only, never pass/fail, as evidence for A5.** | new row |
+| Mid-request retirement and revocation | Forbidden room B retired at each barrier (pin, embed, open, hydrate) while A's request proceeds: A succeeds exactly. A's own room retired mid-request → `resource_unavailable`. Capability expiry → 401. OpenClast post-check → `search_authorization_changed` | W8, W13a |
+| Retirement purge | After retirement, no object, staging or candidate artifact exists for the retired `partition_id`. Every remaining vector object belongs to a live resource whose descriptor and layout agree. The journal reaches `purged` only after durable deletion. Crash-injected runs recover before serving. Recreation under fresh IDs inherits nothing. *(Not "no retired chunk IDs anywhere": chunk IDs omit the room and may legitimately recur under a reclassified vault.)* | W13a–W13f |
+| Cross-file embeds | Literal text only; vectors bitwise identical across target presence | new row |
+| Audit and storage privacy | Kwiry logs contain no query text or fingerprint, subject or actor. **No query embedding is ever persisted, and no diagnostic vector dump exists anywhere.** Passage vectors exist only inside live vector objects and in-progress staging for live resources. The OpenClast audit holds only the D3 keyed fingerprint. | W11 |
+| Named errors, no fallback | `mode_unavailable`, `semantic_not_ready`, `semantic_failed`, one leg down, `filter_unavailable`, `ranked_unpageable` | W10 |
+| Shipped = observer | Identical functional digest across every semantic and hybrid row | W12a, W12b |
 
-Dependency: S7 needs the internal witness observer, which today exists only on the unmerged `feat/ig1-witness-observer` branch (`5ee249e`). It has to land on `main`, or be rebased, before S7.
+W1, W3, W4, W6, W7 and W9 are re-run as regression.
 
-### 10.1 Observer events (feature-gated, absent from shipped builds)
-
-The vocabulary is added to the existing per-resource events (`selected`, `reader_*`, `scoring`, `hydrate_*`): `vector_gate_ready` / `vector_gate_refused` (per resource, before any open), `vector_open`, `vector_scan`, `vector_refused`, `query_embed` (no resource), `fusion` (count of each list only), `end_recheck_ok` / `end_recheck_refused`. The invariant stays the same: **zero vector events for any excluded resource.**
-
-### 10.2 Witness mapping
-
-V-row numbers belong to OpenClast and are not in this repository, so the mapping is by theme. Numbers get pinned when the OpenClast V1–V16 table is shared.
-
-| OpenClast V-theme | New Kwiry evidence | Extends existing row |
-|---|---|---|
-| Two-user vector and hybrid | asymmetric two-user/two-room semantic and hybrid requests; observer shows only signed partitions | W2, W8 (zero excluded-partition access) |
-| Forbidden-partition invariance | byte-equal hits, order, truncation and coverage vs a physical baseline holding only authorized rooms, unchanged under forbidden add, remove or mutate | W5 (authorized-only baseline) |
-| Mid-request revocation | room retired between gate and response → `resource_unavailable`; capability expiry → 401; OpenClast post-check → `search_authorization_changed` | W8 (live grant), W13a |
-| Retirement purge | after retirement, no vector file or staging entry for the old `partition_id`; recreation gets new IDs and an empty `pending` state | W13a–W13f |
-| Cross-file embeds | embed and link fixture: literal text only; vector identical across target presence | new row |
-| Audit privacy | Kwiry logs and data root contain no query text, subject, actor, embeddings or distances; OpenClast audit holds only the D3 keyed fingerprint | W11 |
-| Named errors, no fallback | `mode_unavailable`, `semantic_not_ready`, `semantic_failed`, one-leg-down, `filter_unavailable`, `ranked_unpageable` | W10 |
-| Shipped = observer | functional digest identical across all semantic and hybrid rows | W12a, W12b |
-
-W1, W3, W4, W6, W7 and W9 are re-run unchanged as regression.
-
-## 11. Contract amendments needed
+## 12. Contract amendment package A1–A6
 
 Flagged here only. `CONTRACT.md` is not edited by this design.
 
-- **A1 — governed modes and default (§4, §11).** Admit `semantic` and `hybrid` in the OpenClast profile under §5's authorization-before-retrieval rule as designed here. In that profile `mode` is **required** at Kwiry. The D2 default (`lexical`) is applied at the OpenClast seam. The desktop default (`hybrid`) is unchanged unless the owner extends D2 (Q4).
-- **A2 — capability identity (§5).** §5 currently requires "represented subject, distinct current actor". D4 forbids user IDs at the engine, even pseudonymous ones. Amend this so the Kwiry capability carries no subject, actor or subject revision. The verified principal becomes the gateway workload, `sub` is a fixed workload identifier, and `jti` stays a per-request random nonce. The change needs a coordinated OpenClast claim transition.
-- **A3 — scoped readiness probe (§4).** A capability-protected `POST /v0/readiness` in the OpenClast profile returning closed per-resource enums for signed resources only (§5.3). The alternative is to decline, which leaves undifferentiated disclosure.
-- **A4 — governed freshness and generation headers (§4, IG-1 doc).** In the OpenClast profile, `X-Kwiry-Generation` becomes an authorized view digest and `X-Kwiry-Index-Freshness` is computed over signed resources only (§9). This also fixes an existing IG-1 leak.
+- **A1 — governed modes and default (§4, §11).**
+  - Admit `semantic` and `hybrid` in the OpenClast profile under §5's rule as designed here.
+  - In that profile `mode` is required at Kwiry. D2's default (`lexical`) is applied at the OpenClast seam.
+  - The desktop default (`hybrid`) is unchanged unless the owner extends D2 (Q1).
+- **A2 — capability identity and verified context (§5).**
+  - Replace "represented subject, distinct current actor" with: the capability carries **no** user identity, pseudonymous or otherwise.
+  - `sub` must exactly match an entry in Kwiry's configured **workload-subject allowlist** (for example `["openclast-search-gateway"]`, compared bytewise).
+  - A capability carrying `actor`, `subject_revision` or any identity-bearing claim outside the declared claim set is refused with `401`. Unknown claims are refused, not ignored.
+  - `jti` stays a per-request random nonce.
+  - The verified request context preserves `exp`, the exact action, `jti`, resources and `max_limit` for later rechecks.
+  - Each `vault_id` may appear at most once among the resources.
+  - Requires a coordinated OpenClast claim transition.
+- **A3 — scoped readiness probe (§4).** A capability-protected `POST /v0/readiness`, action `readiness`, returning closed per-resource enums for the exact signed `{tenant_id, vault_id, room_id}` tuples only (§5.3). Search actions are scoped to `/search` (§6.5).
+- **A4 — scoped freshness and generation headers (§4; IG-1 doc).** Applies to the existing lexical endpoint as well.
+  - **Authorized-view encoding.** `X-Kwiry-Generation: v1-<hex>`, where `<hex>` is SHA-256 over:
+    - `"kwiry-authorized-view-v1\0"`;
+    - the mode class byte (`L` for lexical; `S` for semantic and hybrid);
+    - the u64 little-endian resource count;
+    - for each signed resource in bytewise `(tenant_id, vault_id, room_id)` order: the length-prefixed `tenant_id`, `vault_id` and `room_id`, the length-prefixed lexical object ID, and, in class `S` only, the length-prefixed vector object ID.
+    
+    The class `L` digest ignores vector objects, so vector publication never changes the lexical view. The header contains no timestamp and changes only when an authorized resource's objects change.
+  - **Per-resource freshness.** Each resource is `current`, `reconciling`, `stale` or `unavailable`:
+    - `current → reconciling` when a pass whose read scope includes that resource's vault starts. Path-scoped passes include only vaults with changed paths. Full passes are boot- or schedule-triggered, never content-triggered.
+    - `reconciling → current` when the pass publishes with no remaining dirty state for that vault.
+    - `reconciling → stale` when it ends incomplete: incomplete enumeration, retained content, or an unavailable vault.
+    - `current → stale` on a watcher event for that vault.
+    - `stale → reconciling` when the next covering pass starts.
+    - Any state becomes `unavailable` when the resource is unmapped or tombstoned. Such a resource is never served.
+    
+    The response header reports the **worst** state among the signed resources, ordered `stale` > `reconciling` > `current`. Resources that are `unavailable` are refused earlier.
+- **A5 — semantic readiness-timing limit (owner decision 2026-11-17).** For a request, semantic and hybrid results are exactly invariant to forbidden resources. Readiness *timing* is not. A fair shared scheduler builds vectors, and the moment a resource first answers rather than returning `semantic_not_ready` may depend on server load, including indexing load from resources the caller cannot see. Kwiry bounds this with round-robin scheduling and bounded work units, exposes readiness only as closed enums, and makes no claim of timing invariance. Changing the scheduling policy (§10) in a way that adds a channel requires amending A5.
+- **A6 — retirement and durable purge (§5).**
+  - Retirement has two distinct, separately reported states.
+  - **Retrieval revoked:** no new request can use the resource; in-flight requests are refused at their end-of-request check.
+  - **Purge completed:** every Kwiry-held artifact of the resource (lexical and vector objects, staging and candidates) is unlinked, the deletions are durable (parent directories fsynced), no lease remains, and the completion record is durable.
+  - Kwiry never reports purge completed after a deletion or sync failure.
+  - Incomplete retirements are resumed before serving after any restart.
+  - A retired resource tuple is never re-indexed.
+  - Purge is file unlinking, not cryptographic erasure of the storage medium.
 
-Not amendments: refusing non-room filters (the explicit-refusal rule already covers it), exact baseline equality (stronger than §1.1, not in conflict), and `ranked_unpageable` (an OpenClast mapping of `cursor_unavailable`).
+Not amendments:
 
-## 12. Risks and open questions
+- refusing non-room filters, which the existing explicit-refusal rule already covers;
+- exact baseline equality, which is stronger than §1.1 and does not conflict with it;
+- `ranked_unpageable`, which is an OpenClast mapping.
+
+## 13. Risks and open questions
 
 **Risks**
 
-- **R1 — ONNX determinism.** Byte equality needs bit-identical embeddings for the same text. Per-source batching removes cross-file padding effects. ORT thread-count or kernel selection could still vary between runs. *Mitigation:* fix the ORT intra-op thread count for the governed profile, and add an S3 test that re-embeds and compares bits (feature-gated ONNX test). If that test fails, the baseline proof must be re-scoped with the owner. **Highest technical risk.**
-- **R2 — Storage and copy cost.** Vectors add about 1.5 KiB per chunk per generation. Without hard links (S3), every publish copies them, and with three retained generations that is about 3× the vector size.
-- **R3 — Memory.** The model in the sidecar, plus a second query embedder (decision 3), adds hundreds of MiB RSS. To be measured; tmpfs and host headroom matter.
-- **R4 — Time to ready.** Initial embedding of a large room can take minutes, so newly enrolled rooms report `pending` for that long. Lexical stays available.
-- **R5 — Exact scan latency.** sqlite-vec measured about 39 ms at 100k chunks (desktop, vec0). A plain-table scalar scan is expected to be similar but is unmeasured. With 256 resources, latency is bounded by total authorized chunks. Any ANN must first re-prove baseline equality (fixed input).
-- **R6 — Observer not on `main`.** S7 is blocked until the observer branch lands.
-- **R7 — Existing IG-1 header and log leaks (§9).** These are real today, independent of IG-2A. Worth fixing even if IG-2A slips.
-- **R8 — Purge is not secure erase** (§4.5).
+- **R1 — ONNX determinism.** This is the highest technical risk, and S5 is a hard gate (§4.5). Fallback: batch size 1. Otherwise re-scope with the owner.
+- **R2 — Layout migration (S2).** It changes IG-1's accepted storage and needs a full IG-1 witness re-run. It is limited to disposable state with a one-time rebuild.
+- **R3 — Memory.** The query embedder plus the builder embedder plus sidecar RSS, measured in S7. Host headroom matters.
+- **R4 — Time to ready under load.** This is the stated limit (A5). Large enrollments can keep other rooms `pending` for a while. Lexical search stays available throughout.
+- **R5 — Purge completion latency.** Purge waits on lease drain, which the request deadline bounds. A stuck fsync keeps the state at `revoked`, which is honest but needs operator visibility.
+- **R6 — Exact-scan latency.** Plain-table scans are unmeasured, and the fan-in can reach 256 resources.
+- **R7 — Observer not on `main`.** This blocks S8.
+- **R8 — Existing IG-1 leaks.** These are real today. S1a and S1b fix them regardless of whether IG-2A proceeds.
 
-**Open questions** (beyond the four decisions in §2)
+**Open questions**
 
-- **Q5** — Per-partition encryption with crypto-shredding on retirement: wanted later, or out of scope?
-- **Q6** — Should Kwiry itself omit `score` and `chunk_id` in the openclast profile, as defence in depth instead of relying on OpenClast stripping them? That would need a hit-schema amendment.
-- **Q4** — Should D2 (default lexical) also change the desktop default, which is `hybrid` per contract §4 and vertical-3?
-- **Q7** — Desktop labels L2-derived scores as "cosine similarity" (§3). Fix it as a separate desktop correction?
-- **Q8** — Kwiry's `openclast` profile is to be renamed to a generic governed profile (IG-1 follow-up). IG-2A code should use the generic name where it is new.
+- **Q1** — Should D2 (default lexical) also change the desktop default?
+- **Q2** — Should Kwiry itself omit `score` and `chunk_id` in the governed profile, as defence in depth? That needs a hit-schema amendment.
+- **Q3** — Do we want per-resource encryption keys with crypto-shredding on retirement later?
+- **Q4** — Desktop reports L2-derived scores as "cosine similarity". Fix that separately?
+- **Q5** — The `openclast` profile is to be renamed to a generic governed profile. New IG-2A identifiers should use the generic name.
+- **Q6** — Should the advisory time-to-ready evidence (§11.2) feed a published operator expectation, such as a target per thousand chunks on reference hardware?
