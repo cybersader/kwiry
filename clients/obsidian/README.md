@@ -58,6 +58,76 @@ File previews use Obsidian's core **Page preview** plugin. Enable it, then hold 
 
 In-plugin · Lexical builds, restores, and reconciles the current vault locally. Daemon results may include registered trees outside the current vault; those results remain searchable but show a factual notice instead of opening locally.
 
+## Public search API for other plugins
+
+Any Obsidian plugin can use `app.plugins.plugins["kwiry-search"]?.api`. Check
+`api?.version === 1` before calling it, and catch rejected promises. The exported
+TypeScript contract and `KwiryApiError` live in [`src/public-api.ts`](src/public-api.ts):
+
+```ts
+interface KwirySearchApiV1 {
+  readonly version: 1;
+  ready(): Promise<void>;
+  search(query: string, opts?: { limit?: number }): Promise<
+    Array<{ path: string; score: number; heading?: string }>
+  >;
+}
+
+const api = app.plugins.plugins["kwiry-search"]?.api;
+if (api?.version === 1) {
+  try {
+    await api.ready();
+    const hits = await api.search("pear blossoms", { limit: 30 });
+    // Consume hits in backend order; paths are relative to the current vault.
+  } catch (error) {
+    // Cross-plugin bundles should inspect error.name === "KwiryApiError"
+    // and error.code rather than rely on instanceof across bundle boundaries.
+  }
+}
+```
+
+- **Versioning:** additive changes retain `version: 1`; breaking changes require a
+  new API version. The API version is independent of the plugin release version.
+- **Backend and mode:** uses the same backend manager as the search modal, without
+  starting another backend or index. In-plugin uses lexical; Daemon uses the
+  configured default search mode. Unsupported modes reject, never fall back.
+- **Current-vault scope:** Daemon requires the existing current-vault mapping
+  (`daemonCurrentVaultId`) and sends that vault ID as a search filter. The modal's
+  optional registered-tree filter is not used: this API has no cross-vault result
+  identity. Invalid or foreign-vault hits reject rather than masquerade as local
+  paths. In-plugin already searches only the active vault.
+- **Readiness:** `ready()` checks current availability, including mode and mapping.
+  Before backend activation or while no searchable generation exists, it rejects;
+  it does not poll or wait indefinitely for an index build. Retry after the backend
+  becomes ready. A rebuild with an existing searchable generation is allowed.
+  Readiness is a snapshot, so `search()` checks again and can still reject.
+- **Inputs and limits:** queries must be non-empty strings (whitespace-only is
+  invalid). Limit defaults to 20; finite numeric values are floored and clamped to
+  **1–100**. Non-finite or non-numeric limits and malformed options reject.
+- **Results:** section hits in engine order, without grouping, deduplication, or
+  reranking; a file may appear more than once. Scores are backend-owned and are not
+  comparable across modes/backends. `heading` is the final Markdown section
+  heading when present. Each hit is frozen and the array is a fresh defensive copy.
+  An empty array means a successful search with no matches, never a hidden error.
+- **Read-only lifecycle:** no vault writes, settings changes, or credentials are
+  exposed. Calls through retained API references reject after plugin unload;
+  in-flight results are also refused if the plugin unloads or the backend changes.
+
+Every rejection is a named `KwiryApiError` with a stable `code` and a safe message:
+
+| Code | Meaning |
+|---|---|
+| `invalid_query` | Non-string/empty input, or the backend rejects query syntax. |
+| `invalid_options` | Malformed options or non-finite/non-numeric limit. |
+| `backend_unavailable` | No selected backend, unreachable daemon, or disposed/unavailable backend. |
+| `index_not_ready` | No searchable index exists yet. |
+| `mode_unavailable` | Configured mode is unsupported or could not be honored. |
+| `vault_mapping_required` | Current vault is not mapped to the daemon. |
+| `invalid_result` | Unsafe path, foreign/stale hit, or invalid score. |
+| `backend_changed` | Backend changed during the call; retry against the new backend. |
+| `plugin_unloaded` | Plugin unloaded; reacquire the API after enabling it again. |
+| `search_failed` | Other backend failure; raw internal error details are not exposed. |
+
 ## Development
 
 Prerequisites include Rust 1.95.0, `wasm32-unknown-unknown`, `wasm-bindgen-cli` 0.2.126, and Node 22 or 24.

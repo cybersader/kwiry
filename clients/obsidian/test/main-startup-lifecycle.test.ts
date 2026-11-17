@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { build, type Plugin as EsbuildPlugin } from "esbuild";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { KwirySearchApiV1 } from "../src/public-api";
+
 interface LifecycleHarness {
   hoverSources: Array<{ id: string; display: string; defaultMod: boolean }>;
   layoutReady: (() => void) | null;
@@ -76,7 +78,9 @@ async function loadProductionPlugin(): Promise<new () => {
     diagnosticsReportLevel: "debug" | "info" | "warn" | "error";
     diagnosticsReportScope: "all" | "indexing" | "search" | "startup" | "failures";
   };
+  readonly api: KwirySearchApiV1;
   onload(): Promise<void>;
+  onunload(): void;
   saveSettings(): Promise<void>;
   onSourcePolicyChanged(): Promise<void>;
   rebuildInPluginIndex(): Promise<void>;
@@ -222,7 +226,12 @@ function stubSource(path: string): string {
         const harness = globalThis.__kwiryStartupLifecycleHarness;
         export class InPluginLexicalBackend {
           constructor(options) {
-            this.identity = { profile: "in_plugin", instanceId: options.instanceId };
+            this.identity = {
+              profile: "in_plugin",
+              instanceId: options.instanceId,
+              label: "In-plugin",
+              boundVaultId: options.activeVaultId,
+            };
             this.statusValue = {
               identity: this.identity,
               capabilities: {
@@ -261,6 +270,26 @@ function stubSource(path: string): string {
             harness.statusListener?.(this.statusValue);
           }
           async status() { return this.statusValue; }
+          async search(request) {
+            return {
+              requestedMode: request.mode,
+              effectiveMode: request.mode,
+              response: {
+                hits: [{
+                  path: "Notes/Orchard.md",
+                  format: "markdown",
+                  heading_path: ["Pears"],
+                  score: 2,
+                  vault_id: this.identity.boundVaultId,
+                  origin: {
+                    profile: this.identity.profile,
+                    backendInstanceId: this.identity.instanceId,
+                    vaultId: this.identity.boundVaultId,
+                  },
+                }],
+              },
+            };
+          }
           subscribeStatus(listener) {
             harness.statusListener = listener;
             listener(this.statusValue);
@@ -389,6 +418,28 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("publishes the API on the plugin and revokes cached references synchronously on unload", async () => {
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    const api = plugin.api;
+    expect(api.version).toBe(1);
+    await expect(api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+    await plugin.onload();
+    await expect(api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.backendInitializations).toBe(1));
+    await expect(api.ready()).resolves.toBeUndefined();
+    await expect(api.search("pear")).resolves.toEqual([
+      { path: "Notes/Orchard.md", score: 2, heading: "Pears" },
+    ]);
+    expect(plugin.api).toBe(api);
+    expect(harness.backendInitializations).toBe(1);
+    expect(harness.savedData).toEqual([]);
+    plugin.onunload();
+    await expect(api.ready()).rejects.toMatchObject({ name: "KwiryApiError", code: "plugin_unloaded" });
+    await expect(api.search("pear")).rejects.toMatchObject({ code: "plugin_unloaded" });
   });
 
   it("hover preview: registers the native source with Mod required by default", async () => {
