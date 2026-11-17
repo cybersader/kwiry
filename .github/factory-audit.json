@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "exclude_roots": [
+    {"path": "bench/embedding", "reason": "historical research benchmark; never built in CI"},
+    {"path": "bench/tantivy-wasm", "reason": "historical research benchmark; never built in CI"},
+    {"path": "bench/vector", "reason": "historical research benchmark; never built in CI"},
+    {"path": "tools/kwiry-fixtures", "reason": "manual fixture generator; never built in CI (Dependabot still covers it)"}
+  ],
+  "locked_via": [
+    {"path": "bench/portable-core-wasm", "evidence": "bench/portable-core-wasm/scripts/test-parity.cjs", "reason": "CI runs npm test --prefix bench/portable-core-wasm, which spawns cargo test/build/run --locked"}
+  ]
+}
