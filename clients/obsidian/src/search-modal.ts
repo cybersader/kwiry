@@ -102,6 +102,15 @@ export const FORMAT_CHIP_PRESENTATIONS = {
 } as const satisfies Record<BackendSearchHit["format"], FormatChipPresentation>;
 
 export const SEARCH_STATUS_ANIMATION_DELAY_MS = 180;
+/// A query that failed only because no index was searchable yet is resubmitted
+/// once the backend becomes searchable, including after a recovery or a manual
+/// rebuild from a terminal failure.
+const RETAINED_QUERY_RERUN_CODES: ReadonlySet<string> = new Set([
+  "index_building",
+  "worker_recovering",
+  "worker_failed",
+  "index_build_failed",
+]);
 export const FIELD_CONTROL_HELP_TEXT =
   "Field controls: in:name or in:title strictly scopes lexical search; >title or >body prefers one field. Hybrid supports preference but not strict scope. Semantic supports neither control.";
 
@@ -901,7 +910,8 @@ export class KwirySearchModal extends SuggestModal<ModalResult> {
 
   private rerunRetainedQuery(status: BackendStatus): void {
     if (status.identity.instanceId !== this.backend.identity.instanceId
-      || this.lastErrorCode !== "index_building"
+      || this.lastErrorCode === null
+      || !RETAINED_QUERY_RERUN_CODES.has(this.lastErrorCode)
       || this.inputEl.value.trim().length === 0) {
       return;
     }

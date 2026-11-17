@@ -23,7 +23,7 @@ import type {
   SourceRemoval,
   StatusResult,
 } from "./protocol";
-import { SOURCE_FORMATS } from "./protocol";
+import { SOURCE_FORMATS, WORKER_INITIALIZE_TIMEOUT_MS } from "./protocol";
 import {
   WorkerRpcClient,
   type RpcCommand,
@@ -44,6 +44,7 @@ export class InPluginWorkerSession {
     private readonly objectUrl: string,
     private readonly revokeObjectUrl: (url: string) => void,
     timeoutMs?: number,
+    private readonly initializeTimeoutMs = WORKER_INITIALIZE_TIMEOUT_MS,
   ) {
     this.client = new WorkerRpcClient(
       worker,
@@ -57,6 +58,8 @@ export class InPluginWorkerSession {
     sourcePolicyHash = DEFAULT_SOURCE_POLICY_HASH,
     enabledSourceFormats: readonly SourceFormat[] = SOURCE_FORMATS,
   ): Promise<InitializeResult> {
+    // The cold boot gets its own first-signal window; see
+    // WORKER_INITIALIZE_TIMEOUT_MS. Its later steps report progress.
     return this.request({
       operation: "initialize",
       vault_id: vaultId,
@@ -64,7 +67,7 @@ export class InPluginWorkerSession {
       // Sorted here rather than trusted: the Worker requires a sorted,
       // duplicate-free set, and the caller's own ordering is not evidence.
       enabled_source_formats: [...new Set(enabledSourceFormats)].sort(),
-    }) as Promise<InitializeResult>;
+    }, this.initializeTimeoutMs) as Promise<InitializeResult>;
   }
 
   beginBuild(generation: string): Promise<BuildResult> {
@@ -209,10 +212,10 @@ export class InPluginWorkerSession {
     return this.request({ operation: "status" }) as Promise<StatusResult>;
   }
 
-  private request(command: RpcCommand): Promise<unknown> {
+  private request(command: RpcCommand, timeoutMs?: number): Promise<unknown> {
     const barrier = this.longOperationBarrier;
-    if (barrier === null) return this.client.request(command);
-    return barrier.then(() => this.client.request(command));
+    if (barrier === null) return this.client.request(command, timeoutMs);
+    return barrier.then(() => this.client.request(command, timeoutMs));
   }
 
   private requestLong(command: RpcCommand): Promise<unknown> {

@@ -11,6 +11,7 @@ import {
   INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
   INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
   INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+  WORKER_PROGRESS_KIND,
   WORKER_PROTOCOL_VERSION,
   emptyRestoreEvictionReport,
   emptySourceFormatCounts,
@@ -189,6 +190,118 @@ function checkpointRestoreResult(generation = "g1") {
     cursor: CHECKPOINT_CURSOR,
   };
 }
+
+function progressNotice(requestId: number, operation: string): unknown {
+  return {
+    version: WORKER_PROTOCOL_VERSION,
+    kind: WORKER_PROGRESS_KIND,
+    request_id: requestId,
+    operation,
+  };
+}
+
+describe("WorkerRpcClient no-progress watchdog", () => {
+  it("keeps a slow request that reports progress alive past the no-progress window", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 30_000, null, 600_000);
+      let settled = false;
+      const pending = client.request({ operation: "status" });
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+
+      // Synthetic slow machine: each unit of work takes 20 s, the whole request
+      // takes 120 s. A fixed 30 s deadline would have killed it at 30 s.
+      for (let step = 0; step < 6; step += 1) {
+        await vi.advanceTimersByTimeAsync(20_000);
+        worker.emitMessage(progressNotice(1, "status"));
+      }
+      expect(settled).toBe(false);
+      worker.emitMessage(statusResponse(1));
+      await expect(pending).resolves.toMatchObject({ phase: "building" });
+      expect(worker.terminate).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still times out a request that stops reporting progress", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 30_000, null, 600_000);
+      const pending = client.request({ operation: "status" });
+      const rejected = expect(pending).rejects.toMatchObject({ code: "timeout", retryable: true });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      worker.emitMessage(progressNotice(1, "status"));
+      // The Worker goes silent: the window restarts at the last notice only.
+      await vi.advanceTimersByTimeAsync(30_001);
+
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a request that reports progress forever with a hard ceiling", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 30_000, null, 100_000);
+      const pending = client.request({ operation: "status" });
+      const rejected = expect(pending).rejects.toMatchObject({ code: "timeout" });
+
+      for (let step = 0; step < 6; step += 1) {
+        await vi.advanceTimersByTimeAsync(20_000);
+        worker.emitMessage(progressNotice(1, "status"));
+      }
+
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-arms requests queued behind the progressing one", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 30_000, null, 600_000);
+      const first = client.request({ operation: "status" });
+      const queued = client.request({ operation: "status" });
+
+      // Only the request being worked on reports progress; the one waiting in
+      // the Worker's serialized queue behind it must not time out meanwhile.
+      for (let step = 0; step < 3; step += 1) {
+        await vi.advanceTimersByTimeAsync(20_000);
+        worker.emitMessage(progressNotice(1, "status"));
+      }
+      worker.emitMessage(statusResponse(1));
+      worker.emitMessage(statusResponse(2));
+      await expect(first).resolves.toMatchObject({ phase: "building" });
+      await expect(queued).resolves.toMatchObject({ phase: "building" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a progress notice for a request that is not pending", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
+    const pending = client.request({ operation: "status" });
+    worker.emitMessage(progressNotice(7, "status"));
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request", stage: "protocol" });
+  });
+
+  it("refuses a progress notice that names a different operation", async () => {
+    const worker = new MockWorker();
+    const client = new WorkerRpcClient(worker, PRODUCTION_RPC_PROTOCOL, 1_000);
+    const pending = client.request({ operation: "status" });
+    worker.emitMessage(progressNotice(1, "search"));
+    await expect(pending).rejects.toMatchObject({ code: "invalid_request", stage: "protocol" });
+  });
+});
 
 describe("WorkerRpcClient", () => {
   it("correlates responses and removes completed requests", async () => {
