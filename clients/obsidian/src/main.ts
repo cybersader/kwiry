@@ -45,6 +45,7 @@ import type {
 } from "./diagnostics/log";
 import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
 import { LatestRequestEpoch } from "./latest-request-epoch";
+import { createPublicSearchApi, type KwirySearchApiV1 } from "./public-api";
 import { KwirySearchModal } from "./search-modal";
 import { corePolicyFingerprint, enabledSourceFormatList } from "./source-formats";
 import {
@@ -90,6 +91,14 @@ export default class KwiryPlugin extends Plugin {
   private startupTimeline: StartupTimeline | null = null;
   private privateTools: PrivateTools = createPrivateTools(this, undefined);
   private sourcePolicyHash: string | null = null;
+  private readonly publicSearch = createPublicSearchApi({
+    currentBackend: async () => this.backendManager?.current(),
+    defaultMode: () => this.settings.defaultMode,
+  });
+
+  get api(): KwirySearchApiV1 {
+    return this.publicSearch.api;
+  }
 
   async onload(): Promise<void> {
     const pluginEpoch = ++this.pluginEpoch;
@@ -212,6 +221,7 @@ export default class KwiryPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.publicSearch.dispose();
     this.startupTimeline?.finish("cancelled", "plugin_unloaded");
     this.pluginEpoch += 1;
     this.activationEpoch += 1;
