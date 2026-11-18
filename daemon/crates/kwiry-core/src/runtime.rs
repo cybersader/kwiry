@@ -3369,10 +3369,9 @@ mod tests {
         let allowed_resource = config.resource_key(&config.vaults[0]).unwrap();
 
         let baseline = Config {
-            vaults: vec![VaultRegistration {
-                room: None,
-                ..allowed_registration
-            }],
+            // Preserve the room identity while removing the forbidden corpus:
+            // the room is part of the chunk ID in both storage profiles.
+            vaults: vec![allowed_registration],
             ..Config::default()
         };
         build_index(&baseline, &baseline_data).unwrap();

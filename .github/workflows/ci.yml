@@ -39,6 +39,7 @@ jobs:
         working-directory: daemon
         run: cargo test --locked --workspace --all-features
       - name: Verify N30 and N31 against the release binary
+        if: ${{ !cancelled() }}
         working-directory: daemon
         run: cargo test --release --locked -p kwiry --test daemon format_release_
 
