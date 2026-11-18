@@ -570,6 +570,9 @@ pub fn ensure_vault_registration(
         .find(|vault| vault.id == id && (vault.room == room || !allows_repeated_vault(config)))
     {
         if existing.path == canonical_path && existing.room == room {
+            if config.server.profile == HostProfile::OpenClast {
+                validate_config(&canonical_path, config)?;
+            }
             return Ok((existing.clone(), VaultRegistrationDisposition::Unchanged));
         }
         return Err(Error::InvalidConfig {

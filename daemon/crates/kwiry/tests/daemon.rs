@@ -749,7 +749,12 @@ fn format_release_n31_rb3_refuses_admission_registration() {
         });
     }
     fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
-    assert_startup_refused(&path, &data, "duplicate vault ID", |_| {}); // N31, RB3
+    let expected_error = kwiry_core::Error::DuplicateVaultId(config.vaults[0].id.clone());
+    assert!(matches!(
+        load_config(&path),
+        Err(kwiry_core::Error::DuplicateVaultId(_))
+    ));
+    assert_startup_refused(&path, &data, &expected_error.to_string(), |_| {}); // N31, RB3
     let b = config.vaults.pop().unwrap();
     save_config(&path, &config).unwrap();
     config = kwiry_core::load_config(&path).unwrap();
