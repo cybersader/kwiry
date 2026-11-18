@@ -502,11 +502,12 @@ fn covered_resources(config: &Config, scope: &ReconcileScope) -> BTreeSet<Resour
     config
         .vaults
         .iter()
-        .filter(|vault| match scope {
-            ReconcileScope::Full => true,
-            ReconcileScope::Paths(paths) => paths.iter().any(|(id, _)| id == &vault.id),
-        })
         .filter_map(|vault| config.resource_key(vault))
+        .filter(|resource| match scope {
+            ReconcileScope::Full => true,
+            ReconcileScope::Paths(paths) => paths.iter().any(|(id, _)| id == &resource.vault_id),
+            ReconcileScope::RoomPaths(paths) => paths.iter().any(|(key, _)| key == resource),
+        })
         .collect()
 }
 
@@ -1025,13 +1026,24 @@ fn system_time_nanos() -> u128 {
         .map_or(0, |duration| duration.as_nanos())
 }
 
-fn vault_read_scope(scope: &ReconcileScope, vault_id: &str) -> Option<BTreeSet<String>> {
+fn vault_read_scope(
+    scope: &ReconcileScope,
+    vault_id: &str,
+    resource: Option<&ResourceKey>,
+) -> Option<BTreeSet<String>> {
     match scope {
         ReconcileScope::Full => None,
         ReconcileScope::Paths(paths) => Some(
             paths
                 .iter()
-                .filter(|(scoped_vault, _)| scoped_vault == vault_id)
+                .filter(|(id, _)| id == vault_id)
+                .map(|(_, path)| path.clone())
+                .collect(),
+        ),
+        ReconcileScope::RoomPaths(paths) => Some(
+            paths
+                .iter()
+                .filter(|(key, _)| Some(key) == resource)
                 .map(|(_, path)| path.clone())
                 .collect(),
         ),
@@ -1160,7 +1172,9 @@ impl DesktopIndexManager {
                 config.indexing.audit_sources_per_pass,
                 config.indexing.audit_bytes_per_pass,
             ),
-            ReconcileScope::Paths(_) => AuditBudget::new(self.audit_cursor, 0, 0),
+            ReconcileScope::Paths(_) | ReconcileScope::RoomPaths(_) => {
+                AuditBudget::new(self.audit_cursor, 0, 0)
+            }
         };
         self.runtime.set_freshness_basis(config.indexing.basis);
         let configured_ids: HashSet<_> = config
@@ -1205,7 +1219,7 @@ impl DesktopIndexManager {
                 .map(|(key, _)| key.clone())
                 .collect();
             let semantic_runtime = self.runtime.semantic.load_full();
-            let vault_read_scope = vault_read_scope(scope, &vault.id);
+            let vault_read_scope = vault_read_scope(scope, &vault.id, None);
             let observed = observe_vault(
                 vault,
                 &self.manifest,
@@ -1559,7 +1573,9 @@ impl OpenClastIndexManager {
                 config.indexing.audit_sources_per_pass,
                 config.indexing.audit_bytes_per_pass,
             ),
-            ReconcileScope::Paths(_) => AuditBudget::new(self.audit_cursor, 0, 0),
+            ReconcileScope::Paths(_) | ReconcileScope::RoomPaths(_) => {
+                AuditBudget::new(self.audit_cursor, 0, 0)
+            }
         };
         self.runtime.set_freshness_basis(config.indexing.basis);
         let current_fingerprints: BTreeMap<_, _> = config
@@ -1639,7 +1655,7 @@ impl OpenClastIndexManager {
                 .filter(|(_, file)| file.resource.as_ref() == Some(&resource))
                 .map(|(key, _)| key.clone())
                 .collect();
-            let vault_read_scope = vault_read_scope(scope, &vault.id);
+            let vault_read_scope = vault_read_scope(scope, &vault.id, Some(&resource));
             let observed = observe_vault(
                 vault,
                 &self.manifest,
@@ -6184,7 +6200,7 @@ mod tests {
         manager
             .reconcile_scoped(
                 config.clone(),
-                &ReconcileScope::Paths(BTreeSet::from([(rb.vault_id.clone(), "index.md".into())])),
+                &ReconcileScope::RoomPaths(BTreeSet::from([(rb.clone(), "index.md".into())])),
             )
             .unwrap();
         assert_eq!(a_only, search(&filters, std::slice::from_ref(&ra), 20)); // P11

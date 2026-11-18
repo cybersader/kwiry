@@ -1496,6 +1496,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["kwiry-id-scheme"], "room-v1");
         assert_eq!(
             response.headers().get(INDEX_FRESHNESS_HEADER).unwrap(),
             "current; basis=strict_hash"
@@ -1523,7 +1524,11 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let response: ApiSearchResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(response.hits.len(), 1);
-        assert_eq!(response.hits[0].vault_id, "fixture");
+        assert_eq!(response.hits[0].vault_id, resource.vault_id);
+        assert_eq!(
+            response.hits[0].room_id.as_deref(),
+            Some(resource.room_id.as_str())
+        );
 
         let excessive_limit = app
             .oneshot(

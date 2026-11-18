@@ -59,11 +59,13 @@ enum EventEffect {
     ConfigChanged,
     Rescan(RescanCause),
     Touched(Vec<(String, String)>),
+    TouchedRooms(Vec<(kwiry_core::ResourceKey, String)>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WatchRoot {
     vault_id: String,
+    resource: Option<kwiry_core::ResourceKey>,
     root: PathBuf,
 }
 
@@ -73,6 +75,7 @@ struct WatchRoot {
 #[derive(Debug, Default)]
 struct PendingPaths {
     touched: BTreeSet<(String, String)>,
+    touched_rooms: BTreeSet<(kwiry_core::ResourceKey, String)>,
     rescan: Option<RescanCause>,
 }
 
@@ -82,6 +85,7 @@ impl PendingPaths {
             self.rescan = Some(cause);
         }
         self.touched.clear();
+        self.touched_rooms.clear();
     }
 
     fn insert(&mut self, key: (String, String)) {
@@ -89,19 +93,33 @@ impl PendingPaths {
             return;
         }
         self.touched.insert(key);
-        if self.touched.len() > MAX_PENDING_PATHS {
+        if self.touched.len() + self.touched_rooms.len() > MAX_PENDING_PATHS {
+            self.note_rescan(RescanCause::PathCapacity);
+        }
+    }
+
+    fn insert_room(&mut self, key: (kwiry_core::ResourceKey, String)) {
+        if self.rescan.is_some() {
+            return;
+        }
+        self.touched_rooms.insert(key);
+        if self.touched.len() + self.touched_rooms.len() > MAX_PENDING_PATHS {
             self.note_rescan(RescanCause::PathCapacity);
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.touched.is_empty() && self.rescan.is_none()
+        self.touched.is_empty() && self.touched_rooms.is_empty() && self.rescan.is_none()
     }
 
     fn take_scope(&mut self) -> ReconcileScope {
         if self.rescan.take().is_some() {
             self.touched.clear();
+            self.touched_rooms.clear();
             ReconcileScope::Full
+        } else if !self.touched_rooms.is_empty() {
+            debug_assert!(self.touched.is_empty(), "one host profile per watcher");
+            ReconcileScope::RoomPaths(std::mem::take(&mut self.touched_rooms))
         } else {
             ReconcileScope::Paths(std::mem::take(&mut self.touched))
         }
@@ -112,6 +130,11 @@ impl PendingPaths {
     fn merge_back(&mut self, scope: ReconcileScope) {
         match scope {
             ReconcileScope::Full => self.note_rescan(RescanCause::FailedPass),
+            ReconcileScope::RoomPaths(paths) => {
+                for path in paths {
+                    self.insert_room(path);
+                }
+            }
             ReconcileScope::Paths(paths) => {
                 for path in paths {
                     self.insert(path);
@@ -146,6 +169,7 @@ fn classify_event(
         return EventEffect::ConfigChanged;
     }
     let mut touched = Vec::new();
+    let mut touched_rooms = Vec::new();
     for path in &event.paths {
         // A path may fall under several nested registered roots; each
         // registered vault enumerates independently, so record all.
@@ -154,7 +178,10 @@ fn classify_event(
                 continue;
             };
             match normalize_relative(relative) {
-                Some(relative) => touched.push((root.vault_id.clone(), relative)),
+                Some(relative) => match &root.resource {
+                    Some(resource) => touched_rooms.push((resource.clone(), relative)),
+                    None => touched.push((root.vault_id.clone(), relative)),
+                },
                 // Byte-identical to walk.rs normalization: a component
                 // that is not valid UTF-8 cannot be matched to a source
                 // key, so the batch must escalate.
@@ -162,7 +189,11 @@ fn classify_event(
             }
         }
     }
-    EventEffect::Touched(touched)
+    if touched_rooms.is_empty() {
+        EventEffect::Touched(touched)
+    } else {
+        EventEffect::TouchedRooms(touched_rooms)
+    }
 }
 
 /// Access notifications that cannot have changed file contents.
@@ -198,6 +229,7 @@ fn watch_roots(config: &Config) -> Vec<WatchRoot> {
         .iter()
         .map(|vault| WatchRoot {
             vault_id: vault.id.clone(),
+            resource: config.resource_key(vault),
             root: vault.path.clone(),
         })
         .collect()
@@ -298,6 +330,7 @@ async fn run_watcher(
                 last_dirty = Some(now);
                 let dirty_scope = match &effect {
                     EventEffect::Touched(paths) => ReconcileScope::Paths(paths.iter().cloned().collect()),
+                    EventEffect::TouchedRooms(paths) => ReconcileScope::RoomPaths(paths.iter().cloned().collect()),
                     _ => ReconcileScope::Full,
                 };
                 manager.mark_resources_dirty(&config, &dirty_scope);
@@ -307,6 +340,9 @@ async fn run_watcher(
                         pending.note_rescan(RescanCause::ConfigChanged);
                     }
                     EventEffect::Rescan(cause) => pending.note_rescan(cause),
+                    EventEffect::TouchedRooms(touched) => {
+                        for key in touched { pending.insert_room(key); }
+                    }
                     EventEffect::Touched(touched) => {
                         for key in touched {
                             pending.insert(key);
@@ -506,10 +542,12 @@ mod tests {
         vec![
             WatchRoot {
                 vault_id: "outer".into(),
+                resource: None,
                 root: PathBuf::from("/vaults/outer"),
             },
             WatchRoot {
                 vault_id: "inner".into(),
+                resource: None,
                 root: PathBuf::from("/vaults/outer/inner"),
             },
         ]

@@ -63,6 +63,7 @@ pub(crate) enum SourceDecision {
 pub enum ReconcileScope {
     Full,
     Paths(BTreeSet<(String, String)>),
+    RoomPaths(BTreeSet<(ResourceKey, String)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
