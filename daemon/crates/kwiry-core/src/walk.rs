@@ -25,6 +25,37 @@ pub(crate) struct EnumerationResult {
     pub warnings: Vec<IngestWarning>,
     pub completeness: EnumerationCompleteness,
     pub excluded: BTreeSet<String>,
+    pub directories: DirectoryEvidence,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DirectoryEvidence {
+    pub complete: BTreeSet<String>,
+    pub seen_directories: BTreeSet<String>,
+    pub unverified_entries: BTreeSet<String>,
+}
+
+impl DirectoryEvidence {
+    /// The source was not discovered. A completed listing establishes absence
+    /// for an unobserved file, or for a missing directory on its path. Names
+    /// observed but not classified are not evidence of absence.
+    pub(crate) fn proves_absent(&self, source: &str) -> bool {
+        let mut child = Path::new(source);
+        let mut is_source = true;
+        while let Some(parent) = child.parent() {
+            let child_path = child.to_str().expect("registered source path is UTF-8");
+            let parent_path = parent.to_str().expect("registered source path is UTF-8");
+            if self.complete.contains(parent_path)
+                && !self.unverified_entries.contains(child_path)
+                && (is_source || !self.seen_directories.contains(child_path))
+            {
+                return true;
+            }
+            child = parent;
+            is_source = false;
+        }
+        false
+    }
 }
 
 pub(crate) fn discover_vault(vault: &VaultRegistration) -> EnumerationResult {
@@ -141,6 +172,7 @@ pub(crate) fn discover_vault(vault: &VaultRegistration) -> EnumerationResult {
         warnings,
         completeness,
         excluded: BTreeSet::new(),
+        directories: DirectoryEvidence::default(),
     }
 }
 

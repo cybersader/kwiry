@@ -13,7 +13,7 @@ use crate::source::{
 };
 use crate::walk::{EnumerationResult, discover_vault};
 
-pub fn ingest_vault(vault: &VaultRegistration) -> IngestReport {
+pub(crate) fn ingest_vault(vault: &VaultRegistration) -> IngestReport {
     let (outcomes, enumeration) = ingest_vault_files(vault);
     let mut warnings = enumeration.warnings;
     let mut report = IngestReport::default();

@@ -35,10 +35,16 @@ jobs:
           workspaces: daemon
       - name: Local daemon quality gate
         run: make check COMPONENT=daemon
+      - name: Verify r10 FR9–FR12 in the core API
+        working-directory: daemon
+        run: |
+          for vector in fr9_ fr10_ fr11_ fr12_; do
+            cargo test --locked -p kwiry-core --lib "$vector"
+          done
       - name: Test all workspace features (component harnesses force Holdings on)
         working-directory: daemon
         run: cargo test --locked --workspace --all-features
-      - name: Verify N30, N31, and FR1–FR3 against the release binary
+      - name: Verify N30, N31, FR1–FR3, FR7, FR11 and FR12 against the release binary
         if: ${{ !cancelled() }}
         working-directory: daemon
         env:

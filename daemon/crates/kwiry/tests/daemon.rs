@@ -889,6 +889,105 @@ fn format_release_fr7_refuses_stale_cap_beyond_one_day() {
     assert!(!data.exists());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn format_release_fr11_http_refuses_ingestion_and_boot_uses_guarded_walker() {
+    let fixture = tempdir().unwrap();
+    let root = fixture.path();
+    let path = isolated_config(root);
+    let data = root.join("data");
+    let room = root.join("room");
+    fs::create_dir(&room).unwrap();
+    fs::write(room.join("ordinary.md"), "ordinary fixture").unwrap();
+    fs::write(room.join("linked.md"), "synthetic restricted fixture").unwrap();
+    fs::hard_link(room.join("linked.md"), room.join("alias.md")).unwrap();
+    let vault_id = "VaultAaaa_0123456789abc";
+    let room_id = "RoomAaaa_0123456789abc";
+    let mut config = format_daemon_config(root);
+    config.vaults.push(VaultRegistration {
+        id: vault_id.into(),
+        path: room,
+        room: Some(room_id.into()),
+    });
+    save_config(&path, &config).unwrap();
+    let daemon = Daemon::start_openclast(&path, &data);
+    let at = format_release_token_time(&data);
+    let token = |jti| {
+        sign_format_token(
+            &[(vault_id, room_id)],
+            false,
+            Some("kwiry-cap+jwt"),
+            jti,
+            at,
+        )
+    };
+    assert_eq!(
+        request(&daemon.address, &token(1), "POST", "/v0/index", Some("{}")).0,
+        404
+    );
+    assert_eq!(search(&daemon.address, &token(2), "ordinary").len(), 1);
+    assert!(search(&daemon.address, &token(3), "restricted").is_empty());
+    daemon.stop();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn format_release_fr12_http_reports_all_missing_signed_indexes() {
+    let fixture = tempdir().unwrap();
+    let root = fixture.path();
+    let path = isolated_config(root);
+    let data = root.join("data");
+    let room = root.join("room");
+    fs::create_dir(&room).unwrap();
+    fs::write(room.join("index.md"), "synthetic middle witness").unwrap();
+    let signed = [
+        ("VaultAaaa_0123456789abc", "RoomAaaa_0123456789abc"),
+        ("VaultBbbb_0123456789abc", "RoomBbbb_0123456789abc"),
+        ("VaultCccc_0123456789abc", "RoomCccc_0123456789abc"),
+    ];
+    let mut config = format_daemon_config(root);
+    config.vaults.push(VaultRegistration {
+        id: signed[1].0.into(),
+        path: room,
+        room: Some(signed[1].1.into()),
+    });
+    save_config(&path, &config).unwrap();
+    let daemon = Daemon::start_openclast(&path, &data);
+    let at = format_release_token_time(&data);
+    let middle = sign_format_token(&signed[1..2], false, Some("kwiry-cap+jwt"), 1, at);
+    assert_eq!(search(&daemon.address, &middle, "witness").len(), 1);
+    let all = sign_format_token(&signed, false, Some("kwiry-cap+jwt"), 2, at);
+    let (status, body) = request(
+        &daemon.address,
+        &all,
+        "POST",
+        "/v0/search",
+        Some(r#"{"q":"witness","mode":"lexical","limit":20}"#),
+    );
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":{"code":"resource_unavailable","message":"an authorized resource is not available for search","resource_indexes":[0,2]}}"#
+    );
+    daemon.stop();
+}
+
+#[cfg(target_os = "linux")]
+fn format_release_token_time(data: &Path) -> u64 {
+    let clock = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let epoch: u64 = fs::read_to_string(data.join("replay-epoch"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait_for(|| clock() > epoch);
+    clock()
+}
+
 fn assert_startup_refused(
     config: &Path,
     data: &Path,

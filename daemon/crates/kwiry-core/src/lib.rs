@@ -80,8 +80,6 @@ pub use auth::{Principal, Scope, load_or_create_token, load_token, token_matches
 #[cfg(feature = "native")]
 pub use bootstrap::{DesktopBootstrap, bootstrap_desktop};
 #[cfg(feature = "native")]
-pub use chunk::ingest_vault;
-#[cfg(feature = "native")]
 pub use config::{
     ConfigLock, Paths, VaultRegistrationDisposition, acquire_config_lock, acquire_setup_lock,
     add_vault, ensure_vault_registration, load_config, load_config_for_paths, register_vault,
@@ -243,20 +241,45 @@ pub use typo::{
     TypoVocabularyCandidate, finalize_typo_suggestion, prepare_typo_suggestion,
 };
 
+/// Ingest desktop vaults without building an index. OpenClast callers must
+/// use `build_index`, which enforces the room boundaries before reading.
 #[cfg(feature = "native")]
 pub fn ingest_config(config: &Config) -> Result<IngestReport> {
+    if config.server.profile == HostProfile::OpenClast {
+        return Err(Error::State(
+            "openclast_ingestion_requires_room_walker: use build_index".to_owned(),
+        ));
+    }
     if config.vaults.is_empty() {
         return Err(Error::NoVaults);
     }
 
     let mut combined = IngestReport::default();
     for vault in &config.vaults {
-        let mut report = ingest_vault(vault);
+        let mut report = chunk::ingest_vault(vault);
         combined.documents += report.documents;
         combined.chunks.append(&mut report.chunks);
         combined.warnings.append(&mut report.warnings);
     }
     Ok(combined)
+}
+
+#[cfg(all(test, feature = "native"))]
+#[test]
+fn fr11_ingest_config_refuses_openclast_before_desktop_discovery() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("note.md"), "synthetic evidence").unwrap();
+    let mut config = Config::default();
+    config.vaults.push(VaultRegistration {
+        id: "fixture".into(),
+        path: fixture.path().to_owned(),
+        room: Some("room".into()),
+    });
+    assert_eq!(ingest_config(&config).unwrap().documents, 1);
+    config.server.profile = HostProfile::OpenClast;
+    assert!(
+        matches!(ingest_config(&config), Err(Error::State(message)) if message.starts_with("openclast_ingestion_requires_room_walker"))
+    );
 }
 
 #[cfg(feature = "native")]

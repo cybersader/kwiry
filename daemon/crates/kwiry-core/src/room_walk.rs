@@ -17,7 +17,7 @@ mod platform {
     use std::path::PathBuf;
     use std::time::UNIX_EPOCH;
 
-    use rustix::fs::{CWD, Dir, Mode, OFlags, ResolveFlags, openat2};
+    use rustix::fs::{AtFlags, CWD, Dir, Mode, OFlags, ResolveFlags, StatxFlags, openat2, statx};
 
     use super::*;
     use crate::format::SourceFormat;
@@ -34,6 +34,23 @@ mod platform {
 
     fn open_root(path: &Path) -> rustix::io::Result<File> {
         openat2(CWD, path, OPEN | OFlags::DIRECTORY, Mode::empty(), NO_LINKS).map(File::from)
+    }
+
+    pub(crate) fn open_root_for_boundary(path: &Path) -> crate::Result<File> {
+        open_root(path).map_err(probe_refusal)
+    }
+
+    pub(crate) fn descriptor_mount_id(root: &File) -> Option<u64> {
+        let info = statx(root, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID).ok()?;
+        let mount_id = (info.stx_mask & StatxFlags::MNT_ID.bits() != 0).then_some(info.stx_mnt_id);
+        #[cfg(test)]
+        if let Some(forced) = MOUNT_ID_OVERRIDE.with(|override_| {
+            let (target, forced) = override_.get()?;
+            (identity(&root.metadata().ok()?) == target).then_some(forced)
+        }) {
+            return forced;
+        }
+        mount_id
     }
 
     fn probe_refusal(error: rustix::io::Errno) -> crate::Error {
@@ -93,6 +110,7 @@ mod platform {
             let mut roots = BTreeMap::new();
             let mut failures = BTreeMap::new();
             let mut by_identity = BTreeMap::new();
+            let mut mount_ids = Vec::with_capacity(paths.len());
             for path in &paths {
                 let opened = open_root(path).ok().and_then(|file| {
                     let inode = identity(&file.metadata().ok()?);
@@ -106,15 +124,19 @@ mod platform {
                             "room root is shared with another registration",
                         );
                     }
+                    mount_ids.push(descriptor_mount_id(&file));
                     roots.insert(path.clone(), (file, inode));
                 } else {
+                    mount_ids.push(None);
                     failures.insert(path.clone(), "room root could not be opened safely");
                 }
             }
-            match crate::room_boundary::failures(&paths, config, data_root) {
+            match crate::room_boundary::walk_failures(&paths, &mount_ids, config, data_root) {
                 Ok(boundary) => {
                     for (path, failure) in paths.into_iter().zip(boundary) {
-                        if let Some(message) = failure {
+                        if let Some(message) = failure
+                            && roots.contains_key(&path)
+                        {
                             failures.insert(path, message);
                         }
                     }
@@ -166,7 +188,7 @@ mod platform {
                     Ok(Dir::new(std::os::fd::OwnedFd::from(file))?)
                 });
                 let Ok(mut dir) = dir else {
-                    skip(
+                    defect(
                         &mut enumeration,
                         vault,
                         &relative,
@@ -174,22 +196,45 @@ mod platform {
                     );
                     continue;
                 };
-                while let Some(entry) = dir.next() {
-                    let Ok(entry) = entry else {
-                        skip(
+                #[cfg(test)]
+                let mut observed_entry = false;
+                loop {
+                    #[cfg(test)]
+                    if observed_entry && should_interrupt_listing(&vault.path.join(&relative)) {
+                        defect(
                             &mut enumeration,
                             vault,
                             &relative,
                             "directory could not be enumerated safely",
                         );
                         break;
+                    }
+                    let entry = match dir.next() {
+                        None => {
+                            enumeration.directories.complete.insert(relative.clone());
+                            break;
+                        }
+                        Some(Err(_)) => {
+                            defect(
+                                &mut enumeration,
+                                vault,
+                                &relative,
+                                "directory could not be enumerated safely",
+                            );
+                            break;
+                        }
+                        Some(Ok(entry)) => entry,
                     };
                     let name = entry.file_name().to_bytes();
                     if name.starts_with(b".") {
                         continue;
                     }
+                    #[cfg(test)]
+                    {
+                        observed_entry = true;
+                    }
                     let Ok(name) = std::str::from_utf8(name) else {
-                        skip(
+                        defect(
                             &mut enumeration,
                             vault,
                             &relative,
@@ -204,7 +249,7 @@ mod platform {
                     };
                     // O_PATH avoids opening special files for I/O. Both the
                     // recorded identity and subsequent read use the captured root.
-                    let Ok(fd) = dir.fd().and_then(|dirfd| {
+                    let fd = match dir.fd().and_then(|dirfd| {
                         openat2(
                             dirfd,
                             name,
@@ -212,22 +257,36 @@ mod platform {
                             Mode::empty(),
                             ROOM_ONLY,
                         )
-                    }) else {
-                        skip(
-                            &mut enumeration,
-                            vault,
-                            &path,
-                            "entry excluded by room boundary",
-                        );
-                        continue;
+                    }) {
+                        Ok(fd) => fd,
+                        Err(rustix::io::Errno::LOOP | rustix::io::Errno::XDEV) => {
+                            skip(
+                                &mut enumeration,
+                                vault,
+                                &path,
+                                "entry excluded by room boundary",
+                            );
+                            continue;
+                        }
+                        Err(_) => {
+                            defect(
+                                &mut enumeration,
+                                vault,
+                                &path,
+                                "entry could not be opened safely",
+                            );
+                            enumeration.directories.unverified_entries.insert(path);
+                            continue;
+                        }
                     };
                     let Ok(metadata) = File::from(fd).metadata() else {
-                        skip(
+                        defect(
                             &mut enumeration,
                             vault,
                             &path,
                             "entry metadata could not be read safely",
                         );
+                        enumeration.directories.unverified_entries.insert(path);
                         continue;
                     };
                     if metadata.is_dir() {
@@ -235,6 +294,10 @@ mod platform {
                         if found != *inode && self.identities.contains(&found) {
                             return (nesting_failure(vault), None);
                         }
+                        enumeration
+                            .directories
+                            .seen_directories
+                            .insert(path.clone());
                         pending.push_back((path, found));
                         continue;
                     }
@@ -297,6 +360,38 @@ mod platform {
                 }),
             )
         }
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        static INTERRUPT_LISTING: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+        static MOUNT_ID_OVERRIDE: Cell<Option<(Inode, Option<u64>)>> = const { Cell::new(None) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_mount_id_override<T>(
+        path: &Path,
+        forced: Option<u64>,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        let id = identity(&std::fs::metadata(path).unwrap());
+        let previous = MOUNT_ID_OVERRIDE.replace(Some((id, forced)));
+        let result = run();
+        MOUNT_ID_OVERRIDE.set(previous);
+        result
+    }
+
+    #[cfg(test)]
+    fn should_interrupt_listing(path: &Path) -> bool {
+        INTERRUPT_LISTING.with(|fault| fault.borrow().as_deref() == Some(path))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_interrupted_listing<T>(path: PathBuf, run: impl FnOnce() -> T) -> T {
+        let previous = INTERRUPT_LISTING.replace(Some(path));
+        let result = run();
+        INTERRUPT_LISTING.set(previous);
+        result
     }
 
     // Check every reopened directory component, not only the final inode.
@@ -476,7 +571,11 @@ mod platform {
 }
 
 pub use platform::probe_openclast_ingestion;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use platform::with_interrupted_listing;
 pub(crate) use platform::{RoomRead, RoomRoots, single_link};
+#[cfg(target_os = "linux")]
+pub(crate) use platform::{descriptor_mount_id, open_root_for_boundary};
 
 fn failed_walk(vault: &VaultRegistration, message: &str) -> EnumerationResult {
     let mut enumeration = empty_enumeration();
@@ -497,6 +596,7 @@ fn empty_enumeration() -> EnumerationResult {
         warnings: Vec::new(),
         completeness: EnumerationCompleteness::Complete,
         excluded: BTreeSet::new(),
+        directories: Default::default(),
     }
 }
 
@@ -507,6 +607,15 @@ fn skip(
     message: &str,
 ) {
     enumeration.excluded.insert(relative.to_owned());
+    defect(enumeration, vault, relative, message);
+}
+
+fn defect(
+    enumeration: &mut EnumerationResult,
+    vault: &VaultRegistration,
+    relative: &str,
+    message: &str,
+) {
     enumeration.completeness = EnumerationCompleteness::Defective;
     enumeration.warnings.push(IngestWarning {
         path: vault.path.join(Path::new(relative)),
@@ -517,6 +626,62 @@ fn skip(
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr10_mount_ids_bind_config_and_walk_to_room_descriptors() {
+        use std::fs;
+        let fixture = tempfile::tempdir().unwrap();
+        let a = fixture.path().join("a");
+        let b = fixture.path().join("b");
+        let settings = fixture.path().join("settings/config.toml");
+        let data = fixture.path().join("data");
+        let register = |id: &str, path: &Path| {
+            fs::create_dir(path).unwrap();
+            fs::write(path.join("index.md"), "synthetic evidence").unwrap();
+            VaultRegistration {
+                id: id.into(),
+                path: path.into(),
+                room: Some(id.into()),
+            }
+        };
+        let mut config = Config::default();
+        config.server.profile = crate::HostProfile::OpenClast;
+        config.auth.openclast = Some(crate::OpenClastAuthConfig {
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
+            issuer: "synthetic-issuer".into(),
+            audience: "synthetic-audience".into(),
+            jwks_file: fixture.path().join("keys.json"),
+            max_token_ttl_seconds: 60,
+            workload_subject_allowlist: vec![],
+            legacy_identity_accept_until: None,
+        });
+        config.vaults = vec![register("a", &a), register("b", &b)];
+        crate::save_config(&settings, &config).unwrap();
+        let paths = crate::Paths::resolve(Some(settings), Some(data.clone())).unwrap();
+        let loaded = crate::load_config_for_paths(&paths).unwrap();
+        for id in [None, Some(u64::MAX)] {
+            platform::with_mount_id_override(&a, id, || {
+                let error = crate::load_config_for_paths(&paths).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("opened room mount does not match mountinfo")
+                );
+                assert!(!data.exists());
+                let roots = RoomRoots::capture(&loaded, Some(&data));
+                let (failed, reader) = roots.walk(&loaded.vaults[0]);
+                assert!(reader.is_none());
+                assert!(failed.files.is_empty());
+                assert!(!failed.completeness.may_infer_deletions());
+                assert_eq!(failed.warnings[0].path, a);
+                assert_eq!(
+                    failed.warnings[0].message,
+                    "opened room mount does not match mountinfo"
+                );
+                assert_eq!(roots.walk(&loaded.vaults[1]).0.files.len(), 1);
+            });
+        }
+    }
 
     #[test]
     fn fr5_n40_scope_and_move_after_capture() {

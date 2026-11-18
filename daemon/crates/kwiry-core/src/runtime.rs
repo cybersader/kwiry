@@ -207,12 +207,12 @@ impl SearchRuntime {
                 "authorized resource search is unavailable in the desktop profile".to_owned(),
             )),
             ActiveSearchIndex::OpenClast(index) => {
-                self.check_authorized_resources(index, filters, resources)?;
+                let opened = self.open_authorized_resources(index, filters, resources)?;
                 index.search_with_profile(
                     query,
                     limit,
                     filters,
-                    resources,
+                    &opened,
                     profile,
                     query_time_epoch_seconds,
                 )
@@ -233,8 +233,8 @@ impl SearchRuntime {
                 "authorized resource search is unavailable in the desktop profile".to_owned(),
             )),
             ActiveSearchIndex::OpenClast(index) => {
-                self.check_authorized_resources(index, filters, resources)?;
-                let outcome = index.search_with_quality(query, limit, filters, resources)?;
+                let opened = self.open_authorized_resources(index, filters, resources)?;
+                let outcome = search_opened_with_quality(&opened, query, limit, filters)?;
                 Ok(GenerationSearchResult {
                     generation: index.scoped_generation(filters, resources)?,
                     hits: outcome.hits,
@@ -422,7 +422,7 @@ impl SearchRuntime {
 
     fn record_room_walks(
         &self,
-        walks: &BTreeMap<ResourceKey, bool>,
+        walks: &BTreeMap<ResourceKey, RoomWalkOutcome>,
         max_stale_serve_seconds: u64,
         started: Instant,
         published: bool,
@@ -431,20 +431,26 @@ impl SearchRuntime {
             .resource_freshness
             .lock()
             .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
-        for (resource, completed) in walks {
+        for (resource, outcome) in walks {
             let state = states.entry(resource.clone()).or_default();
-            if *completed {
+            if matches!(outcome, RoomWalkOutcome::Complete) {
                 if published {
                     state.walk = RoomWalkState::Ready;
                 }
             } else {
-                // Carry the first failure across retries. Without a successful
-                // walk in this process we cannot establish a grace period:
-                // a restart must not restore expired access.
+                // Carry the first failure across retries. A restart must not
+                // give unverified rows a new grace period. An initial partial
+                // walk may serve only when it retained no unverified rows.
+                state.state = IndexFreshnessState::Stale;
                 let since = match state.walk {
                     RoomWalkState::Ready => Some(started),
                     RoomWalkState::Failed { since, .. } => since,
-                    RoomWalkState::Unchecked => None,
+                    RoomWalkState::Unchecked => match outcome {
+                        RoomWalkOutcome::Incomplete {
+                            retained_unverified: false,
+                        } => Some(started),
+                        _ => None,
+                    },
                 };
                 state.walk = RoomWalkState::Failed {
                     since,
@@ -455,29 +461,29 @@ impl SearchRuntime {
         Ok(())
     }
 
-    fn check_authorized_resources(
+    fn open_authorized_resources<'a>(
         &self,
         index: &PartitionedSearchIndex,
         filters: &SearchFilters,
-        resources: &[ResourceKey],
-    ) -> Result<()> {
+        resources: &'a [ResourceKey],
+    ) -> Result<OpenedResources<'a>> {
         let states = self
             .resource_freshness
             .lock()
             .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
-        self.check_authorized_resources_with_state(index, filters, resources, &states)
+        self.open_authorized_resources_with_state(index, filters, resources, &states)
     }
 
-    fn check_authorized_resources_with_state(
+    fn open_authorized_resources_with_state<'a>(
         &self,
         index: &PartitionedSearchIndex,
         filters: &SearchFilters,
-        resources: &[ResourceKey],
+        resources: &'a [ResourceKey],
         states: &BTreeMap<ResourceKey, ResourceFreshness>,
-    ) -> Result<()> {
+    ) -> Result<OpenedResources<'a>> {
         let registered = self.registered_resources.load();
         let now = Instant::now();
-        index.check_resources_against(filters, resources, |resource| {
+        index.open_resources(filters, resources, |resource| {
             registered
                 .as_ref()
                 .is_none_or(|keys| keys.contains(resource))
@@ -509,7 +515,7 @@ impl SearchRuntime {
             ));
         };
         let effective = effective_resources(filters, resources);
-        self.check_authorized_resources_with_state(index, filters, resources, &states)?;
+        self.open_authorized_resources_with_state(index, filters, resources, &states)?;
         let current_generation = index.scoped_generation(filters, resources)?;
         let mut worst = IndexFreshnessState::Current;
         for resource in effective {
@@ -575,6 +581,11 @@ struct ResourceFreshness {
     state: IndexFreshnessState,
     epoch: u64,
     walk: RoomWalkState,
+}
+
+enum RoomWalkOutcome {
+    Complete,
+    Incomplete { retained_unverified: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -711,6 +722,29 @@ struct PartitionedSearchIndex {
     readers: std::sync::Mutex<BTreeMap<ResourceKey, Arc<SearchIndex>>>,
 }
 
+type OpenedResources<'a> = BTreeMap<&'a ResourceKey, Arc<SearchIndex>>;
+
+fn partition_readers<'a>(opened: &'a OpenedResources<'_>) -> Vec<PartitionReader<'a>> {
+    opened
+        .iter()
+        .map(|(resource, partition)| PartitionReader {
+            index: &partition.index,
+            fields: &partition.fields,
+            reader: &partition.reader,
+            resource,
+        })
+        .collect()
+}
+
+fn search_opened_with_quality(
+    opened: &OpenedResources<'_>,
+    query: &str,
+    limit: usize,
+    filters: &SearchFilters,
+) -> Result<LexicalSearchOutcome> {
+    search_partitions_with_quality(&partition_readers(opened), query, limit, filters)
+}
+
 impl PartitionedSearchIndex {
     fn open(active: &crate::generation::GenerationPaths) -> Result<Self> {
         let layout = GenerationLayout::load(&active.layout_path)?;
@@ -750,33 +784,39 @@ impl PartitionedSearchIndex {
         })
     }
 
-    fn check_resources(&self, filters: &SearchFilters, resources: &[ResourceKey]) -> Result<()> {
-        self.check_resources_against(filters, resources, |_| true)
-    }
-
-    fn check_resources_against(
+    /// Open the complete effective set in signed order before query work.
+    /// Retain the verified handles, but report all unavailable signed indexes
+    /// together, whether registration, expiry or reader opening failed.
+    fn open_resources<'a>(
         &self,
         filters: &SearchFilters,
-        resources: &[ResourceKey],
+        resources: &'a [ResourceKey],
         is_available: impl Fn(&ResourceKey) -> bool,
-    ) -> Result<()> {
-        let indexes: Vec<_> = resources
-            .iter()
-            .enumerate()
-            .filter_map(|(index, resource)| {
-                (matches_resource_filters(filters, resource)
-                    && (!self.partition_dirs.contains_key(resource) || !is_available(resource)))
-                .then_some(index)
-            })
-            .collect();
-        if !indexes.is_empty() {
-            return Err(if crate::source::ROOM_INCLUSIVE_IDS {
-                Error::UnavailableResourceIndexes(indexes)
+    ) -> Result<OpenedResources<'a>> {
+        let mut indexes = Vec::new();
+        let mut opened = BTreeMap::new();
+        for (index, resource) in resources.iter().enumerate() {
+            if !matches_resource_filters(filters, resource) {
+                continue;
+            }
+            let reader = self
+                .partition_dirs
+                .get(resource)
+                .filter(|_| is_available(resource))
+                .and_then(|path| self.authorized_reader(resource, path).ok());
+            if let Some(reader) = reader {
+                opened.insert(resource, reader);
             } else {
-                Error::ResourceUnavailable
-            });
+                indexes.push(index);
+            }
         }
-        Ok(())
+        if indexes.is_empty() {
+            Ok(opened)
+        } else if crate::source::ROOM_INCLUSIVE_IDS {
+            Err(Error::UnavailableResourceIndexes(indexes))
+        } else {
+            Err(Error::ResourceUnavailable)
+        }
     }
 
     fn scoped_generation(
@@ -784,7 +824,6 @@ impl PartitionedSearchIndex {
         filters: &SearchFilters,
         resources: &[ResourceKey],
     ) -> Result<String> {
-        self.check_resources(filters, resources)?;
         let effective = effective_resources(filters, resources);
         let mut digest = Sha256::new();
         digest.update(b"L");
@@ -811,26 +850,22 @@ impl PartitionedSearchIndex {
             .readers
             .lock()
             .map_err(|_| Error::Index("partition reader cache mutex poisoned".to_owned()))?;
+        // A cached reader must not make a removed partition servable.
+        if !index_dir.join("meta.json").is_file() {
+            readers.remove(resource);
+            return Err(Error::ResourceUnavailable);
+        }
         if let Some(reader) = readers.get(resource) {
             return Ok(reader.clone());
         }
-        let partition = match SearchIndex::open(self.generation.clone(), index_dir) {
-            Ok(partition) => partition,
-            // The generation directory was pruned while this stale reader
-            // was still installed: a typed retriable state, not an
-            // internal error. The next generation swap resolves it.
-            Err(_) if !index_dir.join("meta.json").is_file() => {
-                return Err(Error::IndexBuilding);
-            }
-            Err(error) => return Err(error),
-        };
+        let partition = SearchIndex::open(self.generation.clone(), index_dir)?;
         partition.source_key_field()?;
         let partition = Arc::new(partition);
         readers.insert(resource.clone(), partition.clone());
         Ok(partition)
     }
 
-    #[cfg(any(test, feature = "internal-d5c-preview"))]
+    #[cfg(test)]
     fn search(
         &self,
         query: &str,
@@ -843,6 +878,7 @@ impl PartitionedSearchIndex {
             .hits)
     }
 
+    #[cfg(test)]
     fn search_with_quality(
         &self,
         query: &str,
@@ -850,26 +886,8 @@ impl PartitionedSearchIndex {
         filters: &SearchFilters,
         resources: &[ResourceKey],
     ) -> Result<LexicalSearchOutcome> {
-        self.check_resources(filters, resources)?;
-        let selected = effective_resources(filters, resources)
-            .into_iter()
-            .map(|resource| (resource, &self.partition_dirs[resource]));
-
-        let opened = selected
-            .map(|(resource, index_dir)| {
-                Ok((resource, self.authorized_reader(resource, index_dir)?))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let readers = opened
-            .iter()
-            .map(|(resource, partition)| PartitionReader {
-                index: &partition.index,
-                fields: &partition.fields,
-                reader: &partition.reader,
-                resource,
-            })
-            .collect::<Vec<_>>();
-        search_partitions_with_quality(&readers, query, limit, filters)
+        let opened = self.open_resources(filters, resources, |_| true)?;
+        search_opened_with_quality(&opened, query, limit, filters)
     }
 
     #[cfg(feature = "internal-d5c-preview")]
@@ -878,33 +896,14 @@ impl PartitionedSearchIndex {
         query: &str,
         limit: usize,
         filters: &SearchFilters,
-        resources: &[ResourceKey],
+        opened: &OpenedResources<'_>,
         profile: &RelevanceProfile,
         query_time_epoch_seconds: u64,
     ) -> Result<Vec<SearchHit>> {
         if matches!(profile, RelevanceProfile::LexicalV1) {
-            return self.search(query, limit, filters, resources);
+            return Ok(search_opened_with_quality(opened, query, limit, filters)?.hits);
         }
-
-        self.check_resources(filters, resources)?;
-        let selected = effective_resources(filters, resources)
-            .into_iter()
-            .map(|resource| (resource, &self.partition_dirs[resource]));
-
-        let opened = selected
-            .map(|(resource, index_dir)| {
-                Ok((resource, self.authorized_reader(resource, index_dir)?))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let readers = opened
-            .iter()
-            .map(|(resource, partition)| PartitionReader {
-                index: &partition.index,
-                fields: &partition.fields,
-                reader: &partition.reader,
-                resource,
-            })
-            .collect::<Vec<_>>();
+        let readers = partition_readers(opened);
         search_partitions_with_profile(
             &readers,
             query,
@@ -1567,6 +1566,8 @@ struct OpenClastIndexManager {
 
 impl OpenClastIndexManager {
     fn open(config: Config, data_dir: &Path, runtime: SearchRuntime) -> Result<Self> {
+        #[cfg(not(target_os = "linux"))]
+        crate::room_walk::probe_openclast_ingestion(data_dir, &config.vaults)?;
         crate::room_boundary::validate_data_root(&config, data_dir)?;
         let data_root = DataRoot::new(data_dir);
         let lock = data_root.acquire_writer_lock()?;
@@ -1689,7 +1690,7 @@ impl OpenClastIndexManager {
         config: Config,
         scope: &ReconcileScope,
         incomplete: &mut BTreeSet<ResourceKey>,
-        walks: &mut BTreeMap<ResourceKey, bool>,
+        walks: &mut BTreeMap<ResourceKey, RoomWalkOutcome>,
     ) -> Result<ReconcileReport> {
         let mut plan = ReconcilePlan::new(&self.manifest);
         let mut next_room_retries = BTreeSet::new();
@@ -1775,7 +1776,12 @@ impl OpenClastIndexManager {
             let room_roots =
                 crate::room_walk::RoomRoots::capture(&config, Some(self.data_root.path()));
             if !vault.path.is_dir() {
-                walks.insert(resource.clone(), false);
+                walks.insert(
+                    resource.clone(),
+                    RoomWalkOutcome::Incomplete {
+                        retained_unverified: true,
+                    },
+                );
                 incomplete.insert(resource.clone());
                 unavailable_vaults.push(vault.id.clone());
                 for (key, file) in &self.manifest.files {
@@ -1823,7 +1829,6 @@ impl OpenClastIndexManager {
                 },
                 &mut audit,
             );
-            walks.insert(resource.clone(), !observed.whole_walk_failed);
             if !observed.whole_walk_failed {
                 next_resources.insert(resource.clone());
             }
@@ -1835,6 +1840,8 @@ impl OpenClastIndexManager {
             // the configured evidence basis already describes metadata reuse.
             // Its shared budget must not couple one room's freshness to another.
             let excluded_paths = observed.enumeration.excluded;
+            let directory_evidence = observed.enumeration.directories;
+            let mut retained_unverified = observed.whole_walk_failed;
             warnings.extend(observed.enumeration.warnings);
             source_files_read += observed.source_files_read;
             source_bytes_read += observed.source_bytes_read;
@@ -1899,7 +1906,9 @@ impl OpenClastIndexManager {
                 let excluded = excluded_paths.iter().any(|path| {
                     path.is_empty() || Path::new(&previous_file.path).starts_with(path)
                 });
-                if discovery_incomplete && !excluded {
+                if !excluded && !directory_evidence.proves_absent(&previous_file.path) {
+                    retained_unverified = true;
+                    incomplete.insert(resource.clone());
                     plan.retain_source(&key, previous_file, RetentionReason::IncompleteEnumeration);
                     continue;
                 }
@@ -1916,6 +1925,14 @@ impl OpenClastIndexManager {
                     plan.remove_index_source(key, PartitionScope::Resource(resource.clone()));
                 }
             }
+            let outcome = if incomplete.contains(&resource) {
+                RoomWalkOutcome::Incomplete {
+                    retained_unverified,
+                }
+            } else {
+                RoomWalkOutcome::Complete
+            };
+            walks.insert(resource, outcome);
         }
 
         let next_layout = GenerationLayout::openclast(next_resources)?;
@@ -2938,7 +2955,7 @@ mod tests {
                 std::slice::from_ref(&resource),
             )
             .unwrap_err();
-        assert!(matches!(error, Error::IndexBuilding));
+        assert!(matches!(error, Error::UnavailableResourceIndexes(indexes) if indexes == [0]));
     }
 
     #[cfg_attr(
@@ -3207,6 +3224,206 @@ mod tests {
         });
         config.vaults = vaults;
         config
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fr9_partial_directory_keeps_only_uncertain_rows_stale() {
+        for cap in [0, 60] {
+            let fixture = tempdir().unwrap();
+            let a = fixture.path().join("a");
+            let b = fixture.path().join("b");
+            let listed = a.join("listed");
+            let linked = a.join("linked.md");
+            let hidden = a.join(".linked.md");
+            let unread = a.join("unread");
+            let data = fixture.path().join("data");
+            fs::create_dir_all(&listed).unwrap();
+            fs::create_dir_all(&unread).unwrap();
+            fs::create_dir(&b).unwrap();
+            fs::write(listed.join("moved.md"), "synthetic departed").unwrap();
+            fs::write(unread.join("removed.md"), "synthetic uncertain").unwrap();
+            fs::write(unread.join("kept.md"), "synthetic remaining").unwrap();
+            let registration = |name: &str, path| VaultRegistration {
+                id: name.into(),
+                path,
+                room: Some(name.into()),
+            };
+            let mut config =
+                openclast_config(vec![registration("a", a), registration("b", b.clone())]);
+            config.indexing.max_stale_serve_seconds = cap;
+            build_index(&config, &data).unwrap();
+            let runtime = SearchRuntime::new();
+            let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+            manager.reconcile(config.clone()).unwrap();
+            let a_key = config.resource_key(&config.vaults[0]).unwrap();
+            let a_only = std::slice::from_ref(&a_key);
+            let filters = SearchFilters::default();
+            let search = |q| runtime.search_authorized_with_generation(q, 10, &filters, a_only);
+            assert_eq!(search("departed").unwrap().hits.len(), 1);
+            fs::rename(listed.join("moved.md"), b.join("moved.md")).unwrap();
+            fs::remove_file(unread.join("removed.md")).unwrap();
+            fs::write(&hidden, "synthetic link fixture").unwrap();
+            fs::hard_link(&hidden, &linked).unwrap();
+            let partial = crate::room_walk::with_interrupted_listing(unread.clone(), || {
+                manager.reconcile(config.clone())
+            })
+            .unwrap();
+            assert!(partial.warnings.iter().any(|warning| warning.path == unread
+                && warning.message == "directory could not be enumerated safely"));
+            assert!(
+                !partial
+                    .manifest
+                    .files
+                    .values()
+                    .any(|row| row.resource.as_ref() == Some(&a_key)
+                        && row.path == "listed/moved.md")
+            );
+            assert!(
+                partial
+                    .manifest
+                    .files
+                    .values()
+                    .any(|row| row.path == "unread/removed.md")
+            );
+            if cap == 0 {
+                assert!(
+                    matches!(search("uncertain"), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
+                );
+            } else {
+                assert!(search("departed").unwrap().hits.is_empty());
+                let retained = search("uncertain").unwrap();
+                assert_eq!(retained.hits.len(), 1);
+                assert_eq!(
+                    runtime
+                        .authorized_freshness(&filters, a_only, &retained.generation)
+                        .unwrap()
+                        .state,
+                    IndexFreshnessState::Stale
+                );
+            }
+            assert!(
+                partial.warnings.iter().any(|warning| warning.path == linked
+                    && warning.message == "hard-linked file excluded")
+            );
+            fs::remove_file(linked).unwrap();
+            let full = manager.reconcile(config).unwrap();
+            assert!(full.warnings.is_empty());
+            let deleted = search("uncertain").unwrap();
+            assert!(deleted.hits.is_empty());
+            assert_eq!(
+                runtime
+                    .authorized_freshness(&filters, a_only, &deleted.generation)
+                    .unwrap()
+                    .state,
+                IndexFreshnessState::Current
+            );
+            manager.shutdown().unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fr12_aggregates_disappeared_cold_and_cached_partitions() {
+        let fixture = tempdir().unwrap();
+        let data = fixture.path().join("data");
+        let config = openclast_config(
+            ["a", "b", "c"]
+                .into_iter()
+                .map(|id| {
+                    let path = fixture.path().join(id);
+                    fs::create_dir(&path).unwrap();
+                    fs::write(path.join("note.md"), "synthetic needle").unwrap();
+                    VaultRegistration {
+                        id: id.into(),
+                        path,
+                        room: Some(id.into()),
+                    }
+                })
+                .collect(),
+        );
+        build_index(&config, &data).unwrap();
+        let active = DataRoot::new(&data).active().unwrap().unwrap();
+        let index = PartitionedSearchIndex::open(&active).unwrap();
+        let signed: Vec<_> = config
+            .vaults
+            .iter()
+            .map(|v| config.resource_key(v).unwrap())
+            .collect();
+        let filters = SearchFilters::default();
+        assert_eq!(
+            index
+                .search("needle", 10, &filters, &signed[..1])
+                .unwrap()
+                .len(),
+            1
+        );
+        for i in [0, 2] {
+            fs::remove_dir_all(partition_index_dir(&active.partitions_dir, &signed[i])).unwrap();
+        }
+        assert!(
+            matches!(index.search("needle", 10, &filters, &signed), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0, 2])
+        );
+        assert_eq!(
+            index
+                .search("needle", 10, &filters, &signed[1..2])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fr11_public_index_build_and_reconcile_use_the_room_walker() {
+        let fixture = tempdir().unwrap();
+        let data = fixture.path().join("data");
+        let path = fixture.path().join("room");
+        fs::create_dir(&path).unwrap();
+        let config = openclast_config(vec![VaultRegistration {
+            id: "vault".into(),
+            path: path.clone(),
+            room: Some("room".into()),
+        }]);
+        fs::write(path.join("ordinary.md"), "ordinary fixture").unwrap();
+        fs::write(path.join("linked.md"), "synthetic private fixture").unwrap();
+        fs::hard_link(path.join("linked.md"), path.join("alias.md")).unwrap();
+        let stats = build_index(&config, &data).unwrap();
+        assert_eq!(stats.documents, 1);
+        let resources = [config.resource_key(&config.vaults[0]).unwrap()];
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let counters = |report: ReconcileReport| {
+            report
+                .warnings
+                .iter()
+                .filter(|w| w.message == "hard-linked file excluded")
+                .count()
+        };
+        assert_eq!(counters(manager.reconcile(config.clone()).unwrap()), 2);
+        assert_eq!(
+            counters(
+                manager
+                    .reconcile_scoped(config, &ReconcileScope::Full)
+                    .unwrap()
+            ),
+            2
+        );
+        let filters = SearchFilters::default();
+        assert!(
+            runtime
+                .search_authorized("private", 10, &filters, &resources)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            runtime
+                .search_authorized("ordinary", 10, &filters, &resources)
+                .unwrap()
+                .len(),
+            1
+        );
+        manager.shutdown().unwrap();
     }
 
     #[cfg(target_os = "linux")]

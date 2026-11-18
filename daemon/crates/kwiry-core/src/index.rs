@@ -212,6 +212,8 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
     }
 
     if config.server.profile == HostProfile::OpenClast {
+        #[cfg(not(target_os = "linux"))]
+        crate::room_walk::probe_openclast_ingestion(data_dir, &config.vaults)?;
         crate::room_boundary::validate_data_root(config, data_dir)?;
     }
     let data_root = DataRoot::new(data_dir);

@@ -39,7 +39,25 @@ pub(crate) fn validate(config: &Config, data_root: Option<&Path>) -> Result<()> 
         .map(|vault| fs::canonicalize(&vault.path))
         .collect::<io::Result<Vec<_>>>()
         .map_err(|_| boundary_error("room root cannot be resolved"))?;
-    match failures(&roots, config, data_root)?
+    if roots.is_empty() {
+        return Ok(());
+    }
+    // Keep the room handles live until the same snapshot has been checked.
+    #[cfg(target_os = "linux")]
+    let opened = roots
+        .iter()
+        .map(|path| crate::room_walk::open_root_for_boundary(path))
+        .collect::<Result<Vec<_>>>()?;
+    #[cfg(target_os = "linux")]
+    let mount_ids = opened
+        .iter()
+        .map(crate::room_walk::descriptor_mount_id)
+        .collect::<Vec<_>>();
+    #[cfg(target_os = "linux")]
+    let ids = Some(mount_ids.as_slice());
+    #[cfg(not(target_os = "linux"))]
+    let ids = None;
+    match compare(&roots, &state_paths(config, data_root)?, true, ids)?
         .into_iter()
         .flatten()
         .next()
@@ -62,7 +80,7 @@ pub(crate) fn validate_data_root(config: &Config, data_root: &Path) -> Result<()
         .collect();
     let data_root = resolve_state_path(data_root)
         .map_err(|_| boundary_error("Kwiry data root cannot be resolved"))?;
-    let failures = compare(&rooms, &[data_root], false)?;
+    let failures = compare(&rooms, &[data_root], false, None)?;
     if failures.iter().any(Option::is_some) {
         return Err(boundary_error(
             "Kwiry data root is not separate from the room roots",
@@ -71,15 +89,26 @@ pub(crate) fn validate_data_root(config: &Config, data_root: &Path) -> Result<()
     Ok(())
 }
 
-pub(crate) fn failures(
+#[cfg(target_os = "linux")]
+pub(crate) fn walk_failures(
     roots: &[PathBuf],
+    mount_ids: &[Option<u64>],
     config: &Config,
     data_root: Option<&Path>,
 ) -> Result<Vec<Failure>> {
     if roots.is_empty() {
         return Ok(Vec::new());
     }
-    let state = config
+    compare(
+        roots,
+        &state_paths(config, data_root)?,
+        true,
+        Some(mount_ids),
+    )
+}
+
+fn state_paths(config: &Config, data_root: Option<&Path>) -> Result<Vec<PathBuf>> {
+    config
         .openclast_state_paths
         .iter()
         .map(PathBuf::as_path)
@@ -93,11 +122,17 @@ pub(crate) fn failures(
         )
         .map(resolve_state_path)
         .collect::<io::Result<Vec<_>>>()
-        .map_err(|_| boundary_error("Kwiry state path cannot be resolved"))?;
-    compare(roots, &state, true)
+        .map_err(|_| boundary_error("Kwiry state path cannot be resolved"))
 }
 
-fn compare(roots: &[PathBuf], state: &[PathBuf], compare_rooms: bool) -> Result<Vec<Failure>> {
+fn compare(
+    roots: &[PathBuf],
+    state: &[PathBuf],
+    compare_rooms: bool,
+    descriptor_mount_ids: Option<&[Option<u64>]>,
+) -> Result<Vec<Failure>> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = descriptor_mount_ids;
     let mut failures = vec![None; roots.len()];
     for (i, room) in roots.iter().enumerate() {
         for (j, other) in roots[..i].iter().enumerate() {
@@ -111,7 +146,13 @@ fn compare(roots: &[PathBuf], state: &[PathBuf], compare_rooms: bool) -> Result<
         }
     }
     #[cfg(target_os = "linux")]
-    linux::validate_mounts(roots, state, &mut failures, compare_rooms)?;
+    linux::validate_mounts(
+        roots,
+        state,
+        &mut failures,
+        compare_rooms,
+        descriptor_mount_ids,
+    )?;
     Ok(failures)
 }
 
@@ -177,7 +218,7 @@ mod linux {
             .collect()
     }
 
-    fn location<'a>(mounts: &[Mount<'a>], path: &Path) -> Result<(&'a [u8], PathBuf)> {
+    fn location<'a>(mounts: &[Mount<'a>], path: &Path) -> Result<Location<'a>> {
         let mut roots = mounts.iter().filter(|mount| {
             mount.point == Path::new("/")
                 && !mounts
@@ -212,7 +253,27 @@ mod linux {
             mount = next;
         }
         let below_mount = path.strip_prefix(&mount.point).expect("covering mount");
-        Ok((mount.device, mount.root.join(below_mount)))
+        let mount_id = std::str::from_utf8(mount.id)
+            .ok()
+            .and_then(|id| id.parse().ok())
+            .ok_or_else(|| boundary_error("invalid mount ID"))?;
+        Ok(Location {
+            mount_id,
+            device: mount.device,
+            path: mount.root.join(below_mount),
+        })
+    }
+
+    struct Location<'a> {
+        mount_id: u64,
+        device: &'a [u8],
+        path: PathBuf,
+    }
+
+    impl Location<'_> {
+        fn overlaps(&self, other: &Self) -> bool {
+            self.device == other.device && overlap(&self.path, &other.path)
+        }
     }
 
     pub(super) fn validate_mounts(
@@ -220,10 +281,18 @@ mod linux {
         state: &[PathBuf],
         failures: &mut [Failure],
         compare_rooms: bool,
+        descriptor_mount_ids: Option<&[Option<u64>]>,
     ) -> Result<()> {
         let bytes = fs::read("/proc/self/mountinfo")
             .map_err(|_| boundary_error("mountinfo is unavailable"))?;
-        validate_mount_snapshot(&bytes, rooms, state, failures, compare_rooms)
+        validate_mount_snapshot(
+            &bytes,
+            rooms,
+            state,
+            failures,
+            compare_rooms,
+            descriptor_mount_ids,
+        )
     }
 
     fn validate_mount_snapshot(
@@ -232,6 +301,7 @@ mod linux {
         state: &[PathBuf],
         failures: &mut [Failure],
         compare_rooms: bool,
+        descriptor_mount_ids: Option<&[Option<u64>]>,
     ) -> Result<()> {
         let mounts = parse_mounts(bytes)?;
         let room_keys: Vec<_> = rooms.iter().map(|path| location(&mounts, path)).collect();
@@ -240,28 +310,53 @@ mod linux {
             .map(|path| location(&mounts, path))
             .collect::<Result<Vec<_>>>()?;
         for (i, key) in room_keys.iter().enumerate() {
-            let Ok((dev, room)) = key else {
+            let Ok(room) = key else {
                 failures[i] = Some("room mount could not be checked");
                 continue;
             };
             for (j, other) in room_keys[..i].iter().enumerate() {
-                if compare_rooms
-                    && other
-                        .as_ref()
-                        .is_ok_and(|(other_dev, path)| dev == other_dev && overlap(room, path))
-                {
+                if compare_rooms && other.as_ref().is_ok_and(|other| room.overlaps(other)) {
                     failures[i] = Some("room roots overlap through a mount");
                     failures[j] = failures[i];
                 }
             }
-            if state
-                .iter()
-                .any(|(state_dev, path)| dev == state_dev && overlap(room, path))
-            {
+            if state.iter().any(|path| room.overlaps(path)) {
                 failures[i] = Some("room root overlaps Kwiry state through a mount");
             }
         }
+        // A path-only location is not evidence about an already-open room.
+        // Compare with the mount ID of that very descriptor from statx.
+        if let Some(ids) = descriptor_mount_ids {
+            for (i, key) in room_keys.iter().enumerate() {
+                if let Ok(room) = key
+                    && ids.get(i).copied().flatten() != Some(room.mount_id)
+                {
+                    failures[i] = Some("opened room mount does not match mountinfo");
+                }
+            }
+        }
         Ok(())
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn room_mount_snapshot_requires_matching_descriptor_mount_id() {
+        let snapshot = b"1 0 8:1 / / rw - ext4 fixture rw\n";
+        let rooms = ["/rooms/A".into(), "/rooms/B".into()];
+        for mount_id in [Some(1), Some(2), None] {
+            let mut failures = [None; 2];
+            validate_mount_snapshot(
+                snapshot,
+                &rooms,
+                &[],
+                &mut failures,
+                true,
+                Some(&[mount_id, Some(1)]),
+            )
+            .unwrap();
+            assert_eq!(failures[0].is_none(), mount_id == Some(1));
+            assert_eq!(failures[1], None, "an unrelated room remains available");
+        }
     }
 
     #[cfg(test)]
@@ -271,7 +366,7 @@ mod linux {
         let a = PathBuf::from("/aliases/A");
         let check = |rooms: &[PathBuf], state: &[PathBuf]| {
             let mut failures = vec![None; rooms.len()];
-            validate_mount_snapshot(mountinfo, rooms, state, &mut failures, true).unwrap();
+            validate_mount_snapshot(mountinfo, rooms, state, &mut failures, true, None).unwrap();
             failures
                 .into_iter()
                 .map(|result| result.is_some())
