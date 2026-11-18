@@ -74,7 +74,17 @@ jobs:
           test_bin=$(cargo test --locked -p kwiry-core --lib --no-run --message-format=json |
             jq -er 'select(.reason == "compiler-artifact" and .profile.test and .target.name == "kwiry_core") | .executable')
           parent_ns=$(readlink /proc/self/ns/mnt)
-          sudo unshare -rm env KWIRY_N24_PARENT_NS="$parent_ns" "$test_bin" --ignored --exact room_walk::tests::room_walk_n24_does_not_cross_a_bind_mount
+          scratch=$(mktemp -d)
+          trap 'rm -rf "$scratch"' EXIT
+          chmod 755 "$scratch"
+          install -m 755 "$test_bin" "$scratch/n24"
+          sudo unshare -rm env KWIRY_N24_PARENT_NS="$parent_ns" "$scratch/n24" --ignored --exact room_walk::tests::room_walk_n24_does_not_cross_a_bind_mount
+
+      - name: Exercise N26 with the actual build constant off
+        working-directory: daemon
+        run: |
+          sed -i 's/pub const ROOM_INCLUSIVE_IDS: bool = true;/pub const ROOM_INCLUSIVE_IDS: bool = false;/' crates/kwiry-core/src/source.rs
+          cargo test --locked -p kwiry-core --lib multi_room_registration_vectors_n19_n21_n26_n27_n29
 
   daemon-windows:
     name: Daemon Windows (fmt, clippy, tests)
@@ -126,6 +136,8 @@ jobs:
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - name: Format standalone adapter
         run: cargo fmt --manifest-path bench/portable-core-wasm/Cargo.toml --all -- --check
+      - name: Clippy standalone adapter
+        run: cargo clippy --locked --manifest-path bench/portable-core-wasm/Cargo.toml --all-targets --all-features -- -D warnings
       - name: Check and test portable-only core
         run: |
           cargo clippy --locked --manifest-path daemon/Cargo.toml -p kwiry-core --no-default-features --features portable --all-targets -- -D warnings

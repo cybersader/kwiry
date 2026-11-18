@@ -133,7 +133,7 @@ impl From<CapabilityResource> for ResourceKey {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct CapabilityConstraints {
-    max_limit: serde_json::Number,
+    max_limit: Box<serde_json::value::RawValue>,
     #[serde(flatten, skip_serializing)]
     unknown: HashMap<String, IgnoredAny>,
 }
@@ -354,8 +354,8 @@ impl CapabilityVerifier {
         {
             return Err(CapabilityFailure::Unauthorized);
         }
-        let raw_limit = claims.constraints.max_limit.to_string();
-        let integer = raw_limit.strip_prefix('-').unwrap_or(&raw_limit);
+        let raw_limit = claims.constraints.max_limit.get();
+        let integer = raw_limit.strip_prefix('-').unwrap_or(raw_limit);
         if !integer.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(CapabilityFailure::Unauthorized);
         }
@@ -426,11 +426,13 @@ impl CapabilityVerifier {
 
 /// Walk the original JSON before any flatten or Value map can drop keys.
 fn reject_duplicate_members(raw: &[u8]) -> Result<(), CapabilityFailure> {
-    struct Unique;
+    use serde_json::value::RawValue;
+
+    struct Unique(usize);
     impl<'de> serde::de::Visitor<'de> for Unique {
         type Value = ();
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("JSON without duplicate member names")
+            f.write_str("JSON containers without duplicate member names")
         }
         fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
             let mut keys = BTreeSet::new();
@@ -438,43 +440,38 @@ fn reject_duplicate_members(raw: &[u8]) -> Result<(), CapabilityFailure> {
                 if !keys.insert(key) {
                     return Err(A::Error::custom("duplicate JSON member"));
                 }
-                map.next_value_seed(Unique)?;
+                let raw = map.next_value::<&RawValue>()?;
+                inspect_child(raw.get(), self.0 + 1).map_err(A::Error::custom)?;
             }
             Ok(())
         }
         fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-            while seq.next_element_seed(Unique)?.is_some() {}
-            Ok(())
-        }
-        fn visit_bool<E>(self, _: bool) -> Result<(), E> {
-            Ok(())
-        }
-        fn visit_i64<E>(self, _: i64) -> Result<(), E> {
-            Ok(())
-        }
-        fn visit_u64<E>(self, _: u64) -> Result<(), E> {
-            Ok(())
-        }
-        fn visit_f64<E>(self, _: f64) -> Result<(), E> {
-            Ok(())
-        }
-        fn visit_str<E>(self, _: &str) -> Result<(), E> {
-            Ok(())
-        }
-        fn visit_unit<E>(self) -> Result<(), E> {
+            while let Some(raw) = seq.next_element::<&RawValue>()? {
+                inspect_child(raw.get(), self.0 + 1).map_err(A::Error::custom)?;
+            }
             Ok(())
         }
     }
-    impl<'de> serde::de::DeserializeSeed<'de> for Unique {
-        type Value = ();
-        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
-            d.deserialize_any(self)
+
+    fn inspect_child(raw: &str, depth: usize) -> Result<(), serde_json::Error> {
+        // A RawValue has already passed syntax validation. Walk containers
+        // without converting JSON numbers to floats (notably max_limit).
+        if !matches!(raw.as_bytes().first(), Some(b'{' | b'[')) {
+            return Ok(());
         }
+        if depth >= 128 {
+            return Err(serde_json::Error::custom(
+                "signed JSON is nested too deeply",
+            ));
+        }
+        let mut input = serde_json::Deserializer::from_str(raw);
+        serde::Deserializer::deserialize_any(&mut input, Unique(depth))?;
+        input.end()
     }
-    let mut input = serde_json::Deserializer::from_slice(raw);
-    serde::de::DeserializeSeed::deserialize(Unique, &mut input)
-        .and_then(|()| input.end())
-        .map_err(|_| CapabilityFailure::Unauthorized)
+
+    let raw: &RawValue =
+        serde_json::from_slice(raw).map_err(|_| CapabilityFailure::Unauthorized)?;
+    inspect_child(raw.get(), 0).map_err(|_| CapabilityFailure::Unauthorized)
 }
 
 fn allowed_algorithm(
@@ -540,6 +537,10 @@ mod tests {
         }
     }
 
+    fn limit(value: i64) -> Box<serde_json::value::RawValue> {
+        serde_json::value::to_raw_value(&value).unwrap()
+    }
+
     fn claims() -> CapabilityClaims {
         let now = unix_time().unwrap();
         CapabilityClaims {
@@ -560,7 +561,7 @@ mod tests {
                 unknown: HashMap::new(),
             }],
             constraints: CapabilityConstraints {
-                max_limit: 20.into(),
+                max_limit: limit(20),
                 unknown: HashMap::new(),
             },
             policy_revision: Some(Some("policy-a".into())),
@@ -757,7 +758,7 @@ mod tests {
         );
 
         let mut excessive_limit = claims();
-        excessive_limit.constraints.max_limit = ((MAX_SEARCH_LIMIT + 1) as u64).into();
+        excessive_limit.constraints.max_limit = limit((MAX_SEARCH_LIMIT + 1) as i64);
         assert_eq!(
             verifier.verify(&sign(&excessive_limit, Some("ed01"))),
             Err(CapabilityFailure::Forbidden)
@@ -941,7 +942,7 @@ mod tests {
                 4 => invalid.iat = invalid.exp + 1,
                 5 => invalid.actions = vec!["other-action".into()],
                 6 => invalid.jti.clear(),
-                _ => invalid.constraints.max_limit = 101.into(),
+                _ => invalid.constraints.max_limit = limit(101),
             }
             assert!(verifier.verify(&sign(&invalid, Some("ed01"))).is_err());
         }
@@ -1137,9 +1138,9 @@ mod tests {
                 "N7 tenant_id"
             );
         }
-        for limit in [-1, 0, 101] {
+        for invalid_limit in [-1, 0, 101] {
             let mut invalid = claims.clone();
-            invalid.constraints.max_limit = limit.into();
+            invalid.constraints.max_limit = limit(invalid_limit);
             assert_eq!(
                 check(&invalid, true),
                 Err(CapabilityFailure::Forbidden),

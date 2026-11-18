@@ -802,6 +802,10 @@ mod tests {
             load_config(&path)
         };
         config.vaults = vec![a.clone(), b.clone()];
+        if !crate::source::ROOM_INCLUSIVE_IDS {
+            assert!(load(&config).is_err(), "N26: actual legacy-format build");
+            return;
+        }
         assert!(load(&config).is_ok());
         assert!(
             validate_room_registrations(&path, &config, false).is_err(),
