@@ -201,23 +201,15 @@ impl SearchRuntime {
         profile: &RelevanceProfile,
         query_time_epoch_seconds: u64,
     ) -> Result<Vec<SearchHit>> {
-        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
-        match active.as_ref() {
-            ActiveSearchIndex::Desktop(_) => Err(Error::Auth(
-                "authorized resource search is unavailable in the desktop profile".to_owned(),
-            )),
-            ActiveSearchIndex::OpenClast(index) => {
-                let opened = self.open_authorized_resources(index, filters, resources)?;
-                index.search_with_profile(
-                    query,
-                    limit,
-                    filters,
-                    &opened,
-                    profile,
-                    query_time_epoch_seconds,
-                )
-            }
-        }
+        let (index, opened) = self.open_authorized_snapshot(filters, resources)?;
+        index.search_with_profile(
+            query,
+            limit,
+            filters,
+            &opened,
+            profile,
+            query_time_epoch_seconds,
+        )
     }
 
     pub fn search_authorized_with_generation(
@@ -227,21 +219,13 @@ impl SearchRuntime {
         filters: &SearchFilters,
         resources: &[ResourceKey],
     ) -> Result<GenerationSearchResult> {
-        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
-        match active.as_ref() {
-            ActiveSearchIndex::Desktop(_) => Err(Error::Auth(
-                "authorized resource search is unavailable in the desktop profile".to_owned(),
-            )),
-            ActiveSearchIndex::OpenClast(index) => {
-                let opened = self.open_authorized_resources(index, filters, resources)?;
-                let outcome = search_opened_with_quality(&opened, query, limit, filters)?;
-                Ok(GenerationSearchResult {
-                    generation: index.scoped_generation(filters, resources)?,
-                    hits: outcome.hits,
-                    lexical_match_quality: Some(outcome.match_quality),
-                })
-            }
-        }
+        let (index, opened) = self.open_authorized_snapshot(filters, resources)?;
+        let outcome = search_opened_with_quality(&opened, query, limit, filters)?;
+        Ok(GenerationSearchResult {
+            generation: index.scoped_generation(filters, resources)?,
+            hits: outcome.hits,
+            lexical_match_quality: Some(outcome.match_quality),
+        })
     }
 
     /// Semantic-only search: nearest chunks by embedding distance, then
@@ -448,7 +432,7 @@ impl SearchRuntime {
                     RoomWalkState::Unchecked => match outcome {
                         RoomWalkOutcome::Incomplete {
                             retained_unverified: false,
-                        } => Some(started),
+                        } if published => Some(started),
                         _ => None,
                     },
                 };
@@ -461,17 +445,26 @@ impl SearchRuntime {
         Ok(())
     }
 
-    fn open_authorized_resources<'a>(
+    fn open_authorized_snapshot<'a>(
         &self,
-        index: &PartitionedSearchIndex,
         filters: &SearchFilters,
         resources: &'a [ResourceKey],
-    ) -> Result<OpenedResources<'a>> {
+    ) -> Result<(Arc<PartitionedSearchIndex>, OpenedResources<'a>)> {
+        // Reopening clears evidence under this lock before replacing the
+        // snapshot. Never combine a superseded snapshot with a new proof.
         let states = self
             .resource_freshness
             .lock()
             .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
-        self.open_authorized_resources_with_state(index, filters, resources, &states)
+        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
+        let ActiveSearchIndex::OpenClast(index) = active.as_ref() else {
+            return Err(Error::Auth(
+                "authorized resource search is unavailable in the desktop profile".into(),
+            ));
+        };
+        let opened =
+            self.open_authorized_resources_with_state(index, filters, resources, &states)?;
+        Ok((index.clone(), opened))
     }
 
     fn open_authorized_resources_with_state<'a>(
@@ -487,9 +480,9 @@ impl SearchRuntime {
             registered
                 .as_ref()
                 .is_none_or(|keys| keys.contains(resource))
-                && !states
+                && states
                     .get(resource)
-                    .is_some_and(|state| state.stale_expired(now))
+                    .is_some_and(|state| state.is_servable(now))
         })
     }
 
@@ -566,6 +559,18 @@ impl SearchRuntime {
             .store(Some(Arc::new(ActiveSearchIndex::Desktop(generation))));
     }
 
+    fn install_reopened_openclast(&self, generation: Arc<PartitionedSearchIndex>) -> Result<()> {
+        let mut states = self
+            .resource_freshness
+            .lock()
+            .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
+        // An on-disk generation is not evidence that its rooms are still
+        // servable. Even a caller reusing a SearchRuntime must re-prove them.
+        states.clear();
+        self.install_openclast(generation);
+        Ok(())
+    }
+
     fn install_openclast(&self, generation: Arc<PartitionedSearchIndex>) {
         self.active
             .store(Some(Arc::new(ActiveSearchIndex::OpenClast(generation))));
@@ -599,12 +604,13 @@ enum RoomWalkState {
 }
 
 impl ResourceFreshness {
-    fn stale_expired(&self, now: Instant) -> bool {
+    fn is_servable(&self, now: Instant) -> bool {
         match self.walk {
             RoomWalkState::Failed { since, grace } => {
-                since.is_none_or(|start| now.saturating_duration_since(start) >= grace)
+                since.is_some_and(|start| now.saturating_duration_since(start) < grace)
             }
-            _ => false,
+            RoomWalkState::Ready => true,
+            RoomWalkState::Unchecked => false,
         }
     }
 }
@@ -1648,7 +1654,7 @@ impl OpenClastIndexManager {
         let layout = GenerationLayout::load(&active.layout_path)?;
         let search = Arc::new(PartitionedSearchIndex::open(&active)?);
         runtime.set_freshness_basis(config.indexing.basis);
-        runtime.install_openclast(search);
+        runtime.install_reopened_openclast(search)?;
         Ok(Self {
             _lock: lock,
             data_root,
@@ -1672,6 +1678,7 @@ impl OpenClastIndexManager {
     }
 
     fn reconcile(&mut self, config: Config, scope: &ReconcileScope) -> Result<ReconcileReport> {
+        crate::room_boundary::validate_ingestion_roots(&config)?;
         let epochs = self.runtime.begin_resource_pass(&config, scope)?;
         let mut incomplete = BTreeSet::new();
         let max_stale_serve_seconds = config.indexing.max_stale_serve_seconds;
@@ -3228,6 +3235,187 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn fr9_reopen_does_not_restore_stale_rows() {
+        let fixture = tempdir().unwrap();
+        let room = fixture.path().join("room");
+        let data = fixture.path().join("data");
+        fs::create_dir(&room).unwrap();
+        fs::write(room.join("removed.md"), "synthetic expired").unwrap();
+        fs::write(room.join("kept.md"), "synthetic remaining").unwrap();
+        let mut config = openclast_config(vec![VaultRegistration {
+            id: "fixture".into(),
+            path: room.clone(),
+            room: Some("room".into()),
+        }]);
+        config.indexing.max_stale_serve_seconds = 0;
+        build_index(&config, &data).unwrap();
+        let resources = [config.resource_key(&config.vaults[0]).unwrap()];
+        let filters = SearchFilters::default();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
+        let initial = runtime
+            .search_authorized_with_generation("expired", 10, &filters, &resources)
+            .unwrap();
+        assert_eq!(initial.hits.len(), 1);
+        fs::remove_file(room.join("removed.md")).unwrap();
+        let partial = |manager: &mut IndexManager, config: &Config| {
+            let report = crate::room_walk::with_interrupted_listing(room.clone(), || {
+                manager.reconcile(config.clone())
+            })
+            .unwrap();
+            assert!(
+                report
+                    .manifest
+                    .files
+                    .values()
+                    .any(|row| row.path == "removed.md")
+            );
+        };
+        let require_refusal = |runtime: &SearchRuntime| {
+            assert!(
+                matches!(runtime.search_authorized("expired", 10, &filters, &resources), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
+            );
+            assert!(
+                matches!(runtime.authorized_freshness(&filters, &resources, &initial.generation), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
+            );
+        };
+        partial(&mut manager, &config);
+        require_refusal(&runtime);
+        manager.shutdown().unwrap();
+
+        // A new runtime and a positive cap cannot revive unverified rows.
+        config.indexing.max_stale_serve_seconds = 60;
+        let reopened = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data, reopened.clone()).unwrap();
+        require_refusal(&reopened);
+        partial(&mut manager, &config);
+        require_refusal(&reopened);
+        manager.reconcile(config.clone()).unwrap();
+        assert!(
+            reopened
+                .search_authorized("expired", 10, &filters, &resources)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .search_authorized("remaining", 10, &filters, &resources)
+                .unwrap()
+                .len(),
+            1
+        );
+        manager.shutdown().unwrap();
+
+        // Nor does reusing the runtime preserve a previous manager's proof.
+        let mut manager = IndexManager::open(config.clone(), &data, reopened.clone()).unwrap();
+        require_refusal(&reopened);
+        manager.reconcile(config).unwrap();
+        assert_eq!(
+            reopened
+                .search_authorized("remaining", 10, &filters, &resources)
+                .unwrap()
+                .len(),
+            1
+        );
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fr11_rejects_noncanonical_roots_at_public_boundaries() {
+        let fixture = tempdir().unwrap();
+        let base = fs::canonicalize(fixture.path()).unwrap();
+        let b = base.join("B");
+        let sub = b.join("sub");
+        let symlink = base.join("alias");
+        fs::create_dir_all(&sub).unwrap();
+        std::os::unix::fs::symlink(&sub, &symlink).unwrap();
+        fs::write(sub.join("note.md"), "synthetic fixture").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "b".into(),
+                path: b,
+                room: Some("b".into()),
+            }],
+            ..openclast_config(Vec::new())
+        };
+        let mut config = config;
+        config.auth.openclast.as_mut().unwrap().tenant_id = "tenant_AAAAAAAAAAAAAAAAAAAA".into();
+        let settings = base.join("settings/config.toml");
+        let data = base.join("data");
+        let bad_data = base.join("unused-data");
+        crate::save_config(&settings, &config).unwrap();
+        let paths = crate::Paths::resolve(Some(settings.clone()), Some(data.clone())).unwrap();
+        let saved = fs::read(&settings).unwrap();
+        build_index(&config, &data).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime).unwrap();
+        let original_generation = DataRoot::new(&data).active().unwrap().unwrap().id;
+        let invalid = |error: Error| {
+            assert!(
+                error
+                    .to_string()
+                    .contains("room root path is not canonical"),
+                "{error}"
+            )
+        };
+        for bad in [
+            base.join("B/../B/sub"),
+            base.join("B/./sub"),
+            base.join("B//sub"),
+            base.join("B/sub/"),
+            PathBuf::from("B/sub"),
+            symlink,
+        ] {
+            let mut attempted = config.clone();
+            invalid(
+                crate::add_vault(&mut attempted, "a".into(), bad.clone(), Some("a".into()))
+                    .unwrap_err(),
+            );
+            invalid(
+                crate::ensure_vault_registration(
+                    &mut attempted,
+                    "a".into(),
+                    bad.clone(),
+                    Some("a".into()),
+                )
+                .unwrap_err(),
+            );
+            invalid(
+                crate::register_vault(&paths, "a".into(), bad.clone(), Some("a".into()))
+                    .unwrap_err(),
+            );
+            assert_eq!(attempted, config);
+            assert_eq!(fs::read(&settings).unwrap(), saved);
+            attempted.vaults.push(VaultRegistration {
+                id: "a".into(),
+                path: bad,
+                room: Some("a".into()),
+            });
+            invalid(crate::save_config(&settings, &attempted).unwrap_err());
+            invalid(build_index(&attempted, &bad_data).unwrap_err());
+            invalid(crate::probe_openclast_ingestion(&bad_data, &attempted.vaults).unwrap_err());
+            let Err(error) = IndexManager::open(attempted.clone(), &data, SearchRuntime::new())
+            else {
+                panic!("bad room path must refuse open")
+            };
+            invalid(error);
+            invalid(manager.reconcile(attempted.clone()).unwrap_err());
+            assert!(!bad_data.exists());
+            fs::write(&settings, toml::to_string(&attempted).unwrap()).unwrap();
+            invalid(crate::load_config_for_paths(&paths).unwrap_err());
+            fs::write(&settings, &saved).unwrap();
+        }
+        assert_eq!(
+            DataRoot::new(&data).active().unwrap().unwrap().id,
+            original_generation
+        );
+        manager.shutdown().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn fr9_partial_directory_keeps_only_uncertain_rows_stale() {
         for cap in [0, 60] {
             let fixture = tempdir().unwrap();
@@ -3512,7 +3700,8 @@ mod tests {
         ]);
         build_index(&config, &data).unwrap();
         let runtime = SearchRuntime::new();
-        let manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
         let resource_x = config.resource_key(&config.vaults[0]).unwrap();
         let resource_y = config.resource_key(&config.vaults[1]).unwrap();
         let x_hits = runtime
@@ -3613,7 +3802,8 @@ mod tests {
         ]);
         build_index(&config, &data).unwrap();
         let runtime = SearchRuntime::new();
-        let manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
         let allowed_resource = config.resource_key(&config.vaults[0]).unwrap();
         let forbidden_resource = config.resource_key(&config.vaults[1]).unwrap();
 
@@ -3737,7 +3927,8 @@ mod tests {
         ]);
         build_index(&config, &data).unwrap();
         let runtime = SearchRuntime::new();
-        let manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
         let allowed_resource = config.resource_key(&config.vaults[0]).unwrap();
 
         let baseline = Config {
@@ -4282,21 +4473,12 @@ mod tests {
             &SearchFilters::default(),
             std::slice::from_ref(&new_resource),
         )));
-        for query in ["duplicateterm", "deletedterm"] {
-            assert_eq!(
-                runtime
-                    .search_authorized(
-                        query,
-                        20,
-                        &SearchFilters::default(),
-                        std::slice::from_ref(&new_resource),
-                    )
-                    .unwrap()
-                    .len(),
-                1
-            );
-        }
-
+        assert!(
+            matches!(runtime.search_authorized("duplicateterm", 20, &SearchFilters::default(), std::slice::from_ref(&new_resource)), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
+        );
+        assert!(
+            matches!(runtime.search_authorized("deletedterm", 20, &SearchFilters::default(), std::slice::from_ref(&new_resource)), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
+        );
         manager.reconcile(new_config.clone()).unwrap();
         for query in ["retryterm", "duplicateterm", "deletedterm"] {
             assert!(withheld(runtime.search_authorized(
@@ -4337,7 +4519,9 @@ mod tests {
         manager.shutdown().unwrap();
 
         let runtime = SearchRuntime::new();
-        let manager = IndexManager::open(new_config, &data_root, runtime.clone()).unwrap();
+        let mut manager =
+            IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
+        manager.reconcile(new_config).unwrap();
         for query in ["retryterm", "duplicateterm"] {
             assert_eq!(
                 runtime
@@ -4421,17 +4605,8 @@ mod tests {
         let runtime = SearchRuntime::new();
         let mut manager =
             IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
-        assert_eq!(
-            runtime
-                .search_authorized(
-                    "unpublishedterm",
-                    20,
-                    &SearchFilters::default(),
-                    std::slice::from_ref(&resource),
-                )
-                .unwrap()
-                .len(),
-            1
+        assert!(
+            matches!(runtime.search_authorized("unpublishedterm", 20, &SearchFilters::default(), std::slice::from_ref(&resource)), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
         );
         manager.reconcile(new_config.clone()).unwrap();
         assert!(
@@ -4455,7 +4630,9 @@ mod tests {
         manager.shutdown().unwrap();
 
         let runtime = SearchRuntime::new();
-        let manager = IndexManager::open(new_config, &data_root, runtime.clone()).unwrap();
+        let mut manager =
+            IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
+        manager.reconcile(new_config).unwrap();
         assert!(
             runtime
                 .search_authorized(
@@ -4520,17 +4697,8 @@ mod tests {
         let runtime = SearchRuntime::new();
         let mut manager =
             IndexManager::open(new_config.clone(), &data_root, runtime.clone()).unwrap();
-        assert_eq!(
-            runtime
-                .search_authorized(
-                    "withheldterm",
-                    20,
-                    &SearchFilters::default(),
-                    std::slice::from_ref(&new_resource),
-                )
-                .unwrap()
-                .len(),
-            1
+        assert!(
+            matches!(runtime.search_authorized("withheldterm", 20, &SearchFilters::default(), std::slice::from_ref(&new_resource)), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
         );
         let report = manager.reconcile(new_config.clone()).unwrap();
 
@@ -5171,9 +5339,16 @@ mod tests {
         let manager = IndexManager::open(config, &data_root, runtime.clone()).unwrap();
 
         assert_eq!(manager.open_evictions().total(), 1);
+        assert!(
+            matches!(runtime.search_authorized("plainterm", 20, &SearchFilters::default(), std::slice::from_ref(&resource)), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
+        );
+        // Inspect the actual postings before any reconcile can reingest the
+        // file with the current extractor. Public search remains blocked.
+        let active = DataRoot::new(&data_root).active().unwrap().unwrap();
+        let partitions = PartitionedSearchIndex::open(&active).unwrap();
         let search = |query: &str| {
-            runtime
-                .search_authorized(
+            partitions
+                .search(
                     query,
                     20,
                     &SearchFilters::default(),
@@ -6437,7 +6612,8 @@ mod tests {
         manager.shutdown().unwrap();
         // A full rebuild with unchanged bytes has exactly the same revision.
         build_index(&config, &data).unwrap();
-        let manager = IndexManager::open(config, &data, runtime.clone()).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config).unwrap();
         let after_rebuild = runtime
             .search_authorized_with_generation(query, 20, &filters, &resource)
             .unwrap();
@@ -6720,6 +6896,7 @@ mod tests {
         let runtime = SearchRuntime::new();
         build_index(&config, &data).unwrap();
         let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
         let filters = SearchFilters::default();
         let search = |resource| {
             runtime

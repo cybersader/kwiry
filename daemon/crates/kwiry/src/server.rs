@@ -1663,7 +1663,8 @@ mod tests {
         build_index(&config, &data).unwrap();
         let runtime = SearchRuntime::new();
         runtime.set_openclast_registrations(&config);
-        let manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
         let status = Arc::new(RwLock::new(DaemonStatus::starting("0.1.0")));
         let verifier = CapabilityVerifier::load(&auth_config, &data).unwrap();
         let epoch: u64 = fs::read_to_string(data.join("replay-epoch"))

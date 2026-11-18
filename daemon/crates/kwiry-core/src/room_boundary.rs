@@ -1,7 +1,7 @@
 //! OpenClast room boundaries in the current mount namespace.
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::{Config, Error, Result};
 
@@ -30,15 +30,44 @@ fn resolve_state_path(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// Validate the original spelling before the filesystem can normalize it.
+/// Missing/offline roots have no canonical path to walk, but do not invalidate
+/// unrelated rooms at runtime. Registration requires all roots to resolve.
+pub(crate) fn canonical_room_root(path: &Path) -> Result<Option<PathBuf>> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+        || path.components().collect::<PathBuf>().as_os_str() != path.as_os_str()
+    {
+        return Err(boundary_error("room root path is not canonical"));
+    }
+    match fs::canonicalize(path) {
+        Ok(canonical) if canonical.as_os_str() == path.as_os_str() => Ok(Some(canonical)),
+        Ok(_) => Err(boundary_error("room root path is not canonical")),
+        Err(_) => Ok(None),
+    }
+}
+
+pub(crate) fn require_canonical_room_root(path: &Path) -> Result<PathBuf> {
+    canonical_room_root(path)?.ok_or_else(|| boundary_error("room root cannot be resolved"))
+}
+
+pub(crate) fn validate_ingestion_roots(config: &Config) -> Result<()> {
+    for vault in &config.vaults {
+        canonical_room_root(&vault.path)?;
+    }
+    Ok(())
+}
+
 /// Refuse invalid configurations before writing Kwiry state. The walker uses
 /// the same comparison but blocks only the affected rooms.
 pub(crate) fn validate(config: &Config, data_root: Option<&Path>) -> Result<()> {
     let roots = config
         .vaults
         .iter()
-        .map(|vault| fs::canonicalize(&vault.path))
-        .collect::<io::Result<Vec<_>>>()
-        .map_err(|_| boundary_error("room root cannot be resolved"))?;
+        .map(|vault| require_canonical_room_root(&vault.path))
+        .collect::<Result<Vec<_>>>()?;
     if roots.is_empty() {
         return Ok(());
     }
@@ -48,6 +77,22 @@ pub(crate) fn validate(config: &Config, data_root: Option<&Path>) -> Result<()> 
         .iter()
         .map(|path| crate::room_walk::open_root_for_boundary(path))
         .collect::<Result<Vec<_>>>()?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let mut identities = std::collections::BTreeSet::new();
+        for root in &opened {
+            let metadata = root
+                .metadata()
+                .map_err(|_| boundary_error("room root metadata is unavailable"))?;
+            if !identities.insert((metadata.dev(), metadata.ino())) {
+                return Err(boundary_error(
+                    "room root is shared with another registration",
+                ));
+            }
+        }
+    }
     #[cfg(target_os = "linux")]
     let mount_ids = opened
         .iter()
@@ -76,8 +121,8 @@ pub(crate) fn validate_data_root(config: &Config, data_root: &Path) -> Result<()
     let rooms: Vec<_> = config
         .vaults
         .iter()
-        .map(|vault| fs::canonicalize(&vault.path).unwrap_or_else(|_| vault.path.clone()))
-        .collect();
+        .map(|vault| Ok(canonical_room_root(&vault.path)?.unwrap_or_else(|| vault.path.clone())))
+        .collect::<Result<_>>()?;
     let data_root = resolve_state_path(data_root)
         .map_err(|_| boundary_error("Kwiry data root cannot be resolved"))?;
     let failures = compare(&rooms, &[data_root], false, None)?;

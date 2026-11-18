@@ -174,18 +174,9 @@ fn prepare_config(path: &Path, config: &mut Config, paths: Option<&Paths>) -> Re
             protected.push(config_path.with_extension("lock"));
         }
         config.openclast_state_paths = protected;
-        normalize_openclast_rooms(path, config)?;
+        crate::room_boundary::validate(config, None)?;
     }
     Ok(())
-}
-
-fn normalize_openclast_rooms(path: &Path, config: &mut Config) -> Result<()> {
-    for vault in &mut config.vaults {
-        vault.path = fs::canonicalize(&vault.path).map_err(|error| io_error(&vault.path, error))?;
-    }
-    // Check the actual paths handed to the walker, including bind aliases.
-    validate_room_registrations(path, config)?;
-    crate::room_boundary::validate(config, None)
 }
 
 pub fn register_vault(
@@ -322,8 +313,7 @@ fn validate_room_registrations(path: &Path, config: &Config) -> Result<()> {
             if !rooms.insert(room) {
                 return Err(invalid("a room may be registered only once"));
             }
-            let root = fs::canonicalize(&vault.path)
-                .map_err(|_| invalid("cannot canonicalize OpenClast room root"))?;
+            let root = crate::room_boundary::require_canonical_room_root(&vault.path)?;
             if !root.is_dir()
                 || roots.iter().any(|previous: &PathBuf| {
                     root.starts_with(previous) || previous.starts_with(&root)
@@ -509,7 +499,7 @@ pub fn add_vault(
         return Err(Error::DuplicateVaultId(id));
     }
 
-    if id.trim().is_empty() || !path.is_absolute() || !path.is_dir() {
+    if id.trim().is_empty() {
         return Err(Error::InvalidVaultPath(path));
     }
     if room.as_deref().is_some_and(|room| room.trim().is_empty()) {
@@ -519,7 +509,7 @@ pub fn add_vault(
         });
     }
 
-    let canonical_path = fs::canonicalize(&path).map_err(|_| Error::InvalidVaultPath(path))?;
+    let canonical_path = registration_root(config.server.profile, path)?;
     let registration = VaultRegistration {
         id,
         path: canonical_path,
@@ -535,7 +525,7 @@ pub fn ensure_vault_registration(
     path: PathBuf,
     room: Option<String>,
 ) -> Result<(VaultRegistration, VaultRegistrationDisposition)> {
-    if id.trim().is_empty() || !path.is_absolute() || !path.is_dir() {
+    if id.trim().is_empty() {
         return Err(Error::InvalidVaultPath(path));
     }
     if room.as_deref().is_some_and(|room| room.trim().is_empty()) {
@@ -545,7 +535,7 @@ pub fn ensure_vault_registration(
         });
     }
 
-    let canonical_path = fs::canonicalize(&path).map_err(|_| Error::InvalidVaultPath(path))?;
+    let canonical_path = registration_root(config.server.profile, path)?;
     if let Some(existing) = config
         .vaults
         .iter()
@@ -554,6 +544,7 @@ pub fn ensure_vault_registration(
         if existing.path == canonical_path && existing.room == room {
             if config.server.profile == HostProfile::OpenClast {
                 validate_config(&canonical_path, config)?;
+                crate::room_boundary::validate(config, None)?;
             }
             return Ok((existing.clone(), VaultRegistrationDisposition::Unchanged));
         }
@@ -582,12 +573,26 @@ pub fn ensure_vault_registration(
     Ok((registration, VaultRegistrationDisposition::Added))
 }
 
+fn registration_root(profile: HostProfile, path: PathBuf) -> Result<PathBuf> {
+    if profile == HostProfile::OpenClast {
+        let canonical = crate::room_boundary::require_canonical_room_root(&path)?;
+        if !canonical.is_dir() {
+            return Err(Error::InvalidVaultPath(path));
+        }
+        return Ok(canonical);
+    }
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(Error::InvalidVaultPath(path));
+    }
+    fs::canonicalize(&path).map_err(|_| Error::InvalidVaultPath(path))
+}
+
 fn insert_registration(config: &mut Config, registration: &VaultRegistration) -> Result<()> {
     if config.server.profile == HostProfile::OpenClast {
         let mut candidate = config.clone();
         candidate.vaults.push(registration.clone());
         validate_config(&registration.path, &candidate)?;
-        normalize_openclast_rooms(&registration.path, &mut candidate)?;
+        crate::room_boundary::validate(&candidate, None)?;
         *config = candidate;
     } else {
         config.vaults.push(registration.clone());
@@ -669,7 +674,7 @@ mod tests {
         config.server.profile = HostProfile::OpenClast;
         config.vaults.push(VaultRegistration {
             id: "notes".into(),
-            path: vault,
+            path: fs::canonicalize(vault).unwrap(),
             room: None,
         });
 
@@ -854,7 +859,7 @@ mod tests {
         let root = |name| {
             let root = dir.path().join(name);
             fs::create_dir_all(&root).unwrap();
-            root
+            fs::canonicalize(root).unwrap()
         };
         let a = VaultRegistration {
             id: "VaultOne_0123456789abc".into(),

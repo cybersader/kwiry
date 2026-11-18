@@ -64,6 +64,9 @@ mod platform {
         data_root: &Path,
         vaults: &[VaultRegistration],
     ) -> crate::Result<()> {
+        for vault in vaults {
+            crate::room_boundary::require_canonical_room_root(&vault.path)?;
+        }
         std::fs::create_dir_all(data_root)
             .map_err(|error| crate::error::io_error(data_root, error))?;
         let data_root = std::fs::canonicalize(data_root)
@@ -96,31 +99,44 @@ mod platform {
 
     pub(crate) struct RoomRoots {
         roots: BTreeMap<PathBuf, (File, Inode)>,
-        failures: BTreeMap<PathBuf, &'static str>,
+        failures: BTreeMap<std::ffi::OsString, &'static str>,
         identities: BTreeSet<Inode>,
     }
 
     impl RoomRoots {
         pub(crate) fn capture(config: &Config, data_root: Option<&Path>) -> Self {
-            let paths: Vec<_> = config
-                .vaults
-                .iter()
-                .map(|vault| vault.path.clone())
-                .collect();
+            let mut paths = Vec::with_capacity(config.vaults.len());
             let mut roots = BTreeMap::new();
             let mut failures = BTreeMap::new();
             let mut by_identity = BTreeMap::new();
-            let mut mount_ids = Vec::with_capacity(paths.len());
-            for path in &paths {
-                let opened = open_root(path).ok().and_then(|file| {
+            let mut mount_ids = Vec::with_capacity(config.vaults.len());
+            for vault in &config.vaults {
+                let path = match crate::room_boundary::canonical_room_root(&vault.path) {
+                    Ok(Some(path)) => path,
+                    Ok(None) => {
+                        failures.insert(
+                            vault.path.as_os_str().to_owned(),
+                            "room root could not be opened safely",
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        failures.insert(
+                            vault.path.as_os_str().to_owned(),
+                            "room root path is not canonical",
+                        );
+                        continue;
+                    }
+                };
+                let opened = open_root(&path).ok().and_then(|file| {
                     let inode = identity(&file.metadata().ok()?);
                     Some((file, inode))
                 });
                 if let Some((file, inode)) = opened {
-                    if let Some(other) = by_identity.insert(inode, path.clone()) {
+                    if let Some(other) = by_identity.insert(inode, path.as_os_str().to_owned()) {
                         failures.insert(other, "room root is shared with another registration");
                         failures.insert(
-                            path.clone(),
+                            path.as_os_str().to_owned(),
                             "room root is shared with another registration",
                         );
                     }
@@ -128,8 +144,14 @@ mod platform {
                     roots.insert(path.clone(), (file, inode));
                 } else {
                     mount_ids.push(None);
-                    failures.insert(path.clone(), "room root could not be opened safely");
+                    failures.insert(
+                        path.as_os_str().to_owned(),
+                        "room root could not be opened safely",
+                    );
                 }
+                // A canonical path still participates in overlap detection
+                // when its own handle cannot be opened. It cannot be walked.
+                paths.push(path);
             }
             match crate::room_boundary::walk_failures(&paths, &mount_ids, config, data_root) {
                 Ok(boundary) => {
@@ -137,13 +159,14 @@ mod platform {
                         if let Some(message) = failure
                             && roots.contains_key(&path)
                         {
-                            failures.insert(path, message);
+                            failures.insert(path.into_os_string(), message);
                         }
                     }
                 }
                 Err(_) => {
                     for path in paths {
-                        failures.insert(path, "room boundary could not be checked");
+                        failures
+                            .insert(path.into_os_string(), "room boundary could not be checked");
                     }
                 }
             }
@@ -158,7 +181,7 @@ mod platform {
             &self,
             vault: &VaultRegistration,
         ) -> (EnumerationResult, Option<RoomRead<'_>>) {
-            if let Some(message) = self.failures.get(&vault.path) {
+            if let Some(message) = self.failures.get(vault.path.as_os_str()) {
                 return (failed_walk(vault, message), None);
             }
             let Some((root, inode)) = self.roots.get(&vault.path) else {
