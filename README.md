@@ -61,6 +61,8 @@ cargo run -p kwiry -- search "your query"
 cargo run -p kwiry -- serve --semantic
 ```
 
+This covers the daemon only. For prerequisites and the full local test set (daemon plus the Obsidian client), see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Documentation
 
 Start with the orientation layer, then follow links to the canonical contract and delivered behavior:
@@ -79,7 +81,7 @@ Start with the orientation layer, then follow links to the canonical contract an
 - [`bench/fts5-wasm-obsidian-probe/README.md`](bench/fts5-wasm-obsidian-probe/README.md) — one-file Gate 2 automation, public frozen releases, field evidence, and accepted verdict
 - [`docs/roadmap/desktop-obsidian.md`](docs/roadmap/desktop-obsidian.md) — D5 status, including published property projection and grouped UX plus pending ranking/daily-drive/distribution acceptance
 
-Serve the repository documentation and logo previews without GitHub:
+Optional, maintainer-only: serve the repository documentation and logo previews without GitHub. Contributors don't need this; the tailnet modes require Tailscale.
 
 ```bash
 ./scripts/serve-docs.sh local      # localhost only
