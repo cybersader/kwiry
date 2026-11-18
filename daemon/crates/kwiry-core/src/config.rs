@@ -278,6 +278,17 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
                     });
                 }
             }
+            let mut workload_subjects = BTreeSet::new();
+            if auth
+                .workload_subject_allowlist
+                .iter()
+                .any(|subject| subject.trim().is_empty() || !workload_subjects.insert(subject))
+            {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message: "auth.openclast.workload_subject_allowlist must contain distinct nonempty workload subjects, never user identities".to_owned(),
+                });
+            }
             if !auth.jwks_file.is_absolute() {
                 return Err(Error::InvalidConfig {
                     path: path.to_path_buf(),
@@ -505,6 +516,8 @@ mod tests {
             audience: "kwiry-search".into(),
             jwks_file: temporary.path().join("jwks.json"),
             max_token_ttl_seconds: 60,
+            workload_subject_allowlist: Vec::new(),
+            legacy_identity_accept_until: None,
         });
         let error = save_config(&config_path, &config).unwrap_err();
         assert!(error.to_string().contains("requires a nonempty room"));

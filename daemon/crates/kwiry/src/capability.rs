@@ -7,6 +7,7 @@ use jsonwebtoken::jwk::{
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use kwiry_core::{HostProfile, OpenClastAuthConfig, Principal, ResourceKey, Scope};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 const MAX_RESOURCES: usize = 256;
@@ -31,32 +32,81 @@ pub(crate) struct CapabilityVerifier {
     audience: String,
     tenant_id: String,
     max_token_ttl_seconds: u64,
+    workload_subject_allowlist: Vec<String>,
+    legacy_identity_accept_until: Option<u64>,
     keys: HashMap<String, VerificationKey>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct CapabilityClaims {
     iss: String,
     aud: String,
     sub: String,
-    actor: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_string"
+    )]
+    actor: Option<String>,
     jti: String,
     iat: u64,
     nbf: u64,
     exp: u64,
     tenant: String,
     actions: Vec<String>,
-    resources: Vec<ResourceKey>,
+    resources: Vec<CapabilityResource>,
     constraints: CapabilityConstraints,
     #[serde(default)]
     policy_revision: Option<String>,
-    #[serde(default)]
-    subject_revision: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_optional_string"
+    )]
+    subject_revision: Option<Option<String>>,
+    #[serde(flatten, skip_serializing)]
+    unknown: HashMap<String, IgnoredAny>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Workload claims are closed at every signed object level; legacy claims keep
+// ignoring unrecognized fields until the operator activates the cutover.
+#[derive(Clone, Serialize, Deserialize)]
+struct CapabilityResource {
+    tenant_id: String,
+    vault_id: String,
+    room_id: String,
+    #[serde(flatten, skip_serializing)]
+    unknown: HashMap<String, IgnoredAny>,
+}
+
+impl From<CapabilityResource> for ResourceKey {
+    fn from(resource: CapabilityResource) -> Self {
+        Self {
+            tenant_id: resource.tenant_id,
+            vault_id: resource.vault_id,
+            room_id: resource.room_id,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct CapabilityConstraints {
     max_limit: usize,
+    #[serde(flatten, skip_serializing)]
+    unknown: HashMap<String, IgnoredAny>,
+}
+
+fn present_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+// Legacy issuers could send null; workload issuers must omit the key entirely.
+fn present_optional_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 impl CapabilityVerifier {
@@ -113,6 +163,8 @@ impl CapabilityVerifier {
             audience: config.audience.clone(),
             tenant_id: config.tenant_id.clone(),
             max_token_ttl_seconds: config.max_token_ttl_seconds,
+            workload_subject_allowlist: config.workload_subject_allowlist.clone(),
+            legacy_identity_accept_until: config.legacy_identity_accept_until,
             keys,
         })
     }
@@ -145,13 +197,31 @@ impl CapabilityVerifier {
         if claims.iss != self.issuer
             || claims.aud != self.audience
             || claims.sub.trim().is_empty()
-            || claims.actor.trim().is_empty()
-            || claims.sub == claims.actor
             || claims.jti.trim().is_empty()
         {
             return Err(CapabilityFailure::Unauthorized);
         }
         let now = unix_time().map_err(|_| CapabilityFailure::Unauthorized)?;
+        match claims.actor.as_deref() {
+            None if claims.subject_revision.is_none()
+                && claims.unknown.is_empty()
+                && claims.constraints.unknown.is_empty()
+                && claims
+                    .resources
+                    .iter()
+                    .all(|resource| resource.unknown.is_empty())
+                && self
+                    .workload_subject_allowlist
+                    .iter()
+                    .any(|subject| subject.as_bytes() == claims.sub.as_bytes()) => {}
+            Some(actor)
+                if !actor.trim().is_empty()
+                    && actor != claims.sub
+                    && self
+                        .legacy_identity_accept_until
+                        .is_none_or(|cutoff| now < cutoff) => {}
+            _ => return Err(CapabilityFailure::Unauthorized),
+        }
         if claims.exp < claims.iat
             || claims.nbf > claims.exp
             || claims.iat > now
@@ -171,11 +241,14 @@ impl CapabilityVerifier {
         }
 
         let mut resources = BTreeSet::new();
+        let mut vault_ids = BTreeSet::new();
         for resource in claims.resources {
+            let resource = ResourceKey::from(resource);
             if resource.tenant_id != self.tenant_id
                 || resource.tenant_id.trim().is_empty()
                 || resource.vault_id.trim().is_empty()
                 || resource.room_id.trim().is_empty()
+                || !vault_ids.insert(resource.vault_id.clone())
                 || !resources.insert(resource)
             {
                 return Err(CapabilityFailure::Forbidden);
@@ -184,13 +257,12 @@ impl CapabilityVerifier {
 
         Ok(Principal {
             profile: HostProfile::OpenClast,
-            subject: claims.sub,
-            actor: claims.actor,
+            exp: Some(claims.exp),
+            action: Some(SEARCH_ACTION.to_owned()),
             scopes: vec![Scope::Search],
             resources: resources.into_iter().collect(),
             jti: Some(claims.jti),
             policy_revision: claims.policy_revision,
-            subject_revision: claims.subject_revision,
             max_limit: claims.constraints.max_limit,
         })
     }
@@ -254,6 +326,8 @@ mod tests {
             audience: "kwiry-search".into(),
             jwks_file: Path::new("/unused").to_path_buf(),
             max_token_ttl_seconds: 60,
+            workload_subject_allowlist: Vec::new(),
+            legacy_identity_accept_until: None,
         }
     }
 
@@ -263,21 +337,26 @@ mod tests {
             iss: "issuer".into(),
             aud: "kwiry-search".into(),
             sub: "user-a".into(),
-            actor: "openclast-orchestrator".into(),
+            actor: Some("openclast-orchestrator".into()),
             jti: "decision-a".into(),
             iat: now,
             nbf: now.saturating_sub(1),
             exp: now + 60,
             tenant: "tenant-a".into(),
             actions: vec![SEARCH_ACTION.into()],
-            resources: vec![ResourceKey {
+            resources: vec![CapabilityResource {
                 tenant_id: "tenant-a".into(),
                 vault_id: "vault-a".into(),
                 room_id: "room-a".into(),
+                unknown: HashMap::new(),
             }],
-            constraints: CapabilityConstraints { max_limit: 20 },
+            constraints: CapabilityConstraints {
+                max_limit: 20,
+                unknown: HashMap::new(),
+            },
             policy_revision: Some("policy-a".into()),
-            subject_revision: Some("subject-a".into()),
+            subject_revision: Some(Some("subject-a".into())),
+            unknown: HashMap::new(),
         }
     }
 
@@ -349,16 +428,23 @@ mod tests {
     #[test]
     fn signed_capability_preserves_exact_authorization_context() {
         let verifier = CapabilityVerifier::from_jwks(&config(), ED25519_JWKS).unwrap();
-        let principal = verifier.verify(&sign(&claims(), Some("ed01"))).unwrap();
+        let claims = claims();
+        let principal = verifier.verify(&sign(&claims, Some("ed01"))).unwrap();
 
         assert_eq!(principal.profile, HostProfile::OpenClast);
-        assert_eq!(principal.subject, "user-a");
-        assert_eq!(principal.actor, "openclast-orchestrator");
+        assert_eq!(principal.exp, Some(claims.exp));
+        assert_eq!(principal.action.as_deref(), Some(SEARCH_ACTION));
         assert_eq!(principal.scopes, [Scope::Search]);
-        assert_eq!(principal.resources, claims().resources);
+        assert_eq!(
+            principal.resources,
+            claims
+                .resources
+                .into_iter()
+                .map(ResourceKey::from)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(principal.jti.as_deref(), Some("decision-a"));
         assert_eq!(principal.policy_revision.as_deref(), Some("policy-a"));
-        assert_eq!(principal.subject_revision.as_deref(), Some("subject-a"));
         assert_eq!(principal.max_limit, 20);
     }
 
@@ -389,7 +475,7 @@ mod tests {
         );
 
         let mut self_acted = claims();
-        self_acted.actor = self_acted.sub.clone();
+        self_acted.actor = Some(self_acted.sub.clone());
         assert_eq!(
             verifier.verify(&sign(&self_acted, Some("ed01"))),
             Err(CapabilityFailure::Unauthorized)
@@ -460,6 +546,182 @@ mod tests {
         excessive_limit.constraints.max_limit = MAX_SEARCH_LIMIT + 1;
         assert_eq!(
             verifier.verify(&sign(&excessive_limit, Some("ed01"))),
+            Err(CapabilityFailure::Forbidden)
+        );
+    }
+
+    #[test]
+    fn both_shapes_accept_before_cutoff_and_legacy_only_until_explicit_cutoff() {
+        let mut config = config();
+        config.workload_subject_allowlist = vec!["workload:search".into()];
+        config.legacy_identity_accept_until = Some(unix_time().unwrap() + 300);
+        let before = CapabilityVerifier::from_jwks(&config, ED25519_JWKS).unwrap();
+        let legacy = claims();
+        let mut workload = claims();
+        workload.sub = "workload:search".into();
+        workload.actor = None;
+        workload.subject_revision = None;
+        let legacy_principal = before.verify(&sign(&legacy, Some("ed01"))).unwrap();
+        let workload_principal = before.verify(&sign(&workload, Some("ed01"))).unwrap();
+        assert_eq!(
+            legacy_principal, workload_principal,
+            "identity is not retained"
+        );
+        for principal in [&legacy_principal, &workload_principal] {
+            let context = format!("{principal:?}");
+            for sentinel in [
+                "user-a",
+                "openclast-orchestrator",
+                "subject-a",
+                "workload:search",
+                "subject",
+                "actor",
+            ] {
+                assert!(!context.contains(sentinel), "context retained {sentinel}");
+            }
+            assert_eq!(principal.exp, Some(legacy.exp));
+            assert_eq!(principal.action.as_deref(), Some(SEARCH_ACTION));
+        }
+        config.legacy_identity_accept_until = Some(unix_time().unwrap());
+        let after = CapabilityVerifier::from_jwks(&config, ED25519_JWKS).unwrap();
+        assert_eq!(
+            after.verify(&sign(&legacy, Some("ed01"))),
+            Err(CapabilityFailure::Unauthorized)
+        );
+        assert!(after.verify(&sign(&workload, Some("ed01"))).is_ok());
+        // An unset cutoff must not force workload-only before issuer coordination.
+        config.legacy_identity_accept_until = None;
+        let unset = CapabilityVerifier::from_jwks(&config, ED25519_JWKS).unwrap();
+        assert!(unset.verify(&sign(&legacy, Some("ed01"))).is_ok());
+    }
+
+    #[test]
+    fn workload_shape_is_bytewise_allowlisted_and_cannot_smuggle_identity_claims() {
+        let mut config = config();
+        config.workload_subject_allowlist = vec!["workload:search".into()];
+        config.legacy_identity_accept_until = Some(0);
+        let verifier = CapabilityVerifier::from_jwks(&config, ED25519_JWKS).unwrap();
+        let mut workload = claims();
+        workload.actor = None;
+        workload.subject_revision = None;
+        for sub in ["user-a", "Workload:search", "workload:search ", ""] {
+            workload.sub = sub.into();
+            assert_eq!(
+                verifier.verify(&sign(&workload, Some("ed01"))),
+                Err(CapabilityFailure::Unauthorized)
+            );
+        }
+        workload.sub = "workload:search".into();
+        assert!(verifier.verify(&sign(&workload, Some("ed01"))).is_ok());
+        workload.subject_revision = Some(Some("identity-revision".into()));
+        assert_eq!(
+            verifier.verify(&sign(&workload, Some("ed01"))),
+            Err(CapabilityFailure::Unauthorized)
+        );
+        workload.subject_revision = None;
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("ed01".into());
+        for (key, value) in [
+            ("actor", serde_json::Value::Null),
+            ("subject_revision", serde_json::Value::Null),
+            ("unknown_identity", serde_json::json!("secret-identity")),
+        ] {
+            let mut raw = serde_json::to_value(&workload).unwrap();
+            raw[key] = value;
+            let token = encode(
+                &header,
+                &raw,
+                &EncodingKey::from_ed_der(ED25519_PRIVATE_DER),
+            )
+            .unwrap();
+            assert_eq!(
+                verifier.verify(&token),
+                Err(CapabilityFailure::Unauthorized),
+                "claim {key}"
+            );
+        }
+        // Shared signature/issuer/audience/time/authority checks apply to both shapes.
+        for mutate in 0..8 {
+            let mut invalid = workload.clone();
+            match mutate {
+                0 => invalid.iss = "foreign-issuer".into(),
+                1 => invalid.aud = "foreign-audience".into(),
+                2 => invalid.exp = invalid.iat + 61,
+                3 => invalid.nbf = invalid.exp + 1,
+                4 => invalid.iat = invalid.exp + 1,
+                5 => invalid.actions = vec!["other-action".into()],
+                6 => invalid.jti.clear(),
+                _ => invalid.constraints.max_limit = 101,
+            }
+            assert!(verifier.verify(&sign(&invalid, Some("ed01"))).is_err());
+        }
+        assert_eq!(
+            verifier.verify(&sign(&workload, None)),
+            Err(CapabilityFailure::Unauthorized)
+        );
+        assert_eq!(
+            verifier.verify(&sign(&workload, Some("unknown"))),
+            Err(CapabilityFailure::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn unknown_claims_are_ignored_only_by_the_legacy_branch_before_cutover() {
+        let mut config = config();
+        config.workload_subject_allowlist = vec!["workload:search".into()];
+        config.legacy_identity_accept_until = Some(unix_time().unwrap() + 300);
+        let before = CapabilityVerifier::from_jwks(&config, ED25519_JWKS).unwrap();
+        config.legacy_identity_accept_until = Some(0);
+        let after = CapabilityVerifier::from_jwks(&config, ED25519_JWKS).unwrap();
+        let mut legacy = claims();
+        legacy.subject_revision = Some(None);
+        let mut workload = legacy.clone();
+        workload.sub = "workload:search".into();
+        workload.actor = None;
+        workload.subject_revision = None;
+        let context = before.verify(&sign(&legacy, Some("ed01"))).unwrap();
+        for (shape, legacy_shape) in [(legacy, true), (workload, false)] {
+            for level in 0..3 {
+                let mut raw = serde_json::to_value(&shape).unwrap();
+                let target = match level {
+                    0 => &mut raw,
+                    1 => &mut raw["constraints"],
+                    _ => &mut raw["resources"][0],
+                };
+                target["unknown_identity"] = serde_json::json!("synthetic-identity");
+                let mut header = Header::new(Algorithm::EdDSA);
+                header.kid = Some("ed01".into());
+                let token = encode(
+                    &header,
+                    &raw,
+                    &EncodingKey::from_ed_der(ED25519_PRIVATE_DER),
+                )
+                .unwrap();
+                let expected = if legacy_shape {
+                    Ok(context.clone())
+                } else {
+                    Err(CapabilityFailure::Unauthorized)
+                };
+                assert_eq!(before.verify(&token), expected, "claim level {level}");
+                assert_eq!(after.verify(&token), Err(CapabilityFailure::Unauthorized));
+            }
+            let mut header = Header::new(Algorithm::HS256);
+            header.kid = Some("ed01".into());
+            let token =
+                encode(&header, &shape, &EncodingKey::from_secret(b"synthetic-key")).unwrap();
+            assert_eq!(before.verify(&token), Err(CapabilityFailure::Unauthorized));
+        }
+    }
+
+    #[test]
+    fn repeated_vault_id_is_refused_even_for_distinct_resource_tuples() {
+        let verifier = CapabilityVerifier::from_jwks(&config(), ED25519_JWKS).unwrap();
+        let mut repeated = claims();
+        let mut second = repeated.resources[0].clone();
+        second.room_id = "other-room".into();
+        repeated.resources.push(second);
+        assert_eq!(
+            verifier.verify(&sign(&repeated, Some("ed01"))),
             Err(CapabilityFailure::Forbidden)
         );
     }

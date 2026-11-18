@@ -1,13 +1,20 @@
 use tokio::sync::{mpsc, oneshot};
 
-use kwiry_core::{Config, IndexManager, ReconcileReport, ReconcileScope, Result};
+use kwiry_core::{Config, IndexManager, ReconcileReport, ReconcileScope, Result, SearchRuntime};
 
 #[derive(Clone)]
 pub(crate) struct ManagerHandle {
     sender: mpsc::Sender<ManagerCommand>,
+    runtime: SearchRuntime,
 }
 
 impl ManagerHandle {
+    pub(crate) fn mark_resources_dirty(&self, config: &Config, scope: &ReconcileScope) {
+        if let Err(error) = self.runtime.mark_resources_dirty(config, scope) {
+            tracing::error!(%error, "could not record resource freshness");
+        }
+    }
+
     pub(crate) async fn reconcile_scoped(
         &self,
         config: Config,
@@ -52,6 +59,7 @@ enum ManagerCommand {
 
 pub(crate) fn spawn_manager(
     mut manager: IndexManager,
+    runtime: SearchRuntime,
 ) -> (ManagerHandle, tokio::task::JoinHandle<()>) {
     let (sender, mut receiver) = mpsc::channel(16);
     let task = tokio::task::spawn_blocking(move || {
@@ -71,5 +79,5 @@ pub(crate) fn spawn_manager(
             }
         }
     });
-    (ManagerHandle { sender }, task)
+    (ManagerHandle { sender, runtime }, task)
 }

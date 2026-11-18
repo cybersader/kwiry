@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use sha2::{Digest, Sha256};
+
+use crate::status::{IndexFreshness, IndexFreshnessState};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -71,6 +75,7 @@ pub struct SearchRuntime {
     active: Arc<ArcSwapOption<ActiveSearchIndex>>,
     semantic: Arc<ArcSwapOption<SemanticRuntime>>,
     freshness_basis: Arc<AtomicU8>,
+    resource_freshness: Arc<Mutex<BTreeMap<ResourceKey, ResourceFreshness>>>,
 }
 
 impl Default for SearchRuntime {
@@ -85,6 +90,7 @@ impl SearchRuntime {
             active: Arc::new(ArcSwapOption::empty()),
             semantic: Arc::new(ArcSwapOption::empty()),
             freshness_basis: Arc::new(AtomicU8::new(0)),
+            resource_freshness: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -213,7 +219,7 @@ impl SearchRuntime {
             ActiveSearchIndex::OpenClast(index) => {
                 let outcome = index.search_with_quality(query, limit, filters, resources)?;
                 Ok(GenerationSearchResult {
-                    generation: index.generation.clone(),
+                    generation: index.scoped_generation(filters, resources)?,
                     hits: outcome.hits,
                     lexical_match_quality: Some(outcome.match_quality),
                 })
@@ -334,6 +340,103 @@ impl SearchRuntime {
         self.freshness_basis.store(value, Ordering::Release);
     }
 
+    /// Watcher evidence is scoped to the vaults whose paths changed. Unknown
+    /// delivery scope (overflow/config change) conservatively covers all rooms.
+    pub fn mark_resources_dirty(&self, config: &Config, scope: &ReconcileScope) -> Result<()> {
+        if config.server.profile != HostProfile::OpenClast {
+            return Ok(());
+        }
+        let mut states = self
+            .resource_freshness
+            .lock()
+            .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
+        for resource in covered_resources(config, scope) {
+            let state = states.entry(resource).or_default();
+            state.epoch = state
+                .epoch
+                .checked_add(1)
+                .ok_or_else(|| Error::State("resource freshness epoch exhausted".into()))?;
+            state.state = IndexFreshnessState::Stale;
+        }
+        Ok(())
+    }
+
+    fn begin_resource_pass(
+        &self,
+        config: &Config,
+        scope: &ReconcileScope,
+    ) -> Result<BTreeMap<ResourceKey, u64>> {
+        let mut states = self
+            .resource_freshness
+            .lock()
+            .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
+        let mut epochs = BTreeMap::new();
+        for resource in covered_resources(config, scope) {
+            let state = states.entry(resource.clone()).or_default();
+            state.state = IndexFreshnessState::Reconciling;
+            epochs.insert(resource, state.epoch);
+        }
+        Ok(epochs)
+    }
+
+    fn finish_resource_pass(
+        &self,
+        epochs: BTreeMap<ResourceKey, u64>,
+        incomplete: &BTreeSet<String>,
+        succeeded: bool,
+    ) -> Result<()> {
+        let mut states = self
+            .resource_freshness
+            .lock()
+            .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
+        for (resource, epoch) in epochs {
+            let state = states.entry(resource.clone()).or_default();
+            state.state =
+                if succeeded && !incomplete.contains(&resource.vault_id) && state.epoch == epoch {
+                    IndexFreshnessState::Current
+                } else {
+                    IndexFreshnessState::Stale
+                };
+        }
+        Ok(())
+    }
+
+    /// Recheck the effective set at response time. A changed authorized revision
+    /// makes an already-running search stale; forbidden publications do not.
+    pub fn authorized_freshness(
+        &self,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+        served_generation: &str,
+    ) -> Result<IndexFreshness> {
+        // Read freshness before loading the active snapshot, under the same
+        // lock that finishes a pass. Otherwise a completed publication between
+        // those reads could label a superseded response current.
+        let states = self
+            .resource_freshness
+            .lock()
+            .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
+        let active = self.active.load_full().ok_or(Error::IndexBuilding)?;
+        let ActiveSearchIndex::OpenClast(index) = active.as_ref() else {
+            return Err(Error::Auth(
+                "scoped freshness requires the openclast profile".into(),
+            ));
+        };
+        let effective = effective_resources(filters, resources);
+        let current_generation = index.scoped_generation(filters, resources)?;
+        let mut worst = IndexFreshnessState::Current;
+        for resource in effective {
+            let state = states
+                .get(resource)
+                .map_or(IndexFreshnessState::Stale, |state| state.state);
+            worst = worse_freshness(worst, state);
+        }
+        if current_generation != served_generation {
+            worst = worse_freshness(worst, IndexFreshnessState::Stale);
+        }
+        Ok(IndexFreshness::new(worst, self.freshness_basis()))
+    }
+
     pub fn generation(&self) -> Option<String> {
         self.active.load_full().map(|active| match active.as_ref() {
             ActiveSearchIndex::Desktop(index) => index.generation.clone(),
@@ -374,6 +477,102 @@ impl SearchRuntime {
     }
 }
 
+#[derive(Clone)]
+struct ResourceFreshness {
+    state: IndexFreshnessState,
+    epoch: u64,
+}
+
+impl Default for ResourceFreshness {
+    fn default() -> Self {
+        Self {
+            state: IndexFreshnessState::Stale,
+            epoch: 0,
+        }
+    }
+}
+
+fn covered_resources(config: &Config, scope: &ReconcileScope) -> BTreeSet<ResourceKey> {
+    config
+        .vaults
+        .iter()
+        .filter(|vault| match scope {
+            ReconcileScope::Full => true,
+            ReconcileScope::Paths(paths) => paths.iter().any(|(id, _)| id == &vault.id),
+        })
+        .filter_map(|vault| config.resource_key(vault))
+        .collect()
+}
+
+fn effective_resources<'a>(
+    filters: &SearchFilters,
+    resources: &'a [ResourceKey],
+) -> BTreeSet<&'a ResourceKey> {
+    resources
+        .iter()
+        .filter(|resource| {
+            filters
+                .vault_id
+                .as_deref()
+                .is_none_or(|id| id == resource.vault_id)
+                && filters
+                    .room
+                    .as_deref()
+                    .is_none_or(|room| room == resource.room_id)
+        })
+        .collect()
+}
+
+fn worse_freshness(a: IndexFreshnessState, b: IndexFreshnessState) -> IndexFreshnessState {
+    fn rank(state: IndexFreshnessState) -> u8 {
+        match state {
+            IndexFreshnessState::Current => 0,
+            IndexFreshnessState::Reconciling => 1,
+            IndexFreshnessState::Stale => 2,
+            IndexFreshnessState::Unavailable => 3,
+        }
+    }
+    if rank(a) >= rank(b) { a } else { b }
+}
+
+// All binary lengths/counts use u64-LE, never platform-sized integers.
+fn digest_bytes(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
+}
+
+/// Transitional v1 revision. Compact serde JSON has deterministic struct field
+/// order and includes every persisted ManifestFile field (including optional
+/// fields according to their on-disk serde rules). Rows are source_key ordered,
+/// framed separately from their keys, and counted. No global timestamp/revision
+/// participates. Adding a persisted field automatically adds it to this digest.
+fn resource_revision(manifest: &Manifest, resource: &ResourceKey) -> Result<[u8; 32]> {
+    let mut digest = Sha256::new();
+    digest_bytes(&mut digest, b"kwiry-resource-revision-v1");
+    for version in [
+        u64::from(manifest.manifest_version),
+        u64::from(manifest.index_format_version),
+        manifest.chunking_version,
+        u64::from(manifest.preparation_schema_version),
+        u64::from(manifest.format_identity_schema_version),
+    ] {
+        digest.update(version.to_le_bytes());
+    }
+    let files: Vec<_> = manifest
+        .files
+        .iter()
+        .filter(|(_, file)| file.resource.as_ref() == Some(resource))
+        .collect();
+    digest.update((files.len() as u64).to_le_bytes());
+    for (key, file) in files {
+        digest_bytes(&mut digest, key.as_bytes());
+        let bytes = serde_json::to_vec(file)
+            .map_err(|_| Error::State("resource revision serialization failed".into()))?;
+        digest_bytes(&mut digest, &bytes);
+    }
+    Ok(digest.finalize().into())
+}
+
 enum ActiveSearchIndex {
     Desktop(Arc<SearchIndex>),
     OpenClast(Arc<PartitionedSearchIndex>),
@@ -382,6 +581,7 @@ enum ActiveSearchIndex {
 struct PartitionedSearchIndex {
     generation: String,
     partition_dirs: BTreeMap<ResourceKey, PathBuf>,
+    revisions: BTreeMap<ResourceKey, [u8; 32]>,
     /// Lazy per-resource readers. A partition is opened only after a
     /// request's authorized resource intersection selects it, then cached
     /// for the lifetime of this immutable generation; a generation swap
@@ -394,8 +594,14 @@ struct PartitionedSearchIndex {
 impl PartitionedSearchIndex {
     fn open(active: &crate::generation::GenerationPaths) -> Result<Self> {
         let layout = GenerationLayout::load(&active.layout_path)?;
+        let (manifest, _) = Manifest::load(&active.manifest_path)?.adopt();
+        let mut revisions = BTreeMap::new();
         let mut partition_dirs = BTreeMap::new();
         for partition in layout.partitions {
+            revisions.insert(
+                partition.resource.clone(),
+                resource_revision(&manifest, &partition.resource)?,
+            );
             let index_dir = partition_index_dir(&active.partitions_dir, &partition.resource);
             if !index_dir.join("meta.json").is_file() {
                 return Err(Error::State(format!(
@@ -418,8 +624,31 @@ impl PartitionedSearchIndex {
         Ok(Self {
             generation: active.id.clone(),
             partition_dirs,
+            revisions,
             readers: std::sync::Mutex::new(BTreeMap::new()),
         })
+    }
+
+    fn scoped_generation(
+        &self,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+    ) -> Result<String> {
+        let effective = effective_resources(filters, resources);
+        let mut digest = Sha256::new();
+        digest.update(b"L");
+        digest.update((effective.len() as u64).to_le_bytes());
+        for resource in effective {
+            let revision = self
+                .revisions
+                .get(resource)
+                .ok_or(Error::ResourceUnavailable)?;
+            for field in [&resource.tenant_id, &resource.vault_id, &resource.room_id] {
+                digest_bytes(&mut digest, field.as_bytes());
+            }
+            digest_bytes(&mut digest, revision);
+        }
+        Ok(format!("v1-{:x}", digest.finalize()))
     }
 
     fn authorized_reader(
@@ -1291,6 +1520,20 @@ impl OpenClastIndexManager {
     }
 
     fn reconcile(&mut self, config: Config, scope: &ReconcileScope) -> Result<ReconcileReport> {
+        let epochs = self.runtime.begin_resource_pass(&config, scope)?;
+        let mut incomplete = BTreeSet::new();
+        let result = self.reconcile_inner(config, scope, &mut incomplete);
+        self.runtime
+            .finish_resource_pass(epochs, &incomplete, result.is_ok())?;
+        result
+    }
+
+    fn reconcile_inner(
+        &mut self,
+        config: Config,
+        scope: &ReconcileScope,
+        incomplete: &mut BTreeSet<String>,
+    ) -> Result<ReconcileReport> {
         let mut plan = ReconcilePlan::new(&self.manifest);
         let mut next_resources: BTreeSet<_> = self
             .layout
@@ -1378,6 +1621,7 @@ impl OpenClastIndexManager {
                 next_resources.remove(previous);
             }
             if !vault.path.is_dir() {
+                incomplete.insert(vault.id.clone());
                 unavailable_vaults.push(vault.id.clone());
                 for (key, file) in &self.manifest.files {
                     if file.vault_id == vault.id {
@@ -1418,6 +1662,12 @@ impl OpenClastIndexManager {
                 &mut audit,
             );
             let discovery_incomplete = !observed.enumeration.completeness.may_infer_deletions();
+            if discovery_incomplete {
+                incomplete.insert(vault.id.clone());
+            }
+            // A rolling audit backlog is not dirty state under metadata_audit:
+            // the configured evidence basis already describes metadata reuse.
+            // Its shared budget must not couple one room's freshness to another.
             warnings.extend(observed.enumeration.warnings);
             source_files_read += observed.source_files_read;
             source_bytes_read += observed.source_bytes_read;
@@ -1431,6 +1681,7 @@ impl OpenClastIndexManager {
                     warnings.push(warning);
                 }
                 if outcome.kind == FileOutcomeKind::TransientError {
+                    incomplete.insert(vault.id.clone());
                     if let Some(previous) = self.manifest.files.get(&key) {
                         plan.retain_source(&key, previous, RetentionReason::TransientReadError);
                     }
@@ -2778,6 +3029,8 @@ mod tests {
             audience: "kwiry-search".into(),
             jwks_file: PathBuf::from("/run/secrets/search-jwks.json"),
             max_token_ttl_seconds: 60,
+            workload_subject_allowlist: Vec::new(),
+            legacy_identity_accept_until: None,
         });
         config.vaults = vaults;
         config
@@ -5321,5 +5574,412 @@ mod tests {
             !resident_content_terms(&served.index_dir).contains("inheritedterm00"),
             "the departed note's vocabulary must leave the term dictionary with it"
         );
+    }
+
+    fn governed_header_fixture() -> (
+        tempfile::TempDir,
+        Config,
+        PathBuf,
+        SearchRuntime,
+        IndexManager,
+    ) {
+        let temp = tempdir().unwrap();
+        let mut vaults = Vec::new();
+        for id in ["a", "b"] {
+            let path = temp.path().join(id);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("note.md"), "# Note\nneedle evidence").unwrap();
+            vaults.push(VaultRegistration {
+                id: id.into(),
+                path,
+                room: Some(format!("room-{id}")),
+            });
+        }
+        let config = openclast_config(vaults);
+        let data = temp.path().join("data");
+        build_index(&config, &data).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
+        (temp, config, data, runtime, manager)
+    }
+
+    #[test]
+    fn governed_headers_ignore_forbidden_publish_reconcile_and_watcher_evidence() {
+        let (_temp, config, data, runtime, mut manager) = governed_header_fixture();
+        let resources = [config.resource_key(&config.vaults[0]).unwrap()];
+        let filters = SearchFilters::default();
+        let baseline = runtime
+            .search_authorized_with_generation("needle", 20, &filters, &resources)
+            .unwrap();
+        assert!(baseline.generation.starts_with("v1-"));
+        assert_eq!(baseline.generation.len(), 67);
+        let freshness = || {
+            runtime
+                .authorized_freshness(&filters, &resources, &baseline.generation)
+                .unwrap()
+        };
+        assert_eq!(freshness().state, IndexFreshnessState::Current);
+        let forbidden_scope =
+            ReconcileScope::Paths(BTreeSet::from([("b".into(), "note.md".into())]));
+        runtime
+            .mark_resources_dirty(&config, &forbidden_scope)
+            .unwrap();
+        assert_eq!(freshness().state, IndexFreshnessState::Current);
+        let epochs = runtime
+            .begin_resource_pass(&config, &forbidden_scope)
+            .unwrap();
+        assert_eq!(freshness().state, IndexFreshnessState::Current);
+        runtime
+            .finish_resource_pass(epochs, &BTreeSet::new(), false)
+            .unwrap();
+        assert_eq!(freshness().state, IndexFreshnessState::Current);
+        let old_global = runtime.generation();
+        fs::write(
+            config.vaults[1].path.join("note.md"),
+            "# Forbidden\nchanged changed needle",
+        )
+        .unwrap();
+        manager
+            .reconcile_scoped(config.clone(), &forbidden_scope)
+            .unwrap();
+        assert_ne!(old_global, runtime.generation());
+        assert_eq!(
+            runtime
+                .search_authorized_with_generation("needle", 20, &filters, &resources)
+                .unwrap(),
+            baseline
+        );
+        assert_eq!(freshness().state, IndexFreshnessState::Current);
+        // Full publication (including its timestamp) also leaves A's header alone
+        // once the covering pass completes.
+        manager.reconcile(config.clone()).unwrap();
+        assert_eq!(
+            runtime
+                .search_authorized_with_generation("needle", 20, &filters, &resources)
+                .unwrap(),
+            baseline
+        );
+        assert_eq!(freshness().state, IndexFreshnessState::Current);
+        // Removing and re-adding a forbidden partition must not identify a new
+        // authorized view either, even though both operations publish layouts.
+        let mut without_forbidden = config.clone();
+        without_forbidden.vaults.pop();
+        for next in [without_forbidden, config.clone()] {
+            manager.reconcile(next).unwrap();
+            assert_eq!(
+                runtime
+                    .search_authorized_with_generation("needle", 20, &filters, &resources)
+                    .unwrap(),
+                baseline
+            );
+            assert_eq!(freshness().state, IndexFreshnessState::Current);
+        }
+        manager.shutdown().unwrap();
+        // An external full rebuild, not just incremental reconciliation.
+        build_index(&config, &data).unwrap();
+        let mut reopened = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        reopened.reconcile(config).unwrap();
+        assert_eq!(
+            runtime
+                .search_authorized_with_generation("needle", 20, &filters, &resources)
+                .unwrap(),
+            baseline
+        );
+        assert_eq!(freshness().state, IndexFreshnessState::Current);
+        reopened.shutdown().unwrap();
+    }
+
+    #[test]
+    fn governed_metadata_audit_backlog_cannot_leak_forbidden_work() {
+        let (temp, mut config, _data, runtime, mut manager) = governed_header_fixture();
+        let resource = [config.resource_key(&config.vaults[0]).unwrap()];
+        // Settled mtimes select the metadata fast path deterministically.
+        for vault in &config.vaults {
+            fs::File::options()
+                .write(true)
+                .open(vault.path.join("note.md"))
+                .unwrap()
+                .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000))
+                .unwrap();
+        }
+        manager.reconcile(config.clone()).unwrap();
+        config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+        config.indexing.audit_sources_per_pass = 1;
+        // The forbidden vault consumes the only audit slot before A is visited.
+        config.vaults.reverse();
+        let report = manager.reconcile(config.clone()).unwrap();
+        assert!(report.audit_pending);
+        let filters = SearchFilters::default();
+        let actual = runtime
+            .search_authorized_with_generation("needle", 20, &filters, &resource)
+            .unwrap();
+        let freshness = runtime
+            .authorized_freshness(&filters, &resource, &actual.generation)
+            .unwrap();
+        assert_eq!(freshness.state, IndexFreshnessState::Current);
+        assert_eq!(freshness.basis, IndexFreshnessBasis::MetadataAudit);
+
+        config.vaults.retain(|vault| vault.id == "a");
+        let baseline_data = temp.path().join("authorized-only");
+        build_index(&config, &baseline_data).unwrap();
+        let baseline_runtime = SearchRuntime::new();
+        let mut baseline_manager =
+            IndexManager::open(config.clone(), &baseline_data, baseline_runtime.clone()).unwrap();
+        let report = baseline_manager.reconcile(config.clone()).unwrap();
+        assert!(!report.audit_pending);
+        let baseline = baseline_runtime
+            .search_authorized_with_generation("needle", 20, &filters, &resource)
+            .unwrap();
+        assert_eq!(actual, baseline);
+        assert_eq!(
+            freshness,
+            baseline_runtime
+                .authorized_freshness(&filters, &resource, &baseline.generation)
+                .unwrap()
+        );
+        let scope = ReconcileScope::Paths(BTreeSet::from([("a".into(), "note.md".into())]));
+        runtime.mark_resources_dirty(&config, &scope).unwrap();
+        manager.reconcile_scoped(config, &scope).unwrap();
+        assert_eq!(
+            runtime
+                .authorized_freshness(&filters, &resource, &actual.generation)
+                .unwrap(),
+            freshness
+        );
+        baseline_manager.shutdown().unwrap();
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn governed_freshness_transitions_and_effective_set_are_resource_scoped() {
+        let (_temp, config, _data, runtime, mut manager) = governed_header_fixture();
+        let a = config.resource_key(&config.vaults[0]).unwrap();
+        let b = config.resource_key(&config.vaults[1]).unwrap();
+        let resources = [a.clone(), b.clone()];
+        let filters = SearchFilters::default();
+        let generation = runtime
+            .search_authorized_with_generation("needle", 20, &filters, &resources)
+            .unwrap()
+            .generation;
+        let state = || {
+            runtime
+                .authorized_freshness(&filters, &resources, &generation)
+                .unwrap()
+                .state
+        };
+        let scope = ReconcileScope::Paths(BTreeSet::from([("a".into(), "note.md".into())]));
+        let epochs = runtime.begin_resource_pass(&config, &scope).unwrap();
+        assert_eq!(state(), IndexFreshnessState::Reconciling);
+        runtime
+            .finish_resource_pass(epochs, &BTreeSet::from(["a".into()]), true)
+            .unwrap();
+        assert_eq!(state(), IndexFreshnessState::Stale);
+        let epochs = runtime.begin_resource_pass(&config, &scope).unwrap();
+        assert_eq!(state(), IndexFreshnessState::Reconciling);
+        runtime.mark_resources_dirty(&config, &scope).unwrap();
+        runtime
+            .finish_resource_pass(epochs, &BTreeSet::new(), true)
+            .unwrap();
+        assert_eq!(
+            state(),
+            IndexFreshnessState::Stale,
+            "a concurrent event must survive completion"
+        );
+        manager.reconcile_scoped(config.clone(), &scope).unwrap();
+        assert_eq!(state(), IndexFreshnessState::Current);
+        runtime.mark_resources_dirty(&config, &scope).unwrap();
+        assert_eq!(state(), IndexFreshnessState::Stale);
+        let only_b = SearchFilters {
+            room: Some(b.room_id.clone()),
+            ..SearchFilters::default()
+        };
+        let from_both = runtime
+            .search_authorized_with_generation("needle", 20, &only_b, &resources)
+            .unwrap();
+        let from_b = runtime
+            .search_authorized_with_generation("needle", 20, &only_b, std::slice::from_ref(&b))
+            .unwrap();
+        assert_eq!(from_both, from_b);
+        assert_eq!(
+            runtime
+                .authorized_freshness(&only_b, &resources, &from_b.generation)
+                .unwrap()
+                .state,
+            IndexFreshnessState::Current
+        );
+        // Sorting is bytewise tuple order, independent of signed ordering.
+        let reversed = runtime
+            .search_authorized_with_generation("needle", 20, &filters, &[b, a])
+            .unwrap();
+        assert_eq!(generation, reversed.generation);
+        let empty_filters = SearchFilters {
+            room: Some("no-such-room".into()),
+            ..SearchFilters::default()
+        };
+        let empty = runtime
+            .search_authorized_with_generation("needle", 20, &empty_filters, &resources)
+            .unwrap();
+        assert!(empty.hits.is_empty());
+        assert_eq!(
+            runtime
+                .authorized_freshness(&empty_filters, &resources, &empty.generation)
+                .unwrap()
+                .state,
+            IndexFreshnessState::Current
+        );
+        fs::write(
+            config.vaults[0].path.join("note.md"),
+            "# Changed\nneedle new evidence",
+        )
+        .unwrap();
+        manager.reconcile_scoped(config.clone(), &scope).unwrap();
+        assert_eq!(
+            state(),
+            IndexFreshnessState::Stale,
+            "superseded authorized revision"
+        );
+        let mut unmapped = config.clone();
+        unmapped.vaults.remove(0);
+        manager.reconcile(unmapped).unwrap();
+        assert!(matches!(
+            runtime.authorized_freshness(&filters, &resources, &generation),
+            Err(Error::ResourceUnavailable)
+        ));
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn governed_mtime_only_rebuild_changes_range_results_and_identity_together() {
+        let (_temp, config, data, runtime, manager) = governed_header_fixture();
+        let file = config.vaults[0].path.join("note.md");
+        let resource = [config.resource_key(&config.vaults[0]).unwrap()];
+        let filters = SearchFilters::default();
+        let set_time = |seconds| {
+            fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .unwrap()
+        };
+        manager.shutdown().unwrap();
+        set_time(1_600_000_000);
+        build_index(&config, &data).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
+        let query = "mtime:[1599999999 TO 1600000001]";
+        let before = runtime
+            .search_authorized_with_generation(query, 20, &filters, &resource)
+            .unwrap();
+        assert_eq!(before.hits.len(), 1);
+        let hash = manager.manifest().files[&source_key("a", "note.md")]
+            .content_hash
+            .clone();
+        // Reconciliation is also a rebuild of the mtime-bearing index document.
+        set_time(1_700_000_000);
+        manager.reconcile(config.clone()).unwrap();
+        let after_reconcile = runtime
+            .search_authorized_with_generation(query, 20, &filters, &resource)
+            .unwrap();
+        assert!(after_reconcile.hits.is_empty());
+        assert_ne!(before.generation, after_reconcile.generation);
+        assert_eq!(
+            hash,
+            manager.manifest().files[&source_key("a", "note.md")].content_hash
+        );
+        assert_eq!(
+            runtime
+                .search_authorized("mtime:[1699999999 TO 1700000001]", 20, &filters, &resource)
+                .unwrap()
+                .len(),
+            1
+        );
+        manager.shutdown().unwrap();
+        // A full rebuild with unchanged bytes has exactly the same revision.
+        build_index(&config, &data).unwrap();
+        let manager = IndexManager::open(config, &data, runtime.clone()).unwrap();
+        let after_rebuild = runtime
+            .search_authorized_with_generation(query, 20, &filters, &resource)
+            .unwrap();
+        assert_eq!(after_rebuild, after_reconcile);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn governed_revision_covers_every_persisted_file_field_and_manifest_version() {
+        let (_temp, config, _data, _runtime, manager) = governed_header_fixture();
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        let manifest = manager.manifest();
+        let baseline = resource_revision(manifest, &resource).unwrap();
+        let key = manifest
+            .files
+            .iter()
+            .find(|(_, f)| f.resource.as_ref() == Some(&resource))
+            .unwrap()
+            .0
+            .clone();
+        let original = serde_json::to_value(&manifest.files[&key]).unwrap();
+        // Mutate every serialized field, including nested resource/coverage/profile
+        // values. This test automatically grows with persisted ManifestFile fields.
+        for (field, value) in original.as_object().unwrap() {
+            let mut row = original.clone();
+            row[field] = match value {
+                serde_json::Value::String(value) => {
+                    serde_json::Value::String(format!("{value}-changed"))
+                }
+                serde_json::Value::Number(value) => serde_json::json!(value.as_u64().unwrap() + 1),
+                serde_json::Value::Null => serde_json::json!("changed"),
+                serde_json::Value::Object(_) => {
+                    let mut v = value.clone();
+                    v["room_id"] = serde_json::json!("changed-room");
+                    v
+                }
+                _ => panic!("add a field mutation for {field}"),
+            };
+            // Closed enums cannot deserialize arbitrary names: use real alternates.
+            match field.as_str() {
+                "format" => row[field] = serde_json::json!("text"),
+                "extraction_profile" => row[field] = serde_json::json!("none"),
+                "coverage" => row[field] = serde_json::json!("unreadable"),
+                "outcome" => row[field] = serde_json::json!("skipped"),
+                _ => {}
+            }
+            let mut changed = manifest.clone();
+            changed
+                .files
+                .insert(key.clone(), serde_json::from_value(row).unwrap());
+            assert_ne!(
+                baseline,
+                resource_revision(&changed, &resource).unwrap(),
+                "field {field}"
+            );
+        }
+        for version in 0..5 {
+            let mut changed = manifest.clone();
+            match version {
+                0 => changed.manifest_version += 1,
+                1 => changed.index_format_version += 1,
+                2 => changed.chunking_version += 1,
+                3 => changed.preparation_schema_version += 1,
+                _ => changed.format_identity_schema_version += 1,
+            }
+            assert_ne!(baseline, resource_revision(&changed, &resource).unwrap());
+        }
+        let mut global_only = manifest.clone();
+        global_only.state_revision += 1;
+        global_only.last_sync = Some("unrelated-global-time".into());
+        assert_eq!(
+            baseline,
+            resource_revision(&global_only, &resource).unwrap()
+        );
+        // u64-LE framing is architecture independent, including lengths >255.
+        let mut framed = Sha256::new();
+        digest_bytes(&mut framed, &[7; 300]);
+        let mut expected = Sha256::new();
+        expected.update(300_u64.to_le_bytes());
+        expected.update([7; 300]);
+        assert_eq!(framed.finalize(), expected.finalize());
+        manager.shutdown().unwrap();
     }
 }

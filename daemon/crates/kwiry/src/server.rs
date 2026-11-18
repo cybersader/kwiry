@@ -10,7 +10,6 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
@@ -225,7 +224,7 @@ pub(crate) async fn serve(
         *status.write().await = seeded;
     }
 
-    let (manager_handle, manager_task) = spawn_manager(manager);
+    let (manager_handle, manager_task) = spawn_manager(manager, runtime.clone());
     // The watcher is armed before the boot pass so nothing observed while
     // it runs is lost; the manager actor serializes the passes.
     let watcher = spawn_watcher(
@@ -250,7 +249,7 @@ pub(crate) async fn serve(
     // Boot reconciliation catches offline changes against a pre-existing
     // generation. A generation built moments ago in this same process has
     // none, so it publishes directly as current.
-    if freshly_built {
+    if freshly_built && config.server.profile == HostProfile::Desktop {
         let next = status_with_model(
             status_from_manifest(&config, &boot_manifest, &[], runtime.generation()),
             &status,
@@ -566,17 +565,22 @@ async fn search(
     if state.profile == HostProfile::OpenClast {
         tracing::info!(
             jti = principal.jti.as_deref().unwrap_or("missing"),
-            subject = %subject_digest(&principal.subject),
-            actor = %principal.actor,
             resources = principal.resources.len(),
             results = result.hits.len(),
             "OpenClast search enforced"
         );
     }
 
-    let status = state.status.read().await;
-    let freshness =
-        response_freshness(&status, &result.generation, state.runtime.freshness_basis());
+    let freshness = match state.profile {
+        HostProfile::Desktop => {
+            let status = state.status.read().await;
+            response_freshness(&status, &result.generation, state.runtime.freshness_basis())
+        }
+        HostProfile::OpenClast => state
+            .runtime
+            .authorized_freshness(&request.filters, &principal.resources, &result.generation)
+            .map_err(map_core_error)?,
+    };
     let mut response = Json(ApiSearchResponse {
         hits: result.hits,
         next_cursor: None,
@@ -665,13 +669,6 @@ fn response_freshness(
         IndexFreshnessState::Current
     };
     IndexFreshness::new(state, basis)
-}
-
-fn subject_digest(subject: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"kwiry-subject-log-v1\0");
-    digest.update(subject.as_bytes());
-    format!("{:x}", digest.finalize())
 }
 
 fn map_core_error(error: kwiry_core::Error) -> HttpError {
@@ -846,6 +843,8 @@ mod tests {
             audience: "kwiry-search".into(),
             jwks_file,
             max_token_ttl_seconds: 60,
+            workload_subject_allowlist: Vec::new(),
+            legacy_identity_accept_until: None,
         }
     }
 
@@ -925,6 +924,10 @@ mod tests {
 
     #[test]
     fn freshness_tracks_the_generation_and_reconciliation_state() {
+        assert!(
+            Principal::desktop().resources.is_empty(),
+            "desktop must take its explicit profile branch even with resources: []"
+        );
         let mut status = DaemonStatus::starting("0.1.0");
         status.generation = Some("generation-a".to_owned());
         status.dirty = false;
@@ -1398,8 +1401,17 @@ mod tests {
         }];
         build_index(&config, &data).unwrap();
         let runtime = SearchRuntime::new();
-        let manager = IndexManager::open(config, &data, runtime.clone()).unwrap();
-        let generation = runtime.generation().unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config).unwrap();
+        let generation = runtime
+            .search_authorized_with_generation(
+                "authorizedprobe",
+                20,
+                &kwiry_core::SearchFilters::default(),
+                std::slice::from_ref(&resource),
+            )
+            .unwrap()
+            .generation;
         let mut status = DaemonStatus::starting("0.1.0");
         status.state = DaemonState::Ready;
         status.generation = Some(generation.clone());

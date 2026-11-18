@@ -20,13 +20,13 @@ pub enum Scope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
     pub profile: HostProfile,
-    pub subject: String,
-    pub actor: String,
+    /// Capability expiry and exact action; absent for desktop bearer auth.
+    pub exp: Option<u64>,
+    pub action: Option<String>,
     pub scopes: Vec<Scope>,
     pub resources: Vec<ResourceKey>,
     pub jti: Option<String>,
     pub policy_revision: Option<String>,
-    pub subject_revision: Option<String>,
     pub max_limit: usize,
 }
 
@@ -34,13 +34,12 @@ impl Principal {
     pub fn desktop() -> Self {
         Self {
             profile: HostProfile::Desktop,
-            subject: "desktop-user".to_owned(),
-            actor: "kwiry-desktop".to_owned(),
+            exp: None,
+            action: None,
             scopes: vec![Scope::Search, Scope::Admin],
             resources: Vec::new(),
             jti: None,
             policy_revision: None,
-            subject_revision: None,
             max_limit: 100,
         }
     }

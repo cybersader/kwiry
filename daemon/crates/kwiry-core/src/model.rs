@@ -137,6 +137,13 @@ pub struct OpenClastAuthConfig {
     pub jwks_file: PathBuf,
     #[serde(default = "default_capability_ttl_seconds")]
     pub max_token_ttl_seconds: u64,
+    /// Exact, bytewise workload subjects. Never put user identities here.
+    #[serde(default)]
+    pub workload_subject_allowlist: Vec<String>,
+    /// Unix seconds, set only after the issuer confirms its workload transition.
+    /// None preserves the legacy branch until the operator coordinates cutover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_identity_accept_until: Option<u64>,
 }
 
 #[cfg(feature = "native")]

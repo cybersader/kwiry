@@ -296,6 +296,11 @@ async fn run_watcher(
                 let now = Instant::now();
                 first_dirty.get_or_insert(now);
                 last_dirty = Some(now);
+                let dirty_scope = match &effect {
+                    EventEffect::Touched(paths) => ReconcileScope::Paths(paths.iter().cloned().collect()),
+                    _ => ReconcileScope::Full,
+                };
+                manager.mark_resources_dirty(&config, &dirty_scope);
                 match effect {
                     EventEffect::ConfigChanged => {
                         config_dirty = true;
@@ -315,6 +320,7 @@ async fn run_watcher(
                 if overflow.swap(false, Ordering::AcqRel) {
                     // A dropped delivery may have been anything, including
                     // a config write.
+                    manager.mark_resources_dirty(&config, &ReconcileScope::Full);
                     config_dirty = true;
                     pending.note_rescan(RescanCause::ChannelOverflow);
                     first_dirty.get_or_insert(now);
