@@ -2,7 +2,28 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 export const WORKER_PROTOCOL_VERSION = 16 as const;
+/**
+ * The no-progress window for an ordinary request. It is not a wall-clock budget:
+ * every progress notice the Worker posts re-arms it, so a slow machine that is
+ * still advancing is never killed for being slow, while a Worker that stops
+ * advancing is still detected within this window.
+ */
 export const WORKER_REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * The first-signal window for `initialize`. Before its first progress notice the
+ * Worker must parse its own script and compile embedded WebAssembly, and neither
+ * step can report progress part-way through. On a contended desktop (a large
+ * vault still loading) that boot can exceed the ordinary window without anything
+ * being wrong, so it gets a longer one. Later steps re-arm the ordinary window.
+ */
+export const WORKER_INITIALIZE_TIMEOUT_MS = 120_000;
+/**
+ * Hard ceiling on one request however much progress it reports, so a Worker
+ * that keeps emitting notices without finishing still ends in an explicit
+ * timeout rather than an indefinite wait.
+ */
+export const WORKER_MAX_REQUEST_DURATION_MS = 15 * 60_000;
+export const WORKER_PROGRESS_KIND = "progress" as const;
 export const MAX_PENDING_REQUESTS = 16;
 export const MAX_BATCH_SOURCES = 16;
 export const MAX_SOURCE_CHANGES = 16;
@@ -960,6 +981,33 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
   }
   return hasExactKeys(value, ["version", "id", "operation", "ok", "error"])
     && isWorkerError(value.error);
+}
+
+/**
+ * A liveness notice the Worker posts while it is still working on `request_id`.
+ * It deliberately has no top-level `id`: it is never a response, and a reader
+ * that correlates responses by `id` must not mistake it for one.
+ */
+export interface WorkerProgressNotice {
+  version: typeof WORKER_PROTOCOL_VERSION;
+  kind: typeof WORKER_PROGRESS_KIND;
+  request_id: number;
+  operation: string;
+}
+
+/// Shape check only. The operation is deliberately not matched against the
+/// production operation list: the host correlates it with the pending request,
+/// which is the stronger check, and naming the list here would pull production
+/// operation names into builds that compile them out.
+export function isWorkerProgressNotice(value: unknown): value is WorkerProgressNotice {
+  return isRecord(value)
+    && hasExactKeys(value, ["version", "kind", "request_id", "operation"])
+    && value.version === WORKER_PROTOCOL_VERSION
+    && value.kind === WORKER_PROGRESS_KIND
+    && isRequestId(value.request_id)
+    && typeof value.operation === "string"
+    && value.operation.length > 0
+    && value.operation.length <= 64;
 }
 
 export function fixedWorkerError(

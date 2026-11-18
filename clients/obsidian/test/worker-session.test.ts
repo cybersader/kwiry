@@ -8,6 +8,7 @@ import {
   INITIAL_BUILD_CHECKPOINT_IMAGE_VERSION,
   INITIAL_BUILD_CHECKPOINT_RECORD_KIND,
   INITIAL_BUILD_CHECKPOINT_RECORD_VERSION,
+  WORKER_INITIALIZE_TIMEOUT_MS,
   WORKER_PROTOCOL_VERSION,
   emptyRestoreEvictionReport,
   emptySourceFormatCounts,
@@ -515,12 +516,38 @@ describe("InPluginWorkerSession", () => {
     vi.useFakeTimers();
     try {
       const worker = new MockWorker();
-      worker.heldOperations.add("initialize");
+      worker.heldOperations.add("status");
       const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 10);
-      const pending = session.initialize("active-vault");
+      const pending = session.status();
       const rejected = expect(pending).rejects.toMatchObject({ code: "timeout" });
 
       await vi.advanceTimersByTimeAsync(11);
+
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives the cold initialize its own first-signal window, not the ordinary deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      worker.heldOperations.add("initialize");
+      const session = new InPluginWorkerSession(worker, "blob:kwiry", vi.fn(), 10);
+      let settled = false;
+      const pending = session.initialize("active-vault");
+      void pending.then(
+        () => { settled = true; },
+        () => { settled = true; },
+      );
+
+      // Field failure: a contended desktop spent more than the ordinary window
+      // booting the Worker, and the old fixed deadline killed it every time.
+      await vi.advanceTimersByTimeAsync(WORKER_INITIALIZE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      const rejected = expect(pending).rejects.toMatchObject({ code: "timeout" });
+      await vi.advanceTimersByTimeAsync(2);
 
       await rejected;
     } finally {
