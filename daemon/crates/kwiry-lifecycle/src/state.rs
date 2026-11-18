@@ -24,6 +24,10 @@ pub const INSTRS: usize = 2;
 pub const DIRS: usize = 3;
 /// Attestations the bounded journal can hold.
 pub const PIN_ENTRIES: usize = 3;
+/// Engine holders of the id-space besides the modeled one (HW §15 H.30,
+/// H.31), abstracted to what the epoch-change mint gate reads. Only the H.25
+/// focused probe gives them a role; elsewhere they stay unenrolled.
+pub const PEERS: usize = 2;
 
 /// The room each unit's descriptor names.
 pub const UNIT_ROOM: [usize; UNITS] = [0, 0, 1];
@@ -254,10 +258,73 @@ pub struct Auth {
     pub rollback_suspected: bool,
     pub failed_restore: bool,
     pub journal_lost_audited: bool,
-    /// H.25: a new epoch closed minting for the id-space; it reopens when the
-    /// (single modeled) enrolled holder has a report accepted whose
-    /// `list_ref` is a tag-valid list of the current epoch.
-    pub mint_gate: bool,
+    /// H.25, H.30: a new epoch closed minting for the id-space. `None`: open.
+    pub mint_gate: Option<MintGate>,
+    /// H.30.2 `lists_stopped_at` (`T_stop`) in the epoch link: the instant the
+    /// old lineage stopped serving lists. Recorded in the H.25 probe only,
+    /// which models time.
+    pub lists_stopped_at: Option<u16>,
+}
+
+/// H.30: one holder's seat at the epoch-change mint gate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Seat {
+    /// Not a member: not enrolled and enabled in the new epoch's first
+    /// transaction (H.30.1).
+    #[default]
+    Absent,
+    /// A member that has not cleared yet.
+    Pending,
+    /// A member that cleared: an accepted current-epoch report (H.30.2(a)) or
+    /// the lease timeout (H.30.2(b)).
+    Cleared,
+}
+
+/// H.25 and H.30: the mint gate of the id-space after a new epoch. The
+/// peers' seats are in [`Peer::seat`]. It opens (becomes `None`) once no
+/// seat is pending and, after `restore_journal_lost`, the id-space-wide
+/// lease timeout has passed (H.30.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MintGate {
+    /// The modeled holder's seat (always enrolled and enabled).
+    pub holder: Seat,
+    /// H.30.4: minting also waits for the id-space-wide lease timeout.
+    pub idspace_wait: bool,
+}
+
+/// A holder's roster entry at the authority (HW §2.1): enabled, and the key
+/// generation it is enrolled with. Absent means not enrolled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Roster {
+    pub enabled: bool,
+    pub key: u8,
+}
+
+/// Another engine holder of the id-space (HW §15 H.30, H.31). Its own
+/// lifecycle is the modeled holder's machine; the gate reads it only through
+/// its roster entry, whether its current-epoch reports are accepted, and
+/// whether it still serves an earlier-epoch list. Everything about one peer
+/// is in this record, so peers are interchangeable and the checker sorts
+/// them (`step::canonical`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Peer {
+    /// The authority's live roster entry.
+    pub roster: Option<Roster>,
+    /// Its entry in the authority backup (taken with `AuthBackup`).
+    pub backup: Option<Roster>,
+    /// H.31: its latest roster entry journaled after the backup
+    /// (`holder_enrolled`, `holder_key_rotated`, `holder_disabled`,
+    /// `holder_enabled`); replay applies it.
+    pub journaled: Option<Roster>,
+    /// H.30: its seat at the current mint gate.
+    pub seat: Seat,
+    /// Ground truth: the key generation it signs with.
+    pub key: u8,
+    /// Ground truth: the epoch of the list it serves under a live lease
+    /// (`None`: serves nothing).
+    pub lease: Option<u8>,
+    /// Ground truth: it will never report again (gone or stuck).
+    pub silent: bool,
 }
 
 // -------------------------------------------------------------------- lists
@@ -501,6 +568,9 @@ pub struct Durable {
     pub reset_pending: bool,
     /// H.19: send status even at zero inventory, until accepted in this epoch.
     pub epoch_status_pending: bool,
+    /// H.21.5, H.23, H.26: `clock_behind_authority`, written through the
+    /// single holder-state writer when raised (C19) and when cleared (C20).
+    pub clock_behind: bool,
     /// H.16 holder pin-history `{pin_id → resource.id}` from verified lists,
     /// grow-only, persisted in A1's W with the high-water.
     pub pin_history: [Option<u8>; DIRS],
@@ -645,6 +715,14 @@ pub struct Volatile {
     /// H.23: a `page_size: 1` clock-probe list request of this process is
     /// outstanding (its nonce and send instant live only in this process).
     pub clock_probe: bool,
+    /// H.26: the in-memory `clock_behind_authority` refusal. Raised at once
+    /// by C19; loaded from holder state at startup.
+    pub clock_hold: bool,
+    /// H.26: C19 raised the hold and its durable write has not committed.
+    pub clock_unpersisted: bool,
+    /// Rejected H.27 reading only: the status-first gate was released in
+    /// memory by a status bug halt in this process.
+    pub gate_released: bool,
     /// The newest list admitted by an H row in this process (it is also the
     /// list an in-progress apply is applying).
     pub admitted: Option<ListMsg>,
@@ -665,6 +743,10 @@ pub struct Volatile {
     /// Rejected H.24 reading only: rooms whose artifacts this process took as
     /// current from the in-process baseline instead of the durable record.
     pub adopted: u8,
+    /// Rejected H.28 reading only: rooms whose previously validated artifacts
+    /// of an earlier `pin_ref` this process keeps serving under the H10.5
+    /// stale bound.
+    pub stale_carry: u8,
     /// The unattributed inventory as of the last L3 update.
     pub inv: u8,
     pub umem: [UMem; UNITS],
@@ -696,6 +778,9 @@ impl Volatile {
             admitted_until: u8::MAX,
             capability: None,
             clock_probe: false,
+            clock_hold: false,
+            clock_unpersisted: false,
+            gate_released: false,
             admitted: None,
             applied: None,
             apply: None,
@@ -708,6 +793,7 @@ impl Volatile {
             block: 0,
             pin_conflict: 0,
             adopted: 0,
+            stale_carry: 0,
             inv: 0,
             umem: [UMem::Live; UNITS],
             scans: [None; OBLS],
@@ -751,14 +837,13 @@ pub struct Env {
     pub legacy_started: bool,
     pub clock: u8,
     pub envelope: Option<crate::wire::Envelope>,
-    pub exposure_elapsed: u8,
+    /// The focused probes' clock, in seconds.
+    pub exposure_elapsed: u16,
     pub capability_skew: u8,
-    /// H.21 refuses governed requests until clock correction is confirmed
-    /// (H.23). Recorded in holder state: a restart is no correction.
-    pub clock_behind_authority: bool,
     /// Ground truth: how far (seconds) the engine clock lags the authority
-    /// clock. Only a local clock step changes it.
-    pub lag: u8,
+    /// clock; negative when it runs ahead (H.29). Only a local clock step
+    /// changes it.
+    pub lag: i8,
     /// H.23: the one clock probe of the current 60 s window has been sent.
     pub probe_window_used: bool,
     pub bad_journal: bool,
@@ -767,6 +852,12 @@ pub struct Env {
     pub root_dir: [u8; ROOMS],
     /// H10.5: the bounded stale-service window after a root mismatch ended.
     pub stale_expired: bool,
+    /// H.30.2(b): the authority clock passed `T_stop + serve_seconds_ceiling
+    /// + 150 s`, so every earlier-epoch lease has lapsed.
+    pub lease_timeout: bool,
+    /// Checker reduction switch: peers are sorted in the canonical state
+    /// (`step::canonical`). Fixed for a run.
+    pub peer_symmetry: bool,
 }
 
 /// Focused profiles opt in to independent boundaries without multiplying
@@ -812,7 +903,7 @@ pub struct Ghost {
     pub search_due: bool,
     /// H.25 probe: the instant minting stopped (rollback suspicion or a
     /// restore began).
-    pub mint_stop: Option<u8>,
+    pub mint_stop: Option<u16>,
     /// From this epoch on, `pin_ref`s below this were minted before a
     /// `restore_journal_lost` (the lost timeline).
     pub pin_floor: (u8, u8),
@@ -825,6 +916,8 @@ pub struct Ghost {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct State {
     pub auth: Auth,
+    /// H.30, H.31: the other engine holders of the id-space.
+    pub peers: [Peer; PEERS],
     pub env: Env,
     pub dur: Durable,
     pub vol: Volatile,
@@ -874,8 +967,10 @@ impl State {
                 rollback_suspected: false,
                 failed_restore: false,
                 journal_lost_audited: false,
-                mint_gate: false,
+                mint_gate: None,
+                lists_stopped_at: None,
             },
+            peers: [Peer::default(); PEERS],
             env: Env {
                 root_dir: [0, 1],
                 ..Env::default()
@@ -894,6 +989,7 @@ impl State {
                 root_holder: Some(0),
                 reset_pending: false,
                 epoch_status_pending: false,
+                clock_behind: false,
                 pin_history: [None; DIRS],
                 derived: [Some(1), Some(2)],
                 state_holder: Some(0),

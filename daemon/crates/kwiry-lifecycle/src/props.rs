@@ -12,7 +12,7 @@
 //! | I7 | Some healthy actor (holder, environment or operator) can move whenever any work is outstanding |
 //! | I8 | An operator wait (auth halt, bug halt) is entered only on a fault, never on a correct authority or network response |
 //! | I9 | The unattributed inventory never counts data attributable to a listed holding (except units a release reserved) |
-//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes once the holder has reported in it (H.25), under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
+//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes, through member reports or the lease timeout, including for a member that never reports (H.25, H.30), under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
 
 use crate::state::*;
 use crate::step::{Obs, Outcome, delete_authorized, mintable, reserving, room_class, servable};
@@ -122,7 +122,7 @@ impl Prop {
                 "I1: a room served under a null, changed-unapplied, conflicting, pre-journal-loss or orphaned pin, from another room's bytes or another pin_ref's artifacts, or past the stale bound"
             }
             Prop::I1EpochExposure => {
-                "I1: an earlier-epoch list released results more than 90 s after minting stopped"
+                "I1: a holder's earlier-epoch list released results more than 90 s after minting stopped"
             }
             Prop::I8ReplayTarget => {
                 "I8: a replayed finalization or clear left its restored target outstanding"
@@ -288,7 +288,7 @@ pub fn settled(s: &State) -> bool {
 /// A retirement cannot disappear from the goal when the authority is restored.
 /// An epoch acceptance is answered by a status accepted in the new epoch
 /// (HW §15 H.19), whatever its count, and minting resumes after an epoch
-/// change once the holder has reported in it (H.25).
+/// change, through member reports or the lease timeout (H.25, H.30).
 pub fn goal(s: &State) -> bool {
     !s.ghost.status_due && !s.ghost.search_due && retirements_done(s)
 }

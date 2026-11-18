@@ -89,6 +89,15 @@ pub enum Obs {
     /// H.25: an earlier-epoch list released results more than 90 s after
     /// minting stopped.
     EpochOverexposed,
+    /// H.30.3: unsampled `lifecycle.mint_gate.cleared_by_lease` events, each
+    /// with the H.11 silence alert for its holder: whether the modeled holder
+    /// cleared by lease, and how many peers did.
+    MintGateClearedByLease {
+        holder: bool,
+        peers: u8,
+    },
+    /// H.30.3: no admin override clears a member early.
+    MintOverrideRefused,
     ListWitnessOmitted,
     /// Unsampled `lifecycle.witness.unverifiable`; the model has one holder.
     WitnessUnverifiable(wire::WitnessReason),
@@ -288,6 +297,7 @@ pub fn servable(s: &State, r: usize) -> bool {
     }
     s.vol.phase == Phase::P7
         && s.env.clock < s.vol.lease_until
+        && !earlier_epoch_lapsed(s)
         && s.vol.route != Route::Halted403
         && s.vol.class[r] == Class::Active
         && s.dur.tomb & bit(r) == 0
@@ -295,27 +305,52 @@ pub fn servable(s: &State, r: usize) -> bool {
         && pin_servable(s, r)
 }
 
+/// H.30.2(b): once the authority clock passes `T_stop +
+/// serve_seconds_ceiling + 150 s`, a lease from an earlier-epoch list has
+/// lapsed (it could not be renewed after `T_stop`).
+fn earlier_epoch_lapsed(s: &State) -> bool {
+    s.env.lease_timeout
+        && s.vol
+            .applied
+            .is_some_and(|l| l.rev.epoch < s.auth.core.epoch)
+}
+
 /// H.16.5: a non-null pin from a list applied in this process, artifacts
 /// derived under its `pin_ref`, no AP24 conflict, and the root observed at
 /// `pin_id`. On a mismatch only H10.5 bounded stale service of those
-/// same-ref artifacts remains.
+/// same-ref artifacts remains (H.28).
 pub fn pin_servable(s: &State, r: usize) -> bool {
     let Some(p) = s.vol.applied.and_then(|l| l.pins[r]) else {
         return false;
     };
-    (s.dur.derived[r] == Some(p.pin_ref) || s.vol.adopted & bit(r) != 0)
+    let mismatch = s.env.root_dir[r] != p.id;
+    (s.dur.derived[r] == Some(p.pin_ref)
+        || s.vol.adopted & bit(r) != 0
+        || (s.vol.stale_carry & bit(r) != 0 && mismatch && !s.env.stale_expired))
         && s.vol.pin_conflict & bit(r) == 0
-        && (s.env.root_dir[r] == p.id || !s.env.stale_expired)
+        && (!mismatch || !s.env.stale_expired)
+}
+
+/// H.21.5, H.23, H.26: governed requests are refused while the in-memory
+/// hold is raised or holder state records it.
+pub fn clock_held(s: &State) -> bool {
+    s.vol.clock_hold || s.dur.clock_behind
 }
 
 /// The H.19 status-first gate (a holder choice H.22.1 permits): after an
 /// epoch acceptance, obligation reports wait for the fresh status's
-/// current-epoch receipt. H.22.3: a status bug halt releases it. The release
-/// is read from the durable `halted` state, so it survives a restart.
+/// current-epoch receipt. H.22.3: a status bug halt releases it. H.27: the
+/// gate is derived from durable holder state, open once a current-epoch
+/// status ack is recorded (`epoch_status_pending` cleared) or while the
+/// status is durably `halted`; an N5 resume (`halted` → `invalidated`)
+/// closes it again until the re-derived status is acknowledged.
 pub fn status_gate_shut(s: &State, d: Design) -> bool {
-    s.dur.epoch_status_pending
-        && !(d.has(Fix::StatusGateRelease)
-            && s.dur.slots[STATUS].is_some_and(|p| p.st == DurSt::Halted))
+    let released = if d.has(Fix::DurableStatusGate) {
+        s.dur.slots[STATUS].is_some_and(|p| p.st == DurSt::Halted)
+    } else {
+        s.vol.gate_released
+    };
+    s.dur.epoch_status_pending && !(d.has(Fix::StatusGateRelease) && released)
 }
 
 /// AP24 `root_pin_previously_listed`: the holder's pin-history holds the
@@ -586,6 +621,12 @@ fn write(o: &mut Out) -> Option<bool> {
 
 /// Discard all volatile state (crash, shutdown, operator stop).
 fn stop(n: &mut State) {
+    if n.vol.clock_unpersisted {
+        // H.26: a crash before C19's write loses only the flag. Nothing is
+        // served until a list of the next process applies, and its pages
+        // are measured again; the evidence is gone with the process.
+        n.ghost.lag_proven = false;
+    }
     n.vol = Volatile::down();
     n.env.recovering = false;
     n.env.legacy_started = false;
@@ -819,6 +860,17 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         ProbeWindow => probe_window(s, d),
         ClockStep { lag } => clock_step(s, d, lag),
         OpClearClock => op_clear_clock(s, d),
+        PersistClockHold => persist_clock_hold(s, d),
+        PeerEnroll(p) => peer_enroll(s, d, p as usize),
+        PeerDisable(p) => peer_set_enabled(s, d, p as usize, false),
+        PeerEnable(p) => peer_set_enabled(s, d, p as usize, true),
+        PeerRotate(p) => peer_rotate(s, d, p as usize),
+        PeerMove(p) => peer_move(s, p as usize),
+        PeerReport(p) => peer_report(s, d, p as usize),
+        PeerSilent(p) => peer_silent(s, p as usize),
+        PeerAnswer(p) => peer_answer(s, p as usize),
+        LeaseTimeout => lease_timeout(s, d),
+        OpMintOverride => op_mint_override(s, d),
         AttestRoot { room, dir, stale } => attest_root(s, room, dir, stale),
         RepointRoot { room, dir } => repoint_root(s, room as usize, dir),
         PinRebuild(r) => pin_rebuild(s, d, r as usize),
@@ -867,6 +919,7 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
 /// - Audit-only authority data no step reads: `blocked_by`,
 ///   `superseded_mismatch`, the journal-loss audit flag, and the journal
 ///   itself once no restore remains in the budget.
+/// - With `peer_symmetry` (the H.30 fixtures), the order of the peers.
 pub fn canonical(s: &mut State, cfg: &Config) {
     let core = &mut s.auth.core;
     core.superseded_mismatch = 0;
@@ -888,6 +941,12 @@ pub fn canonical(s: &mut State, cfg: &Config) {
         } else if let Some(k) = f.key.as_mut() {
             k.list_ref = Rev { epoch: 0, seq: 0 };
         }
+    }
+    // H.30 peers are interchangeable: every fact about one is in its record,
+    // every peer action exists for each index, and no property or
+    // observation names a peer's position.
+    if s.env.peer_symmetry {
+        s.peers.sort_unstable();
     }
     if s.env.probe != Probe::None {
         return;
@@ -1021,6 +1080,10 @@ fn boot(s: &State, d: Design) -> Step {
         o.n.dur.hw = None;
         o.n.dur.last_list_ref = None;
         o.n.dur.reset_pending = true;
+        // H.26: a fresh holder state starts with the clock flag clear; the
+        // first nonce-bound page measures the clock again.
+        o.n.dur.clock_behind = false;
+        o.n.ghost.lag_proven = false;
     } else if s.dur.state_holder == Some(s.env.holder)
         && present_mask(&s.dur) == 0
         && s.dur.root_holder.is_none()
@@ -1515,6 +1578,19 @@ fn apply_a4(s: &State, d: Design, l: &ListMsg) -> Step {
     o.n.vol.pin_conflict = (0..ROOMS)
         .filter(|&r| history_conflict(&s.dur, d, r, l.pins[r]))
         .fold(0, |a, r| a | bit(r));
+    if !d.has(Fix::SameRefStaleService) {
+        // The reading H.28 rejects: H10.5 stale service covers every
+        // previously validated artifact, so artifacts of an earlier
+        // `pin_ref` keep serving within the bound while the root does not
+        // match the new pin (even after the A0 refusal of the change).
+        o.n.vol.stale_carry = (0..ROOMS)
+            .filter(|&r| {
+                l.pins[r].is_some_and(|p| {
+                    s.dur.derived[r].is_some_and(|x| x != p.pin_ref) && s.env.root_dir[r] != p.id
+                })
+            })
+            .fold(s.vol.stale_carry, |a, r| a | bit(r));
+    }
     if !d.has(Fix::DurablePinDerivation) {
         // The reading H.24 rejects: "derived under `pin_ref`" judged against
         // the in-process baseline. An unchanged pin keeps its artifacts; with
@@ -2107,6 +2183,11 @@ fn transmit(s: &State, d: Design, c: usize) -> Step {
         (DurSt::Armed, SlotVol::Idle) if d.has(Fix::RestartArmedResumes) => From::Restored,
         _ => return Ok(None),
     };
+    // H.22.1, H.27: a shut gate holds back transmission of an obligation
+    // report never sent; reports already sent while it was open stand.
+    if c < OBLS && from == From::Ready && !p.earlier && status_gate_shut(s, d) {
+        return Ok(None);
+    }
     let ok = transmission_guard(s, d, p.key);
     let tx = p.earlier || from != From::Ready;
     let mut o = Out::new(s);
@@ -2417,6 +2498,11 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
                     ..p
                 });
                 o.n.vol.slotv[c] = SlotVol::Idle;
+                if c == STATUS && !d.has(Fix::DurableStatusGate) {
+                    // The reading H.27 rejects: the release is an event of
+                    // this process, not derived from the durable halt.
+                    o.n.vol.gate_released = true;
+                }
                 o.obs(Obs::OperatorWait {
                     healthy: resp.healthy,
                 });
@@ -2470,8 +2556,38 @@ fn replenish(s: &State) -> Step {
 /// the holding is `active`.
 pub fn mintable(s: &State, room: usize) -> bool {
     !s.auth.rollback_suspected
-        && !s.auth.mint_gate
+        && s.auth.mint_gate.is_none()
         && s.auth.core.rooms[room].phase == APhase::Active
+}
+
+/// H.30.1: whether a peer still holds the gate shut. Frozen membership reads
+/// its seat; the reading H.30.1 rejects reads the live roster ("every
+/// enrolled, enabled engine holder"), so a member disabled during the gate
+/// stops counting and a later enrollee starts.
+fn peer_pending(p: &Peer, d: Design, timed_out: bool) -> bool {
+    if d.has(Fix::FrozenMintMembership) {
+        p.seat == Seat::Pending
+    } else {
+        !timed_out && p.roster.is_some_and(|r| r.enabled) && p.seat != Seat::Cleared
+    }
+}
+
+/// H.25, H.30.3: minting for the id-space resumes once no member is pending
+/// and, after `restore_journal_lost`, the id-space-wide timeout has passed.
+fn settle_gate(o: &mut Out, d: Design) {
+    let Some(g) = o.n.auth.mint_gate else {
+        return;
+    };
+    let timed_out = o.n.env.lease_timeout && d.has(Fix::MintLeaseTimeout);
+    if g.holder == Seat::Pending
+        || g.idspace_wait
+        || o.n.peers.iter().any(|p| peer_pending(p, d, timed_out))
+    {
+        return;
+    }
+    o.n.auth.mint_gate = None;
+    o.n.ghost.search_due = false;
+    o.row(H15);
 }
 
 pub fn witness(s: &mut State, d: Design, echo: Rev, tag_valid: bool) -> RefVerdict {
@@ -2692,17 +2808,18 @@ fn auth_process(s: &State, d: Design, c: usize, idx: usize) -> Step {
     if o.n.auth.core.seq > pre.seq && d.has(Fix::AtomicJournalReplay) {
         record_report_journal(&mut o.n.auth, pre, req.key, kind);
     }
-    // H.25: an accepted report (status or obligation) whose `list_ref` is a
-    // tag-valid list of the current epoch proves the holder applied a
-    // new-epoch list and stopped serving the old one. The model has one
-    // enrolled, enabled holder, so this reopens minting for the id-space.
-    if o.n.auth.mint_gate
+    // H.25, H.30.2(a): an accepted report (status or obligation) whose
+    // `list_ref` is a tag-valid list of the current epoch proves the holder
+    // applied a new-epoch list and stopped serving the old one, so it clears
+    // the modeled holder's seat (a member, being enrolled and enabled).
+    if let Some(g) = o.n.auth.mint_gate.as_mut()
+        && g.holder == Seat::Pending
         && matches!(kind, RespKind::Accepted { .. })
         && req.key.list_ref().epoch == o.n.auth.core.epoch
     {
-        o.n.auth.mint_gate = false;
-        o.n.ghost.search_due = false;
-        o.row(H14);
+        g.holder = Seat::Cleared;
+        o.row(H15);
+        settle_gate(&mut o, d);
     }
     if let (Key::S(k), RespKind::Accepted { epoch, .. }) = (req.key, kind)
         && epoch == o.n.auth.core.epoch
@@ -3169,6 +3286,9 @@ fn auth_backup(s: &State) -> Step {
     }
     let mut o = Out::new(s);
     o.n.auth.backup = Some(Box::new(s.auth.core));
+    for p in o.n.peers.iter_mut() {
+        p.backup = p.roster;
+    }
     o.done()
 }
 
@@ -3184,8 +3304,12 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
     }
     let mut o = Out::new(s);
     if s.env.probe == Probe::EpochMint && s.ghost.mint_stop.is_none() {
-        // H.15.1: minting stops when a restore begins.
+        // H.15.1: minting stops when a restore begins. H.30.2: the old
+        // lineage stops serving lists then too (`lists_stopped_at`): the
+        // old authority is stopped first, or the restored authority's first
+        // start refuses lists under suspicion.
         o.n.ghost.mint_stop = Some(s.env.exposure_elapsed);
+        o.n.auth.lists_stopped_at = Some(s.env.exposure_elapsed);
     }
     if s.env.bad_journal && !override_lost {
         if d.has(Fix::AtomicJournalReplay) {
@@ -3197,14 +3321,6 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
         o.obs(Obs::UnverifiedRestore);
     }
     o.n.budget.restores -= 1;
-    if d.has(Fix::EpochMintGate) {
-        // H.25: nothing is minted for the id-space until every holder has
-        // reported in the new epoch. L1 then requires that minting resumes
-        // for a holder that held a high-water when the epoch changed.
-        o.n.auth.mint_gate = true;
-        o.n.ghost.search_due = s.dur.hw.is_some();
-        o.row(H14);
-    }
     let next_instr = s.auth.core.next_instr;
     o.n.auth.core = AuthCore {
         epoch: s.auth.core.epoch + 1,
@@ -3274,6 +3390,45 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
         c.status_receipts = Default::default();
         for o in c.rooms.iter_mut().filter_map(|r| r.obl.as_mut()) {
             o.receipts = Default::default();
+        }
+    }
+    // H.31: the roster as of the backup, then (supported restore only) the
+    // journaled roster entries after it, in journal order. A
+    // `restore_journal_lost` decision has no journal to replay.
+    let mut roster_replayed = false;
+    for p in o.n.peers.iter_mut() {
+        let journaled = p.journaled.filter(|_| !override_lost);
+        roster_replayed |= journaled.is_some();
+        p.roster = journaled.or(p.backup);
+        p.backup = None;
+        p.journaled = None;
+    }
+    if roster_replayed {
+        o.row(H17);
+    }
+    if d.has(Fix::EpochMintGate) {
+        // H.25, H.30.1: nothing is minted for the id-space until every member
+        // has cleared. The members are frozen now, in the new epoch's first
+        // transaction after replay: the engine holders enrolled and enabled.
+        // H.30.4: after `restore_journal_lost` the snapshot may miss a
+        // holder, so minting also waits for the id-space-wide timeout. L1
+        // requires that minting resumes for a holder that held a high-water
+        // when the epoch changed.
+        o.n.auth.mint_gate = Some(MintGate {
+            holder: Seat::Pending,
+            idspace_wait: override_lost && d.has(Fix::JournalLostMintWait),
+        });
+        for p in o.n.peers.iter_mut() {
+            p.seat = if p.roster.is_some_and(|r| r.enabled) {
+                Seat::Pending
+            } else {
+                Seat::Absent
+            };
+        }
+        o.n.ghost.search_due = s.dur.hw.is_some();
+        o.row(H14);
+        if s.env.lease_timeout {
+            clear_by_lease(&mut o, d);
         }
     }
     o.n.auth.rollback_suspected = false;
@@ -3461,7 +3616,7 @@ fn replay_journal(out: &mut Out, backup: &AuthCore, d: Design) {
     }
 }
 
-fn tick_exposure(s: &State, elapsed: u8) -> Step {
+fn tick_exposure(s: &State, elapsed: u16) -> Step {
     if !matches!(s.env.probe, Probe::Exposure | Probe::EpochMint)
         || elapsed <= s.env.exposure_elapsed
     {
@@ -3483,7 +3638,7 @@ fn answer_capability(s: &State, d: Design, room: usize, expiry_with_skew: u8) ->
         .admitted
         .is_some_and(|l| l.items[room] != Item::Active);
     let answered = servable(s, room)
-        && !s.env.clock_behind_authority
+        && !clock_held(s)
         && wire::pre_retirement_answer(d, s.env.exposure_elapsed, expiry_with_skew, a0);
     let mut o = Out::new(s);
     o.row(if answered { C17 } else { C18 });
@@ -3529,7 +3684,7 @@ fn start_capability(s: &State, d: Design, room: u8, iat: i16, exp: i16) -> Step 
         Some(CapabilityRefusal::FutureIat)
     } else if fenced && long {
         Some(CapabilityRefusal::LifetimeTooLong)
-    } else if fenced && o.n.env.clock_behind_authority {
+    } else if fenced && clock_held(&o.n) {
         Some(CapabilityRefusal::ClockBehind)
     } else if d.has(Fix::CapabilityExposure) && now > deadline {
         Some(CapabilityRefusal::Expired)
@@ -3575,7 +3730,7 @@ fn finish_capability(s: &State, d: Design) -> Step {
     o.n.vol.capability = None;
     if fenced && expired {
         refuse_capability(&mut o, CapabilityRefusal::Expired);
-    } else if fenced && s.env.clock_behind_authority {
+    } else if fenced && clock_held(s) {
         refuse_capability(&mut o, CapabilityRefusal::ClockBehind);
     } else if !capability_room_active(s, req.room) {
         refuse_capability(&mut o, CapabilityRefusal::NotActive);
@@ -3610,24 +3765,60 @@ fn refuse_capability(o: &mut Out, reason: CapabilityRefusal) {
 
 /// A verified page or capability with `iat − now_recv > 30 s`: proof that the
 /// engine clock lags by more than 30 s (transit only makes it look ahead).
-/// H.21.5 raises `clock_behind_authority` (C19).
+/// H.21.5 raises `clock_behind_authority` (C19). H.26: the refusal takes
+/// effect in memory at once; the durable write is a step of its own
+/// ([`persist_clock_hold`]), so a crash can fall between them.
 fn clock_evidence(o: &mut Out, d: Design) {
     o.n.ghost.lag_proven = true;
     if d.has(Fix::EngineCapabilityFence) {
-        o.n.env.clock_behind_authority = true;
+        if d.has(Fix::ClockHoldMemoryFirst) {
+            o.n.vol.clock_hold = true;
+        }
+        if !o.n.dur.clock_behind {
+            o.n.vol.clock_unpersisted = true;
+        }
         o.row(C19);
         o.obs(Obs::ClockBehindAuthority);
     }
+}
+
+/// Lower the hold, in memory and in holder state (C20's W).
+fn clear_clock_hold(o: &mut Out) {
+    o.n.vol.clock_hold = false;
+    o.n.vol.clock_unpersisted = false;
+    o.n.dur.clock_behind = false;
 }
 
 /// The reading H.23 rejects ("it resumes when the condition clears"): any
 /// input that no longer shows the lag clears the hold. With H.23 only C20's
 /// confirmed correction clears it, so this does nothing.
 fn unconfirmed_clear(o: &mut Out, d: Design) {
-    if !d.has(Fix::ConfirmedClockCorrection) && o.n.env.clock_behind_authority {
-        o.n.env.clock_behind_authority = false;
+    if !d.has(Fix::ConfirmedClockCorrection) && clock_held(&o.n) {
+        clear_clock_hold(o);
         o.row(C20);
     }
+}
+
+/// C19's durable write (H.26). The reading that the flag is volatile writes
+/// holder state without it, so a restart forgets it; the reading that the
+/// refusal waits for the write starts refusing only now.
+fn persist_clock_hold(s: &State, d: Design) -> Step {
+    if !s.vol.clock_unpersisted || s.vol.phase == Phase::Down {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.row(C19);
+    match write(&mut o) {
+        None => return Ok(None),
+        Some(false) => return o.done(),
+        Some(true) => {}
+    }
+    o.n.vol.clock_unpersisted = false;
+    o.n.vol.clock_hold = true;
+    if d.has(Fix::DurableClockHold) {
+        o.n.dur.clock_behind = true;
+    }
+    o.done()
 }
 
 /// H.21.5 and H.23 on one verified list page (any page, not only page 0).
@@ -3651,12 +3842,18 @@ fn observe_list_clock(s: &State, d: Design, iat: i16, rtt: Option<u8>) -> Step {
         clock_evidence(&mut o, d);
     } else if !d.has(Fix::ConfirmedClockCorrection) {
         unconfirmed_clear(&mut o, d);
-    } else if let (true, Some(r)) = (s.env.clock_behind_authority, rtt) {
-        // C20: lag ≤ (iat − now_recv) + transit, and transit ≤ rtt.
+    } else if let (true, Some(r)) = (clock_held(s), rtt) {
+        // C20: lag ≤ (iat − now_recv) + transit, and transit ≤ rtt. H.29:
+        // the inequality alone decides, whatever `rtt` is.
         let bound = ahead + i32::from(r);
         o.row(C20);
-        if bound <= 30 {
-            o.n.env.clock_behind_authority = false;
+        if bound <= 30 && (d.has(Fix::InequalityDecidesClear) || r <= 30) {
+            match write(&mut o) {
+                None => return Ok(None),
+                Some(false) => return o.done(),
+                Some(true) => {}
+            }
+            clear_clock_hold(&mut o);
         } else {
             o.obs(Obs::ClockLagAlert {
                 bound: bound as i16,
@@ -3671,7 +3868,7 @@ fn observe_list_clock(s: &State, d: Design, iat: i16, rtt: Option<u8>) -> Step {
 /// 60 s window, counted under H.8 (the model does not schedule rates).
 fn clock_probe(s: &State) -> Step {
     if s.env.probe != Probe::Exposure
-        || !s.env.clock_behind_authority
+        || !clock_held(s)
         || s.vol.clock_probe
         || s.env.probe_window_used
         || !matches!(s.vol.phase, Phase::P5 | Phase::P7)
@@ -3688,8 +3885,7 @@ fn clock_probe(s: &State) -> Step {
 
 /// 60 s pass. Elapsed time never clears the hold under H.23.
 fn probe_window(s: &State, d: Design) -> Step {
-    if s.env.probe != Probe::Exposure || !(s.env.probe_window_used || s.env.clock_behind_authority)
-    {
+    if s.env.probe != Probe::Exposure || !(s.env.probe_window_used || clock_held(s)) {
         return Ok(None);
     }
     let mut o = Out::new(s);
@@ -3700,7 +3896,7 @@ fn probe_window(s: &State, d: Design) -> Step {
 
 /// A local NTP or clock-step event. It may or may not fix the lag; it is no
 /// evidence either way, so under H.23 it never clears the hold.
-fn clock_step(s: &State, d: Design, lag: u8) -> Step {
+fn clock_step(s: &State, d: Design, lag: i8) -> Step {
     if s.env.probe != Probe::Exposure || lag == s.env.lag {
         return Ok(None);
     }
@@ -3715,7 +3911,7 @@ fn clock_step(s: &State, d: Design, lag: u8) -> Step {
 
 /// An operator command cannot clear the hold under H.23 (fail closed).
 fn op_clear_clock(s: &State, d: Design) -> Step {
-    if s.env.probe != Probe::Exposure || !s.env.clock_behind_authority {
+    if s.env.probe != Probe::Exposure || !clock_held(s) {
         return Ok(None);
     }
     let mut o = Out::new(s);
@@ -3724,6 +3920,246 @@ fn op_clear_clock(s: &State, d: Design) -> Step {
     } else {
         unconfirmed_clear(&mut o, d);
     }
+    o.done()
+}
+
+// ------------------------------------------- H.30 / H.31 other holders
+
+/// The old lineage serves lists: no restore has begun.
+fn lists_served(s: &State) -> bool {
+    s.auth.lists_stopped_at.is_none() && !s.auth.rollback_suspected && !s.auth.failed_restore
+}
+
+/// H.31: a roster change after the backup is a journal entry, appended
+/// before its governance transaction (H.1.2), so the restore replays it.
+/// The reading H.31 rejects journals nothing.
+fn journal_roster(p: &mut Peer, has_backup: bool, d: Design) {
+    if d.has(Fix::RosterJournal) && has_backup {
+        p.journaled = p.roster;
+    }
+}
+
+/// The authority recognizes the peer's requests: enrolled, enabled, and the
+/// key it signs with is the enrolled one (otherwise `401` or `403`).
+fn peer_authorized(p: &Peer) -> bool {
+    p.roster.is_some_and(|r| r.enabled && r.key == p.key)
+}
+
+/// `enroll-holder` (HW §2.1): a new engine holder of the id-space. It lists
+/// at once if lists are served. Enrolled after the new epoch's first
+/// transaction, it is not a mint-gate member (H.30.1).
+fn peer_enroll(s: &State, d: Design, i: usize) -> Step {
+    if s.env.probe != Probe::EpochMint
+        || s.peers[i] != Peer::default()
+        || s.auth.rollback_suspected
+        || s.auth.failed_restore
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let has_backup = s.auth.backup.is_some();
+    let p = &mut o.n.peers[i];
+    p.roster = Some(Roster {
+        enabled: true,
+        key: 0,
+    });
+    p.lease = Some(s.auth.core.epoch);
+    journal_roster(p, has_backup, d);
+    o.done()
+}
+
+/// An admin disables or re-enables a peer. In the old lineage, a disabled
+/// holder's next request gets `403` and it halts, and a re-enabled one
+/// restarts and lists (H.30.1's premise for a holder disabled at the
+/// snapshot). During the gate a disabled member may still serve until its
+/// next request is refused, and a re-enabled one needs a restart that
+/// applies only current-epoch lists: neither changes what it serves.
+fn peer_set_enabled(s: &State, d: Design, i: usize, enabled: bool) -> Step {
+    let p = s.peers[i];
+    let Some(r) = p.roster else {
+        return Ok(None);
+    };
+    if s.env.probe != Probe::EpochMint
+        || r.enabled == enabled
+        || s.auth.rollback_suspected
+        || s.auth.failed_restore
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let has_backup = s.auth.backup.is_some();
+    let old_lineage = lists_served(s);
+    let n = &mut o.n.peers[i];
+    n.roster = Some(Roster { enabled, ..r });
+    journal_roster(n, has_backup, d);
+    if old_lineage {
+        n.lease = enabled.then_some(s.auth.core.epoch);
+    }
+    // The reading H.30.1 rejects can open the gate when a member stops
+    // counting.
+    settle_gate(&mut o, d);
+    o.done()
+}
+
+/// An admin rotates a peer's key in the old lineage (HW §2.1): the holder
+/// signs with the new key, which the roster records.
+fn peer_rotate(s: &State, d: Design, i: usize) -> Step {
+    let p = s.peers[i];
+    if s.env.probe != Probe::EpochMint || !lists_served(s) || p.key != 0 || !peer_authorized(&p) {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let has_backup = s.auth.backup.is_some();
+    let n = &mut o.n.peers[i];
+    n.key = 1;
+    n.roster = p.roster.map(|r| Roster { key: 1, ..r });
+    journal_roster(n, has_backup, d);
+    o.done()
+}
+
+/// The peer's operator accepts the new epoch and the peer applies a list of
+/// it, so it stops serving its earlier-epoch list.
+fn peer_move(s: &State, i: usize) -> Step {
+    let p = s.peers[i];
+    let cur = s.auth.core.epoch;
+    if s.env.probe != Probe::EpochMint
+        || cur == 0
+        || s.auth.rollback_suspected
+        || p.silent
+        || p.lease == Some(cur)
+        || !peer_authorized(&p)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.peers[i].lease = Some(cur);
+    o.done()
+}
+
+/// The peer's status report with a tag-valid current-epoch `list_ref`
+/// (H.30.2(a)). Accepted only for a recognized enrollment. Only a report that
+/// clears a seat is explored: a later enrollee's startup status is harmless.
+fn peer_report(s: &State, d: Design, i: usize) -> Step {
+    let p = s.peers[i];
+    let Some(_) = s.auth.mint_gate else {
+        return Ok(None);
+    };
+    let counts =
+        p.seat == Seat::Pending || (!d.has(Fix::FrozenMintMembership) && p.seat == Seat::Absent);
+    if p.silent || p.lease != Some(s.auth.core.epoch) || !peer_authorized(&p) || !counts {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.peers[i].seat = Seat::Cleared;
+    o.row(H15);
+    settle_gate(&mut o, d);
+    o.done()
+}
+
+fn peer_silent(s: &State, i: usize) -> Step {
+    let p = s.peers[i];
+    if s.env.probe != Probe::EpochMint || p.silent || p.roster.is_none() {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.peers[i].silent = true;
+    o.done()
+}
+
+/// A capability minted now is presented to a peer that still serves an
+/// earlier-epoch list. Capabilities minted before the stop answer at most
+/// until 90 s after it (H.15, H.21); only a later answer is exposure.
+fn peer_answer(s: &State, i: usize) -> Step {
+    let now = s.env.exposure_elapsed;
+    let stale = s.peers[i].lease.is_some_and(|e| e < s.auth.core.epoch);
+    if s.env.probe != Probe::EpochMint
+        || !stale
+        || !(0..ROOMS).any(|r| mintable(s, r))
+        || s.ghost.mint_stop.is_none_or(|t| now <= t + 90)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.obs(Obs::EpochOverexposed);
+    o.done()
+}
+
+/// H.30.2(b): the authority clock passes `T_stop + serve_seconds_ceiling +
+/// 150 s` (1050 s with the default ceiling). Every lease from the old
+/// lineage has lapsed (`quarantine_after` and the monotonic deadline, the
+/// 30 s response deadline and the 120 s skew), and every member still pending
+/// clears with `lifecycle.mint_gate.cleared_by_lease` and the H.11 alert.
+/// The id-space-wide timeout of H.30.4 passes with it.
+fn lease_timeout(s: &State, d: Design) -> Step {
+    let Some(t) = s.auth.lists_stopped_at else {
+        return Ok(None);
+    };
+    if s.env.probe != Probe::EpochMint || s.env.lease_timeout {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.env.lease_timeout = true;
+    o.n.env.exposure_elapsed = s.env.exposure_elapsed.max(t + 1051);
+    for p in o.n.peers.iter_mut() {
+        if p.lease.is_some_and(|e| e < s.auth.core.epoch || e == 0) {
+            p.lease = None;
+        }
+    }
+    clear_by_lease(&mut o, d);
+    o.done()
+}
+
+/// H.30.2(b) on the open gate once `now > T_stop + serve_seconds_ceiling +
+/// 150 s` (also at a gate created after that instant, when a restore took
+/// longer): every pending member clears by lease, and the H.30.4 wait ends.
+fn clear_by_lease(o: &mut Out, d: Design) {
+    let Some(g) = o.n.auth.mint_gate.as_mut() else {
+        return;
+    };
+    g.idspace_wait = false;
+    if d.has(Fix::MintLeaseTimeout) {
+        let holder = g.holder == Seat::Pending;
+        if holder {
+            g.holder = Seat::Cleared;
+        }
+        let mut peers = 0;
+        for p in o.n.peers.iter_mut() {
+            if p.seat == Seat::Pending {
+                p.seat = Seat::Cleared;
+                peers += 1;
+            }
+        }
+        if holder || peers != 0 {
+            o.obs(Obs::MintGateClearedByLease { holder, peers });
+        }
+    }
+    o.row(H16);
+    settle_gate(o, d);
+}
+
+/// H.30.3: an admin asks to clear the gate early. Refused: an early override
+/// would reopen the exposure H.25 closes. The reading H.30.3 rejects clears
+/// every pending member and the id-space wait.
+fn op_mint_override(s: &State, d: Design) -> Step {
+    if s.env.probe != Probe::EpochMint || s.auth.mint_gate.is_none() {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    if d.has(Fix::NoMintOverride) {
+        o.obs(Obs::MintOverrideRefused);
+        return o.done();
+    }
+    if let Some(g) = o.n.auth.mint_gate.as_mut() {
+        g.holder = Seat::Cleared;
+        g.idspace_wait = false;
+    }
+    for p in o.n.peers.iter_mut() {
+        if p.seat == Seat::Pending {
+            p.seat = Seat::Cleared;
+        }
+    }
+    o.n.auth.mint_gate = None;
+    o.n.ghost.search_due = false;
     o.done()
 }
 
@@ -3829,6 +4265,7 @@ fn pin_rebuild(s: &State, d: Design, r: usize) -> Step {
     }
     o.n.dur.derived[r] = Some(p.pin_ref);
     o.n.vol.adopted &= !bit(r);
+    o.n.vol.stale_carry &= !bit(r);
     o.n.ghost.derived_ref[r] = Some(p.pin_ref);
     o.n.ghost.derived_from[r] = s.ghost.dir_room[s.env.root_dir[r] as usize];
     o.done()
@@ -3913,6 +4350,9 @@ fn probe(s: &State, d: Design, action: Action) -> Step {
             if s.vol.phase == Phase::Down && s.dur.state_holder.is_some() =>
         {
             o.n.dur.state_holder = None;
+            // H.26: holder-state loss starts with the clock flag clear.
+            o.n.dur.clock_behind = false;
+            o.n.ghost.lag_proven = false;
         }
         (Probe::Root, BeginRecovery)
             if s.vol.phase == Phase::Down && s.dur.state_holder.is_none() && !s.env.recovering =>

@@ -11,8 +11,8 @@ use kwiry_lifecycle::props::{self, Prop};
 use kwiry_lifecycle::row_id::RowId;
 use kwiry_lifecycle::state::*;
 use kwiry_lifecycle::step::{
-    CapabilityRefusal, Config, Obs, Outcome, ReapprovalCause, exec, mintable, observed_remaining,
-    servable,
+    CapabilityRefusal, Config, Obs, Outcome, ReapprovalCause, clock_held, exec, mintable,
+    observed_remaining, servable,
 };
 use kwiry_lifecycle::wire::{self, AckClass, Expiry, KeyPin, Keyset, Proof};
 
@@ -27,7 +27,7 @@ const BUDGET: Budget = Budget {
     restores: 1,
 };
 const REV: Rev = Rev { epoch: 0, seq: 1 };
-const D: Design = Design::REV11_1;
+const D: Design = Design::REV11_2;
 
 fn profile(name: &'static str, design: Design) -> Profile {
     Profile {
@@ -1779,22 +1779,19 @@ fn h21_clock_evidence_refuses_all_governed_reads_until_correction() {
     ))));
     // H.23's confirmed correction (rev11_1.rs covers everything that is not).
     f.run(&[ClockStep { lag: 0 }, ClockProbe]);
-    assert!(
-        f.s.env.clock_behind_authority,
-        "a clock step confirms nothing"
-    );
+    assert!(clock_held(&f.s), "a clock step confirms nothing");
     f.step(VerifyListPage {
         iat: 0,
         rtt: Some(10),
     });
-    assert!(!f.s.env.clock_behind_authority);
+    assert!(!clock_held(&f.s));
     // Any verified page raises it, nonce-bound or not; an older one does not
     // clear it.
     f.run(&[ClockStep { lag: 31 }, at_limit, AuthRetire(0), FetchStart]);
     f.step(VerifyListPage { iat: 30, rtt: None });
-    assert!(!f.s.env.clock_behind_authority);
+    assert!(!clock_held(&f.s));
     f.step(VerifyListPage { iat: 31, rtt: None });
-    assert!(f.s.env.clock_behind_authority);
+    assert!(clock_held(&f.s));
     f.step(VerifyListPage { iat: 29, rtt: None });
     let out = f.outcome(FinishCapability).unwrap();
     assert!(out.obs.contains(&Some(Obs::CapabilityRefused(

@@ -43,7 +43,7 @@ fn budget(retires: u8, retire_rooms: u8) -> Budget {
 fn profile(name: &'static str, budget: Budget) -> Profile {
     Profile {
         name,
-        design: Design::REV11_1,
+        design: Design::REV11_2,
         budget,
         faults: 0,
         garbage: false,

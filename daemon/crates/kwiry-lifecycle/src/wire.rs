@@ -321,6 +321,6 @@ pub fn absence_proved(page_zero_iat: i64, exp: i64, last: Option<RState>, sent: 
 
 /// Seconds relative to the original retirement, not the restore time. The
 /// signed expiry may be sooner than the 90 s envelope. A0 always wins.
-pub fn pre_retirement_answer(d: Design, elapsed: u8, expiry_with_skew: u8, a0: bool) -> bool {
-    !a0 && (!d.has(Fix::CapabilityExposure) || elapsed <= expiry_with_skew.min(90))
+pub fn pre_retirement_answer(d: Design, elapsed: u16, expiry_with_skew: u8, a0: bool) -> bool {
+    !a0 && (!d.has(Fix::CapabilityExposure) || elapsed <= u16::from(expiry_with_skew.min(90)))
 }

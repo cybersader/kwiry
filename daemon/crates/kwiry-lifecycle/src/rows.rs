@@ -443,13 +443,43 @@ pub const MACHINES: &[Machine] = &[
             ),
             row!(
                 H14,
-                r#"Authority: a new epoch (supported restore, `restore_journal_lost`, or operator)"#,
-                r#"Until every enrolled, enabled engine holder of the custody id-space has had a status or obligation report accepted whose `list_ref` is a tag-valid list of the current epoch; disabled or decommissioned holders do not count"#,
+                r#"Authority: the first transaction of a new epoch (supported restore, `restore_journal_lost`, or operator), after H.1 and H.31 replay (H17)"#,
                 r#"—"#,
-                r#"OpenClast mints no search capability for any room of the id-space. A holder still on an earlier-epoch list is served only under capabilities minted before minting stopped: at most 90 s after the stop (H.15, H.21), whatever remains of its 900 s lease. Search for the id-space stays down until its last holder reports (H6 and the T1 fresh status clear it promptly), then minting resumes"#,
                 r#"—"#,
-                r#"HW §15 H.25, H.1.4, H.15.1, H.19.5, G.4"#,
+                r#"OpenClast mints no search capability for any room of the custody id-space until H15 or H16 opens the gate. **Members are frozen now:** the engine holders enrolled and enabled for the id-space in this transaction. The set never grows: a holder enrolled later in the epoch is not a member, nor is one disabled at the snapshot, and disabling or re-enabling a member changes nothing (a disabled member may serve until its next request gets `403`). After `restore_journal_lost` the snapshot may miss a holder, so minting also waits for the id-space-wide lease timeout (H16). A holder still on an earlier-epoch list is served only under capabilities minted before minting stopped: at most 90 s after the stop (H.15, H.21), whatever remains of its lease"#,
+                r#"—"#,
+                r#"HW §15 H.25, H.30.1, H.30.4, H.1.4, H.15.1, H.19.5, G.4"#,
                 Step
+            ),
+            row!(
+                H15,
+                r#"Authority, gate closed: a pending member's status or obligation report is accepted"#,
+                r#"Its `list_ref` is a tag-valid list of the current epoch"#,
+                r#"—"#,
+                r#"The member clears: it applied a new-epoch list and stopped serving the old one. Minting resumes once no member is pending and no id-space-wide wait remains. H6 and the T1 fresh status clear the holder promptly. A later enrollee's startup status is harmless and does not count"#,
+                r#"—"#,
+                r#"HW §15 H.25, H.30.2(a), H.30.3"#,
+                Step
+            ),
+            row!(
+                H16,
+                r#"Authority, gate closed: `now > T_stop + serve_seconds_ceiling + 150 s`, with `T_stop` the epoch link's `lists_stopped_at`"#,
+                r#"`T_stop`: the start of a supported restore (the old authority is stopped first), or the restored authority's first start for `restore_journal_lost` and a raw restore. `serve_seconds_ceiling` comes from deployment configuration, default 900, and enrollment refuses an engine `serve_seconds` above it: at most 1050 s by default"#,
+                r#"—"#,
+                r#"Every earlier-epoch lease has lapsed. Each pending member clears by lease with the unsampled `lifecycle.mint_gate.cleared_by_lease` event (`holder_id`, `provider_scope`) and the H.11 silence alert, and the id-space-wide wait ends, so minting resumes even if a member never reports. **No admin override** clears a member earlier; an admin investigates the alert and disables or decommissions a holder that is gone"#,
+                r#"—"#,
+                r#"HW §15 H.30.2(b), H.30.3, H.30.4, H.11"#,
+                Focused("mint-gate fixture with other holders")
+            ),
+            row!(
+                H17,
+                r#"Authority: holder enrollment, key rotation, disable, enable or lease-policy change"#,
+                r#"Journal kinds `holder_enrolled`, `holder_key_rotated`, `holder_disabled`, `holder_enabled` and `holder_policy_changed` (`"v": 1`). An entry with a missing or ill-typed member fails chain verification (H12j)"#,
+                r#"Journal append and fsync, then the governance transaction (H.1.2)"#,
+                r#"A supported restore replays the entries in journal order onto the restored state (H.18's target rule) before H14 freezes the members, so its roster is complete and no id-space-wide wait applies. `restore_journal_lost` has no journal: later roster changes are lost, which H14 and H16 cover"#,
+                r#"Reconcile completes or aborts the appended entry"#,
+                r#"HW §15 H.31, H.30.5, H.1.2, H.14, H.18"#,
+                Focused("mint-gate fixture with other holders")
             ),
         ],
     },
@@ -919,20 +949,20 @@ pub const MACHINES: &[Machine] = &[
                 C19,
                 r#"any + a verified list page or capability shows the holder clock is behind"#,
                 r#"`iat − now_recv > 30 s` on any verified page (nonce-bound or not) or capability: transit only makes the engine look ahead, so the lag is at least that"#,
-                r#"W (`clock_behind_authority`; the refusal takes effect in memory first)"#,
+                r#"L3 (refuse at once) → W (`clock_behind_authority` through the single holder-state writer)"#,
                 r#"Raised: refuse every capability-authorized governed request until C20. List fetches, applies, reports and status continue"#,
-                r#"The hold survives restart: a restart is no clock correction"#,
-                r#"HW §15 H.21.5, H.23"#,
+                r#"Before W: only the flag is lost; the restart serves nothing until a list applies, and its pages are measured again. After W: the hold survives restart, which is no clock correction. Holder-state loss and trust on first use start with it clear"#,
+                r#"HW §15 H.21.5, H.23, H.26"#,
                 Focused("capability admission and release fixture")
             ),
             row!(
                 C20,
                 r#"raised + a verified list page received in this process in response to a list request this process sent (F1 or C21), with the matching `nonce` echo"#,
-                r#"`(iat − now_recv) + rtt ≤ 30 s`, with `rtt` measured on the monotonic clock from sending that page's request to receiving the page. Lag ≤ `(iat − now_recv)` + transit and transit ≤ `rtt`, so this bounds the lag at 30 s"#,
-                r#"W (clear `clock_behind_authority`)"#,
-                r#"Cleared; governed requests resume under C17. Otherwise unchanged, with an alert naming `measured_lag_upper_bound` and `rtt`. **Nothing else clears the hold:** no capability, no page without this process's nonce, no older or replayed artifact, no NTP or clock-step event, no elapsed time and no operator command"#,
+                r#"`(iat − now_recv) + rtt ≤ 30 s`, whatever `rtt` is, with `rtt` measured on the monotonic clock from sending that page's request to receiving the page. Lag = `(iat − now_recv)` + transit and transit ≤ `rtt`, so this bounds the lag at 30 s. A clock running ahead (negative `iat − now_recv`) only shortens serving, so it may clear with `rtt > 30 s`"#,
+                r#"W (clear `clock_behind_authority`), then the in-memory hold"#,
+                r#"Cleared; governed requests resume under C17. Otherwise unchanged, with an alert naming `measured_lag_upper_bound` and `rtt`. **Nothing else clears the hold:** no capability, no page without this process's nonce, no older or replayed artifact, no NTP or clock-step event, no elapsed time, no restart and no operator command"#,
                 r#"Either: the hold, or its confirmed clearing"#,
-                r#"HW §15 H.23"#,
+                r#"HW §15 H.23, H.26, H.29"#,
                 Focused("clock-correction fixture")
             ),
             row!(
@@ -940,9 +970,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"raised + the probe timer (at most once per 60 s)"#,
                 r#"M10 Normal"#,
                 r#"—"#,
-                r#"One extra list request with `page_size: 1` and a fresh `nonce`, counted under H.8. Its page feeds C20; its result need not be applied. With clocks that agree and a round trip under 30 s it confirms; otherwise the hold stays and alerts (fail closed)"#,
+                r#"One extra list request with `page_size: 1` and a fresh `nonce`, counted under H.8. Its page feeds C20; its result need not be applied. It confirms when its page satisfies C20's inequality; otherwise the hold stays and alerts (fail closed). Every start lists at once (§5.3), so a persisted hold with agreeing clocks clears on the first page"#,
                 r#"The request dies with the process; the next process probes again"#,
-                r#"HW §15 H.23, H.8"#,
+                r#"HW §15 H.23, H.26, H.29, H.8"#,
                 Focused("clock-correction fixture")
             ),
         ],
@@ -1140,11 +1170,11 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 R1,
                 r#"none, invalidated or rejected (or ready or sent with a lower state) + a derived state `s`"#,
-                r#"Publisher transaction: `obl_ver[o]`, `res_ver[r]`, `inv_ver` and the epoch unchanged since the pass. Then **either** `s > F`, **or** `s == F` as a same-state update (counts or manifest digest differ from the last accepted report) or a reconfirmation (R1r, or after R14), at most once per 300 s per obligation. Plus the enqueue guard, and an empty inventory for `complete`. After an epoch acceptance, nothing is transmitted until the H6 fresh-epoch status has a current-epoch receipt (T1 goes first); `429`, `401 replay`, `401 proof_expired`, `409 stale_list_ref` and `503` on the status keep this gate shut while T2 retries. A status bug halt (T6c, or R17 on the status) releases it (H.22)"#,
+                r#"Publisher transaction: `obl_ver[o]`, `res_ver[r]`, `inv_ver` and the epoch unchanged since the pass. Then **either** `s > F`, **or** `s == F` as a same-state update (counts or manifest digest differ from the last accepted report) or a reconfirmation (R1r, or after R14), at most once per 300 s per obligation. Plus the enqueue guard, and an empty inventory for `complete`. After an epoch acceptance, nothing is derived or transmitted until the H6 fresh-epoch status has a current-epoch receipt (T1 goes first); `429`, `401 replay`, `401 proof_expired`, `409 stale_list_ref` and `503` on the status keep this gate shut while T2 retries. A status bug halt (T6c, or R17 on the status) releases it (H.22). The gate is derived from durable holder state (H.27): open once a current-epoch status ack is recorded or while the status is durably `halted`, so a restart keeps it; N5 (`halted → invalidated`) closes it again until the re-derived status is acknowledged"#,
                 r#"W[`receipts/<key>` scan record, for `complete`] → W[`manifests/<key>`] → W (`pending = ready{key, B}`)"#,
                 r#"ready"#,
                 r#"After a side file: an orphan, later pruned. After W: ready, re-validated by R2 after the restart"#,
-                r#"HW §4.1, §4.4, §14 Q3, Q7, §15 H.19, H.22; F5-4; R6-7; R7-5"#,
+                r#"HW §4.1, §4.4, §14 Q3, Q7, §15 H.19, H.22, H.27; F5-4; R6-7; R7-5"#,
                 Step
             ),
             row!(
@@ -1160,11 +1190,11 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 R2,
                 r#"ready, sent, or armed restored by a restart (R4a) + transmission (first send or retry)"#,
-                r#"The transmission guard passes against the current snapshot and **records the versions it read** (`obl_ver[o]`, `res_ver[r]`, `inv_ver`, epoch). For `complete` after a restart, a barrier and scan completed in this process"#,
+                r#"The transmission guard passes against the current snapshot and **records the versions it read** (`obl_ver[o]`, `res_ver[r]`, `inv_ver`, epoch). For `complete` after a restart, a barrier and scan completed in this process. A first send waits while the R1 status-first gate is shut; a report already sent while it was open is retried (H.27)"#,
                 r#"W[`sent/<d>.jws`] → W (append `{jti, d, exp}`; pending → `armed`)"#,
                 r#"armed"#,
                 r#"After W: the attempt counts as possibly accepted"#,
-                r#"F5-1, R6-3"#,
+                r#"F5-1, R6-3, HW §15 H.27"#,
                 Step
             ),
             row!(
@@ -1757,8 +1787,8 @@ pub const MACHINES: &[Machine] = &[
                 r#"—"#,
                 r#"W (status → `halted`)"#,
                 r#"halted; bug alert; never re-derived automatically. N5 resumes. Releases the R1 status-first gate: obligation reports proceed while the status waits"#,
-                r#"Either; a durable `halted` keeps the gate released"#,
-                r#"HW §4.5, §15 H.22, R7-7"#,
+                r#"Either; a durable `halted` keeps the gate released (H.27)"#,
+                r#"HW §4.5, §15 H.22, H.27, R7-7"#,
                 Step
             ),
             row!(
@@ -1938,9 +1968,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"a report or the status `halted` (R9, R17, T6c) + operator `kwiry holder resume-report` (daemon stopped, audited, after the cause is fixed)"#,
                 r#"The command holds `holder.lock`"#,
                 r#"W (`halted → invalidated`; attempts that may have been transmitted go to `uncertain`)"#,
-                r#"Restart; R1 or T1 re-derives under a new key"#,
+                r#"Restart; R1 or T1 re-derives under a new key. A status resumed after an epoch acceptance closes the R1 gate again until its re-derived status has a current-epoch ack; reports sent while it was open stand (H.27)"#,
                 r#"Either"#,
-                r#"Round-8 #5"#,
+                r#"Round-8 #5, HW §15 H.27"#,
                 Step
             ),
         ],
@@ -1984,9 +2014,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"A query, readiness check or end-of-request release for room `r`"#,
                 r#"`root_pin` non-null; artifacts stamped with its `pin_ref` by the holder's durable derivation record, never by the in-process baseline (H.24); the root observed at its `pin_id`; no pin-history conflict (AP24 `root_pin_previously_listed`); list received in this process"#,
                 r#"—"#,
-                r#"Served; otherwise R17 with no results. A `null` pin, a mismatch or a conflict withholds the artifacts and authorizes no deletion. A pin that changed while the holder was down serves no artifact derived under the old `pin_ref` (H10.5 covers only same-ref artifacts)"#,
+                r#"Served; otherwise R17 with no results. A `null` pin, a mismatch or a conflict withholds the artifacts and authorizes no deletion. An artifact stamped with any other `pin_ref` never serves, in any state, inside the stale bound included; a pin that changed while the holder was down serves no artifact derived under the old `pin_ref` (H.28)"#,
                 r#"—"#,
-                r#"HW §15 H.16.5, H.24; AP1, AP6, AP7, AP16, AP18"#,
+                r#"HW §15 H.16.5, H.24, H.28; AP1, AP6, AP7, AP16, AP18"#,
                 Implicit("the serving guard every read evaluates")
             ),
             row!(
@@ -2001,12 +2031,12 @@ pub const MACHINES: &[Machine] = &[
             ),
             row!(
                 P5,
-                r#"Root observed at another `pin_id` (AP3) + the H10.5 stale bound passes"#,
+                r#"Root observed at another `pin_id` (AP3) while the listed `pin_ref` is unchanged + the H10.5 stale bound passes"#,
+                r#"Only artifacts published by a walk whose root observation matched `pin_id` under the current `pin_ref`"#,
                 r#"—"#,
+                r#"Until the bound (at most `max_stale_serve_seconds`), only those same-ref artifacts may serve: never after an A0 refusal, never for AP24 or `root_pin_previously_listed`, and never an artifact stamped with another `pin_ref`. Then R17. A changed `pin_ref` ends service of the earlier ref's artifacts at A0; the room serves again only from a walk under the new ref (P4)"#,
                 r#"—"#,
-                r#"Until the bound, only previously validated artifacts stamped with the current `pin_ref` may serve (never after an A0 refusal or for AP24); then R17"#,
-                r#"—"#,
-                r#"HW §15 H.16.5, H10.5; AP3"#,
+                r#"HW §15 H.16.5, H.28, H10.5; AP3"#,
                 Focused("root-pin fixture")
             ),
             row!(

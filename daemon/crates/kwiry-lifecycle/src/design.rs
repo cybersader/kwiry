@@ -1,7 +1,7 @@
 //! Which revision of the lifecycle the model executes.
 //!
 //! [`Design::REV8`] is the revision-8 table encoded as written (with the
-//! interpretations listed in the crate docs). [`Design::REV11_1`] adds every
+//! interpretations listed in the crate docs). [`Design::REV11_2`] adds every
 //! [`Fix`]. Each fix is a separate flag so the checker can show that it is
 //! necessary: removing any single fix from the corresponding revision must reproduce the
 //! counterexample it closes (`tests/model_check.rs`).
@@ -112,6 +112,33 @@ pub enum Fix {
     /// H.25: after a new epoch, mint nothing for the id-space until every
     /// holder has a report accepted with a current-epoch `list_ref`.
     EpochMintGate,
+    /// H.26: `clock_behind_authority` is holder state, so a restart does not
+    /// clear it (only C20 does).
+    DurableClockHold,
+    /// H.26: the raise takes effect in memory before its durable write.
+    ClockHoldMemoryFirst,
+    /// H.27: the status-first gate is derived from durable holder state, so
+    /// a durable `halted` keeps it open across a restart.
+    DurableStatusGate,
+    /// H.28: H10.5 bounded stale service covers only artifacts published
+    /// under the current `pin_ref`.
+    SameRefStaleService,
+    /// H.29: the H.23 inequality alone decides the clear, whatever `rtt`.
+    InequalityDecidesClear,
+    /// H.30.1: gate membership is frozen at the new epoch's first
+    /// transaction.
+    FrozenMintMembership,
+    /// H.30.2(b), H.30.3: a member clears at `T_stop +
+    /// serve_seconds_ceiling + 150 s`.
+    MintLeaseTimeout,
+    /// H.30.3: no admin override clears a member early.
+    NoMintOverride,
+    /// H.30.4: after `restore_journal_lost`, minting also waits for the
+    /// id-space-wide lease timeout.
+    JournalLostMintWait,
+    /// H.31: roster changes are journal entries replayed by a supported
+    /// restore.
+    RosterJournal,
 }
 
 impl Fix {
@@ -166,6 +193,19 @@ impl Fix {
         Fix::ConfirmedClockCorrection,
         Fix::DurablePinDerivation,
         Fix::EpochMintGate,
+    ];
+
+    pub const REV11_2: [Fix; 10] = [
+        Fix::DurableClockHold,
+        Fix::ClockHoldMemoryFirst,
+        Fix::DurableStatusGate,
+        Fix::SameRefStaleService,
+        Fix::InequalityDecidesClear,
+        Fix::FrozenMintMembership,
+        Fix::MintLeaseTimeout,
+        Fix::NoMintOverride,
+        Fix::JournalLostMintWait,
+        Fix::RosterJournal,
     ];
 
     const fn bit(self) -> u64 {
@@ -224,6 +264,16 @@ impl Fix {
                 "H.24: artifacts serve only under their durable derivation record"
             }
             Fix::EpochMintGate => "H.25: mint after a new epoch only once every holder reported",
+            Fix::DurableClockHold => "H.26: clock_behind_authority survives a restart",
+            Fix::ClockHoldMemoryFirst => "H.26: the clock refusal precedes its durable write",
+            Fix::DurableStatusGate => "H.27: the status gate is read from durable state",
+            Fix::SameRefStaleService => "H.28: H10.5 stale service is same-ref only",
+            Fix::InequalityDecidesClear => "H.29: the H.23 inequality alone decides the clear",
+            Fix::FrozenMintMembership => "H.30.1: mint-gate membership is frozen",
+            Fix::MintLeaseTimeout => "H.30.2: a member clears at the lease timeout",
+            Fix::NoMintOverride => "H.30.3: no admin override clears a member early",
+            Fix::JournalLostMintWait => "H.30.4: journal-lost minting waits for the lease timeout",
+            Fix::RosterJournal => "H.31: the holder roster is journaled and replayed",
             Fix::LeaseAndRollbackFence => {
                 "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
             }
@@ -281,12 +331,25 @@ impl Design {
         d
     };
 
-    /// Revision 11.1: HOLDINGS-WIRE §15 H.22–H.25.
+    /// Revision 11.1: HOLDINGS-WIRE §15 H.22–H.25. The H.26–H.31 flags are
+    /// off, so it executes the readings those amendments reject (the
+    /// ablations reproduce them).
     pub const REV11_1: Design = {
         let mut d = Self::REV11;
         let mut i = 0;
         while i < Fix::REV11_1.len() {
             d = d.with(Fix::REV11_1[i]);
+            i += 1;
+        }
+        d
+    };
+
+    /// Revision 11.2: HOLDINGS-WIRE §15 H.26–H.31.
+    pub const REV11_2: Design = {
+        let mut d = Self::REV11_1;
+        let mut i = 0;
+        while i < Fix::REV11_2.len() {
+            d = d.with(Fix::REV11_2[i]);
             i += 1;
         }
         d
@@ -325,14 +388,18 @@ impl fmt::Debug for Design {
         if *self == Design::REV11_1 {
             return write!(f, "REV11.1");
         }
+        if *self == Design::REV11_2 {
+            return write!(f, "REV11.2");
+        }
         let missing: Vec<_> = Fix::REV9
             .iter()
             .chain(&Fix::REV10)
             .chain(&Fix::REV10_1)
             .chain(&Fix::REV11)
             .chain(&Fix::REV11_1)
+            .chain(&Fix::REV11_2)
             .filter(|x| !self.has(**x))
             .collect();
-        write!(f, "REV11.1 without {missing:?}")
+        write!(f, "REV11.2 without {missing:?}")
     }
 }

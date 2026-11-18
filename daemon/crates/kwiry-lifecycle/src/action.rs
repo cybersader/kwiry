@@ -162,7 +162,8 @@ pub enum Action {
     OpRestart,
     OpClearHalt(u8),
     OpReopen(u8),
-    TickExposure(u8),
+    /// The focused probes' clock reaches this many seconds.
+    TickExposure(u16),
     AnswerCapability {
         room: u8,
         expiry_with_skew: u8,
@@ -187,12 +188,39 @@ pub enum Action {
     ClockProbe,
     /// 60 s pass: the next probe window opens.
     ProbeWindow,
-    /// A local NTP or clock-step event: the true lag becomes `lag` seconds.
+    /// A local NTP or clock-step event: the true lag becomes `lag` seconds
+    /// (negative: the engine clock runs ahead).
     ClockStep {
-        lag: u8,
+        lag: i8,
     },
     /// An operator command asking to clear `clock_behind_authority`.
     OpClearClock,
+    /// H.26: the durable write of a `clock_behind_authority` the holder
+    /// raised in memory (C19's W).
+    PersistClockHold,
+    /// H.30 and H.31 (focused probe): an admin enrolls engine holder `p` of
+    /// the id-space; it lists at once.
+    PeerEnroll(u8),
+    /// An admin disables peer `p`.
+    PeerDisable(u8),
+    /// An admin re-enables peer `p`.
+    PeerEnable(u8),
+    /// An admin rotates peer `p`'s key (the holder signs with the new key).
+    PeerRotate(u8),
+    /// Peer `p` accepts the new epoch and applies a list of it (needs an
+    /// enrollment the authority recognizes).
+    PeerMove(u8),
+    /// Peer `p`'s status report with a current-epoch `list_ref`.
+    PeerReport(u8),
+    /// Peer `p` is gone or stuck: it never reports again.
+    PeerSilent(u8),
+    /// A capability minted now is presented to peer `p`.
+    PeerAnswer(u8),
+    /// H.30.2(b): the authority clock passes `T_stop + serve_seconds_ceiling
+    /// + 150 s`.
+    LeaseTimeout,
+    /// H.30.3: an admin asks to clear the mint gate early.
+    OpMintOverride,
     /// H.16 focused inputs. `dir: None` is `--pin-id none`; `stale` is a
     /// stale `--expect-current`.
     AttestRoot {
@@ -254,8 +282,16 @@ impl Action {
             | StaleDeadline
             | ProbeWindow
             | ClockStep { .. }
-            | TickExposure(_) => Kind::Scenario,
-            BeginRecovery | CommitRecovery | OpClearClock => Kind::Operator,
+            | TickExposure(_)
+            | PeerEnroll(_)
+            | PeerDisable(_)
+            | PeerEnable(_)
+            | PeerRotate(_)
+            | PeerSilent(_)
+            | PeerAnswer(_) => Kind::Scenario,
+            BeginRecovery | CommitRecovery | OpClearClock | OpMintOverride => Kind::Operator,
+            // Another holder's progress and the passage of time are fair.
+            PeerMove(_) | PeerReport(_) | LeaseTimeout => Kind::Env,
             AuthRetire(_) | AuthUnlist(_) | AuthRelist(_) | AuthDrop(_) | AuthBackup
             | AuthRestore => Kind::Scenario,
             OpAcceptEpoch | OpRestart | OpClearHalt(_) | OpReopen(_) | OpRestoreJournalLost => {

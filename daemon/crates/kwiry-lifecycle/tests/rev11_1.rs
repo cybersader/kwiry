@@ -9,7 +9,7 @@ use kwiry_lifecycle::props::{self, Prop};
 use kwiry_lifecycle::row_id::RowId;
 use kwiry_lifecycle::state::*;
 use kwiry_lifecycle::step::{
-    CapabilityRefusal, Config, Obs, Outcome, exec, mintable, servable, status_gate_shut,
+    CapabilityRefusal, Config, Obs, Outcome, clock_held, exec, mintable, servable, status_gate_shut,
 };
 
 const BUDGET: Budget = Budget {
@@ -32,7 +32,7 @@ const NONE: Budget = Budget {
     drops: 0,
     restores: 0,
 };
-const D: Design = Design::REV11_1;
+const D: Design = Design::REV11_2;
 
 fn profile(name: &'static str) -> Profile {
     Profile {
@@ -289,8 +289,8 @@ fn h22_status_floor_restarts_every_epoch() {
 // ------------------------------------------------------------------ H.23
 
 /// The engine clock lags 40 s; a verified page proved it, so
-/// `clock_behind_authority` is raised.
-fn clock_held() -> Fake {
+/// `clock_behind_authority` is raised and written to holder state (H.26).
+fn clock_raised() -> Fake {
     let mut f = Fake::new();
     f.s.env.probe = Probe::Exposure;
     f.s.env.capability_skew = 30;
@@ -301,11 +301,13 @@ fn clock_held() -> Fake {
         f.rows(VerifyListPage { iat: 40, rtt: None })
             .contains(&RowId::C19)
     );
+    assert!(f.rows(PersistClockHold).contains(&RowId::C19));
+    assert!(f.s.dur.clock_behind);
     f.step(ListDeliver);
     while f.s.vol.apply.is_some() {
         f.step(Apply);
     }
-    assert!(f.s.env.clock_behind_authority && f.s.ghost.lag_proven);
+    assert!(clock_held(&f.s) && f.s.ghost.lag_proven);
     f
 }
 
@@ -323,7 +325,7 @@ const ASK: Action = StartCapability {
 /// (I1).
 #[test]
 fn h23_nothing_but_a_confirmed_correction_clears_the_hold() {
-    let f = clock_held();
+    let f = clock_raised();
     let probe = |page: Action| vec![ClockProbe, page, ASK];
     let sources: [(&str, Vec<Action>); 7] = [
         ("a capability", vec![ASK]),
@@ -370,11 +372,11 @@ fn h23_nothing_but_a_confirmed_correction_clears_the_hold() {
 
     // A restart is no correction either: the hold is in holder state, and a
     // page can only answer a request of the running process.
-    let mut f = clock_held();
+    let mut f = clock_raised();
     f.step(ClockProbe);
     f.step(Crash);
     f.boot();
-    assert!(f.s.env.clock_behind_authority);
+    assert!(clock_held(&f.s));
     assert!(!f.enabled(VerifyListPage {
         iat: 30,
         rtt: Some(10)
@@ -390,7 +392,7 @@ fn h23_nothing_but_a_confirmed_correction_clears_the_hold() {
 /// alerts with the measured bound and `rtt`. Lists continue while it holds.
 #[test]
 fn h23_the_probe_confirms_agreeing_clocks_and_alerts_otherwise() {
-    let mut f = clock_held();
+    let mut f = clock_raised();
     // Still 40 s behind: no consistent page can confirm.
     f.step(ClockProbe);
     assert!(!f.enabled(ClockProbe), "one probe at a time");
@@ -402,7 +404,7 @@ fn h23_the_probe_confirms_agreeing_clocks_and_alerts_otherwise() {
         out.obs
             .contains(&Some(Obs::ClockLagAlert { bound: 40, rtt: 10 }))
     );
-    assert!(f.s.env.clock_behind_authority);
+    assert!(clock_held(&f.s));
     assert!(!f.enabled(ClockProbe), "at most one probe per 60 s");
     // The clock is fixed, but the round trip is 31 s.
     f.run(&[ClockStep { lag: 0 }, ProbeWindow, ClockProbe]);
@@ -414,7 +416,7 @@ fn h23_the_probe_confirms_agreeing_clocks_and_alerts_otherwise() {
         out.obs
             .contains(&Some(Obs::ClockLagAlert { bound: 31, rtt: 31 }))
     );
-    assert!(f.s.env.clock_behind_authority);
+    assert!(clock_held(&f.s));
     // Lists, applies and the probe's own page continue while it holds; the
     // probe's result is not applied.
     f.step(AuthUnlist(1));
@@ -430,7 +432,7 @@ fn h23_the_probe_confirms_agreeing_clocks_and_alerts_otherwise() {
         })
         .contains(&RowId::C20)
     );
-    assert!(!f.s.env.clock_behind_authority);
+    assert!(!clock_held(&f.s));
     assert_eq!(f.s.vol.admitted, admitted, "the probe applies nothing");
     assert!(f.step(ASK).next.vol.capability.is_some());
 }
@@ -520,6 +522,8 @@ fn epoch_candidates() -> Vec<Action> {
         Dispatch(2),
         AuthProcess { c: 2, idx: 0 },
         Deliver { c: 2, idx: 0 },
+        // H.30.2(b): time passes the lease timeout (fair).
+        LeaseTimeout,
     ];
     for t in [60, 90, 91, 150] {
         c.push(TickExposure(t));
@@ -538,7 +542,8 @@ fn epoch_candidates() -> Vec<Action> {
 /// capabilities minted before minting stopped, so at most 90 s after the
 /// stop, whatever remains of its lease. Without the mint gate, R0's pin is
 /// nulled by `restore_journal_lost` and still serves past 90 s. With it,
-/// L1 also proves search recovers once the holder reports.
+/// L1 also proves search recovers: after `restore_journal_lost` minting waits
+/// for the H.30.4 id-space-wide lease timeout as well as the holder's report.
 #[test]
 fn h25_minting_waits_for_every_holder_and_exposure_stays_within_90_s() {
     let f = minting_stopped();
@@ -589,11 +594,13 @@ fn h25_minting_waits_for_every_holder_and_exposure_stays_within_90_s() {
 
 /// H.25 cost: search for the id-space stays down from the new epoch until
 /// the last holder has accepted it and reported; then minting resumes. A
-/// supported restore closes the gate too.
+/// supported restore closes the gate too. After `restore_journal_lost`,
+/// minting also waits for the id-space-wide lease timeout (H.30.4).
 #[test]
 fn h25_search_is_down_until_the_last_holder_reports() {
     for lost in [true, false] {
         let mut f = Fake::new();
+        f.s.env.probe = Probe::EpochMint;
         f.boot();
         f.list();
         f.step(AuthBackup);
@@ -611,6 +618,10 @@ fn h25_search_is_down_until_the_last_holder_reports() {
         assert!(!mintable(&f.s, 0), "accepting the epoch is not reporting");
         f.request(2);
         f.step(AuthProcess { c: 2, idx: 0 });
+        if lost {
+            assert!(!mintable(&f.s, 0), "the id-space-wide timeout is pending");
+            assert!(f.rows(LeaseTimeout).contains(&RowId::H15));
+        }
         assert!(
             mintable(&f.s, 0) && mintable(&f.s, 1),
             "the last holder reported"
