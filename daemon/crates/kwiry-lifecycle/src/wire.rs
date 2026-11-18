@@ -3,12 +3,12 @@
 //! module is not a JWS, JCS, HMAC or HTTP implementation.
 
 use crate::design::{Design, Fix};
-use crate::state::Rev;
+use crate::state::{RState, Rev};
 
 pub const PROOF_TTL: i64 = 300;
 pub const SKEW: i64 = 120;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Proof {
     pub jti: u32,
     pub iat: i64,
@@ -25,7 +25,18 @@ impl Proof {
     }
 
     pub fn timely_at_receipt(self, now: i64) -> bool {
-        now.abs_diff(self.iat) <= SKEW as u64 && self.timely_at_commit(now)
+        self.receipt(Design::REV10_1, now)
+    }
+
+    pub fn receipt(self, d: Design, now: i64) -> bool {
+        now.abs_diff(self.iat) <= SKEW as u64
+            && self.timely_at_commit(now)
+            && (!d.has(Fix::ProofDeadline)
+                || (60..=300).contains(&self.exp.saturating_sub(self.iat)))
+    }
+
+    pub fn cas(self, d: Design, now: i64) -> bool {
+        !d.has(Fix::ProofDeadline) || self.timely_at_commit(now)
     }
 
     pub fn timely_at_commit(self, now: i64) -> bool {
@@ -179,4 +190,121 @@ pub fn release_matches(retained: Option<u8>, approved_count: u8, unattributed: u
 pub fn list_budget_seconds(items_total: u64) -> u64 {
     let pages = items_total.div_ceil(500).max(1);
     pages.saturating_mul(2).saturating_add(30).clamp(120, 1800)
+}
+
+/// An independently parsed ref slot. Tag validity covers this holder and all
+/// five required fields. Malformed refs are not evidence at step 4.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum RefInput {
+    #[default]
+    Absent,
+    Malformed,
+    WellFormed {
+        rev: Rev,
+        tag_valid: bool,
+    },
+}
+impl RefInput {
+    pub fn verified(rev: Rev) -> Self {
+        Self::WellFormed {
+            rev,
+            tag_valid: true,
+        }
+    }
+    pub fn invalid_tag(self) -> bool {
+        matches!(
+            self,
+            Self::WellFormed {
+                tag_valid: false,
+                ..
+            }
+        )
+    }
+}
+
+/// Abstract raw and verified claims at the authority. Negative flags model
+/// invalid input; `ProofTimes` uses the authority's clock at receipt and CAS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Envelope {
+    pub too_large: bool,
+    pub custody_unreadable: bool,
+    pub bad_signature: bool,
+    pub refs: [RefInput; 2],
+    pub replay: bool,
+    pub wrong_scope: bool,
+    pub rate_limited: bool,
+    pub malformed: bool,
+    pub clock: Option<ProofTimes>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProofTimes {
+    pub proof: Proof,
+    pub received: i64,
+    pub commit: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    TooLarge,
+    EpochMismatch,
+    Witness,
+    CustodyUnavailable,
+    InvalidProof,
+    ProofExpired,
+    Replay,
+    Scope,
+    Rate,
+    Grammar,
+}
+
+/// HOLDINGS-WIRE §15 H.12 steps 1–9, identical on all three routes. The
+/// caller latches only Witness, then runs route-specific checks and the CAS.
+pub fn preflight(d: Design, e: Envelope, store: Rev, suspected: bool) -> Result<(), Refusal> {
+    use Refusal::*;
+    let bad_grammar = e.malformed || e.refs.contains(&RefInput::Malformed);
+    let witness = || {
+        e.refs.iter().any(|r| {
+            matches!(r, RefInput::WellFormed { rev, tag_valid }
+        if reference(d, store, *rev, *tag_valid) == RefVerdict::Rollback)
+        })
+    };
+    let would_expire = || e.clock.is_some_and(|t| !t.proof.receipt(d, t.received));
+    let h12 = d.has(Fix::UnifiedValidation);
+    if e.too_large {
+        Err(TooLarge)
+    } else if suspected {
+        Err(EpochMismatch)
+    } else if e.custody_unreadable {
+        Err(CustodyUnavailable)
+    } else if e.bad_signature {
+        Err(InvalidProof)
+    } else if h12 && witness() {
+        Err(Witness)
+    } else if would_expire() {
+        Err(ProofExpired)
+    } else if e.replay {
+        Err(Replay)
+    } else if e.wrong_scope {
+        Err(Scope)
+    } else if e.rate_limited {
+        Err(Rate)
+    } else if bad_grammar {
+        Err(Grammar)
+    } else if !h12 && witness() {
+        Err(Witness)
+    } else {
+        Ok(())
+    }
+}
+
+/// R15 uses Kwiry's conservative exp+420 margin, and only page 0's iat.
+pub fn absence_proved(page_zero_iat: i64, exp: i64, last: Option<RState>, sent: RState) -> bool {
+    page_zero_iat > exp.saturating_add(420) && last.is_none_or(|x| x < sent)
+}
+
+/// Seconds relative to the original retirement, not the restore time. The
+/// signed expiry may be sooner than the 90 s envelope. A0 always wins.
+pub fn pre_retirement_answer(d: Design, elapsed: u8, expiry_with_skew: u8, a0: bool) -> bool {
+    !a0 && (!d.has(Fix::CapabilityExposure) || elapsed <= expiry_with_skew.min(90))
 }

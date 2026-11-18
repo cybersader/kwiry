@@ -48,7 +48,7 @@ In every reachable state of every bounded run (`daemon/crates/kwiry-lifecycle/sr
 | I9 | The unattributed inventory never counts data attributable to a listed holding (units a release reserved excepted) |
 | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or human `blocked`; neither absence nor an unheld room without a retirement counts as a lost obligation under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
 
-I1 separately checks holder binding, lease/fence and pinned-key safety in the focused profiles. I8 also checks first-byte cancellation after 403 and visibility of eligible release declines. A holder with only a pre-retirement snapshot is still subject to the pre-existing capability TTL (§5.4); the authority never mints a new capability for a ghost retirement.
+I1 separately checks holder binding, lease/fence and pinned-key safety in the focused profiles, and in focused fixtures that a corrupt retirement journal fences restore and minting (HW §15 H.14) and that a capability minted before a retirement is answered only until `exp + clock_skew_allowance` or A0, whichever is first, at most 90 s after the retirement commit (H.15, C17, C18). I8 also checks first-byte cancellation after 403, visibility of eligible release declines, the H.12 validation order (a verified rollback witness wins over every later error) and the H.13 proof deadline (nothing commits after `D = exp + 120 s`). The authority never mints a new capability for a ghost retirement.
 
 The bounds, the reductions and what they leave out are in the crate documentation."#;
 

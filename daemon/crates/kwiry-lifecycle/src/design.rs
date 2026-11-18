@@ -68,6 +68,14 @@ pub enum Fix {
     CancelOnForbidden,
     /// Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply.
     LeaseAndRollbackFence,
+    /// H.12: the shared validation pipeline preserves authenticated witnesses.
+    UnifiedValidation,
+    /// H.13: receipt and CAS enforce the same proof deadline.
+    ProofDeadline,
+    /// H.14: verify the entire journal, then replay it atomically.
+    AtomicJournalReplay,
+    /// H.15: bound the pre-retirement capability at the engine boundary.
+    CapabilityExposure,
 }
 
 impl Fix {
@@ -95,6 +103,13 @@ impl Fix {
         Fix::ExactDeletionEvidence,
         Fix::CancelOnForbidden,
         Fix::LeaseAndRollbackFence,
+    ];
+
+    pub const REV10_1: [Fix; 4] = [
+        Fix::UnifiedValidation,
+        Fix::ProofDeadline,
+        Fix::AtomicJournalReplay,
+        Fix::CapabilityExposure,
     ];
 
     const fn bit(self) -> u32 {
@@ -127,6 +142,14 @@ impl Fix {
                 "Astra: prove the exact claimant against independent inventory"
             }
             Fix::CancelOnForbidden => "Astra: a 403 revokes the unsent transport queue",
+            Fix::UnifiedValidation => {
+                "H.12: authenticated witness precedes time/replay/scope/rate/grammar"
+            }
+            Fix::ProofDeadline => "H.13: proof duration, CAS deadline and page-zero absence",
+            Fix::AtomicJournalReplay => "H.14: verified, atomic journal replay",
+            Fix::CapabilityExposure => {
+                "H.15: engine answers stop by the original capability deadline"
+            }
             Fix::LeaseAndRollbackFence => {
                 "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
             }
@@ -163,6 +186,12 @@ impl Design {
         d
     };
 
+    pub const REV10_1: Design = Self::REV10
+        .with(Fix::UnifiedValidation)
+        .with(Fix::ProofDeadline)
+        .with(Fix::AtomicJournalReplay)
+        .with(Fix::CapabilityExposure);
+
     pub const fn has(self, f: Fix) -> bool {
         self.0 & f.bit() != 0
     }
@@ -187,11 +216,15 @@ impl fmt::Debug for Design {
         if *self == Design::REV10 {
             return write!(f, "REV10");
         }
+        if *self == Design::REV10_1 {
+            return write!(f, "REV10.1");
+        }
         let missing: Vec<_> = Fix::REV9
             .iter()
             .chain(&Fix::REV10)
+            .chain(&Fix::REV10_1)
             .filter(|x| !self.has(**x))
             .collect();
-        write!(f, "REV10 without {missing:?}")
+        write!(f, "REV10.1 without {missing:?}")
     }
 }

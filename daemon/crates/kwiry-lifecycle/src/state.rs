@@ -131,6 +131,7 @@ pub enum APhase {
 pub struct AObl {
     pub created_seq: u8,
     pub blocked: bool,
+    pub blocked_by: Option<DeclineEntry>,
     /// The last accepted report's ack (the "current ack" of HW §4.4).
     pub accepted: Option<Ack>,
     /// Idempotency receipts: keys accepted, with the epoch of their ack.
@@ -162,6 +163,7 @@ pub struct Instr {
     pub id: u8,
     pub manifest: u8,
     pub approved_count: u8,
+    pub issued_seq: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -179,6 +181,22 @@ pub struct AuthCore {
     pub status_receipts: Bag<(SKey, u8, Option<ReleaseDisposition>), 8>,
 }
 
+/// Digest and decision identities are symbolic in this model; the typed body
+/// stands for the retained status digest and is not exposed as resource data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DeclineEntry {
+    pub seq: u8,
+    pub status_digest: SKey,
+    pub declined_count: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FinalEntry {
+    pub seq: u8,
+    pub status_digest: SKey,
+    pub executed: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Auth {
     pub core: AuthCore,
@@ -187,9 +205,13 @@ pub struct Auth {
     /// Bounded projection of the off-store H.1 journal. Room index represents
     /// the stable holder/holding/obligation identity, not a new allocation.
     pub journal_retired: u8,
-    pub journal_declined: [u8; ROOMS],
+    pub journal_declined: [Option<DeclineEntry>; ROOMS],
+    pub journal_cleared: [u8; ROOMS],
+    pub journal_finalized: [Option<FinalEntry>; INSTRS],
     pub journal_issued: [Option<(u8, Instr)>; INSTRS],
     pub rollback_suspected: bool,
+    pub failed_restore: bool,
+    pub journal_lost_audited: bool,
 }
 
 // -------------------------------------------------------------------- lists
@@ -243,6 +265,8 @@ pub enum ListErr {
         replay: bool,
     },
     ProofExpired,
+    BadRequest,
+    StaleListRef,
     /// `403 holder_not_authorized`.
     Forbidden,
 }
@@ -647,6 +671,9 @@ pub struct Env {
     pub recovering: bool,
     pub legacy_started: bool,
     pub clock: u8,
+    pub envelope: Option<crate::wire::Envelope>,
+    pub exposure_elapsed: u8,
+    pub bad_journal: bool,
     pub list_signing: Option<(u8, Option<crate::wire::Keyset>)>,
 }
 
@@ -661,6 +688,8 @@ pub enum Probe {
     Evidence,
     Proof,
     Governance,
+    Exposure,
+    Journal,
 }
 
 /// Ghost state read only by invariants.
@@ -707,9 +736,13 @@ impl State {
                 },
                 backup: None,
                 journal_retired: 0,
-                journal_declined: [0; ROOMS],
+                journal_declined: [None; ROOMS],
+                journal_cleared: [0; ROOMS],
+                journal_finalized: [None; INSTRS],
                 journal_issued: [None; INSTRS],
                 rollback_suspected: false,
+                failed_restore: false,
+                journal_lost_audited: false,
             },
             env: Env::default(),
             dur: Durable {

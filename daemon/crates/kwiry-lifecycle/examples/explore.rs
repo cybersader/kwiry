@@ -3,8 +3,9 @@
 //!
 //! `cargo run -p kwiry-lifecycle --example explore -- <design> key=value ...`
 //!
-//! `<design>`: `rev8`, `rev9`, or `rev9-<Fix>` (revision 9 without one fix,
-//! by `Fix` name, e.g. `rev9-NarrowFirst`). Keys: `retires`, `changes`,
+//! `<design>`: `rev8`, `rev9`, `rev10`, `rev10.1` (the default), or
+//! `<rev>-<Fix>` (that revision without one fix, by `Fix` name, e.g.
+//! `rev9-NarrowFirst` or `rev10.1-ProofDeadline`). Keys: `retires`, `changes`,
 //! `crashes`, `faults`, `drops`, `restores` (budgets); `rr`, `cr` (room masks
 //! for retirements and list changes); `families` (a `faults::` bitmask);
 //! `garbage`, `same`, `liveness` (0/1); `skip` (`Prop::bit` mask); `max`
@@ -23,7 +24,8 @@ fn main() {
     let design = match args.first().map(String::as_str) {
         Some("rev8") => Design::REV8,
         Some("rev9") => Design::REV9,
-        Some("rev10") | None => Design::REV10,
+        Some("rev10") => Design::REV10,
+        Some("rev10.1") | None => Design::REV10_1,
         Some(other) => {
             let (base, name) = other
                 .split_once('-')
@@ -31,12 +33,17 @@ fn main() {
             let d = if base == "rev9" {
                 Design::REV9
             } else {
-                assert_eq!(base, "rev10");
-                Design::REV10
+                if base == "rev10" {
+                    Design::REV10
+                } else {
+                    assert_eq!(base, "rev10.1");
+                    Design::REV10_1
+                }
             };
             let fix = Fix::REV9
                 .into_iter()
                 .chain(Fix::REV10)
+                .chain(Fix::REV10_1)
                 .find(|f| format!("{f:?}") == name)
                 .expect("unknown fix name");
             d.without(fix)

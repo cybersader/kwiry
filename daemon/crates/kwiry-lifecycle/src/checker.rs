@@ -38,7 +38,7 @@ use crate::design::Design;
 use crate::props::{self, Prop};
 use crate::row_id::RowId;
 use crate::state::*;
-use crate::step::{Config, Outcome, exec};
+use crate::step::{Config, Outcome, Step, canonical, exec};
 
 /// One bounded run.
 #[derive(Clone, Copy, Debug)]
@@ -139,25 +139,37 @@ impl Hasher for Pass {
         self.0
     }
     fn write(&mut self, _: &[u8]) {
-        unreachable!("only u128 fingerprints are hashed")
+        unreachable!("only fingerprints are hashed")
     }
-    fn write_u128(&mut self, i: u128) {
-        self.0 = i as u64;
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
     }
 }
 
-fn fingerprint(s: &State) -> u128 {
+/// A 128-bit fingerprint stored at 4-byte alignment, so a `seen` entry is
+/// 20 bytes rather than the 32 a `u128` key pads to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Fp([u32; 4]);
+
+impl Hash for Fp {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        h.write_u64(u64::from(self.0[0]) | (u64::from(self.0[1]) << 32));
+    }
+}
+
+fn fingerprint(s: &State) -> Fp {
     let mut a = Fx::default();
     s.hash(&mut a);
     let mut b = DefaultHasher::new();
     s.hash(&mut b);
-    (u128::from(a.finish()) << 64) | u128::from(b.finish())
+    let (a, b) = (a.finish(), b.finish());
+    Fp([b as u32, (b >> 32) as u32, a as u32, (a >> 32) as u32])
 }
 
 // ----------------------------------------------------------------- explore
 
 struct Graph {
-    seen: HashMap<u128, u32, BuildHasherDefault<Pass>>,
+    seen: HashMap<Fp, u32, BuildHasherDefault<Pass>>,
     parent: Vec<u32>,
     via: Vec<u16>,
     goal: Vec<bool>,
@@ -190,6 +202,34 @@ impl Graph {
     }
 }
 
+/// A BFS frontier stored in fixed-size chunks.
+#[derive(Default)]
+struct Frontier {
+    chunks: VecDeque<Vec<State>>,
+    len: usize,
+}
+
+impl Frontier {
+    const CHUNK: usize = 1 << 14;
+
+    fn push(&mut self, s: State) {
+        if self.chunks.back().is_none_or(|c| c.len() == Self::CHUNK) {
+            self.chunks.push_back(Vec::with_capacity(Self::CHUNK));
+        }
+        self.chunks.back_mut().expect("just ensured").push(s);
+        self.len += 1;
+    }
+}
+
+/// One step of the explored quotient: [`exec`], then [`canonical`].
+fn quotient(s: &State, a: Action, cfg: &Config) -> Step {
+    let mut out = exec(s, a, cfg)?;
+    if let Some(o) = out.as_mut() {
+        canonical(&mut o.next, cfg);
+    }
+    Ok(out)
+}
+
 struct Run {
     cfg: Config,
     candidates: Vec<Action>,
@@ -198,11 +238,13 @@ struct Run {
 
 impl Run {
     fn init(&self) -> State {
-        self.initial.clone()
+        let mut s = self.initial.clone();
+        canonical(&mut s, &self.cfg);
+        s
     }
 
     fn step(&self, s: &State, ci: u16) -> Outcome {
-        exec(s, self.candidates[ci as usize], &self.cfg)
+        quotient(s, self.candidates[ci as usize], &self.cfg)
             .expect("replayed steps were checked")
             .expect("replayed steps were enabled")
     }
@@ -278,79 +320,88 @@ pub fn check_from(p: &Profile, initial: State, candidates: Vec<Action>) -> Repor
     let mut max_frontier = 1;
     let mut depth = 0;
 
-    let mut layer = vec![init];
+    let mut layer = Frontier::default();
+    layer.push(init);
     let mut layer_start = 0u32;
-    'bfs: while !layer.is_empty() {
-        max_frontier = max_frontier.max(layer.len());
-        let mut next = Vec::new();
-        for (k, s) in layer.iter().enumerate() {
-            let here = layer_start + k as u32;
-            g.goal.push(props::goal(s));
-            if let Some(prop) = props::check_state(s, p.skip) {
-                violation = Some(run.safety_cex(&g, prop, here, None, String::new()));
-                break 'bfs;
-            }
-            let mut healthy = false;
-            for (ci, &a) in run.candidates.iter().enumerate() {
-                let ci = ci as u16;
-                let out = match exec(s, a, &run.cfg) {
-                    Ok(Some(out)) => out,
-                    Ok(None) => continue,
-                    Err(b) => {
-                        violation = Some(run.safety_cex(
-                            &g,
-                            Prop::Bound,
-                            here,
-                            None,
-                            format!("{b} (taking {a:?})"),
-                        ));
-                        break 'bfs;
-                    }
-                };
-                transitions += 1;
-                for r in out.rows.iter() {
-                    rows_seen[r.index()] = true;
-                }
-                if let Some(prop) = props::check_step(s, &out, p.skip) {
-                    violation = Some(run.safety_cex(&g, prop, here, Some(ci), String::new()));
+    'bfs: while layer.len != 0 {
+        max_frontier = max_frontier.max(layer.len);
+        let mut next = Frontier::default();
+        let mut k = 0u32;
+        // Chunks are freed as soon as they are expanded, so the peak holds
+        // about one frontier rather than two. Order (and so state ids) is
+        // unchanged.
+        while let Some(chunk) = layer.chunks.pop_front() {
+            for s in &chunk {
+                let here = layer_start + k;
+                k += 1;
+                g.goal.push(props::goal(s));
+                if let Some(prop) = props::check_state(s, p.skip) {
+                    violation = Some(run.safety_cex(&g, prop, here, None, String::new()));
                     break 'bfs;
                 }
-                let fp = fingerprint(&out.next);
-                let j = match g.seen.get(&fp) {
-                    Some(&j) => j,
-                    None => {
-                        let j = u32::try_from(g.parent.len()).expect("fewer than 2^32 states");
-                        g.seen.insert(fp, j);
-                        g.parent.push(here);
-                        g.via.push(ci);
-                        next.push(out.next);
-                        j
+                let mut healthy = false;
+                for (ci, &a) in run.candidates.iter().enumerate() {
+                    let ci = ci as u16;
+                    let out = match quotient(s, a, &run.cfg) {
+                        Ok(Some(out)) => out,
+                        Ok(None) => continue,
+                        Err(b) => {
+                            violation = Some(run.safety_cex(
+                                &g,
+                                Prop::Bound,
+                                here,
+                                None,
+                                format!("{b} (taking {a:?})"),
+                            ));
+                            break 'bfs;
+                        }
+                    };
+                    transitions += 1;
+                    for r in out.rows.iter() {
+                        rows_seen[r.index()] = true;
                     }
-                };
-                if a.healthy() {
-                    healthy = true;
-                    if p.liveness {
-                        let n = keys.len() as u16;
-                        g.to.push(j);
-                        g.key.push(*keys.entry(a.fairness_key()).or_insert(n));
+                    if let Some(prop) = props::check_step(s, &out, p.skip) {
+                        violation = Some(run.safety_cex(&g, prop, here, Some(ci), String::new()));
+                        break 'bfs;
+                    }
+                    let fp = fingerprint(&out.next);
+                    let j = match g.seen.get(&fp) {
+                        Some(&j) => j,
+                        None => {
+                            let j = u32::try_from(g.parent.len()).expect("fewer than 2^32 states");
+                            g.seen.insert(fp, j);
+                            g.parent.push(here);
+                            g.via.push(ci);
+                            next.push(out.next);
+                            j
+                        }
+                    };
+                    if a.healthy() {
+                        healthy = true;
+                        if p.liveness {
+                            let n = keys.len() as u16;
+                            g.to.push(j);
+                            g.key.push(*keys.entry(a.fairness_key()).or_insert(n));
+                        }
                     }
                 }
-            }
-            if p.liveness {
-                g.off
-                    .push(u32::try_from(g.to.len()).expect("fewer than 2^32 edges"));
-            }
-            if !healthy && !props::settled(s) && p.skip & Prop::I7Deadlock.bit() == 0 {
-                violation = Some(run.safety_cex(&g, Prop::I7Deadlock, here, None, String::new()));
-                break 'bfs;
-            }
-            if g.parent.len() > p.max_states {
-                let detail = format!("more than {} states", p.max_states);
-                violation = Some(run.safety_cex(&g, Prop::Bound, here, None, detail));
-                break 'bfs;
+                if p.liveness {
+                    g.off
+                        .push(u32::try_from(g.to.len()).expect("fewer than 2^32 edges"));
+                }
+                if !healthy && !props::settled(s) && p.skip & Prop::I7Deadlock.bit() == 0 {
+                    violation =
+                        Some(run.safety_cex(&g, Prop::I7Deadlock, here, None, String::new()));
+                    break 'bfs;
+                }
+                if g.parent.len() > p.max_states {
+                    let detail = format!("more than {} states", p.max_states);
+                    violation = Some(run.safety_cex(&g, Prop::Bound, here, None, detail));
+                    break 'bfs;
+                }
             }
         }
-        layer_start += layer.len() as u32;
+        layer_start += layer.len as u32;
         layer = next;
         depth += 1;
     }
@@ -551,7 +602,7 @@ fn fair_cycle(run: &Run, g: &Graph, scc: &[u32], mark: &[u32], token: u32) -> Co
             if !a.healthy() {
                 return None;
             }
-            match exec(&s, *a, &run.cfg) {
+            match quotient(&s, *a, &run.cfg) {
                 Ok(Some(out)) if g.seen.get(&fingerprint(&out.next)) == Some(&target) => {
                     Some((ci, out))
                 }

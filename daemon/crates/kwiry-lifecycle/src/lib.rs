@@ -27,7 +27,8 @@
 //! - [`checker`]: bounded explicit-state BFS with crash injection, plus a
 //!   strong-fairness SCC analysis for L1.
 //! - [`design`]: revision 8 as written ([`design::Design::REV8`]) and each
-//!   repair as a separate [`design::Fix`]; [`design::Design::REV10`] has all.
+//!   repair as a separate [`design::Fix`]; [`design::Design::REV10_1`] has
+//!   all.
 //!
 //! # Universe and bounds
 //!
@@ -66,8 +67,26 @@
 //!
 //! # Reductions (sound for the checked properties)
 //!
-//! - A relist whose result would equal the applied list is a no-op and is
-//!   not explored; A2n and A3n run inside the preceding step.
+//! - The checker explores the quotient [`step::canonical`]. It prunes
+//!   authority idempotency receipts for request bodies that can never be
+//!   presented again, erases the parts of the holder's floor and accepted
+//!   status bodies that only an equality with a newer body could read, and
+//!   erases audit-only authority records (and the journal once no restore
+//!   remains). `tests/projection.rs` checks the bisimulation condition (same
+//!   enabled actions, rows, observations, properties and projected
+//!   successors) on reachable states of four profiles.
+//! - A failed deletion that changes nothing (L5f, O11 and O11g failures) is a
+//!   stutter: it spends no fault budget and its successor is its source. That
+//!   admits any number of such failures, a superset of the budgeted ones, and
+//!   adds no states. Failures that change state (O7) still spend budget.
+//! - A relist is explored only when the list's items or instructions would
+//!   change, the epoch changes, the holder must relist (`relist`), the
+//!   authority is rollback-suspected, an admitted list is not yet applied, or
+//!   a focused key/lease probe needs it. A relist that only advances the
+//!   revision (a seq-only or counts-only transaction) is not explored. A2n
+//!   and A3n run inside the preceding step.
+//! - A human decline that blocks no modeled obligation is audit only (a seq
+//!   bump) and is not explored.
 //! - A purge pass scans after every revoked unit had a deletion attempt
 //!   (§5.6 steps 4–6 then 7); failed deletions are quarantined and do not
 //!   block the scan.
@@ -82,13 +101,17 @@
 //! verified symbols. Appendix A tests simulate bytes and receipt/commit time
 //! with a deterministic fake, not HTTP or cryptography. Only focused fixtures
 //! exercise absolute lease lapse, a holder swap, interrupted backup recovery,
-//! a lost-state reset, one live handle and one late builder publication.
-//! Not covered: real dual clocks, in-flight query drains, general builders and
-//! staging, filesystem/lock failure modes, migration and launcher deployment,
-//! journal fsync/hash-chain failures and admin journal-loss override, actual
-//! raw restore beyond a synthetic witness, rate scheduling/cursor churn, R15's
-//! time clause, escalation, more than two of anything, or H.11 alert delivery.
-//! The S3 conformance gate adds these where Kwiry owns the implementation.
+//! a lost-state reset, one live handle, one late builder publication, the
+//! H.12 validation order (an injected request envelope), the H.13 clock
+//! boundaries, a corrupt retirement journal and the audited
+//! `restore_journal_lost` override (one symbolic flag, not a hash chain), and
+//! the H.15 capability window. Not covered: real dual clocks, in-flight query
+//! drains, general builders and staging, filesystem/lock failure modes,
+//! migration and launcher deployment, the journal's encoding and fsync
+//! failures, actual raw restore beyond a synthetic witness, rate
+//! scheduling/cursor churn, R15's time clause, escalation, more than two of
+//! anything, or H.11 alert delivery. The S3 conformance gate adds these where
+//! Kwiry owns the implementation.
 
 pub mod action;
 pub mod bag;

@@ -40,6 +40,10 @@ pub enum Prop {
     I8AuthorityFidelity,
     I8ListWitness,
     I8ConvergenceEnvelope,
+    I8ValidationPrecedence,
+    I8ProofDeadline,
+    I1UnverifiedRestore,
+    I1CapabilityExposure,
     /// A model bound was hit; the result would not be exhaustive.
     Bound,
 }
@@ -98,6 +102,14 @@ impl Prop {
             }
             Prop::I8ConvergenceEnvelope => {
                 "I8: a valid state_regression current_ack extension was not decoded"
+            }
+            Prop::I8ValidationPrecedence => {
+                "I8: a later validation rejected a real rollback witness"
+            }
+            Prop::I8ProofDeadline => "I8: a report committed beyond the proof deadline",
+            Prop::I1UnverifiedRestore => "I1: a corrupt journal did not fence restore/minting",
+            Prop::I1CapabilityExposure => {
+                "I1: a pre-retirement capability answered beyond its deadline"
             }
             Prop::Bound => "a model bound was exceeded",
         }
@@ -181,6 +193,10 @@ fn step_violations(prev: &State, out: &Outcome) -> Vec<Prop> {
             Obs::AuthorityUnfaithful => Some(Prop::I8AuthorityFidelity),
             Obs::ListWitnessOmitted => Some(Prop::I8ListWitness),
             Obs::WrongConvergenceEnvelope => Some(Prop::I8ConvergenceEnvelope),
+            Obs::ValidationPrecedence => Some(Prop::I8ValidationPrecedence),
+            Obs::ProofDeadlineMissed => Some(Prop::I8ProofDeadline),
+            Obs::UnverifiedRestore => Some(Prop::I1UnverifiedRestore),
+            Obs::CapabilityOverexposed => Some(Prop::I1CapabilityExposure),
             Obs::SentWhileForbidden => Some(Prop::I8ForbiddenSend),
             Obs::DeclineInvisible => Some(Prop::I8DeclineVisible),
             Obs::OperatorWait { healthy: true } => Some(Prop::I8HealthyHalt),

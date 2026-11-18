@@ -130,6 +130,9 @@ pub enum Action {
     OpRestart,
     OpClearHalt(u8),
     OpReopen(u8),
+    TickExposure(u8),
+    AnswerCapability { room: u8, expiry_with_skew: u8 },
+    OpRestoreJournalLost,
     SwapHolder,
     LoseHolderState,
     BeginRecovery,
@@ -168,11 +171,14 @@ impl Action {
             | LeaseDeadline
             | KeepOpen
             | LatePublish
-            | WrongRelease { .. } => Kind::Scenario,
+            | WrongRelease { .. }
+            | TickExposure(_) => Kind::Scenario,
             BeginRecovery | CommitRecovery => Kind::Operator,
             AuthRetire(_) | AuthUnlist(_) | AuthRelist(_) | AuthDrop(_) | AuthBackup
             | AuthRestore => Kind::Scenario,
-            OpAcceptEpoch | OpRestart | OpClearHalt(_) | OpReopen(_) => Kind::Operator,
+            OpAcceptEpoch | OpRestart | OpClearHalt(_) | OpReopen(_) | OpRestoreJournalLost => {
+                Kind::Operator
+            }
             AuthProcess { .. } | DropDead { .. } | HumanRelease | HumanDecline | SpaceFreed => {
                 Kind::Env
             }
@@ -217,6 +223,7 @@ impl Action {
             Crash,
             AuthBackup,
             AuthRestore,
+            OpRestoreJournalLost,
             OpAcceptEpoch,
             OpRestart,
             ProofBackoffElapsed(3),

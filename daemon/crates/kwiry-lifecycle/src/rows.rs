@@ -421,6 +421,26 @@ pub const MACHINES: &[Machine] = &[
                 r#"R6-5"#,
                 NotModeled("cancelling an armed acceptance is never needed for progress")
             ),
+            row!(
+                H12j,
+                r#"Any state + an authority restore whose retirement journal or replica fails verification (an entry of any kind with a missing or ill-typed member, an unknown `kind` or `v`, or a broken chain)"#,
+                r#"—"#,
+                r#"—"#,
+                r#"Unchanged: no partial replay, no new epoch, no capability minted; every route answers `503 authority_epoch_mismatch` (H10) and leases run down"#,
+                r#"—"#,
+                r#"HW §15 H.1.5, H.14"#,
+                Focused("corrupt-journal restore fixture")
+            ),
+            row!(
+                H13j,
+                r#"After H12j, the authority's audited `restore_journal_lost` decision"#,
+                r#"An admin decision, recorded as `cause: "restore-journal-lost"` with an unsampled security event"#,
+                r#"—"#,
+                r#"A new epoch without replay, refused as in H4 until `accept-epoch` (H5, H6). No lost instruction is listed again and no `blocked` is restored, so affected obligations list `terminating`; the next status report raises the unattributed count for a new decision"#,
+                r#"—"#,
+                r#"HW §15 H.1.5, H.14"#,
+                Focused("audited journal-lost override fixture")
+            ),
         ],
     },
     Machine {
@@ -791,7 +811,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"Unchanged; `tombstone_conflict`"#,
                 r#"—"#,
                 r#"HW H13"#,
-                Step
+                Focused(
+                    "a correct authority never lists a retired id active (HW §15 H.7, H.1 replay); reached by an H.7 violation or the audited journal-loss residual"
+                )
             ),
             row!(
                 C10,
@@ -862,6 +884,26 @@ pub const MACHINES: &[Machine] = &[
                 r#"As in A3"#,
                 r#"Completeness, HW §14 Q8"#,
                 NotModeled("escalation is not modeled")
+            ),
+            row!(
+                C17,
+                r#"active + a search capability for `r` that OpenClast minted before `r`'s retirement committed, before A0 admits a list carrying the retirement"#,
+                r#"`now ≤ exp + clock_skew_allowance`, with `exp − iat ≤ 60 s` and `clock_skew_allowance ≤ 30 s`"#,
+                r#"—"#,
+                r#"Answered. This is at most 90 s after the retirement commit; OpenClast's T1 re-check refuses the whole call before any result reaches a caller"#,
+                r#"—"#,
+                r#"HW §15 H.15 rules 1–3"#,
+                Focused("capability-exposure fixture")
+            ),
+            row!(
+                C18,
+                r#"any + a search capability for `r` past `exp + clock_skew_allowance`, or once A0 has admitted a list carrying `r`'s retirement"#,
+                r#"—"#,
+                r#"—"#,
+                r#"Refused (`resource_unavailable`). A supported restore adds no window: the bound runs from the original retirement commit, and nothing is minted while the restore is incomplete"#,
+                r#"—"#,
+                r#"HW §15 H.15 rules 2 and 4, K.1"#,
+                Focused("capability-exposure fixture")
             ),
         ],
     },

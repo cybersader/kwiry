@@ -1,8 +1,9 @@
 //! The lifecycle model check.
 //!
-//! - `rev10_holds`: every CI profile explores exhaustively within its bounds
-//!   and every property (I1–I9, L1) holds; the union of rows the profiles
-//!   exercise matches the table's coverage notes.
+//! - `rev10_holds`: every CI profile of revision 10.1 explores its bounded
+//!   quotient exhaustively (`step::canonical`; the reductions are in the
+//!   crate docs) and every property (I1–I9, L1) holds; the union of rows the
+//!   profiles exercise matches the table's coverage notes.
 //! - `each_fix_is_necessary`: removing any original fix from revision 9
 //!   reproduces the counterexample it closes, and the same profile holds
 //!   with the fix.
@@ -42,7 +43,7 @@ fn budget(retires: u8, retire_rooms: u8) -> Budget {
 fn profile(name: &'static str, budget: Budget) -> Profile {
     Profile {
         name,
-        design: Design::REV10,
+        design: Design::REV10_1,
         budget,
         faults: 0,
         garbage: false,

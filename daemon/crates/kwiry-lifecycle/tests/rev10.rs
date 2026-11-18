@@ -24,7 +24,7 @@ const BUDGET: Budget = Budget {
     restores: 1,
 };
 const REV: Rev = Rev { epoch: 0, seq: 1 };
-const D: Design = Design::REV10;
+const D: Design = Design::REV10_1;
 
 fn profile(name: &'static str, design: Design) -> Profile {
     Profile {
@@ -631,6 +631,8 @@ fn retirement_replay_is_necessary_for_safety_and_l1() {
     };
     p.liveness = true;
     p.skip = Prop::I8AuthorityFidelity.bit();
+    // The L1 counterexample needs the whole graph (about 69k states).
+    p.max_states = 200_000;
     for design in [Design::REV9, D.without(Fix::RetirementReplay)] {
         let r = check(&Profile { design, ..p });
         assert_eq!(r.violation.unwrap().prop, Prop::I1Retirement);
@@ -845,4 +847,524 @@ fn k9_list_budget_respects_cursor_cap() {
     assert_eq!(wire::list_budget_seconds(100_000), 430);
     assert_eq!(wire::list_budget_seconds(442_500), 1800);
     assert_eq!(wire::list_budget_seconds(u64::MAX), 1800);
+}
+
+// ------------------------------------------------- revision 10.1 (H.12–H.15)
+
+#[test]
+fn h12_every_route_preserves_a_verified_witness_before_later_errors() {
+    use wire::{Envelope, ProofTimes, RefInput, Refusal};
+    let ahead = RefInput::verified(Rev { epoch: 0, seq: 2 });
+    let envelope = Envelope {
+        refs: [RefInput::Malformed, ahead],
+        malformed: true,
+        replay: true,
+        wrong_scope: true,
+        rate_limited: true,
+        clock: Some(ProofTimes {
+            proof: Proof::sign(1, 0),
+            received: 421,
+            commit: 421,
+        }),
+        ..Envelope::default()
+    };
+    // Step 4 wins over an expired proof, a replayed jti, a wrong scope, the
+    // rate limit and malformed claims (including the other, malformed ref).
+    assert_eq!(
+        wire::preflight(D, envelope, REV, false),
+        Err(Refusal::Witness)
+    );
+    // Steps 1–3 still come first.
+    let first = [
+        (
+            Envelope {
+                too_large: true,
+                ..envelope
+            },
+            true,
+            Refusal::TooLarge,
+        ),
+        (
+            Envelope {
+                bad_signature: true,
+                ..envelope
+            },
+            true,
+            Refusal::EpochMismatch,
+        ),
+        (
+            Envelope {
+                custody_unreadable: true,
+                bad_signature: true,
+                ..envelope
+            },
+            false,
+            Refusal::CustodyUnavailable,
+        ),
+        (
+            Envelope {
+                bad_signature: true,
+                ..envelope
+            },
+            false,
+            Refusal::InvalidProof,
+        ),
+    ];
+    for (e, suspected, expected) in first {
+        assert_eq!(wire::preflight(D, e, REV, suspected), Err(expected));
+    }
+    // A malformed ref is no evidence: steps 5–9 decide, in order.
+    let no_witness = Envelope {
+        refs: [RefInput::Malformed; 2],
+        ..envelope
+    };
+    for (e, expected) in [
+        (no_witness, Refusal::ProofExpired),
+        (
+            Envelope {
+                clock: None,
+                ..no_witness
+            },
+            Refusal::Replay,
+        ),
+        (
+            Envelope {
+                clock: None,
+                replay: false,
+                ..no_witness
+            },
+            Refusal::Scope,
+        ),
+        (
+            Envelope {
+                clock: None,
+                replay: false,
+                wrong_scope: false,
+                ..no_witness
+            },
+            Refusal::Rate,
+        ),
+        (
+            Envelope {
+                refs: [RefInput::Malformed, RefInput::Absent],
+                ..Envelope::default()
+            },
+            Refusal::Grammar,
+        ),
+    ] {
+        assert_eq!(wire::preflight(D, e, REV, false), Err(expected));
+    }
+    // A tag that does not verify is skipped at step 4: it is no witness.
+    let bad_tag = RefInput::WellFormed {
+        rev: Rev { epoch: 0, seq: 2 },
+        tag_valid: false,
+    };
+    assert!(bad_tag.invalid_tag());
+    let skipped = Envelope {
+        refs: [bad_tag, RefInput::Absent],
+        ..Envelope::default()
+    };
+    assert_eq!(wire::preflight(D, skipped, REV, false), Ok(()));
+
+    // The list route.
+    let mut list = Fake::new();
+    list.boot();
+    list.s.env.envelope = Some(envelope);
+    ablate(
+        Fix::UnifiedValidation,
+        Prop::I8ValidationPrecedence,
+        list.s.clone(),
+        &[FetchStart],
+    );
+    list.step(FetchStart);
+    assert!(list.s.auth.rollback_suspected && !mintable(&list.s, 0));
+    assert!(matches!(
+        list.s.net.list,
+        Some(ListResp::Err {
+            code: ListErr::EpochMismatch,
+            ..
+        })
+    ));
+    assert!(list.step(ListDeliver).contains(&RowId::H10));
+    // The report and status routes.
+    for (c, key) in [
+        (
+            0,
+            Key::O(OKey {
+                o: 0,
+                state: RState::Revoked,
+                list_ref: REV,
+                manifest: 0,
+                remaining: true,
+            }),
+        ),
+        (
+            2,
+            Key::S(SKey {
+                list_ref: REV,
+                reset: false,
+                manifest: 0,
+                result: None,
+            }),
+        ),
+    ] {
+        let mut f = Fake::new();
+        f.s.env.envelope = Some(envelope);
+        f.s.net.reqs[c]
+            .push(
+                Req {
+                    key,
+                    replay: false,
+                    aged: false,
+                    commit_late: false,
+                    alive: true,
+                },
+                "fixture",
+            )
+            .unwrap();
+        let action = AuthProcess { c: c as u8, idx: 0 };
+        ablate(
+            Fix::UnifiedValidation,
+            Prop::I8ValidationPrecedence,
+            f.s.clone(),
+            &[action],
+        );
+        f.step(action);
+        assert_eq!(
+            f.s.net.resps[c].get(0).unwrap().kind,
+            RespKind::EpochMismatch
+        );
+        assert_eq!(f.s.auth.core.seq, REV.seq, "nothing processed or committed");
+        assert!(f.s.auth.rollback_suspected);
+    }
+}
+
+fn report_in_flight() -> Fake {
+    let mut f = Fake::new();
+    f.boot();
+    f.list();
+    f.step(AuthRetire(0));
+    f.list();
+    f.request(0);
+    f
+}
+
+/// The in-flight report, as the authority sees it at the given clock.
+fn timed(mut s: State, proof: Proof, received: i64, commit: i64) -> State {
+    use wire::{Envelope, ProofTimes, RefInput};
+    let list_ref = s.net.reqs[0].get(0).unwrap().key.list_ref();
+    s.env.envelope = Some(Envelope {
+        refs: [RefInput::verified(list_ref), RefInput::Absent],
+        clock: Some(ProofTimes {
+            proof,
+            received,
+            commit,
+        }),
+        ..Envelope::default()
+    });
+    s
+}
+
+fn report_at(proof: Proof, received: i64, commit: i64) -> (RespKind, AuthCore, AuthCore) {
+    let mut f = report_in_flight();
+    let before = f.s.auth.core;
+    f.s = timed(f.s, proof, received, commit);
+    f.step(AuthProcess { c: 0, idx: 0 });
+    (f.s.net.resps[0].get(0).unwrap().kind, before, f.s.auth.core)
+}
+
+/// V11 as H.13 restates it: one deadline `D = exp + 120 s`, checked at
+/// receipt and again inside the CAS; bare `exp` is never a boundary.
+#[test]
+fn v11_restated_receipt_and_commit_share_the_deadline() {
+    // Controls: a 60 s proof received at `exp + 1` is accepted, and its
+    // commit at exactly `D` commits.
+    let short = Proof {
+        jti: 12,
+        iat: 1000,
+        exp: 1060,
+    };
+    assert!(short.timely_at_receipt(1061));
+    let (kind, before, after) = report_at(short, 1061, 1180);
+    assert!(matches!(kind, RespKind::Accepted { .. }));
+    assert_eq!(after.seq, before.seq + 1);
+
+    // Received in time, CAS at `D + 1`: 401 proof_expired, nothing
+    // committed, seq unchanged, no idempotency receipt.
+    let (kind, before, after) = report_at(short, 1061, 1181);
+    assert_eq!(kind, RespKind::ProofExpired);
+    assert_eq!(after, before, "no seq, no receipt, no obligation change");
+    ablate(
+        Fix::ProofDeadline,
+        Prop::I8ProofDeadline,
+        timed(report_in_flight().s, short, 1061, 1181),
+        &[AuthProcess { c: 0, idx: 0 }],
+    );
+
+    // Kwiry's own proofs (`exp = iat + 300`): receipt needs `|now − iat| ≤
+    // 120`, so `D = iat + 420` is the last commit instant.
+    let own = Proof::sign(10, 1000);
+    assert!(own.timely_at_receipt(1120) && !own.timely_at_receipt(1121));
+    assert!(matches!(
+        report_at(own, 1120, 1420).0,
+        RespKind::Accepted { .. }
+    ));
+    assert_eq!(report_at(own, 1120, 1421).0, RespKind::ProofExpired);
+    // A proof that lives longer than 300 s is refused at receipt, so it can
+    // never stretch D past iat + 420.
+    let long = Proof { exp: 1301, ..own };
+    let (kind, before, after) = report_at(long, 1100, 1400);
+    assert_eq!(kind, RespKind::ProofExpired);
+    assert_eq!(after, before);
+    ablate(
+        Fix::ProofDeadline,
+        Prop::I8ProofDeadline,
+        timed(report_in_flight().s, long, 1100, 1400),
+        &[AuthProcess { c: 0, idx: 0 }],
+    );
+}
+
+#[test]
+fn h13_only_page_zero_supports_absence_and_proof_duration_is_bounded() {
+    let short = Proof {
+        jti: 1,
+        iat: 0,
+        exp: 59,
+    };
+    let long = Proof { exp: 301, ..short };
+    assert!(short.receipt(D.without(Fix::ProofDeadline), 0));
+    assert!(!short.timely_at_receipt(0) && !long.timely_at_receipt(0));
+    assert!(Proof { exp: 60, ..short }.timely_at_receipt(0));
+    // Kwiry's R15 margin is exp + 420, against page 0's iat only.
+    assert!(!wire::absence_proved(
+        720,
+        300,
+        Some(RState::Revoked),
+        RState::Complete
+    ));
+    assert!(wire::absence_proved(
+        721,
+        300,
+        Some(RState::Revoked),
+        RState::Complete
+    ));
+    assert!(wire::absence_proved(721, 300, None, RState::Revoked));
+    assert!(!wire::absence_proved(
+        721,
+        300,
+        Some(RState::Complete),
+        RState::Complete
+    ));
+}
+
+fn release_before_restore() -> Fake {
+    let mut f = Fake::new();
+    f.boot();
+    f.list();
+    f.step(AuthUnlist(1));
+    f.list();
+    f.request(2);
+    f.reply(2);
+    f.run(&[AuthBackup, HumanRelease]);
+    f.list();
+    f
+}
+
+#[test]
+fn h14_replay_carries_bindings_in_one_transaction_and_never_reexecutes() {
+    let mut f = release_before_restore();
+    let issued = f.s.auth.core.instr.unwrap();
+    let baseline = f.s.auth.backup.as_ref().unwrap().seq;
+    // The holder holds a result for this id that the authority never
+    // finalized: the re-listed id is re-reported, never executed again.
+    f.s.dur.instr[0] = IDur::MismatchReported(f.s.vol.inv);
+    f.step(AuthRestore);
+    let replay = f.s.auth.core.instr.unwrap();
+    assert_eq!(
+        replay,
+        Instr {
+            issued_seq: baseline + 1,
+            ..issued
+        },
+        "same id, bound digest and count from the entry; issued_seq is the replay seq"
+    );
+    assert_eq!(f.s.auth.core.seq, baseline + 1, "one replay transaction");
+    f.list();
+    f.step(OpAcceptEpoch);
+    f.boot();
+    let l = f.list();
+    assert!(l.instr.is_some_and(|i| i.issued_seq <= l.rev.seq));
+    assert!(f.try_step(RelBind(0)).is_none());
+    f.request(2);
+    let result = f.s.dur.slots[2].unwrap().key.status().unwrap().result;
+    assert!(result.is_some_and(|r| r.instr == 0 && !r.executed));
+    f.reply(2);
+    assert_eq!(f.s.auth.core.superseded_mismatch, 1);
+    assert!(f.s.auth.core.instr.is_none());
+
+    // A release finalized after the backup is never listed again.
+    let mut f = release_before_restore();
+    f.run(&[
+        RelBind(0),
+        RelDetach(0),
+        RelDrain(0),
+        RelDelete {
+            i: 0,
+            u: 2,
+            fail: false,
+        },
+        RelDeleted(0),
+        Action::RelResult(0),
+    ]);
+    f.request(2);
+    f.reply(2);
+    assert!(f.s.auth.journal_finalized[0].is_some_and(|e| e.executed));
+    f.step(AuthRestore);
+    assert!(f.s.auth.core.instr.is_none());
+    assert_eq!(f.s.auth.core.final_instr, 1);
+}
+
+#[test]
+fn h14_decline_and_clear_replay_carried_data_and_a_corrupt_chain_fences_everything() {
+    let mut f = ready_to_decline();
+    f.run(&[AuthBackup, HumanDecline]);
+    let declined = f.s.auth.journal_declined[0].unwrap();
+    let mut cleared = Fake {
+        s: f.s.clone(),
+        cfg: f.cfg,
+    };
+    f.step(AuthRestore);
+    let obl = f.s.auth.core.rooms[0].obl.unwrap();
+    assert!(
+        obl.blocked && obl.blocked_by == Some(declined),
+        "digest and at from the entry"
+    );
+    cleared.s.env.probe = Probe::Governance;
+    cleared.run(&[OpReopen(0), AuthRestore]);
+    assert!(
+        !cleared.s.auth.core.rooms[0].obl.unwrap().blocked,
+        "a later blocked_cleared wins"
+    );
+
+    let mut f = release_before_restore();
+    f.s.env.bad_journal = true;
+    ablate(
+        Fix::AtomicJournalReplay,
+        Prop::I1UnverifiedRestore,
+        f.s.clone(),
+        &[AuthRestore],
+    );
+    let pre = f.s.auth.core;
+    assert!(f.step(AuthRestore).contains(&RowId::H12j));
+    assert_eq!(f.s.auth.core, pre, "no partial replay, no new epoch");
+    assert!(f.s.auth.failed_restore && f.s.auth.rollback_suspected);
+    assert!(!mintable(&f.s, 0));
+    f.step(FetchStart);
+    assert!(matches!(
+        f.s.net.list,
+        Some(ListResp::Err {
+            code: ListErr::EpochMismatch,
+            ..
+        })
+    ));
+    assert!(f.try_step(AuthRestore).is_none(), "no automatic retry");
+    assert!(f.step(OpRestoreJournalLost).contains(&RowId::H13j));
+    assert!(f.s.auth.journal_lost_audited && !f.s.auth.rollback_suspected);
+    assert_eq!(f.s.auth.core.epoch, 1);
+    assert!(
+        f.s.auth.core.instr.is_none(),
+        "a lost approval must be given again"
+    );
+    assert!(
+        f.s.auth.core.status.is_none(),
+        "the next status report re-raises the count"
+    );
+}
+
+#[test]
+fn h15_capability_deadline_and_a0_both_bound_exposure() {
+    let mut f = Fake::new();
+    f.s.env.probe = Probe::Exposure;
+    f.boot();
+    f.list();
+    f.step(AuthRetire(0));
+    assert!(!mintable(&f.s, 0), "nothing new enters the window");
+    let ask = AnswerCapability {
+        room: 0,
+        expiry_with_skew: 90,
+    };
+    ablate(
+        Fix::CapabilityExposure,
+        Prop::I1CapabilityExposure,
+        f.s.clone(),
+        &[TickExposure(91), ask],
+    );
+    f.step(TickExposure(90));
+    assert!(
+        f.step(ask).contains(&RowId::C17),
+        "inside exp + skew, at most 90 s"
+    );
+    let sooner = AnswerCapability {
+        room: 0,
+        expiry_with_skew: 89,
+    };
+    assert!(f.step(sooner).contains(&RowId::C18));
+    let mut expired = Fake {
+        s: f.s.clone(),
+        cfg: f.cfg,
+    };
+    expired.step(TickExposure(91));
+    assert!(expired.step(ask).contains(&RowId::C18), "never past 90 s");
+    f.run(&[FetchStart, ListDeliver]);
+    assert!(
+        f.step(ask).contains(&RowId::C18),
+        "A0 refuses before any apply write"
+    );
+    assert!(!servable(&f.s, 0));
+}
+
+/// H.7 forbids listing a retired id `active` again, and H.1 replay keeps a
+/// supported restore from doing it, so no CI profile reaches C9. C9 is the
+/// holder's fail-closed answer if the authority does it anyway (a bug, or the
+/// audited `restore_journal_lost` residual): tombstones win, the room is not
+/// served and nothing is deleted.
+#[test]
+fn c9_a_resurrecting_list_never_reopens_a_tombstoned_room() {
+    let mut f = Fake::new();
+    f.boot();
+    f.list();
+    f.step(AuthRetire(0));
+    f.list();
+    assert!(f.s.dur.tomb & 1 != 0);
+    let units = f.s.dur.units;
+    // Inject the H.7 violation. I1's ghost clause flags that by design, so
+    // the steps below check every other property.
+    let c = &mut f.s.auth.core;
+    c.rooms[0] = ARoom {
+        phase: APhase::Active,
+        obl: None,
+    };
+    c.seq += 1;
+    c.holder_rev = c.seq;
+    let skip = Prop::I1Retirement.bit();
+    let mut rows = Vec::new();
+    let mut go = |f: &mut Fake, a: Action| {
+        let out = exec(&f.s, a, &f.cfg)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{a:?} disabled"));
+        assert_eq!(props::check_step(&f.s, &out, skip), None, "{a:?}");
+        assert_eq!(props::check_state(&out.next, skip), None, "{a:?}");
+        rows.extend(out.rows.iter());
+        f.s = out.next;
+    };
+    go(&mut f, FetchStart);
+    go(&mut f, ListDeliver);
+    while f.s.vol.apply.is_some() {
+        go(&mut f, Apply);
+    }
+    assert!(rows.contains(&RowId::C9));
+    assert_eq!(f.s.vol.class[0], Class::Conflict);
+    assert!(!servable(&f.s, 0));
+    assert!(f.s.dur.tomb & 1 != 0, "tombstones only grow");
+    assert_eq!(f.s.dur.units, units, "nothing deleted");
 }
