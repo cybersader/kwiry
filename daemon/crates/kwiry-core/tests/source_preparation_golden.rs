@@ -11,8 +11,8 @@ mod format_matrix_fixtures;
 
 use format_matrix_fixtures::{STANDARD_PATH, format_matrix_fixtures, standard_markdown};
 use kwiry_core::{
-    Frontmatter, PropertyValue, SourceDescriptor, SourceFormat, SourcePreparation,
-    SourcePreparationKind, prepare_source_buffer,
+    ExtractionProfile, Frontmatter, PropertyValue, SourceDescriptor, SourceFormat,
+    SourcePreparation, SourcePreparationKind, prepare_source_buffer,
 };
 
 const LINK_COUNT: usize = 5_000;
@@ -31,31 +31,67 @@ struct Fixture {
 }
 
 #[test]
-fn writes_real_source_preparation_goldens() {
+fn real_source_preparations_match_goldens() {
     let fixtures = fixtures();
     assert_eq!(fixtures.len(), FIXTURE_COUNT);
 
-    let output_directory = output_directory();
-    fs::create_dir_all(&output_directory).expect("create golden fixture directory");
+    // Tests compare and never write tracked files. Regenerating is an
+    // explicit, separate act: `KWIRY_REGENERATE_GOLDENS=1`.
+    let regenerate = std::env::var_os("KWIRY_REGENERATE_GOLDENS").is_some_and(|v| v == "1");
+    let directory = fixture_directory();
+    let expected_names: BTreeSet<_> = fixtures.iter().map(|f| f.file_name.to_owned()).collect();
+    let json_names = || -> BTreeSet<String> {
+        fs::read_dir(&directory)
+            .expect("read golden fixture directory")
+            .map(|entry| entry.expect("read golden fixture entry"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .map(|entry| entry.file_name().into_string().expect("UTF-8 fixture name"))
+            .collect()
+    };
+    if regenerate {
+        // A removed producer case must not leave a JSON file that the
+        // consumer suite keeps accepting.
+        for stale in json_names().difference(&expected_names) {
+            fs::remove_file(directory.join(stale))
+                .expect("remove stale source preparation fixture");
+        }
+    }
+    assert_eq!(json_names(), expected_names, "golden fixture inventory");
 
-    // A removed producer case must not leave an old JSON file that the consumer
-    // suite can continue accepting after Rust stops generating it.
-    remove_stale_json(&output_directory, &fixtures);
-
-    for fixture in &fixtures {
-        assert_adversarial_shape(fixture);
+    for mut fixture in fixtures {
+        assert_adversarial_shape(&fixture);
+        // The Obsidian goldens describe the portable producer. The simple PDF
+        // fixture is covered by both tiers: only its producer tag may differ.
+        if fixture.preparation.format == SourceFormat::Pdf {
+            let built_profile = if cfg!(feature = "native-pdf-extractor") {
+                ExtractionProfile::Enhanced
+            } else {
+                ExtractionProfile::Portable
+            };
+            assert_eq!(fixture.preparation.extraction_profile, built_profile);
+            fixture.preparation.extraction_profile = ExtractionProfile::Portable;
+        }
         let mut json = serde_json::to_string_pretty(&fixture.preparation)
             .expect("serialize source preparation fixture");
         json.push('\n');
-        fs::write(output_directory.join(fixture.file_name), json)
-            .expect("write source preparation fixture");
+        if regenerate {
+            fs::write(directory.join(fixture.file_name), &json)
+                .expect("write source preparation fixture");
+        }
+        let expected = fs::read_to_string(directory.join(fixture.file_name))
+            .expect("read source preparation fixture")
+            .replace("\r\n", "\n");
+        let first_difference = expected.lines().zip(json.lines()).position(|(a, b)| a != b);
+        assert!(
+            expected == json,
+            "golden drift in {} (first differing line: {:?}; expected {} bytes, generated {}); \
+             regenerate with KWIRY_REGENERATE_GOLDENS=1 and commit the JSON with the producer change",
+            fixture.file_name,
+            first_difference.map(|line| line + 1),
+            expected.len(),
+            json.len()
+        );
     }
-
-    println!(
-        "generated {} source preparation fixtures in {}",
-        fixtures.len(),
-        output_directory.display()
-    );
 }
 
 fn fixtures() -> Vec<Fixture> {
@@ -604,27 +640,7 @@ fn assert_adversarial_shape(fixture: &Fixture) {
     }
 }
 
-fn remove_stale_json(output_directory: &Path, fixtures: &[Fixture]) {
-    let expected = fixtures
-        .iter()
-        .map(|fixture| fixture.file_name)
-        .collect::<BTreeSet<_>>();
-    for entry in fs::read_dir(output_directory).expect("read golden fixture directory") {
-        let path = entry.expect("read golden fixture entry").path();
-        let is_json = path
-            .extension()
-            .is_some_and(|extension| extension == "json");
-        let is_expected = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| expected.contains(name));
-        if is_json && !is_expected {
-            fs::remove_file(path).expect("remove stale source preparation fixture");
-        }
-    }
-}
-
-fn output_directory() -> PathBuf {
+fn fixture_directory() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(3)
