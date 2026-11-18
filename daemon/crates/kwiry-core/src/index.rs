@@ -211,6 +211,9 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
         return Err(Error::NoVaults);
     }
 
+    if config.server.profile == HostProfile::OpenClast {
+        crate::room_boundary::validate_data_root(config, data_dir)?;
+    }
     let data_root = DataRoot::new(data_dir);
     let _lock = data_root.acquire_writer_lock()?;
     let candidate = data_root.create_candidate()?;
@@ -223,6 +226,7 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
             &candidate.partitions_dir,
             &candidate.manifest_path(),
             &candidate.layout_path(),
+            data_dir,
         ),
     };
     let stats = match result {
@@ -318,6 +322,7 @@ fn build_openclast_candidate(
     partitions_dir: &Path,
     manifest_path: &Path,
     layout_path: &Path,
+    data_dir: &Path,
 ) -> Result<IndexStats> {
     let resources: Vec<_> = config
         .vaults
@@ -335,8 +340,8 @@ fn build_openclast_candidate(
     let mut manifest = Manifest::default();
     let mut stats = IndexStats::default();
 
-    let room_roots = crate::room_walk::RoomRoots::capture(config);
     for vault in &config.vaults {
+        let room_roots = crate::room_walk::RoomRoots::capture(config, Some(data_dir));
         let resource = config.resource_key(vault).ok_or_else(|| {
             Error::State(format!(
                 "openclast vault {} is missing an exact resource classification",
@@ -405,9 +410,6 @@ fn build_partition(
     stats: &mut IndexStats,
     room_roots: &crate::room_walk::RoomRoots,
 ) -> Result<()> {
-    if !vault.path.is_dir() {
-        return Err(Error::InvalidVaultPath(vault.path.clone()));
-    }
     if vault.id != resource.vault_id || vault.room.as_deref() != Some(resource.room_id.as_str()) {
         return Err(Error::State(format!(
             "vault {} does not match its resource partition",

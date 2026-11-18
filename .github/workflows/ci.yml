@@ -38,10 +38,14 @@ jobs:
       - name: Test all workspace features (component harnesses force Holdings on)
         working-directory: daemon
         run: cargo test --locked --workspace --all-features
-      - name: Verify N30 and N31 against the release binary
+      - name: Verify N30, N31, and FR1–FR3 against the release binary
         if: ${{ !cancelled() }}
         working-directory: daemon
-        run: cargo test --release --locked -p kwiry --test daemon format_release_
+        env:
+          KWIRY_FR1_STRACE: "1"
+        run: |
+          command -v strace || (sudo apt-get update && sudo apt-get install -y strace)
+          cargo test --release --locked -p kwiry --test daemon format_release_
 
   daemon-openclast-platform:
     name: OpenClast platform refusal (macOS)
@@ -92,7 +96,7 @@ jobs:
           KWIRY_ROLLBACK_BINARY: ${{ github.workspace }}/rollback-base/daemon/target/debug/kwiry
         run: cargo test --locked -p kwiry --test room_rollback
 
-      - name: Exercise N24 in a private Linux mount namespace
+      - name: Exercise N24 and FR4 in a private Linux mount namespace
         working-directory: daemon
         run: |
           test_bin=$(cargo test --locked -p kwiry-core --lib --no-run --message-format=json |

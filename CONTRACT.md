@@ -54,7 +54,7 @@ Unit of indexing = **section chunk** (split at headings, with size caps and over
 
 ```jsonc
 {
-  "chunk_id": "sha256(vault_id + path + heading_path + chunk_ix)", // deterministic and path-derived; changes when the path changes
+  "chunk_id": "sha256(vault_id + room_id (where applicable) + path + heading_path + chunk_ix)", // deterministic and path-derived; changes when the path changes (owner-approved 2026-11-18, OpenClast MULTI-ROOM-CAPABILITY.md §9 D-r9-2)
   "vault_id": "string",          // registered tree identity
   "room": "string | null",       // OpenClast room tag; null on plain desktop
   "path": "notes/foo.md",        // vault-relative, forward slashes
@@ -81,7 +81,7 @@ Independent vault and room sets are prohibited because they can authorize an acc
 
 ## 4. HTTP API (v0 surface)
 
-All under `/v0/`. Content-type JSON. Errors: `{ "error": { "code", "message" } }`.
+All under `/v0/`. Content-type JSON. Errors: `{ "error": { "code", "message" } }`. OpenClast R17 returns HTTP 503 with `{ "error": { "code": "resource_unavailable", "message": "an authorized resource is not available for search", "resource_indexes": [i, ...] } }`; `resource_indexes` is the nonempty list of distinct, ascending, zero-based positions in the signed `resources` array for unavailable resources in the effective set E (owner-approved 2026-11-18, OpenClast MULTI-ROOM-CAPABILITY.md §9 D-r9-2).
 
 | Method & path | Purpose | Notes |
 |---|---|---|

@@ -44,9 +44,10 @@ pub struct Config {
     pub indexing: IndexingConfig,
     #[serde(default)]
     pub vaults: Vec<VaultRegistration>,
-    /// Kwiry-local pins, held durably outside the editable registration TOML.
+    /// Runtime-only locations that must stay outside OpenClast room trees.
+    #[doc(hidden)]
     #[serde(skip)]
-    pub room_root_identities: BTreeMap<String, String>,
+    pub openclast_state_paths: Vec<PathBuf>,
 }
 
 #[cfg(feature = "native")]
@@ -59,7 +60,7 @@ impl Default for Config {
             semantic: SemanticConfig::default(),
             indexing: IndexingConfig::default(),
             vaults: Vec::new(),
-            room_root_identities: BTreeMap::new(),
+            openclast_state_paths: Vec::new(),
         }
     }
 }
@@ -196,6 +197,8 @@ pub struct IndexingConfig {
     pub audit_bytes_per_pass: u64,
     #[serde(default = "default_racy_window_millis")]
     pub racy_window_millis: u64,
+    #[serde(default = "default_max_stale_serve_seconds")]
+    pub max_stale_serve_seconds: u64,
 }
 
 #[cfg(feature = "native")]
@@ -206,8 +209,14 @@ impl Default for IndexingConfig {
             audit_sources_per_pass: default_audit_sources_per_pass(),
             audit_bytes_per_pass: default_audit_bytes_per_pass(),
             racy_window_millis: default_racy_window_millis(),
+            max_stale_serve_seconds: default_max_stale_serve_seconds(),
         }
     }
+}
+
+#[cfg(feature = "native")]
+const fn default_max_stale_serve_seconds() -> u64 {
+    3600
 }
 
 #[cfg(feature = "native")]

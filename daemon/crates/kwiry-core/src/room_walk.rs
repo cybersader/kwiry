@@ -1,4 +1,4 @@
-//! OpenClast ingestion opens and reads sources beneath pinned directory handles.
+//! OpenClast ingestion opens and reads sources beneath directory handles captured for the current walk.
 use std::collections::BTreeSet;
 use std::fs::{File, Metadata};
 use std::io;
@@ -76,59 +76,58 @@ mod platform {
         Ok(())
     }
 
-    pub(crate) fn pin_room_root(path: &Path) -> crate::Result<String> {
-        let root = open_root(path).map_err(probe_refusal)?;
-        let metadata = root
-            .metadata()
-            .map_err(|error| crate::error::io_error(path, error))?;
-        Ok(identity_key(identity(&metadata)))
-    }
-
-    fn identity_key((device, inode): Inode) -> String {
-        format!("{device:x}:{inode:x}")
-    }
-
     pub(crate) struct RoomRoots {
         roots: BTreeMap<PathBuf, (File, Inode)>,
-        // Keep every pinned identity even if its original root no longer opens.
-        // The corresponding inode may have moved inside a different room.
-        pinned: BTreeSet<String>,
+        failures: BTreeMap<PathBuf, &'static str>,
+        identities: BTreeSet<Inode>,
     }
 
     impl RoomRoots {
-        pub(crate) fn capture(config: &Config) -> Self {
-            let mut pinned: BTreeSet<_> = config.room_root_identities.values().cloned().collect();
-            let opened = (|| {
-                let mut paths = BTreeSet::<PathBuf>::new();
-                let mut identities = BTreeSet::new();
-                let mut roots = BTreeMap::new();
-                for vault in &config.vaults {
-                    let path = std::fs::canonicalize(&vault.path).ok()?;
-                    let root = open_root(&path).ok()?;
-                    let inode = identity(&root.metadata().ok()?);
-                    let key = identity_key(inode);
-                    if vault
-                        .room
-                        .as_ref()
-                        .and_then(|room| config.room_root_identities.get(room))
-                        .is_some_and(|pin| pin != &key)
-                        || !identities.insert(inode)
-                        || paths
-                            .iter()
-                            .any(|prior| prior.starts_with(&path) || path.starts_with(prior))
-                    {
-                        return None;
+        pub(crate) fn capture(config: &Config, data_root: Option<&Path>) -> Self {
+            let paths: Vec<_> = config
+                .vaults
+                .iter()
+                .map(|vault| vault.path.clone())
+                .collect();
+            let mut roots = BTreeMap::new();
+            let mut failures = BTreeMap::new();
+            let mut by_identity = BTreeMap::new();
+            for path in &paths {
+                let opened = open_root(path).ok().and_then(|file| {
+                    let inode = identity(&file.metadata().ok()?);
+                    Some((file, inode))
+                });
+                if let Some((file, inode)) = opened {
+                    if let Some(other) = by_identity.insert(inode, path.clone()) {
+                        failures.insert(other, "room root is shared with another registration");
+                        failures.insert(
+                            path.clone(),
+                            "room root is shared with another registration",
+                        );
                     }
-                    pinned.insert(key);
-                    paths.insert(path);
-                    roots.insert(vault.path.clone(), (root, inode));
+                    roots.insert(path.clone(), (file, inode));
+                } else {
+                    failures.insert(path.clone(), "room root could not be opened safely");
                 }
-                Some(roots)
-            })();
-            // No room can index while another registered root is defective.
+            }
+            match crate::room_boundary::failures(&paths, config, data_root) {
+                Ok(boundary) => {
+                    for (path, failure) in paths.into_iter().zip(boundary) {
+                        if let Some(message) = failure {
+                            failures.insert(path, message);
+                        }
+                    }
+                }
+                Err(_) => {
+                    for path in paths {
+                        failures.insert(path, "room boundary could not be checked");
+                    }
+                }
+            }
             Self {
-                roots: opened.unwrap_or_default(),
-                pinned,
+                roots,
+                failures,
+                identities: by_identity.into_keys().collect(),
             }
         }
 
@@ -136,36 +135,38 @@ mod platform {
             &self,
             vault: &VaultRegistration,
         ) -> (EnumerationResult, Option<RoomRead<'_>>) {
-            let mut enumeration = empty_enumeration();
+            if let Some(message) = self.failures.get(&vault.path) {
+                return (failed_walk(vault, message), None);
+            }
             let Some((root, inode)) = self.roots.get(&vault.path) else {
-                skip(
-                    &mut enumeration,
-                    vault,
-                    "",
-                    "registered room roots could not be verified safely",
+                return (
+                    failed_walk(vault, "room root could not be opened safely"),
+                    None,
                 );
-                return (enumeration, None);
             };
+            let mut enumeration = empty_enumeration();
             let mut files = BTreeMap::new();
             let mut pending = VecDeque::from([(String::new(), *inode)]);
             while let Some((relative, expected_inode)) = pending.pop_front() {
-                let path = if relative.is_empty() { "." } else { &relative };
-                let dir = (|| -> io::Result<Dir> {
-                    let file = File::from(openat2(
-                        root,
-                        path,
-                        OPEN | OFlags::DIRECTORY,
-                        Mode::empty(),
-                        ROOM_ONLY,
-                    )?);
-                    let inode = identity(&file.metadata()?);
-                    if inode != expected_inode
-                        || (!relative.is_empty() && self.pinned.contains(&identity_key(inode)))
-                    {
+                let dir = descend(
+                    root,
+                    relative.split('/').filter(|part| !part.is_empty()),
+                    &self.identities,
+                    OPEN,
+                );
+                if matches!(dir, Ok(None)) {
+                    return (
+                        failed_walk(vault, "walk encountered another registered room root"),
+                        None,
+                    );
+                }
+                let dir = dir.and_then(|file| {
+                    let file = file.expect("boundary miss handled above");
+                    if identity(&file.metadata()?) != expected_inode {
                         return Err(io::Error::other("directory identity changed"));
                     }
                     Ok(Dir::new(std::os::fd::OwnedFd::from(file))?)
-                })();
+                });
                 let Ok(mut dir) = dir else {
                     skip(
                         &mut enumeration,
@@ -204,7 +205,7 @@ mod platform {
                         format!("{relative}/{name}")
                     };
                     // O_PATH avoids opening special files for I/O. Both the
-                    // recorded identity and subsequent read use the pinned root.
+                    // recorded identity and subsequent read use the captured root.
                     let Ok(fd) = dir.fd().and_then(|dirfd| {
                         openat2(
                             dirfd,
@@ -232,16 +233,14 @@ mod platform {
                         continue;
                     };
                     if metadata.is_dir() {
-                        if self.pinned.contains(&identity_key(identity(&metadata))) {
-                            skip(
-                                &mut enumeration,
-                                vault,
-                                &path,
-                                "directory is another registered room root",
+                        let found = identity(&metadata);
+                        if found != *inode && self.identities.contains(&found) {
+                            return (
+                                failed_walk(vault, "walk encountered another registered room root"),
+                                None,
                             );
-                        } else {
-                            pending.push_back((path, identity(&metadata)));
                         }
+                        pending.push_back((path, found));
                         continue;
                     }
                     if !metadata.is_file() {
@@ -293,20 +292,88 @@ mod platform {
             enumeration
                 .files
                 .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-            (enumeration, Some(RoomRead { root, files }))
+            (
+                enumeration,
+                Some(RoomRead {
+                    root,
+                    files,
+                    identities: &self.identities,
+                }),
+            )
         }
+    }
+
+    // Check every reopened directory component, not only the final inode.
+    // A concurrent move could put a captured root above that final directory.
+    fn descend<'a>(
+        root: &File,
+        parts: impl Iterator<Item = &'a str>,
+        identities: &BTreeSet<Inode>,
+        final_flags: OFlags,
+    ) -> io::Result<Option<File>> {
+        let mut parts = parts.peekable();
+        if parts.peek().is_none() {
+            return Ok(Some(File::from(openat2(
+                root,
+                ".",
+                final_flags | OFlags::DIRECTORY,
+                Mode::empty(),
+                ROOM_ONLY,
+            )?)));
+        }
+        let mut directory = None;
+        while let Some(part) = parts.next() {
+            let flags = if parts.peek().is_some() {
+                OFlags::PATH | OFlags::CLOEXEC
+            } else {
+                final_flags
+            };
+            let child = File::from(openat2(
+                directory.as_ref().unwrap_or(root),
+                part,
+                flags | OFlags::DIRECTORY,
+                Mode::empty(),
+                ROOM_ONLY,
+            )?);
+            if identities.contains(&identity(&child.metadata()?)) {
+                return Ok(None);
+            }
+            directory = Some(child);
+        }
+        Ok(directory)
     }
 
     pub(crate) struct RoomRead<'a> {
         root: &'a File,
         files: BTreeMap<String, Inode>,
+        identities: &'a BTreeSet<Inode>,
     }
 
     impl RoomRead<'_> {
         pub(crate) fn open(&self, relative: &str) -> io::Result<File> {
+            let (directory, name) = relative
+                .rsplit_once('/')
+                .map_or((None, relative), |(directory, name)| {
+                    (Some(directory), name)
+                });
+            let parent = if let Some(directory) = directory {
+                Some(
+                    descend(
+                        self.root,
+                        directory.split('/'),
+                        self.identities,
+                        OFlags::PATH | OFlags::CLOEXEC,
+                    )?
+                    .ok_or_else(|| {
+                        io::Error::other("source is no longer within the room boundary")
+                    })?,
+                )
+            } else {
+                None
+            };
             let file = File::from(openat2(
-                self.root,
-                relative,
+                parent.as_ref().unwrap_or(self.root),
+                name,
                 OPEN,
                 Mode::empty(),
                 ROOM_ONLY,
@@ -373,7 +440,7 @@ mod platform {
     pub(crate) struct RoomRead<'a>(std::marker::PhantomData<&'a ()>);
 
     impl RoomRoots {
-        pub(crate) fn capture(_: &Config) -> Self {
+        pub(crate) fn capture(_: &Config, _: Option<&Path>) -> Self {
             Self
         }
         pub(crate) fn walk(
@@ -402,10 +469,18 @@ mod platform {
     }
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) use platform::pin_room_root;
 pub use platform::probe_openclast_ingestion;
 pub(crate) use platform::{RoomRead, RoomRoots, single_link};
+
+#[cfg(target_os = "linux")]
+fn failed_walk(vault: &VaultRegistration, message: &str) -> EnumerationResult {
+    let mut enumeration = empty_enumeration();
+    skip(&mut enumeration, vault, "", message);
+    // A wholly failed walk is not evidence of deletion. The runtime may
+    // retain the last committed artifacts; no candidates from this pass survive.
+    enumeration.excluded.clear();
+    enumeration
+}
 
 fn empty_enumeration() -> EnumerationResult {
     EnumerationResult {
@@ -435,90 +510,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn n40_missing_replaced_or_nested_pin_fails_every_room_walk() {
+    fn fr5_n40_scope_and_move_after_capture() {
         use std::fs;
-        for case in ["missing", "replacement", "resolved-nested"] {
-            let fixture = tempfile::tempdir().unwrap();
-            let ra = fixture.path().join("a");
-            let rd = fixture.path().join("d");
-            let nested = ra.join("unexpected");
-            fs::create_dir(&ra).unwrap();
-            fs::create_dir(&rd).unwrap();
-            fs::write(ra.join("index.md"), "synthetic alpha").unwrap();
-            fs::write(rd.join("index.md"), "synthetic delta").unwrap();
-            let mut config = Config::default();
-            config.server.profile = crate::HostProfile::OpenClast;
-            config.vaults = vec![
-                VaultRegistration {
-                    id: "vault-a".into(),
-                    path: ra.clone(),
-                    room: Some("room-a".into()),
-                },
-                VaultRegistration {
-                    id: "vault-d".into(),
-                    path: rd.clone(),
-                    room: Some("room-d".into()),
-                },
-            ];
-            config.auth.openclast = Some(crate::OpenClastAuthConfig {
-                tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
-                issuer: "synthetic-issuer".into(),
-                audience: "synthetic-audience".into(),
-                jwks_file: fixture.path().join("synthetic-jwks.json"),
-                max_token_ttl_seconds: 60,
-                workload_subject_allowlist: vec![],
-                legacy_identity_accept_until: Some(0),
-            });
-            let config_path = fixture.path().join("kwiry.toml");
-            // Start with an already-provisioned pin store. Reload must
-            // not silently pick up a replacement root.
-            let pins_path = config_path.with_extension("room-roots.json");
-            let pins: std::collections::BTreeMap<_, _> = config
-                .vaults
-                .iter()
-                .map(|vault| {
-                    (
-                        vault.room.as_deref().unwrap(),
-                        pin_room_root(&vault.path).unwrap(),
-                    )
-                })
-                .collect();
-            fs::write(&pins_path, serde_json::to_vec(&pins).unwrap()).unwrap();
-            fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
-            let config = crate::load_config(&config_path).unwrap();
-            assert_eq!(config.room_root_identities.len(), 2);
-            let persisted_pins = fs::read(&pins_path).unwrap();
-            let pins = config.room_root_identities.clone();
-            fs::rename(&rd, &nested).unwrap();
-            match case {
-                "missing" => {}
-                "replacement" => fs::create_dir(&rd).unwrap(),
-                "resolved-nested" => std::os::unix::fs::symlink(&nested, &rd).unwrap(),
-                _ => unreachable!(),
-            }
-            if case == "replacement" {
-                fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
-                let reloaded = crate::load_config(&config_path).unwrap();
-                assert_eq!(reloaded.room_root_identities, pins);
-            }
-            assert_eq!(fs::read(&pins_path).unwrap(), persisted_pins);
-            let roots = RoomRoots::capture(&config);
-            for vault in &config.vaults {
-                let (enumeration, reader) = roots.walk(vault);
-                assert!(reader.is_none(), "{case}");
-                assert!(enumeration.files.is_empty());
-                assert!(!enumeration.completeness.may_infer_deletions());
-                let [warning] = &enumeration.warnings[..] else {
-                    panic!("expected a single warning")
-                };
-                assert_eq!(warning.path, vault.path);
-                assert_eq!(
-                    warning.message,
-                    "registered room roots could not be verified safely"
-                );
-            }
-            assert_eq!(config.room_root_identities, pins);
-        }
+        let fixture = tempfile::tempdir().unwrap();
+        let ra = fixture.path().join("a");
+        let rd = fixture.path().join("d");
+        let nested = ra.join("moved");
+        fs::create_dir(&ra).unwrap();
+        fs::create_dir(&rd).unwrap();
+        fs::write(ra.join("index.md"), "synthetic alpha").unwrap();
+        fs::write(rd.join("index.md"), "synthetic delta").unwrap();
+        let vault = |path, id: &str| VaultRegistration {
+            id: id.into(),
+            path,
+            room: Some(id.into()),
+        };
+        let config = Config {
+            vaults: vec![vault(ra.clone(), "a"), vault(rd.clone(), "d")],
+            ..Config::default()
+        };
+        let [a, d] = &config.vaults[..] else {
+            unreachable!()
+        };
+
+        // (i) An unrelated unavailable room does not block A.
+        let offline = fixture.path().join("offline");
+        fs::rename(&rd, &offline).unwrap();
+        let roots = RoomRoots::capture(&config, None);
+        assert_eq!(roots.walk(a).0.files.len(), 1);
+        assert!(roots.walk(d).1.is_none());
+        fs::rename(&offline, &rd).unwrap();
+
+        // (ii) A directory encountered after capture is still D's root.
+        let roots = RoomRoots::capture(&config, None);
+        fs::rename(&rd, &nested).unwrap();
+        std::os::unix::fs::symlink(&nested, &rd).unwrap();
+        let (enumeration, reader) = roots.walk(a);
+        assert!(!enumeration.completeness.may_infer_deletions());
+        assert!(reader.is_none());
+        assert!(enumeration.files.is_empty());
+        assert_eq!(enumeration.warnings[0].path, ra);
+        assert_eq!(
+            enumeration.warnings[0].message,
+            "walk encountered another registered room root"
+        );
+
+        // (iii) With D gone at the next capture there is no identity history.
+        fs::remove_file(&rd).unwrap();
+        let roots = RoomRoots::capture(&config, None);
+        assert!(roots.walk(d).1.is_none());
+        let (enumeration, reader) = roots.walk(a);
+        assert!(enumeration.completeness.may_infer_deletions());
+        assert_eq!(enumeration.files.len(), 2);
+        assert!(reader.unwrap().open("moved/index.md").is_ok());
     }
 
     #[test]
@@ -539,10 +583,13 @@ mod tests {
             path: directory.path().into(),
             room: Some("room".into()),
         };
-        let roots = RoomRoots::capture(&Config {
-            vaults: vec![vault.clone()],
-            ..Config::default()
-        });
+        let roots = RoomRoots::capture(
+            &Config {
+                vaults: vec![vault.clone()],
+                ..Config::default()
+            },
+            None,
+        );
         let (enumeration, _) = roots.walk(&vault);
         assert!(!enumeration.completeness.may_infer_deletions());
         assert_eq!(enumeration.warnings[0].path, socket);
@@ -564,10 +611,13 @@ mod tests {
             room: Some(room),
         };
         let vaults = [room(a.clone(), "a".into()), room(b.clone(), "b".into())];
-        let roots = RoomRoots::capture(&Config {
-            vaults: vaults.to_vec(),
-            ..Config::default()
-        });
+        let roots = RoomRoots::capture(
+            &Config {
+                vaults: vaults.to_vec(),
+                ..Config::default()
+            },
+            None,
+        );
         let (enumeration, reader) = roots.walk(&vaults[0]);
         assert_eq!(enumeration.files.len(), 2);
         let reader = reader.unwrap();
@@ -615,19 +665,77 @@ mod tests {
             },
             VaultRegistration {
                 id: "vault".into(),
-                path: b,
+                path: b.clone(),
                 room: Some("b".into()),
             },
         ];
-        let roots = RoomRoots::capture(&Config {
-            vaults: rooms.to_vec(),
-            ..Config::default()
-        });
+        let roots = RoomRoots::capture(
+            &Config {
+                vaults: rooms.to_vec(),
+                ..Config::default()
+            },
+            None,
+        );
         let (enumeration, _) = roots.walk(&rooms[0]);
         let unmounted = Command::new("umount").arg(&sub).status().unwrap();
         assert!(unmounted.success());
         assert!(enumeration.files.is_empty());
         assert!(!enumeration.completeness.may_infer_deletions());
         assert_eq!(enumeration.warnings[0].path, sub);
+
+        let c = fixture.path().join("c");
+        std::fs::create_dir(&c).unwrap();
+        std::fs::write(c.join("index.md"), "synthetic gamma").unwrap();
+        let config = Config {
+            vaults: rooms
+                .into_iter()
+                .chain([VaultRegistration {
+                    id: "healthy".into(),
+                    path: c,
+                    room: Some("c".into()),
+                }])
+                .collect(),
+            ..Config::default()
+        };
+        for alias in ["sub", ".trash"] {
+            let source = b.join(alias);
+            std::fs::create_dir(&source).unwrap();
+            std::fs::write(source.join("index.md"), "synthetic beta").unwrap();
+            assert!(
+                Command::new("mount")
+                    .arg("--bind")
+                    .arg(&source)
+                    .arg(&a)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            for vault in &config.vaults[..2] {
+                let roots = RoomRoots::capture(&config, None);
+                let (enumeration, reader) = roots.walk(vault);
+                assert!(reader.is_none());
+                assert!(enumeration.files.is_empty());
+                assert!(!enumeration.completeness.may_infer_deletions());
+                assert_eq!(enumeration.warnings[0].path, vault.path);
+                assert_eq!(
+                    enumeration.warnings[0].message,
+                    "room roots overlap through a mount"
+                );
+            }
+            let roots = RoomRoots::capture(&config, None);
+            assert_eq!(roots.walk(&config.vaults[2]).0.files.len(), 1);
+            let only_a = Config {
+                vaults: vec![config.vaults[0].clone()],
+                ..Config::default()
+            };
+            let roots = RoomRoots::capture(&only_a, Some(&source));
+            let (enumeration, reader) = roots.walk(&only_a.vaults[0]);
+            assert!(reader.is_none());
+            assert_eq!(
+                enumeration.warnings[0].message,
+                "room root overlaps Kwiry state through a mount"
+            );
+            assert!(Command::new("umount").arg(&a).status().unwrap().success());
+        }
     }
 }

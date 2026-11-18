@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::status::{IndexFreshness, IndexFreshnessState};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use tantivy::IndexWriter;
@@ -207,11 +207,7 @@ impl SearchRuntime {
                 "authorized resource search is unavailable in the desktop profile".to_owned(),
             )),
             ActiveSearchIndex::OpenClast(index) => {
-                index.check_resources_against(
-                    filters,
-                    resources,
-                    self.registered_resources.load().as_deref(),
-                )?;
+                self.check_authorized_resources(index, filters, resources)?;
                 index.search_with_profile(
                     query,
                     limit,
@@ -237,11 +233,7 @@ impl SearchRuntime {
                 "authorized resource search is unavailable in the desktop profile".to_owned(),
             )),
             ActiveSearchIndex::OpenClast(index) => {
-                index.check_resources_against(
-                    filters,
-                    resources,
-                    self.registered_resources.load().as_deref(),
-                )?;
+                self.check_authorized_resources(index, filters, resources)?;
                 let outcome = index.search_with_quality(query, limit, filters, resources)?;
                 Ok(GenerationSearchResult {
                     generation: index.scoped_generation(filters, resources)?,
@@ -428,6 +420,73 @@ impl SearchRuntime {
         Ok(())
     }
 
+    fn record_room_walks(
+        &self,
+        walks: &BTreeMap<ResourceKey, bool>,
+        max_stale_serve_seconds: u64,
+        started: Instant,
+        published: bool,
+    ) -> Result<()> {
+        let mut states = self
+            .resource_freshness
+            .lock()
+            .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
+        for (resource, completed) in walks {
+            let state = states.entry(resource.clone()).or_default();
+            if *completed {
+                if published {
+                    state.walk = RoomWalkState::Ready;
+                }
+            } else {
+                // Carry the first failure across retries. Without a successful
+                // walk in this process we cannot establish a grace period:
+                // a restart must not restore expired access.
+                let since = match state.walk {
+                    RoomWalkState::Ready => Some(started),
+                    RoomWalkState::Failed { since, .. } => since,
+                    RoomWalkState::Unchecked => None,
+                };
+                state.walk = RoomWalkState::Failed {
+                    since,
+                    grace: Duration::from_secs(max_stale_serve_seconds),
+                };
+            }
+        }
+        Ok(())
+    }
+
+    fn check_authorized_resources(
+        &self,
+        index: &PartitionedSearchIndex,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+    ) -> Result<()> {
+        let states = self
+            .resource_freshness
+            .lock()
+            .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
+        self.check_authorized_resources_with_state(index, filters, resources, &states)
+    }
+
+    fn check_authorized_resources_with_state(
+        &self,
+        index: &PartitionedSearchIndex,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+        states: &BTreeMap<ResourceKey, ResourceFreshness>,
+    ) -> Result<()> {
+        let registered = self.registered_resources.load();
+        let now = Instant::now();
+        index.check_resources_against(filters, resources, |resource| {
+            registered
+                .as_ref()
+                .is_none_or(|keys| keys.contains(resource))
+                && !states
+                    .get(resource)
+                    .is_some_and(|state| state.stale_expired(now))
+        })
+    }
+
     /// Recheck the effective set at response time. A changed authorized revision
     /// makes an already-running search stale; forbidden publications do not.
     pub fn authorized_freshness(
@@ -450,11 +509,7 @@ impl SearchRuntime {
             ));
         };
         let effective = effective_resources(filters, resources);
-        index.check_resources_against(
-            filters,
-            resources,
-            self.registered_resources.load().as_deref(),
-        )?;
+        self.check_authorized_resources_with_state(index, filters, resources, &states)?;
         let current_generation = index.scoped_generation(filters, resources)?;
         let mut worst = IndexFreshnessState::Current;
         for resource in effective {
@@ -519,6 +574,28 @@ impl SearchRuntime {
 struct ResourceFreshness {
     state: IndexFreshnessState,
     epoch: u64,
+    walk: RoomWalkState,
+}
+
+#[derive(Clone, Copy)]
+enum RoomWalkState {
+    Unchecked,
+    Ready,
+    Failed {
+        since: Option<Instant>,
+        grace: Duration,
+    },
+}
+
+impl ResourceFreshness {
+    fn stale_expired(&self, now: Instant) -> bool {
+        match self.walk {
+            RoomWalkState::Failed { since, grace } => {
+                since.is_none_or(|start| now.saturating_duration_since(start) >= grace)
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Default for ResourceFreshness {
@@ -526,6 +603,7 @@ impl Default for ResourceFreshness {
         Self {
             state: IndexFreshnessState::Stale,
             epoch: 0,
+            walk: RoomWalkState::Unchecked,
         }
     }
 }
@@ -673,22 +751,21 @@ impl PartitionedSearchIndex {
     }
 
     fn check_resources(&self, filters: &SearchFilters, resources: &[ResourceKey]) -> Result<()> {
-        self.check_resources_against(filters, resources, None)
+        self.check_resources_against(filters, resources, |_| true)
     }
 
     fn check_resources_against(
         &self,
         filters: &SearchFilters,
         resources: &[ResourceKey],
-        registered: Option<&BTreeSet<ResourceKey>>,
+        is_available: impl Fn(&ResourceKey) -> bool,
     ) -> Result<()> {
         let indexes: Vec<_> = resources
             .iter()
             .enumerate()
             .filter_map(|(index, resource)| {
                 (matches_resource_filters(filters, resource)
-                    && (!self.partition_dirs.contains_key(resource)
-                        || registered.is_some_and(|keys| !keys.contains(resource))))
+                    && (!self.partition_dirs.contains_key(resource) || !is_available(resource)))
                 .then_some(index)
             })
             .collect();
@@ -939,6 +1016,7 @@ impl SearchIndex {
 
 struct VaultObservations {
     outcomes: Vec<FileIngestOutcome>,
+    whole_walk_failed: bool,
     reused_keys: BTreeSet<String>,
     enumeration: EnumerationResult,
     source_files_read: usize,
@@ -1053,6 +1131,7 @@ fn observe_vault(
 
     VaultObservations {
         outcomes,
+        whole_walk_failed: context.room_roots.is_some() && secure_read.is_none(),
         reused_keys,
         enumeration,
         source_files_read,
@@ -1473,6 +1552,7 @@ struct OpenClastIndexManager {
 
 impl OpenClastIndexManager {
     fn open(config: Config, data_dir: &Path, runtime: SearchRuntime) -> Result<Self> {
+        crate::room_boundary::validate_data_root(&config, data_dir)?;
         let data_root = DataRoot::new(data_dir);
         let lock = data_root.acquire_writer_lock()?;
         let mut active = data_root.active()?.ok_or_else(|| {
@@ -1578,7 +1658,12 @@ impl OpenClastIndexManager {
     fn reconcile(&mut self, config: Config, scope: &ReconcileScope) -> Result<ReconcileReport> {
         let epochs = self.runtime.begin_resource_pass(&config, scope)?;
         let mut incomplete = BTreeSet::new();
-        let result = self.reconcile_inner(config, scope, &mut incomplete);
+        let max_stale_serve_seconds = config.indexing.max_stale_serve_seconds;
+        let started = Instant::now();
+        let mut walks = BTreeMap::new();
+        let result = self.reconcile_inner(config, scope, &mut incomplete, &mut walks);
+        self.runtime
+            .record_room_walks(&walks, max_stale_serve_seconds, started, result.is_ok())?;
         self.runtime
             .finish_resource_pass(epochs, &incomplete, result.is_ok())?;
         result
@@ -1589,6 +1674,7 @@ impl OpenClastIndexManager {
         config: Config,
         scope: &ReconcileScope,
         incomplete: &mut BTreeSet<ResourceKey>,
+        walks: &mut BTreeMap<ResourceKey, bool>,
     ) -> Result<ReconcileReport> {
         let mut plan = ReconcilePlan::new(&self.manifest);
         let mut next_room_retries = BTreeSet::new();
@@ -1635,7 +1721,6 @@ impl OpenClastIndexManager {
                     })
             })
             .collect::<Result<_>>()?;
-        let room_roots = crate::room_walk::RoomRoots::capture(&config);
         // Removed registrations never retain content, including the other room
         // of a repeated vault. Removing a layout entry drops the full partition.
         let removed_keys: Vec<_> = self
@@ -1672,8 +1757,10 @@ impl OpenClastIndexManager {
             if vault_reclassified {
                 next_resources.remove(&resource);
             }
-            if !vault.path.is_dir() && !config.room_root_identities.contains_key(&resource.room_id)
-            {
+            let room_roots =
+                crate::room_walk::RoomRoots::capture(&config, Some(self.data_root.path()));
+            if !vault.path.is_dir() {
+                walks.insert(resource.clone(), false);
                 incomplete.insert(resource.clone());
                 unavailable_vaults.push(vault.id.clone());
                 for (key, file) in &self.manifest.files {
@@ -1692,7 +1779,6 @@ impl OpenClastIndexManager {
                 });
                 continue;
             }
-            next_resources.insert(resource.clone());
             let previous_keys: Vec<_> = self
                 .manifest
                 .files
@@ -1722,6 +1808,10 @@ impl OpenClastIndexManager {
                 },
                 &mut audit,
             );
+            walks.insert(resource.clone(), !observed.whole_walk_failed);
+            if !observed.whole_walk_failed {
+                next_resources.insert(resource.clone());
+            }
             let discovery_incomplete = !observed.enumeration.completeness.may_infer_deletions();
             if discovery_incomplete {
                 incomplete.insert(resource.clone());
@@ -1872,6 +1962,7 @@ impl OpenClastIndexManager {
         let publish_generation =
             manifest_changed || layout_changed || changed_sources > 0 || added_chunks > 0;
         if publish_generation {
+            crate::room_boundary::validate_data_root(&config, self.data_root.path())?;
             plan.next_manifest.mark_synced()?;
             let candidate = self.data_root.create_candidate_from(&self.active)?;
             let staging_dir = candidate.staging_dir.clone();
@@ -3101,6 +3192,54 @@ mod tests {
         });
         config.vaults = vaults;
         config
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fr7_expired_room_does_not_hide_healthy_room_deletions() {
+        let fixture = tempdir().unwrap();
+        let a = fixture.path().join("a");
+        let b = fixture.path().join("b");
+        let data = fixture.path().join("data");
+        let register = |name: &str, root: &Path| {
+            fs::create_dir(root).unwrap();
+            fs::write(root.join("index.md"), "synthetic pinecone").unwrap();
+            VaultRegistration {
+                id: name.into(),
+                path: root.into(),
+                room: Some(name.into()),
+            }
+        };
+        let config = openclast_config(vec![register("a", &a), register("b", &b)]);
+        assert_eq!(config.indexing.max_stale_serve_seconds, 3600);
+        build_index(&config, &data).unwrap();
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
+        let a_key = config.resource_key(&config.vaults[0]).unwrap();
+        let b_key = config.resource_key(&config.vaults[1]).unwrap();
+        fs::rename(&a, fixture.path().join("offline")).unwrap();
+        manager.reconcile(config.clone()).unwrap();
+        let filters = SearchFilters::default();
+        let search = |resources: &[ResourceKey]| {
+            runtime.search_authorized("pinecone", 20, &filters, resources)
+        };
+        assert_eq!(search(&[a_key.clone(), b_key.clone()]).unwrap().len(), 2);
+        {
+            let mut states = runtime.resource_freshness.lock().unwrap();
+            let RoomWalkState::Failed { since, .. } = &mut states.get_mut(&a_key).unwrap().walk
+            else {
+                panic!("room walk must fail")
+            };
+            *since = Some(Instant::now() - Duration::from_secs(3600));
+        }
+        fs::remove_file(b.join("index.md")).unwrap();
+        manager.reconcile(config).unwrap();
+        assert!(search(std::slice::from_ref(&b_key)).unwrap().is_empty());
+        assert!(
+            matches!(search(&[b_key, a_key]), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [1])
+        );
+        manager.shutdown().unwrap();
     }
 
     #[cfg_attr(
@@ -4548,6 +4687,7 @@ mod tests {
                 audit_sources_per_pass: 0,
                 audit_bytes_per_pass: 0,
                 racy_window_millis: 0,
+                ..Default::default()
             },
             ..Config::default()
         };

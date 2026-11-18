@@ -48,6 +48,8 @@ mod ranking_eval;
 #[cfg(feature = "native")]
 mod reconcile;
 #[cfg(feature = "native")]
+mod room_boundary;
+#[cfg(feature = "native")]
 mod room_format;
 #[cfg(feature = "native")]
 mod room_walk;
@@ -82,7 +84,7 @@ pub use chunk::ingest_vault;
 #[cfg(feature = "native")]
 pub use config::{
     ConfigLock, Paths, VaultRegistrationDisposition, acquire_config_lock, acquire_setup_lock,
-    add_vault, ensure_vault_registration, load_config, load_startup_config, register_vault,
+    add_vault, ensure_vault_registration, load_config, load_config_for_paths, register_vault,
     save_config, update_config,
 };
 #[cfg(feature = "native")]

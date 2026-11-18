@@ -40,7 +40,22 @@ impl Daemon {
         prefix: &str,
         customize: impl FnOnce(&mut Command),
     ) -> Self {
-        let mut command = Command::new(cargo_bin("kwiry"));
+        Self::start_command(
+            Command::new(cargo_bin("kwiry")),
+            config,
+            data,
+            prefix,
+            customize,
+        )
+    }
+
+    fn start_command(
+        mut command: Command,
+        config: &Path,
+        data: &Path,
+        prefix: &str,
+        customize: impl FnOnce(&mut Command),
+    ) -> Self {
         command
             .arg("--config")
             .arg(config)
@@ -242,7 +257,7 @@ fn daemon_watches_populated_subtree_lifecycle() {
 #[test]
 fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
     let temporary = tempdir().unwrap();
-    let config_path = temporary.path().join("config.toml");
+    let config_path = isolated_config(temporary.path());
     let data = temporary.path().join("data");
     let vault = temporary.path().join("vault");
     let jwks_file = temporary.path().join("search.jwks.json");
@@ -272,7 +287,6 @@ fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
         path: vault,
         room: Some("RoomAaaa_0123456789abc".into()),
     }];
-    seed_test_room_pins(&config_path, &config);
     save_config(&config_path, &config).unwrap();
 
     let daemon = Daemon::start_openclast(&config_path, &data);
@@ -334,7 +348,7 @@ fn vaultless_daemon_serves_health_and_typed_index_building_instead_of_exiting() 
 #[test]
 fn format_release_p17_p19_n30_n32_n35_to_n39_and_governed_watcher() {
     let temp = tempdir().unwrap();
-    let config_path = temp.path().join("config.toml");
+    let config_path = isolated_config(temp.path());
     let data = temp.path().join("data");
     let a = temp.path().join("a");
     let b = temp.path().join("b");
@@ -417,7 +431,6 @@ fn format_release_p17_p19_n30_n32_n35_to_n39_and_governed_watcher() {
             room: Some("RoomBbbb_0123456789abc".into()),
         },
     ];
-    seed_test_room_pins(&config_path, &config);
     save_config(&config_path, &config).unwrap();
     let daemon = Daemon::start_custom(
         &config_path,
@@ -683,96 +696,25 @@ fn format_daemon_config(root: &Path) -> Config {
     config
 }
 
-// Fixtures with already-registered rooms carry a pre-existing pin store.
-fn seed_test_room_pins(path: &Path, config: &Config) {
-    use std::os::unix::fs::MetadataExt;
-    let pins: std::collections::BTreeMap<_, _> = config
-        .vaults
-        .iter()
-        .map(|vault| {
-            let metadata = fs::metadata(&vault.path).unwrap();
-            (
-                vault.room.as_deref().unwrap(),
-                format!("{:x}:{:x}", metadata.dev(), metadata.ino()),
-            )
-        })
-        .collect();
-    fs::write(
-        path.with_extension("room-roots.json"),
-        serde_json::to_vec(&pins).unwrap(),
-    )
-    .unwrap();
+fn isolated_config(root: &Path) -> std::path::PathBuf {
+    let control = root.join("control");
+    fs::create_dir_all(&control).unwrap();
+    control.join("config.toml")
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn format_release_rp12_missing_pins_refuse_startup_with_prior_state() {
-    for (with_room, with_data) in [(true, true), (false, true), (true, false)] {
-        let fixture = tempdir().unwrap();
-        let root = fixture.path();
-        let path = root.join("kwiry.toml");
-        let data = root.join("data");
-        let mut config = format_daemon_config(root);
-        if with_room {
-            let room = root.join("room");
-            fs::create_dir(&room).unwrap();
-            config.vaults.push(VaultRegistration {
-                id: "VaultOne_0123456789abc".into(),
-                path: room,
-                room: Some("RoomAaaa_0123456789abc".into()),
-            });
-        }
-        seed_test_room_pins(&path, &config);
-        save_config(&path, &config).unwrap();
-        if with_data {
-            fs::create_dir(&data).unwrap();
-            fs::write(data.join("existing-state"), "unchanged").unwrap();
-        }
-        let pins = path.with_extension("room-roots.json");
-        fs::remove_file(&pins).unwrap();
-        let config_bytes = fs::read(&path).unwrap();
-        assert_startup_refused(&path, &data, "openclast_room_pins_missing", |_| {});
-        assert!(!pins.exists());
-        assert_eq!(fs::read(&path).unwrap(), config_bytes);
-        if with_data {
-            assert_eq!(
-                fs::read_to_string(data.join("existing-state")).unwrap(),
-                "unchanged"
-            );
-        } else {
-            assert!(!data.exists());
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn format_release_fresh_explicit_registration_pins_once() {
+fn format_release_fr1_fr2_ignores_legacy_file_and_never_writes_it() {
     let fixture = tempdir().unwrap();
     let root = fixture.path();
-    let path = root.join("kwiry.toml");
+    let path = isolated_config(root);
     let data = root.join("data");
     let room = root.join("room");
     fs::create_dir(&room).unwrap();
-    fs::write(room.join("index.md"), "synthetic first registration").unwrap();
-    let config = format_daemon_config(root);
-    save_config(&path, &config).unwrap();
-    let mut edited = config.clone();
-    let room_id = "RoomAaaa_0123456789abc";
+    fs::write(room.join("index.md"), "synthetic pinecone").unwrap();
+    save_config(&path, &format_daemon_config(root)).unwrap();
     let vault_id = "VaultOne_0123456789abc";
-    edited.vaults.push(VaultRegistration {
-        id: vault_id.into(),
-        path: room.clone(),
-        room: Some(room_id.into()),
-    });
-    assert!(
-        save_config(&path, &edited)
-            .unwrap_err()
-            .to_string()
-            .contains("openclast_room_pins_missing")
-    );
-    let pins = path.with_extension("room-roots.json");
-    assert!(!pins.exists());
+    let room_id = "RoomAaaa_0123456789abc";
     let output = Command::new(cargo_bin("kwiry"))
         .arg("--config")
         .arg(&path)
@@ -789,34 +731,162 @@ fn format_release_fresh_explicit_registration_pins_once() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let legacy = path.with_extension("room-roots.json");
+    assert!(!legacy.exists());
     assert!(!data.exists());
-    let pin_bytes = fs::read(&pins).unwrap();
-    assert!(
-        load_config(&path)
+    let wrong = br#"{"RoomAaaa_0123456789abc":"0:0"}"#;
+    fs::write(&legacy, wrong).unwrap();
+    let trace = root.join("syscalls.log");
+    let trace_enabled = std::env::var_os("KWIRY_FR1_STRACE").is_some();
+    let command = if trace_enabled {
+        let mut command = Command::new("strace");
+        // Keep the tracee a direct child so the normal daemon cleanup owns it.
+        command
+            .args(["-D", "-f", "-e", "trace=%file", "-o"])
+            .arg(&trace)
+            .arg(cargo_bin("kwiry"));
+        command
+    } else {
+        Command::new(cargo_bin("kwiry"))
+    };
+    let daemon = Daemon::start_command(
+        command,
+        &path,
+        &data,
+        "kwiry OpenClast sidecar listening on http://",
+        |_| {},
+    );
+    let clock = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .room_root_identities
-            .contains_key(room_id)
+            .as_secs()
+    };
+    let epoch: u64 = fs::read_to_string(data.join("replay-epoch"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait_for(|| clock() > epoch);
+    let token = sign_format_token(
+        &[(vault_id, room_id)],
+        false,
+        Some("kwiry-cap+jwt"),
+        1,
+        clock(),
     );
-    let second_root = root.join("second");
-    fs::create_dir(&second_root).unwrap();
-    edited.vaults.push(VaultRegistration {
-        id: "VaultTwo_0123456789abc".into(),
-        path: second_root,
-        room: Some("RoomBbbb_0123456789abc".into()),
-    });
-    let registered_config = fs::read(&path).unwrap();
-    fs::write(&path, toml::to_string_pretty(&edited).unwrap()).unwrap();
-    assert!(
-        load_config(&path)
-            .unwrap_err()
-            .to_string()
-            .contains("openclast_room_pins_missing")
-    );
-    assert_eq!(fs::read(&pins).unwrap(), pin_bytes);
-    fs::write(&path, registered_config).unwrap();
-    let daemon = Daemon::start_openclast(&path, &data);
+    assert_eq!(search(&daemon.address, &token, "pinecone").len(), 1);
     daemon.stop();
-    assert_eq!(fs::read(&pins).unwrap(), pin_bytes);
+    if trace_enabled {
+        let calls = fs::read_to_string(trace).unwrap();
+        assert!(
+            calls.contains("config.toml"),
+            "trace must observe actual config access"
+        );
+        assert!(
+            !calls.contains("room-roots.json"),
+            "legacy sidecar was accessed"
+        );
+    }
+    assert_eq!(fs::read(&legacy).unwrap(), wrong);
+    fs::remove_file(&legacy).unwrap();
+    Daemon::start_openclast(&path, &data).stop();
+    assert!(!legacy.exists());
+    let mut entries: Vec<_> = fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    entries.sort_unstable();
+    assert_eq!(entries, ["config.lock", "config.toml"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn format_release_fr3_refuses_state_overlap_in_both_directions() {
+    use std::os::unix::fs::symlink;
+    for case in [
+        "data-inside",
+        "data-containing",
+        "config-inside",
+        "config-containing",
+        "token-inside",
+        "token-containing",
+    ] {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        let mut path = isolated_config(root);
+        let mut data = root.join("data");
+        let mut room = root.join("room");
+        match case {
+            "data-inside" => data = room.join("data"),
+            "data-containing" => room = data.join("room"),
+            "config-inside" => path = room.join("control/config.toml"),
+            "config-containing" => room = path.parent().unwrap().join("room"),
+            "token-containing" => room = root.join("token-dir/room"),
+            _ => (),
+        }
+        fs::create_dir_all(&room).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        match case {
+            "token-inside" => {
+                fs::write(room.join("token"), "synthetic").unwrap();
+                symlink(room.join("token"), path.with_extension("token")).unwrap();
+            }
+            "token-containing" => {
+                symlink(root.join("token-dir"), path.with_extension("token")).unwrap()
+            }
+            _ => (),
+        }
+        let mut config = format_daemon_config(root);
+        config.vaults.push(VaultRegistration {
+            id: "VaultOne_0123456789abc".into(),
+            path: room,
+            room: Some("RoomAaaa_0123456789abc".into()),
+        });
+        fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let paths = kwiry_core::Paths::resolve(Some(path.clone()), Some(data.clone())).unwrap();
+        assert!(
+            kwiry_core::load_config_for_paths(&paths)
+                .unwrap_err()
+                .to_string()
+                .contains("openclast_room_boundary"),
+            "{case}"
+        );
+        assert_startup_refused(&path, &data, "openclast_room_boundary", |_| {});
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!data.join("daemon.lock").exists());
+        assert!(!path.with_extension("lock").exists());
+        if case != "data-containing" {
+            assert!(!data.exists());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn format_release_fr7_refuses_stale_cap_beyond_one_day() {
+    let fixture = tempdir().unwrap();
+    let root = fixture.path();
+    let path = isolated_config(root);
+    let data = root.join("data");
+    let mut config = format_daemon_config(root);
+    for seconds in [0, 86_400] {
+        config.indexing.max_stale_serve_seconds = seconds;
+        save_config(&path, &config).unwrap();
+        assert_eq!(
+            load_config(&path).unwrap().indexing.max_stale_serve_seconds,
+            seconds
+        );
+    }
+    config.indexing.max_stale_serve_seconds = 86_401;
+    fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    assert_startup_refused(
+        &path,
+        &data,
+        "indexing.max_stale_serve_seconds must be between 0 and 86400",
+        |_| {},
+    );
+    assert!(!data.exists());
 }
 
 fn assert_startup_refused(
@@ -870,7 +940,7 @@ fn assert_startup_refused(
 fn format_release_n31_rb3_refuses_admission_registration() {
     let fixture = tempdir().unwrap();
     let root = fixture.path();
-    let path = root.join("kwiry.toml");
+    let path = isolated_config(root);
     let data = root.join("data");
     let mut config = format_daemon_config(root);
     for (name, room) in [
@@ -886,7 +956,6 @@ fn format_release_n31_rb3_refuses_admission_registration() {
             room: Some(room.into()),
         });
     }
-    seed_test_room_pins(&path, &config);
     fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
     let expected_error = kwiry_core::Error::DuplicateVaultId(config.vaults[0].id.clone());
     assert!(matches!(
@@ -962,7 +1031,7 @@ fn n34_openat2_probe_refuses_all_errors_even_with_no_rooms() {
     use std::os::unix::process::CommandExt;
     let fixture = tempdir().unwrap();
     let root = fixture.path();
-    let config = root.join("kwiry.toml");
+    let config = isolated_config(root);
     let data = root.join("data");
     for (room_count, errno) in [
         (1, libc::ENOSYS),
@@ -981,7 +1050,6 @@ fn n34_openat2_probe_refuses_all_errors_even_with_no_rooms() {
                 room: Some("RoomAaaa_0123456789abc".into()),
             });
         }
-        seed_test_room_pins(&config, &settings);
         save_config(&config, &settings).unwrap();
         assert_startup_refused(
             &config,

@@ -16,7 +16,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use kwiry_core::{
     DaemonState, DataRoot, HostProfile, IndexFreshnessBasis, LexicalSearchRequest, Paths,
-    acquire_setup_lock, build_index, load_config, register_vault, search_index, update_config,
+    acquire_setup_lock, build_index, load_config, load_config_for_paths, register_vault,
+    search_index, update_config,
 };
 use serde::Serialize;
 
@@ -270,7 +271,7 @@ async fn main() -> Result<()> {
         }
         Command::Config { command } => run_config(&paths, command)?,
         Command::Index => {
-            let config = load_config(&paths.config).with_context(|| {
+            let config = load_config_for_paths(&paths).with_context(|| {
                 format!(
                     "failed to load configuration from {}",
                     paths.config.display()
@@ -334,7 +335,7 @@ async fn main() -> Result<()> {
 fn run_config(paths: &Paths, command: ConfigCommand) -> Result<()> {
     match command {
         ConfigCommand::Show { json } => {
-            let config = load_config(&paths.config)?;
+            let config = load_config_for_paths(paths)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&config)?);
             } else {

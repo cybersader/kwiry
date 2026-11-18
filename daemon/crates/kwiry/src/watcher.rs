@@ -10,7 +10,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::{RwLock, mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use kwiry_core::{Config, DaemonState, DaemonStatus, Paths, ReconcileScope, load_config};
+use kwiry_core::{Config, DaemonState, DaemonStatus, Paths, ReconcileScope, load_config_for_paths};
 
 use crate::runtime::ManagerHandle;
 use crate::server::status_from_manifest;
@@ -370,7 +370,7 @@ async fn run_watcher(
                 let overdue = first_dirty.is_some_and(|first| now.duration_since(first) >= MAX_DEBOUNCE);
                 if quiet || overdue {
                     if config_dirty {
-                        match load_config(&paths.config) {
+                        match load_config_for_paths(&paths) {
                             Ok(next) => {
                                 config_invalid = false;
                                 if startup_config.requires_restart_for(&next) {
