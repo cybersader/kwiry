@@ -19,15 +19,17 @@ pub enum FaultCode {
     Forbidden,
     /// `409 idempotency_conflict`, `400 invalid_request`, `413`.
     Bug,
+    ProofExpired,
 }
 
 impl FaultCode {
-    pub const ALL: [FaultCode; 5] = [
+    pub const ALL: [FaultCode; 6] = [
         FaultCode::Transient,
         FaultCode::EpochMismatch,
         FaultCode::BadProof,
         FaultCode::Forbidden,
         FaultCode::Bug,
+        FaultCode::ProofExpired,
     ];
 }
 
@@ -101,6 +103,7 @@ pub enum Action {
     AuthProcess { c: u8, idx: u8 },
     DropDead { c: u8, idx: u8 },
     HumanRelease,
+    HumanDecline,
     SpaceFreed,
     // --- faults
     AuthFault { c: u8, idx: u8, code: FaultCode },
@@ -108,6 +111,8 @@ pub enum Action {
     NetDup { c: u8, idx: u8 },
     Detach { c: u8, idx: u8 },
     AgeOut(u8),
+    DelayCommit(u8),
+    ProofBackoffElapsed(u8),
     ListFault(FaultCode),
     ListDup,
     ListLost,
@@ -124,6 +129,18 @@ pub enum Action {
     OpAcceptEpoch,
     OpRestart,
     OpClearHalt(u8),
+    OpReopen(u8),
+    SwapHolder,
+    LoseHolderState,
+    BeginRecovery,
+    CommitRecovery,
+    TryLegacy,
+    LeaseDeadline,
+    KeepOpen,
+    CloseHandle,
+    LatePublish,
+    ReconcileLate,
+    WrongRelease { i: u8, u: u8 },
 }
 
 impl Action {
@@ -139,15 +156,26 @@ impl Action {
             | NetDup { .. }
             | Detach { .. }
             | AgeOut(_)
+            | DelayCommit(_)
             | ListFault(_)
             | ListDup
             | ListLost
             | DiskFull => Kind::Fault,
             Crash => Kind::Crash,
+            SwapHolder
+            | LoseHolderState
+            | TryLegacy
+            | LeaseDeadline
+            | KeepOpen
+            | LatePublish
+            | WrongRelease { .. } => Kind::Scenario,
+            BeginRecovery | CommitRecovery => Kind::Operator,
             AuthRetire(_) | AuthUnlist(_) | AuthRelist(_) | AuthDrop(_) | AuthBackup
             | AuthRestore => Kind::Scenario,
-            OpAcceptEpoch | OpRestart | OpClearHalt(_) => Kind::Operator,
-            AuthProcess { .. } | DropDead { .. } | HumanRelease | SpaceFreed => Kind::Env,
+            OpAcceptEpoch | OpRestart | OpClearHalt(_) | OpReopen(_) => Kind::Operator,
+            AuthProcess { .. } | DropDead { .. } | HumanRelease | HumanDecline | SpaceFreed => {
+                Kind::Env
+            }
             _ => Kind::Holder,
         }
     }
@@ -181,6 +209,7 @@ impl Action {
             Apply,
             Replenish,
             HumanRelease,
+            HumanDecline,
             SpaceFreed,
             ListDup,
             ListLost,
@@ -190,6 +219,17 @@ impl Action {
             AuthRestore,
             OpAcceptEpoch,
             OpRestart,
+            ProofBackoffElapsed(3),
+            SwapHolder,
+            LoseHolderState,
+            BeginRecovery,
+            CommitRecovery,
+            TryLegacy,
+            LeaseDeadline,
+            KeepOpen,
+            CloseHandle,
+            LatePublish,
+            ReconcileLate,
         ];
         for code in FaultCode::ALL {
             v.push(ListFault(code));
@@ -203,6 +243,7 @@ impl Action {
                 RelResult(i),
             ]);
             for u in 0..3u8 {
+                v.push(WrongRelease { i, u });
                 for fail in [false, true] {
                     v.push(RelDelete { i, u, fail });
                 }
@@ -225,6 +266,7 @@ impl Action {
                 AuthUnlist(r),
                 AuthRelist(r),
                 AuthDrop(r),
+                OpReopen(r),
             ]);
         }
         for c in 0..3u8 {
@@ -235,6 +277,8 @@ impl Action {
                 Dispatch(c),
                 NetFail(c),
                 AgeOut(c),
+                DelayCommit(c),
+                ProofBackoffElapsed(c),
                 OpClearHalt(c),
             ]);
             for idx in 0..6u8 {

@@ -14,6 +14,8 @@ use crate::row_id::RowId;
 pub enum Model {
     /// A transition of the model cites this row.
     Step,
+    /// Executed by a focused CI state/fixture rather than required in core profiles.
+    Focused(&'static str),
     /// Enforced inside other steps' guards; no transition of its own.
     Implicit(&'static str),
     /// Outside the model's scope (stated in the crate docs).
@@ -90,7 +92,7 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 S2,
                 r#"P0L, load identity"#,
-                r#"`holder.json` and `holder.key` readable and valid"#,
+                r#"`holder.json` and `holder.key` readable and valid; under both locks inspect `holder-id` without following links; a populated root must already be bound to this holder"#,
                 r#"—"#,
                 r#"S3, S4 or S5; otherwise `FC(not_enrolled)`"#,
                 r#"—"#,
@@ -100,32 +102,34 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 S3,
                 r#"P0L, `holder-state.json` present"#,
-                r#"Read under both locks; parses; schema 3; `holder_id` equals `holder.json`"#,
+                r#"Read under both locks; parses; schema 3; `holder_id` equals `holder.json` and any root binding; a populated root cannot be adopted under a different holder"#,
                 r#"—"#,
                 r#"P1. A parse or schema failure gives `FC(holder_state_corrupt)`; a mismatch gives `FC(holder_identity_mismatch)`"#,
                 r#"—"#,
                 r#"F5-6, R7-1"#,
-                Implicit("every boot loads valid holder state")
+                Implicit(
+                    "boot validates the durable root and state identities; sequential swap fixture"
+                )
             ),
             row!(
                 S4,
                 r#"P0L, `holder-state.json` absent"#,
-                r#"Data root proven lost (§5.2 scan) while both locks are held. **Immediately before W, the file is re-checked as absent and the scan is re-run.** If either re-check fails, take S3 or S5 instead"#,
-                r#"W (fresh state: `high_water: null`, `reset_pending: true`)"#,
+                r#"No root binding and data root proven lost (§5.2 scan) while both locks are held. **Immediately before W, the file is re-checked as absent and the scan is re-run.** If either re-check fails, take S3 or S5 instead"#,
+                r#"Fsync root holder marker before governed publication; W (fresh state: `high_water: null`, `last_list_ref: null`, `reset_pending: true`)"#,
                 r#"P1"#,
                 r#"Restart takes S3 with `reset_pending` still set, so trust on first use continues"#,
                 r#"HW §13, R7-1"#,
-                NotModeled("holder-state loss and trust on first use")
+                Focused("empty-root reset fixture; two-file persistence cuts are conformance work")
             ),
             row!(
                 S5,
                 r#"P0L, `holder-state.json` absent"#,
-                r#"Data root intact"#,
+                r#"Data root intact or holder marker present; missing state is never a re-enrollment signal"#,
                 r#"—"#,
                 r#"`FC(holder_state_missing)`"#,
                 r#"—"#,
                 r#"R6-6, F5-6"#,
-                NotModeled("holder-state loss and trust on first use")
+                Implicit("boot refusal under missing state fixture")
             ),
             row!(
                 S6,
@@ -255,7 +259,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"Restart, then S3"#,
                 r#"A partial copy without `holder-state.json` gives S5 again, and the operator reruns"#,
                 r#"HW §14 G (backup rule), R7-1"#,
-                NotModeled("fail-closed startup and offline recovery")
+                Focused(
+                    "interrupted identity-preserving recovery; actual backup files are not modeled"
+                )
             ),
             row!(
                 S16,
@@ -434,9 +440,9 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 F1,
                 r#"Idle + trigger: startup, an interval in `[0.8, 1.0] × relist_seconds`, a rebuild, the step-3a early relist, or a backoff timer"#,
-                r#"Nothing in flight; M10 is `Normal`; HW §7 start rate; an early relist needs ≥ 5 s since the last start"#,
+                r#"Nothing in flight; M10 is `Normal`; HW §15 H.8: ≥ 5 s between counted starts; 410 restart and the single replay/expiry retry exempt; echo durable `last_list_ref` except on first list or reset"#,
                 r#"—"#,
-                r#"InFlight, with a fresh nonce and deadlines of 10 s (connect), 30 s (each response) and 120 s (whole list)"#,
+                r#"InFlight, with a fresh nonce and deadlines of 10 s (connect), 30 s (each response) and 120 s baseline, scaled from page 0 (whole list; §5.3)"#,
                 r#"—"#,
                 r#"HW §3.1, §7, amendment B, R6-8"#,
                 Step
@@ -522,6 +528,46 @@ pub const MACHINES: &[Machine] = &[
                 r#"—"#,
                 r#"HW §4.5, round-8 #6"#,
                 Step
+            ),
+            row!(
+                F8p,
+                r#"list receives `401 proof_expired`"#,
+                r#"First consecutive expiry"#,
+                r#"—"#,
+                r#"Re-sign the same business request with fresh `jti`/`iat`, `exp = iat + 300`; retry once, exempt from rate"#,
+                r#"Restart does not turn an expiry into authentication failure"#,
+                r#"HW §15 H.3, H.4, H.8"#,
+                Step
+            ),
+            row!(
+                F8b,
+                r#"list receives `401 proof_expired`"#,
+                r#"Single re-signed retry also expired"#,
+                r#"—"#,
+                r#"Back off and alert on clock; no authorization halt"#,
+                r#"Restart does not turn an expiry into authentication failure"#,
+                r#"HW §15 H.3, H.4, H.8"#,
+                Focused("consecutive expiry fixture")
+            ),
+            row!(
+                F10,
+                r#"Authority artifact has unknown `kid`"#,
+                r#"No valid advancing key-set statement under a currently pinned key after one fetch"#,
+                r#"—"#,
+                r#"Refuse `unknown_kid`; do not apply; leases continue to run"#,
+                r#"—"#,
+                r#"HW §15 H.6"#,
+                Focused("key-rotation fixture")
+            ),
+            row!(
+                F11,
+                r#"Authority sends a new key-set statement"#,
+                r#"Verify `openclast-lifecycle-keyset+jwt`, issuer, wildcard audience, pinned signer, strictly increasing `keyset_seq`, key and retirement claims"#,
+                r#"W (`holder.json`, single writer)"#,
+                r#"Accept replacement pins durably before using a new signing key"#,
+                r#"Reload the last durable key-set sequence and pins"#,
+                r#"HW §15 H.6"#,
+                Focused("key-rotation fixture")
             ),
             row!(
                 F9,
@@ -613,7 +659,7 @@ pub const MACHINES: &[Machine] = &[
                 A4,
                 r#"Swap the snapshot"#,
                 r#"—"#,
-                r#"L3 (pointer, leases, classes, inventory, reservations; clear A0's refusals; bump `lease_ver`, `class_ver[r]`, `res_ver[r]`, `obl_ver[o]`, `inv_ver`, `layout_ver` as affected)"#,
+                r#"W (last_list_ref) → L3 (pointer, leases, classes, inventory, reservations; clear A0's refusals; bump `lease_ver`, `class_ver[r]`, `res_ver[r]`, `obl_ver[o]`, `inv_ver`, `layout_ver` as affected)"#,
                 r#"A5"#,
                 r#"—"#,
                 r#"F5-4, R6-7"#,
@@ -673,7 +719,7 @@ pub const MACHINES: &[Machine] = &[
                 r#"lapsed"#,
                 r#"—"#,
                 r#"Q4, HW §3.3"#,
-                NotModeled("leases never lapse in the model (lapse only narrows serving)")
+                Focused("abstract deadline boundary, including during apply")
             ),
             row!(
                 C3,
@@ -683,7 +729,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"active"#,
                 r#"—"#,
                 r#"Q4"#,
-                NotModeled("leases never lapse in the model (lapse only narrows serving)")
+                Implicit(
+                    "a fresh verified still-live lease applied at A4 restores serving; focused fixture"
+                )
             ),
             row!(
                 C4,
@@ -796,6 +844,16 @@ pub const MACHINES: &[Machine] = &[
                 NotModeled("the authority model never re-terminates a dropped holding")
             ),
             row!(
+                C16,
+                r#"Signed list contains `terminating` + `blocked`"#,
+                r#"H.9 decision by authorized human; only remaining blocker at decision was unattributed quarantine"#,
+                r#"W (adopt the list as for `terminating`)"#,
+                r#"Obligated, withhold; keep attributed purge/reporting, no deletion authority from `blocked`, no escalation while blocked"#,
+                r#"Read tombstones, then re-list"#,
+                r#"HW §15 H.9"#,
+                Focused("release decline and blocked-list fixture")
+            ),
+            row!(
                 C15,
                 r#"retired-complete + L `retired` with `escalated`"#,
                 r#"—"#,
@@ -839,7 +897,7 @@ pub const MACHINES: &[Machine] = &[
                 r#"live (layout or withheld reference)"#,
                 r#"—"#,
                 r#"§4.3"#,
-                NotModeled("builders")
+                Focused("one late builder output, not the full builder state machine")
             ),
             row!(
                 O3,
@@ -960,6 +1018,16 @@ pub const MACHINES: &[Machine] = &[
                 r#"A crash between L1's W and the ledger write is repaired by S10 or S10n"#,
                 r#"R7-6"#,
                 Step
+            ),
+            row!(
+                O14x,
+                r#"Independent census discovers a late builder output after final scan"#,
+                r#"Object belongs to the obligated resource"#,
+                r#"— (model); production republishes registry and durably reconciles any staged files"#,
+                r#"Invalidate the scan and complete attempt; re-admit only under the purge claimant"#,
+                r#"Repeat physical census after restart"#,
+                r#"Astra deletion evidence"#,
+                Focused("late-publication fixture")
             ),
             row!(
                 O14,
@@ -1114,7 +1182,7 @@ pub const MACHINES: &[Machine] = &[
                 r#"W[`receipts/conv-<ack jti>`] → W (`F = max(F, accepted_state)`; clear pending and uncertain entries that are covered)"#,
                 r#"none, or pending"#,
                 r#"As in R5"#,
-                r#"HW §4.4"#,
+                r#"HW §4.4, §15 H.5: `current_ack` problem member or `OpenClast-Lifecycle-Outcome: already_complete`; key mismatch also means convergence"#,
                 Step
             ),
             row!(
@@ -1125,7 +1193,7 @@ pub const MACHINES: &[Machine] = &[
                 r#"rejected or unchanged; a list must apply before R1 re-derives for `o` (R13 learns the current epoch's floor)"#,
                 r#"Either"#,
                 r#"R6-2, round-8 #4"#,
-                Step
+                Focused("previous-epoch convergence vector V4")
             ),
             row!(
                 R7,
@@ -1145,7 +1213,7 @@ pub const MACHINES: &[Machine] = &[
                 r#"rejected; F1. If `o` is then absent, R12"#,
                 r#"Either"#,
                 r#"HW §4.5"#,
-                Step
+                Focused("report-only refusal fixture; supported journal replay keeps identities")
             ),
             row!(
                 R9,
@@ -1186,6 +1254,26 @@ pub const MACHINES: &[Machine] = &[
                 r#"—"#,
                 r#"HW §4.5, round-8 #6"#,
                 Step
+            ),
+            row!(
+                R11p,
+                r#"report receives `401 proof_expired`"#,
+                r#"First consecutive expiry"#,
+                r#"—"#,
+                r#"Re-sign the same business request with fresh `jti`/`iat`, `exp = iat + 300`; retry once, exempt from rate"#,
+                r#"Restart does not turn an expiry into authentication failure"#,
+                r#"HW §15 H.3, H.4, H.8"#,
+                Step
+            ),
+            row!(
+                R11b,
+                r#"report receives `401 proof_expired`"#,
+                r#"Single re-signed retry also expired"#,
+                r#"—"#,
+                r#"Back off and alert on clock; no authorization halt"#,
+                r#"Restart does not turn an expiry into authentication failure"#,
+                r#"HW §15 H.3, H.4, H.8"#,
+                Focused("consecutive expiry fixture")
             ),
             row!(
                 R12,
@@ -1245,7 +1333,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"Unchanged; `ack_unverifiable` (`ack_contradiction` for a rejected key); after 3 in a row, halted (N5 resumes)"#,
                 r#"—"#,
                 r#"F5-1"#,
-                NotModeled("forged or mismatched acks")
+                Focused(
+                    "lost-attempt fixture V2; repeated unverifiable and forged acks are not explored"
+                )
             ),
             row!(
                 R18,
@@ -1432,7 +1522,7 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 T1,
                 r#"none, invalidated or rejected + a trigger (`reset_pending`, a digest change, a release outcome, daily while non-zero)"#,
-                r#"At least 60 s since the last send; publisher transaction reading `inv_ver`"#,
+                r#"New status key: at least 60 s since last new key; same-key retries exempt. Publisher transaction reads `inv_ver`"#,
                 r#"W[`manifests/<key>`] → W (`status = ready{key, body}`)"#,
                 r#"ready"#,
                 r#"Either"#,
@@ -1472,7 +1562,7 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 T2d,
                 r#"queued + dispatch (transport)"#,
-                r#"The linearization point: `inv_ver`, the release-outcome state and `reset_pending` are unchanged since T2, and the attempt has been queued for less than 30 s"#,
+                r#"The first-byte linearization point: M10 is not `AuthHalted(403)`; `inv_ver`, the release-outcome state and `reset_pending` are unchanged since T2, and the attempt has been queued for less than 30 s"#,
                 r#"— (bytes on the wire: connect 10 s, response 30 s, under a cancellation token)"#,
                 r#"sent"#,
                 r#"—"#,
@@ -1560,6 +1650,26 @@ pub const MACHINES: &[Machine] = &[
                 Step
             ),
             row!(
+                T6p,
+                r#"status receives `401 proof_expired`"#,
+                r#"First consecutive expiry"#,
+                r#"—"#,
+                r#"Re-sign the same business request with fresh `jti`/`iat`, `exp = iat + 300`; retry once, exempt from rate"#,
+                r#"Restart does not turn an expiry into authentication failure"#,
+                r#"HW §15 H.3, H.4, H.8"#,
+                Step
+            ),
+            row!(
+                T6e,
+                r#"status receives `401 proof_expired`"#,
+                r#"Single re-signed retry also expired"#,
+                r#"—"#,
+                r#"Back off and alert on clock; no authorization halt"#,
+                r#"Restart does not turn an expiry into authentication failure"#,
+                r#"HW §15 H.3, H.4, H.8"#,
+                Focused("consecutive expiry fixture")
+            ),
+            row!(
                 T6c,
                 r#"sent + `409 idempotency_conflict`, `400 invalid_request` or `413`"#,
                 r#"—"#,
@@ -1571,12 +1681,12 @@ pub const MACHINES: &[Machine] = &[
             ),
             row!(
                 T6d,
-                r#"sent + `409 stale_list_ref` or `404`"#,
+                r#"sent + `409 stale_list_ref`"#,
                 r#"—"#,
                 r#"W (`rejected`)"#,
                 r#"rejected; F1, then T1"#,
                 r#"Either"#,
-                r#"HW §4.5"#,
+                r#"HW §15 H.4 (no status 404)"#,
                 Step
             ),
             row!(
@@ -1710,6 +1820,16 @@ pub const MACHINES: &[Machine] = &[
                 r#"—"#,
                 r#"HW §4.5, R7-7"#,
                 Step
+            ),
+            row!(
+                N2c,
+                r#"N2 enters 403 halt or a handoff reaches its first-byte guard"#,
+                r#"Check route health at first byte for report and status; do not rely on enqueue-time health"#,
+                r#"W when recording invalidation; close transport gate and cancel unsent bytes without waiting for disk"#,
+                r#"Queued attempt is never sent; previously transmitted attempts are kept as uncertain"#,
+                r#"No queued bytes survive restart; recover durable possibly-transmitted attempts conservatively"#,
+                r#"Astra hard stop"#,
+                Focused("403 queue-cut fixture; also explored in general fault profiles")
             ),
             row!(
                 N3,

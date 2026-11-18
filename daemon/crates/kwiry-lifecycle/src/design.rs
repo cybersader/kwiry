@@ -1,9 +1,9 @@
 //! Which revision of the lifecycle the model executes.
 //!
 //! [`Design::REV8`] is the revision-8 table encoded as written (with the
-//! interpretations listed in the crate docs). [`Design::REV9`] adds every
+//! interpretations listed in the crate docs). [`Design::REV10`] adds every
 //! [`Fix`]. Each fix is a separate flag so the checker can show that it is
-//! necessary: removing any single fix from `REV9` must reproduce the
+//! necessary: removing any single fix from the corresponding revision must reproduce the
 //! counterexample it closes (`tests/model_check.rs`).
 
 use std::fmt;
@@ -46,10 +46,32 @@ pub enum Fix {
     /// Found by this model (M-2). A release reservation whose detach (L1's G)
     /// failed is re-detached in process, not only at the next start (row L1d).
     ReleaseDetachRetries,
+    /// H.1: replay committed retirements before opening a new epoch.
+    RetirementReplay,
+    /// H.2–H.4: witness, status, and transaction revision fidelity.
+    AuthorityFidelity,
+    /// H.2: send the last applied list reference.
+    EchoListRef,
+    /// H.6: only a currently pinned key may authorize rotation.
+    SignedKeyRotation,
+    /// H.3: time-only failures retry once and back off.
+    ProofExpiryRetry,
+    /// H.9: the human may decline without authorizing deletion.
+    ReleaseDeclined,
+    /// H.5: classify signed convergence evidence, not exact receipts.
+    ConvergenceEnvelope,
+    /// Astra: reject a sequential holder swap on a populated root.
+    RootHolderBinding,
+    /// Astra: prove the exact claimant against independent inventory.
+    ExactDeletionEvidence,
+    /// Astra: a 403 revokes the unsent transport queue.
+    CancelOnForbidden,
+    /// Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply.
+    LeaseAndRollbackFence,
 }
 
 impl Fix {
-    pub const ALL: [Fix; 9] = [
+    pub const REV9: [Fix; 9] = [
         Fix::RestartArmedResumes,
         Fix::DispatchLinearized,
         Fix::NarrowFirst,
@@ -61,8 +83,22 @@ impl Fix {
         Fix::ReleaseDetachRetries,
     ];
 
-    const fn bit(self) -> u16 {
-        1 << self as u16
+    pub const REV10: [Fix; 11] = [
+        Fix::RetirementReplay,
+        Fix::AuthorityFidelity,
+        Fix::EchoListRef,
+        Fix::SignedKeyRotation,
+        Fix::ProofExpiryRetry,
+        Fix::ReleaseDeclined,
+        Fix::ConvergenceEnvelope,
+        Fix::RootHolderBinding,
+        Fix::ExactDeletionEvidence,
+        Fix::CancelOnForbidden,
+        Fix::LeaseAndRollbackFence,
+    ];
+
+    const fn bit(self) -> u32 {
+        1 << self as u32
     }
 
     /// The review finding this fix closes.
@@ -77,13 +113,30 @@ impl Fix {
             Fix::DerivedQuarantineOwner => "round-8 #7 (GC deletion failure has no owner)",
             Fix::GcClaimRevalidates => "model M-1 (GC deletes after its reason lapsed)",
             Fix::ReleaseDetachRetries => "model M-2 (failed release detach is never retried)",
+            Fix::RetirementReplay => "H.1: replay committed retirements before opening a new epoch",
+            Fix::AuthorityFidelity => "H.2–H.4: witness, status, and transaction revision fidelity",
+            Fix::EchoListRef => "H.2: send the last applied list reference",
+            Fix::SignedKeyRotation => "H.6: only a currently pinned key may authorize rotation",
+            Fix::ProofExpiryRetry => "H.3: time-only failures retry once and back off",
+            Fix::ReleaseDeclined => "H.9: the human may decline without authorizing deletion",
+            Fix::ConvergenceEnvelope => {
+                "H.5: classify signed convergence evidence, not exact receipts"
+            }
+            Fix::RootHolderBinding => "Astra: reject a sequential holder swap on a populated root",
+            Fix::ExactDeletionEvidence => {
+                "Astra: prove the exact claimant against independent inventory"
+            }
+            Fix::CancelOnForbidden => "Astra: a 403 revokes the unsent transport queue",
+            Fix::LeaseAndRollbackFence => {
+                "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
+            }
         }
     }
 }
 
 /// A set of [`Fix`]es.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Design(u16);
+pub struct Design(u32);
 
 impl Design {
     /// Revision 8 as written.
@@ -92,11 +145,22 @@ impl Design {
     pub const REV9: Design = {
         let mut bits = 0;
         let mut i = 0;
-        while i < Fix::ALL.len() {
-            bits |= Fix::ALL[i].bit();
+        while i < Fix::REV9.len() {
+            bits |= Fix::REV9[i].bit();
             i += 1;
         }
         Design(bits)
+    };
+
+    /// Revision 10: H.1–H.11 and the independent holder-side findings.
+    pub const REV10: Design = {
+        let mut d = Self::REV9;
+        let mut i = 0;
+        while i < Fix::REV10.len() {
+            d = d.with(Fix::REV10[i]);
+            i += 1;
+        }
+        d
     };
 
     pub const fn has(self, f: Fix) -> bool {
@@ -120,7 +184,14 @@ impl fmt::Debug for Design {
         if *self == Design::REV9 {
             return write!(f, "REV9");
         }
-        let missing: Vec<_> = Fix::ALL.iter().filter(|x| !self.has(**x)).collect();
-        write!(f, "REV9 without {missing:?}")
+        if *self == Design::REV10 {
+            return write!(f, "REV10");
+        }
+        let missing: Vec<_> = Fix::REV9
+            .iter()
+            .chain(&Fix::REV10)
+            .filter(|x| !self.has(**x))
+            .collect();
+        write!(f, "REV10 without {missing:?}")
     }
 }

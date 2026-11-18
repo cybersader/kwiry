@@ -3,8 +3,8 @@
 //!
 //! | Id | Property |
 //! |---|---|
-//! | I1 | A resource is servable only if the newest list admitted by an H row shows it `active` and it is not tombstoned (checked whenever no apply transaction is mid-flight; an apply linearizes at A4) |
-//! | I2 | A unit is deleted only under a listed obligation for its resource, a strict release reservation, or GC of an unreferenced object of an active resource |
+//! | I1 | A resource is servable only if the newest list admitted by an H row shows it `active` and it is not tombstoned (including during apply); retirements cannot be minted or resurrected in a newer list |
+//! | I2 | A unit is deleted only under a listed obligation for its resource, that exact release claimant and reservation, or GC of an unreferenced object of an active resource |
 //! | I3 | `complete` is never dispatched while the unattributed inventory is non-empty, while anything of the resource remains, or while its proof is stale |
 //! | I4 | Tombstones only grow |
 //! | I5 | Floors are monotone within an epoch, belong to the high-water's epoch, and evidence minted in another epoch never raises them |
@@ -12,10 +12,10 @@
 //! | I7 | Some healthy actor (holder, environment or operator) can move whenever any work is outstanding |
 //! | I8 | An operator wait (auth halt, bug halt) is entered only on a fault, never on a correct authority or network response |
 //! | I9 | The unattributed inventory never counts data attributable to a listed holding (except units a release reserved) |
-//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every obligation reaches `complete` under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
+//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked` under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
 
 use crate::state::*;
-use crate::step::{Obs, Outcome, reserving, room_class, servable};
+use crate::step::{Obs, Outcome, delete_authorized, mintable, reserving, room_class, servable};
 
 /// Which property a counterexample violates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,6 +31,15 @@ pub enum Prop {
     I8HealthyHalt,
     I9Attribution,
     L1Liveness,
+    I1Retirement,
+    I8ForbiddenSend,
+    I8DeclineVisible,
+    I1WrongHolder,
+    I1Lease,
+    I1UntrustedKey,
+    I8AuthorityFidelity,
+    I8ListWitness,
+    I8ConvergenceEnvelope,
     /// A model bound was hit; the result would not be exhaustive.
     Bound,
 }
@@ -67,7 +76,28 @@ impl Prop {
                 "I9: the unattributed inventory counts data attributable to a listed holding"
             }
             Prop::L1Liveness => {
-                "L1: an obligation never completes under fair healthy scheduling (fair cycle or dead end)"
+                "L1: an obligation never reaches complete or blocked under fair healthy scheduling (fair cycle or dead end)"
+            }
+            Prop::I1Retirement => {
+                "I1: a ghost retirement became mintable or servable under a post-retirement list"
+            }
+            Prop::I8ForbiddenSend => "I8: an unsent report reached the wire after a 403 halt",
+            Prop::I8DeclineVisible => {
+                "I8: a human release decline did not block the eligible obligation"
+            }
+            Prop::I1WrongHolder => "I1: a non-empty root was opened under another holder identity",
+            Prop::I1Lease => "I1: governed data was served without a live verified lease",
+            Prop::I1UntrustedKey => {
+                "I1: an unpinned signing key authorized a list without a valid pinned statement"
+            }
+            Prop::I8AuthorityFidelity => {
+                "I8: the authority missed rollback evidence or failed to advance seq on acceptance"
+            }
+            Prop::I8ListWitness => {
+                "I8: the list request omitted a verified rollback witness from its last applied list"
+            }
+            Prop::I8ConvergenceEnvelope => {
+                "I8: a valid state_regression current_ack extension was not decoded"
             }
             Prop::Bound => "a model bound was exceeded",
         }
@@ -96,8 +126,23 @@ fn state_violations(s: &State) -> Vec<Prop> {
             && (s.vol.admitted.is_none_or(|l| l.items[r] != Item::Active)
                 || s.dur.tomb & bit(r) != 0)
     });
-    if quiescent && i1 {
+    if s.env.legacy_started && (0..ROOMS).any(|r| servable(s, r))
+        || (s.env.probe == Probe::Lease
+            && s.env.clock >= s.vol.admitted_until
+            && s.vol.applied == s.vol.admitted
+            && (0..ROOMS).any(|r| servable(s, r)))
+    {
+        v.push(Prop::I1Lease);
+    }
+    if i1 {
         v.push(Prop::I1Serving);
+    }
+    if (0..ROOMS).any(|r| {
+        s.ghost.retired_at[r].is_some_and(|retired| {
+            mintable(s, r) || (servable(s, r) && s.vol.applied.is_some_and(|l| l.rev >= retired))
+        })
+    }) {
+        v.push(Prop::I1Retirement);
     }
     let i9 = (0..UNITS).any(|u| {
         s.vol.inv & bit(u) != 0
@@ -128,9 +173,16 @@ fn step_violations(prev: &State, out: &Outcome) -> Vec<Prop> {
             } => Some(Prop::I3CompleteDispatch),
             Obs::DispatchedComplete { fresh: false, .. } => Some(Prop::I3StaleProof),
             Obs::FloorRaised { ev, cur, .. } if ev != cur => Some(Prop::I5Floors),
-            Obs::Deleted {
-                authorized: false, ..
-            } => Some(Prop::I2Deletion),
+            Obs::Deleted { u, claimant } if !delete_authorized(prev, u as usize, claimant) => {
+                Some(Prop::I2Deletion)
+            }
+            Obs::RootOpenedAsWrongHolder => Some(Prop::I1WrongHolder),
+            Obs::UntrustedKey => Some(Prop::I1UntrustedKey),
+            Obs::AuthorityUnfaithful => Some(Prop::I8AuthorityFidelity),
+            Obs::ListWitnessOmitted => Some(Prop::I8ListWitness),
+            Obs::WrongConvergenceEnvelope => Some(Prop::I8ConvergenceEnvelope),
+            Obs::SentWhileForbidden => Some(Prop::I8ForbiddenSend),
+            Obs::DeclineInvisible => Some(Prop::I8DeclineVisible),
             Obs::OperatorWait { healthy: true } => Some(Prop::I8HealthyHalt),
             Obs::AcceptanceConsumed { reused: true } => Some(Prop::I6Acceptance),
             _ => None,
@@ -171,11 +223,12 @@ pub fn settled(s: &State) -> bool {
         && s.net.resps.iter().all(|b| b.is_empty())
 }
 
-/// L1's goal: every obligation the authority holds is complete.
+/// A retirement cannot disappear from the goal when the authority is restored.
 pub fn goal(s: &State) -> bool {
-    s.auth
-        .core
-        .rooms
-        .iter()
-        .all(|r| r.obl.is_none_or(|o| o.complete()))
+    (0..ROOMS).all(|r| {
+        s.ghost.retired_at[r].is_none()
+            || s.auth.core.rooms[r]
+                .obl
+                .is_some_and(|o| o.complete() || o.blocked)
+    })
 }

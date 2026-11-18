@@ -68,12 +68,14 @@ pub struct OKey {
 pub struct RelResult {
     pub instr: u8,
     pub executed: bool,
+    pub observed: u8,
 }
 
 /// Holder status business body (HW §14 E, G.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SKey {
     pub list_ref: Rev,
+    pub reset: bool,
     pub manifest: u8,
     pub result: Option<RelResult>,
 }
@@ -128,10 +130,11 @@ pub enum APhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AObl {
     pub created_seq: u8,
+    pub blocked: bool,
     /// The last accepted report's ack (the "current ack" of HW §4.4).
     pub accepted: Option<Ack>,
     /// Idempotency receipts: keys accepted, with the epoch of their ack.
-    pub receipts: Bag<(OKey, u8), 6>,
+    pub receipts: Bag<(OKey, u8, u8), 6>,
 }
 
 impl AObl {
@@ -158,6 +161,7 @@ pub struct ARoom {
 pub struct Instr {
     pub id: u8,
     pub manifest: u8,
+    pub approved_count: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -167,8 +171,12 @@ pub struct AuthCore {
     pub rooms: [ARoom; ROOMS],
     pub instr: Option<Instr>,
     pub next_instr: u8,
+    pub holder_rev: u8,
+    pub release_declined: bool,
+    pub final_instr: u8,
+    pub superseded_mismatch: u8,
     pub status: Option<SKey>,
-    pub status_receipts: Bag<(SKey, u8), 8>,
+    pub status_receipts: Bag<(SKey, u8, Option<ReleaseDisposition>), 8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -176,6 +184,12 @@ pub struct Auth {
     pub core: AuthCore,
     /// A state backup taken for a later supported restore.
     pub backup: Option<Box<AuthCore>>,
+    /// Bounded projection of the off-store H.1 journal. Room index represents
+    /// the stable holder/holding/obligation identity, not a new allocation.
+    pub journal_retired: u8,
+    pub journal_declined: [u8; ROOMS],
+    pub journal_issued: [Option<(u8, Instr)>; INSTRS],
+    pub rollback_suspected: bool,
 }
 
 // -------------------------------------------------------------------- lists
@@ -187,6 +201,7 @@ pub enum Item {
     Active,
     /// `terminating`, with `obligation.last_accepted.state`.
     Terminating(Option<RState>),
+    Blocked(Option<RState>),
     /// `retired` with `complete`.
     Retired,
 }
@@ -194,13 +209,16 @@ pub enum Item {
 impl Item {
     pub fn last_accepted(self) -> Option<RState> {
         match self {
-            Item::Terminating(l) => l,
+            Item::Terminating(l) | Item::Blocked(l) => l,
             Item::Retired => Some(RState::Complete),
             _ => None,
         }
     }
     pub fn obligated(self) -> bool {
-        matches!(self, Item::Terminating(_) | Item::Retired)
+        matches!(
+            self,
+            Item::Terminating(_) | Item::Blocked(_) | Item::Retired
+        )
     }
 }
 
@@ -210,6 +228,7 @@ impl Item {
 pub struct ListMsg {
     pub rev: Rev,
     pub items: [Item; ROOMS],
+    pub holder_rev: u8,
     pub instr: Option<Instr>,
 }
 
@@ -220,7 +239,10 @@ pub enum ListErr {
     /// `503 authority_epoch_mismatch` (H10).
     EpochMismatch,
     /// `401`: `replay` or `invalid_holder_proof`.
-    Unauthorized { replay: bool },
+    Unauthorized {
+        replay: bool,
+    },
+    ProofExpired,
     /// `403 holder_not_authorized`.
     Forbidden,
 }
@@ -236,7 +258,11 @@ pub enum ListResp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RespKind {
     /// `200` with an ack for the request's key (new or byte-identical replay).
-    Accepted { epoch: u8 },
+    Accepted {
+        epoch: u8,
+        disposition: Option<ReleaseDisposition>,
+        accepted_holder_reset: Option<bool>,
+    },
     /// `200 already_complete` carrying the original ack (convergence).
     AlreadyComplete(Ack),
     /// `409 state_regression` carrying the current ack (convergence).
@@ -250,13 +276,23 @@ pub enum RespKind {
     /// `409 idempotency_conflict`, `400 invalid_request`, `413`.
     Bug,
     /// `401` (`replay` or `invalid_holder_proof`).
-    Unauthorized { replay: bool },
+    Unauthorized {
+        replay: bool,
+    },
+    ProofExpired,
     /// `403 holder_not_authorized`.
     Forbidden,
     /// `429`, `503 lifecycle_unavailable`, network failure, deadline.
     Transient,
     /// `503 authority_epoch_mismatch`.
     EpochMismatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReleaseDisposition {
+    Applied,
+    UnknownInstruction,
+    AlreadyFinal,
 }
 
 /// A report or status request on the wire.
@@ -267,6 +303,8 @@ pub struct Req {
     pub replay: bool,
     /// The JWS `exp` passed while the attempt sat in the transport queue.
     pub aged: bool,
+    /// The authority received a timely proof, but the CAS was delayed.
+    pub commit_late: bool,
     /// The holder's connection is still open (a response can be delivered).
     pub alive: bool,
 }
@@ -351,7 +389,7 @@ pub enum IDur {
     Deleted(u8),
     Done,
     Mismatch(u8),
-    MismatchReported,
+    MismatchReported(u8),
 }
 
 impl IDur {
@@ -381,6 +419,12 @@ pub struct Durable {
     pub slots: [Option<Pending>; CHANS],
     pub uncertain: [Bag<Key, 5>; CHANS],
     pub status_acc: Option<SKey>,
+    pub last_list_ref: Option<Rev>,
+    pub pinned_keys: crate::wire::KeyPin,
+    pub manifests: u8,
+    pub root_holder: Option<u8>,
+    pub reset_pending: bool,
+    pub state_holder: Option<u8>,
     pub instr: [IDur; INSTRS],
     pub units: [UDur; UNITS],
     pub generation: Generation,
@@ -442,7 +486,7 @@ impl Class {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Reason {
-    Obligation,
+    Obligation(u8),
     Gc,
     Release(u8),
 }
@@ -503,6 +547,11 @@ pub struct Volatile {
     pub phase: Phase,
     pub route: Route,
     pub fetching: bool,
+    /// A consecutive expiry has already consumed this exchange’s immediate retry.
+    pub proof_retried: u8,
+    pub proof_backoff: u8,
+    pub lease_until: u8,
+    pub admitted_until: u8,
     /// The newest list admitted by an H row in this process (it is also the
     /// list an in-progress apply is applying).
     pub admitted: Option<ListMsg>,
@@ -542,6 +591,10 @@ impl Volatile {
             phase: Phase::Down,
             route: Route::Normal,
             fetching: false,
+            proof_retried: 0,
+            proof_backoff: 0,
+            lease_until: u8::MAX,
+            admitted_until: u8::MAX,
             admitted: None,
             applied: None,
             apply: None,
@@ -586,12 +639,35 @@ pub struct Budget {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Env {
     pub disk_full: bool,
+    pub probe: Probe,
+    pub open_unlinked: u8,
+    pub late_published: u8,
+    pub late_once: bool,
+    pub holder: u8,
+    pub recovering: bool,
+    pub legacy_started: bool,
+    pub clock: u8,
+    pub list_signing: Option<(u8, Option<crate::wire::Keyset>)>,
+}
+
+/// Focused profiles opt in to independent boundaries without multiplying
+/// every clock, filesystem and startup schedule into the core profiles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Probe {
+    #[default]
+    None,
+    Root,
+    Lease,
+    Evidence,
+    Proof,
+    Governance,
 }
 
 /// Ghost state read only by invariants.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Ghost {
     pub consumed: Bag<Acceptance, 2>,
+    pub retired_at: [Option<Rev>; ROOMS],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -622,10 +698,18 @@ impl State {
                     rooms: [room; ROOMS],
                     instr: None,
                     next_instr: 0,
+                    holder_rev: 1,
+                    release_declined: false,
+                    final_instr: 0,
+                    superseded_mismatch: 0,
                     status: None,
                     status_receipts: Bag::default(),
                 },
                 backup: None,
+                journal_retired: 0,
+                journal_declined: [0; ROOMS],
+                journal_issued: [None; INSTRS],
+                rollback_suspected: false,
             },
             env: Env::default(),
             dur: Durable {
@@ -636,6 +720,12 @@ impl State {
                 slots: [None; CHANS],
                 uncertain: [Bag::default(); CHANS],
                 status_acc: None,
+                last_list_ref: None,
+                pinned_keys: crate::wire::KeyPin::ENROLLED,
+                manifests: 1,
+                root_holder: Some(0),
+                reset_pending: false,
+                state_holder: Some(0),
                 instr: [IDur::Unseen; INSTRS],
                 units: [
                     UDur::Present,

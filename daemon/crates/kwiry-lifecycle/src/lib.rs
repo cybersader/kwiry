@@ -1,6 +1,6 @@
 //! Executable, model-checked holder lifecycle for Kwiry as an OpenClast
 //! `Holdings` consumer (IG-2A design §5, frozen contract HOLDINGS-WIRE
-//! amendments A–G.5).
+//! amendments A–H).
 //!
 //! The model is **normative**: the design document's §5.8 transition table
 //! is rendered from [`rows`] by [`table::render`], and the test suite fails
@@ -27,7 +27,7 @@
 //! - [`checker`]: bounded explicit-state BFS with crash injection, plus a
 //!   strong-fairness SCC analysis for L1.
 //! - [`design`]: revision 8 as written ([`design::Design::REV8`]) and each
-//!   repair as a separate [`design::Fix`]; [`design::Design::REV9`] has all.
+//!   repair as a separate [`design::Fix`]; [`design::Design::REV10`] has all.
 //!
 //! # Universe and bounds
 //!
@@ -75,16 +75,20 @@
 //!   in profiles that enable them; they are never needed for progress.
 //! - States are stored as 128-bit fingerprints (hash compaction).
 //!
-//! # Not covered
+//! # Coverage limits
 //!
-//! Lease timing and lapse (lapse only narrows serving, so leaving it out is
-//! the adversarial case for I1); builders, staging and admission gates;
-//! request leases and the drain wait (claims assume the counts reach zero);
-//! layout-v2 migration; holder-state loss, trust on first use and offline
-//! recovery; unconfigured rooms; escalation; rate limits and the 300 s
-//! same-state window; R15's time clause; forged acks; raw (same-epoch)
-//! authority restores; more than two of anything; and real time. The
-//! `rows` coverage notes name each table row the model does not execute.
+//! The core keeps at most two rooms/obligations/instructions and one supported
+//! restore. It treats tags, signatures, list pagination and request bodies as
+//! verified symbols. Appendix A tests simulate bytes and receipt/commit time
+//! with a deterministic fake, not HTTP or cryptography. Only focused fixtures
+//! exercise absolute lease lapse, a holder swap, interrupted backup recovery,
+//! a lost-state reset, one live handle and one late builder publication.
+//! Not covered: real dual clocks, in-flight query drains, general builders and
+//! staging, filesystem/lock failure modes, migration and launcher deployment,
+//! journal fsync/hash-chain failures and admin journal-loss override, actual
+//! raw restore beyond a synthetic witness, rate scheduling/cursor churn, R15's
+//! time clause, escalation, more than two of anything, or H.11 alert delivery.
+//! The S3 conformance gate adds these where Kwiry owns the implementation.
 
 pub mod action;
 pub mod bag;
@@ -96,3 +100,5 @@ pub mod rows;
 pub mod state;
 pub mod step;
 pub mod table;
+
+pub mod wire;

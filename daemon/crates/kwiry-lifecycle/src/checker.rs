@@ -190,15 +190,15 @@ impl Graph {
     }
 }
 
-struct Run<'a> {
-    p: &'a Profile,
+struct Run {
     cfg: Config,
     candidates: Vec<Action>,
+    initial: State,
 }
 
-impl Run<'_> {
+impl Run {
     fn init(&self) -> State {
-        State::initial(self.p.budget, self.p.garbage)
+        self.initial.clone()
     }
 
     fn step(&self, s: &State, ci: u16) -> Outcome {
@@ -244,15 +244,21 @@ impl Run<'_> {
 }
 
 pub fn check(p: &Profile) -> Report {
+    check_from(p, State::initial(p.budget, p.garbage), Action::candidates())
+}
+
+/// Explore a focused subsystem from a particular fixture, with its explicit
+/// candidate set. The same BFS, safety properties and trace renderer are used.
+pub fn check_from(p: &Profile, initial: State, candidates: Vec<Action>) -> Report {
     let started = Instant::now();
     let run = Run {
-        p,
         cfg: Config {
             design: p.design,
             faults: p.faults,
             same_state: p.same_state,
         },
-        candidates: Action::candidates(),
+        candidates,
+        initial,
     };
     let mut g = Graph {
         seen: HashMap::default(),
@@ -437,7 +443,7 @@ impl Tarjan {
     }
 }
 
-fn liveness(run: &Run<'_>, g: &Graph, nkeys: usize) -> Option<Counterexample> {
+fn liveness(run: &Run, g: &Graph, nkeys: usize) -> Option<Counterexample> {
     let n = g.parent.len();
     let nongoal: Vec<u32> = (0..n as u32).filter(|v| !g.goal[*v as usize]).collect();
     for &v in &nongoal {
@@ -502,7 +508,7 @@ fn liveness(run: &Run<'_>, g: &Graph, nkeys: usize) -> Option<Counterexample> {
     None
 }
 
-fn fair_cycle(run: &Run<'_>, g: &Graph, scc: &[u32], mark: &[u32], token: u32) -> Counterexample {
+fn fair_cycle(run: &Run, g: &Graph, scc: &[u32], mark: &[u32], token: u32) -> Counterexample {
     // The member closest to the initial state gives the shortest prefix.
     let entry = *scc.iter().min().expect("non-empty SCC");
     let entry_path = g.path_to(entry);

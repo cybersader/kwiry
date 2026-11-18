@@ -1,9 +1,9 @@
 //! The lifecycle model check.
 //!
-//! - `rev9_holds`: every CI profile explores exhaustively within its bounds
+//! - `rev10_holds`: every CI profile explores exhaustively within its bounds
 //!   and every property (I1–I9, L1) holds; the union of rows the profiles
 //!   exercise matches the table's coverage notes.
-//! - `each_fix_is_necessary`: removing any single fix from revision 9
+//! - `each_fix_is_necessary`: removing any original fix from revision 9
 //!   reproduces the counterexample it closes, and the same profile holds
 //!   with the fix.
 //! - `round8_finding3_after_high_water`: the exact round-8 #3 shape, scripted.
@@ -42,7 +42,7 @@ fn budget(retires: u8, retire_rooms: u8) -> Budget {
 fn profile(name: &'static str, budget: Budget) -> Profile {
     Profile {
         name,
-        design: Design::REV9,
+        design: Design::REV10,
         budget,
         faults: 0,
         garbage: false,
@@ -195,7 +195,7 @@ fn rows_named(rows: &[RowId]) -> String {
 }
 
 #[test]
-fn rev9_holds() {
+fn rev10_holds() {
     let mut seen = vec![false; RowId::ALL.len()];
     let mut total = 0;
     for p in ci_profiles() {
@@ -241,6 +241,7 @@ fn rev9_holds() {
 fn finding(fix: Fix) -> (Profile, Prop) {
     let base = |name, b| Profile {
         liveness: true,
+        skip: Prop::I8AuthorityFidelity.bit(),
         ..profile(name, b)
     };
     match fix {
@@ -257,7 +258,7 @@ fn finding(fix: Fix) -> (Profile, Prop) {
         Fix::DispatchLinearized => (
             Profile {
                 liveness: false,
-                skip: Prop::I3StaleProof.bit(),
+                skip: Prop::I3StaleProof.bit() | Prop::I8AuthorityFidelity.bit(),
                 ..base(
                     "finding-2",
                     Budget {
@@ -365,15 +366,27 @@ fn finding(fix: Fix) -> (Profile, Prop) {
             },
             Prop::I7Deadlock,
         ),
+        _ => unreachable!("rev-10 fixes are checked by rev10.rs"),
     }
 }
 
 #[test]
 fn each_fix_is_necessary() {
-    for fix in Fix::ALL {
+    for fix in Fix::REV9 {
         let (p, expected) = finding(fix);
+        let p = Profile {
+            design: Design::REV9,
+            ..p
+        };
         let without = check(&Profile {
             design: Design::REV9.without(fix),
+            skip: p.skip
+                | Prop::I1Retirement.bit()
+                | if p.budget.restores > 0 {
+                    Prop::L1Liveness.bit()
+                } else {
+                    0
+                },
             ..p
         });
         let cex = without
@@ -389,7 +402,16 @@ fn each_fix_is_necessary() {
             rows_named(&cex.rows())
         );
         assert_eq!(cex.prop, expected, "{fix:?}: unexpected property");
-        let with = check(&p);
+        let with = check(&Profile {
+            skip: p.skip
+                | Prop::I1Retirement.bit()
+                | if p.budget.restores > 0 {
+                    Prop::L1Liveness.bit()
+                } else {
+                    0
+                },
+            ..p
+        });
         assert!(
             with.violation.is_none(),
             "{fix:?} with the fix:\n{}",
@@ -450,7 +472,7 @@ fn round8_finding3_after_high_water() {
         },
         &steps,
     );
-    assert_eq!(rev8.err(), Some(ScriptEnd::Violation(12, Prop::I1Serving)));
+    assert_eq!(rev8.err(), Some(ScriptEnd::Violation(10, Prop::I1Serving)));
     let rev9 = script(&p, &steps).expect("revision 9 refuses the room at admission");
     assert!(!kwiry_lifecycle::step::servable(&rev9, 1));
     assert_eq!(

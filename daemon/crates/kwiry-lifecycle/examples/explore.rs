@@ -22,16 +22,24 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let design = match args.first().map(String::as_str) {
         Some("rev8") => Design::REV8,
-        Some("rev9") | None => Design::REV9,
+        Some("rev9") => Design::REV9,
+        Some("rev10") | None => Design::REV10,
         Some(other) => {
-            let name = other
-                .strip_prefix("rev9-")
-                .expect("rev8, rev9 or rev9-<Fix>");
-            let fix = Fix::ALL
+            let (base, name) = other
+                .split_once('-')
+                .expect("rev8, rev9, rev10 or rev10-<Fix>");
+            let d = if base == "rev9" {
+                Design::REV9
+            } else {
+                assert_eq!(base, "rev10");
+                Design::REV10
+            };
+            let fix = Fix::REV9
                 .into_iter()
+                .chain(Fix::REV10)
                 .find(|f| format!("{f:?}") == name)
                 .expect("unknown fix name");
-            Design::REV9.without(fix)
+            d.without(fix)
         }
     };
     let mut budget = Budget {

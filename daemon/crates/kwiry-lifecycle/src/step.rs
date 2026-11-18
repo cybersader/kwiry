@@ -21,6 +21,7 @@ use crate::bag::Bound;
 use crate::design::{Design, Fix};
 use crate::row_id::RowId::{self, *};
 use crate::state::*;
+use crate::wire::{self, AckClass, Expiry, RefVerdict};
 
 /// Knobs that are not part of the state.
 #[derive(Clone, Copy, Debug)]
@@ -46,17 +47,35 @@ pub enum Obs {
     },
     /// A floor rose on evidence minted in epoch `ev` while the holder's
     /// high-water is in epoch `cur`.
-    FloorRaised { o: u8, ev: u8, cur: u8 },
+    FloorRaised {
+        o: u8,
+        ev: u8,
+        cur: u8,
+    },
     /// A unit was unlinked. `authorized`: an obligation listed for its
     /// resource, a release reservation, or GC of an unreferenced object of an
     /// active resource owned the deletion at that instant.
-    Deleted { u: u8, authorized: bool },
+    Deleted {
+        u: u8,
+        claimant: Reason,
+    },
     /// The holder entered a state only an operator can leave. `healthy`: the
     /// trigger was a correct authority or network response, not a fault.
-    OperatorWait { healthy: bool },
+    OperatorWait {
+        healthy: bool,
+    },
+    SentWhileForbidden,
+    DeclineInvisible,
+    RootOpenedAsWrongHolder,
+    UntrustedKey,
+    AuthorityUnfaithful,
+    WrongConvergenceEnvelope,
+    ListWitnessOmitted,
     /// An armed epoch acceptance was consumed. `reused`: it was consumed
     /// before.
-    AcceptanceConsumed { reused: bool },
+    AcceptanceConsumed {
+        reused: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -196,7 +215,11 @@ pub fn inventory(s: &State) -> u8 {
 }
 
 pub fn servable(s: &State, r: usize) -> bool {
+    if s.env.legacy_started {
+        return s.dur.generation.layout & bit(r) != 0;
+    }
     s.vol.phase == Phase::P7
+        && s.env.clock < s.vol.lease_until
         && s.vol.route != Route::Halted403
         && s.vol.class[r] == Class::Active
         && s.dur.tomb & bit(r) == 0
@@ -217,27 +240,49 @@ pub fn release_outcome(s: &State) -> Option<RelResult> {
     };
     let reported = |r: RelResult| s.dur.status_acc.and_then(|k| k.result) == Some(r);
     (0..INSTRS).find_map(|i| {
-        let result = |executed: bool| RelResult {
+        let result = |executed: bool, observed| RelResult {
             instr: i as u8,
             executed,
+            observed,
         };
         match s.dur.instr[i] {
-            IDur::Deleted(_) if s.vol.resulted & bit(i) != 0 => Some(result(true)),
-            IDur::Mismatch(_) => Some(result(false)),
-            IDur::Done if listed(i) && !reported(result(true)) => Some(result(true)),
-            IDur::MismatchReported if listed(i) && !reported(result(false)) => Some(result(false)),
+            IDur::Deleted(_) if s.vol.resulted & bit(i) != 0 => Some(result(true, 0)),
+            IDur::Mismatch(m) => Some(result(false, m)),
+            IDur::Done if listed(i) && !reported(result(true, 0)) => Some(result(true, 0)),
+            IDur::MismatchReported(m) if listed(i) && !reported(result(false, m)) => {
+                Some(result(false, m))
+            }
             _ => None,
         }
     })
 }
 
-/// Ghost check for I2: who may delete `u` at this instant.
-pub fn delete_authorized(s: &State, u: usize) -> bool {
+/// Physical census, independent of the report scan and registry reclamation.
+/// An unlinked but open unit and an unregistered builder output both remain.
+pub fn observed_remaining(s: &State, o: usize) -> bool {
+    units_of(o).any(|u| {
+        s.dur.units[u] != UDur::Deleted
+            || (s.env.open_unlinked | s.env.late_published) & bit(u) != 0
+    })
+}
+
+/// Check the exact claimant, not the disjunction of reasons for a unit.
+pub fn delete_authorized(s: &State, u: usize, claimant: Reason) -> bool {
     let c = room_class(s, u);
-    let reserved = (0..INSTRS).any(
-        |i| matches!(s.dur.instr[i], IDur::Reserved(m) | IDur::Draining(m) if m & bit(u) != 0),
-    );
-    c.obligated() || reserved || (c == Class::Active && !referenced(s, u))
+    if (s.dur.units[u] == UDur::Present && referenced(s, u)) || s.env.open_unlinked & bit(u) != 0 {
+        return false;
+    }
+    match claimant {
+        Reason::Obligation(ob) => {
+            ob as usize == UNIT_ROOM[u] && c.obligated() && reserving(&s.dur, u).is_none()
+        }
+        Reason::Gc => c == Class::Active && reserving(&s.dur, u).is_none(),
+        Reason::Release(i) => {
+            matches!(s.dur.instr[i as usize], IDur::Draining(m) if m & bit(u) != 0)
+                && (s.vol.umem[u] == UMem::Revoked(Reason::Release(i))
+                    || s.dur.units[u] == UDur::Quarantined(QOwner::Release(i)))
+        }
+    }
 }
 
 pub fn classify(l: &ListMsg, tomb: u8) -> [Class; ROOMS] {
@@ -246,7 +291,7 @@ pub fn classify(l: &ListMsg, tomb: u8) -> [Class; ROOMS] {
         match l.items[r] {
             Item::Active if t => Class::Conflict,
             Item::Active => Class::Active,
-            Item::Terminating(_) => Class::Obligated,
+            Item::Terminating(_) | Item::Blocked(_) => Class::Obligated,
             Item::Retired => Class::RetiredComplete,
             Item::Absent if t => Class::TombUnlisted,
             Item::Absent => Class::Unknown,
@@ -285,7 +330,7 @@ fn class_row(old: Class, new: Class) -> Option<RowId> {
 
 fn obligation_view(i: Item) -> Option<(bool, Option<RState>)> {
     match i {
-        Item::Terminating(l) => Some((false, l)),
+        Item::Terminating(l) | Item::Blocked(l) => Some((false, l)),
         Item::Retired => Some((true, Some(RState::Complete))),
         _ => None,
     }
@@ -325,7 +370,14 @@ fn list_view(core: &AuthCore) -> ListMsg {
     let items = core.rooms.map(|r| match r.phase {
         APhase::Active => Item::Active,
         APhase::Unlisted => Item::Absent,
-        APhase::Terminating => Item::Terminating(r.obl.and_then(|o| o.accepted).map(|a| a.state)),
+        APhase::Terminating => {
+            let last = r.obl.and_then(|o| o.accepted).map(|a| a.state);
+            if r.obl.is_some_and(|o| o.blocked) {
+                Item::Blocked(last)
+            } else {
+                Item::Terminating(last)
+            }
+        }
         APhase::Retired => Item::Retired,
     });
     ListMsg {
@@ -334,6 +386,7 @@ fn list_view(core: &AuthCore) -> ListMsg {
             seq: core.seq,
         },
         items,
+        holder_rev: core.holder_rev,
         instr: core.instr,
     }
 }
@@ -411,6 +464,9 @@ fn write(o: &mut Out) -> Option<bool> {
 /// Discard all volatile state (crash, shutdown, operator stop).
 fn stop(n: &mut State) {
     n.vol = Volatile::down();
+    n.env.recovering = false;
+    n.env.legacy_started = false;
+    n.env.open_unlinked = 0;
     n.net.list = None;
     for c in 0..CHANS {
         n.net.reqs[c].map_in_place(|r| r.alive = false);
@@ -490,20 +546,23 @@ fn raise_floor(o: &mut Out, ob: usize, state: RState, key: Option<OKey>, ev: u8)
 fn settle_release(o: &mut Out, rr: Option<RelResult>) {
     let Some(r) = rr else { return };
     let i = r.instr as usize;
+    if i >= INSTRS {
+        return;
+    }
     match (o.n.dur.instr[i], r.executed) {
         (IDur::Deleted(_) | IDur::Done, true) => {
             o.n.dur.instr[i] = IDur::Done;
             o.row(L7);
         }
-        (IDur::Mismatch(_) | IDur::MismatchReported, false) => {
-            o.n.dur.instr[i] = IDur::MismatchReported;
+        (IDur::Mismatch(_) | IDur::MismatchReported(_), false) => {
+            o.n.dur.instr[i] = IDur::MismatchReported(r.observed);
             o.row(L8);
         }
         _ => {}
     }
 }
 
-fn halt(o: &mut Out, to: Route, healthy: bool) {
+fn halt(o: &mut Out, d: Design, to: Route, healthy: bool) -> Result<(), Bound> {
     match (o.n.vol.route, to) {
         (Route::Normal, Route::Halted401) => {
             o.n.vol.route = Route::Halted401;
@@ -514,10 +573,44 @@ fn halt(o: &mut Out, to: Route, healthy: bool) {
             o.n.vol.route = Route::Halted403;
             o.row(N2);
             o.row(C11);
+            if d.has(Fix::CancelOnForbidden) {
+                for c in 0..CHANS {
+                    if matches!(
+                        o.n.vol.slotv[c],
+                        SlotVol::Armed { .. } | SlotVol::Queued { .. } | SlotVol::Sent { .. }
+                    ) {
+                        invalidate_slot(&mut o.n, c)?;
+                        o.row(N2c);
+                    }
+                }
+            }
             o.obs(Obs::OperatorWait { healthy });
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn proof_expiry(s: &mut State, d: Design, c: usize) -> Expiry {
+    let result = wire::expiry(d, s.vol.proof_retried & bit(c) != 0);
+    match result {
+        Expiry::Resign => s.vol.proof_retried |= bit(c),
+        Expiry::BackoffClockAlert => {
+            s.vol.proof_retried &= !bit(c);
+            s.vol.proof_backoff |= bit(c);
+        }
+        Expiry::Halt => {}
+    }
+    result
+}
+
+fn proof_backoff_elapsed(s: &State, c: usize) -> Step {
+    if s.vol.proof_backoff & bit(c) == 0 {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.vol.proof_backoff &= !bit(c);
+    o.done()
 }
 
 fn fault_ok(s: &State, cfg: &Config, family: u16) -> bool {
@@ -542,10 +635,10 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
     use Action::*;
     let d = cfg.design;
     match a {
-        Boot => boot(s),
+        Boot => boot(s, d),
         Markers => markers(s),
         Narrow => narrow(s),
-        FetchStart => fetch_start(s),
+        FetchStart => fetch_start(s, d),
         ListDeliver => list_deliver(s, d),
         Apply => apply(s, d),
         RelBind(i) => rel_bind(s, i as usize),
@@ -559,22 +652,26 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         Quarantine(u) => quarantine(s, d, u as usize),
         QRetry { u, fail } => qretry(s, cfg, u as usize, fail),
         PurgeDelete { u, fail } => purge_delete(s, cfg, u as usize, fail),
-        PurgeScan(o) => purge_scan(s, o as usize),
+        PurgeScan(o) => purge_scan(s, d, o as usize),
         Enqueue(c) => enqueue(s, c as usize, cfg.same_state),
         Transmit(c) => transmit(s, d, c as usize),
         Handoff(c) => handoff(s, c as usize),
         Dispatch(c) => dispatch(s, d, c as usize),
         Deliver { c, idx } => deliver(s, d, c as usize, idx as usize),
         Replenish => replenish(s),
-        AuthProcess { c, idx } => auth_process(s, c as usize, idx as usize),
+        AuthProcess { c, idx } => auth_process(s, d, c as usize, idx as usize),
         DropDead { c, idx } => drop_dead(s, c as usize, idx as usize),
         HumanRelease => human_release(s),
+        HumanDecline => human_decline(s, d),
+        OpReopen(ob) => reopen(s, ob as usize),
         SpaceFreed => space_freed(s),
         AuthFault { c, idx, code } => auth_fault(s, cfg, c as usize, idx as usize, code),
         NetFail(c) => net_fail(s, cfg, c as usize),
         NetDup { c, idx } => net_dup(s, cfg, c as usize, idx as usize),
         Detach { c, idx } => detach(s, cfg, c as usize, idx as usize),
         AgeOut(c) => age_out(s, cfg, c as usize),
+        DelayCommit(c) => delay_commit(s, cfg, c as usize),
+        ProofBackoffElapsed(c) => proof_backoff_elapsed(s, c as usize),
         ListFault(code) => list_fault(s, cfg, code),
         ListDup => list_dup(s, cfg),
         ListLost => list_lost(s, cfg),
@@ -585,21 +682,52 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         AuthRelist(r) => auth_relist(s, r as usize),
         AuthDrop(r) => auth_drop(s, r as usize),
         AuthBackup => auth_backup(s),
-        AuthRestore => auth_restore(s),
+        AuthRestore => auth_restore(s, d),
         OpAcceptEpoch => op_accept_epoch(s),
         OpRestart => op_restart(s),
         OpClearHalt(c) => op_clear_halt(s, d, c as usize),
+        SwapHolder
+        | LoseHolderState
+        | BeginRecovery
+        | CommitRecovery
+        | TryLegacy
+        | LeaseDeadline
+        | KeepOpen
+        | CloseHandle
+        | LatePublish
+        | ReconcileLate
+        | WrongRelease { .. } => probe(s, d, a),
     }
 }
 
 // ------------------------------------------------------------- M1 startup
 
-fn boot(s: &State) -> Step {
-    if s.vol.phase != Phase::Down {
+fn boot(s: &State, d: Design) -> Step {
+    if s.vol.phase != Phase::Down || s.env.legacy_started {
         return Ok(None);
     }
     let mut o = Out::new(s);
     o.n.vol = Volatile::down();
+    if s.dur.state_holder.is_none() && present_mask(&s.dur) == 0 && s.dur.root_holder.is_none() {
+        o.row(S4);
+        o.n.dur.state_holder = Some(s.env.holder);
+        o.n.dur.root_holder = Some(s.env.holder);
+        o.n.dur.hw = None;
+        o.n.dur.last_list_ref = None;
+        o.n.dur.reset_pending = true;
+    } else if s.dur.state_holder == Some(s.env.holder)
+        && present_mask(&s.dur) == 0
+        && s.dur.root_holder.is_none()
+    {
+        o.n.dur.root_holder = Some(s.env.holder);
+    } else if s.dur.state_holder.is_none() {
+        return Ok(None); // S5: non-empty or claimed root, no holder state
+    } else if s.dur.root_holder != Some(s.env.holder) || s.dur.state_holder != Some(s.env.holder) {
+        if d.has(Fix::RootHolderBinding) {
+            return Ok(None);
+        }
+        o.obs(Obs::RootOpenedAsWrongHolder);
+    }
     o.n.vol.phase = Phase::P3;
     o.row(S6);
     o.row(S7);
@@ -671,7 +799,7 @@ fn narrow(s: &State) -> Step {
                 _ => {}
             }
         } else if o.n.dur.tomb & bit(room) != 0 && o.n.dur.units[u] == UDur::Present {
-            o.n.vol.umem[u] = UMem::Revoked(Reason::Obligation);
+            o.n.vol.umem[u] = UMem::Revoked(Reason::Obligation(room as u8));
         }
     }
     o.n.vol.detached = (0..INSTRS)
@@ -692,12 +820,23 @@ fn fetch_useful(s: &State) -> bool {
     let Some(applied) = s.vol.applied else {
         return true;
     };
-    s.vol.relist || list_view(&s.auth.core) != applied || s.vol.admitted != Some(applied)
+    let next = list_view(&s.auth.core);
+    // A seq-only transaction does not change this holder's list projection.
+    s.env.list_signing.is_some_and(|(kid, stmt)| {
+        s.dur.pinned_keys.kids & kid == 0 || stmt.is_some_and(|k| k.seq > s.dur.pinned_keys.seq)
+    }) || (s.env.probe == Probe::Lease && s.env.clock >= s.vol.lease_until)
+        || s.vol.relist
+        || next.rev.epoch != applied.rev.epoch
+        || next.holder_rev != applied.holder_rev
+        || next.items != applied.items
+        || next.instr != applied.instr
+        || s.vol.admitted != Some(applied)
 }
 
-fn fetch_start(s: &State) -> Step {
+fn fetch_start(s: &State, d: Design) -> Step {
     if !matches!(s.vol.phase, Phase::P5 | Phase::P7)
         || s.vol.fetching
+        || s.vol.proof_backoff & bit(CHANS) != 0
         || s.vol.apply.is_some()
         || !fetch_useful(s)
     {
@@ -707,7 +846,26 @@ fn fetch_start(s: &State) -> Step {
         return Ok(None); // N3
     }
     let mut o = Out::new(s);
-    o.n.net.list = Some(ListResp::List(list_view(&s.auth.core)));
+    let view = list_view(&s.auth.core);
+    let echo = wire::list_echo(d, s.dur.last_list_ref);
+    if s.dur
+        .last_list_ref
+        .is_some_and(|r| wire::reference(Design::REV10, view.rev, r, true) == RefVerdict::Rollback)
+        && echo.is_none()
+    {
+        o.obs(Obs::ListWitnessOmitted);
+    }
+    if echo.is_some_and(|r| wire::reference(d, view.rev, r, true) == RefVerdict::Rollback) {
+        o.n.auth.rollback_suspected = true;
+    }
+    o.n.net.list = Some(if o.n.auth.rollback_suspected {
+        ListResp::Err {
+            code: ListErr::EpochMismatch,
+            healthy: true,
+        }
+    } else {
+        ListResp::List(view)
+    });
     o.n.vol.fetching = true;
     o.row(F1);
     o.done()
@@ -722,11 +880,36 @@ fn list_deliver(s: &State, d: Design) -> Step {
     o.n.vol.fetching = false;
     match resp {
         ListResp::List(l) => {
+            if let Some((kid, statement)) = s.env.list_signing {
+                let Ok(pin) = s.dur.pinned_keys.authorize(d, kid, statement) else {
+                    o.row(F10);
+                    return o.done();
+                };
+                if s.dur
+                    .pinned_keys
+                    .authorize(Design::REV10, kid, statement)
+                    .is_err()
+                {
+                    o.obs(Obs::UntrustedKey);
+                }
+                if pin != s.dur.pinned_keys {
+                    o.row(F11);
+                    match write(&mut o) {
+                        None => return Ok(None),
+                        Some(false) => return o.done(),
+                        Some(true) => o.n.dur.pinned_keys = pin,
+                    }
+                }
+            }
+            o.n.vol.proof_retried &= !bit(CHANS);
             o.row(F3);
             match admission(&s.dur, &l) {
                 Adm::Admit(h) => {
                     o.row(h);
                     o.n.vol.admitted = Some(l);
+                    if s.env.probe == Probe::Lease {
+                        o.n.vol.admitted_until = s.env.clock + 1;
+                    }
                     o.n.vol.apply = Some(ApplyStep::A1);
                     o.n.vol.alert_epoch = None;
                     if d.has(Fix::NarrowFirst) {
@@ -743,7 +926,15 @@ fn list_deliver(s: &State, d: Design) -> Step {
             }
         }
         ListResp::Err { code, healthy } => match code {
-            ListErr::Transient => o.row(F7),
+            ListErr::Transient => {
+                o.n.vol.proof_retried &= !bit(CHANS);
+                o.row(F7);
+            }
+            ListErr::ProofExpired => match proof_expiry(&mut o.n, d, CHANS) {
+                Expiry::Halt => halt(&mut o, d, Route::Halted401, true)?,
+                Expiry::Resign => o.row(F8p),
+                Expiry::BackoffClockAlert => o.row(F8b),
+            },
             ListErr::EpochMismatch => {
                 o.row(F7);
                 o.row(H10);
@@ -751,11 +942,11 @@ fn list_deliver(s: &State, d: Design) -> Step {
             ListErr::Unauthorized { replay: true } if d.has(Fix::ReplayRetries) => o.row(F8r),
             ListErr::Unauthorized { .. } => {
                 o.row(F8);
-                halt(&mut o, Route::Halted401, healthy);
+                halt(&mut o, d, Route::Halted401, healthy)?;
             }
             ListErr::Forbidden => {
                 o.row(F8);
-                halt(&mut o, Route::Halted403, healthy);
+                halt(&mut o, d, Route::Halted403, healthy)?;
             }
         },
     }
@@ -840,6 +1031,7 @@ fn apply_a1(s: &State, l: &ListMsg) -> Step {
             o.n.ghost.consumed.insert(acc, "consumed acceptances")?;
             o.obs(Obs::AcceptanceConsumed { reused });
             o.n.dur.floors = [None; OBLS];
+            o.n.dur.status_acc = None;
             for c in 0..CHANS {
                 invalidate_slot(&mut o.n, c)?;
             }
@@ -894,11 +1086,6 @@ fn apply_a1(s: &State, l: &ListMsg) -> Step {
     for i in 0..INSTRS {
         let listed = l.instr.is_some_and(|x| x.id as usize == i);
         match o.n.dur.instr[i] {
-            IDur::Done | IDur::MismatchReported | IDur::Mismatch(_) if !listed => {
-                o.n.dur.instr[i] = IDur::Unseen;
-                o.n.vol.resulted &= !bit(i);
-                o.n.vol.detached &= !bit(i);
-            }
             IDur::Reserved(_) | IDur::Draining(_) | IDur::Deleted(_) if !listed => o.row(L11),
             _ => {}
         }
@@ -930,7 +1117,24 @@ fn apply_a4(s: &State, d: Design, l: &ListMsg) -> Step {
     let mut o = Out::new(s);
     let old = s.vol.class;
     let new = classify(l, s.dur.tomb);
+    if d.has(Fix::EchoListRef) && s.dur.last_list_ref != Some(l.rev) {
+        match write(&mut o) {
+            None => return Ok(None),
+            Some(false) => {
+                o.n.vol.apply = None;
+                return o.done();
+            }
+            Some(true) => o.n.dur.last_list_ref = Some(l.rev),
+        }
+    }
     o.n.vol.class = new;
+    if s.env.probe == Probe::Lease {
+        o.n.vol.lease_until = if d.has(Fix::LeaseAndRollbackFence) {
+            s.vol.admitted_until
+        } else {
+            s.env.clock + 1
+        };
+    }
     o.n.vol.block = 0;
     o.n.vol.mem_gen = s.dur.generation;
     for ob in 0..OBLS {
@@ -954,9 +1158,9 @@ fn apply_a4(s: &State, d: Design, l: &ListMsg) -> Step {
         }
         if new[r].obligated() || s.dur.tomb & bit(r) != 0 {
             match o.n.vol.umem[u] {
-                UMem::Live => o.n.vol.umem[u] = UMem::Revoked(Reason::Obligation),
+                UMem::Live => o.n.vol.umem[u] = UMem::Revoked(Reason::Obligation(r as u8)),
                 UMem::Revoked(Reason::Gc) if d.has(Fix::GcClaimRevalidates) => {
-                    o.n.vol.umem[u] = UMem::Revoked(Reason::Obligation);
+                    o.n.vol.umem[u] = UMem::Revoked(Reason::Obligation(r as u8));
                 }
                 UMem::Revoked(_) => {}
             }
@@ -998,9 +1202,11 @@ fn rel_bind(s: &State, i: usize) -> Step {
     if ins.id as usize != i {
         return Ok(None);
     }
-    let ok = ins.manifest != 0
-        && ins.manifest & !s.vol.inv == 0
-        && ins.manifest & reserved_units(&s.dur) == 0;
+    let ok = wire::release_matches(
+        (s.dur.manifests & bit(ins.manifest as usize) != 0).then_some(ins.manifest),
+        ins.approved_count,
+        s.vol.inv & !reserved_units(&s.dur),
+    );
     let mut o = Out::new(s);
     o.row(if ok { L1 } else { L2 });
     match write(&mut o) {
@@ -1085,7 +1291,10 @@ fn rel_delete(s: &State, cfg: &Config, i: usize, u: usize, fail: bool) -> Step {
     let IDur::Draining(units) = s.dur.instr[i] else {
         return Ok(None);
     };
-    if s.vol.phase != Phase::P7 || units & bit(u) == 0 {
+    if s.vol.phase != Phase::P7
+        || units & bit(u) == 0
+        || (cfg.design.has(Fix::ExactDeletionEvidence) && s.env.open_unlinked & bit(u) != 0)
+    {
         return Ok(None);
     }
     let quarantined = match s.dur.units[u] {
@@ -1108,7 +1317,7 @@ fn rel_delete(s: &State, cfg: &Config, i: usize, u: usize, fail: bool) -> Step {
     }
     o.obs(Obs::Deleted {
         u: u as u8,
-        authorized: delete_authorized(s, u),
+        claimant: Reason::Release(i as u8),
     });
     o.n.dur.units[u] = UDur::Deleted;
     o.n.vol.umem[u] = UMem::Live;
@@ -1172,6 +1381,7 @@ fn gc_delete(s: &State, cfg: &Config, u: usize, fail: bool) -> Step {
     if s.vol.phase != Phase::P7
         || s.dur.units[u] != UDur::Present
         || s.vol.umem[u] != UMem::Revoked(Reason::Gc)
+        || (d.has(Fix::ExactDeletionEvidence) && s.env.open_unlinked & bit(u) != 0)
     {
         return Ok(None);
     }
@@ -1197,7 +1407,7 @@ fn gc_delete(s: &State, cfg: &Config, u: usize, fail: bool) -> Step {
         o.row(O6);
         o.obs(Obs::Deleted {
             u: u as u8,
-            authorized: delete_authorized(s, u),
+            claimant: Reason::Gc,
         });
         o.n.dur.units[u] = UDur::Deleted;
     }
@@ -1220,7 +1430,7 @@ fn quarantine(s: &State, d: Design, u: usize) -> Step {
     match s.vol.umem[u] {
         UMem::Live => {}
         UMem::Revoked(Reason::Gc) if d.has(Fix::GcClaimRevalidates) => {}
-        UMem::Revoked(Reason::Obligation) if c == Class::TombUnlisted => {}
+        UMem::Revoked(Reason::Obligation(_)) if c == Class::TombUnlisted => {}
         UMem::Revoked(_) => return Ok(None),
     }
     let mut o = Out::new(s);
@@ -1241,7 +1451,10 @@ fn qretry(s: &State, cfg: &Config, u: usize, fail: bool) -> Step {
     let UDur::Quarantined(q) = s.dur.units[u] else {
         return Ok(None);
     };
-    if s.vol.phase != Phase::P7 || reserving(&s.dur, u).is_some() {
+    if s.vol.phase != Phase::P7
+        || reserving(&s.dur, u).is_some()
+        || (cfg.design.has(Fix::ExactDeletionEvidence) && s.env.open_unlinked & bit(u) != 0)
+    {
         return Ok(None);
     }
     let c = room_class(s, u);
@@ -1261,7 +1474,11 @@ fn qretry(s: &State, cfg: &Config, u: usize, fail: bool) -> Step {
     }
     o.obs(Obs::Deleted {
         u: u as u8,
-        authorized: delete_authorized(s, u),
+        claimant: if c.obligated() {
+            Reason::Obligation(UNIT_ROOM[u] as u8)
+        } else {
+            Reason::Gc
+        },
     });
     o.n.dur.units[u] = UDur::Deleted;
     bump(&mut o.n, Bump::Res(UNIT_ROOM[u]));
@@ -1273,7 +1490,8 @@ fn purge_delete(s: &State, cfg: &Config, u: usize, fail: bool) -> Step {
     if s.vol.phase != Phase::P7
         || s.dur.units[u] != UDur::Present
         || !room_class(s, u).obligated()
-        || s.vol.umem[u] != UMem::Revoked(Reason::Obligation)
+        || s.vol.umem[u] != UMem::Revoked(Reason::Obligation(UNIT_ROOM[u] as u8))
+        || (cfg.design.has(Fix::ExactDeletionEvidence) && s.env.open_unlinked & bit(u) != 0)
     {
         return Ok(None);
     }
@@ -1295,7 +1513,7 @@ fn purge_delete(s: &State, cfg: &Config, u: usize, fail: bool) -> Step {
         o.row(O6);
         o.obs(Obs::Deleted {
             u: u as u8,
-            authorized: delete_authorized(s, u),
+            claimant: Reason::Obligation(UNIT_ROOM[u] as u8),
         });
         o.n.dur.units[u] = UDur::Deleted;
     }
@@ -1306,19 +1524,24 @@ fn purge_delete(s: &State, cfg: &Config, u: usize, fail: bool) -> Step {
 }
 
 /// §5.6 steps 4–6: barrier and final scan, in this process.
-fn purge_scan(s: &State, ob: usize) -> Step {
+fn purge_scan(s: &State, d: Design, ob: usize) -> Step {
     if s.vol.phase != Phase::P7 || !s.vol.class[ob].obligated() {
         return Ok(None);
     }
     // Steps 4–5 first: a pass scans once every revoked unit of `r` has had a
     // deletion attempt (failures are quarantined and retried later, O11).
     let unattempted = units_of(ob).any(|u| {
-        s.dur.units[u] == UDur::Present && s.vol.umem[u] == UMem::Revoked(Reason::Obligation)
+        s.dur.units[u] == UDur::Present
+            && s.vol.umem[u] == UMem::Revoked(Reason::Obligation(UNIT_ROOM[u] as u8))
     });
     if unattempted {
         return Ok(None);
     }
-    let rem = remaining(s, ob);
+    let rem = if d.has(Fix::ExactDeletionEvidence) {
+        observed_remaining(s, ob)
+    } else {
+        remaining(s, ob)
+    };
     let state = if !rem && s.vol.inv == 0 {
         RState::Complete
     } else {
@@ -1369,7 +1592,12 @@ fn enqueue(s: &State, c: usize, same_state: bool) -> Step {
         };
         let floor_ok = s.dur.floors[c].is_none_or(|f| {
             state > f.state
-                || (same_state && state == f.state && state != RState::Complete && f.key != Some(k))
+                || (same_state
+                    && state == f.state
+                    && state != RState::Complete
+                    && f.key.is_none_or(|prev| {
+                        prev.manifest != k.manifest || prev.remaining != k.remaining
+                    }))
         });
         let pend_ok = p.is_none_or(|p| {
             let pst = p.key.obl().map_or(RState::Complete, |k| k.state);
@@ -1392,7 +1620,7 @@ fn enqueue(s: &State, c: usize, same_state: bool) -> Step {
     } else {
         let rr = release_outcome(s);
         let last = s.dur.status_acc.map_or(0, |k| k.manifest);
-        if s.vol.inv == last && rr.is_none() {
+        if s.vol.inv == last && rr.is_none() && !s.dur.reset_pending {
             return Ok(None);
         }
         if p.is_some_and(|p| !matches!(p.st, DurSt::Invalidated | DurSt::Rejected)) {
@@ -1400,6 +1628,7 @@ fn enqueue(s: &State, c: usize, same_state: bool) -> Step {
         }
         let k = SKey {
             list_ref: hw,
+            reset: s.dur.reset_pending,
             manifest: s.vol.inv,
             result: rr,
         };
@@ -1421,12 +1650,16 @@ fn enqueue(s: &State, c: usize, same_state: bool) -> Step {
 
 /// The transmission guard (§5.6): re-derive the claim from the current
 /// snapshot.
-fn transmission_guard(s: &State, key: Key) -> bool {
+fn transmission_guard(s: &State, d: Design, key: Key) -> bool {
     let Some(hw) = s.dur.hw else { return false };
     match key {
         Key::O(k) => {
             let ob = k.o as usize;
-            let rem = remaining(s, ob);
+            let rem = if d.has(Fix::ExactDeletionEvidence) {
+                observed_remaining(s, ob)
+            } else {
+                remaining(s, ob)
+            };
             s.vol.class[ob].obligated()
                 && k.list_ref.epoch == hw.epoch
                 && k.manifest == s.vol.inv
@@ -1452,7 +1685,8 @@ enum From {
 }
 
 fn transmit(s: &State, d: Design, c: usize) -> Step {
-    if s.vol.phase != Phase::P7 || s.vol.route != Route::Normal {
+    if s.vol.phase != Phase::P7 || s.vol.route != Route::Normal || s.vol.proof_backoff & bit(c) != 0
+    {
         return Ok(None); // N3 refuses R2 and T2 while halted
     }
     let Some(p) = s.dur.slots[c] else {
@@ -1464,7 +1698,7 @@ fn transmit(s: &State, d: Design, c: usize) -> Step {
         (DurSt::Armed, SlotVol::Idle) if d.has(Fix::RestartArmedResumes) => From::Restored,
         _ => return Ok(None),
     };
-    let ok = transmission_guard(s, p.key);
+    let ok = transmission_guard(s, d, p.key);
     let tx = p.earlier || from != From::Ready;
     let mut o = Out::new(s);
     if from == From::Restored {
@@ -1487,6 +1721,11 @@ fn transmit(s: &State, d: Design, c: usize) -> Step {
             earlier: tx,
         });
         o.n.vol.slotv[c] = SlotVol::Armed { clean: true };
+        let manifest = match p.key {
+            Key::O(k) => k.manifest,
+            Key::S(k) => k.manifest,
+        };
+        o.n.dur.manifests |= bit(manifest as usize);
     } else {
         if tx {
             o.n.dur.uncertain[c].insert(p.key, "uncertain keys per channel")?;
@@ -1545,8 +1784,18 @@ fn dispatch(s: &State, d: Design, c: usize) -> Step {
     };
     let p = s.dur.slots[c].expect("a queued attempt has its pending report");
     let mut o = Out::new(s);
+    if d.has(Fix::CancelOnForbidden) && s.vol.route == Route::Halted403 {
+        invalidate_slot(&mut o.n, c)?;
+        o.row(N2c);
+        return o.done();
+    }
     if d.has(Fix::DispatchLinearized) {
-        if !clean || aged {
+        let observed_conflict = d.has(Fix::ExactDeletionEvidence)
+            && p.key.obl().is_some_and(|k| {
+                k.state == RState::Complete
+                    && (observed_remaining(s, k.o as usize) || inventory(s) != 0)
+            });
+        if !clean || aged || observed_conflict {
             o.row(ch_row(c, R2q, T2q));
             o.n.vol.slotv[c] = SlotVol::Armed { clean: false };
             return o.done();
@@ -1558,15 +1807,19 @@ fn dispatch(s: &State, d: Design, c: usize) -> Step {
     {
         o.obs(Obs::DispatchedComplete {
             o: k.o,
-            true_claim: s.vol.inv == 0 && !remaining(s, k.o as usize),
+            true_claim: inventory(s) == 0 && !observed_remaining(s, k.o as usize),
             fresh: clean,
         });
+    }
+    if s.vol.route == Route::Halted403 {
+        o.obs(Obs::SentWhileForbidden);
     }
     o.n.net.reqs[c].push(
         Req {
             key: p.key,
             replay: false,
             aged,
+            commit_late: false,
             alive: true,
         },
         "requests in flight per channel",
@@ -1601,9 +1854,32 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
             }
         };
     }
+    if awaiting && resp.kind != RespKind::ProofExpired {
+        o.n.vol.proof_retried &= !bit(c);
+    }
     match resp.kind {
-        RespKind::Accepted { epoch } => {
-            if awaiting {
+        RespKind::ProofExpired if awaiting => match proof_expiry(&mut o.n, d, c) {
+            Expiry::Halt => halt(&mut o, d, Route::Halted401, true)?,
+            retry => {
+                o.row(if retry == Expiry::Resign {
+                    ch_row(c, R11p, T6p)
+                } else {
+                    ch_row(c, R11b, T6e)
+                });
+                o.n.vol.slotv[c] = SlotVol::Sent { awaiting: false };
+            }
+        },
+        RespKind::ProofExpired => {}
+        RespKind::Accepted {
+            epoch,
+            accepted_holder_reset,
+            ..
+        } => {
+            if awaiting && epoch != cur_epoch && d.has(Fix::AuthorityFidelity) {
+                o.row(ch_row(c, R19, T7));
+                o.n.vol.slotv[c] = SlotVol::Sent { awaiting: false };
+                o.n.vol.relist = true;
+            } else if awaiting {
                 o.row(ch_row(c, R5, T4));
                 commit!();
                 match resp.key {
@@ -1613,6 +1889,9 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
                     }
                     Key::S(k) => {
                         o.n.dur.status_acc = Some(k);
+                        if accepted_holder_reset == Some(true) && k.reset && epoch == cur_epoch {
+                            o.n.dur.reset_pending = false;
+                        }
                         clear_slot(&mut o.n, c);
                         settle_release(&mut o, k.result);
                     }
@@ -1640,6 +1919,9 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
                     Key::S(k) => {
                         o.row(T7);
                         commit!();
+                        if accepted_holder_reset == Some(true) && k.reset && epoch == cur_epoch {
+                            o.n.dur.reset_pending = false;
+                        }
                         settle_release(&mut o, k.result);
                     }
                 }
@@ -1649,7 +1931,26 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
         RespKind::AlreadyComplete(ack) | RespKind::StateRegression(ack) => {
             let applies = c < OBLS && (awaiting || p.is_some_and(|p| p.st == DurSt::Invalidated));
             if applies {
-                if d.has(Fix::ConvergenceEpochBound) && ack.epoch != cur_epoch {
+                // Rev 9 assumed the entire 409 body was the compact ack.
+                // Under H.5 the signed ack is in the problem extension.
+                if d.has(Fix::AuthorityFidelity)
+                    && !d.has(Fix::ConvergenceEnvelope)
+                    && matches!(resp.kind, RespKind::StateRegression(_))
+                {
+                    o.n.vol.relist = true;
+                    o.obs(Obs::WrongConvergenceEnvelope);
+                    return o.done();
+                }
+                let envelope = wire::classify_ack(
+                    d,
+                    0,
+                    1,
+                    matches!(resp.kind, RespKind::StateRegression(_)),
+                    matches!(resp.kind, RespKind::AlreadyComplete(_)),
+                    ack.epoch == cur_epoch,
+                    false,
+                );
+                if d.has(Fix::ConvergenceEpochBound) && envelope == AckClass::AuditAndRelist {
                     o.row(R6e);
                     commit!();
                     if awaiting && let Some(p) = p {
@@ -1722,14 +2023,14 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
                     o.n.vol.slotv[c] = SlotVol::Sent { awaiting: false };
                 } else {
                     o.row(ch_row(c, R11, T6b));
-                    halt(&mut o, Route::Halted401, resp.healthy);
+                    halt(&mut o, d, Route::Halted401, resp.healthy)?;
                 }
             }
         }
         RespKind::Forbidden => {
             if awaiting {
                 o.row(ch_row(c, R11, T6a));
-                halt(&mut o, Route::Halted403, resp.healthy);
+                halt(&mut o, d, Route::Halted403, resp.healthy)?;
             }
         }
     }
@@ -1749,14 +2050,35 @@ fn replenish(s: &State) -> Step {
 
 // ------------------------------------------------- healthy environment
 
-fn process_report(core: &mut AuthCore, k: OKey) -> Result<RespKind, Bound> {
+pub fn mintable(s: &State, room: usize) -> bool {
+    !s.auth.rollback_suspected && s.auth.core.rooms[room].phase == APhase::Active
+}
+
+pub fn witness(s: &mut State, d: Design, echo: Rev, tag_valid: bool) -> RefVerdict {
+    let store = list_view(&s.auth.core).rev;
+    let result = wire::reference(d, store, echo, tag_valid);
+    if result == RefVerdict::Rollback {
+        s.auth.rollback_suspected = true;
+    }
+    result
+}
+
+fn accepted(epoch: u8) -> RespKind {
+    RespKind::Accepted {
+        epoch,
+        disposition: None,
+        accepted_holder_reset: None,
+    }
+}
+
+fn process_report(core: &mut AuthCore, d: Design, k: OKey) -> Result<RespKind, Bound> {
     let (epoch, seq) = (core.epoch, core.seq);
     let room = &mut core.rooms[k.o as usize];
     let Some(obl) = room.obl.as_mut() else {
         return Ok(RespKind::NotFound);
     };
-    if let Some((_, ep)) = obl.receipts.iter().find(|(rk, _)| *rk == k) {
-        return Ok(RespKind::Accepted { epoch: ep });
+    if let Some((_, ep, _)) = obl.receipts.iter().find(|(rk, _, _)| *rk == k) {
+        return Ok(accepted(ep));
     }
     if k.list_ref.epoch != epoch || k.list_ref.seq < obl.created_seq || k.list_ref.seq > seq {
         return Ok(RespKind::StaleListRef);
@@ -1776,50 +2098,139 @@ fn process_report(core: &mut AuthCore, k: OKey) -> Result<RespKind, Bound> {
         state: k.state,
         epoch,
     });
-    obl.receipts
-        .insert((k, epoch), "authority receipts per obligation")?;
+    obl.receipts.insert(
+        (k, epoch, core.seq + 1),
+        "authority receipts per obligation",
+    )?;
+    if k.manifest == 0 {
+        obl.blocked = false;
+    }
     if k.state == RState::Complete {
         room.phase = APhase::Retired;
-        core.seq += 1;
     }
-    Ok(RespKind::Accepted { epoch })
+    if k.state == RState::Complete || d.has(Fix::AuthorityFidelity) {
+        core.seq += 1;
+        core.holder_rev = core.seq;
+    }
+    Ok(accepted(epoch))
 }
 
-fn process_status(core: &mut AuthCore, k: SKey) -> Result<RespKind, Bound> {
-    if let Some((_, ep)) = core.status_receipts.iter().find(|(rk, _)| *rk == k) {
-        return Ok(RespKind::Accepted { epoch: ep });
+fn process_status(core: &mut AuthCore, d: Design, k: SKey) -> Result<RespKind, Bound> {
+    let fidelity = d.has(Fix::AuthorityFidelity);
+    if let Some((_, epoch, disposition)) = core.status_receipts.iter().find(|(rk, _, _)| *rk == k) {
+        return Ok(RespKind::Accepted {
+            epoch,
+            disposition,
+            accepted_holder_reset: Some(k.reset),
+        });
     }
-    if k.list_ref.epoch != core.epoch || k.list_ref.seq > core.seq {
+    if k.list_ref.epoch != core.epoch
+        || k.list_ref.seq > core.seq
+        || (fidelity
+            && core.status.is_some_and(|last| {
+                last.list_ref.epoch == core.epoch && k.list_ref.seq < last.list_ref.seq
+            }))
+    {
         return Ok(RespKind::StaleListRef);
     }
-    core.status = Some(k);
-    core.status_receipts
-        .insert((k, core.epoch), "authority status receipts")?;
-    if let Some(rr) = k.result
-        && core.instr.is_some_and(|x| x.id == rr.instr)
+    let mut changed = false;
+    let disposition = if let Some(rr) = k.result {
+        if core.instr.is_some_and(|x| x.id == rr.instr) {
+            core.instr = None;
+            changed = true;
+            Some(ReleaseDisposition::Applied)
+        } else if (rr.instr as usize) < INSTRS && core.final_instr & bit(rr.instr as usize) != 0 {
+            Some(ReleaseDisposition::AlreadyFinal)
+        } else {
+            Some(ReleaseDisposition::UnknownInstruction)
+        }
+    } else {
+        None
+    };
+    if disposition == Some(ReleaseDisposition::Applied)
+        && let Some(rr) = k.result
     {
-        core.instr = None;
+        core.final_instr |= bit(rr.instr as usize);
+        if !rr.executed {
+            core.superseded_mismatch |= bit(rr.instr as usize);
+        }
+    }
+    if k.manifest == 0
+        || (disposition == Some(ReleaseDisposition::Applied)
+            && k.result.is_some_and(|r| r.executed))
+    {
+        core.release_declined = false;
+        for obl in core.rooms.iter_mut().filter_map(|r| r.obl.as_mut()) {
+            changed |= obl.blocked;
+            obl.blocked = false;
+        }
+    }
+    core.status = Some(k);
+    let disposition = if fidelity { disposition } else { None };
+    core.status_receipts
+        .insert((k, core.epoch, disposition), "authority status receipts")?;
+    if changed || fidelity {
         core.seq += 1;
     }
-    Ok(RespKind::Accepted { epoch: core.epoch })
+    if changed {
+        core.holder_rev = core.seq;
+    }
+    Ok(RespKind::Accepted {
+        epoch: core.epoch,
+        disposition,
+        accepted_holder_reset: Some(k.reset),
+    })
 }
 
-fn auth_process(s: &State, c: usize, idx: usize) -> Step {
+fn auth_process(s: &State, d: Design, c: usize, idx: usize) -> Step {
     let Some(req) = s.net.reqs[c].get(idx) else {
         return Ok(None);
     };
     let mut o = Out::new(s);
     o.n.net.reqs[c].remove_at(idx);
-    let kind = if req.replay {
+    let mut kind = if req.replay {
         RespKind::Unauthorized { replay: true }
     } else if req.aged {
-        RespKind::Unauthorized { replay: false }
+        if d.has(Fix::AuthorityFidelity) {
+            RespKind::ProofExpired
+        } else {
+            RespKind::Unauthorized { replay: false }
+        }
+    } else if witness(&mut o.n, d, req.key.list_ref(), true) == RefVerdict::Rollback
+        || o.n.auth.rollback_suspected
+    {
+        RespKind::EpochMismatch
     } else {
         match req.key {
-            Key::O(k) => process_report(&mut o.n.auth.core, k)?,
-            Key::S(k) => process_status(&mut o.n.auth.core, k)?,
+            Key::O(k) => process_report(&mut o.n.auth.core, d, k)?,
+            Key::S(k) => process_status(&mut o.n.auth.core, d, k)?,
         }
     };
+    let pre = &s.auth.core;
+    if req.commit_late
+        && o.n.auth.core.seq > pre.seq
+        && !wire::Proof::sign(1, 0).timely_at_commit(wire::PROOF_TTL + wire::SKEW + 1)
+    {
+        // Nothing escapes the CAS on a failed proof-time recheck.
+        o.n.auth.core = *pre;
+        kind = RespKind::ProofExpired;
+    }
+    let post = &o.n.auth.core;
+    let replay_key = match req.key {
+        Key::O(k) => pre.rooms[k.o as usize]
+            .obl
+            .is_some_and(|o| o.receipts.iter().any(|(key, _, _)| key == k)),
+        Key::S(k) => pre.status_receipts.iter().any(|(key, _, _)| key == k),
+    };
+    let must_detect = !req.replay
+        && !req.aged
+        && wire::reference(Design::REV10, list_view(pre).rev, req.key.list_ref(), true)
+            == RefVerdict::Rollback;
+    if (must_detect && (kind != RespKind::EpochMismatch || !o.n.auth.rollback_suspected))
+        || (matches!(kind, RespKind::Accepted { .. }) && !replay_key && post.seq != pre.seq + 1)
+    {
+        o.obs(Obs::AuthorityUnfaithful);
+    }
     if req.alive {
         o.n.net.resps[c].push(
             Resp {
@@ -1860,9 +2271,73 @@ fn human_release(s: &State) -> Step {
     c.instr = Some(Instr {
         id: c.next_instr,
         manifest: st.manifest,
+        approved_count: st.manifest.count_ones() as u8,
     });
+    let ins = c.instr.expect("just issued");
     c.next_instr += 1;
     c.seq += 1;
+    c.holder_rev = c.seq;
+    o.n.auth.journal_issued[ins.id as usize] = Some((c.seq, ins));
+    o.done()
+}
+
+fn human_decline(s: &State, d: Design) -> Step {
+    if !d.has(Fix::AuthorityFidelity) {
+        return Ok(None);
+    }
+    let core = &s.auth.core;
+    if core.instr.is_some() || core.release_declined || core.status.is_none_or(|k| k.manifest == 0)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let c = &mut o.n.auth.core;
+    c.release_declined = true;
+    c.seq += 1;
+    let mut eligible = false;
+    for r in 0..ROOMS {
+        let Some(obl) = c.rooms[r].obl.as_mut() else {
+            continue;
+        };
+        if obl.accepted.is_some_and(|a| a.state == RState::Incomplete)
+            && obl
+                .receipts
+                .iter()
+                .max_by_key(|(_, _, seq)| *seq)
+                .is_some_and(|(k, _, _)| {
+                    k.state == RState::Incomplete && !k.remaining && k.manifest != 0
+                })
+        {
+            eligible = true;
+            if d.has(Fix::ReleaseDeclined) {
+                c.holder_rev = c.seq;
+                obl.blocked = true;
+                o.n.auth.journal_declined[r] = c.seq;
+            }
+        }
+    }
+    if eligible {
+        if d.has(Fix::ReleaseDeclined) {
+            o.row(C16);
+        } else {
+            o.obs(Obs::DeclineInvisible);
+        }
+    }
+    // If the report arrives after this decision the H.9 guard is not met;
+    // keep the decision snapshot rather than treating it as deletion authority.
+    o.done()
+}
+
+fn reopen(s: &State, ob: usize) -> Step {
+    if s.env.probe != Probe::Governance || !s.auth.core.rooms[ob].obl.is_some_and(|o| o.blocked) {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let core = &mut o.n.auth.core;
+    core.rooms[ob].obl.as_mut().expect("guard checked").blocked = false;
+    core.release_declined = false;
+    core.seq += 1;
+    core.holder_rev = core.seq;
     o.done()
 }
 
@@ -1882,6 +2357,7 @@ fn resp_kind(code: FaultCode) -> RespKind {
         FaultCode::Transient => RespKind::Transient,
         FaultCode::EpochMismatch => RespKind::EpochMismatch,
         FaultCode::BadProof => RespKind::Unauthorized { replay: false },
+        FaultCode::ProofExpired => RespKind::ProofExpired,
         FaultCode::Forbidden => RespKind::Forbidden,
         FaultCode::Bug => RespKind::Bug,
     }
@@ -1891,7 +2367,10 @@ fn auth_fault(s: &State, cfg: &Config, c: usize, idx: usize, code: FaultCode) ->
     let Some(req) = s.net.reqs[c].get(idx) else {
         return Ok(None);
     };
-    if !fault_ok(s, cfg, faults::REPORT_ERRORS) || !req.alive {
+    if !fault_ok(s, cfg, faults::REPORT_ERRORS)
+        || !req.alive
+        || (code == FaultCode::ProofExpired && !cfg.design.has(Fix::AuthorityFidelity))
+    {
         return Ok(None);
     }
     let mut o = Out::new(s);
@@ -1901,7 +2380,7 @@ fn auth_fault(s: &State, cfg: &Config, c: usize, idx: usize, code: FaultCode) ->
         Resp {
             key: req.key,
             kind: resp_kind(code),
-            healthy: false,
+            healthy: code == FaultCode::ProofExpired,
             late: false,
         },
         "responses in flight per channel",
@@ -1973,11 +2452,42 @@ fn age_out(s: &State, cfg: &Config, c: usize) -> Step {
     o.done()
 }
 
+fn delay_commit(s: &State, cfg: &Config, c: usize) -> Step {
+    let Some(req) = s.net.reqs[c].get(0) else {
+        return Ok(None);
+    };
+    if s.env.probe != Probe::Proof
+        || req.aged
+        || req.commit_late
+        || req.replay
+        || !req.alive
+        || !cfg.design.has(Fix::AuthorityFidelity)
+        || !fault_ok(s, cfg, faults::AGE_OUT)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.budget.faults -= 1;
+    o.n.net.reqs[c].remove_at(0);
+    o.n.net.reqs[c].push(
+        Req {
+            commit_late: true,
+            ..req
+        },
+        "requests in flight per channel",
+    )?;
+    o.done()
+}
+
 fn list_fault(s: &State, cfg: &Config, code: FaultCode) -> Step {
+    if code == FaultCode::ProofExpired && !cfg.design.has(Fix::AuthorityFidelity) {
+        return Ok(None);
+    }
     let code = match code {
         FaultCode::Transient => ListErr::Transient,
         FaultCode::EpochMismatch => ListErr::EpochMismatch,
         FaultCode::BadProof => ListErr::Unauthorized { replay: false },
+        FaultCode::ProofExpired => ListErr::ProofExpired,
         FaultCode::Forbidden => ListErr::Forbidden,
         FaultCode::Bug => return Ok(None),
     };
@@ -1988,7 +2498,7 @@ fn list_fault(s: &State, cfg: &Config, code: FaultCode) -> Step {
     o.n.budget.faults -= 1;
     o.n.net.list = Some(ListResp::Err {
         code,
-        healthy: false,
+        healthy: code == ListErr::ProofExpired,
     });
     o.done()
 }
@@ -2031,7 +2541,7 @@ fn disk_full(s: &State, cfg: &Config) -> Step {
 }
 
 fn crash(s: &State) -> Step {
-    if s.budget.crashes == 0 || s.vol.phase == Phase::Down {
+    if s.budget.crashes == 0 || (s.vol.phase == Phase::Down && !s.env.recovering) {
         return Ok(None);
     }
     let mut o = Out::new(s);
@@ -2055,10 +2565,18 @@ fn auth_retire(s: &State, r: usize) -> Step {
     o.n.budget.retires -= 1;
     let c = &mut o.n.auth.core;
     c.seq += 1;
+    let rev = Rev {
+        epoch: c.epoch,
+        seq: c.seq,
+    };
+    o.n.ghost.retired_at[r] = Some(rev);
+    o.n.auth.journal_retired |= bit(r);
+    c.holder_rev = c.seq;
     c.rooms[r] = ARoom {
         phase: APhase::Terminating,
         obl: Some(AObl {
             created_seq: c.seq,
+            blocked: false,
             accepted: None,
             receipts: Default::default(),
         }),
@@ -2079,6 +2597,7 @@ fn auth_unlist(s: &State, r: usize) -> Step {
     o.n.budget.changes -= 1;
     o.n.auth.core.rooms[r].phase = APhase::Unlisted;
     o.n.auth.core.seq += 1;
+    o.n.auth.core.holder_rev = o.n.auth.core.seq;
     o.done()
 }
 
@@ -2095,6 +2614,7 @@ fn auth_relist(s: &State, r: usize) -> Step {
     o.n.budget.changes -= 1;
     o.n.auth.core.rooms[r].phase = APhase::Active;
     o.n.auth.core.seq += 1;
+    o.n.auth.core.holder_rev = o.n.auth.core.seq;
     o.done()
 }
 
@@ -2107,6 +2627,7 @@ fn auth_drop(s: &State, r: usize) -> Step {
     o.n.budget.drops -= 1;
     o.n.auth.core.rooms[r].phase = APhase::Unlisted;
     o.n.auth.core.seq += 1;
+    o.n.auth.core.holder_rev = o.n.auth.core.seq;
     o.done()
 }
 
@@ -2122,7 +2643,7 @@ fn auth_backup(s: &State) -> Step {
 /// A supported restore (HW §14 Q4, G.4): the backed-up state under a newly
 /// minted epoch. Instruction ids are random in the real system and never
 /// reused, so the id counter is not rolled back.
-fn auth_restore(s: &State) -> Step {
+fn auth_restore(s: &State, d: Design) -> Step {
     let Some(b) = s.auth.backup.as_deref() else {
         return Ok(None);
     };
@@ -2137,6 +2658,54 @@ fn auth_restore(s: &State) -> Step {
         next_instr,
         ..*b
     };
+    if d.has(Fix::RetirementReplay) {
+        let c = &mut o.n.auth.core;
+        for r in 0..ROOMS {
+            if o.n.auth.journal_retired & bit(r) != 0 && c.rooms[r].obl.is_none() {
+                c.seq += 1;
+                c.holder_rev = c.seq;
+                c.rooms[r] = ARoom {
+                    phase: APhase::Terminating,
+                    obl: Some(AObl {
+                        created_seq: c.seq,
+                        blocked: false,
+                        accepted: None,
+                        receipts: Default::default(),
+                    }),
+                };
+            }
+            if o.n.auth.journal_declined[r] > b.seq
+                && let Some(obl) = c.rooms[r].obl.as_mut()
+                && !obl.complete()
+            {
+                obl.blocked = true;
+                c.release_declined = true;
+                c.seq += 1;
+                c.holder_rev = c.seq;
+            }
+        }
+        // One outstanding slot. Recorded results in the backup win.
+        for (seq, ins) in o.n.auth.journal_issued.into_iter().flatten() {
+            if seq > b.seq
+                && !c
+                    .status_receipts
+                    .iter()
+                    .any(|(k, _, _)| k.result.is_some_and(|r| r.instr == ins.id))
+            {
+                c.instr = Some(ins);
+                c.seq += 1;
+                c.holder_rev = c.seq;
+            }
+        }
+    }
+    if d.has(Fix::AuthorityFidelity) {
+        let c = &mut o.n.auth.core;
+        c.status_receipts = Default::default();
+        for o in c.rooms.iter_mut().filter_map(|r| r.obl.as_mut()) {
+            o.receipts = Default::default();
+        }
+    }
+    o.n.auth.rollback_suspected = false;
     o.n.auth.backup = None;
     o.done()
 }
@@ -2186,5 +2755,92 @@ fn op_clear_halt(s: &State, d: Design, c: usize) -> Step {
         earlier: false,
     });
     o.row(N5);
+    o.done()
+}
+
+// Focused adversary probes share the main transition and invariant functions.
+fn probe(s: &State, d: Design, action: Action) -> Step {
+    use Action::*;
+    let mut o = Out::new(s);
+    match (s.env.probe, action) {
+        (Probe::Root, SwapHolder) if s.vol.phase == Phase::Down && s.env.holder == 0 => {
+            o.n.env.holder = 1;
+            // A valid state belonging to the new holder, not a corrupt file.
+            o.n.dur.state_holder = Some(1);
+        }
+        (Probe::Root, LoseHolderState)
+            if s.vol.phase == Phase::Down && s.dur.state_holder.is_some() =>
+        {
+            o.n.dur.state_holder = None;
+        }
+        (Probe::Root, BeginRecovery)
+            if s.vol.phase == Phase::Down && s.dur.state_holder.is_none() && !s.env.recovering =>
+        {
+            // Backup authenticity/age are held fixed here; validate owner before restoring.
+            if d.has(Fix::RootHolderBinding) && Some(s.env.holder) != s.dur.root_holder {
+                return Ok(None);
+            }
+            o.n.env.recovering = true;
+            o.row(S15);
+        }
+        (Probe::Root, CommitRecovery) if s.vol.phase == Phase::Down && s.env.recovering => {
+            if d.has(Fix::RootHolderBinding) && Some(s.env.holder) != s.dur.root_holder {
+                return Ok(None);
+            }
+            o.n.dur.state_holder = Some(s.env.holder);
+            o.n.env.recovering = false;
+            o.row(S15);
+        }
+        (Probe::Lease, TryLegacy) if s.vol.phase == Phase::Down && !s.env.legacy_started => {
+            if d.has(Fix::LeaseAndRollbackFence) || s.dur.rollback_closed {
+                return Ok(None);
+            }
+            o.n.env.legacy_started = true;
+        }
+        (Probe::Lease, LeaseDeadline) if s.env.clock < 2 && s.vol.admitted.is_some() => {
+            o.n.env.clock += 1;
+            o.row(C2);
+        }
+        // A handle to the old current object can be installed before A0. Its
+        // directory entry may disappear; the independent census still sees it.
+        (Probe::Evidence, KeepOpen) if servable(s, 0) && s.env.open_unlinked == 0 => {
+            o.n.env.open_unlinked = bit(0);
+        }
+        (Probe::Evidence, CloseHandle) if s.env.open_unlinked != 0 => {
+            o.n.env.open_unlinked = 0;
+            bump(&mut o.n, Bump::Res(0));
+        }
+        // Model an output published by a builder after the final scan, but
+        // before the first wire byte; the holder registry has not observed it.
+        (Probe::Evidence, LatePublish)
+            if !s.env.late_once
+                && s.vol.scans[0].is_some_and(|sc| sc.state == RState::Complete) =>
+        {
+            o.n.env.late_published = bit(1);
+            o.n.env.late_once = true;
+            o.row(O2);
+        }
+        (Probe::Evidence, ReconcileLate)
+            if s.env.late_published != 0 && s.vol.phase == Phase::P7 =>
+        {
+            o.n.env.late_published = 0;
+            o.n.dur.units[1] = UDur::Present;
+            o.n.vol.umem[1] = UMem::Revoked(Reason::Obligation(0));
+            bump(&mut o.n, Bump::Res(0));
+            o.row(O14x);
+        }
+        (Probe::Evidence, WrongRelease { i, u })
+            if !d.has(Fix::ExactDeletionEvidence)
+                && matches!(s.dur.instr[1 - i as usize], IDur::Draining(m) if m & bit(u as usize) != 0)
+                && s.dur.units[u as usize] != UDur::Deleted =>
+        {
+            o.n.dur.units[u as usize] = UDur::Deleted;
+            o.obs(Obs::Deleted {
+                u,
+                claimant: Reason::Release(i),
+            });
+        }
+        _ => return Ok(None),
+    }
     o.done()
 }
