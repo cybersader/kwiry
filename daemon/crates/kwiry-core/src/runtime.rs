@@ -3364,6 +3364,7 @@ mod tests {
         assert!(
             matches!(index.search("needle", 10, &filters, &signed), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0, 2])
         );
+        assert!(index.readers.lock().unwrap().contains_key(&signed[1]));
         assert_eq!(
             index
                 .search("needle", 10, &filters, &signed[1..2])

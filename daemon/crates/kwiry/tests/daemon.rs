@@ -901,7 +901,7 @@ fn format_release_fr11_http_refuses_ingestion_and_boot_uses_guarded_walker() {
     fs::write(room.join("ordinary.md"), "ordinary fixture").unwrap();
     fs::write(room.join("linked.md"), "synthetic restricted fixture").unwrap();
     fs::hard_link(room.join("linked.md"), room.join("alias.md")).unwrap();
-    let vault_id = "VaultAaaa_0123456789abc";
+    let vault_id = "VaultAaa_0123456789abc";
     let room_id = "RoomAaaa_0123456789abc";
     let mut config = format_daemon_config(root);
     config.vaults.push(VaultRegistration {
@@ -941,9 +941,9 @@ fn format_release_fr12_http_reports_all_missing_signed_indexes() {
     fs::create_dir(&room).unwrap();
     fs::write(room.join("index.md"), "synthetic middle witness").unwrap();
     let signed = [
-        ("VaultAaaa_0123456789abc", "RoomAaaa_0123456789abc"),
-        ("VaultBbbb_0123456789abc", "RoomBbbb_0123456789abc"),
-        ("VaultCccc_0123456789abc", "RoomCccc_0123456789abc"),
+        ("VaultAaa_0123456789abc", "RoomAaaa_0123456789abc"),
+        ("VaultBbb_0123456789abc", "RoomBbbb_0123456789abc"),
+        ("VaultCcc_0123456789abc", "RoomCccc_0123456789abc"),
     ];
     let mut config = format_daemon_config(root);
     config.vaults.push(VaultRegistration {

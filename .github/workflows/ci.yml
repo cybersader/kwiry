@@ -36,11 +36,14 @@ jobs:
       - name: Local daemon quality gate
         run: make check COMPONENT=daemon
       - name: Verify r10 FR9–FR12 in the core API
+        if: ${{ !cancelled() }}
         working-directory: daemon
         run: |
+          status=0
           for vector in fr9_ fr10_ fr11_ fr12_; do
-            cargo test --locked -p kwiry-core --lib "$vector"
+            cargo test --locked -p kwiry-core --lib "$vector" || status=1
           done
+          exit "$status"
       - name: Test all workspace features (component harnesses force Holdings on)
         working-directory: daemon
         run: cargo test --locked --workspace --all-features
