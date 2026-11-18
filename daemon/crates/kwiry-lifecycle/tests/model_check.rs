@@ -1,6 +1,6 @@
 //! The lifecycle model check.
 //!
-//! - `rev10_holds`: every CI profile of revision 11 explores its bounded
+//! - `rev10_holds`: every CI profile of revision 11.1 explores its bounded
 //!   quotient exhaustively (`step::canonical`; the reductions are in the
 //!   crate docs) and every property (I1–I9, L1) holds; the union of rows the
 //!   profiles exercise matches the table's coverage notes.
@@ -43,7 +43,7 @@ fn budget(retires: u8, retire_rooms: u8) -> Budget {
 fn profile(name: &'static str, budget: Budget) -> Profile {
     Profile {
         name,
-        design: Design::REV11,
+        design: Design::REV11_1,
         budget,
         faults: 0,
         garbage: false,

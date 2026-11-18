@@ -254,6 +254,10 @@ pub struct Auth {
     pub rollback_suspected: bool,
     pub failed_restore: bool,
     pub journal_lost_audited: bool,
+    /// H.25: a new epoch closed minting for the id-space; it reopens when the
+    /// (single modeled) enrolled holder has a report accepted whose
+    /// `list_ref` is a tag-valid list of the current epoch.
+    pub mint_gate: bool,
 }
 
 // -------------------------------------------------------------------- lists
@@ -638,6 +642,9 @@ pub struct Volatile {
     pub lease_until: u8,
     pub admitted_until: u8,
     pub capability: Option<InFlightCapability>,
+    /// H.23: a `page_size: 1` clock-probe list request of this process is
+    /// outstanding (its nonce and send instant live only in this process).
+    pub clock_probe: bool,
     /// The newest list admitted by an H row in this process (it is also the
     /// list an in-progress apply is applying).
     pub admitted: Option<ListMsg>,
@@ -655,6 +662,9 @@ pub struct Volatile {
     /// H.16 AP24: rooms whose applied pin the holder's pin-history holds under
     /// another room (`root_pin_previously_listed`), set at A4.
     pub pin_conflict: u8,
+    /// Rejected H.24 reading only: rooms whose artifacts this process took as
+    /// current from the in-process baseline instead of the durable record.
+    pub adopted: u8,
     /// The unattributed inventory as of the last L3 update.
     pub inv: u8,
     pub umem: [UMem; UNITS],
@@ -685,6 +695,7 @@ impl Volatile {
             lease_until: u8::MAX,
             admitted_until: u8::MAX,
             capability: None,
+            clock_probe: false,
             admitted: None,
             applied: None,
             apply: None,
@@ -696,6 +707,7 @@ impl Volatile {
             class: [Class::Pending; ROOMS],
             block: 0,
             pin_conflict: 0,
+            adopted: 0,
             inv: 0,
             umem: [UMem::Live; UNITS],
             scans: [None; OBLS],
@@ -741,8 +753,14 @@ pub struct Env {
     pub envelope: Option<crate::wire::Envelope>,
     pub exposure_elapsed: u8,
     pub capability_skew: u8,
-    /// H.21 refuses governed requests until clock correction is confirmed.
+    /// H.21 refuses governed requests until clock correction is confirmed
+    /// (H.23). Recorded in holder state: a restart is no correction.
     pub clock_behind_authority: bool,
+    /// Ground truth: how far (seconds) the engine clock lags the authority
+    /// clock. Only a local clock step changes it.
+    pub lag: u8,
+    /// H.23: the one clock probe of the current 60 s window has been sent.
+    pub probe_window_used: bool,
     pub bad_journal: bool,
     pub list_signing: Option<(u8, Option<crate::wire::Keyset>)>,
     /// H.16: the directory each room's configured root resolves to now.
@@ -766,6 +784,9 @@ pub enum Probe {
     Journal,
     /// H.16 root pins: attestation, storage changes and rebuilds.
     Pin,
+    /// H.25: capabilities minted around a new epoch, against a holder that
+    /// still serves its earlier-epoch list.
+    EpochMint,
 }
 
 /// Ghost state read only by invariants.
@@ -780,6 +801,18 @@ pub struct Ghost {
     pub dir_room: [Option<u8>; DIRS],
     /// The room whose bytes each room's current artifacts were built from.
     pub derived_from: [Option<u8>; ROOMS],
+    /// The `pin_ref` each room's current artifacts were actually built under
+    /// (H.24: the holder's durable record must agree).
+    pub derived_ref: [Option<u8>; ROOMS],
+    /// H.23: verified evidence proved the engine clock more than 30 s behind,
+    /// and no clock step has brought it back within 30 s since.
+    pub lag_proven: bool,
+    /// H.25 liveness: the epoch changed while the holder held a high-water,
+    /// and minting has not reopened yet.
+    pub search_due: bool,
+    /// H.25 probe: the instant minting stopped (rollback suspicion or a
+    /// restore began).
+    pub mint_stop: Option<u8>,
     /// From this epoch on, `pin_ref`s below this were minted before a
     /// `restore_journal_lost` (the lost timeline).
     pub pin_floor: (u8, u8),
@@ -841,6 +874,7 @@ impl State {
                 rollback_suspected: false,
                 failed_restore: false,
                 journal_lost_audited: false,
+                mint_gate: false,
             },
             env: Env {
                 root_dir: [0, 1],
@@ -887,6 +921,7 @@ impl State {
             ghost: Ghost {
                 dir_room: [Some(0), Some(1), None],
                 derived_from: [Some(0), Some(1)],
+                derived_ref: [Some(1), Some(2)],
                 ..Ghost::default()
             },
         }

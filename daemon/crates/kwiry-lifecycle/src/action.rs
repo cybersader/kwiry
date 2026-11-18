@@ -174,10 +174,25 @@ pub enum Action {
         exp: i16,
     },
     FinishCapability,
+    /// A verified list page with authority `iat`. `rtt: Some(r)`: it answers
+    /// a list request this process sent, with the matching `nonce` echo, and
+    /// `r` seconds passed on the monotonic clock since that request was sent.
+    /// `None`: not bound to this process's nonce (nonce-less, replayed, or
+    /// answering an earlier process's request).
     VerifyListPage {
         iat: i16,
+        rtt: Option<u8>,
     },
-    ClockSynchronized,
+    /// H.23 probe: one `page_size: 1` list request, at most once per 60 s.
+    ClockProbe,
+    /// 60 s pass: the next probe window opens.
+    ProbeWindow,
+    /// A local NTP or clock-step event: the true lag becomes `lag` seconds.
+    ClockStep {
+        lag: u8,
+    },
+    /// An operator command asking to clear `clock_behind_authority`.
+    OpClearClock,
     /// H.16 focused inputs. `dir: None` is `--pin-id none`; `stale` is a
     /// stale `--expect-current`.
     AttestRoot {
@@ -237,8 +252,10 @@ impl Action {
             | AttestRoot { .. }
             | RepointRoot { .. }
             | StaleDeadline
+            | ProbeWindow
+            | ClockStep { .. }
             | TickExposure(_) => Kind::Scenario,
-            BeginRecovery | CommitRecovery => Kind::Operator,
+            BeginRecovery | CommitRecovery | OpClearClock => Kind::Operator,
             AuthRetire(_) | AuthUnlist(_) | AuthRelist(_) | AuthDrop(_) | AuthBackup
             | AuthRestore => Kind::Scenario,
             OpAcceptEpoch | OpRestart | OpClearHalt(_) | OpReopen(_) | OpRestoreJournalLost => {

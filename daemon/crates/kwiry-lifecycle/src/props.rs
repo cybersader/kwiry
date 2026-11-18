@@ -12,7 +12,7 @@
 //! | I7 | Some healthy actor (holder, environment or operator) can move whenever any work is outstanding |
 //! | I8 | An operator wait (auth halt, bug halt) is entered only on a fault, never on a correct authority or network response |
 //! | I9 | The unattributed inventory never counts data attributable to a listed holding (except units a release reserved) |
-//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, and every consumed epoch acceptance is answered by a status accepted in the new epoch, under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
+//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes once the holder has reported in it (H.25), under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
 
 use crate::state::*;
 use crate::step::{Obs, Outcome, delete_authorized, mintable, reserving, room_class, servable};
@@ -48,6 +48,7 @@ pub enum Prop {
     I8CommitInvariant,
     I8ReplayTarget,
     I1RootPin,
+    I1EpochExposure,
     /// A model bound was hit; the result would not be exhaustive.
     Bound,
 }
@@ -118,7 +119,10 @@ impl Prop {
             Prop::I8AdvisoryListWitness => "I8: an unverifiable advisory witness refused the list",
             Prop::I8CommitInvariant => "I8: an inconsistent static check did not abort the CAS",
             Prop::I1RootPin => {
-                "I1: a room served under a null, changed-unapplied, conflicting, pre-journal-loss or orphaned pin, from another room's bytes, or past the stale bound"
+                "I1: a room served under a null, changed-unapplied, conflicting, pre-journal-loss or orphaned pin, from another room's bytes or another pin_ref's artifacts, or past the stale bound"
+            }
+            Prop::I1EpochExposure => {
+                "I1: an earlier-epoch list released results more than 90 s after minting stopped"
             }
             Prop::I8ReplayTarget => {
                 "I8: a replayed finalization or clear left its restored target outstanding"
@@ -193,7 +197,8 @@ fn state_violations(s: &State) -> Vec<Prop> {
 /// H.16: a served room's admitted pin is non-null and already applied; under
 /// a list of the epoch a `restore_journal_lost` opened (or later) it was
 /// minted after that decision; it is no orphaned directory; its artifacts
-/// hold only its own bytes; and a root mismatch is within H10.5.
+/// hold only its own bytes and were built under that `pin_ref` (H.24); and a
+/// root mismatch is within H10.5.
 fn root_pin_unsafe(s: &State, r: usize) -> bool {
     let admitted = s.vol.admitted.and_then(|l| l.pins[r]);
     let Some(l) = s.vol.applied else {
@@ -208,6 +213,7 @@ fn root_pin_unsafe(s: &State, r: usize) -> bool {
         || (l.rev.epoch >= floor_epoch && p.pin_ref < floor)
         || (l.rev.epoch >= orphan_epoch && orphans & bit(p.id as usize) != 0)
         || s.ghost.derived_from[r] != Some(r as u8)
+        || s.ghost.derived_ref[r] != Some(p.pin_ref)
         || (s.env.root_dir[r] != p.id && s.env.stale_expired)
 }
 
@@ -233,6 +239,7 @@ fn step_violations(prev: &State, out: &Outcome) -> Vec<Prop> {
             Obs::ProofDeadlineMissed => Some(Prop::I8ProofDeadline),
             Obs::UnverifiedRestore => Some(Prop::I1UnverifiedRestore),
             Obs::CapabilityOverexposed => Some(Prop::I1CapabilityExposure),
+            Obs::EpochOverexposed => Some(Prop::I1EpochExposure),
             Obs::AdvisoryWitnessRejected => Some(Prop::I8AdvisoryListWitness),
             Obs::CommitInvariantMissed => Some(Prop::I8CommitInvariant),
             Obs::ReplayTargetMissed => Some(Prop::I8ReplayTarget),
@@ -280,13 +287,20 @@ pub fn settled(s: &State) -> bool {
 
 /// A retirement cannot disappear from the goal when the authority is restored.
 /// An epoch acceptance is answered by a status accepted in the new epoch
-/// (HW §15 H.19), whatever its count.
+/// (HW §15 H.19), whatever its count, and minting resumes after an epoch
+/// change once the holder has reported in it (H.25).
 pub fn goal(s: &State) -> bool {
-    !s.ghost.status_due
-        && (0..ROOMS).all(|r| {
-            s.ghost.retired_at[r].is_none()
-                || s.auth.core.rooms[r]
-                    .obl
-                    .is_some_and(|o| o.complete() || o.blocked)
-        })
+    !s.ghost.status_due && !s.ghost.search_due && retirements_done(s)
+}
+
+/// Every ghost retirement reached `complete` or `blocked`: the obligation
+/// half of L1. H.22's ablation checks it without the operator's status
+/// resume.
+pub fn retirements_done(s: &State) -> bool {
+    (0..ROOMS).all(|r| {
+        s.ghost.retired_at[r].is_none()
+            || s.auth.core.rooms[r]
+                .obl
+                .is_some_and(|o| o.complete() || o.blocked)
+    })
 }

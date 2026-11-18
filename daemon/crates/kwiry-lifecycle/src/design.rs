@@ -1,7 +1,7 @@
 //! Which revision of the lifecycle the model executes.
 //!
 //! [`Design::REV8`] is the revision-8 table encoded as written (with the
-//! interpretations listed in the crate docs). [`Design::REV10`] adds every
+//! interpretations listed in the crate docs). [`Design::REV11_1`] adds every
 //! [`Fix`]. Each fix is a separate flag so the checker can show that it is
 //! necessary: removing any single fix from the corresponding revision must reproduce the
 //! counterexample it closes (`tests/model_check.rs`).
@@ -99,6 +99,19 @@ pub enum Fix {
     JournalLostPinReset,
     /// H.16.3 (r16): replay reserves an orphaned attestation's `pin_id` as `"*"`.
     OrphanPinReserve,
+    /// H.22.3: a status bug halt releases the status-first gate, so obligation
+    /// reports proceed while the status waits for N5.
+    StatusGateRelease,
+    /// H.23: `clock_behind_authority` clears only on a confirmed correction, a
+    /// nonce-bound page of this process's own list request with
+    /// `(iat − now_recv) + rtt ≤ 30 s`.
+    ConfirmedClockCorrection,
+    /// H.24: "derived under `pin_ref`" is judged against the durable
+    /// derivation record, never against the in-process baseline.
+    DurablePinDerivation,
+    /// H.25: after a new epoch, mint nothing for the id-space until every
+    /// holder has a report accepted with a current-epoch `list_ref`.
+    EpochMintGate,
 }
 
 impl Fix {
@@ -146,6 +159,13 @@ impl Fix {
         Fix::RootPinHistory,
         Fix::JournalLostPinReset,
         Fix::OrphanPinReserve,
+    ];
+
+    pub const REV11_1: [Fix; 4] = [
+        Fix::StatusGateRelease,
+        Fix::ConfirmedClockCorrection,
+        Fix::DurablePinDerivation,
+        Fix::EpochMintGate,
     ];
 
     const fn bit(self) -> u64 {
@@ -196,6 +216,14 @@ impl Fix {
             Fix::RootPinHistory => "H.16 AP24: the pin-history refuses another room's pin_id",
             Fix::JournalLostPinReset => "H.19.5: restore_journal_lost nulls every active pin",
             Fix::OrphanPinReserve => "H.16.3: replay reserves an orphaned pin_id",
+            Fix::StatusGateRelease => "H.22: a status bug halt releases the status-first gate",
+            Fix::ConfirmedClockCorrection => {
+                "H.23: the clock hold clears only on a nonce-bound, rtt-bounded page"
+            }
+            Fix::DurablePinDerivation => {
+                "H.24: artifacts serve only under their durable derivation record"
+            }
+            Fix::EpochMintGate => "H.25: mint after a new epoch only once every holder reported",
             Fix::LeaseAndRollbackFence => {
                 "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
             }
@@ -241,11 +269,24 @@ impl Design {
         .with(Fix::AtomicJournalReplay)
         .with(Fix::CapabilityExposure);
 
+    /// The revision-11 fix set. The H.22–H.25 flags are off, so it executes
+    /// the readings those amendments reject (the ablations reproduce them).
     pub const REV11: Design = {
         let mut d = Self::REV10_1;
         let mut i = 0;
         while i < Fix::REV11.len() {
             d = d.with(Fix::REV11[i]);
+            i += 1;
+        }
+        d
+    };
+
+    /// Revision 11.1: HOLDINGS-WIRE §15 H.22–H.25.
+    pub const REV11_1: Design = {
+        let mut d = Self::REV11;
+        let mut i = 0;
+        while i < Fix::REV11_1.len() {
+            d = d.with(Fix::REV11_1[i]);
             i += 1;
         }
         d
@@ -281,13 +322,17 @@ impl fmt::Debug for Design {
         if *self == Design::REV11 {
             return write!(f, "REV11");
         }
+        if *self == Design::REV11_1 {
+            return write!(f, "REV11.1");
+        }
         let missing: Vec<_> = Fix::REV9
             .iter()
             .chain(&Fix::REV10)
             .chain(&Fix::REV10_1)
             .chain(&Fix::REV11)
+            .chain(&Fix::REV11_1)
             .filter(|x| !self.has(**x))
             .collect();
-        write!(f, "REV11 without {missing:?}")
+        write!(f, "REV11.1 without {missing:?}")
     }
 }

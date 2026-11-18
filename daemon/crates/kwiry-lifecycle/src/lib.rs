@@ -24,12 +24,13 @@
 //!   the healthy authority and network, the human release decision, the
 //!   operator, and budgeted faults, crashes and scenario changes.
 //! - [`props`]: invariants I1–I9 and the liveness goal L1 (every retirement
-//!   reaches `complete` or `blocked`, and every epoch acceptance is answered
-//!   by a status accepted in the new epoch).
+//!   reaches `complete` or `blocked`, every epoch acceptance is answered by a
+//!   status accepted in the new epoch, and minting resumes after an epoch
+//!   change).
 //! - [`checker`]: bounded explicit-state BFS with crash injection, plus a
 //!   strong-fairness SCC analysis for L1.
 //! - [`design`]: revision 8 as written ([`design::Design::REV8`]) and each
-//!   repair as a separate [`design::Fix`]; [`design::Design::REV11`] has
+//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_1`] has
 //!   all.
 //!
 //! # Universe and bounds
@@ -124,15 +125,23 @@
 //! H.12 validation order (an injected request envelope), the H.13 clock
 //! boundaries, a corrupt retirement journal and the audited
 //! `restore_journal_lost` override (one symbolic flag, not a hash chain),
-//! the H.21 capability/clock rules at admission and release, and the H.16
-//! root pins (attestation, replay and orphan reservation, the journal-lost
-//! reset, storage moves and swaps, rebuilds and the stale bound; the core
-//! profiles carry static pins). For H.19 the restored typed evidence is
+//! the H.21 capability/clock rules at admission and release, the H.23 clock
+//! correction (true lag and round trip as abstract seconds, the probe and its
+//! 60 s window), the H.25 mint gate's exposure bound (a probe clock from the
+//! instant minting stopped), and the H.16 root pins (attestation, replay and
+//! orphan reservation, the journal-lost reset, storage moves and swaps,
+//! rebuilds and the stale bound; the core profiles carry static pins). The
+//! core profiles do check the H.25 gate itself: minting stays closed after a
+//! supported restore until the holder's current-epoch report, and L1 requires
+//! it to reopen when the holder held a high-water at the restore. A holder
+//! whose first list arrives after the restore (H1) reopens it with its S4
+//! reset status, which the core profiles start past. For H.19 the restored typed evidence is
 //! retained separately from live protocol indexes; the real custody bytes
 //! and the escalation scheduler are not modeled. Not covered: the H.16
 //! filesystem, walk, grammar, golden-vector, pagination, multi-holder and
-//! concurrency vectors (design §5.8, "H.16 conformance obligations"), real
-//! dual clocks, in-flight query
+//! concurrency vectors (design §5.8, "H.16 conformance obligations"), more
+//! than one holder per id-space (H.25's "every holder"), real dual clocks,
+//! in-flight query
 //! drains, general builders and staging, filesystem/lock failure modes,
 //! migration and launcher deployment, the journal's encoding and fsync
 //! failures, actual raw restore beyond a synthetic witness, rate

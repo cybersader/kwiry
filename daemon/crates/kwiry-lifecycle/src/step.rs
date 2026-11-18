@@ -78,6 +78,17 @@ pub enum Obs {
     CapabilityOverexposed,
     CapabilityRefused(CapabilityRefusal),
     ClockBehindAuthority,
+    /// H.23: a nonce-bound page did not confirm a correction; the alert names
+    /// `measured_lag_upper_bound` (`(iat − now_recv) + rtt`) and `rtt`.
+    ClockLagAlert {
+        bound: i16,
+        rtt: u8,
+    },
+    /// H.23: an operator command cannot clear the hold.
+    ClockClearRefused,
+    /// H.25: an earlier-epoch list released results more than 90 s after
+    /// minting stopped.
+    EpochOverexposed,
     ListWitnessOmitted,
     /// Unsampled `lifecycle.witness.unverifiable`; the model has one holder.
     WitnessUnverifiable(wire::WitnessReason),
@@ -292,9 +303,19 @@ pub fn pin_servable(s: &State, r: usize) -> bool {
     let Some(p) = s.vol.applied.and_then(|l| l.pins[r]) else {
         return false;
     };
-    s.dur.derived[r] == Some(p.pin_ref)
+    (s.dur.derived[r] == Some(p.pin_ref) || s.vol.adopted & bit(r) != 0)
         && s.vol.pin_conflict & bit(r) == 0
         && (s.env.root_dir[r] == p.id || !s.env.stale_expired)
+}
+
+/// The H.19 status-first gate (a holder choice H.22.1 permits): after an
+/// epoch acceptance, obligation reports wait for the fresh status's
+/// current-epoch receipt. H.22.3: a status bug halt releases it. The release
+/// is read from the durable `halted` state, so it survives a restart.
+pub fn status_gate_shut(s: &State, d: Design) -> bool {
+    s.dur.epoch_status_pending
+        && !(d.has(Fix::StatusGateRelease)
+            && s.dur.slots[STATUS].is_some_and(|p| p.st == DurSt::Halted))
 }
 
 /// AP24 `root_pin_previously_listed`: the holder's pin-history holds the
@@ -306,15 +327,16 @@ fn history_conflict(dur: &Durable, d: Design, r: usize, pin: Option<Pin>) -> boo
 
 /// H.16.5 effective point: rooms an admitted list shows `active` with a
 /// changed, null or history-conflicting pin, refused at A0 until A4.
+/// H.24: "changed" is judged against the same holding's pin in the list last
+/// applied in this process; at process start that baseline is empty, so every
+/// pin of the first list is changed.
 fn pin_refusal(s: &State, d: Design, l: &ListMsg) -> u8 {
-    let Some(applied) = s.vol.applied else {
-        return 0; // nothing is served before the first A4 of this process
-    };
+    let baseline = s.vol.applied.map(|a| a.pins);
     (0..ROOMS)
         .filter(|&r| {
             l.items[r] == Item::Active
                 && (l.pins[r].is_none()
-                    || l.pins[r] != applied.pins[r]
+                    || baseline.is_none_or(|b| l.pins[r] != b[r])
                     || history_conflict(&s.dur, d, r, l.pins[r]))
         })
         .fold(0, |a, r| a | bit(r))
@@ -754,7 +776,7 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         QRetry { u, fail } => qretry(s, cfg, u as usize, fail),
         PurgeDelete { u, fail } => purge_delete(s, cfg, u as usize, fail),
         PurgeScan(o) => purge_scan(s, d, o as usize),
-        Enqueue(c) => enqueue(s, c as usize, cfg.same_state),
+        Enqueue(c) => enqueue(s, d, c as usize, cfg.same_state),
         Transmit(c) => transmit(s, d, c as usize),
         Handoff(c) => handoff(s, c as usize),
         Dispatch(c) => dispatch(s, d, c as usize),
@@ -792,8 +814,11 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         } => answer_capability(s, d, room as usize, expiry_with_skew),
         StartCapability { room, iat, exp } => start_capability(s, d, room, iat, exp),
         FinishCapability => finish_capability(s, d),
-        VerifyListPage { iat } => observe_list_clock(s, d, iat),
-        ClockSynchronized => clock_synchronized(s),
+        VerifyListPage { iat, rtt } => observe_list_clock(s, d, iat, rtt),
+        ClockProbe => clock_probe(s),
+        ProbeWindow => probe_window(s, d),
+        ClockStep { lag } => clock_step(s, d, lag),
+        OpClearClock => op_clear_clock(s, d),
         AttestRoot { room, dir, stale } => attest_root(s, room, dir, stale),
         RepointRoot { room, dir } => repoint_root(s, room as usize, dir),
         PinRebuild(r) => pin_rebuild(s, d, r as usize),
@@ -1490,6 +1515,26 @@ fn apply_a4(s: &State, d: Design, l: &ListMsg) -> Step {
     o.n.vol.pin_conflict = (0..ROOMS)
         .filter(|&r| history_conflict(&s.dur, d, r, l.pins[r]))
         .fold(0, |a, r| a | bit(r));
+    if !d.has(Fix::DurablePinDerivation) {
+        // The reading H.24 rejects: "derived under `pin_ref`" judged against
+        // the in-process baseline. An unchanged pin keeps its artifacts; with
+        // the empty start-up baseline, the artifacts on disk are taken as
+        // derived under the first list's pins.
+        o.n.vol.adopted = (0..ROOMS)
+            .filter(|&r| {
+                l.pins[r].is_some()
+                    && match s.vol.applied {
+                        None => s.dur.derived[r].is_some(),
+                        Some(a) => {
+                            a.pins[r] == l.pins[r]
+                                && (s.vol.adopted & bit(r) != 0
+                                    || a.pins[r]
+                                        .is_some_and(|p| s.dur.derived[r] == Some(p.pin_ref)))
+                        }
+                    }
+            })
+            .fold(0, |a, r| a | bit(r));
+    }
     o.n.vol.mem_gen = s.dur.generation;
     for ob in 0..OBLS {
         if s.vol.applied.map(|p| obligation_view(p.items[ob])) != Some(obligation_view(l.items[ob]))
@@ -1923,7 +1968,7 @@ fn purge_scan(s: &State, d: Design, ob: usize) -> Step {
 
 // ------------------------------------------------- M6 / M8 report actors
 
-fn enqueue(s: &State, c: usize, same_state: bool) -> Step {
+fn enqueue(s: &State, d: Design, c: usize, same_state: bool) -> Step {
     if s.vol.phase != Phase::P7 || !publisher_idle(s) || s.vol.relist {
         return Ok(None);
     }
@@ -1934,8 +1979,8 @@ fn enqueue(s: &State, c: usize, same_state: bool) -> Step {
     let key = if c < OBLS {
         // H.19 "first opportunity": after an epoch acceptance the fresh
         // status goes first; new-epoch obligation reports wait for its
-        // current-epoch receipt.
-        if !s.vol.class[c].obligated() || s.dur.epoch_status_pending {
+        // current-epoch receipt (H.22.1), unless it bug-halted (H.22.3).
+        if !s.vol.class[c].obligated() || status_gate_shut(s, d) {
             return Ok(None);
         }
         let (state, rem, inv) = match s.vol.scans[c] {
@@ -2420,8 +2465,13 @@ fn replenish(s: &State) -> Step {
 
 // ------------------------------------------------- healthy environment
 
+/// OpenClast may mint a search capability naming `room`: no rollback
+/// suspicion or restore in progress (H.15.1), no H.25 epoch-change gate, and
+/// the holding is `active`.
 pub fn mintable(s: &State, room: usize) -> bool {
-    !s.auth.rollback_suspected && s.auth.core.rooms[room].phase == APhase::Active
+    !s.auth.rollback_suspected
+        && !s.auth.mint_gate
+        && s.auth.core.rooms[room].phase == APhase::Active
 }
 
 pub fn witness(s: &mut State, d: Design, echo: Rev, tag_valid: bool) -> RefVerdict {
@@ -2641,6 +2691,18 @@ fn auth_process(s: &State, d: Design, c: usize, idx: usize) -> Step {
     }
     if o.n.auth.core.seq > pre.seq && d.has(Fix::AtomicJournalReplay) {
         record_report_journal(&mut o.n.auth, pre, req.key, kind);
+    }
+    // H.25: an accepted report (status or obligation) whose `list_ref` is a
+    // tag-valid list of the current epoch proves the holder applied a
+    // new-epoch list and stopped serving the old one. The model has one
+    // enrolled, enabled holder, so this reopens minting for the id-space.
+    if o.n.auth.mint_gate
+        && matches!(kind, RespKind::Accepted { .. })
+        && req.key.list_ref().epoch == o.n.auth.core.epoch
+    {
+        o.n.auth.mint_gate = false;
+        o.n.ghost.search_due = false;
+        o.row(H14);
     }
     if let (Key::S(k), RespKind::Accepted { epoch, .. }) = (req.key, kind)
         && epoch == o.n.auth.core.epoch
@@ -3121,6 +3183,10 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
         return Ok(None);
     }
     let mut o = Out::new(s);
+    if s.env.probe == Probe::EpochMint && s.ghost.mint_stop.is_none() {
+        // H.15.1: minting stops when a restore begins.
+        o.n.ghost.mint_stop = Some(s.env.exposure_elapsed);
+    }
     if s.env.bad_journal && !override_lost {
         if d.has(Fix::AtomicJournalReplay) {
             o.n.auth.failed_restore = true;
@@ -3131,6 +3197,14 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
         o.obs(Obs::UnverifiedRestore);
     }
     o.n.budget.restores -= 1;
+    if d.has(Fix::EpochMintGate) {
+        // H.25: nothing is minted for the id-space until every holder has
+        // reported in the new epoch. L1 then requires that minting resumes
+        // for a holder that held a high-water when the epoch changed.
+        o.n.auth.mint_gate = true;
+        o.n.ghost.search_due = s.dur.hw.is_some();
+        o.row(H14);
+    }
     let next_instr = s.auth.core.next_instr;
     o.n.auth.core = AuthCore {
         epoch: s.auth.core.epoch + 1,
@@ -3388,7 +3462,9 @@ fn replay_journal(out: &mut Out, backup: &AuthCore, d: Design) {
 }
 
 fn tick_exposure(s: &State, elapsed: u8) -> Step {
-    if s.env.probe != Probe::Exposure || elapsed <= s.env.exposure_elapsed {
+    if !matches!(s.env.probe, Probe::Exposure | Probe::EpochMint)
+        || elapsed <= s.env.exposure_elapsed
+    {
         return Ok(None);
     }
     let mut o = Out::new(s);
@@ -3427,24 +3503,33 @@ fn answer_capability(s: &State, d: Design, room: usize, expiry_with_skew: u8) ->
 // H.21 uses the holder's receive/release clock, not knowledge of when an
 // authority retirement committed. The focused clock is monotone, in seconds.
 fn start_capability(s: &State, d: Design, room: u8, iat: i16, exp: i16) -> Step {
-    if !matches!(s.env.probe, Probe::Exposure | Probe::Pin) {
+    if !matches!(s.env.probe, Probe::Exposure | Probe::Pin | Probe::EpochMint) {
         return Ok(None);
     }
     let now = i32::from(s.env.exposure_elapsed);
     let (iat, exp) = (i32::from(iat), i32::from(exp));
+    // The authority stamps `iat` on its own clock, so no capability is dated
+    // after the authority instant it arrives at (`now + lag`).
+    if iat - now > i32::from(s.env.lag)
+        || (s.env.probe == Probe::EpochMint && !minted(s, room, iat, exp, now))
+    {
+        return Ok(None);
+    }
     let deadline = exp + i32::from(s.env.capability_skew);
     let future = iat > now + 30;
     let long = exp - iat > 60;
     let fenced = d.has(Fix::EngineCapabilityFence);
     let mut o = Out::new(s);
-    if fenced && future {
-        flag_clock_behind(&mut o);
+    if future {
+        clock_evidence(&mut o, d);
+    } else {
+        unconfirmed_clear(&mut o, d);
     }
     let refusal = if fenced && future {
         Some(CapabilityRefusal::FutureIat)
     } else if fenced && long {
         Some(CapabilityRefusal::LifetimeTooLong)
-    } else if fenced && s.env.clock_behind_authority {
+    } else if fenced && o.n.env.clock_behind_authority {
         Some(CapabilityRefusal::ClockBehind)
     } else if d.has(Fix::CapabilityExposure) && now > deadline {
         Some(CapabilityRefusal::Expired)
@@ -3460,18 +3545,31 @@ fn start_capability(s: &State, d: Design, room: u8, iat: i16, exp: i16) -> Step 
             return Ok(None); // the probe bounds admitted work, not clock evidence
         }
         o.n.vol.capability = Some(InFlightCapability { room, deadline });
-        if future || long || s.env.clock_behind_authority || now > deadline {
+        if future || long || o.n.ghost.lag_proven || now > deadline {
             o.obs(Obs::CapabilityOverexposed);
         }
     }
     o.done()
 }
 
+/// H.25 probe: whether the authority could have minted this capability.
+/// Minting was open before it stopped; after that, a capability is minted
+/// (and presented) only at an instant where `mintable` holds. Mint limits
+/// cap the lifetime at 60 s.
+fn minted(s: &State, room: u8, iat: i32, exp: i32, now: i32) -> bool {
+    exp - iat <= 60
+        && match s.ghost.mint_stop {
+            None => iat <= now,
+            Some(t) => iat <= i32::from(t) || (iat == now && mintable(s, usize::from(room))),
+        }
+}
+
 fn finish_capability(s: &State, d: Design) -> Step {
     let Some(req) = s.vol.capability else {
         return Ok(None);
     };
-    let expired = i32::from(s.env.exposure_elapsed) > req.deadline;
+    let now = i32::from(s.env.exposure_elapsed);
+    let expired = now > req.deadline;
     let fenced = d.has(Fix::EngineCapabilityFence);
     let mut o = Out::new(s);
     o.n.vol.capability = None;
@@ -3483,8 +3581,18 @@ fn finish_capability(s: &State, d: Design) -> Step {
         refuse_capability(&mut o, CapabilityRefusal::NotActive);
     } else {
         o.row(C17);
-        if expired || s.env.clock_behind_authority {
+        if expired || s.ghost.lag_proven {
             o.obs(Obs::CapabilityOverexposed);
+        }
+        // H.25: results released from an earlier-epoch list, beyond the
+        // 90 s that capabilities minted before the stop can reach.
+        if s.env.probe == Probe::EpochMint
+            && s.vol
+                .applied
+                .is_some_and(|l| l.rev.epoch < s.auth.core.epoch)
+            && s.ghost.mint_stop.is_some_and(|t| now > i32::from(t) + 90)
+        {
+            o.obs(Obs::EpochOverexposed);
         }
     }
     o.done()
@@ -3500,34 +3608,122 @@ fn refuse_capability(o: &mut Out, reason: CapabilityRefusal) {
     o.obs(Obs::CapabilityRefused(reason));
 }
 
-fn flag_clock_behind(o: &mut Out) {
-    o.n.env.clock_behind_authority = true;
-    o.row(C19);
-    o.obs(Obs::ClockBehindAuthority);
+/// A verified page or capability with `iat − now_recv > 30 s`: proof that the
+/// engine clock lags by more than 30 s (transit only makes it look ahead).
+/// H.21.5 raises `clock_behind_authority` (C19).
+fn clock_evidence(o: &mut Out, d: Design) {
+    o.n.ghost.lag_proven = true;
+    if d.has(Fix::EngineCapabilityFence) {
+        o.n.env.clock_behind_authority = true;
+        o.row(C19);
+        o.obs(Obs::ClockBehindAuthority);
+    }
 }
 
-fn observe_list_clock(s: &State, d: Design, iat: i16) -> Step {
-    if s.env.probe != Probe::Exposure || !s.vol.fetching {
+/// The reading H.23 rejects ("it resumes when the condition clears"): any
+/// input that no longer shows the lag clears the hold. With H.23 only C20's
+/// confirmed correction clears it, so this does nothing.
+fn unconfirmed_clear(o: &mut Out, d: Design) {
+    if !d.has(Fix::ConfirmedClockCorrection) && o.n.env.clock_behind_authority {
+        o.n.env.clock_behind_authority = false;
+        o.row(C20);
+    }
+}
+
+/// H.21.5 and H.23 on one verified list page (any page, not only page 0).
+fn observe_list_clock(s: &State, d: Design, iat: i16, rtt: Option<u8>) -> Step {
+    if s.env.probe != Probe::Exposure || !(s.vol.fetching || s.vol.clock_probe) {
+        return Ok(None);
+    }
+    let ahead = i32::from(iat) - i32::from(s.env.exposure_elapsed); // iat − now_recv
+    let lag = i32::from(s.env.lag);
+    // The authority signs between this process sending the request and
+    // receiving the page: lag − rtt ≤ iat − now_recv ≤ lag. A page that is
+    // not bound to this process's nonce may be arbitrarily old.
+    if ahead > lag || rtt.is_some_and(|r| ahead < lag - i32::from(r)) {
         return Ok(None);
     }
     let mut o = Out::new(s);
-    // The action represents any page after signature verification, not just
-    // page 0 or the delivery of a fully assembled list.
-    if d.has(Fix::EngineCapabilityFence) && i32::from(iat) > i32::from(s.env.exposure_elapsed) + 30
-    {
-        flag_clock_behind(&mut o);
+    if rtt.is_some() && s.vol.clock_probe {
+        o.n.vol.clock_probe = false; // the probe's page: its result need not be applied
+    }
+    if ahead > 30 {
+        clock_evidence(&mut o, d);
+    } else if !d.has(Fix::ConfirmedClockCorrection) {
+        unconfirmed_clear(&mut o, d);
+    } else if let (true, Some(r)) = (s.env.clock_behind_authority, rtt) {
+        // C20: lag ≤ (iat − now_recv) + transit, and transit ≤ rtt.
+        let bound = ahead + i32::from(r);
+        o.row(C20);
+        if bound <= 30 {
+            o.n.env.clock_behind_authority = false;
+        } else {
+            o.obs(Obs::ClockLagAlert {
+                bound: bound as i16,
+                rtt: r,
+            });
+        }
     }
     o.done()
 }
 
-fn clock_synchronized(s: &State) -> Step {
+/// C21: while the hold is raised, at most one `page_size: 1` list request per
+/// 60 s window, counted under H.8 (the model does not schedule rates).
+fn clock_probe(s: &State) -> Step {
+    if s.env.probe != Probe::Exposure
+        || !s.env.clock_behind_authority
+        || s.vol.clock_probe
+        || s.env.probe_window_used
+        || !matches!(s.vol.phase, Phase::P5 | Phase::P7)
+        || s.vol.route != Route::Normal
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.vol.clock_probe = true;
+    o.n.env.probe_window_used = true;
+    o.row(C21);
+    o.done()
+}
+
+/// 60 s pass. Elapsed time never clears the hold under H.23.
+fn probe_window(s: &State, d: Design) -> Step {
+    if s.env.probe != Probe::Exposure || !(s.env.probe_window_used || s.env.clock_behind_authority)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.env.probe_window_used = false;
+    unconfirmed_clear(&mut o, d);
+    o.done()
+}
+
+/// A local NTP or clock-step event. It may or may not fix the lag; it is no
+/// evidence either way, so under H.23 it never clears the hold.
+fn clock_step(s: &State, d: Design, lag: u8) -> Step {
+    if s.env.probe != Probe::Exposure || lag == s.env.lag {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.env.lag = lag;
+    if lag <= 30 {
+        o.n.ghost.lag_proven = false;
+    }
+    unconfirmed_clear(&mut o, d);
+    o.done()
+}
+
+/// An operator command cannot clear the hold under H.23 (fail closed).
+fn op_clear_clock(s: &State, d: Design) -> Step {
     if s.env.probe != Probe::Exposure || !s.env.clock_behind_authority {
         return Ok(None);
     }
-    // A confirmed correction, not a merely older signed timestamp.
     let mut o = Out::new(s);
-    o.n.env.clock_behind_authority = false;
-    o.row(C19);
+    if d.has(Fix::ConfirmedClockCorrection) {
+        o.obs(Obs::ClockClearRefused);
+    } else {
+        unconfirmed_clear(&mut o, d);
+    }
     o.done()
 }
 
@@ -3632,6 +3828,8 @@ fn pin_rebuild(s: &State, d: Design, r: usize) -> Step {
         Some(true) => {}
     }
     o.n.dur.derived[r] = Some(p.pin_ref);
+    o.n.vol.adopted &= !bit(r);
+    o.n.ghost.derived_ref[r] = Some(p.pin_ref);
     o.n.ghost.derived_from[r] = s.ghost.dir_room[s.env.root_dir[r] as usize];
     o.done()
 }

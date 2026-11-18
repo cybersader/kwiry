@@ -303,6 +303,7 @@ pub fn check(p: &Profile) -> Report {
         State::initial(b, p.garbage),
         Action::candidates(),
         symmetric,
+        props::goal,
     )
 }
 
@@ -310,10 +311,27 @@ pub fn check(p: &Profile) -> Report {
 /// candidate set. Room symmetry is disabled: the initial roles or candidates
 /// may not be interchangeable. Otherwise the same checker is used.
 pub fn check_from(p: &Profile, initial: State, candidates: Vec<Action>) -> Report {
-    explore(p, initial, candidates, false)
+    explore(p, initial, candidates, false, props::goal)
 }
 
-fn explore(p: &Profile, initial: State, candidates: Vec<Action>, symmetric: bool) -> Report {
+/// As [`check_from`], with another liveness goal (for example only the
+/// obligation half of L1, [`props::retirements_done`]).
+pub fn check_from_with_goal(
+    p: &Profile,
+    initial: State,
+    candidates: Vec<Action>,
+    goal: fn(&State) -> bool,
+) -> Report {
+    explore(p, initial, candidates, false, goal)
+}
+
+fn explore(
+    p: &Profile,
+    initial: State,
+    candidates: Vec<Action>,
+    symmetric: bool,
+    goal: fn(&State) -> bool,
+) -> Report {
     let started = Instant::now();
     let run = Run {
         cfg: Config {
@@ -364,7 +382,7 @@ fn explore(p: &Profile, initial: State, candidates: Vec<Action>, symmetric: bool
             for s in &chunk {
                 let here = layer_start + k;
                 k += 1;
-                g.goal.push(props::goal(s));
+                g.goal.push(goal(s));
                 if let Some(prop) = props::check_state(s, p.skip) {
                     violation = Some(run.safety_cex(&g, prop, here, None, String::new()));
                     break 'bfs;

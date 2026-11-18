@@ -13,7 +13,7 @@ use kwiry_lifecycle::row_id::RowId;
 use kwiry_lifecycle::state::*;
 use kwiry_lifecycle::step::{CapabilityRefusal, Config, Obs, Outcome, PinRefusal, exec, servable};
 
-const D: Design = Design::REV11;
+const D: Design = Design::REV11_1;
 const BUDGET: Budget = Budget {
     retire_rooms: 0b11,
     change_rooms: 0b10,
@@ -224,6 +224,7 @@ fn h16_root_mismatch_fails_closed_and_stale_service_is_bounded() {
 
     let mut f = running();
     f.s.dur.derived[0] = None; // AP19: data root wiped
+    f.s.ghost.derived_ref[0] = None;
     f.step(RepointRoot { room: 0, dir: 1 });
     assert!(f.outcome(PinRebuild(0)).is_none(), "root_pin_mismatch");
     ablate(
@@ -331,6 +332,7 @@ fn h16_holder_rollback_never_serves_an_older_ref() {
     f.s.budget.crashes = 1;
     f.step(Crash);
     f.s.dur.derived[0] = Some(1); // holder dir and data root rolled back
+    f.s.ghost.derived_ref[0] = Some(1);
     f.boot();
     assert!(!servable(&f.s, 0), "AP7: no list in this process");
     f.list();

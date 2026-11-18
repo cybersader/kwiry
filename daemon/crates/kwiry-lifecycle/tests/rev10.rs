@@ -27,7 +27,7 @@ const BUDGET: Budget = Budget {
     restores: 1,
 };
 const REV: Rev = Rev { epoch: 0, seq: 1 };
-const D: Design = Design::REV11;
+const D: Design = Design::REV11_1;
 
 fn profile(name: &'static str, design: Design) -> Profile {
     Profile {
@@ -1734,6 +1734,9 @@ fn h21_capability_deadline_and_a0_are_rechecked_at_release() {
 #[test]
 fn h21_clock_evidence_refuses_all_governed_reads_until_correction() {
     let mut f = exposure_fixture();
+    // The engine clock lags the authority by 31 s: the authority stamps
+    // `iat` on its own clock, so `iat − now_recv` can reach 31.
+    f.s.env.lag = 31;
     let at_limit = StartCapability {
         room: 0,
         iat: 30,
@@ -1774,12 +1777,25 @@ fn h21_clock_evidence_refuses_all_governed_reads_until_correction() {
     assert!(refused.obs.contains(&Some(Obs::CapabilityRefused(
         CapabilityRefusal::ClockBehind
     ))));
-    f.run(&[ClockSynchronized, at_limit, AuthRetire(0), FetchStart]);
-    f.step(VerifyListPage { iat: 30 });
+    // H.23's confirmed correction (rev11_1.rs covers everything that is not).
+    f.run(&[ClockStep { lag: 0 }, ClockProbe]);
+    assert!(
+        f.s.env.clock_behind_authority,
+        "a clock step confirms nothing"
+    );
+    f.step(VerifyListPage {
+        iat: 0,
+        rtt: Some(10),
+    });
     assert!(!f.s.env.clock_behind_authority);
-    f.step(VerifyListPage { iat: 31 });
+    // Any verified page raises it, nonce-bound or not; an older one does not
+    // clear it.
+    f.run(&[ClockStep { lag: 31 }, at_limit, AuthRetire(0), FetchStart]);
+    f.step(VerifyListPage { iat: 30, rtt: None });
+    assert!(!f.s.env.clock_behind_authority);
+    f.step(VerifyListPage { iat: 31, rtt: None });
     assert!(f.s.env.clock_behind_authority);
-    f.step(VerifyListPage { iat: 29 });
+    f.step(VerifyListPage { iat: 29, rtt: None });
     let out = f.outcome(FinishCapability).unwrap();
     assert!(out.obs.contains(&Some(Obs::CapabilityRefused(
         CapabilityRefusal::ClockBehind

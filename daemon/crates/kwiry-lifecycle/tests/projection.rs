@@ -93,7 +93,7 @@ fn agree(s: &State, cfg: &Config, cands: &[Action]) -> (bool, bool) {
 
 fn check_profile(name: &str, budget: Budget, fam: u16, same_state: bool, seed: u64) {
     let cfg = Config {
-        design: kwiry_lifecycle::design::Design::REV11,
+        design: kwiry_lifecycle::design::Design::REV11_1,
         faults: fam,
         same_state,
     };
