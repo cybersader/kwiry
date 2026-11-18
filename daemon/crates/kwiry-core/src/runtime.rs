@@ -1574,6 +1574,7 @@ impl OpenClastIndexManager {
     fn open(config: Config, data_dir: &Path, runtime: SearchRuntime) -> Result<Self> {
         #[cfg(not(target_os = "linux"))]
         crate::room_walk::probe_openclast_ingestion(data_dir, &config.vaults)?;
+        crate::room_boundary::validate_ingestion_roots(&config, &[])?;
         crate::room_boundary::validate_data_root(&config, data_dir)?;
         let data_root = DataRoot::new(data_dir);
         let lock = data_root.acquire_writer_lock()?;
@@ -1678,7 +1679,7 @@ impl OpenClastIndexManager {
     }
 
     fn reconcile(&mut self, config: Config, scope: &ReconcileScope) -> Result<ReconcileReport> {
-        crate::room_boundary::validate_ingestion_roots(&config)?;
+        crate::room_boundary::validate_ingestion_roots(&config, &self.config.vaults)?;
         let epochs = self.runtime.begin_resource_pass(&config, scope)?;
         let mut incomplete = BTreeSet::new();
         let max_stale_serve_seconds = config.indexing.max_stale_serve_seconds;
@@ -3335,12 +3336,13 @@ mod tests {
         let config = Config {
             vaults: vec![VaultRegistration {
                 id: "b".into(),
-                path: b,
+                path: b.clone(),
                 room: Some("b".into()),
             }],
             ..openclast_config(Vec::new())
         };
         let mut config = config;
+        config.indexing.max_stale_serve_seconds = 0;
         config.auth.openclast.as_mut().unwrap().tenant_id = "tenant_AAAAAAAAAAAAAAAAAAAA".into();
         let settings = base.join("settings/config.toml");
         let data = base.join("data");
@@ -3350,7 +3352,7 @@ mod tests {
         let saved = fs::read(&settings).unwrap();
         build_index(&config, &data).unwrap();
         let runtime = SearchRuntime::new();
-        let mut manager = IndexManager::open(config.clone(), &data, runtime).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
         let original_generation = DataRoot::new(&data).active().unwrap().unwrap().id;
         let invalid = |error: Error| {
             assert!(
@@ -3410,6 +3412,31 @@ mod tests {
         assert_eq!(
             DataRoot::new(&data).active().unwrap().unwrap().id,
             original_generation
+        );
+        // A filesystem change at an unchanged registration is a failed
+        // walk, not a rejected config proposal that leaves its proof current.
+        manager.reconcile(config.clone()).unwrap();
+        let resources = [config.resource_key(&config.vaults[0]).unwrap()];
+        let filters = SearchFilters::default();
+        assert_eq!(
+            runtime
+                .search_authorized("fixture", 10, &filters, &resources)
+                .unwrap()
+                .len(),
+            1
+        );
+        let moved = base.join("moved");
+        fs::rename(&b, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &b).unwrap();
+        let rejected = manager.reconcile(config).unwrap();
+        assert!(
+            rejected
+                .warnings
+                .iter()
+                .any(|warning| warning.message == "room root path is not canonical")
+        );
+        assert!(
+            matches!(runtime.search_authorized("fixture", 10, &filters, &resources), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
         );
         manager.shutdown().unwrap();
     }

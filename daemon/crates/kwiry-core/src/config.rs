@@ -454,7 +454,8 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
                 message: "vault IDs must not be empty".to_owned(),
             });
         }
-        if !vault.path.is_absolute() {
+        // OpenClast validates the exact raw spelling in require_canonical_room_root.
+        if config.server.profile == HostProfile::Desktop && !vault.path.is_absolute() {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
                 message: format!("vault path must be absolute: {}", vault.path.display()),

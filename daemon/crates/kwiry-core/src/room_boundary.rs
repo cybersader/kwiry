@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::{Config, Error, Result};
+use crate::{Config, Error, Result, VaultRegistration};
 
 type Failure = Option<&'static str>;
 
@@ -53,9 +53,21 @@ pub(crate) fn require_canonical_room_root(path: &Path) -> Result<PathBuf> {
     canonical_room_root(path)?.ok_or_else(|| boundary_error("room root cannot be resolved"))
 }
 
-pub(crate) fn validate_ingestion_roots(config: &Config) -> Result<()> {
+pub(crate) fn validate_ingestion_roots(
+    config: &Config,
+    previous: &[VaultRegistration],
+) -> Result<()> {
     for vault in &config.vaults {
-        canonical_room_root(&vault.path)?;
+        // A root supplied by the caller must be canonical. A physical change
+        // at an unchanged registration is instead a per-room walk failure;
+        // it must be observed so its stale-serving deadline starts.
+        if !previous.iter().any(|prior| {
+            prior.id == vault.id
+                && prior.room == vault.room
+                && prior.path.as_os_str() == vault.path.as_os_str()
+        }) {
+            canonical_room_root(&vault.path)?;
+        }
     }
     Ok(())
 }
@@ -121,8 +133,9 @@ pub(crate) fn validate_data_root(config: &Config, data_root: &Path) -> Result<()
     let rooms: Vec<_> = config
         .vaults
         .iter()
-        .map(|vault| Ok(canonical_room_root(&vault.path)?.unwrap_or_else(|| vault.path.clone())))
-        .collect::<Result<_>>()?;
+        .map(|vault| resolve_state_path(&vault.path))
+        .collect::<io::Result<_>>()
+        .map_err(|_| boundary_error("room location cannot be resolved for data isolation"))?;
     let data_root = resolve_state_path(data_root)
         .map_err(|_| boundary_error("Kwiry data root cannot be resolved"))?;
     let failures = compare(&rooms, &[data_root], false, None)?;
