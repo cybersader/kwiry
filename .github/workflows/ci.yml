@@ -35,6 +35,9 @@ jobs:
           workspaces: daemon
       - name: Local daemon quality gate
         run: make check COMPONENT=daemon
+      - name: Test all workspace features
+        working-directory: daemon
+        run: cargo test --locked --workspace --all-features
 
   daemon-room-rollback:
     name: Room identity rollback (4ba5ba94)
@@ -64,6 +67,14 @@ jobs:
         env:
           KWIRY_ROLLBACK_BINARY: ${{ github.workspace }}/rollback-base/daemon/target/debug/kwiry
         run: cargo test --locked -p kwiry --test room_rollback
+
+      - name: Exercise N24 in a private Linux mount namespace
+        working-directory: daemon
+        run: |
+          test_bin=$(cargo test --locked -p kwiry-core --lib --no-run --message-format=json |
+            jq -er 'select(.reason == "compiler-artifact" and .profile.test and .target.name == "kwiry_core") | .executable')
+          parent_ns=$(readlink /proc/self/ns/mnt)
+          sudo unshare -rm env KWIRY_N24_PARENT_NS="$parent_ns" "$test_bin" --ignored --exact room_walk::tests::room_walk_n24_does_not_cross_a_bind_mount
 
   daemon-windows:
     name: Daemon Windows (fmt, clippy, tests)

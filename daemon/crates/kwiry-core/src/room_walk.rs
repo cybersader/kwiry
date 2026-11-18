@@ -360,4 +360,53 @@ mod tests {
         assert!(reader.open("x.md").is_err());
         assert!(reader.open("d/x.md").is_err());
     }
+
+    #[test]
+    #[ignore = "run by the dedicated Linux CI job inside unshare -rm"]
+    fn room_walk_n24_does_not_cross_a_bind_mount() {
+        use std::process::Command;
+        let own_ns = std::fs::read_link("/proc/self/ns/mnt").unwrap();
+        let init_ns =
+            std::env::var_os("KWIRY_N24_PARENT_NS").expect("CI passes the parent mount namespace");
+        assert_ne!(
+            own_ns.as_os_str(),
+            init_ns,
+            "run only within a private mount namespace"
+        );
+        let fixture = tempfile::tempdir().unwrap();
+        let a = fixture.path().join("a");
+        let b = fixture.path().join("b");
+        let sub = a.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::write(b.join("index.md"), "beta").unwrap();
+        assert!(
+            Command::new("mount")
+                .arg("--bind")
+                .arg(&b)
+                .arg(&sub)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let rooms = [
+            VaultRegistration {
+                id: "vault".into(),
+                path: a.clone(),
+                room: Some("a".into()),
+            },
+            VaultRegistration {
+                id: "vault".into(),
+                path: b,
+                room: Some("b".into()),
+            },
+        ];
+        let roots = RoomRoots::capture(&rooms);
+        let (enumeration, _) = roots.walk(&rooms[0]);
+        let unmounted = Command::new("umount").arg(&sub).status().unwrap();
+        assert!(unmounted.success());
+        assert!(enumeration.files.is_empty());
+        assert!(!enumeration.completeness.may_infer_deletions());
+        assert_eq!(enumeration.warnings[0].path, sub);
+    }
 }

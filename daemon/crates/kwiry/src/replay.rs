@@ -137,4 +137,18 @@ mod tests {
         );
         assert!(state.record("fresh", 103, 160, 103).is_ok());
     }
+
+    #[test]
+    fn replay_watermark_failure_does_not_admit_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let replay = ReplayState::start(directory.path(), 100).unwrap();
+        let blocked = directory.path().join("replay-iat-watermark");
+        fs::create_dir(&blocked).unwrap();
+        assert_eq!(
+            replay.record("new", 101, 160, 101),
+            Err(CapabilityFailure::ReplayStateUnavailable)
+        );
+        fs::remove_dir(blocked).unwrap();
+        assert!(replay.record("new", 101, 160, 101).is_ok());
+    }
 }

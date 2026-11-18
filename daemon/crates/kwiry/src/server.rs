@@ -934,6 +934,17 @@ mod tests {
         assert!(!error.body.error.message.contains("room"));
     }
 
+    #[tokio::test]
+    async fn unavailable_resource_indexes_are_exact_and_nonrevealing() {
+        let response = map_core_error(kwiry_core::Error::UnavailableResourceIndexes(vec![0, 2]))
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            r#"{"error":{"code":"resource_unavailable","message":"an authorized resource is not available for search","resource_indexes":[0,2]}}"#
+        );
+    }
+
     #[test]
     fn lexical_match_quality_header_is_closed_and_mode_aware() {
         fn value(mode: SearchMode, quality: Option<LexicalMatchQuality>) -> &'static str {

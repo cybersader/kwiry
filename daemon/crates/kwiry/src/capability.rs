@@ -160,10 +160,12 @@ impl CapabilityVerifier {
             )
         })?;
         let mut verifier = Self::from_jwks(config, &source)?;
-        verifier.replay = Some(Arc::new(
-            ReplayState::start(data_root, unix_time()?)
-                .map_err(|error| format!("could not establish replay state: {error}"))?,
-        ));
+        if ROOM_INCLUSIVE_IDS {
+            verifier.replay = Some(Arc::new(
+                ReplayState::start(data_root, unix_time()?)
+                    .map_err(|error| format!("could not establish replay state: {error}"))?,
+            ));
+        }
         Ok(verifier)
     }
 
@@ -352,14 +354,16 @@ impl CapabilityVerifier {
         {
             return Err(CapabilityFailure::Unauthorized);
         }
-        let max_limit = claims.constraints.max_limit;
-        if !max_limit.is_i64() && !max_limit.is_u64() {
+        let raw_limit = claims.constraints.max_limit.to_string();
+        let integer = raw_limit.strip_prefix('-').unwrap_or(&raw_limit);
+        if !integer.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(CapabilityFailure::Unauthorized);
         }
-        let max_limit = max_limit
-            .as_u64()
-            .and_then(|limit| usize::try_from(limit).ok())
-            .unwrap_or(0);
+        let max_limit = match raw_limit.parse::<usize>() {
+            Ok(limit) => limit,
+            Err(_) if ROOM_INCLUSIVE_IDS => 0, // integer out of range
+            Err(_) => return Err(CapabilityFailure::Unauthorized),
+        };
         if claims.tenant != self.tenant_id
             || (ROOM_INCLUSIVE_IDS && !valid_tenant_identifier(&claims.tenant))
             || claims.actions != [SEARCH_ACTION]
@@ -1266,7 +1270,11 @@ mod tests {
     fn repeated_capability_requires_fresh_replay_state_n17_n18() {
         let (mut verifier, mut workload) = workload_fixture();
         let directory = tempfile::tempdir().unwrap();
-        let iat = workload.iat;
+        let now = workload.iat;
+        let iat = now - 2;
+        workload.iat = iat;
+        workload.nbf = iat;
+        workload.exp = iat + 60;
         verifier.replay = Some(Arc::new(
             ReplayState::start(directory.path(), iat - 1).unwrap(),
         ));
@@ -1281,15 +1289,47 @@ mod tests {
             Err(CapabilityFailure::Unauthorized)
         );
         verifier.replay = None;
-        verifier.replay = Some(Arc::new(ReplayState::start(directory.path(), iat).unwrap()));
+        verifier.replay = Some(Arc::new(
+            ReplayState::start(directory.path(), iat + 1).unwrap(),
+        ));
         assert_eq!(
             verifier.verify_with_format(&valid, true),
             Err(CapabilityFailure::Unauthorized)
+        );
+        workload.iat = now;
+        workload.jti = "fresh-after-restart".into();
+        assert!(
+            verifier
+                .verify_with_format(&sign(&workload, Some("ed01")), true)
+                .is_ok()
         );
         workload.iat = unix_time().unwrap() + 1;
         assert_eq!(
             verifier.verify_with_format(&sign(&workload, Some("ed01")), true),
             Err(CapabilityFailure::Unauthorized)
         );
+    }
+
+    #[test]
+    fn case_tail_and_maximum_cardinality_are_bytewise() {
+        let (verifier, mut workload) = workload_fixture();
+        let verify = |claims: &CapabilityClaims| {
+            verifier
+                .verify_claims(&sign(claims, Some("ed01")), true)
+                .unwrap()
+                .0
+        };
+        workload.resources[1].room_id = "roomAaaa_0123456789abc".into();
+        assert_eq!(verify(&workload).resources.len(), 2); // P9 verifier half
+        workload.resources[0].room_id = "RoomXxxx_0123456789abc".into();
+        workload.resources[1].room_id = "RoomXxxx_0123456789abd".into();
+        assert_eq!(verify(&workload).resources.len(), 2); // P15 verifier half
+        workload.resources = (0..256)
+            .map(|index| CapabilityResource {
+                room_id: format!("Room_{index:017}"),
+                ..workload.resources[0].clone()
+            })
+            .collect();
+        assert_eq!(verify(&workload).resources.len(), 256); // P4 verifier half
     }
 }

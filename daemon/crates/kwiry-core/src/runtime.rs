@@ -1426,6 +1426,7 @@ struct OpenClastIndexManager {
     config: Config,
     audit_cursor: usize,
     evictions: EvictionReport,
+    room_retries: BTreeSet<(ResourceKey, String)>,
 }
 
 impl OpenClastIndexManager {
@@ -1520,6 +1521,7 @@ impl OpenClastIndexManager {
             config,
             audit_cursor,
             evictions,
+            room_retries: BTreeSet::new(),
         })
     }
 
@@ -1547,6 +1549,7 @@ impl OpenClastIndexManager {
         incomplete: &mut BTreeSet<ResourceKey>,
     ) -> Result<ReconcileReport> {
         let mut plan = ReconcilePlan::new(&self.manifest);
+        let mut next_room_retries = BTreeSet::new();
         let mut next_resources: BTreeSet<_> = self
             .layout
             .partitions
@@ -1655,7 +1658,14 @@ impl OpenClastIndexManager {
                 .filter(|(_, file)| file.resource.as_ref() == Some(&resource))
                 .map(|(key, _)| key.clone())
                 .collect();
-            let vault_read_scope = vault_read_scope(scope, &vault.id, Some(&resource));
+            let mut vault_read_scope = vault_read_scope(scope, &vault.id, Some(&resource));
+            if let Some(paths) = vault_read_scope.as_mut() {
+                paths.extend(
+                    self.room_retries
+                        .iter()
+                        .filter_map(|(key, path)| (key == &resource).then_some(path.clone())),
+                );
+            }
             let observed = observe_vault(
                 vault,
                 &self.manifest,
@@ -1696,6 +1706,9 @@ impl OpenClastIndexManager {
                 }
                 if outcome.kind == FileOutcomeKind::TransientError {
                     incomplete.insert(resource.clone());
+                    if room_roots.is_some() {
+                        next_room_retries.insert((resource.clone(), outcome.path.clone()));
+                    }
                     if let Some(previous) = self.manifest.files.get(&key) {
                         if room_roots.is_some() {
                             plan.remove_source(
@@ -1898,6 +1911,7 @@ impl OpenClastIndexManager {
         }
         let freshness_basis = config.indexing.basis;
         self.config = config;
+        self.room_retries = next_room_retries;
 
         Ok(ReconcileReport {
             changed_sources,
@@ -5956,6 +5970,11 @@ mod tests {
         let (_temp, config, data, runtime, manager) = governed_header_fixture();
         let file = config.vaults[0].path.join("note.md");
         let resource = [config.resource_key(&config.vaults[0]).unwrap()];
+        let source_key = crate::source::room_source_key(
+            &resource[0].vault_id,
+            Some(&resource[0].room_id),
+            "note.md",
+        );
         let filters = SearchFilters::default();
         let set_time = |seconds| {
             fs::File::options()
@@ -5975,9 +5994,7 @@ mod tests {
             .search_authorized_with_generation(query, 20, &filters, &resource)
             .unwrap();
         assert_eq!(before.hits.len(), 1);
-        let hash = manager.manifest().files[&crate::source::source_key("a", "note.md")]
-            .content_hash
-            .clone();
+        let hash = manager.manifest().files[&source_key].content_hash.clone();
         // Reconciliation is also a rebuild of the mtime-bearing index document.
         set_time(1_700_000_000);
         manager.reconcile(config.clone()).unwrap();
@@ -5986,10 +6003,7 @@ mod tests {
             .unwrap();
         assert!(after_reconcile.hits.is_empty());
         assert_ne!(before.generation, after_reconcile.generation);
-        assert_eq!(
-            hash,
-            manager.manifest().files[&crate::source::source_key("a", "note.md")].content_hash
-        );
+        assert_eq!(hash, manager.manifest().files[&source_key].content_hash);
         assert_eq!(
             runtime
                 .search_authorized("mtime:[1699999999 TO 1700000001]", 20, &filters, &resource)
@@ -6179,6 +6193,36 @@ mod tests {
             )
         ); // P14
         assert_eq!(search(&filters, &resources, 1).hits.len(), 1); // P10
+
+        let mut d = vault("d", "RoomDddd_0123456789abc", "delta shared");
+        d.id = "VaultTwo_0123456789abc".into();
+        let rd = config.resource_key(&d).unwrap();
+        config.vaults.push(d);
+        manager.reconcile(config.clone()).unwrap();
+        assert_eq!(
+            search(&filters, &[ra.clone(), rb.clone(), rd.clone()], 20)
+                .hits
+                .len(),
+            3
+        ); // P3 core
+        let wrong_vault = ResourceKey {
+            vault_id: ra.vault_id.clone(),
+            ..rd
+        };
+        let absent = ResourceKey {
+            room_id: "RoomZzzz_0123456789abc".into(),
+            ..wrong_vault.clone()
+        };
+        for missing in [wrong_vault.clone(), absent.clone()] {
+            assert!(
+                matches!(runtime.search_authorized_with_generation("shared", 20, &filters, &[missing]), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0])
+            ); // N14
+        }
+        assert!(
+            matches!(runtime.search_authorized_with_generation("shared", 20, &filters, &[wrong_vault, ra.clone(), absent]), Err(Error::UnavailableResourceIndexes(indexes)) if indexes == [0, 2])
+        ); // no partial hits; evaluate every tuple
+        config.vaults.pop();
+        manager.reconcile(config.clone()).unwrap();
 
         let c = vault("c", "RoomCccc_0123456789abc", "gamma alone");
         config.vaults.push(c.clone());
