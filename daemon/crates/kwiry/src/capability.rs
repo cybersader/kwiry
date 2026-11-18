@@ -59,6 +59,8 @@ struct CapabilityHeader {
     // A present typ must be a string; only omission permits legacy handling.
     #[serde(default, deserialize_with = "present_string")]
     typ: Option<String>,
+    #[serde(default, deserialize_with = "present_ignored")]
+    crit: Option<IgnoredAny>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -142,6 +144,12 @@ fn present_string<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
     String::deserialize(deserializer).map(Some)
+}
+
+fn present_ignored<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<IgnoredAny>, D::Error> {
+    IgnoredAny::deserialize(deserializer).map(Some)
 }
 
 // Legacy issuers could send null; workload issuers must omit the key entirely.
@@ -264,14 +272,12 @@ impl CapabilityVerifier {
         let raw_header = decode_segment(encoded_header)?;
         if ROOM_INCLUSIVE_IDS {
             reject_duplicate_members(&raw_header)?;
-            let object: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_slice(&raw_header).map_err(|_| CapabilityFailure::Unauthorized)?;
-            if object.contains_key("crit") {
-                return Err(CapabilityFailure::Unauthorized);
-            }
         }
         let header: CapabilityHeader =
             serde_json::from_slice(&raw_header).map_err(|_| CapabilityFailure::Unauthorized)?;
+        if ROOM_INCLUSIVE_IDS && header.crit.is_some() {
+            return Err(CapabilityFailure::Unauthorized);
+        }
         // RFC 8725 §3.11: do not accept another kind of signed document here.
         let legacy_only = match header.typ.as_deref() {
             Some(CAPABILITY_TYP) => false,
@@ -1179,6 +1185,18 @@ mod tests {
             .remove("room_id");
         raw["resources"][0]["rooms"] = json!(["RoomAaaa_0123456789abc", "RoomBbbb_0123456789abc"]);
         verify_value(&raw); // N9
+        for value in [Value::Null, json!("1"), json!(true), json!(1.25)] {
+            let mut raw = original.clone();
+            raw["constraints"]["max_limit"] = value;
+            verify_value(&raw); // R3 requires a JSON integer.
+        }
+        let mut enormous = workload.clone();
+        enormous.constraints.max_limit =
+            serde_json::value::RawValue::from_string("9".repeat(80)).unwrap();
+        assert!(matches!(
+            verifier.verify_claims(&sign(&enormous, Some("ed01")), true),
+            Err(CapabilityFailure::Forbidden)
+        ));
         for value in [
             Value::Null,
             json!(123),

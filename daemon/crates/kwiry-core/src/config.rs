@@ -137,6 +137,10 @@ pub fn load_config(path: &Path) -> Result<Config> {
             vault.path =
                 fs::canonicalize(&vault.path).map_err(|error| io_error(&vault.path, error))?;
         }
+        // Check the actual path values passed to the walker. A symlink
+        // changed between the first validation and canonicalization must
+        // not turn a valid registration into an overlapping room.
+        validate_room_registrations(path, &config, true)?;
     }
     Ok(config)
 }

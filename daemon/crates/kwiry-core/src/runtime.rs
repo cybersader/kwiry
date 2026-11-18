@@ -5720,6 +5720,10 @@ mod tests {
         (temp, config, data, runtime, manager)
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn governed_headers_ignore_forbidden_publish_reconcile_and_watcher_evidence() {
         let (_temp, config, data, runtime, mut manager) = governed_header_fixture();
@@ -5806,6 +5810,10 @@ mod tests {
         reopened.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn governed_metadata_audit_backlog_cannot_leak_forbidden_work() {
         let (temp, mut config, _data, runtime, mut manager) = governed_header_fixture();
@@ -5867,6 +5875,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn governed_freshness_transitions_and_effective_set_are_resource_scoped() {
         let (_temp, config, _data, runtime, mut manager) = governed_header_fixture();
@@ -5965,6 +5977,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn governed_mtime_only_rebuild_changes_range_results_and_identity_together() {
         let (_temp, config, data, runtime, manager) = governed_header_fixture();
@@ -6022,6 +6038,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn governed_revision_covers_every_persisted_file_field_and_manifest_version() {
         let (_temp, config, _data, _runtime, manager) = governed_header_fixture();
