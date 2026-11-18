@@ -27,9 +27,11 @@ workload_subject_allowlist = ["workload:synthetic-search"]
 ```
 
 1. Deploy the S1b-capable release everywhere. With the cutoff unset, today's legacy shape remains accepted; an empty allowlist enables no workload subjects.
-2. OpenClast switches its issuer to workload-shaped capabilities and confirms `T_switch`.
+2. OpenClast switches its issuer to workload-shaped capabilities with JWT header `typ: kwiry-cap+jwt` and confirms `T_switch`.
 3. Only then set `legacy_identity_accept_until` to `T_switch + max_token_ttl_seconds + clock_skew_allowance` (the design's defaults are 60 seconds plus 30 seconds). Authentication configuration changes require a daemon restart, as before; arrange that restart to activate the cutoff.
 4. Before that cutoff, legacy `sub` and `actor` must be present, distinct, and nonempty; they are validated and discarded. At and after it, the legacy shape returns 401. Workload tokens require an exactly allowlisted `sub`, with neither `actor` nor `subject_revision` present.
+
+The `typ` value is case-sensitive. Until cutover, legacy capabilities may omit `typ` or use `kwiry-cap+jwt`. Every other value returns 401 for both shapes, so OpenClast lifecycle and security event tokens cannot be accepted as search capabilities.
 
 Workload tokens reject unknown claims at every signed object level and reject explicitly null identity claims. The legacy branch keeps its previous parsing behavior, including ignoring unknown fields, until cutover. No unknown field is retained in the verified context or logged. Workload allowlist configuration is an operator trust decision; Kwiry cannot infer whether an arbitrary subject string represents a person.
 

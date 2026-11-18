@@ -12,6 +12,7 @@ semantic-onnx = ["kwiry-core/semantic-onnx"]
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+base64.workspace = true
 clap.workspace = true
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 kwiry-core = { path = "../kwiry-core" }
