@@ -869,6 +869,7 @@ mod tests {
         });
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some("ed01".into());
+        header.typ = None;
         encode(
             &header,
             &claims,

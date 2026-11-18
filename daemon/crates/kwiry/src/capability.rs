@@ -2,17 +2,19 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::jwk::{
     AlgorithmParameters, EllipticCurve, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
 };
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use kwiry_core::{HostProfile, OpenClastAuthConfig, Principal, ResourceKey, Scope};
-use serde::de::IgnoredAny;
+use serde::de::{Error as _, IgnoredAny};
 use serde::{Deserialize, Serialize};
 
 const MAX_RESOURCES: usize = 256;
 const MAX_SEARCH_LIMIT: usize = 100;
 const SEARCH_ACTION: &str = "search:lexical";
+const CAPABILITY_TYP: &str = "kwiry-cap+jwt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CapabilityFailure {
@@ -35,6 +37,15 @@ pub(crate) struct CapabilityVerifier {
     workload_subject_allowlist: Vec<String>,
     legacy_identity_accept_until: Option<u64>,
     keys: HashMap<String, VerificationKey>,
+}
+
+#[derive(Deserialize)]
+struct CapabilityHeader {
+    alg: Algorithm,
+    kid: Option<String>,
+    // A present typ must be a string; only omission permits legacy handling.
+    #[serde(default, deserialize_with = "present_string")]
+    typ: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -66,6 +77,20 @@ struct CapabilityClaims {
     subject_revision: Option<Option<String>>,
     #[serde(flatten, skip_serializing)]
     unknown: HashMap<String, IgnoredAny>,
+}
+
+// Only actor-bearing claims may omit typ. JWT decoding checks this shape after
+// signature verification and before validating registered claims.
+struct LegacyCapabilityClaims(CapabilityClaims);
+
+impl<'de> Deserialize<'de> for LegacyCapabilityClaims {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let claims = CapabilityClaims::deserialize(deserializer)?;
+        if claims.actor.is_none() {
+            return Err(D::Error::missing_field("actor"));
+        }
+        Ok(Self(claims))
+    }
 }
 
 // Workload claims are closed at every signed object level; legacy claims keep
@@ -170,7 +195,20 @@ impl CapabilityVerifier {
     }
 
     pub(crate) fn verify(&self, token: &str) -> Result<Principal, CapabilityFailure> {
-        let header = decode_header(token).map_err(|_| CapabilityFailure::Unauthorized)?;
+        let (encoded_header, _) = token
+            .split_once('.')
+            .ok_or(CapabilityFailure::Unauthorized)?;
+        let header = URL_SAFE_NO_PAD
+            .decode(encoded_header)
+            .map_err(|_| CapabilityFailure::Unauthorized)?;
+        let header: CapabilityHeader =
+            serde_json::from_slice(&header).map_err(|_| CapabilityFailure::Unauthorized)?;
+        // RFC 8725 §3.11: do not accept another kind of signed document here.
+        let legacy_only = match header.typ.as_deref() {
+            Some(CAPABILITY_TYP) => false,
+            None => true,
+            Some(_) => return Err(CapabilityFailure::Unauthorized),
+        };
         let kid = header
             .kid
             .as_deref()
@@ -187,9 +225,14 @@ impl CapabilityVerifier {
         validation.set_audience(&[&self.audience]);
         validation.set_issuer(&[&self.issuer]);
         validation.set_required_spec_claims(&["exp", "nbf", "aud", "iss", "sub"]);
-        let claims = decode::<CapabilityClaims>(token, &key.decoding_key, &validation)
-            .map_err(|_| CapabilityFailure::Unauthorized)?
-            .claims;
+        let claims = if legacy_only {
+            decode::<LegacyCapabilityClaims>(token, &key.decoding_key, &validation)
+                .map(|data| data.claims.0)
+        } else {
+            decode::<CapabilityClaims>(token, &key.decoding_key, &validation)
+                .map(|data| data.claims)
+        }
+        .map_err(|_| CapabilityFailure::Unauthorized)?;
         self.validate_claims(claims)
     }
 
@@ -361,8 +404,13 @@ mod tests {
     }
 
     fn sign(claims: &CapabilityClaims, kid: Option<&str>) -> String {
+        sign_with_typ(claims, kid, Some(CAPABILITY_TYP))
+    }
+
+    fn sign_with_typ(claims: &impl Serialize, kid: Option<&str>, typ: Option<&str>) -> String {
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = kid.map(str::to_owned);
+        header.typ = typ.map(str::to_owned);
         encode(
             &header,
             claims,
@@ -596,6 +644,81 @@ mod tests {
     }
 
     #[test]
+    fn capability_typ_is_required_for_workload_and_optional_for_legacy_before_cutoff() {
+        let mut config = config();
+        config.workload_subject_allowlist = vec!["workload:search".into()];
+        config.legacy_identity_accept_until = Some(unix_time().unwrap() + 300);
+        let verifier = CapabilityVerifier::from_jwks(&config, ED25519_JWKS).unwrap();
+        let legacy = claims();
+        let mut workload = legacy.clone();
+        workload.sub = "workload:search".into();
+        workload.actor = None;
+        workload.subject_revision = None;
+
+        let signed = |claims, typ| sign_with_typ(claims, Some("ed01"), typ);
+        assert!(
+            verifier
+                .verify(&signed(&workload, Some(CAPABILITY_TYP)))
+                .is_ok()
+        );
+        assert_eq!(
+            verifier.verify(&signed(&workload, None)),
+            Err(CapabilityFailure::Unauthorized)
+        );
+        for typ in [None, Some(CAPABILITY_TYP)] {
+            assert!(
+                verifier.verify(&signed(&legacy, typ)).is_ok(),
+                "typ {typ:?}"
+            );
+        }
+
+        for (shape, claims) in [("workload", &workload), ("legacy", &legacy)] {
+            for typ in [
+                "JWT",
+                "Kwiry-cap+jwt",
+                "openclast-holdings-list+jwt",
+                "openclast-obligation-ack+jwt",
+                "openclast-holder-status+jwt",
+                "openclast-holder-status-ack+jwt",
+                "openclast-lifecycle-epoch+jwt",
+                "openclast-tombstone-merge+jwt",
+                "secevent+jwt",
+            ] {
+                assert_eq!(
+                    verifier.verify(&signed(claims, Some(typ))),
+                    Err(CapabilityFailure::Unauthorized),
+                    "{shape} shape with typ {typ:?}"
+                );
+            }
+        }
+
+        config.legacy_identity_accept_until = Some(0);
+        let after = CapabilityVerifier::from_jwks(&config, ED25519_JWKS).unwrap();
+        assert_eq!(
+            after.verify(&signed(&legacy, None)),
+            Err(CapabilityFailure::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn explicit_null_typ_is_not_an_omitted_legacy_typ() {
+        let verifier = CapabilityVerifier::from_jwks(&config(), ED25519_JWKS).unwrap();
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","kid":"ed01","typ":null}"#);
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims()).unwrap());
+        let message = format!("{header}.{payload}");
+        let signature = jsonwebtoken::crypto::sign(
+            message.as_bytes(),
+            &EncodingKey::from_ed_der(ED25519_PRIVATE_DER),
+            Algorithm::EdDSA,
+        )
+        .unwrap();
+        assert_eq!(
+            verifier.verify(&format!("{message}.{signature}")),
+            Err(CapabilityFailure::Unauthorized)
+        );
+    }
+
+    #[test]
     fn workload_shape_is_bytewise_allowlisted_and_cannot_smuggle_identity_claims() {
         let mut config = config();
         config.workload_subject_allowlist = vec!["workload:search".into()];
@@ -619,8 +742,6 @@ mod tests {
             Err(CapabilityFailure::Unauthorized)
         );
         workload.subject_revision = None;
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some("ed01".into());
         for (key, value) in [
             ("actor", serde_json::Value::Null),
             ("subject_revision", serde_json::Value::Null),
@@ -628,12 +749,7 @@ mod tests {
         ] {
             let mut raw = serde_json::to_value(&workload).unwrap();
             raw[key] = value;
-            let token = encode(
-                &header,
-                &raw,
-                &EncodingKey::from_ed_der(ED25519_PRIVATE_DER),
-            )
-            .unwrap();
+            let token = sign_with_typ(&raw, Some("ed01"), Some(CAPABILITY_TYP));
             assert_eq!(
                 verifier.verify(&token),
                 Err(CapabilityFailure::Unauthorized),
@@ -689,14 +805,7 @@ mod tests {
                     _ => &mut raw["resources"][0],
                 };
                 target["unknown_identity"] = serde_json::json!("synthetic-identity");
-                let mut header = Header::new(Algorithm::EdDSA);
-                header.kid = Some("ed01".into());
-                let token = encode(
-                    &header,
-                    &raw,
-                    &EncodingKey::from_ed_der(ED25519_PRIVATE_DER),
-                )
-                .unwrap();
+                let token = sign_with_typ(&raw, Some("ed01"), Some(CAPABILITY_TYP));
                 let expected = if legacy_shape {
                     Ok(context.clone())
                 } else {
@@ -707,6 +816,7 @@ mod tests {
             }
             let mut header = Header::new(Algorithm::HS256);
             header.kid = Some("ed01".into());
+            header.typ = Some(CAPABILITY_TYP.into());
             let token =
                 encode(&header, &shape, &EncodingKey::from_secret(b"synthetic-key")).unwrap();
             assert_eq!(before.verify(&token), Err(CapabilityFailure::Unauthorized));

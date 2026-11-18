@@ -340,7 +340,7 @@ fn governed_headers_survive_real_forbidden_watcher_and_logs_discard_identity() {
         },
     ];
     save_config(&config_path, &config).unwrap();
-    let token = |vault: &str, legacy: bool| {
+    let token = |vault: &str, legacy: bool, typ: Option<&str>| {
         let mut claims = serde_json::json!({
             "iss": "issuer", "aud": "kwiry-search", "sub": "workload:synthetic-search",
             "jti": "synthetic-request-nonce", "iat": now, "nbf": now, "exp": now + 60,
@@ -355,13 +355,19 @@ fn governed_headers_survive_real_forbidden_watcher_and_logs_discard_identity() {
         }
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some("ed01".into());
+        header.typ = typ.map(str::to_owned);
         encode(&header, &claims, &EncodingKey::from_ed_der(PRIVATE_DER)).unwrap()
     };
     let daemon = Daemon::start_openclast(&config_path, &data);
-    let legacy = token("a", true);
-    let workload = token("a", false);
-    let hidden = token("b", false);
+    let legacy = token("a", true, None);
+    let workload = token("a", false, Some("kwiry-cap+jwt"));
+    let hidden = token("b", false, Some("kwiry-cap+jwt"));
     let body = r#"{"q":"visibleprobe","mode":"lexical","limit":20}"#;
+    for (legacy, typ) in [(false, None), (true, Some("openclast-holder-status+jwt"))] {
+        let rejected = token("a", legacy, typ);
+        let (code, _) = request(&daemon.address, &rejected, "POST", "/v0/search", Some(body));
+        assert_eq!(code, 401);
+    }
     let snapshot = |token: &str| {
         let (code, body, headers) =
             request_with_headers(&daemon.address, token, "POST", "/v0/search", Some(body));
