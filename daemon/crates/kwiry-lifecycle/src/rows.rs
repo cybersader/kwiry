@@ -363,10 +363,10 @@ pub const MACHINES: &[Machine] = &[
                 H6,
                 r#"A(E,s→E') + L, `E_L = E'`"#,
                 r#"`hw` equals `from`"#,
-                r#"A1–A6, with W (`hw = (E',s_L)`; acceptance consumed into `epoch_history`; R14 in the same commit)"#,
-                r#"B(E',s_L)"#,
-                r#"Either A(E,s→E') or B(E',s_L)"#,
-                r#"R6-5, R6-2"#,
+                r#"A1–A6, with W (`hw = (E',s_L)`; acceptance consumed into `epoch_history`; R14 and a durable fresh-status trigger in the same commit)"#,
+                r#"B(E',s_L); T1 at the first opportunity, whatever the count"#,
+                r#"Either A(E,s→E') or B(E',s_L) with the fresh-status trigger"#,
+                r#"R6-5, R6-2, HW §15 H.19"#,
                 Step
             ),
             row!(
@@ -436,9 +436,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"After H12j, the authority's audited `restore_journal_lost` decision"#,
                 r#"An admin decision, recorded as `cause: "restore-journal-lost"` with an unsampled security event"#,
                 r#"—"#,
-                r#"A new epoch without replay, refused as in H4 until `accept-epoch` (H5, H6). No lost instruction is listed again and no `blocked` is restored, so affected obligations list `terminating`; the next status report raises the unattributed count for a new decision"#,
+                r#"A new epoch without replay, refused as in H4 until `accept-epoch`. Outstanding instructions are superseded and unlisted; audited re-approval needs a new-epoch report. `blocked` returns to quarantined with escalation resumed; status is not current and its floor restarts. Evidence stays in custody; obligations, phases and `last_accepted` stay intact"#,
                 r#"—"#,
-                r#"HW §15 H.1.5, H.14"#,
+                r#"HW §15 H.1.5, H.14, H.19"#,
                 Focused("audited journal-lost override fixture")
             ),
         ],
@@ -462,9 +462,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"Idle + trigger: startup, an interval in `[0.8, 1.0] × relist_seconds`, a rebuild, the step-3a early relist, or a backoff timer"#,
                 r#"Nothing in flight; M10 is `Normal`; HW §15 H.8: ≥ 5 s between counted starts; 410 restart and the single replay/expiry retry exempt; echo durable `last_list_ref` except on first list or reset"#,
                 r#"—"#,
-                r#"InFlight, with a fresh nonce and deadlines of 10 s (connect), 30 s (each response) and 120 s baseline, scaled from page 0 (whole list; §5.3)"#,
+                r#"InFlight, with a fresh nonce and deadlines of 10 s (connect), 30 s (each response) and 120 s baseline, scaled from page 0 (whole list; §5.3). An unverifiable well-formed `last_list_ref` is ignored and audited; never a list-route 409"#,
                 r#"—"#,
-                r#"HW §3.1, §7, amendment B, R6-8"#,
+                r#"HW §3.1, §7, §15 H.17, amendment B, R6-8"#,
                 Step
             ),
             row!(
@@ -887,23 +887,33 @@ pub const MACHINES: &[Machine] = &[
             ),
             row!(
                 C17,
-                r#"active + a search capability for `r` that OpenClast minted before `r`'s retirement committed, before A0 admits a list carrying the retirement"#,
-                r#"`now ≤ exp + clock_skew_allowance`, with `exp − iat ≤ 60 s` and `clock_skew_allowance ≤ 30 s`"#,
+                r#"active + admit a governed request, then re-check immediately before releasing results"#,
+                r#"`exp − iat ≤ 60 s`; `iat ≤ now + 30 s` at admission. At both cuts: `now ≤ exp + clock_skew_allowance`, no C19 clock hold, and no A0 list showing `r` not active. Configured skew must be ≤ 30 s or startup is refused"#,
                 r#"—"#,
-                r#"Answered. This is at most 90 s after the retirement commit; OpenClast's T1 re-check refuses the whole call before any result reaches a caller"#,
+                r#"Release results only after passing the second cut. For a pre-retirement capability the engine window is at most 90 s; OpenClast's separate T1 re-check can still refuse the whole call"#,
                 r#"—"#,
-                r#"HW §15 H.15 rules 1–3"#,
-                Focused("capability-exposure fixture")
+                r#"HW §15 H.15, H.21"#,
+                Focused("capability admission and release fixture")
             ),
             row!(
                 C18,
-                r#"any + a search capability for `r` past `exp + clock_skew_allowance`, or once A0 has admitted a list carrying `r`'s retirement"#,
+                r#"any + a governed request that fails a C17 check"#,
                 r#"—"#,
                 r#"—"#,
-                r#"Refused (`resource_unavailable`). A supported restore adds no window: the bound runs from the original retirement commit, and nothing is minted while the restore is incomplete"#,
+                r#"Refuse with no results: `capability_expired` past the deadline; refuse a future `iat` or excessive lifetime; C19 refuses while the clock is behind; `resource_unavailable` once A0 shows `r` not active. A supported restore adds no window"#,
                 r#"—"#,
-                r#"HW §15 H.15 rules 2 and 4, K.1"#,
-                Focused("capability-exposure fixture")
+                r#"HW §15 H.15, H.21, K.1"#,
+                Focused("capability admission and release fixture")
+            ),
+            row!(
+                C19,
+                r#"A verified list page or capability shows the holder clock is behind; or clock correction is confirmed"#,
+                r#"`iat − now_recv > 30 s` on any verified page or capability (an older artifact does not clear the hold)"#,
+                r#"—"#,
+                r#"Raise `clock_behind_authority`; refuse all capability-authorized governed requests until the condition clears"#,
+                r#"—"#,
+                r#"HW §15 H.21"#,
+                Focused("capability admission and release fixture")
             ),
         ],
     },
@@ -1100,11 +1110,11 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 R1,
                 r#"none, invalidated or rejected (or ready or sent with a lower state) + a derived state `s`"#,
-                r#"Publisher transaction: `obl_ver[o]`, `res_ver[r]`, `inv_ver` and the epoch unchanged since the pass. Then **either** `s > F`, **or** `s == F` as a same-state update (counts or manifest digest differ from the last accepted report) or a reconfirmation (R1r, or after R14), at most once per 300 s per obligation. Plus the enqueue guard, and an empty inventory for `complete`"#,
+                r#"Publisher transaction: `obl_ver[o]`, `res_ver[r]`, `inv_ver` and the epoch unchanged since the pass. Then **either** `s > F`, **or** `s == F` as a same-state update (counts or manifest digest differ from the last accepted report) or a reconfirmation (R1r, or after R14), at most once per 300 s per obligation. Plus the enqueue guard, and an empty inventory for `complete`. After an epoch acceptance, nothing until the H6 fresh-epoch status has a current-epoch receipt (T1 goes first)"#,
                 r#"W[`receipts/<key>` scan record, for `complete`] → W[`manifests/<key>`] → W (`pending = ready{key, B}`)"#,
                 r#"ready"#,
                 r#"After a side file: an orphan, later pruned. After W: ready, re-validated by R2 after the restart"#,
-                r#"HW §4.1, §4.4, §14 Q3, Q7; F5-4; R6-7; R7-5"#,
+                r#"HW §4.1, §4.4, §14 Q3, Q7, §15 H.19; F5-4; R6-7; R7-5"#,
                 Step
             ),
             row!(
@@ -1269,12 +1279,12 @@ pub const MACHINES: &[Machine] = &[
             ),
             row!(
                 R10,
-                r#"sent + `429`, a `503`, network failure or deadline"#,
+                r#"sent + `429`, a `503`, H.20 `500`, network failure or deadline"#,
                 r#"—"#,
                 r#"—"#,
-                r#"Unchanged; back off; `authority_epoch_mismatch` also H10"#,
+                r#"Unchanged; back off; `authority_epoch_mismatch` also H10. For H.20 the authority emits `lifecycle.invariant_violation` without committing"#,
                 r#"—"#,
-                r#"HW §4.5, §14 F"#,
+                r#"HW §4.5, §14 F, §15 H.20"#,
                 Step
             ),
             row!(
@@ -1563,12 +1573,12 @@ pub const MACHINES: &[Machine] = &[
         rows: &[
             row!(
                 T1,
-                r#"none, invalidated or rejected + a trigger (`reset_pending`, a digest change, a release outcome, daily while non-zero)"#,
+                r#"none, invalidated or rejected + a trigger (`reset_pending`, digest change, release outcome, daily while non-zero, or H6 in any epoch transition even at zero)"#,
                 r#"New status key: at least 60 s since last new key; same-key retries exempt. Publisher transaction reads `inv_ver`"#,
                 r#"W[`manifests/<key>`] → W (`status = ready{key, body}`)"#,
                 r#"ready"#,
-                r#"Either"#,
-                r#"HW §14 E, G.2"#,
+                r#"Either; an unacknowledged H6 trigger survives restart"#,
+                r#"HW §14 E, G.2, §15 H.19"#,
                 Step
             ),
             row!(
@@ -1645,7 +1655,7 @@ pub const MACHINES: &[Machine] = &[
                 T4,
                 r#"sent + status receipt"#,
                 r#"Status path (§5.6)"#,
-                r#"W[`receipts/<key>`] → W (status accepted; `reset_pending = false` if the body said reset; L7 or L8 in the same commit)"#,
+                r#"W[`receipts/<key>`] → W (status accepted; `reset_pending = false` if the body said reset; clear H6 trigger on a current-epoch receipt; L7 or L8 in the same commit)"#,
                 r#"none"#,
                 r#"After the receipt: the retry gets the same ack"#,
                 r#"HW §14 G.1"#,
@@ -1653,12 +1663,12 @@ pub const MACHINES: &[Machine] = &[
             ),
             row!(
                 T5,
-                r#"sent + `429`, a `503`, network failure, deadline, or transport cancellation (S18)"#,
+                r#"sent + `429`, a `503`, H.20 `500`, network failure, deadline, or transport cancellation (S18)"#,
                 r#"—"#,
                 r#"—"#,
-                r#"Back off, or exit; `authority_epoch_mismatch` also H10"#,
+                r#"Back off, or exit; `authority_epoch_mismatch` also H10. H.20 commits nothing and emits `lifecycle.invariant_violation`"#,
                 r#"—"#,
-                r#"HW §14 E, F, R7-8"#,
+                r#"HW §14 E, F, §15 H.20, R7-8"#,
                 Step
             ),
             row!(
@@ -1902,6 +1912,102 @@ pub const MACHINES: &[Machine] = &[
                 r#"Either"#,
                 r#"Round-8 #5"#,
                 Step
+            ),
+        ],
+    },
+    Machine {
+        key: "M11",
+        title: r#"Root pins (HW §15 H.16)"#,
+        intro: r#"Engine room items only. The holder serves a room from artifacts stamped with the item's `root_pin.pin_ref`, built from a root it observes at `root_pin.pin_id`, under a list received in this process. P6–P8 are the authority behaviour the holder relies on."#,
+        header: [
+            r#"ID"#,
+            r#"State + event"#,
+            r#"Guard (reads)"#,
+            r#"Durable writes"#,
+            r#"Next"#,
+            r#"Crash after write"#,
+            r#"Implements"#,
+        ],
+        rows: &[
+            row!(
+                P1,
+                r#"A0: an admitted list shows an `active` room with a changed, `null` or history-conflicting `root_pin`"#,
+                r#"Compared with the pin of the list last applied in this process; conflict = the pin-history holds the `pin_id` under another room"#,
+                r#"L3 only: refuse the room for retrieval, readiness and end-of-request release at once"#,
+                r#"A1. The refusal survives an A1–A3 failure and retries; only a successful A4 broadens serving"#,
+                r#"Nothing durable; restart serves nothing until S12"#,
+                r#"HW §15 H.16.5 effective point; AP22, AP25"#,
+                Focused("root-pin fixture")
+            ),
+            row!(
+                P2,
+                r#"A1 commits a list with pinned room items"#,
+                r#"A `pin_id` not yet in the pin-history"#,
+                r#"In A1's W with the high-water: add `{pin_id → resource.id}`; never replace or evict a pair. If the pairs would exceed the history ceiling, alert and raise it before persisting (never evict, never renew the lease on failure)"#,
+                r#"A2 or A2n"#,
+                r#"The high-water and the pairs commit together"#,
+                r#"HW §15 H.16.5; AP11–AP11d, AP24, AP27"#,
+                Implicit("part of A1's W")
+            ),
+            row!(
+                P3,
+                r#"A query, readiness check or end-of-request release for room `r`"#,
+                r#"`root_pin` non-null; artifacts stamped with its `pin_ref`; the root observed at its `pin_id`; no pin-history conflict (AP24 `root_pin_previously_listed`); list received in this process"#,
+                r#"—"#,
+                r#"Served; otherwise R17 with no results. A `null` pin, a mismatch or a conflict withholds the artifacts and authorizes no deletion"#,
+                r#"—"#,
+                r#"HW §15 H.16.5; AP1, AP6, AP7, AP16, AP18"#,
+                Implicit("the serving guard every read evaluates")
+            ),
+            row!(
+                P4,
+                r#"Room `active` with a non-null applied pin whose `pin_ref` no artifact carries"#,
+                r#"The walk observes the root at `pin_id` (otherwise `root_pin_mismatch`: fail closed, index nothing); no A0 refusal or AP24 conflict; publication re-checks the applied pin"#,
+                r#"G (artifacts stamped with `pin_ref`); a storage budget stops new artifact writes and never evicts protected data"#,
+                r#"Servable under P3"#,
+                r#"An unpublished build is discarded"#,
+                r#"HW §15 H.16.5; AP2, AP4, AP5, AP14, AP19"#,
+                Focused("root-pin fixture")
+            ),
+            row!(
+                P5,
+                r#"Root observed at another `pin_id` (AP3) + the H10.5 stale bound passes"#,
+                r#"—"#,
+                r#"—"#,
+                r#"Until the bound, only previously validated artifacts stamped with the current `pin_ref` may serve (never after an A0 refusal or for AP24); then R17"#,
+                r#"—"#,
+                r#"HW §15 H.16.5, H10.5; AP3"#,
+                Focused("root-pin fixture")
+            ),
+            row!(
+                P6,
+                r#"Authority: `attest-root` for room `r` (admin)"#,
+                r#"Holding known and `active`; `expect_current` equals the current `pin_ref` or `none`; `pin_id` absent from the id-space history or mapped to `r`"#,
+                r#"Journal `root_pin_attested` (fsync) then one transaction: fresh `pin_ref`, history insert, `seq` and `holder_rev` advance; refusals write nothing"#,
+                r#"The next list carries the pin; an in-flight cursor gets 410"#,
+                r#"Reconcile completes or aborts the appended entry"#,
+                r#"HW §15 H.16.1–H.16.4; OA1–OA4, OA8"#,
+                Focused("root-pin fixture")
+            ),
+            row!(
+                P7,
+                r#"Authority: supported restore replays `root_pin_attested` after the restore point"#,
+                r#"In journal order; apply only if the current `pin_ref` equals `prev_pin_ref` and the reuse rule holds"#,
+                r#"Pin and history as journaled; a skipped entry is audited; an entry whose holding is gone reserves its `pin_id` as `"*"` in its `provider_scope`, permanently"#,
+                r#"The first new-epoch list carries the replayed pins"#,
+                r#"—"#,
+                r#"HW §15 H.16.3; OA5, OA11"#,
+                Focused("root-pin fixture")
+            ),
+            row!(
+                P8,
+                r#"Authority: `restore_journal_lost`"#,
+                r#"—"#,
+                r#"First new-epoch transaction: every `active` engine room's pin becomes `null` (cause `holder-reset`); terminating and retired keep their last pin; history kept"#,
+                r#"Each room serves again only after a fresh observation, `attest-root` with `expect_current: none`, and a rebuild under the new `pin_ref`"#,
+                r#"—"#,
+                r#"HW §15 H.19 item 5; OA7"#,
+                Focused("root-pin fixture")
             ),
         ],
     },

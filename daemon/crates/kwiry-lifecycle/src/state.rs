@@ -19,6 +19,11 @@ pub const OBLS: usize = 2;
 pub const CHANS: usize = 3;
 pub const STATUS: usize = 2;
 pub const INSTRS: usize = 2;
+/// Storage directories a room's configured root can resolve to (H.16 pin
+/// ids): `D0` and `D1` hold R0's and R1's data at the start, `D2` is spare.
+pub const DIRS: usize = 3;
+/// Attestations the bounded journal can hold.
+pub const PIN_ENTRIES: usize = 3;
 
 /// The room each unit's descriptor names.
 pub const UNIT_ROOM: [usize; UNITS] = [0, 0, 1];
@@ -117,6 +122,32 @@ pub struct Ack {
 
 // ------------------------------------------------------------------ authority
 
+/// An authority-held root pin (HW §15 H.16): the holder-observed directory
+/// (`pin_id`) and the authority-random `pin_ref` minted at attestation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Pin {
+    pub id: u8,
+    pub pin_ref: u8,
+}
+
+/// A value of the id-space `root_pin_history`: a room, or the reserved `"*"`
+/// of an attestation whose holding did not survive replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PinOwner {
+    Room(u8),
+    Orphan,
+}
+
+/// A `root_pin_attested` journal entry (one id-space, so `provider_scope`
+/// is implicit). `pin: None` is `pin_id: none`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PinEntry {
+    pub seq: u8,
+    pub room: u8,
+    pub pin: Option<Pin>,
+    pub prev: Option<u8>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum APhase {
     Active,
@@ -179,6 +210,10 @@ pub struct AuthCore {
     pub superseded_mismatch: u8,
     pub status: Option<SKey>,
     pub status_receipts: Bag<(SKey, u8, Option<ReleaseDisposition>), 8>,
+    /// H.16: each room holding's `root_pin` (terminating and retired keep
+    /// their last pin) and the grow-only id-space history.
+    pub pins: [Option<Pin>; ROOMS],
+    pub pin_history: [Option<PinOwner>; DIRS],
 }
 
 /// Digest and decision identities are symbolic in this model; the typed body
@@ -202,6 +237,9 @@ pub struct Auth {
     pub core: AuthCore,
     /// A state backup taken for a later supported restore.
     pub backup: Option<Box<AuthCore>>,
+    /// H.19 custody projection: the unchanged restored record, including
+    /// status/acks, the instruction and blocked decisions. Not protocol state.
+    pub journal_lost_evidence: Option<Box<AuthCore>>,
     /// Bounded projection of the off-store H.1 journal. Room index represents
     /// the stable holder/holding/obligation identity, not a new allocation.
     pub journal_retired: u8,
@@ -209,6 +247,10 @@ pub struct Auth {
     pub journal_cleared: [u8; ROOMS],
     pub journal_finalized: [Option<FinalEntry>; INSTRS],
     pub journal_issued: [Option<(u8, Instr)>; INSTRS],
+    /// H.16.3 `root_pin_attested` entries, in journal order.
+    pub journal_pins: [Option<PinEntry>; PIN_ENTRIES],
+    /// `pin_ref`s are authority-random and never reused, even across restores.
+    pub next_pin_ref: u8,
     pub rollback_suspected: bool,
     pub failed_restore: bool,
     pub journal_lost_audited: bool,
@@ -252,6 +294,8 @@ pub struct ListMsg {
     pub items: [Item; ROOMS],
     pub holder_rev: u8,
     pub instr: Option<Instr>,
+    /// H.16.4 `root_pin` of each room item (part of `state_digest`).
+    pub pins: [Option<Pin>; ROOMS],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -266,7 +310,8 @@ pub enum ListErr {
     },
     ProofExpired,
     BadRequest,
-    StaleListRef,
+    /// Historical rev 10.1 mutation only. H.17 forbids 409 on the list route.
+    LegacyStaleListRef,
     /// `403 holder_not_authorized`.
     Forbidden,
 }
@@ -299,6 +344,8 @@ pub enum RespKind {
     NotFound,
     /// `409 idempotency_conflict`, `400 invalid_request`, `413`.
     Bug,
+    /// `500`, accompanied by `lifecycle.invariant_violation` at the authority.
+    InvariantViolation,
     /// `401` (`replay` or `invalid_holder_proof`).
     Unauthorized {
         replay: bool,
@@ -448,6 +495,13 @@ pub struct Durable {
     pub manifests: u8,
     pub root_holder: Option<u8>,
     pub reset_pending: bool,
+    /// H.19: send status even at zero inventory, until accepted in this epoch.
+    pub epoch_status_pending: bool,
+    /// H.16 holder pin-history `{pin_id → resource.id}` from verified lists,
+    /// grow-only, persisted in A1's W with the high-water.
+    pub pin_history: [Option<u8>; DIRS],
+    /// The `pin_ref` each room's current artifacts were derived under.
+    pub derived: [Option<u8>; ROOMS],
     pub state_holder: Option<u8>,
     pub instr: [IDur; INSTRS],
     pub units: [UDur; UNITS],
@@ -557,6 +611,13 @@ pub enum Rsv {
     Exhausted,
 }
 
+/// One admitted governed request in the H.21 probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct InFlightCapability {
+    pub room: u8,
+    pub deadline: i32,
+}
+
 /// Next step of the apply transaction (M4a).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ApplyStep {
@@ -576,6 +637,7 @@ pub struct Volatile {
     pub proof_backoff: u8,
     pub lease_until: u8,
     pub admitted_until: u8,
+    pub capability: Option<InFlightCapability>,
     /// The newest list admitted by an H row in this process (it is also the
     /// list an in-progress apply is applying).
     pub admitted: Option<ListMsg>,
@@ -590,6 +652,9 @@ pub struct Volatile {
     /// Revision 9 (A0): rooms refused in memory by an admitted narrowing whose
     /// apply has not completed.
     pub block: u8,
+    /// H.16 AP24: rooms whose applied pin the holder's pin-history holds under
+    /// another room (`root_pin_previously_listed`), set at A4.
+    pub pin_conflict: u8,
     /// The unattributed inventory as of the last L3 update.
     pub inv: u8,
     pub umem: [UMem; UNITS],
@@ -619,6 +684,7 @@ impl Volatile {
             proof_backoff: 0,
             lease_until: u8::MAX,
             admitted_until: u8::MAX,
+            capability: None,
             admitted: None,
             applied: None,
             apply: None,
@@ -629,6 +695,7 @@ impl Volatile {
             },
             class: [Class::Pending; ROOMS],
             block: 0,
+            pin_conflict: 0,
             inv: 0,
             umem: [UMem::Live; UNITS],
             scans: [None; OBLS],
@@ -673,8 +740,15 @@ pub struct Env {
     pub clock: u8,
     pub envelope: Option<crate::wire::Envelope>,
     pub exposure_elapsed: u8,
+    pub capability_skew: u8,
+    /// H.21 refuses governed requests until clock correction is confirmed.
+    pub clock_behind_authority: bool,
     pub bad_journal: bool,
     pub list_signing: Option<(u8, Option<crate::wire::Keyset>)>,
+    /// H.16: the directory each room's configured root resolves to now.
+    pub root_dir: [u8; ROOMS],
+    /// H10.5: the bounded stale-service window after a root mismatch ended.
+    pub stale_expired: bool,
 }
 
 /// Focused profiles opt in to independent boundaries without multiplying
@@ -690,6 +764,8 @@ pub enum Probe {
     Governance,
     Exposure,
     Journal,
+    /// H.16 root pins: attestation, storage changes and rebuilds.
+    Pin,
 }
 
 /// Ghost state read only by invariants.
@@ -697,6 +773,20 @@ pub enum Probe {
 pub struct Ghost {
     pub consumed: Bag<Acceptance, 2>,
     pub retired_at: [Option<Rev>; ROOMS],
+    /// H.19: an epoch acceptance was consumed and no status has been
+    /// accepted in the new epoch yet.
+    pub status_due: bool,
+    /// H.16 ground truth: the room whose bytes each directory holds.
+    pub dir_room: [Option<u8>; DIRS],
+    /// The room whose bytes each room's current artifacts were built from.
+    pub derived_from: [Option<u8>; ROOMS],
+    /// From this epoch on, `pin_ref`s below this were minted before a
+    /// `restore_journal_lost` (the lost timeline).
+    pub pin_floor: (u8, u8),
+    /// From this epoch on, directories whose attestation's holding did not
+    /// survive replay (the authority's refusal is the control; a holder that
+    /// never saw the attestation cannot exclude them).
+    pub orphan_dirs: (u8, u8),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -733,18 +823,29 @@ impl State {
                     superseded_mismatch: 0,
                     status: None,
                     status_receipts: Bag::default(),
+                    pins: [
+                        Some(Pin { id: 0, pin_ref: 1 }),
+                        Some(Pin { id: 1, pin_ref: 2 }),
+                    ],
+                    pin_history: [Some(PinOwner::Room(0)), Some(PinOwner::Room(1)), None],
                 },
                 backup: None,
+                journal_lost_evidence: None,
                 journal_retired: 0,
                 journal_declined: [None; ROOMS],
                 journal_cleared: [0; ROOMS],
                 journal_finalized: [None; INSTRS],
                 journal_issued: [None; INSTRS],
+                journal_pins: [None; PIN_ENTRIES],
+                next_pin_ref: 3,
                 rollback_suspected: false,
                 failed_restore: false,
                 journal_lost_audited: false,
             },
-            env: Env::default(),
+            env: Env {
+                root_dir: [0, 1],
+                ..Env::default()
+            },
             dur: Durable {
                 hw: None,
                 tomb: 0,
@@ -758,6 +859,9 @@ impl State {
                 manifests: 1,
                 root_holder: Some(0),
                 reset_pending: false,
+                epoch_status_pending: false,
+                pin_history: [None; DIRS],
+                derived: [Some(1), Some(2)],
                 state_holder: Some(0),
                 instr: [IDur::Unseen; INSTRS],
                 units: [
@@ -780,7 +884,11 @@ impl State {
             vol: Volatile::down(),
             net: Net::default(),
             budget,
-            ghost: Ghost::default(),
+            ghost: Ghost {
+                dir_room: [Some(0), Some(1), None],
+                derived_from: [Some(0), Some(1)],
+                ..Ghost::default()
+            },
         }
     }
 }

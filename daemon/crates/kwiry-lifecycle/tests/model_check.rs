@@ -1,6 +1,6 @@
 //! The lifecycle model check.
 //!
-//! - `rev10_holds`: every CI profile of revision 10.1 explores its bounded
+//! - `rev10_holds`: every CI profile of revision 11 explores its bounded
 //!   quotient exhaustively (`step::canonical`; the reductions are in the
 //!   crate docs) and every property (I1–I9, L1) holds; the union of rows the
 //!   profiles exercise matches the table's coverage notes.
@@ -15,12 +15,12 @@
 //! traces.
 
 use kwiry_lifecycle::action::{Action, faults};
-use kwiry_lifecycle::checker::{Profile, Report, ScriptEnd, check, script};
+use kwiry_lifecycle::checker::{Profile, Report, ScriptEnd, check, check_from, script};
 use kwiry_lifecycle::design::{Design, Fix};
 use kwiry_lifecycle::props::Prop;
 use kwiry_lifecycle::row_id::RowId;
 use kwiry_lifecycle::rows::{MACHINES, Model};
-use kwiry_lifecycle::state::Budget;
+use kwiry_lifecycle::state::{Budget, State};
 
 const R0: u8 = 0b01;
 const R1: u8 = 0b10;
@@ -43,7 +43,7 @@ fn budget(retires: u8, retire_rooms: u8) -> Budget {
 fn profile(name: &'static str, budget: Budget) -> Profile {
     Profile {
         name,
-        design: Design::REV10_1,
+        design: Design::REV11,
         budget,
         faults: 0,
         garbage: false,
@@ -54,7 +54,7 @@ fn profile(name: &'static str, budget: Budget) -> Profile {
     }
 }
 
-/// The profiles every `cargo test` run proves (about a minute, under 0.5 GB).
+/// The main profiles every `cargo test` run proves.
 fn ci_profiles() -> Vec<Profile> {
     vec![
         // Two concurrent obligations, GC work, healthy authority.
@@ -236,6 +236,25 @@ fn rev10_holds() {
         "rows marked implicit or not modeled that a step cites: {}",
         rows_named(&unexpected)
     );
+}
+
+#[test]
+fn room_symmetry_preserves_verdicts_and_reachable_rows() {
+    let p = profile("room-symmetry-control", budget(2, BOTH));
+    let full = check_from(
+        &p,
+        State::initial(p.budget, p.garbage),
+        Action::candidates(),
+    );
+    let reduced = check(&p);
+    for report in [&full, &reduced] {
+        print(report);
+        // Both complete with no skips: every safety and liveness verdict
+        // agrees, including the absence of capacity/state-bound failures.
+        assert!(report.violation.is_none(), "{}", report.render());
+    }
+    assert_eq!(reduced.rows_seen, full.rows_seen);
+    assert!(reduced.states < full.states);
 }
 
 /// The profile that reproduces each finding, and the property it violates.
@@ -484,6 +503,10 @@ fn round8_finding3_after_high_water() {
     assert!(rev9.vol.apply.is_none(), "the apply aborted");
 }
 
+// Ignored tests normally run concurrently; their combined peak would
+// exceed the memory budget. Keep an individual profile filter for RSS runs.
+static DEEP_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 #[ignore = "deep run: minutes and a few GB; run with --release -- --ignored"]
 fn deep_profiles() {
@@ -514,25 +537,30 @@ fn deep_profiles() {
                 },
             )
         },
-        Profile {
-            max_states: 40_000_000,
-            ..profile(
-                "deep-two-obligations-crash",
-                Budget {
-                    crashes: 1,
-                    ..budget(2, BOTH)
-                },
-            )
-        },
     ];
     for p in deep {
-        let r = check(&p);
-        print(&r);
-        assert!(
-            r.violation.is_none(),
-            "profile {} failed:\n{}",
-            p.name,
-            r.render()
-        );
+        assert_deep_holds(&p);
     }
+}
+
+#[test]
+#[ignore = "deep run: minutes and a few GB; run with --release -- --ignored"]
+fn deep_two_obligations_crash() {
+    assert_deep_holds(&Profile {
+        max_states: 40_000_000,
+        ..profile(
+            "deep-two-obligations-crash",
+            Budget {
+                crashes: 1,
+                ..budget(2, BOTH)
+            },
+        )
+    });
+}
+
+fn assert_deep_holds(p: &Profile) {
+    let _guard = DEEP_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let r = check(p);
+    print(&r);
+    assert!(r.violation.is_none(), "{}", r.render());
 }

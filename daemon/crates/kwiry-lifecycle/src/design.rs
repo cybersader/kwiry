@@ -76,6 +76,29 @@ pub enum Fix {
     AtomicJournalReplay,
     /// H.15: bound the pre-retirement capability at the engine boundary.
     CapabilityExposure,
+    /// H.17: serve the list despite an unverifiable witness, with audit.
+    AdvisoryListWitness,
+    /// H.18: replay finalizations and clears against restored targets too.
+    RestoredReplayTargets,
+    /// H.19: archive restored evidence and raise a fresh-epoch status.
+    JournalLostRecovery,
+    /// H.20: fail the CAS closed on an internal static-check inconsistency.
+    CommitInvariant,
+    /// H.21: enforce the capability and clock bounds at both request cuts.
+    EngineCapabilityFence,
+    /// H.16.5: index and serve a room only from a root observed at its
+    /// `pin_id`, stamped with its `pin_ref`.
+    RootPinServing,
+    /// H.16.5 effective point: A0 refuses changed, null and conflicting pins
+    /// at once; only A4 broadens serving.
+    RootPinFence,
+    /// H.16 / AP24: the holder's pin-history refuses a `pin_id` it holds under
+    /// another room.
+    RootPinHistory,
+    /// H.19 item 5: `restore_journal_lost` nulls every active pin.
+    JournalLostPinReset,
+    /// H.16.3 (r16): replay reserves an orphaned attestation's `pin_id` as `"*"`.
+    OrphanPinReserve,
 }
 
 impl Fix {
@@ -112,8 +135,21 @@ impl Fix {
         Fix::CapabilityExposure,
     ];
 
-    const fn bit(self) -> u32 {
-        1 << self as u32
+    pub const REV11: [Fix; 10] = [
+        Fix::AdvisoryListWitness,
+        Fix::RestoredReplayTargets,
+        Fix::JournalLostRecovery,
+        Fix::CommitInvariant,
+        Fix::EngineCapabilityFence,
+        Fix::RootPinServing,
+        Fix::RootPinFence,
+        Fix::RootPinHistory,
+        Fix::JournalLostPinReset,
+        Fix::OrphanPinReserve,
+    ];
+
+    const fn bit(self) -> u64 {
+        1 << self as u64
     }
 
     /// The review finding this fix closes.
@@ -150,6 +186,16 @@ impl Fix {
             Fix::CapabilityExposure => {
                 "H.15: engine answers stop by the original capability deadline"
             }
+            Fix::AdvisoryListWitness => "H.17: invalid list witness is advisory",
+            Fix::RestoredReplayTargets => "H.18: replay also applies to restored targets",
+            Fix::JournalLostRecovery => "H.19: preserve evidence and require fresh status",
+            Fix::CommitInvariant => "H.20: static CAS failure aborts with an invariant event",
+            Fix::EngineCapabilityFence => "H.21: engine clock and capability release checks",
+            Fix::RootPinServing => "H.16.5: serve only a root observed at its pin, under its ref",
+            Fix::RootPinFence => "H.16.5: A0 refuses changed, null and conflicting pins at once",
+            Fix::RootPinHistory => "H.16 AP24: the pin-history refuses another room's pin_id",
+            Fix::JournalLostPinReset => "H.19.5: restore_journal_lost nulls every active pin",
+            Fix::OrphanPinReserve => "H.16.3: replay reserves an orphaned pin_id",
             Fix::LeaseAndRollbackFence => {
                 "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
             }
@@ -159,7 +205,7 @@ impl Fix {
 
 /// A set of [`Fix`]es.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Design(u32);
+pub struct Design(u64);
 
 impl Design {
     /// Revision 8 as written.
@@ -186,11 +232,24 @@ impl Design {
         d
     };
 
+    /// The revision-10.1 fix set. The flags H.17–H.21 confirmed or added are
+    /// off, so for those rules it executes the rejected readings that the
+    /// ablations reproduce (for H.18: replay only to replayed targets).
     pub const REV10_1: Design = Self::REV10
         .with(Fix::UnifiedValidation)
         .with(Fix::ProofDeadline)
         .with(Fix::AtomicJournalReplay)
         .with(Fix::CapabilityExposure);
+
+    pub const REV11: Design = {
+        let mut d = Self::REV10_1;
+        let mut i = 0;
+        while i < Fix::REV11.len() {
+            d = d.with(Fix::REV11[i]);
+            i += 1;
+        }
+        d
+    };
 
     pub const fn has(self, f: Fix) -> bool {
         self.0 & f.bit() != 0
@@ -219,12 +278,16 @@ impl fmt::Debug for Design {
         if *self == Design::REV10_1 {
             return write!(f, "REV10.1");
         }
+        if *self == Design::REV11 {
+            return write!(f, "REV11");
+        }
         let missing: Vec<_> = Fix::REV9
             .iter()
             .chain(&Fix::REV10)
             .chain(&Fix::REV10_1)
+            .chain(&Fix::REV11)
             .filter(|x| !self.has(**x))
             .collect();
-        write!(f, "REV10.1 without {missing:?}")
+        write!(f, "REV11 without {missing:?}")
     }
 }

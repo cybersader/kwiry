@@ -10,7 +10,10 @@ use kwiry_lifecycle::design::{Design, Fix};
 use kwiry_lifecycle::props::{self, Prop};
 use kwiry_lifecycle::row_id::RowId;
 use kwiry_lifecycle::state::*;
-use kwiry_lifecycle::step::{Config, exec, mintable, observed_remaining, servable};
+use kwiry_lifecycle::step::{
+    CapabilityRefusal, Config, Obs, Outcome, ReapprovalCause, exec, mintable, observed_remaining,
+    servable,
+};
 use kwiry_lifecycle::wire::{self, AckClass, Expiry, KeyPin, Keyset, Proof};
 
 const BUDGET: Budget = Budget {
@@ -24,7 +27,7 @@ const BUDGET: Budget = Budget {
     restores: 1,
 };
 const REV: Rev = Rev { epoch: 0, seq: 1 };
-const D: Design = Design::REV10_1;
+const D: Design = Design::REV11;
 
 fn profile(name: &'static str, design: Design) -> Profile {
     Profile {
@@ -59,10 +62,14 @@ impl Fake {
             },
         }
     }
-    fn try_step(&mut self, a: Action) -> Option<Vec<RowId>> {
+    fn outcome(&self, a: Action) -> Option<Outcome> {
         let out = exec(&self.s, a, &self.cfg).unwrap()?;
         assert_eq!(props::check_step(&self.s, &out, 0), None, "{a:?}");
         assert_eq!(props::check_state(&out.next, 0), None, "{a:?}");
+        Some(out)
+    }
+    fn try_step(&mut self, a: Action) -> Option<Vec<RowId>> {
+        let out = self.outcome(a)?;
         self.s = out.next;
         Some(out.rows.iter().collect())
     }
@@ -101,6 +108,19 @@ impl Fake {
         let kind = self.s.net.resps[c as usize].get(0).unwrap().kind;
         self.step(Deliver { c, idx: 0 });
         kind
+    }
+    /// H.19: after an epoch acceptance the fresh status goes first; new-epoch
+    /// obligation reports wait for its current-epoch receipt.
+    fn fresh_status(&mut self) {
+        assert!(self.s.dur.epoch_status_pending);
+        assert!(
+            self.try_step(Enqueue(0)).is_none(),
+            "obligation reports wait"
+        );
+        self.request(2);
+        let epoch = self.s.dur.hw.unwrap().epoch;
+        assert!(matches!(self.reply(2), RespKind::Accepted { epoch: e, .. } if e == epoch));
+        assert!(!self.s.dur.epoch_status_pending && !self.s.ghost.status_due);
     }
 }
 
@@ -244,6 +264,7 @@ fn v04_previous_epoch_current_ack_is_audit_only() {
     f.step(OpAcceptEpoch);
     f.boot();
     assert_eq!(f.list().rev.epoch, 1);
+    f.fresh_status();
     f.request(0);
     let key = f.s.dur.slots[0].unwrap().key;
     f.s.net.resps[0]
@@ -529,6 +550,8 @@ fn v12_offline_retirement_survives_restore_and_epoch_acceptance() {
     f.list();
     assert!(!servable(&f.s, 0));
     assert_eq!(f.s.dur.hw.unwrap().epoch, 1);
+    assert!(!props::goal(&f.s), "the fresh-epoch status is still due");
+    f.fresh_status();
     f.run(&[PurgeDelete { u: 0, fail: false }, PurgeScan(0)]);
     f.request(0);
     f.reply(0);
@@ -626,12 +649,14 @@ fn retirement_replay_is_necessary_for_safety_and_l1() {
     let mut p = profile("offline-retirement-restore", Design::REV9);
     p.budget = Budget {
         faults: 0,
+        crashes: 0,
         changes: 0,
         ..BUDGET
     };
     p.liveness = true;
     p.skip = Prop::I8AuthorityFidelity.bit();
-    // The L1 counterexample needs the whole graph (about 69k states).
+    // The L1 counterexample needs the whole graph. Crash schedules aren't
+    // needed for this witness; the epoch/crash CI profile covers them.
     p.max_states = 200_000;
     for design in [Design::REV9, D.without(Fix::RetirementReplay)] {
         let r = check(&Profile { design, ..p });
@@ -1367,4 +1392,402 @@ fn c9_a_resurrecting_list_never_reopens_a_tombstoned_room() {
     assert!(!servable(&f.s, 0));
     assert!(f.s.dur.tomb & 1 != 0, "tombstones only grow");
     assert_eq!(f.s.dur.units, units, "nothing deleted");
+}
+
+// ------------------------------------------------- revision 11 (H.17–H.21)
+
+#[test]
+fn h17_list_witness_is_advisory_but_valid_rollback_evidence_still_wins() {
+    use wire::{Envelope, RefInput, WitnessReason};
+    let mut f = Fake::new();
+    f.boot();
+    let ordinary = f.outcome(FetchStart).unwrap().next.net.list;
+    for (reference, reason) in [
+        (
+            RefInput::WellFormed {
+                rev: Rev { epoch: 0, seq: 2 },
+                tag_valid: false,
+            },
+            WitnessReason::TagInvalid,
+        ),
+        (RefInput::RootRetired(REV), WitnessReason::RootRetired),
+    ] {
+        f.s.env.envelope = Some(Envelope {
+            refs: [RefInput::Absent, reference],
+            ..Envelope::default()
+        });
+        let out = f.outcome(FetchStart).unwrap();
+        assert_eq!(out.next.net.list, ordinary);
+        assert!(!out.next.auth.rollback_suspected);
+        assert!(out.obs.contains(&Some(Obs::WitnessUnverifiable(reason))));
+        ablate(
+            Fix::AdvisoryListWitness,
+            Prop::I8AdvisoryListWitness,
+            f.s.clone(),
+            &[FetchStart],
+        );
+    }
+    for (reference, code) in [
+        (RefInput::Malformed, ListErr::BadRequest),
+        (
+            RefInput::verified(Rev { epoch: 0, seq: 2 }),
+            ListErr::EpochMismatch,
+        ),
+        (
+            RefInput::verified(Rev { epoch: 1, seq: 1 }),
+            ListErr::EpochMismatch,
+        ),
+    ] {
+        f.s.env.envelope = Some(Envelope {
+            refs: [RefInput::Absent, reference],
+            ..Envelope::default()
+        });
+        let out = f.outcome(FetchStart).unwrap();
+        assert!(matches!(out.next.net.list, Some(ListResp::Err { code: got, .. }) if code == got));
+        assert_eq!(
+            out.next.auth.rollback_suspected,
+            code == ListErr::EpochMismatch
+        );
+    }
+    f.s.auth.core.epoch = 1;
+    f.s.env.envelope = Some(Envelope {
+        refs: [RefInput::Absent, RefInput::verified(REV)],
+        ..Envelope::default()
+    });
+    let ancestor = f.outcome(FetchStart).unwrap();
+    assert!(matches!(ancestor.next.net.list, Some(ListResp::List(_))));
+    assert_eq!(ancestor.obs, [None; 4]);
+}
+
+#[test]
+fn h18_replay_finalizes_and_clears_restored_targets_and_audits_missing_ones() {
+    for executed in [true, false] {
+        let mut f = ready_to_decline();
+        f.run(&[HumanRelease, AuthBackup]);
+        let status_digest = f.s.auth.core.status.unwrap();
+        // A finalized journal entry after the snapshot, with no replayed issue.
+        let seq = f.s.auth.core.seq + 1;
+        f.s.auth.journal_finalized[0] = Some(FinalEntry {
+            seq,
+            status_digest,
+            executed,
+        });
+        let out = f.outcome(AuthRestore).unwrap();
+        assert!(out.next.auth.core.instr.is_none());
+        assert_eq!(out.next.auth.core.final_instr, 1);
+        assert_eq!(out.next.auth.core.superseded_mismatch, u8::from(!executed));
+        assert_eq!(
+            out.obs.contains(&Some(Obs::ReapprovalRequested {
+                cause: ReapprovalCause::SupersededMismatch,
+                report: Some(status_digest),
+            })),
+            !executed
+        );
+    }
+
+    let mut f = ready_to_decline();
+    f.s.env.probe = Probe::Governance;
+    f.run(&[HumanDecline, AuthBackup, OpReopen(0)]);
+    let out = f.outcome(AuthRestore).unwrap();
+    assert!(!out.next.auth.core.rooms[0].obl.unwrap().blocked);
+
+    let mut f = Fake::new();
+    f.step(AuthBackup);
+    let status_digest = SKey {
+        list_ref: REV,
+        reset: false,
+        manifest: bit(2),
+        result: None,
+    };
+    f.s.auth.journal_finalized[0] = Some(FinalEntry {
+        seq: 2,
+        status_digest,
+        executed: true,
+    });
+    f.s.auth.journal_declined[0] = Some(DeclineEntry {
+        seq: 3,
+        status_digest,
+        declined_count: 1,
+    });
+    f.s.auth.journal_cleared[1] = 4;
+    let out = f.outcome(AuthRestore).unwrap();
+    assert!(out.obs.contains(&Some(Obs::ReplaySkipped {
+        releases: [2, 0],
+        declines: [3, 0],
+        clears: [0, 4],
+    })));
+    assert_eq!(out.next.auth.core.final_instr, 0, "do not invent a target");
+    assert!(out.next.auth.core.rooms.iter().all(|r| r.obl.is_none()));
+    f.cfg.design = D.without(Fix::RestoredReplayTargets);
+    let without = f.outcome(AuthRestore).unwrap();
+    assert_eq!(without.next.auth.core.final_instr, 0);
+    assert_eq!(without.obs, [None; 4], "missing targets were not audited");
+}
+
+/// H.18's rejected reading applies replay only to targets that replayed
+/// entries created. The checker finds the restored instruction still listed
+/// and the restored block still in force.
+#[test]
+fn h18_restored_targets_are_necessary() {
+    let mut f = ready_to_decline();
+    f.run(&[HumanRelease, AuthBackup]);
+    let status_digest = f.s.auth.core.status.unwrap();
+    f.s.auth.journal_finalized[0] = Some(FinalEntry {
+        seq: f.s.auth.core.seq + 1,
+        status_digest,
+        executed: true,
+    });
+    ablate(
+        Fix::RestoredReplayTargets,
+        Prop::I8ReplayTarget,
+        f.s.clone(),
+        &[AuthRestore],
+    );
+
+    let mut f = ready_to_decline();
+    f.s.env.probe = Probe::Governance;
+    f.run(&[HumanDecline, AuthBackup, OpReopen(0)]);
+    ablate(
+        Fix::RestoredReplayTargets,
+        Prop::I8ReplayTarget,
+        f.s.clone(),
+        &[AuthRestore],
+    );
+}
+
+/// H.19's holder rule is a liveness obligation: without the fresh-epoch
+/// status trigger, a zero-count holder never reports after an epoch change.
+#[test]
+fn h19_fresh_status_is_necessary_for_l1() {
+    let p = Profile {
+        budget: Budget {
+            crashes: 0,
+            faults: 0,
+            changes: 0,
+            ..BUDGET
+        },
+        liveness: true,
+        skip: 0,
+        max_states: 200_000,
+        ..profile("h19-fresh-status", D)
+    };
+    let with = check(&p);
+    assert!(with.violation.is_none(), "{}", with.render());
+    let without = check(&Profile {
+        design: D.without(Fix::JournalLostRecovery),
+        ..p
+    });
+    assert_eq!(
+        without.violation.as_ref().map(|v| v.prop),
+        Some(Prop::L1Liveness),
+        "{}",
+        without.render()
+    );
+}
+
+#[test]
+fn h19_lost_journal_preserves_custody_and_requires_fresh_approval() {
+    let mut f = ready_to_decline();
+    f.run(&[HumanDecline, HumanRelease, AuthBackup]);
+    let restored = f.s.auth.core;
+    f.s.env.bad_journal = true;
+    f.step(AuthRestore);
+    let out = f.outcome(OpRestoreJournalLost).unwrap();
+    assert_eq!(
+        out.next.auth.journal_lost_evidence.as_deref(),
+        Some(&restored)
+    );
+    assert!(out.obs.contains(&Some(Obs::ReapprovalRequested {
+        cause: ReapprovalCause::RestoreJournalLost,
+        report: None,
+    })));
+    let core = out.next.auth.core;
+    assert_eq!(core.final_instr, 1);
+    assert!(core.instr.is_none() && core.status.is_none() && core.status_receipts.is_empty());
+    let obl = core.rooms[0].obl.unwrap();
+    assert!(!obl.blocked && obl.blocked_by.is_none());
+    assert_eq!(core.rooms[0].phase, restored.rooms[0].phase);
+    assert_eq!(obl.accepted, restored.rooms[0].obl.unwrap().accepted);
+    f.s = out.next;
+    assert!(f.try_step(HumanRelease).is_none());
+    assert_eq!(
+        f.list().items[0],
+        Item::Terminating(Some(RState::Incomplete))
+    );
+    f.step(OpAcceptEpoch);
+    f.boot();
+    f.list();
+    f.request(2);
+    assert!(matches!(f.reply(2), RespKind::Accepted { epoch: 1, .. }));
+    f.step(HumanRelease);
+    assert_eq!(f.s.auth.core.instr.unwrap().id, 1, "fresh human approval");
+}
+
+#[test]
+fn h19_any_epoch_acceptance_triggers_zero_count_status_even_across_restart() {
+    for design in [D, D.without(Fix::JournalLostRecovery)] {
+        let mut f = Fake::with(design);
+        f.boot();
+        f.list();
+        f.run(&[AuthBackup, AuthRestore]);
+        f.list();
+        f.step(OpAcceptEpoch);
+        f.boot();
+        f.list();
+        f.step(Crash);
+        f.boot();
+        f.list();
+        if design == D {
+            assert!(f.s.dur.epoch_status_pending);
+            f.request(2);
+            assert_eq!(f.s.dur.slots[2].unwrap().key.status().unwrap().manifest, 0);
+            assert!(matches!(f.reply(2), RespKind::Accepted { epoch: 1, .. }));
+            assert!(!f.s.dur.epoch_status_pending);
+        }
+        assert!(f.try_step(Enqueue(2)).is_none());
+    }
+}
+
+#[test]
+fn h20_static_cas_failure_is_audited_500_with_no_commit() {
+    let p = Proof::sign(1, 0);
+    let mut f = report_in_flight();
+    f.s = timed(f.s, p, 0, 420);
+    f.s.env.envelope.as_mut().unwrap().commit_static_failed = true;
+    let before = f.s.auth.clone();
+    let action = AuthProcess { c: 0, idx: 0 };
+    let out = f.outcome(action).unwrap();
+    assert_eq!(
+        out.next.net.resps[0].get(0).unwrap().kind,
+        RespKind::InvariantViolation
+    );
+    assert!(out.obs.contains(&Some(Obs::CommitInvariantAudit)));
+    assert_eq!(out.next.auth, before);
+    ablate(
+        Fix::CommitInvariant,
+        Prop::I8CommitInvariant,
+        f.s,
+        &[action],
+    );
+}
+
+fn exposure_fixture() -> Fake {
+    let mut f = Fake::new();
+    f.s.env.probe = Probe::Exposure;
+    f.s.env.capability_skew = 30;
+    f.boot();
+    f.list();
+    f
+}
+
+#[test]
+fn h21_capability_deadline_and_a0_are_rechecked_at_release() {
+    let mut f = exposure_fixture();
+    let ask = StartCapability {
+        room: 0,
+        iat: 0,
+        exp: 60,
+    };
+    f.run(&[AuthRetire(0), TickExposure(90), ask]);
+    assert!(f.step(FinishCapability).contains(&RowId::C17));
+    f.step(ask);
+    ablate(
+        Fix::EngineCapabilityFence,
+        Prop::I1CapabilityExposure,
+        f.s.clone(),
+        &[TickExposure(91), FinishCapability],
+    );
+    f.step(TickExposure(91));
+    let out = f.outcome(FinishCapability).unwrap();
+    assert!(
+        out.obs
+            .contains(&Some(Obs::CapabilityRefused(CapabilityRefusal::Expired)))
+    );
+    assert!(!out.rows.iter().any(|r| r == RowId::C17));
+    f.s = out.next;
+    assert!(
+        f.outcome(ask)
+            .unwrap()
+            .obs
+            .contains(&Some(Obs::CapabilityRefused(CapabilityRefusal::Expired)))
+    );
+
+    // A0 of an unlisting (not just a retirement) also refuses an in-flight read.
+    let mut f = exposure_fixture();
+    f.run(&[
+        StartCapability {
+            room: 1,
+            iat: 0,
+            exp: 60,
+        },
+        AuthUnlist(1),
+        FetchStart,
+        ListDeliver,
+    ]);
+    let out = f.outcome(FinishCapability).unwrap();
+    assert!(
+        out.obs
+            .contains(&Some(Obs::CapabilityRefused(CapabilityRefusal::NotActive)))
+    );
+}
+
+#[test]
+fn h21_clock_evidence_refuses_all_governed_reads_until_correction() {
+    let mut f = exposure_fixture();
+    let at_limit = StartCapability {
+        room: 0,
+        iat: 30,
+        exp: 90,
+    };
+    let future = StartCapability {
+        room: 0,
+        iat: 31,
+        exp: 91,
+    };
+    let long = StartCapability {
+        room: 0,
+        iat: 0,
+        exp: 61,
+    };
+    for (action, why) in [
+        (long, CapabilityRefusal::LifetimeTooLong),
+        (future, CapabilityRefusal::FutureIat),
+    ] {
+        ablate(
+            Fix::EngineCapabilityFence,
+            Prop::I1CapabilityExposure,
+            f.s.clone(),
+            &[action],
+        );
+        let out = f.outcome(action).unwrap();
+        assert!(out.obs.contains(&Some(Obs::CapabilityRefused(why))));
+        assert!(out.next.vol.capability.is_none());
+    }
+    f.run(&[at_limit, FinishCapability, future]);
+    let refused = f
+        .outcome(StartCapability {
+            room: 1,
+            iat: 0,
+            exp: 60,
+        })
+        .unwrap();
+    assert!(refused.obs.contains(&Some(Obs::CapabilityRefused(
+        CapabilityRefusal::ClockBehind
+    ))));
+    f.run(&[ClockSynchronized, at_limit, AuthRetire(0), FetchStart]);
+    f.step(VerifyListPage { iat: 30 });
+    assert!(!f.s.env.clock_behind_authority);
+    f.step(VerifyListPage { iat: 31 });
+    assert!(f.s.env.clock_behind_authority);
+    f.step(VerifyListPage { iat: 29 });
+    let out = f.outcome(FinishCapability).unwrap();
+    assert!(out.obs.contains(&Some(Obs::CapabilityRefused(
+        CapabilityRefusal::ClockBehind
+    ))));
+
+    let mut f = Fake::new();
+    f.s.env.capability_skew = 31;
+    assert!(f.try_step(Boot).is_none());
+    f.cfg.design = D.without(Fix::EngineCapabilityFence);
+    assert!(f.try_step(Boot).is_some());
 }

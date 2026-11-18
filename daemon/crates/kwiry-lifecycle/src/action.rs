@@ -82,34 +82,66 @@ pub enum Action {
     RelBind(u8),
     RelDetach(u8),
     RelDrain(u8),
-    RelDelete { i: u8, u: u8, fail: bool },
+    RelDelete {
+        i: u8,
+        u: u8,
+        fail: bool,
+    },
     RelDeleted(u8),
     RelResult(u8),
     // --- M5 GC and obligation purge (holder)
     GcRevoke(u8),
-    GcDelete { u: u8, fail: bool },
+    GcDelete {
+        u: u8,
+        fail: bool,
+    },
     Quarantine(u8),
-    QRetry { u: u8, fail: bool },
-    PurgeDelete { u: u8, fail: bool },
+    QRetry {
+        u: u8,
+        fail: bool,
+    },
+    PurgeDelete {
+        u: u8,
+        fail: bool,
+    },
     PurgeScan(u8),
     // --- M6 / M8 report actors and transport (holder)
     Enqueue(u8),
     Transmit(u8),
     Handoff(u8),
     Dispatch(u8),
-    Deliver { c: u8, idx: u8 },
+    Deliver {
+        c: u8,
+        idx: u8,
+    },
     Replenish,
     // --- healthy environment
-    AuthProcess { c: u8, idx: u8 },
-    DropDead { c: u8, idx: u8 },
+    AuthProcess {
+        c: u8,
+        idx: u8,
+    },
+    DropDead {
+        c: u8,
+        idx: u8,
+    },
     HumanRelease,
     HumanDecline,
     SpaceFreed,
     // --- faults
-    AuthFault { c: u8, idx: u8, code: FaultCode },
+    AuthFault {
+        c: u8,
+        idx: u8,
+        code: FaultCode,
+    },
     NetFail(u8),
-    NetDup { c: u8, idx: u8 },
-    Detach { c: u8, idx: u8 },
+    NetDup {
+        c: u8,
+        idx: u8,
+    },
+    Detach {
+        c: u8,
+        idx: u8,
+    },
     AgeOut(u8),
     DelayCommit(u8),
     ProofBackoffElapsed(u8),
@@ -131,7 +163,34 @@ pub enum Action {
     OpClearHalt(u8),
     OpReopen(u8),
     TickExposure(u8),
-    AnswerCapability { room: u8, expiry_with_skew: u8 },
+    AnswerCapability {
+        room: u8,
+        expiry_with_skew: u8,
+    },
+    /// H.21 focused inputs: the capability and page are already verified.
+    StartCapability {
+        room: u8,
+        iat: i16,
+        exp: i16,
+    },
+    FinishCapability,
+    VerifyListPage {
+        iat: i16,
+    },
+    ClockSynchronized,
+    /// H.16 focused inputs. `dir: None` is `--pin-id none`; `stale` is a
+    /// stale `--expect-current`.
+    AttestRoot {
+        room: u8,
+        dir: Option<u8>,
+        stale: bool,
+    },
+    RepointRoot {
+        room: u8,
+        dir: u8,
+    },
+    PinRebuild(u8),
+    StaleDeadline,
     OpRestoreJournalLost,
     SwapHolder,
     LoseHolderState,
@@ -143,7 +202,10 @@ pub enum Action {
     CloseHandle,
     LatePublish,
     ReconcileLate,
-    WrongRelease { i: u8, u: u8 },
+    WrongRelease {
+        i: u8,
+        u: u8,
+    },
 }
 
 impl Action {
@@ -172,6 +234,9 @@ impl Action {
             | KeepOpen
             | LatePublish
             | WrongRelease { .. }
+            | AttestRoot { .. }
+            | RepointRoot { .. }
+            | StaleDeadline
             | TickExposure(_) => Kind::Scenario,
             BeginRecovery | CommitRecovery => Kind::Operator,
             AuthRetire(_) | AuthUnlist(_) | AuthRelist(_) | AuthDrop(_) | AuthBackup

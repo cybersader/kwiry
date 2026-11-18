@@ -3,7 +3,7 @@
 //!
 //! `cargo run -p kwiry-lifecycle --example explore -- <design> key=value ...`
 //!
-//! `<design>`: `rev8`, `rev9`, `rev10`, `rev10.1` (the default), or
+//! `<design>`: `rev8`, `rev9`, `rev10`, `rev10.1`, `rev11` (the default), or
 //! `<rev>-<Fix>` (that revision without one fix, by `Fix` name, e.g.
 //! `rev9-NarrowFirst` or `rev10.1-ProofDeadline`). Keys: `retires`, `changes`,
 //! `crashes`, `faults`, `drops`, `restores` (budgets); `rr`, `cr` (room masks
@@ -25,25 +25,22 @@ fn main() {
         Some("rev8") => Design::REV8,
         Some("rev9") => Design::REV9,
         Some("rev10") => Design::REV10,
-        Some("rev10.1") | None => Design::REV10_1,
+        Some("rev10.1") => Design::REV10_1,
+        Some("rev11") | None => Design::REV11,
         Some(other) => {
-            let (base, name) = other
-                .split_once('-')
-                .expect("rev8, rev9, rev10 or rev10-<Fix>");
-            let d = if base == "rev9" {
-                Design::REV9
-            } else {
-                if base == "rev10" {
-                    Design::REV10
-                } else {
-                    assert_eq!(base, "rev10.1");
-                    Design::REV10_1
-                }
+            let (base, name) = other.split_once('-').expect("expected <revision>-<Fix>");
+            let d = match base {
+                "rev9" => Design::REV9,
+                "rev10" => Design::REV10,
+                "rev10.1" => Design::REV10_1,
+                "rev11" => Design::REV11,
+                _ => panic!("unknown revision {base}"),
             };
             let fix = Fix::REV9
                 .into_iter()
                 .chain(Fix::REV10)
                 .chain(Fix::REV10_1)
+                .chain(Fix::REV11)
                 .find(|f| format!("{f:?}") == name)
                 .expect("unknown fix name");
             d.without(fix)

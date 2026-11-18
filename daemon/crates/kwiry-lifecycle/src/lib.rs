@@ -23,11 +23,13 @@
 //!   apply, report and status senders, transport, GC and purge, release),
 //!   the healthy authority and network, the human release decision, the
 //!   operator, and budgeted faults, crashes and scenario changes.
-//! - [`props`]: invariants I1–I9 and the liveness goal L1.
+//! - [`props`]: invariants I1–I9 and the liveness goal L1 (every retirement
+//!   reaches `complete` or `blocked`, and every epoch acceptance is answered
+//!   by a status accepted in the new epoch).
 //! - [`checker`]: bounded explicit-state BFS with crash injection, plus a
 //!   strong-fairness SCC analysis for L1.
 //! - [`design`]: revision 8 as written ([`design::Design::REV8`]) and each
-//!   repair as a separate [`design::Fix`]; [`design::Design::REV10_1`] has
+//!   repair as a separate [`design::Fix`]; [`design::Design::REV11`] has
 //!   all.
 //!
 //! # Universe and bounds
@@ -72,7 +74,14 @@
 //!   presented again, erases the parts of the holder's floor and accepted
 //!   status bodies that only an equality with a newer body could read, and
 //!   erases audit-only authority records (and the journal once no restore
-//!   remains). `tests/projection.rs` checks the bisimulation condition (same
+//!   remains). It also keeps only the rank of an obligation receipt's commit
+//!   seq (read only to find the newest), erases a zero-count, result-free
+//!   status once no live or derivable body can fall below its `list_ref`
+//!   (authority) or be re-derived equal to it (holder), and erases all but
+//!   the state of an invalidated slot's key (never transmitted; R6, R13 and
+//!   R18 read only its state). With static pins (outside the root-pin
+//!   probe) it erases the holder's pin-history, which then cannot conflict.
+//!   `tests/projection.rs` checks the bisimulation condition (same
 //!   enabled actions, rows, observations, properties and projected
 //!   successors) on reachable states of four profiles.
 //! - A failed deletion that changes nothing (L5f, O11 and O11g failures) is a
@@ -92,6 +101,16 @@
 //!   block the scan.
 //! - Optional counts-only same-state reports (HW §14 Q7) are explored only
 //!   in profiles that enable them; they are never needed for progress.
+//! - In symmetric retirement/crash profiles, the first retirement names R0
+//!   in the canonical state (R0 ↔ R1, U0 ↔ U2, report channels 0 ↔ 1, and
+//!   directories D0 ↔ D1 with the two initial `pin_ref`s, which are static
+//!   outside the root-pin probe). Before that event, both rooms have
+//!   identical roles and no per-room work.
+//!   After it, the first retirement fixes the labels for the entire suffix;
+//!   in particular no healthy edge swaps labels, so the checker keeps the
+//!   original per-actor fairness classes, not fairness across room orbits.
+//!   Both branches have the same property verdicts and row coverage under
+//!   renaming. Paths replay the concrete representative's first retirement.
 //! - States are stored as 128-bit fingerprints (hash compaction).
 //!
 //! # Coverage limits
@@ -104,8 +123,16 @@
 //! a lost-state reset, one live handle, one late builder publication, the
 //! H.12 validation order (an injected request envelope), the H.13 clock
 //! boundaries, a corrupt retirement journal and the audited
-//! `restore_journal_lost` override (one symbolic flag, not a hash chain), and
-//! the H.15 capability window. Not covered: real dual clocks, in-flight query
+//! `restore_journal_lost` override (one symbolic flag, not a hash chain),
+//! the H.21 capability/clock rules at admission and release, and the H.16
+//! root pins (attestation, replay and orphan reservation, the journal-lost
+//! reset, storage moves and swaps, rebuilds and the stale bound; the core
+//! profiles carry static pins). For H.19 the restored typed evidence is
+//! retained separately from live protocol indexes; the real custody bytes
+//! and the escalation scheduler are not modeled. Not covered: the H.16
+//! filesystem, walk, grammar, golden-vector, pagination, multi-holder and
+//! concurrency vectors (design §5.8, "H.16 conformance obligations"), real
+//! dual clocks, in-flight query
 //! drains, general builders and staging, filesystem/lock failure modes,
 //! migration and launcher deployment, the journal's encoding and fsync
 //! failures, actual raw restore beyond a synthetic witness, rate

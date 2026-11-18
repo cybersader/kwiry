@@ -286,12 +286,34 @@ impl Run {
 }
 
 pub fn check(p: &Profile) -> Report {
-    check_from(p, State::initial(p.budget, p.garbage), Action::candidates())
+    let b = p.budget;
+    // U1 must be permanently absent, and neither room can have a distinct
+    // scenario role. Restrict this quotient to retirement/crash profiles:
+    // faults, changes and restores aren't needed for this reduction.
+    let both_rooms = bit(0) | bit(1);
+    let symmetric = !p.garbage
+        && b.retire_rooms == both_rooms
+        && (b.change_rooms == 0 || b.change_rooms == both_rooms)
+        && b.faults == 0
+        && b.changes == 0
+        && b.drops == 0
+        && b.restores == 0;
+    explore(
+        p,
+        State::initial(b, p.garbage),
+        Action::candidates(),
+        symmetric,
+    )
 }
 
 /// Explore a focused subsystem from a particular fixture, with its explicit
-/// candidate set. The same BFS, safety properties and trace renderer are used.
+/// candidate set. Room symmetry is disabled: the initial roles or candidates
+/// may not be interchangeable. Otherwise the same checker is used.
 pub fn check_from(p: &Profile, initial: State, candidates: Vec<Action>) -> Report {
+    explore(p, initial, candidates, false)
+}
+
+fn explore(p: &Profile, initial: State, candidates: Vec<Action>, symmetric: bool) -> Report {
     let started = Instant::now();
     let run = Run {
         cfg: Config {
@@ -301,6 +323,14 @@ pub fn check_from(p: &Profile, initial: State, candidates: Vec<Action>) -> Repor
         },
         candidates,
         initial,
+    };
+    let first_retire_r0 = if symmetric {
+        run.candidates
+            .iter()
+            .position(|a| *a == Action::AuthRetire(0))
+            .expect("full candidate set") as u16
+    } else {
+        u16::MAX
     };
     let mut g = Graph {
         seen: HashMap::default(),
@@ -364,15 +394,30 @@ pub fn check_from(p: &Profile, initial: State, candidates: Vec<Action>) -> Repor
                         violation = Some(run.safety_cex(&g, prop, here, Some(ci), String::new()));
                         break 'bfs;
                     }
-                    let fp = fingerprint(&out.next);
+                    let mut successor = out.next;
+                    let mut via = ci;
+                    if symmetric
+                        && a == Action::AuthRetire(1)
+                        && s.ghost.retired_at == [None; ROOMS]
+                    {
+                        // Until the first retirement, both rooms stay active and
+                        // mapped. No obligation, per-room work or unattributed
+                        // data exists; all reachable states are fixed by the
+                        // room swap. AuthRetire changes only these two indexed
+                        // fields (the unused journal was erased by canonical()).
+                        successor.auth.core.rooms.swap(0, 1);
+                        successor.ghost.retired_at.swap(0, 1);
+                        via = first_retire_r0;
+                    }
+                    let fp = fingerprint(&successor);
                     let j = match g.seen.get(&fp) {
                         Some(&j) => j,
                         None => {
                             let j = u32::try_from(g.parent.len()).expect("fewer than 2^32 states");
                             g.seen.insert(fp, j);
                             g.parent.push(here);
-                            g.via.push(ci);
-                            next.push(out.next);
+                            g.via.push(via);
+                            next.push(successor);
                             j
                         }
                     };

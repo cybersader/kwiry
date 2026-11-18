@@ -76,12 +76,63 @@ pub enum Obs {
     ProofDeadlineMissed,
     UnverifiedRestore,
     CapabilityOverexposed,
+    CapabilityRefused(CapabilityRefusal),
+    ClockBehindAuthority,
     ListWitnessOmitted,
+    /// Unsampled `lifecycle.witness.unverifiable`; the model has one holder.
+    WitnessUnverifiable(wire::WitnessReason),
+    AdvisoryWitnessRejected,
+    /// Unsampled `lifecycle.invariant_violation` from a failed static CAS check.
+    CommitInvariantAudit,
+    CommitInvariantMissed,
+    /// H.18 `lifecycle.restore.replay_skipped` events, projected as entry
+    /// kinds and seqs (zero means absent); no resource IDs are exposed.
+    ReplaySkipped {
+        releases: [u8; INSTRS],
+        declines: [u8; ROOMS],
+        clears: [u8; ROOMS],
+    },
+    /// A replayed finalization or clear left its target outstanding (H.18).
+    ReplayTargetMissed,
+    /// H.16.2 `lifecycle.root_pin.attest_refused`.
+    PinAttestRefused(PinRefusal),
+    /// H.16.3 replay skipped a `root_pin_attested` entry (audited).
+    PinReplaySkipped,
+    /// `None` means the request waits for a status accepted in the new epoch.
+    ReapprovalRequested {
+        cause: ReapprovalCause,
+        report: Option<SKey>,
+    },
     /// An armed epoch acceptance was consumed. `reused`: it was consumed
     /// before.
     AcceptanceConsumed {
         reused: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapabilityRefusal {
+    LifetimeTooLong,
+    FutureIat,
+    /// `capability_expired`: release no results.
+    Expired,
+    ClockBehind,
+    NotActive,
+}
+
+/// H.16.2 attestation refusal codes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinRefusal {
+    HoldingUnknown,
+    HoldingInactive,
+    Reused,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReapprovalCause {
+    SupersededMismatch,
+    RestoreJournalLost,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -230,6 +281,43 @@ pub fn servable(s: &State, r: usize) -> bool {
         && s.vol.class[r] == Class::Active
         && s.dur.tomb & bit(r) == 0
         && s.vol.block & bit(r) == 0
+        && pin_servable(s, r)
+}
+
+/// H.16.5: a non-null pin from a list applied in this process, artifacts
+/// derived under its `pin_ref`, no AP24 conflict, and the root observed at
+/// `pin_id`. On a mismatch only H10.5 bounded stale service of those
+/// same-ref artifacts remains.
+pub fn pin_servable(s: &State, r: usize) -> bool {
+    let Some(p) = s.vol.applied.and_then(|l| l.pins[r]) else {
+        return false;
+    };
+    s.dur.derived[r] == Some(p.pin_ref)
+        && s.vol.pin_conflict & bit(r) == 0
+        && (s.env.root_dir[r] == p.id || !s.env.stale_expired)
+}
+
+/// AP24 `root_pin_previously_listed`: the holder's pin-history holds the
+/// list's `pin_id` under another room.
+fn history_conflict(dur: &Durable, d: Design, r: usize, pin: Option<Pin>) -> bool {
+    d.has(Fix::RootPinHistory)
+        && pin.is_some_and(|p| dur.pin_history[p.id as usize].is_some_and(|o| o as usize != r))
+}
+
+/// H.16.5 effective point: rooms an admitted list shows `active` with a
+/// changed, null or history-conflicting pin, refused at A0 until A4.
+fn pin_refusal(s: &State, d: Design, l: &ListMsg) -> u8 {
+    let Some(applied) = s.vol.applied else {
+        return 0; // nothing is served before the first A4 of this process
+    };
+    (0..ROOMS)
+        .filter(|&r| {
+            l.items[r] == Item::Active
+                && (l.pins[r].is_none()
+                    || l.pins[r] != applied.pins[r]
+                    || history_conflict(&s.dur, d, r, l.pins[r]))
+        })
+        .fold(0, |a, r| a | bit(r))
 }
 
 pub fn publisher_idle(s: &State) -> bool {
@@ -394,6 +482,13 @@ fn list_view(core: &AuthCore) -> ListMsg {
         items,
         holder_rev: core.holder_rev,
         instr: core.instr,
+        pins: std::array::from_fn(|r| {
+            if core.rooms[r].phase == APhase::Unlisted {
+                None
+            } else {
+                core.pins[r]
+            }
+        }),
     }
 }
 
@@ -695,6 +790,14 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
             room,
             expiry_with_skew,
         } => answer_capability(s, d, room as usize, expiry_with_skew),
+        StartCapability { room, iat, exp } => start_capability(s, d, room, iat, exp),
+        FinishCapability => finish_capability(s, d),
+        VerifyListPage { iat } => observe_list_clock(s, d, iat),
+        ClockSynchronized => clock_synchronized(s),
+        AttestRoot { room, dir, stale } => attest_root(s, room, dir, stale),
+        RepointRoot { room, dir } => repoint_root(s, room as usize, dir),
+        PinRebuild(r) => pin_rebuild(s, d, r as usize),
+        StaleDeadline => stale_deadline(s),
         OpAcceptEpoch => op_accept_epoch(s),
         OpRestart => op_restart(s),
         OpClearHalt(c) => op_clear_halt(s, d, c as usize),
@@ -734,6 +837,8 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
 ///   and its `list_ref` only by equality with a body derived at `hw`. Once
 ///   that `list_ref` is below `hw` it can never be equal again, so it becomes
 ///   `seq 0`, which no list carries.
+/// - With static pins (no root-pin probe) the holder's pin-history, which
+///   then can never conflict.
 /// - Audit-only authority data no step reads: `blocked_by`,
 ///   `superseded_mismatch`, the journal-loss audit flag, and the journal
 ///   itself once no restore remains in the budget.
@@ -762,6 +867,11 @@ pub fn canonical(s: &mut State, cfg: &Config) {
     if s.env.probe != Probe::None {
         return;
     }
+    // Outside the root-pin probe every room keeps its initial `pin_id`, and
+    // the pin-history only ever maps a directory to that room, so it can
+    // never conflict: it is unread. (Which pairs it holds records only
+    // whether a room was listed before an unlisting.)
+    s.dur.pin_history = [None; DIRS];
     let Some(hw) = s.dur.hw else {
         return;
     };
@@ -770,6 +880,17 @@ pub fn canonical(s: &mut State, cfg: &Config) {
         && acc.list_ref.seq < hw.seq
     {
         acc.list_ref.seq = 0;
+    }
+    // An invalidated slot is dormant: it is never transmitted, and an attempt
+    // that may have been sent is already in `uncertain`. Only an obligation
+    // key's state is read (R6, R13 and R18 clear a slot a floor overtakes).
+    for slot in s.dur.slots.iter_mut() {
+        if let Some(p) = slot.as_mut()
+            && p.st == DurSt::Invalidated
+            && !p.earlier
+        {
+            p.key = dormant_key(p.key);
+        }
     }
     let (epoch, seq) = (s.auth.core.epoch, s.auth.core.seq);
     let dead = |r: Rev| r.epoch == hw.epoch && r.epoch == epoch && r.seq < hw.seq && r.seq < seq;
@@ -781,21 +902,89 @@ pub fn canonical(s: &mut State, cfg: &Config) {
                 || dur.uncertain[c].contains(&k)
         })
     };
+    // A zero-count, result-free status is read only by the status floor
+    // (`k.list_ref.seq < last.list_ref.seq`); release and decline need a
+    // non-zero manifest. Once no live or derivable body can fall below its
+    // `list_ref`, it is equivalent to no current status.
+    let floor_moot = |last: SKey| {
+        last.manifest == 0
+            && last.result.is_none()
+            && (last.list_ref.epoch != epoch
+                || ((hw.epoch != epoch || hw.seq >= last.list_ref.seq)
+                    && (0..CHANS).all(|c| {
+                        let low = |k: Key| {
+                            k.status().is_some_and(|k| {
+                                k.list_ref.epoch == epoch && k.list_ref.seq < last.list_ref.seq
+                            })
+                        };
+                        !net.reqs[c].iter().any(|q| low(q.key))
+                            && !dur.slots[c]
+                                .is_some_and(|p| p.st != DurSt::Invalidated && low(p.key))
+                            && !dur.uncertain[c].iter().any(low)
+                    })))
+    };
+    let status_moot = s.auth.core.status.is_some_and(floor_moot);
     let core = &mut s.auth.core;
     for obl in core.rooms.iter_mut().filter_map(|r| r.obl.as_mut()) {
         let newest = obl.receipts.iter().map(|(_, _, at)| at).max();
         obl.receipts
             .retain(|&(k, _, at)| Some(at) == newest || live(Key::O(k)) || !dead(k.list_ref));
+        // A receipt's `at` is read only to find the newest receipt of its
+        // obligation, so keep its rank and forget the absolute seq (which
+        // records how other channels' commits interleaved).
+        let mut ats: Vec<u8> = obl.receipts.iter().map(|(_, _, at)| at).collect();
+        ats.sort_unstable();
+        ats.dedup();
+        obl.receipts.map_in_place(|r| {
+            r.2 = ats.iter().position(|&at| at == r.2).expect("own value") as u8 + 1;
+        });
+    }
+    if status_moot {
+        core.status = None;
     }
     let current = core.status;
     core.status_receipts
         .retain(|&(k, _, _)| Some(k) == current || live(Key::S(k)) || !dead(k.list_ref));
+    // The holder reads its accepted status only for the counts, the result
+    // and the equality with a newly derived body. A zero-count, result-free
+    // body is equivalent to none unless a reset or fresh-epoch trigger could
+    // re-derive it exactly.
+    let d = &mut s.dur;
+    if !d.reset_pending
+        && !d.epoch_status_pending
+        && d.status_acc
+            .is_some_and(|k| k.manifest == 0 && k.result.is_none())
+    {
+        d.status_acc = None;
+    }
+}
+
+/// The placeholder key of an invalidated slot (see [`canonical`]).
+fn dormant_key(k: Key) -> Key {
+    let list_ref = Rev { epoch: 0, seq: 0 };
+    match k {
+        Key::O(k) => Key::O(OKey {
+            list_ref,
+            manifest: 0,
+            remaining: false,
+            ..k
+        }),
+        Key::S(_) => Key::S(SKey {
+            list_ref,
+            reset: false,
+            manifest: 0,
+            result: None,
+        }),
+    }
 }
 
 // ------------------------------------------------------------- M1 startup
 
 fn boot(s: &State, d: Design) -> Step {
-    if s.vol.phase != Phase::Down || s.env.legacy_started {
+    if s.vol.phase != Phase::Down
+        || s.env.legacy_started
+        || (d.has(Fix::EngineCapabilityFence) && s.env.capability_skew > 30)
+    {
         return Ok(None);
     }
     let mut o = Out::new(s);
@@ -922,6 +1111,7 @@ fn fetch_useful(s: &State) -> bool {
         || next.rev.epoch != applied.rev.epoch
         || next.items != applied.items
         || next.instr != applied.instr
+        || next.pins != applied.pins
         || s.vol.admitted != Some(applied)
 }
 
@@ -986,11 +1176,20 @@ fn fetch_start(s: &State, d: Design) -> Step {
         ..Envelope::default()
     });
     o.n.net.list = Some(match preflight(&mut o, d, envelope) {
-        Ok(()) if envelope.refs.iter().any(|r| r.invalid_tag()) => ListResp::Err {
-            code: ListErr::StaleListRef,
-            healthy: false,
+        Ok(()) => match envelope.refs[1].unverifiable() {
+            Some(reason) if d.has(Fix::AdvisoryListWitness) => {
+                o.obs(Obs::WitnessUnverifiable(reason));
+                ListResp::List(view)
+            }
+            Some(_) => {
+                o.obs(Obs::AdvisoryWitnessRejected);
+                ListResp::Err {
+                    code: ListErr::LegacyStaleListRef,
+                    healthy: false,
+                }
+            }
+            None => ListResp::List(view),
         },
-        Ok(()) => ListResp::List(view),
         Err(r) => ListResp::Err {
             code: list_refusal(r),
             healthy: matches!(
@@ -1049,6 +1248,11 @@ fn list_deliver(s: &State, d: Design) -> Step {
                         o.n.vol.block |= narrowing(&l, s.dur.tomb);
                         o.row(A0);
                     }
+                    let refused = pin_refusal(s, d, &l);
+                    if d.has(Fix::RootPinFence) && refused != 0 {
+                        o.n.vol.block |= refused;
+                        o.row(P1);
+                    }
                 }
                 Adm::Refuse(h, alert) => {
                     o.row(h);
@@ -1063,7 +1267,7 @@ fn list_deliver(s: &State, d: Design) -> Step {
                 o.row(F8);
                 halt(&mut o, d, Route::Halted401, false)?;
             }
-            ListErr::Transient | ListErr::StaleListRef => {
+            ListErr::Transient | ListErr::LegacyStaleListRef => {
                 o.n.vol.proof_retried &= !bit(CHANS);
                 o.row(F7);
             }
@@ -1104,7 +1308,7 @@ fn apply(s: &State, d: Design) -> Step {
         .admitted
         .expect("an apply always has its admitted list");
     match step {
-        ApplyStep::A1 => apply_a1(s, &l),
+        ApplyStep::A1 => apply_a1(s, d, &l),
         ApplyStep::A2 => {
             let mut o = Out::new(s);
             o.row(A2);
@@ -1139,7 +1343,7 @@ fn apply(s: &State, d: Design) -> Step {
     }
 }
 
-fn apply_a1(s: &State, l: &ListMsg) -> Step {
+fn apply_a1(s: &State, d: Design, l: &ListMsg) -> Step {
     let Adm::Admit(h) = admission(&s.dur, l) else {
         unreachable!("hw and acceptance change only inside an apply or offline");
     };
@@ -1157,6 +1361,14 @@ fn apply_a1(s: &State, l: &ListMsg) -> Step {
         .filter(|r| l.items[*r].obligated())
         .fold(0, |a, r| a | bit(r));
     o.n.dur.hw = Some(l.rev);
+    // H.16: the list's pairs join the grow-only pin-history in this W.
+    for r in 0..ROOMS {
+        if let Some(p) = l.pins[r]
+            && o.n.dur.pin_history[p.id as usize].is_none()
+        {
+            o.n.dur.pin_history[p.id as usize] = Some(r as u8);
+        }
+    }
     match h {
         H6 => {
             let acc =
@@ -1167,8 +1379,10 @@ fn apply_a1(s: &State, l: &ListMsg) -> Step {
             let reused = o.n.ghost.consumed.contains(&acc);
             o.n.ghost.consumed.insert(acc, "consumed acceptances")?;
             o.obs(Obs::AcceptanceConsumed { reused });
+            o.n.ghost.status_due = true;
             o.n.dur.floors = [None; OBLS];
             o.n.dur.status_acc = None;
+            o.n.dur.epoch_status_pending = d.has(Fix::JournalLostRecovery);
             for c in 0..CHANS {
                 invalidate_slot(&mut o.n, c)?;
             }
@@ -1273,6 +1487,9 @@ fn apply_a4(s: &State, d: Design, l: &ListMsg) -> Step {
         };
     }
     o.n.vol.block = 0;
+    o.n.vol.pin_conflict = (0..ROOMS)
+        .filter(|&r| history_conflict(&s.dur, d, r, l.pins[r]))
+        .fold(0, |a, r| a | bit(r));
     o.n.vol.mem_gen = s.dur.generation;
     for ob in 0..OBLS {
         if s.vol.applied.map(|p| obligation_view(p.items[ob])) != Some(obligation_view(l.items[ob]))
@@ -1715,7 +1932,10 @@ fn enqueue(s: &State, c: usize, same_state: bool) -> Step {
     };
     let p = s.dur.slots[c];
     let key = if c < OBLS {
-        if !s.vol.class[c].obligated() {
+        // H.19 "first opportunity": after an epoch acceptance the fresh
+        // status goes first; new-epoch obligation reports wait for its
+        // current-epoch receipt.
+        if !s.vol.class[c].obligated() || s.dur.epoch_status_pending {
             return Ok(None);
         }
         let (state, rem, inv) = match s.vol.scans[c] {
@@ -1763,7 +1983,8 @@ fn enqueue(s: &State, c: usize, same_state: bool) -> Step {
     } else {
         let rr = release_outcome(s);
         let last = s.dur.status_acc.map_or(0, |k| k.manifest);
-        if s.vol.inv == last && rr.is_none() && !s.dur.reset_pending {
+        if s.vol.inv == last && rr.is_none() && !s.dur.reset_pending && !s.dur.epoch_status_pending
+        {
             return Ok(None);
         }
         if p.is_some_and(|p| !matches!(p.st, DurSt::Invalidated | DurSt::Rejected)) {
@@ -2032,6 +2253,9 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
                     }
                     Key::S(k) => {
                         o.n.dur.status_acc = Some(k);
+                        if epoch == cur_epoch && k.list_ref.epoch == cur_epoch {
+                            o.n.dur.epoch_status_pending = false;
+                        }
                         if accepted_holder_reset == Some(true) && k.reset && epoch == cur_epoch {
                             o.n.dur.reset_pending = false;
                         }
@@ -2062,6 +2286,9 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
                     Key::S(k) => {
                         o.row(T7);
                         commit!();
+                        if epoch == cur_epoch && k.list_ref.epoch == cur_epoch {
+                            o.n.dur.epoch_status_pending = false;
+                        }
                         if accepted_holder_reset == Some(true) && k.reset && epoch == cur_epoch {
                             o.n.dur.reset_pending = false;
                         }
@@ -2150,7 +2377,7 @@ fn deliver(s: &State, d: Design, c: usize, idx: usize) -> Step {
                 });
             }
         }
-        RespKind::Transient | RespKind::EpochMismatch => {
+        RespKind::Transient | RespKind::EpochMismatch | RespKind::InvariantViolation => {
             if awaiting {
                 o.row(ch_row(c, R10, T5));
                 if resp.kind == RespKind::EpochMismatch {
@@ -2403,8 +2630,23 @@ fn auth_process(s: &State, d: Design, c: usize, idx: usize) -> Step {
             o.obs(Obs::ProofDeadlineMissed);
         }
     }
+    if envelope.commit_static_failed && o.n.auth.core != *pre {
+        if d.has(Fix::CommitInvariant) {
+            o.n.auth.core = *pre;
+            kind = RespKind::InvariantViolation;
+            o.obs(Obs::CommitInvariantAudit);
+        } else {
+            o.obs(Obs::CommitInvariantMissed);
+        }
+    }
     if o.n.auth.core.seq > pre.seq && d.has(Fix::AtomicJournalReplay) {
         record_report_journal(&mut o.n.auth, pre, req.key, kind);
+    }
+    if let (Key::S(k), RespKind::Accepted { epoch, .. }) = (req.key, kind)
+        && epoch == o.n.auth.core.epoch
+        && k.list_ref.epoch == epoch
+    {
+        o.n.ghost.status_due = false;
     }
     let post = &o.n.auth.core;
     let replay_key = match req.key {
@@ -2897,7 +3139,46 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
     };
     if override_lost {
         o.n.auth.journal_lost_audited = true;
-        o.n.auth.core.instr = None;
+        let superseded = o.n.auth.core.instr.take();
+        if d.has(Fix::JournalLostRecovery) {
+            // Keep restored evidence in custody; only the current projection
+            // and its replay/floor indexes are cleared in the new epoch.
+            o.n.auth.journal_lost_evidence = o.n.auth.backup.take();
+            if let Some(ins) = superseded {
+                o.n.auth.core.final_instr |= bit(ins.id as usize);
+                o.obs(Obs::ReapprovalRequested {
+                    cause: ReapprovalCause::RestoreJournalLost,
+                    report: None,
+                });
+            }
+        }
+        // H.19 item 5 (H.16.3): pins minted before this decision belong to
+        // the lost timeline; no artifact derived under them may be served.
+        o.n.ghost.pin_floor = (o.n.auth.core.epoch, s.auth.next_pin_ref);
+        o.n.auth.journal_pins = [None; PIN_ENTRIES];
+        if d.has(Fix::JournalLostPinReset) {
+            let c = &mut o.n.auth.core;
+            let mut nulled = false;
+            for r in 0..ROOMS {
+                if c.rooms[r].phase == APhase::Active
+                    && let Some(p) = c.pins[r]
+                {
+                    c.pins[r] = None;
+                    nulled = true;
+                    o.n.auth.journal_pins[r] = Some(PinEntry {
+                        seq: c.seq + 1,
+                        room: r as u8,
+                        pin: None,
+                        prev: Some(p.pin_ref),
+                    });
+                }
+            }
+            if nulled {
+                c.seq += 1;
+                c.holder_rev = c.seq;
+                o.row(P8);
+            }
+        }
         o.n.auth.core.status = None;
         o.n.auth.core.release_declined = false;
         for obl in
@@ -2912,7 +3193,7 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
         }
         o.row(H13j);
     } else if d.has(Fix::RetirementReplay) {
-        replay_journal(&mut o.n.auth, b, d.has(Fix::AtomicJournalReplay));
+        replay_journal(&mut o, b, d);
     }
     if d.has(Fix::AuthorityFidelity) {
         let c = &mut o.n.auth.core;
@@ -2930,11 +3211,16 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
 /// H.14 replay: one transaction; later final/clear entries veto earlier
 /// issue/decline entries. This bounded journal has unique retirements, at
 /// most two instruction IDs, and only the latest decision/clear per room.
-fn replay_journal(a: &mut Auth, backup: &AuthCore, atomic: bool) {
+fn replay_journal(out: &mut Out, backup: &AuthCore, d: Design) {
+    let atomic = d.has(Fix::AtomicJournalReplay);
+    let restored_targets = d.has(Fix::RestoredReplayTargets);
+    let a = &mut out.n.auth;
     let c = &mut a.core;
     let after_backup = |seq| seq > backup.seq;
     let mut replayed = false;
     let replay_seq = backup.seq + 1;
+    let (mut releases, mut declines, mut clears) = ([0; INSTRS], [0; ROOMS], [0; ROOMS]);
+    let mut reapprovals = [None; INSTRS];
     for r in 0..ROOMS {
         if a.journal_retired & bit(r) != 0 && c.rooms[r].obl.is_none() {
             replayed = true;
@@ -2949,16 +3235,23 @@ fn replay_journal(a: &mut Auth, backup: &AuthCore, atomic: bool) {
                 }),
             };
         }
+        let declined = a.journal_declined[r].filter(|e| after_backup(e.seq));
+        let cleared = atomic && after_backup(a.journal_cleared[r]);
         let Some(obl) = c.rooms[r].obl.as_mut() else {
+            declines[r] = declined.map_or(0, |e| e.seq);
+            if cleared {
+                clears[r] = a.journal_cleared[r];
+            }
             continue;
         };
-        let cleared = atomic && after_backup(a.journal_cleared[r]);
-        if cleared {
+        let clear_target =
+            restored_targets || declined.is_some_and(|e| e.seq < a.journal_cleared[r]);
+        if cleared && clear_target {
             replayed = true;
             obl.blocked = false;
             obl.blocked_by = None;
         }
-        if let Some(e) = a.journal_declined[r].filter(|e| after_backup(e.seq))
+        if let Some(e) = declined
             && !obl.complete()
             && (!cleared || a.journal_cleared[r] < e.seq)
         {
@@ -2969,21 +3262,35 @@ fn replay_journal(a: &mut Auth, backup: &AuthCore, atomic: bool) {
     }
     c.release_declined = c.rooms.iter().any(|r| r.obl.is_some_and(|o| o.blocked));
     for i in 0..INSTRS {
+        let issued = a.journal_issued[i].filter(|(seq, _)| after_backup(*seq));
         if atomic && let Some(finalized) = a.journal_finalized[i].filter(|e| after_backup(e.seq)) {
+            let restored = c.instr.is_some_and(|ins| ins.id as usize == i);
+            let replayed_issue = issued.is_some_and(|(seq, _)| seq < finalized.seq);
+            // Without H.18: the rejected reading, where an entry applies only
+            // to a target a replayed entry created, and a missing target is
+            // silently ignored.
+            let target = replayed_issue || (restored_targets && restored);
+            if !target {
+                if restored_targets && c.final_instr & bit(i) == 0 {
+                    releases[i] = finalized.seq;
+                }
+                continue;
+            }
             replayed = true;
-            if c.instr.is_some_and(|ins| ins.id as usize == i) {
+            if restored {
                 c.instr = None;
             }
             c.final_instr |= bit(i);
             if !finalized.executed {
                 c.superseded_mismatch |= bit(i);
+                reapprovals[i] = Some(finalized.status_digest);
             }
             continue;
         }
         // H.14 re-lists unless a later `release_finalized` names the id (the
         // `continue` above). Revision 10 asked the restored state instead,
         // which predates the entry and cannot answer.
-        if let Some((_, ins)) = a.journal_issued[i].filter(|(seq, _)| after_backup(*seq))
+        if let Some((_, ins)) = issued
             && (atomic
                 || !backup
                     .status_receipts
@@ -2997,17 +3304,91 @@ fn replay_journal(a: &mut Auth, backup: &AuthCore, atomic: bool) {
             });
         }
     }
+    // H.16.3: attestations after the restore point, in journal order.
+    let (mut pin_skipped, mut orphaned) = (false, 0u8);
+    for e in a
+        .journal_pins
+        .iter()
+        .flatten()
+        .filter(|e| after_backup(e.seq))
+    {
+        let r = e.room as usize;
+        let cur = c.pins[r].map(|p| p.pin_ref);
+        if c.rooms[r].phase == APhase::Unlisted {
+            // The holding did not survive: reserve the directory as "*".
+            if let Some(p) = e.pin {
+                orphaned |= bit(p.id as usize);
+                if d.has(Fix::OrphanPinReserve) {
+                    c.pin_history[p.id as usize] = Some(PinOwner::Orphan);
+                }
+            }
+            pin_skipped = true;
+        } else if cur == e.pin.map(|p| p.pin_ref) {
+            // Already committed: a no-op.
+        } else if cur != e.prev
+            || e.pin.is_some_and(|p| {
+                c.pin_history[p.id as usize].is_some_and(|o| o != PinOwner::Room(e.room))
+            })
+        {
+            pin_skipped = true;
+        } else {
+            replayed = true;
+            c.pins[r] = e.pin;
+            if let Some(p) = e.pin {
+                c.pin_history[p.id as usize] = Some(PinOwner::Room(e.room));
+            }
+        }
+    }
     if replayed {
         c.seq = replay_seq;
         c.holder_rev = replay_seq;
     }
+    // H.18 as stated: a replayed `release_finalized` leaves its instruction
+    // outstanding nowhere, and a replayed `blocked_cleared` with no later
+    // decline leaves its obligation blocked nowhere.
+    let finalized_listed = (0..INSTRS).any(|i| {
+        a.journal_finalized[i].is_some_and(|e| after_backup(e.seq))
+            && c.instr.is_some_and(|ins| ins.id as usize == i)
+    });
+    let cleared_blocked = (0..ROOMS).any(|r| {
+        let cleared = a.journal_cleared[r];
+        after_backup(cleared)
+            && a.journal_declined[r].is_none_or(|e| e.seq < cleared)
+            && c.rooms[r].obl.is_some_and(|o| o.blocked)
+    });
+    if atomic && (finalized_listed || cleared_blocked) {
+        out.obs(Obs::ReplayTargetMissed);
+    }
+    if orphaned != 0 {
+        let (_, dirs) = out.n.ghost.orphan_dirs;
+        out.n.ghost.orphan_dirs = (out.n.auth.core.epoch, dirs | orphaned);
+    }
+    if pin_skipped {
+        out.obs(Obs::PinReplaySkipped);
+    }
+    if restored_targets
+        && releases
+            .into_iter()
+            .chain(declines)
+            .chain(clears)
+            .any(|seq| seq != 0)
+    {
+        out.obs(Obs::ReplaySkipped {
+            releases,
+            declines,
+            clears,
+        });
+    }
+    for report in reapprovals.into_iter().flatten() {
+        out.obs(Obs::ReapprovalRequested {
+            cause: ReapprovalCause::SupersededMismatch,
+            report: Some(report),
+        });
+    }
 }
 
 fn tick_exposure(s: &State, elapsed: u8) -> Step {
-    if s.env.probe != Probe::Exposure
-        || elapsed <= s.env.exposure_elapsed
-        || s.ghost.retired_at[0].is_none()
-    {
+    if s.env.probe != Probe::Exposure || elapsed <= s.env.exposure_elapsed {
         return Ok(None);
     }
     let mut o = Out::new(s);
@@ -3019,8 +3400,14 @@ fn answer_capability(s: &State, d: Design, room: usize, expiry_with_skew: u8) ->
     if s.env.probe != Probe::Exposure || s.ghost.retired_at[room].is_none() {
         return Ok(None);
     }
-    let a0 = s.vol.admitted.is_some_and(|l| l.items[room].obligated());
+    // H.15 fixture shortcut: admission and release at the same instant,
+    // with an already bounded and verified capability envelope.
+    let a0 = s
+        .vol
+        .admitted
+        .is_some_and(|l| l.items[room] != Item::Active);
     let answered = servable(s, room)
+        && !s.env.clock_behind_authority
         && wire::pre_retirement_answer(d, s.env.exposure_elapsed, expiry_with_skew, a0);
     let mut o = Out::new(s);
     o.row(if answered { C17 } else { C18 });
@@ -3034,6 +3421,235 @@ fn answer_capability(s: &State, d: Design, room: usize, expiry_with_skew: u8) ->
     {
         o.obs(Obs::CapabilityOverexposed);
     }
+    o.done()
+}
+
+// H.21 uses the holder's receive/release clock, not knowledge of when an
+// authority retirement committed. The focused clock is monotone, in seconds.
+fn start_capability(s: &State, d: Design, room: u8, iat: i16, exp: i16) -> Step {
+    if !matches!(s.env.probe, Probe::Exposure | Probe::Pin) {
+        return Ok(None);
+    }
+    let now = i32::from(s.env.exposure_elapsed);
+    let (iat, exp) = (i32::from(iat), i32::from(exp));
+    let deadline = exp + i32::from(s.env.capability_skew);
+    let future = iat > now + 30;
+    let long = exp - iat > 60;
+    let fenced = d.has(Fix::EngineCapabilityFence);
+    let mut o = Out::new(s);
+    if fenced && future {
+        flag_clock_behind(&mut o);
+    }
+    let refusal = if fenced && future {
+        Some(CapabilityRefusal::FutureIat)
+    } else if fenced && long {
+        Some(CapabilityRefusal::LifetimeTooLong)
+    } else if fenced && s.env.clock_behind_authority {
+        Some(CapabilityRefusal::ClockBehind)
+    } else if d.has(Fix::CapabilityExposure) && now > deadline {
+        Some(CapabilityRefusal::Expired)
+    } else if !capability_room_active(s, room) {
+        Some(CapabilityRefusal::NotActive)
+    } else {
+        None
+    };
+    if let Some(reason) = refusal {
+        refuse_capability(&mut o, reason);
+    } else {
+        if s.vol.capability.is_some() {
+            return Ok(None); // the probe bounds admitted work, not clock evidence
+        }
+        o.n.vol.capability = Some(InFlightCapability { room, deadline });
+        if future || long || s.env.clock_behind_authority || now > deadline {
+            o.obs(Obs::CapabilityOverexposed);
+        }
+    }
+    o.done()
+}
+
+fn finish_capability(s: &State, d: Design) -> Step {
+    let Some(req) = s.vol.capability else {
+        return Ok(None);
+    };
+    let expired = i32::from(s.env.exposure_elapsed) > req.deadline;
+    let fenced = d.has(Fix::EngineCapabilityFence);
+    let mut o = Out::new(s);
+    o.n.vol.capability = None;
+    if fenced && expired {
+        refuse_capability(&mut o, CapabilityRefusal::Expired);
+    } else if fenced && s.env.clock_behind_authority {
+        refuse_capability(&mut o, CapabilityRefusal::ClockBehind);
+    } else if !capability_room_active(s, req.room) {
+        refuse_capability(&mut o, CapabilityRefusal::NotActive);
+    } else {
+        o.row(C17);
+        if expired || s.env.clock_behind_authority {
+            o.obs(Obs::CapabilityOverexposed);
+        }
+    }
+    o.done()
+}
+
+fn capability_room_active(s: &State, room: u8) -> bool {
+    let r = usize::from(room);
+    s.vol.admitted.is_some_and(|l| l.items[r] == Item::Active) && servable(s, r)
+}
+
+fn refuse_capability(o: &mut Out, reason: CapabilityRefusal) {
+    o.row(C18);
+    o.obs(Obs::CapabilityRefused(reason));
+}
+
+fn flag_clock_behind(o: &mut Out) {
+    o.n.env.clock_behind_authority = true;
+    o.row(C19);
+    o.obs(Obs::ClockBehindAuthority);
+}
+
+fn observe_list_clock(s: &State, d: Design, iat: i16) -> Step {
+    if s.env.probe != Probe::Exposure || !s.vol.fetching {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    // The action represents any page after signature verification, not just
+    // page 0 or the delivery of a fully assembled list.
+    if d.has(Fix::EngineCapabilityFence) && i32::from(iat) > i32::from(s.env.exposure_elapsed) + 30
+    {
+        flag_clock_behind(&mut o);
+    }
+    o.done()
+}
+
+fn clock_synchronized(s: &State) -> Step {
+    if s.env.probe != Probe::Exposure || !s.env.clock_behind_authority {
+        return Ok(None);
+    }
+    // A confirmed correction, not a merely older signed timestamp.
+    let mut o = Out::new(s);
+    o.n.env.clock_behind_authority = false;
+    o.row(C19);
+    o.done()
+}
+
+// ---------------------------------------------------------------- root pins
+
+/// H.16.2 `openclast lifecycle attest-root` (admin, local). The checks, the
+/// journal append and the governance transaction run under one lock hold, so
+/// the model takes them as one step; a refusal changes nothing.
+fn attest_root(s: &State, room: u8, dir: Option<u8>, stale: bool) -> Step {
+    // A committed attestation is a list change: it spends that budget.
+    if s.env.probe != Probe::Pin
+        || s.budget.changes == 0
+        || s.auth.rollback_suspected
+        || s.auth.failed_restore
+    {
+        return Ok(None);
+    }
+    let r = room as usize;
+    let c = &s.auth.core;
+    let mut o = Out::new(s);
+    let refusal = if c.rooms[r].phase == APhase::Unlisted {
+        Some(PinRefusal::HoldingUnknown)
+    } else if c.rooms[r].phase != APhase::Active {
+        Some(PinRefusal::HoldingInactive)
+    } else if stale {
+        Some(PinRefusal::Conflict)
+    } else if dir
+        .is_some_and(|id| c.pin_history[id as usize].is_some_and(|o| o != PinOwner::Room(room)))
+    {
+        Some(PinRefusal::Reused)
+    } else {
+        None
+    };
+    if let Some(code) = refusal {
+        o.obs(Obs::PinAttestRefused(code));
+        return o.done();
+    }
+    let pin = dir.map(|id| Pin {
+        id,
+        pin_ref: s.auth.next_pin_ref,
+    });
+    if pin.is_some() {
+        o.n.auth.next_pin_ref += 1;
+    }
+    o.n.budget.changes -= 1;
+    let c = &mut o.n.auth.core;
+    let prev = c.pins[r].map(|p| p.pin_ref);
+    c.pins[r] = pin;
+    if let Some(p) = pin {
+        c.pin_history[p.id as usize] = Some(PinOwner::Room(room));
+    }
+    c.seq += 1;
+    c.holder_rev = c.seq;
+    let entry = PinEntry {
+        seq: c.seq,
+        room,
+        pin,
+        prev,
+    };
+    let Some(slot) = o.n.auth.journal_pins.iter_mut().find(|e| e.is_none()) else {
+        return Err(Bound("root pin journal entries"));
+    };
+    *slot = Some(entry);
+    o.row(P6);
+    o.done()
+}
+
+/// The room's configured root now resolves to `dir` (a storage move, a
+/// directory swap, or a configuration edit). An empty directory receives the
+/// room's data; one that already holds a room's bytes keeps them.
+fn repoint_root(s: &State, r: usize, dir: u8) -> Step {
+    if s.env.probe != Probe::Pin || s.env.root_dir[r] == dir {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.env.root_dir[r] = dir;
+    o.n.ghost.dir_room[dir as usize].get_or_insert(r as u8);
+    o.done()
+}
+
+/// Walk and publish the room under the applied `pin_ref` (P4). The walk
+/// fails closed on a root mismatch: nothing from another tree is indexed.
+fn pin_rebuild(s: &State, d: Design, r: usize) -> Step {
+    if s.env.probe != Probe::Pin || s.vol.phase != Phase::P7 || !publisher_idle(s) {
+        return Ok(None);
+    }
+    let Some(p) = s.vol.applied.and_then(|l| l.pins[r]) else {
+        return Ok(None); // a null pin: nothing is built or served
+    };
+    if s.vol.class[r] != Class::Active
+        || s.dur.derived[r] == Some(p.pin_ref)
+        || (s.vol.block | s.vol.pin_conflict) & bit(r) != 0
+        || (d.has(Fix::RootPinServing) && s.env.root_dir[r] != p.id)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.row(P4);
+    match write(&mut o) {
+        None => return Ok(None),
+        Some(false) => return o.done(),
+        Some(true) => {}
+    }
+    o.n.dur.derived[r] = Some(p.pin_ref);
+    o.n.ghost.derived_from[r] = s.ghost.dir_room[s.env.root_dir[r] as usize];
+    o.done()
+}
+
+/// The H10.5 stale bound passes while some room's root mismatches its pin.
+fn stale_deadline(s: &State) -> Step {
+    let mismatch = (0..ROOMS).any(|r| {
+        s.vol
+            .applied
+            .and_then(|l| l.pins[r])
+            .is_some_and(|p| s.env.root_dir[r] != p.id)
+    });
+    if s.env.probe != Probe::Pin || s.env.stale_expired || !mismatch {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.env.stale_expired = true;
+    o.row(P5);
     o.done()
 }
 

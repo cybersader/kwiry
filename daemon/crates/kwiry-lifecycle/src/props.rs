@@ -12,7 +12,7 @@
 //! | I7 | Some healthy actor (holder, environment or operator) can move whenever any work is outstanding |
 //! | I8 | An operator wait (auth halt, bug halt) is entered only on a fault, never on a correct authority or network response |
 //! | I9 | The unattributed inventory never counts data attributable to a listed holding (except units a release reserved) |
-//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked` under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
+//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, and every consumed epoch acceptance is answered by a status accepted in the new epoch, under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
 
 use crate::state::*;
 use crate::step::{Obs, Outcome, delete_authorized, mintable, reserving, room_class, servable};
@@ -44,6 +44,10 @@ pub enum Prop {
     I8ProofDeadline,
     I1UnverifiedRestore,
     I1CapabilityExposure,
+    I8AdvisoryListWitness,
+    I8CommitInvariant,
+    I8ReplayTarget,
+    I1RootPin,
     /// A model bound was hit; the result would not be exhaustive.
     Bound,
 }
@@ -111,6 +115,14 @@ impl Prop {
             Prop::I1CapabilityExposure => {
                 "I1: a pre-retirement capability answered beyond its deadline"
             }
+            Prop::I8AdvisoryListWitness => "I8: an unverifiable advisory witness refused the list",
+            Prop::I8CommitInvariant => "I8: an inconsistent static check did not abort the CAS",
+            Prop::I1RootPin => {
+                "I1: a room served under a null, changed-unapplied, conflicting, pre-journal-loss or orphaned pin, from another room's bytes, or past the stale bound"
+            }
+            Prop::I8ReplayTarget => {
+                "I8: a replayed finalization or clear left its restored target outstanding"
+            }
             Prop::Bound => "a model bound was exceeded",
         }
     }
@@ -149,6 +161,9 @@ fn state_violations(s: &State) -> Vec<Prop> {
     if i1 {
         v.push(Prop::I1Serving);
     }
+    if !s.env.legacy_started && (0..ROOMS).any(|r| servable(s, r) && root_pin_unsafe(s, r)) {
+        v.push(Prop::I1RootPin);
+    }
     if (0..ROOMS).any(|r| {
         s.ghost.retired_at[r].is_some_and(|retired| {
             mintable(s, r) || (servable(s, r) && s.vol.applied.is_some_and(|l| l.rev >= retired))
@@ -175,6 +190,27 @@ fn state_violations(s: &State) -> Vec<Prop> {
     v
 }
 
+/// H.16: a served room's admitted pin is non-null and already applied; under
+/// a list of the epoch a `restore_journal_lost` opened (or later) it was
+/// minted after that decision; it is no orphaned directory; its artifacts
+/// hold only its own bytes; and a root mismatch is within H10.5.
+fn root_pin_unsafe(s: &State, r: usize) -> bool {
+    let admitted = s.vol.admitted.and_then(|l| l.pins[r]);
+    let Some(l) = s.vol.applied else {
+        return true;
+    };
+    let Some(p) = l.pins[r] else {
+        return true;
+    };
+    let (floor_epoch, floor) = s.ghost.pin_floor;
+    let (orphan_epoch, orphans) = s.ghost.orphan_dirs;
+    admitted != Some(p)
+        || (l.rev.epoch >= floor_epoch && p.pin_ref < floor)
+        || (l.rev.epoch >= orphan_epoch && orphans & bit(p.id as usize) != 0)
+        || s.ghost.derived_from[r] != Some(r as u8)
+        || (s.env.root_dir[r] != p.id && s.env.stale_expired)
+}
+
 fn step_violations(prev: &State, out: &Outcome) -> Vec<Prop> {
     let mut v = Vec::new();
     let next = &out.next;
@@ -197,6 +233,9 @@ fn step_violations(prev: &State, out: &Outcome) -> Vec<Prop> {
             Obs::ProofDeadlineMissed => Some(Prop::I8ProofDeadline),
             Obs::UnverifiedRestore => Some(Prop::I1UnverifiedRestore),
             Obs::CapabilityOverexposed => Some(Prop::I1CapabilityExposure),
+            Obs::AdvisoryWitnessRejected => Some(Prop::I8AdvisoryListWitness),
+            Obs::CommitInvariantMissed => Some(Prop::I8CommitInvariant),
+            Obs::ReplayTargetMissed => Some(Prop::I8ReplayTarget),
             Obs::SentWhileForbidden => Some(Prop::I8ForbiddenSend),
             Obs::DeclineInvisible => Some(Prop::I8DeclineVisible),
             Obs::OperatorWait { healthy: true } => Some(Prop::I8HealthyHalt),
@@ -240,11 +279,14 @@ pub fn settled(s: &State) -> bool {
 }
 
 /// A retirement cannot disappear from the goal when the authority is restored.
+/// An epoch acceptance is answered by a status accepted in the new epoch
+/// (HW §15 H.19), whatever its count.
 pub fn goal(s: &State) -> bool {
-    (0..ROOMS).all(|r| {
-        s.ghost.retired_at[r].is_none()
-            || s.auth.core.rooms[r]
-                .obl
-                .is_some_and(|o| o.complete() || o.blocked)
-    })
+    !s.ghost.status_due
+        && (0..ROOMS).all(|r| {
+            s.ghost.retired_at[r].is_none()
+                || s.auth.core.rooms[r]
+                    .obl
+                    .is_some_and(|o| o.complete() || o.blocked)
+        })
 }

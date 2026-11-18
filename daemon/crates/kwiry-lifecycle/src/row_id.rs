@@ -34,7 +34,7 @@ row_ids! {
     // M4a
     A0, A1, A2, A2n, A3, A3n, A4, A5, A6,
     // M4b
-    C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C17, C18,
+    C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13, C14, C15, C16, C17, C18, C19,
     // M5
     O1, O2, O3, O4, O5, O6, O7, O8, O9, O10, O11, O11g, O12, O13, O14, O14x,
     // M6
@@ -48,4 +48,6 @@ row_ids! {
     K1, K1i, K2, K2x, K5, K3, K4,
     // M10
     N1, N2, N2c, N3, N4, N5,
+    // M11
+    P1, P2, P3, P4, P5, P6, P7, P8,
 }

@@ -199,6 +199,8 @@ pub enum RefInput {
     #[default]
     Absent,
     Malformed,
+    /// Well-formed ref whose digest root is no longer retained.
+    RootRetired(Rev),
     WellFormed {
         rev: Rev,
         tag_valid: bool,
@@ -212,14 +214,25 @@ impl RefInput {
         }
     }
     pub fn invalid_tag(self) -> bool {
-        matches!(
-            self,
-            Self::WellFormed {
-                tag_valid: false,
-                ..
-            }
-        )
+        self.unverifiable().is_some()
     }
+
+    pub fn unverifiable(self) -> Option<WitnessReason> {
+        match self {
+            Self::WellFormed {
+                tag_valid: false, ..
+            } => Some(WitnessReason::TagInvalid),
+            Self::RootRetired(_) => Some(WitnessReason::RootRetired),
+            _ => None,
+        }
+    }
+}
+
+/// Reason carried by the H.17 audit event (no resource IDs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WitnessReason {
+    TagInvalid,
+    RootRetired,
 }
 
 /// Abstract raw and verified claims at the authority. Negative flags model
@@ -235,6 +248,9 @@ pub struct Envelope {
     pub rate_limited: bool,
     pub malformed: bool,
     pub clock: Option<ProofTimes>,
+    /// Inject an authority bug at the optional H.20 CAS static re-check;
+    /// this cannot be caused by passage of time or a different signed claim.
+    pub commit_static_failed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
