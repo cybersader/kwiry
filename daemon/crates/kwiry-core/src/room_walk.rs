@@ -470,12 +470,23 @@ mod tests {
                 legacy_identity_accept_until: Some(0),
             });
             let config_path = fixture.path().join("kwiry.toml");
-            // The first config admission writes pins; untouched reloads
-            // must not silently pick up a replacement root.
+            // Start with an already-provisioned pin store. Reload must
+            // not silently pick up a replacement root.
+            let pins_path = config_path.with_extension("room-roots.json");
+            let pins: std::collections::BTreeMap<_, _> = config
+                .vaults
+                .iter()
+                .map(|vault| {
+                    (
+                        vault.room.as_deref().unwrap(),
+                        pin_room_root(&vault.path).unwrap(),
+                    )
+                })
+                .collect();
+            fs::write(&pins_path, serde_json::to_vec(&pins).unwrap()).unwrap();
             fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
             let config = crate::load_config(&config_path).unwrap();
             assert_eq!(config.room_root_identities.len(), 2);
-            let pins_path = config_path.with_extension("room-roots.json");
             let persisted_pins = fs::read(&pins_path).unwrap();
             let pins = config.room_root_identities.clone();
             fs::rename(&rd, &nested).unwrap();

@@ -82,7 +82,8 @@ pub use chunk::ingest_vault;
 #[cfg(feature = "native")]
 pub use config::{
     ConfigLock, Paths, VaultRegistrationDisposition, acquire_config_lock, acquire_setup_lock,
-    add_vault, ensure_vault_registration, load_config, save_config, update_config,
+    add_vault, ensure_vault_registration, load_config, load_startup_config, register_vault,
+    save_config, update_config,
 };
 #[cfg(feature = "native")]
 pub use connection::{

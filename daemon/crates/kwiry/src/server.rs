@@ -18,7 +18,7 @@ use kwiry_core::{
     DaemonState, DaemonStatus, DataRoot, HealthResponse, HostProfile, IndexFreshness,
     IndexFreshnessBasis, IndexFreshnessState, IndexManager, LexicalMatchQuality, Manifest,
     ManifestFileOutcome, ModelStatus, Paths, Principal, ReconcileScope, Scope, SearchMode,
-    SearchRuntime, VaultStatus, bootstrap_desktop, build_index, load_config,
+    SearchRuntime, VaultStatus, bootstrap_desktop, build_index, load_startup_config,
     probe_openclast_ingestion, write_connection_descriptor,
 };
 
@@ -52,7 +52,7 @@ pub(crate) async fn serve(
     bind_override: Option<String>,
     semantic: bool,
 ) -> Result<()> {
-    let initial_config = load_config(&paths.config)?;
+    let initial_config = load_startup_config(&paths)?;
     let profile = initial_config.server.profile;
     if profile == HostProfile::OpenClast {
         probe_openclast_ingestion(&paths.data_dir, &initial_config.vaults)?;

@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use kwiry_core::{
     DaemonState, DataRoot, HostProfile, IndexFreshnessBasis, LexicalSearchRequest, Paths,
-    acquire_setup_lock, add_vault, build_index, load_config, search_index, update_config,
+    acquire_setup_lock, build_index, load_config, register_vault, search_index, update_config,
 };
 use serde::Serialize;
 
@@ -261,8 +261,7 @@ async fn main() -> Result<()> {
         Command::Vault {
             command: VaultCommand::Add { id, path, room },
         } => {
-            let registration =
-                update_config(&paths.config, |config| add_vault(config, id, path, room))?;
+            let registration = register_vault(&paths, id, path, room)?;
             println!(
                 "Registered vault '{}' at {}",
                 registration.id,

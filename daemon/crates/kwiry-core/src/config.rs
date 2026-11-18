@@ -132,28 +132,19 @@ pub fn acquire_setup_lock(paths: &Paths) -> Result<ConfigLock> {
 }
 
 pub fn load_config(path: &Path) -> Result<Config> {
+    load_checked_config(path, None)
+}
+
+pub fn load_startup_config(paths: &Paths) -> Result<Config> {
+    load_checked_config(&paths.config, Some(&paths.data_dir))
+}
+
+fn load_checked_config(path: &Path, data_dir: Option<&Path>) -> Result<Config> {
     let mut config = load_config_unlocked(path)?;
     validate_config(path, &config)?;
     if config.server.profile == HostProfile::OpenClast {
         let pins = load_room_pins(path)?;
-        #[cfg(target_os = "linux")]
-        if config.vaults.iter().any(|vault| {
-            vault
-                .room
-                .as_ref()
-                .is_some_and(|room| !pins.contains_key(room))
-        }) {
-            // First config admission: re-read under the registration lock.
-            // Pins are independent of the editable TOML, so replacing or
-            // regenerating that TOML can never silently re-pin a room.
-            let _lock = acquire_config_lock(&path.with_extension("lock"))?;
-            config = load_config_unlocked(path)?;
-            validate_config(path, &config)?;
-            load_and_pin_rooms(path, &mut config)?;
-            return Ok(config);
-        }
-        config.room_root_identities = pins;
-        normalize_openclast_rooms(path, &mut config)?;
+        apply_room_pins(path, &mut config, pins.as_ref(), data_dir)?;
     }
     Ok(config)
 }
@@ -176,57 +167,127 @@ fn normalize_openclast_rooms(path: &Path, config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-fn pin_openclast_rooms(config: &mut Config) -> Result<()> {
-    #[cfg(not(target_os = "linux"))]
-    let _ = config;
-    #[cfg(target_os = "linux")]
-    if config.server.profile == HostProfile::OpenClast {
-        for vault in &config.vaults {
-            let room = vault.room.as_ref().expect("room required after validation");
-            if let std::collections::btree_map::Entry::Vacant(entry) =
-                config.room_root_identities.entry(room.clone())
-            {
-                entry.insert(crate::room_walk::pin_room_root(&vault.path)?);
-            }
-        }
-    }
-    Ok(())
-}
-
 fn room_pin_path(path: &Path) -> PathBuf {
     path.with_extension("room-roots.json")
 }
 
-fn load_room_pins(path: &Path) -> Result<BTreeMap<String, String>> {
+fn load_room_pins(path: &Path) -> Result<Option<BTreeMap<String, String>>> {
     let pins = room_pin_path(path);
     match fs::read(&pins) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| Error::InvalidConfig {
-            path: pins,
-            message: format!("invalid OpenClast room pin store: {error}"),
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|error| Error::InvalidConfig {
+                    path: pins,
+                    message: format!("invalid OpenClast room pin store: {error}"),
+                })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error(pins, error)),
     }
 }
 
-// Called under the registration lock. An old pin wins over every incoming
-// value, including when a room is temporarily removed from the editable TOML.
-fn load_and_pin_rooms(path: &Path, config: &mut Config) -> Result<()> {
-    if config.server.profile != HostProfile::OpenClast {
-        return Ok(());
+fn data_root_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(path, error)),
     }
-    let mut persisted = load_room_pins(path)?;
-    config.room_root_identities.extend(persisted.clone());
-    normalize_openclast_rooms(path, config)?;
-    pin_openclast_rooms(config)?;
-    let count = persisted.len();
-    persisted.extend(config.room_root_identities.clone());
-    if persisted.len() != count {
-        let bytes = serde_json::to_vec(&persisted)
-            .map_err(|error| Error::State(format!("encode OpenClast room pins: {error}")))?;
-        persist_config_bytes(&room_pin_path(path), &bytes)?;
+}
+
+fn apply_room_pins(
+    path: &Path,
+    config: &mut Config,
+    pins: Option<&BTreeMap<String, String>>,
+    data_dir: Option<&Path>,
+) -> Result<()> {
+    let missing = |message: &str| Error::InvalidConfig {
+        path: room_pin_path(path),
+        message: format!("openclast_room_pins_missing: {message}"),
+    };
+    match pins {
+        Some(pins) => {
+            if config.vaults.iter().any(|vault| {
+                vault
+                    .room
+                    .as_ref()
+                    .is_none_or(|room| !pins.contains_key(room))
+            }) {
+                return Err(missing("configured room has no stored pin"));
+            }
+            config.room_root_identities = pins.clone();
+        }
+        None => {
+            if !config.vaults.is_empty()
+                || data_dir
+                    .map(data_root_present)
+                    .transpose()?
+                    .unwrap_or(false)
+            {
+                return Err(missing("pin store is absent for existing OpenClast state"));
+            }
+            config.room_root_identities.clear();
+        }
+    }
+    normalize_openclast_rooms(path, config)
+}
+
+fn check_existing_room_pins(path: &Path, config: &mut Config) -> Result<()> {
+    if config.server.profile == HostProfile::OpenClast {
+        let pins = load_room_pins(path)?;
+        apply_room_pins(path, config, pins.as_ref(), None)?;
     }
     Ok(())
+}
+
+/// Explicit CLI registration is the only path that can establish a first pin.
+/// A missing store on an existing installation is never repaired from config.
+pub fn register_vault(
+    paths: &Paths,
+    id: String,
+    path: PathBuf,
+    room: Option<String>,
+) -> Result<VaultRegistration> {
+    let _lock = acquire_config_lock(&paths.config_lock)?;
+    let mut config = load_config_unlocked(&paths.config)?;
+    validate_config(&paths.config, &config)?;
+    if config.server.profile == HostProfile::Desktop {
+        let registration = add_vault(&mut config, id, path, room)?;
+        save_config_unlocked(&paths.config, &config)?;
+        return Ok(registration);
+    }
+
+    let pins = load_room_pins(&paths.config)?;
+    apply_room_pins(
+        &paths.config,
+        &mut config,
+        pins.as_ref(),
+        Some(&paths.data_dir),
+    )?;
+    let registration = add_vault(&mut config, id, path, room)?;
+    if let Some(pins) = pins.as_ref() {
+        apply_room_pins(&paths.config, &mut config, Some(pins), None)?;
+    } else {
+        #[cfg(not(target_os = "linux"))]
+        return Err(Error::State(
+            "openclast_ingestion_platform_unsupported".into(),
+        ));
+        #[cfg(target_os = "linux")]
+        {
+            let room = registration
+                .room
+                .as_ref()
+                .expect("validated room registration");
+            let pin = crate::room_walk::pin_room_root(&registration.path)?;
+            let bytes = serde_json::to_vec(&BTreeMap::from([(room, pin)]))
+                .map_err(|error| Error::State(format!("encode OpenClast room pins: {error}")))?;
+            // Publish the pin first. An interrupted config write leaves the
+            // pin reserved, rather than a registration without a pin.
+            persist_config_bytes(&room_pin_path(&paths.config), &bytes, false)?;
+        }
+    }
+    save_config_unlocked(&paths.config, &config)?;
+    Ok(registration)
 }
 
 pub fn save_config(path: &Path, config: &Config) -> Result<()> {
@@ -234,7 +295,7 @@ pub fn save_config(path: &Path, config: &Config) -> Result<()> {
     let _lock = acquire_config_lock(&lock_path)?;
     validate_config(path, config)?;
     let mut config = config.clone();
-    load_and_pin_rooms(path, &mut config)?;
+    check_existing_room_pins(path, &mut config)?;
     save_config_unlocked(path, &config)
 }
 
@@ -243,10 +304,10 @@ pub fn update_config<T>(path: &Path, update: impl FnOnce(&mut Config) -> Result<
     let _lock = acquire_config_lock(&lock_path)?;
     let mut config = load_config_unlocked(path)?;
     validate_config(path, &config)?;
-    load_and_pin_rooms(path, &mut config)?;
+    check_existing_room_pins(path, &mut config)?;
     let result = update(&mut config)?;
     validate_config(path, &config)?;
-    load_and_pin_rooms(path, &mut config)?;
+    check_existing_room_pins(path, &mut config)?;
     save_config_unlocked(path, &config)?;
     Ok(result)
 }
@@ -277,10 +338,10 @@ fn save_config_unlocked(path: &Path, config: &Config) -> Result<()> {
         path: path.to_path_buf(),
         message: error.to_string(),
     })?;
-    persist_config_bytes(path, encoded.as_bytes())
+    persist_config_bytes(path, encoded.as_bytes(), true)
 }
 
-fn persist_config_bytes(path: &Path, encoded: &[u8]) -> Result<()> {
+fn persist_config_bytes(path: &Path, encoded: &[u8], overwrite: bool) -> Result<()> {
     let parent = path.parent().ok_or_else(|| Error::InvalidConfig {
         path: path.to_path_buf(),
         message: "configuration path has no parent".to_owned(),
@@ -294,9 +355,12 @@ fn persist_config_bytes(path: &Path, encoded: &[u8]) -> Result<()> {
         .as_file()
         .sync_all()
         .map_err(|error| io_error(temporary.path(), error))?;
-    temporary
-        .persist(path)
-        .map_err(|error| io_error(path, error.error))?;
+    if overwrite {
+        temporary.persist(path)
+    } else {
+        temporary.persist_noclobber(path)
+    }
+    .map_err(|error| io_error(path, error.error))?;
     sync_parent(parent)?;
     Ok(())
 }
@@ -606,7 +670,6 @@ fn insert_registration(config: &mut Config, registration: &VaultRegistration) ->
         candidate.vaults.push(registration.clone());
         validate_config(&registration.path, &candidate)?;
         normalize_openclast_rooms(&registration.path, &mut candidate)?;
-        pin_openclast_rooms(&mut candidate)?;
         *config = candidate;
     } else {
         config.vaults.push(registration.clone());
@@ -678,6 +741,11 @@ mod tests {
         assert_eq!(loaded.vaults[0].id, "cynario");
     }
 
+    fn seed_test_room_pins<'a>(path: &Path, rooms: impl IntoIterator<Item = &'a str>) {
+        let pins: BTreeMap<_, _> = rooms.into_iter().map(|room| (room, "0:0")).collect();
+        fs::write(room_pin_path(path), serde_json::to_vec(&pins).unwrap()).unwrap();
+    }
+
     #[test]
     fn openclast_profile_requires_exact_enterprise_configuration() {
         let temporary = tempdir().unwrap();
@@ -708,6 +776,7 @@ mod tests {
         assert!(error.to_string().contains("requires a nonempty room"));
 
         config.vaults[0].room = Some("room-a".into());
+        seed_test_room_pins(&config_path, ["room-a"]);
         save_config(&config_path, &config).unwrap();
         assert!(
             fs::read_to_string(&config_path)
@@ -895,6 +964,10 @@ mod tests {
             workload_subject_allowlist: vec![],
             legacy_identity_accept_until: Some(0),
         });
+        seed_test_room_pins(
+            &path,
+            [a.room.as_deref().unwrap(), b.room.as_deref().unwrap()],
+        );
         let load = |candidate: &Config| {
             fs::write(&path, toml::to_string_pretty(candidate).unwrap()).unwrap();
             load_config(&path)

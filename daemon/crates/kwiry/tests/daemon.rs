@@ -272,6 +272,7 @@ fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
         path: vault,
         room: Some("RoomAaaa_0123456789abc".into()),
     }];
+    seed_test_room_pins(&config_path, &config);
     save_config(&config_path, &config).unwrap();
 
     let daemon = Daemon::start_openclast(&config_path, &data);
@@ -416,6 +417,7 @@ fn format_release_p17_p19_n30_n32_n35_to_n39_and_governed_watcher() {
             room: Some("RoomBbbb_0123456789abc".into()),
         },
     ];
+    seed_test_room_pins(&config_path, &config);
     save_config(&config_path, &config).unwrap();
     let daemon = Daemon::start_custom(
         &config_path,
@@ -681,6 +683,142 @@ fn format_daemon_config(root: &Path) -> Config {
     config
 }
 
+// Fixtures with already-registered rooms carry a pre-existing pin store.
+fn seed_test_room_pins(path: &Path, config: &Config) {
+    use std::os::unix::fs::MetadataExt;
+    let pins: std::collections::BTreeMap<_, _> = config
+        .vaults
+        .iter()
+        .map(|vault| {
+            let metadata = fs::metadata(&vault.path).unwrap();
+            (
+                vault.room.as_deref().unwrap(),
+                format!("{:x}:{:x}", metadata.dev(), metadata.ino()),
+            )
+        })
+        .collect();
+    fs::write(
+        path.with_extension("room-roots.json"),
+        serde_json::to_vec(&pins).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn format_release_rp12_missing_pins_refuse_startup_with_prior_state() {
+    for (with_room, with_data) in [(true, true), (false, true), (true, false)] {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        let path = root.join("kwiry.toml");
+        let data = root.join("data");
+        let mut config = format_daemon_config(root);
+        if with_room {
+            let room = root.join("room");
+            fs::create_dir(&room).unwrap();
+            config.vaults.push(VaultRegistration {
+                id: "VaultOne_0123456789abc".into(),
+                path: room,
+                room: Some("RoomAaaa_0123456789abc".into()),
+            });
+        }
+        seed_test_room_pins(&path, &config);
+        save_config(&path, &config).unwrap();
+        if with_data {
+            fs::create_dir(&data).unwrap();
+            fs::write(data.join("existing-state"), "unchanged").unwrap();
+        }
+        let pins = path.with_extension("room-roots.json");
+        fs::remove_file(&pins).unwrap();
+        let config_bytes = fs::read(&path).unwrap();
+        assert_startup_refused(&path, &data, "openclast_room_pins_missing", |_| {});
+        assert!(!pins.exists());
+        assert_eq!(fs::read(&path).unwrap(), config_bytes);
+        if with_data {
+            assert_eq!(
+                fs::read_to_string(data.join("existing-state")).unwrap(),
+                "unchanged"
+            );
+        } else {
+            assert!(!data.exists());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn format_release_fresh_explicit_registration_pins_once() {
+    let fixture = tempdir().unwrap();
+    let root = fixture.path();
+    let path = root.join("kwiry.toml");
+    let data = root.join("data");
+    let room = root.join("room");
+    fs::create_dir(&room).unwrap();
+    fs::write(room.join("index.md"), "synthetic first registration").unwrap();
+    let config = format_daemon_config(root);
+    save_config(&path, &config).unwrap();
+    let mut edited = config.clone();
+    let room_id = "RoomAaaa_0123456789abc";
+    let vault_id = "VaultOne_0123456789abc";
+    edited.vaults.push(VaultRegistration {
+        id: vault_id.into(),
+        path: room.clone(),
+        room: Some(room_id.into()),
+    });
+    assert!(
+        save_config(&path, &edited)
+            .unwrap_err()
+            .to_string()
+            .contains("openclast_room_pins_missing")
+    );
+    let pins = path.with_extension("room-roots.json");
+    assert!(!pins.exists());
+    let output = Command::new(cargo_bin("kwiry"))
+        .arg("--config")
+        .arg(&path)
+        .arg("--data-dir")
+        .arg(&data)
+        .args([
+            "vault", "add", "--id", vault_id, "--room", room_id, "--path",
+        ])
+        .arg(&room)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!data.exists());
+    let pin_bytes = fs::read(&pins).unwrap();
+    assert!(
+        load_config(&path)
+            .unwrap()
+            .room_root_identities
+            .contains_key(room_id)
+    );
+    let second_root = root.join("second");
+    fs::create_dir(&second_root).unwrap();
+    edited.vaults.push(VaultRegistration {
+        id: "VaultTwo_0123456789abc".into(),
+        path: second_root,
+        room: Some("RoomBbbb_0123456789abc".into()),
+    });
+    let registered_config = fs::read(&path).unwrap();
+    fs::write(&path, toml::to_string_pretty(&edited).unwrap()).unwrap();
+    assert!(
+        load_config(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("openclast_room_pins_missing")
+    );
+    assert_eq!(fs::read(&pins).unwrap(), pin_bytes);
+    fs::write(&path, registered_config).unwrap();
+    let daemon = Daemon::start_openclast(&path, &data);
+    daemon.stop();
+    assert_eq!(fs::read(&pins).unwrap(), pin_bytes);
+}
+
 fn assert_startup_refused(
     config: &Path,
     data: &Path,
@@ -748,6 +886,7 @@ fn format_release_n31_rb3_refuses_admission_registration() {
             room: Some(room.into()),
         });
     }
+    seed_test_room_pins(&path, &config);
     fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
     let expected_error = kwiry_core::Error::DuplicateVaultId(config.vaults[0].id.clone());
     assert!(matches!(
@@ -842,6 +981,7 @@ fn n34_openat2_probe_refuses_all_errors_even_with_no_rooms() {
                 room: Some("RoomAaaa_0123456789abc".into()),
             });
         }
+        seed_test_room_pins(&config, &settings);
         save_config(&config, &settings).unwrap();
         assert_startup_refused(
             &config,
