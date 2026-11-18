@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
@@ -8,7 +9,7 @@ use crate::format::SourceFormat;
 use crate::model::{DiscoveredFile, IngestWarning, MAX_FILE_BYTES, VaultRegistration};
 use crate::reconcile::EnumerationCompleteness;
 
-const SKIPPED_DIRECTORIES: &[&str] = &[
+pub(crate) const SKIPPED_DIRECTORIES: &[&str] = &[
     ".git",
     ".hg",
     ".svn",
@@ -23,6 +24,7 @@ pub(crate) struct EnumerationResult {
     pub files: Vec<DiscoveredFile>,
     pub warnings: Vec<IngestWarning>,
     pub completeness: EnumerationCompleteness,
+    pub excluded: BTreeSet<String>,
 }
 
 pub(crate) fn discover_vault(vault: &VaultRegistration) -> EnumerationResult {
@@ -138,6 +140,7 @@ pub(crate) fn discover_vault(vault: &VaultRegistration) -> EnumerationResult {
         files,
         warnings,
         completeness,
+        excluded: BTreeSet::new(),
     }
 }
 
@@ -161,6 +164,7 @@ fn normalized_extension(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
 
     use tempfile::tempdir;

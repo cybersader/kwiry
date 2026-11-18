@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "c90931060a9401ee9b89dd2780f97d21732fb74d7bc902569bd00b295368168d",
+  "schema_version": 11,
+  "source_key": "55fa979a8d7ca5175ddf2ed7456ffecfede130e4ccc9992958115b12097ffab7",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Format Matrix/forestline-gardenway.canvas",
@@ -74,7 +74,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "a2654391013121942520e6b4cddd7b2862683a4e409c29315c3490bf34ec6d5a",
+        "chunk_id": "f2f5488ea3608702a765d4710f069eb456347e7b66ac89f56a53a179a9048665",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/forestline-gardenway.canvas",

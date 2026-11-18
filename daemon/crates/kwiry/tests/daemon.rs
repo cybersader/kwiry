@@ -215,6 +215,10 @@ fn daemon_watches_populated_subtree_lifecycle() {
     daemon.stop();
 }
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+)]
 #[test]
 fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
     let temporary = tempdir().unwrap();
@@ -235,7 +239,7 @@ fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
     config.semantic.enabled = false;
     config.auth.token_file = None;
     config.auth.openclast = Some(OpenClastAuthConfig {
-        tenant_id: "tenant-a".into(),
+        tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
         issuer: "issuer".into(),
         audience: "kwiry-search".into(),
         jwks_file,
@@ -244,9 +248,9 @@ fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
         legacy_identity_accept_until: None,
     });
     config.vaults = vec![VaultRegistration {
-        id: "fixture".into(),
+        id: "VaultOne_0123456789abc".into(),
         path: vault,
-        room: Some("room-a".into()),
+        room: Some("RoomAaaa_0123456789abc".into()),
     }];
     save_config(&config_path, &config).unwrap();
 
@@ -292,6 +296,10 @@ fn vaultless_daemon_serves_health_and_typed_index_building_instead_of_exiting() 
     daemon.stop();
 }
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+)]
 #[test]
 fn governed_headers_survive_real_forbidden_watcher_and_logs_discard_identity() {
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -319,7 +327,7 @@ fn governed_headers_survive_real_forbidden_watcher_and_logs_discard_identity() {
     let mut config = Config::default();
     config.server.profile = HostProfile::OpenClast;
     config.auth.openclast = Some(OpenClastAuthConfig {
-        tenant_id: "tenant-a".into(),
+        tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
         issuer: "issuer".into(),
         audience: "kwiry-search".into(),
         jwks_file,
@@ -329,23 +337,43 @@ fn governed_headers_survive_real_forbidden_watcher_and_logs_discard_identity() {
     });
     config.vaults = vec![
         VaultRegistration {
-            id: "a".into(),
+            id: "VaultOne_0123456789abc".into(),
             path: a,
-            room: Some("room-a".into()),
+            room: Some("RoomAaaa_0123456789abc".into()),
         },
         VaultRegistration {
-            id: "b".into(),
+            id: "VaultTwo_0123456789abc".into(),
             path: b.clone(),
-            room: Some("room-b".into()),
+            room: Some("RoomBbbb_0123456789abc".into()),
         },
     ];
     save_config(&config_path, &config).unwrap();
+    let daemon = Daemon::start_openclast(&config_path, &data);
+    let epoch: u64 = fs::read_to_string(data.join("replay-epoch"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let clock = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    wait_for(|| clock() > epoch);
+    let nonce = std::cell::Cell::new(0);
     let token = |vault: &str, legacy: bool, typ: Option<&str>| {
+        let now = clock();
+        nonce.set(nonce.get() + 1);
+        let (vault, room) = match vault {
+            "a" => ("VaultOne_0123456789abc", "RoomAaaa_0123456789abc"),
+            "b" => ("VaultTwo_0123456789abc", "RoomBbbb_0123456789abc"),
+            _ => unreachable!(),
+        };
         let mut claims = serde_json::json!({
             "iss": "issuer", "aud": "kwiry-search", "sub": "workload:synthetic-search",
-            "jti": "synthetic-request-nonce", "iat": now, "nbf": now, "exp": now + 60,
-            "tenant": "tenant-a", "actions": ["search:lexical"],
-            "resources": [{"tenant_id": "tenant-a", "vault_id": vault, "room_id": format!("room-{vault}")}],
+            "jti": format!("synthetic-request-{}", nonce.get()), "iat": now, "nbf": now, "exp": now + 60,
+            "tenant": "tenant_AAAAAAAAAAAAAAAAAAAA", "actions": ["search:lexical"],
+            "resources": [{"tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA", "vault_id": vault, "room_id": room}],
             "constraints": {"max_limit": 20}
         });
         if legacy {
@@ -358,10 +386,7 @@ fn governed_headers_survive_real_forbidden_watcher_and_logs_discard_identity() {
         header.typ = typ.map(str::to_owned);
         encode(&header, &claims, &EncodingKey::from_ed_der(PRIVATE_DER)).unwrap()
     };
-    let daemon = Daemon::start_openclast(&config_path, &data);
     let legacy = token("a", true, None);
-    let workload = token("a", false, Some("kwiry-cap+jwt"));
-    let hidden = token("b", false, Some("kwiry-cap+jwt"));
     let body = r#"{"q":"visibleprobe","mode":"lexical","limit":20}"#;
     for (legacy, typ) in [(false, None), (true, Some("openclast-holder-status+jwt"))] {
         let rejected = token("a", legacy, typ);
@@ -389,14 +414,25 @@ fn governed_headers_survive_real_forbidden_watcher_and_logs_discard_identity() {
     let baseline = snapshot(&legacy);
     assert!(baseline.0.starts_with("v1-"));
     assert_eq!(baseline.1, "current; basis=strict_hash");
-    assert_eq!(snapshot(&workload), baseline);
+    assert_eq!(
+        snapshot(&token("a", false, Some("kwiry-cap+jwt"))),
+        baseline
+    );
     fs::write(b.join("note.md"), "# Hidden changed\nnewhiddenprobe").unwrap();
     wait_for(|| {
         // Sample A while the actual notify watcher dirties and reconciles B.
         assert_eq!(snapshot(&legacy), baseline);
-        !search(&daemon.address, &hidden, "newhiddenprobe").is_empty()
+        !search(
+            &daemon.address,
+            &token("b", false, Some("kwiry-cap+jwt")),
+            "newhiddenprobe",
+        )
+        .is_empty()
     });
-    assert_eq!(snapshot(&workload), baseline);
+    assert_eq!(
+        snapshot(&token("a", false, Some("kwiry-cap+jwt"))),
+        baseline
+    );
     // A failed bearer also must not reach diagnostics with its token contents.
     let (code, _) = request(
         &daemon.address,

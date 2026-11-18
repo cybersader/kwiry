@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "003e4941b86bf373c4b606fa327e16c99790537935422d2bf4c746d1ca8b5c5f",
+  "schema_version": 11,
+  "source_key": "a2e56e465cf305b2ffd1bcc78c3e791d09b80eb1b5b0f01e75bcb905bc7675bc",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Format Matrix/birchstone-deltafield.txt",
@@ -26,7 +26,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "cc2922080765a57e146242de9a0cd152e377eb000464b82384f6197bf2cfc4ce",
+        "chunk_id": "846dccae0aa3e35620b801f6cfb7dacecb04756482ac83e7428d87730c38a55d",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/birchstone-deltafield.txt",

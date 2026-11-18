@@ -47,6 +47,14 @@ pub(crate) fn ingest_vault_files(
 }
 
 pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> FileIngestOutcome {
+    ingest_file_with_room_handle(vault, file, None)
+}
+
+pub(crate) fn ingest_file_with_room_handle(
+    vault: &VaultRegistration,
+    file: &DiscoveredFile,
+    secure: Option<&crate::room_walk::RoomRead<'_>>,
+) -> FileIngestOutcome {
     let format = SourceFormat::from_extension(&file.extension)
         .expect("vault discovery only admits registered source formats");
     // Dormant since PDF admission — every registered format is extractable, and
@@ -68,7 +76,7 @@ pub(crate) fn ingest_file(vault: &VaultRegistration, file: &DiscoveredFile) -> F
             )),
         );
     }
-    let read = match bounded_snapshot_read(file) {
+    let read = match bounded_snapshot_read(file, secure) {
         Ok(read) => read,
         Err(ReadFailure::Unavailable) => {
             return file_outcome(
@@ -147,15 +155,24 @@ enum ReadFailure {
     Stale,
 }
 
-fn bounded_snapshot_read(file: &DiscoveredFile) -> Result<SnapshotRead, ReadFailure> {
-    let mut handle = File::open(&file.absolute_path).map_err(|_| ReadFailure::Unavailable)?;
+fn bounded_snapshot_read(
+    file: &DiscoveredFile,
+    secure: Option<&crate::room_walk::RoomRead<'_>>,
+) -> Result<SnapshotRead, ReadFailure> {
+    let mut handle = match secure {
+        Some(room) => room.open(&file.relative_path),
+        None => File::open(&file.absolute_path),
+    }
+    .map_err(|_| ReadFailure::Unavailable)?;
     let before = handle.metadata().map_err(|_| ReadFailure::Unavailable)?;
     if before.len() != file.byte_length {
         return Err(ReadFailure::Stale);
     }
     if before.len() > MAX_FILE_BYTES {
         let after = handle.metadata().map_err(|_| ReadFailure::Unavailable)?;
-        if !same_snapshot(&before, &after) {
+        if !same_snapshot(&before, &after)
+            || (secure.is_some() && !crate::room_walk::single_link(&after))
+        {
             return Err(ReadFailure::Stale);
         }
         return Ok(SnapshotRead::Oversized(before.len()));
@@ -174,7 +191,10 @@ fn bounded_snapshot_read(file: &DiscoveredFile) -> Result<SnapshotRead, ReadFail
         .read_to_end(&mut bytes)
         .map_err(|_| ReadFailure::Unavailable)?;
     let after = handle.metadata().map_err(|_| ReadFailure::Unavailable)?;
-    if !same_snapshot(&before, &after) || bytes.len() as u64 != before.len() {
+    if !same_snapshot(&before, &after)
+        || bytes.len() as u64 != before.len()
+        || (secure.is_some() && !crate::room_walk::single_link(&after))
+    {
         return Err(ReadFailure::Stale);
     }
     if bytes.len() as u64 > MAX_FILE_BYTES {
@@ -200,6 +220,7 @@ fn file_outcome_from_preparation(
     if let Err(error) = preparation.ensure_current_policy() {
         return FileIngestOutcome {
             vault_id: preparation.vault_id,
+            room: preparation.room,
             path: preparation.path,
             format: preparation.format,
             extraction_profile: extraction_profile_for(preparation.format),
@@ -219,6 +240,7 @@ fn file_outcome_from_preparation(
     }
     FileIngestOutcome {
         vault_id: preparation.vault_id,
+        room: preparation.room,
         path: preparation.path,
         format: preparation.format,
         extraction_profile: preparation.extraction_profile,
@@ -251,6 +273,7 @@ fn file_outcome(
 ) -> FileIngestOutcome {
     FileIngestOutcome {
         vault_id: vault.id.clone(),
+        room: vault.room.clone(),
         path: file.relative_path.clone(),
         format: SourceFormat::from_extension(&file.extension)
             .expect("vault discovery only admits registered source formats"),

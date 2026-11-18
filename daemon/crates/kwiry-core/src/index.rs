@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 use crate::format::SourceFormat;
 use crate::generation::DataRoot;
 use crate::lexical::{fold_lexical, normalize_raw};
-use crate::manifest::{Manifest, registration_fingerprint, source_key};
+use crate::manifest::{Manifest, registration_fingerprint};
 use crate::model::{
     Config, HostProfile, IndexStats, PreparedChunk, PropertyBag, PropertyValue, ResourceKey,
     RetrievalMetadata, VaultRegistration,
@@ -335,6 +335,8 @@ fn build_openclast_candidate(
     let mut manifest = Manifest::default();
     let mut stats = IndexStats::default();
 
+    let room_roots = crate::source::ROOM_INCLUSIVE_IDS
+        .then(|| crate::room_walk::RoomRoots::capture(&config.vaults));
     for vault in &config.vaults {
         let resource = config.resource_key(vault).ok_or_else(|| {
             Error::State(format!(
@@ -345,7 +347,14 @@ fn build_openclast_candidate(
         let index_dir = partition_index_dir(partitions_dir, &resource);
         fs::create_dir_all(&index_dir)
             .map_err(|error| crate::error::io_error(&index_dir, error))?;
-        build_partition(vault, &resource, &index_dir, &mut manifest, &mut stats)?;
+        build_partition(
+            vault,
+            &resource,
+            &index_dir,
+            &mut manifest,
+            &mut stats,
+            room_roots.as_ref(),
+        )?;
     }
 
     manifest.mark_synced()?;
@@ -395,6 +404,7 @@ fn build_partition(
     index_dir: &Path,
     manifest: &mut Manifest,
     stats: &mut IndexStats,
+    room_roots: Option<&crate::room_walk::RoomRoots>,
 ) -> Result<()> {
     if !vault.path.is_dir() {
         return Err(Error::InvalidVaultPath(vault.path.clone()));
@@ -415,7 +425,22 @@ fn build_partition(
         .writer(WRITER_MEMORY_BYTES)
         .map_err(|error| Error::Index(error.to_string()))?;
     let fingerprint = registration_fingerprint(vault);
-    let (outcomes, enumeration) = ingest_vault_files(vault);
+    let (outcomes, enumeration) = match room_roots {
+        Some(roots) => {
+            let (enumeration, room) = roots.walk(vault);
+            let outcomes = room.map_or_else(Vec::new, |room| {
+                enumeration
+                    .files
+                    .iter()
+                    .map(|file| {
+                        crate::chunk::ingest_file_with_room_handle(vault, file, Some(&room))
+                    })
+                    .collect()
+            });
+            (outcomes, enumeration)
+        }
+        None => ingest_vault_files(vault),
+    };
     stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
@@ -538,9 +563,9 @@ pub(crate) fn chunk_document(
     let mut document = TantivyDocument::default();
     document.add_text(
         required_optional_field(fields.source_key, "source_key")?,
-        source_key(&chunk.vault_id, &chunk.path),
+        crate::source::room_source_key(&chunk.vault_id, chunk.room.as_deref(), &chunk.path),
     );
-    let owns_source_properties = owns_source_properties(prepared)?;
+    let owns_source_properties = owns_source_properties(prepared);
     document.add_u64(
         fields.source_property_owner,
         u64::from(owns_source_properties),
@@ -1020,17 +1045,22 @@ fn escape_json_pointer_component(component: &str) -> String {
 // Source-level property signals belong to chunk zero only. Reusing the stable chunk-id contract
 // avoids repeating note-authored metadata across every chunk while keeping incremental writers,
 // which receive chunks one at a time, on the same projection rule as full rebuilds.
-fn owns_source_properties(prepared: &PreparedChunk) -> Result<bool> {
+fn owns_source_properties(prepared: &PreparedChunk) -> bool {
     let chunk = &prepared.chunk;
-    let heading_json =
-        serde_json::to_vec(&chunk.heading_path).map_err(|error| Error::Index(error.to_string()))?;
-    let mut digest = Sha256::new();
-    digest.update(b"kwiry-chunk-v1\0");
-    update_digest_component(&mut digest, chunk.vault_id.as_bytes());
-    update_digest_component(&mut digest, chunk.path.as_bytes());
-    update_digest_component(&mut digest, &heading_json);
-    digest.update(0_u64.to_le_bytes());
-    Ok(chunk.chunk_id == format!("{:x}", digest.finalize()))
+    let role_tag = (crate::source::ROOM_INCLUSIVE_IDS
+        && prepared
+            .source_format
+            .is_some_and(|format| format.spec().policy.role_tagged_chunk_ids))
+    .then_some(prepared.content_role);
+    chunk.chunk_id
+        == crate::source::chunk_id(
+            &chunk.vault_id,
+            chunk.room.as_deref(),
+            &chunk.path,
+            &chunk.heading_path,
+            0,
+            role_tag,
+        )
 }
 
 fn update_digest_component(digest: &mut Sha256, bytes: &[u8]) {
@@ -1282,11 +1312,11 @@ mod tests {
         };
         let preparation = prepare_source_buffer(&descriptor, body.as_bytes()).unwrap();
         assert!(preparation.chunks.len() > 1);
-        assert!(owns_source_properties(&preparation.chunks[0]).unwrap());
+        assert!(owns_source_properties(&preparation.chunks[0]));
         assert!(
             preparation.chunks[1..]
                 .iter()
-                .all(|chunk| !owns_source_properties(chunk).unwrap())
+                .all(|chunk| !owns_source_properties(chunk))
         );
 
         let schema = build_schema();

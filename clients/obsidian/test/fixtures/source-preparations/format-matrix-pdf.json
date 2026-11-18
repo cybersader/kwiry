@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "5f3b0b37cc06bb4a34aacd208a916cfcc20e299c7564aac052001db1e62646e9",
+  "schema_version": 11,
+  "source_key": "fae40d188644da4cb975799a7f79ff2b494806504a17694057a036bfb8aebc23",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Format Matrix/juniperfield-kestrelway.pdf",
@@ -26,7 +26,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "04e2213e1eeff746faee4ca79c7cd9eba7174a0726d51e3fe57b18afd0c32774",
+        "chunk_id": "c4ebe74072d4ecd06839618b8dd302fcb3c664d147da00dbc88a2ec4cb3fb5af",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/juniperfield-kestrelway.pdf",

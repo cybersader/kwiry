@@ -72,6 +72,11 @@ impl Config {
         ))
     }
 
+    pub fn has_repeated_vault_registration(&self) -> bool {
+        let mut ids = std::collections::BTreeSet::new();
+        self.vaults.iter().any(|vault| !ids.insert(&vault.id))
+    }
+
     pub fn requires_restart_for(&self, next: &Self) -> bool {
         self.version != next.version
             || self.server != next.server
@@ -595,6 +600,8 @@ pub struct LexicalSearchRequest {
 pub struct SearchHit {
     pub chunk_id: String,
     pub vault_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
     pub path: String,
     pub heading_path: Vec<String>,
     pub format: SourceFormat,
@@ -740,6 +747,7 @@ pub(crate) enum FileOutcomeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileIngestOutcome {
     pub vault_id: String,
+    pub room: Option<String>,
     pub path: String,
     pub format: SourceFormat,
     /// The extractor tier that produced this outcome. Recorded on the manifest

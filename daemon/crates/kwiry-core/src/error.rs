@@ -39,6 +39,8 @@ pub enum Error {
     /// so the whole request is refused. Deliberately names no resource.
     #[error("an authorized resource is unavailable")]
     ResourceUnavailable,
+    #[error("an authorized resource is not available for search")]
+    UnavailableResourceIndexes(Vec<usize>),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

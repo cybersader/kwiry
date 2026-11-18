@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "65d552ed4f1e82450a3c375f9075154301d01c3566ec51ce8c058cac0aae86e3",
+  "schema_version": 11,
+  "source_key": "80552c38dc18a20f42ad15606ae9ac55d1d1c803135df7682fe735989877e30a",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Research Board.canvas",
@@ -298,7 +298,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "8dbdabcea476789f2758dcef532d654aab92574e5f03008f01864cc572c5de20",
+        "chunk_id": "6f78dd571dc65d4ae2adecc9c39bba8180793a4c987aa329165ebcd094a17c63",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",
@@ -316,7 +316,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "e2ff459b7d903ec8781dc8f0bf252013f30b948b56a42f0b5fd8b8c3d385ff6d",
+        "chunk_id": "2cf037b0654b8b4abc2e4d1c2c3dbacd985d24a1c9beea7605a204b947896c24",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",
@@ -336,7 +336,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "cc754a6f846a5a640ec52162eb593da92178dbf8df850d76de26ded040780032",
+        "chunk_id": "9b10be9ee7b82b00dc619b501d281c43aea423b3b6b05f9024d77a581cd51ad2",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",
@@ -357,7 +357,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "abf05e6285a22b5e6ba842cb6d2d668a532348a07f7dec7c15d3cedac1984234",
+        "chunk_id": "2d810799d060d03dc12159912e7464bc89632eb515e16c7d90324a9ada7a0bac",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",
@@ -375,7 +375,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "37b79a1720fdb230d4c9650bc325a434c5a1a1da99ecea51d5cf066dc6688afd",
+        "chunk_id": "8484248d7347e26d698dd04a5e8025709f55f8f8dc69472b1be808041a5acbed",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",
@@ -393,7 +393,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "70e646a6b6caca0d921eaaae19d99abb2f97764fc27b23a018a53e43aeb84e01",
+        "chunk_id": "6a762315f856636467edb664097100e46348c9cf0f436bf18ee77aa355349193",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",
@@ -411,7 +411,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "b29bed44148ac78180bddf7998e329d71a483c8917c45c1d437d207a6f7b966b",
+        "chunk_id": "ff0e1522e333adef0e52492c6aaa1e8064fcd14641f4ad4b5a819ae08d5feb82",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",
@@ -431,7 +431,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "0dd76274763fd52eb5568e440dccbcd7617f8b3d8044cba2d38c3b858feb638e",
+        "chunk_id": "621d2c89890fbcdaeb8824bf19526acd336c7e772b349fdb427a3cfc5862f1be",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",
@@ -449,7 +449,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "20c3d9e80a7c971646e9113582e19a92acebe14bf64bbaa93b6402d287ced8cd",
+        "chunk_id": "a6c179fdccd211aa1049ac56e0e1f17decd4ee27797c35d556e113449a269958",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Research Board.canvas",

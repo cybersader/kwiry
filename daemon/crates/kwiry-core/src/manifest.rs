@@ -17,11 +17,12 @@ use crate::policy::{
     extraction_profile_for, format_identity_fingerprint,
 };
 use crate::source::SOURCE_PREPARATION_SCHEMA_VERSION;
-pub use crate::source::source_key;
+#[cfg(test)]
+use crate::source::source_key;
 use crate::state::{read_json, write_json_atomic};
 
 pub const MANIFEST_VERSION: u32 = 5;
-pub const INDEX_FORMAT_VERSION: u32 = 12;
+pub const INDEX_FORMAT_VERSION: u32 = crate::source::NATIVE_INDEX_FORMAT;
 
 /// The record a generation's `manifest.json` holds.
 ///
@@ -421,7 +422,11 @@ impl ManifestFile {
             FileOutcomeKind::TransientError => return None,
         };
         Some((
-            source_key(&outcome.vault_id, &outcome.path),
+            crate::source::room_source_key(
+                &outcome.vault_id,
+                outcome.room.as_deref(),
+                &outcome.path,
+            ),
             Self {
                 vault_id: outcome.vault_id.clone(),
                 path: outcome.path.clone(),
@@ -536,10 +541,10 @@ mod tests {
         // Deliberately unchanged. The Tantivy schema is untouched: it stores
         // `source_format` as a plain field, not as per-format columns, so no
         // format's rows changed shape.
-        assert_eq!(INDEX_FORMAT_VERSION, 12);
+        assert_eq!(INDEX_FORMAT_VERSION, 13);
         // Deliberately unchanged. `SourcePreparation` did not change shape;
         // only the manifest record around it did.
-        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 10);
+        assert_eq!(crate::source::SOURCE_PREPARATION_SCHEMA_VERSION, 11);
         // The identity shape is new, so its schema starts at 1. It is core: a
         // fourth component would bump this and invalidate everything, which is
         // what lets the per-format digest stay at exactly three facts.

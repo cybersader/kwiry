@@ -48,6 +48,8 @@ mod ranking_eval;
 #[cfg(feature = "native")]
 mod reconcile;
 #[cfg(feature = "native")]
+mod room_walk;
+#[cfg(feature = "native")]
 mod runtime;
 #[cfg(feature = "native")]
 mod search;
@@ -217,9 +219,10 @@ pub use semantic::{
 };
 #[cfg(feature = "portable")]
 pub use source::{
-    MAX_PREPARED_CHUNKS_PER_SOURCE, SOURCE_PREPARATION_SCHEMA_VERSION, SourceDescriptor,
-    SourceExactMetadata, SourcePreparation, SourcePreparationError, SourcePreparationKind,
-    prepare_oversized_source, prepare_source_buffer, source_key,
+    MAX_PREPARED_CHUNKS_PER_SOURCE, ROOM_INCLUSIVE_IDS, SOURCE_PREPARATION_SCHEMA_VERSION,
+    SourceDescriptor, SourceExactMetadata, SourcePreparation, SourcePreparationError,
+    SourcePreparationKind, prepare_oversized_source, prepare_source_buffer, room_source_key,
+    source_key,
 };
 #[cfg(feature = "portable")]
 pub use status::{
@@ -250,3 +253,6 @@ pub fn ingest_config(config: &Config) -> Result<IngestReport> {
     }
     Ok(combined)
 }
+
+#[cfg(feature = "native")]
+pub use config::{valid_room_identifier, valid_tenant_identifier};

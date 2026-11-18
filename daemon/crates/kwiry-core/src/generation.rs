@@ -13,7 +13,7 @@ use crate::manifest::{INDEX_FORMAT_VERSION, Manifest};
 use crate::partition::GenerationLayout;
 use crate::state::{read_json, sync_directory, sync_tree, write_json_atomic};
 
-const LAYOUT_VERSION: u32 = 2;
+const LAYOUT_VERSION: u32 = crate::partition::GENERATION_LAYOUT_VERSION;
 const RETAINED_GENERATIONS: usize = 3;
 static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -164,6 +164,20 @@ impl DataRoot {
 
     pub fn publish(&self, candidate: CandidateGeneration) -> Result<GenerationPaths> {
         self.publish_inner(candidate, None)
+    }
+
+    /// Only the immediate predecessor is eligible for an automatic sealed
+    /// rebuild. Unknown/newer formats fail closed through `active()`.
+    pub fn needs_room_identity_rebuild(&self) -> Result<bool> {
+        if !crate::source::ROOM_INCLUSIVE_IDS {
+            return Ok(false);
+        }
+        let path = self.root.join("current.json");
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let current: CurrentGeneration = read_json(&path)?;
+        Ok(current.layout_version == 2 && current.index_format_version == INDEX_FORMAT_VERSION - 1)
     }
 
     pub fn active(&self) -> Result<Option<GenerationPaths>> {

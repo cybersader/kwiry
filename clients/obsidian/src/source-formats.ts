@@ -36,7 +36,7 @@ const EXTRACTABLE_SOURCE_FORMAT_SET: ReadonlySet<SourceFormat> = new Set(
 // Mirrors kwiry_core::source::SOURCE_PREPARATION_SCHEMA_VERSION. This belongs in
 // the policy fingerprint so a preparation-schema change always invalidates a
 // cache even when the enabled extension set is unchanged.
-export const SOURCE_PREPARATION_SCHEMA_VERSION = 10 as const;
+export const SOURCE_PREPARATION_SCHEMA_VERSION = 11 as const;
 
 /**
  * Mirrors `kwiry_core::policy::extraction_policy_fingerprint()` for a portable

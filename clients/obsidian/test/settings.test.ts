@@ -354,7 +354,7 @@ describe("loadSettings", () => {
     // so this fingerprint is the only thing that refuses a pre-PDF cache image.
     expect(EXTRACTION_POLICY_FINGERPRINT)
       .not.toBe("1b393b155b0af728b1ec9c9131573c105c9e7aba41ff31a4d12c824d4c73adef");
-    expect(SOURCE_PREPARATION_SCHEMA_VERSION).toBe(10);
+    expect(SOURCE_PREPARATION_SCHEMA_VERSION).toBe(11);
   });
 
   it("keeps normal settings unaware of private-build namespaces", () => {

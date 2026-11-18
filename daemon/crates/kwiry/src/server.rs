@@ -17,13 +17,13 @@ use kwiry_core::{
     ApiErrorEnvelope, ApiSearchRequest, ApiSearchResponse, Config, ConnectionDescriptor,
     DaemonState, DaemonStatus, DataRoot, HealthResponse, HostProfile, IndexFreshness,
     IndexFreshnessBasis, IndexFreshnessState, IndexManager, LexicalMatchQuality, Manifest,
-    ManifestFileOutcome, ModelStatus, Paths, Principal, ReconcileScope, Scope, SearchMode,
-    SearchRuntime, VaultStatus, bootstrap_desktop, build_index, load_config,
+    ManifestFileOutcome, ModelStatus, Paths, Principal, ROOM_INCLUSIVE_IDS, ReconcileScope, Scope,
+    SearchMode, SearchRuntime, VaultStatus, bootstrap_desktop, build_index, load_config,
     write_connection_descriptor,
 };
 
 use crate::auth::{AuthState, require_auth};
-use crate::capability::CapabilityVerifier;
+use crate::capability::{CapabilityVerifier, HOLDINGS_SERVING_IMPLEMENTED};
 use crate::logging::Redacted;
 use crate::runtime::{ManagerHandle, spawn_manager};
 use crate::watcher::spawn_watcher;
@@ -60,6 +60,19 @@ pub(crate) async fn serve(
     );
     let initial_config = load_config(&paths.config)?;
     let profile = initial_config.server.profile;
+    if ROOM_INCLUSIVE_IDS && profile == HostProfile::OpenClast && !cfg!(target_os = "linux") {
+        return Err(anyhow!(
+            "secure OpenClast room ingestion is unavailable on this platform"
+        ));
+    }
+    if !HOLDINGS_SERVING_IMPLEMENTED
+        && profile == HostProfile::OpenClast
+        && initial_config.has_repeated_vault_registration()
+    {
+        return Err(anyhow!(
+            "multi-room serving requires the Holdings search admission integration"
+        ));
+    }
     let (config, auth, identity) = match profile {
         HostProfile::Desktop => {
             let bootstrap = bootstrap_desktop(&paths)?;
@@ -85,8 +98,8 @@ pub(crate) async fn serve(
             let auth_config = initial_config.auth.openclast.as_ref().ok_or_else(|| {
                 anyhow!("openclast profile requires auth.openclast configuration")
             })?;
-            let verifier =
-                CapabilityVerifier::load(auth_config).map_err(|message| anyhow!(message))?;
+            let verifier = CapabilityVerifier::load(auth_config, &paths.data_dir)
+                .map_err(|message| anyhow!(message))?;
             (
                 initial_config,
                 AuthState::openclast(verifier),
@@ -358,7 +371,8 @@ async fn boot_index(
     let runtime = runtime.clone();
     tokio::task::spawn_blocking(move || -> Result<(IndexManager, bool)> {
         let data_root = DataRoot::new(&data_dir);
-        let freshly_built = if data_root.active()?.is_none() {
+        let can_rebuild_identity = data_root.needs_room_identity_rebuild()?;
+        let freshly_built = if can_rebuild_identity || data_root.active()?.is_none() {
             build_index(&config, &data_dir)?;
             true
         } else {
@@ -456,7 +470,13 @@ pub(crate) fn build_router(state: AppState, auth: AuthState, profile: HostProfil
     }
     protected = protected
         .method_not_allowed_fallback(method_not_allowed)
-        .route_layer(middleware::from_fn_with_state(auth, require_auth));
+        .route_layer(middleware::from_fn_with_state(
+            auth.with_runtime(state.runtime.clone()),
+            require_auth,
+        ));
+    if profile == HostProfile::OpenClast && ROOM_INCLUSIVE_IDS {
+        protected = protected.route_layer(middleware::from_fn(id_scheme_header));
+    }
     Router::new()
         .route("/v0/health", get(health))
         .merge(protected)
@@ -465,8 +485,23 @@ pub(crate) fn build_router(state: AppState, auth: AuthState, profile: HostProfil
         .with_state(state)
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse::default())
+async fn health(State(state): State<AppState>) -> Response {
+    if state.profile == HostProfile::OpenClast && ROOM_INCLUSIVE_IDS {
+        return (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            r#"{"status":"ok","id_scheme":"room-v1"}"#,
+        )
+            .into_response();
+    }
+    Json(HealthResponse::default()).into_response()
+}
+
+async fn id_scheme_header(request: axum::extract::Request, next: middleware::Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert("kwiry-id-scheme", HeaderValue::from_static("room-v1"));
+    response
 }
 
 async fn not_found() -> HttpError {
@@ -684,6 +719,11 @@ fn map_core_error(error: kwiry_core::Error) -> HttpError {
         kwiry_core::Error::SemanticUnavailable(message) => {
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "mode_unavailable", message)
         }
+        kwiry_core::Error::UnavailableResourceIndexes(indexes) => {
+            let mut error = map_core_error(kwiry_core::Error::ResourceUnavailable);
+            error.body.error.resource_indexes = Some(indexes);
+            error
+        }
         kwiry_core::Error::ResourceUnavailable => HttpError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "resource_unavailable",
@@ -838,7 +878,7 @@ mod tests {
         let jwks_file = directory.join("search.jwks.json");
         fs::write(&jwks_file, ED25519_JWKS).unwrap();
         OpenClastAuthConfig {
-            tenant_id: "tenant-a".into(),
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
             issuer: "issuer".into(),
             audience: "kwiry-search".into(),
             jwks_file,
@@ -862,7 +902,7 @@ mod tests {
             "iat": now,
             "nbf": now.saturating_sub(1),
             "exp": now + 60,
-            "tenant": "tenant-a",
+            "tenant": "tenant_AAAAAAAAAAAAAAAAAAAA",
             "actions": ["search:lexical"],
             "resources": [resource],
             "constraints": { "max_limit": max_limit }
@@ -1300,15 +1340,19 @@ mod tests {
         assert_eq!(error.error.code, "index_building");
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[tokio::test]
     async fn openclast_surface_has_no_desktop_auth_or_status_fallback() {
         let temporary = tempdir().unwrap();
         let auth_config = openclast_auth_config(temporary.path());
-        let verifier = CapabilityVerifier::load(&auth_config).unwrap();
+        let verifier = CapabilityVerifier::load(&auth_config, temporary.path()).unwrap();
         let resource = ResourceKey {
-            tenant_id: "tenant-a".into(),
-            vault_id: "fixture".into(),
-            room_id: "room-a".into(),
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
+            vault_id: "VaultOne_0123456789abc".into(),
+            room_id: "RoomAaaa_0123456789abc".into(),
         };
         let token = search_capability(&resource, 20);
         let app = build_router(
@@ -1332,6 +1376,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(
+            health.into_body().collect().await.unwrap().to_bytes(),
+            r#"{"status":"ok","id_scheme":"room-v1"}"#
+        );
 
         let status = app
             .clone()
@@ -1379,6 +1427,10 @@ mod tests {
         assert_eq!(error.error.code, "mode_unavailable");
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[tokio::test]
     async fn openclast_search_enforces_signed_resources_and_limit() {
         let temporary = tempdir().unwrap();
@@ -1388,9 +1440,9 @@ mod tests {
         fs::write(vault.join("note.md"), "# Search\nauthorizedprobe").unwrap();
         let auth_config = openclast_auth_config(temporary.path());
         let resource = ResourceKey {
-            tenant_id: "tenant-a".into(),
-            vault_id: "fixture".into(),
-            room_id: "room-a".into(),
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
+            vault_id: "VaultOne_0123456789abc".into(),
+            room_id: "RoomAaaa_0123456789abc".into(),
         };
         let mut config = Config::default();
         config.server.profile = HostProfile::OpenClast;
@@ -1423,7 +1475,7 @@ mod tests {
                 runtime,
                 status: Arc::new(RwLock::new(status)),
             },
-            AuthState::openclast(CapabilityVerifier::load(&auth_config).unwrap()),
+            AuthState::openclast(CapabilityVerifier::load(&auth_config, temporary.path()).unwrap()),
             HostProfile::OpenClast,
         );
         let token = search_capability(&resource, 20);

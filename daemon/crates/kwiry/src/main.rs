@@ -1,6 +1,7 @@
 mod auth;
 mod capability;
 mod logging;
+mod replay;
 mod runtime;
 mod server;
 mod service;

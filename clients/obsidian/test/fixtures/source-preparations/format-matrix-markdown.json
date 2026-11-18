@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "fa373f8cd647d626cfaef4494897805b1579c27c5e3cdf9d97db79f7853fb034",
+  "schema_version": 11,
+  "source_key": "f3a0d2611ff71d179bfd1a94d59d760bf8cefbcc202f929c6102201cee96aa49",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Format Matrix/amberfield-cedarway.md",
@@ -26,7 +26,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "00a5ba63032b3310122db86e2e6550221fec6741c38f401a94115894775136f6",
+        "chunk_id": "8dc31ae7668c0bca9636d3908a4e6681c7ade66ad8c9623e89befd2153c4e3a9",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/amberfield-cedarway.md",

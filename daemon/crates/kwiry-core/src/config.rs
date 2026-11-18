@@ -130,8 +130,14 @@ pub fn acquire_setup_lock(paths: &Paths) -> Result<ConfigLock> {
 }
 
 pub fn load_config(path: &Path) -> Result<Config> {
-    let config = load_config_unlocked(path)?;
+    let mut config = load_config_unlocked(path)?;
     validate_config(path, &config)?;
+    if config.server.profile == HostProfile::OpenClast && crate::source::ROOM_INCLUSIVE_IDS {
+        for vault in &mut config.vaults {
+            vault.path =
+                fs::canonicalize(&vault.path).map_err(|error| io_error(&vault.path, error))?;
+        }
+    }
     Ok(config)
 }
 
@@ -197,6 +203,68 @@ fn save_config_unlocked(path: &Path, config: &Config) -> Result<()> {
         .persist(path)
         .map_err(|error| io_error(path, error.error))?;
     sync_parent(parent)?;
+    Ok(())
+}
+
+pub fn valid_room_identifier(value: &str) -> bool {
+    opaque_identifier(value, 22)
+}
+
+pub fn valid_tenant_identifier(value: &str) -> bool {
+    value
+        .strip_prefix("tenant_")
+        .is_some_and(|suffix| opaque_identifier(suffix, 20))
+}
+
+fn opaque_identifier(value: &str, size: usize) -> bool {
+    value.len() == size
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn allows_repeated_vault(config: &Config, room_inclusive: bool) -> bool {
+    room_inclusive
+        && config.server.profile == HostProfile::OpenClast
+        && config
+            .auth
+            .openclast
+            .as_ref()
+            .is_some_and(|auth| auth.legacy_identity_accept_until.is_some())
+}
+
+fn validate_room_registrations(path: &Path, config: &Config, room_inclusive: bool) -> Result<()> {
+    let mut vaults = BTreeSet::new();
+    let mut rooms = BTreeSet::new();
+    let mut roots = BTreeSet::new();
+    let invalid = |message: &str| Error::InvalidConfig {
+        path: path.to_path_buf(),
+        message: message.to_owned(),
+    };
+    for vault in &config.vaults {
+        if !vaults.insert(&vault.id) && !allows_repeated_vault(config, room_inclusive) {
+            return Err(Error::DuplicateVaultId(vault.id.clone()));
+        }
+        if config.server.profile == HostProfile::OpenClast && room_inclusive {
+            let room = vault
+                .room
+                .as_deref()
+                .ok_or_else(|| invalid("OpenClast registration requires a room"))?;
+            if !rooms.insert(room) {
+                return Err(invalid("a room may be registered only once"));
+            }
+            let root = fs::canonicalize(&vault.path)
+                .map_err(|_| invalid("cannot canonicalize OpenClast room root"))?;
+            if !root.is_dir()
+                || roots.iter().any(|previous: &PathBuf| {
+                    root.starts_with(previous) || previous.starts_with(&root)
+                })
+            {
+                return Err(invalid("OpenClast room roots must be disjoint directories"));
+            }
+            roots.insert(root);
+        }
+    }
     Ok(())
 }
 
@@ -278,6 +346,13 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
                     });
                 }
             }
+            if crate::source::ROOM_INCLUSIVE_IDS && !valid_tenant_identifier(&auth.tenant_id) {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message: "auth.openclast.tenant_id must match tenant_[A-Za-z0-9_-]{20}"
+                        .to_owned(),
+                });
+            }
             let mut workload_subjects = BTreeSet::new();
             if auth
                 .workload_subject_allowlist
@@ -305,18 +380,11 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
         }
     }
 
-    let mut ids = BTreeSet::new();
     for vault in &config.vaults {
         if vault.id.trim().is_empty() {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
                 message: "vault IDs must not be empty".to_owned(),
-            });
-        }
-        if !ids.insert(vault.id.as_str()) {
-            return Err(Error::InvalidConfig {
-                path: path.to_path_buf(),
-                message: format!("duplicate vault ID: {}", vault.id),
             });
         }
         if !vault.path.is_absolute() {
@@ -345,7 +413,7 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
             });
         }
     }
-    Ok(())
+    validate_room_registrations(path, config, crate::source::ROOM_INCLUSIVE_IDS)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,7 +428,9 @@ pub fn add_vault(
     path: PathBuf,
     room: Option<String>,
 ) -> Result<VaultRegistration> {
-    if config.vaults.iter().any(|vault| vault.id == id) {
+    if !allows_repeated_vault(config, crate::source::ROOM_INCLUSIVE_IDS)
+        && config.vaults.iter().any(|vault| vault.id == id)
+    {
         return Err(Error::DuplicateVaultId(id));
     }
 
@@ -380,8 +450,7 @@ pub fn add_vault(
         path: canonical_path,
         room,
     };
-    config.vaults.push(registration.clone());
-    config.vaults.sort_by(|left, right| left.id.cmp(&right.id));
+    insert_registration(config, &registration)?;
     Ok(registration)
 }
 
@@ -402,7 +471,11 @@ pub fn ensure_vault_registration(
     }
 
     let canonical_path = fs::canonicalize(&path).map_err(|_| Error::InvalidVaultPath(path))?;
-    if let Some(existing) = config.vaults.iter().find(|vault| vault.id == id) {
+    if let Some(existing) = config.vaults.iter().find(|vault| {
+        vault.id == id
+            && (vault.room == room
+                || !allows_repeated_vault(config, crate::source::ROOM_INCLUSIVE_IDS))
+    }) {
         if existing.path == canonical_path && existing.room == room {
             return Ok((existing.clone(), VaultRegistrationDisposition::Unchanged));
         }
@@ -427,9 +500,23 @@ pub fn ensure_vault_registration(
         path: canonical_path,
         room,
     };
-    config.vaults.push(registration.clone());
-    config.vaults.sort_by(|left, right| left.id.cmp(&right.id));
+    insert_registration(config, &registration)?;
     Ok((registration, VaultRegistrationDisposition::Added))
+}
+
+fn insert_registration(config: &mut Config, registration: &VaultRegistration) -> Result<()> {
+    if config.server.profile == HostProfile::OpenClast && crate::source::ROOM_INCLUSIVE_IDS {
+        let mut candidate = config.clone();
+        candidate.vaults.push(registration.clone());
+        validate_config(&registration.path, &candidate)?;
+        config.vaults = candidate.vaults;
+    } else {
+        config.vaults.push(registration.clone());
+    }
+    config
+        .vaults
+        .sort_by(|left, right| (&left.id, &left.room).cmp(&(&right.id, &right.room)));
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -511,7 +598,7 @@ mod tests {
         assert!(error.to_string().contains("requires auth.openclast"));
 
         config.auth.openclast = Some(crate::model::OpenClastAuthConfig {
-            tenant_id: "tenant-a".into(),
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
             issuer: "openclast-search".into(),
             audience: "kwiry-search".into(),
             jwks_file: temporary.path().join("jwks.json"),
@@ -678,5 +765,97 @@ mod tests {
         ));
         drop(first);
         acquire_setup_lock(&paths).unwrap();
+    }
+
+    #[test]
+    fn multi_room_registration_vectors_n19_n21_n26_n27_n29() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let root = |name| {
+            let root = dir.path().join(name);
+            fs::create_dir_all(&root).unwrap();
+            root
+        };
+        let a = VaultRegistration {
+            id: "VaultOne_0123456789abc".into(),
+            path: root("a"),
+            room: Some("RoomAaaa_0123456789abc".into()),
+        };
+        let b = VaultRegistration {
+            id: a.id.clone(),
+            path: root("b"),
+            room: Some("RoomBbbb_0123456789abc".into()),
+        };
+        let mut config = Config::default();
+        config.server.profile = HostProfile::OpenClast;
+        config.auth.openclast = Some(crate::model::OpenClastAuthConfig {
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
+            issuer: "issuer".into(),
+            audience: "audience".into(),
+            jwks_file: dir.path().join("jwks.json"),
+            max_token_ttl_seconds: 60,
+            workload_subject_allowlist: vec![],
+            legacy_identity_accept_until: Some(0),
+        });
+        let load = |candidate: &Config| {
+            fs::write(&path, toml::to_string_pretty(candidate).unwrap()).unwrap();
+            load_config(&path)
+        };
+        config.vaults = vec![a.clone(), b.clone()];
+        assert!(load(&config).is_ok());
+        assert!(
+            validate_room_registrations(&path, &config, false).is_err(),
+            "N26"
+        );
+        let mut refused = config.clone();
+        refused.vaults[1].path = root("a/nested");
+        assert!(load(&refused).is_err(), "N19 load");
+        let mut one = config.clone();
+        one.vaults.pop();
+        assert!(
+            add_vault(
+                &mut one,
+                b.id.clone(),
+                refused.vaults[1].path.clone(),
+                b.room.clone()
+            )
+            .is_err(),
+            "N19 add"
+        );
+        assert!(
+            ensure_vault_registration(
+                &mut one,
+                b.id.clone(),
+                refused.vaults[1].path.clone(),
+                b.room.clone()
+            )
+            .is_err(),
+            "N19 ensure"
+        );
+        refused = config.clone();
+        refused.vaults[1].id = "VaultTwo_0123456789abc".into();
+        refused.vaults[1].room = a.room.clone();
+        assert!(load(&refused).is_err(), "N21");
+        refused = config.clone();
+        refused.auth.openclast.as_mut().unwrap().tenant_id = "tenant_short".into();
+        assert!(load(&refused).is_err(), "N27");
+        config
+            .auth
+            .openclast
+            .as_mut()
+            .unwrap()
+            .legacy_identity_accept_until = None;
+        assert!(load(&config).is_err(), "N29 load");
+        config.vaults.pop();
+        assert!(load(&config).is_ok());
+        assert!(
+            add_vault(&mut config, b.id.clone(), b.path.clone(), b.room.clone()).is_err(),
+            "N29 add"
+        );
+        assert!(
+            ensure_vault_registration(&mut config, b.id, b.path, b.room).is_err(),
+            "N29 ensure"
+        );
+        assert_eq!(config.vaults, [a]);
     }
 }

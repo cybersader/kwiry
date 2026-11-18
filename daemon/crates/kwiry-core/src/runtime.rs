@@ -18,7 +18,6 @@ use tantivy::schema::{Field, Value};
 use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
 
 use crate::api::SearchFilters;
-use crate::chunk::ingest_file;
 use crate::error::{Error, Result};
 use crate::generation::{DataRoot, DataRootLock};
 use crate::index::{
@@ -26,7 +25,6 @@ use crate::index::{
 };
 use crate::manifest::{
     EvictionReport, Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint,
-    source_key,
 };
 use crate::model::{
     Config, FileIngestOutcome, FileOutcomeKind, HostProfile, IndexFreshnessBasis, IngestWarning,
@@ -382,21 +380,23 @@ impl SearchRuntime {
     fn finish_resource_pass(
         &self,
         epochs: BTreeMap<ResourceKey, u64>,
-        incomplete: &BTreeSet<String>,
+        incomplete: &BTreeSet<ResourceKey>,
         succeeded: bool,
     ) -> Result<()> {
         let mut states = self
             .resource_freshness
             .lock()
             .map_err(|_| Error::State("resource freshness lock poisoned".into()))?;
+        for resource in incomplete {
+            states.entry(resource.clone()).or_default().state = IndexFreshnessState::Stale;
+        }
         for (resource, epoch) in epochs {
             let state = states.entry(resource.clone()).or_default();
-            state.state =
-                if succeeded && !incomplete.contains(&resource.vault_id) && state.epoch == epoch {
-                    IndexFreshnessState::Current
-                } else {
-                    IndexFreshnessState::Stale
-                };
+            state.state = if succeeded && !incomplete.contains(&resource) && state.epoch == epoch {
+                IndexFreshnessState::Current
+            } else {
+                IndexFreshnessState::Stale
+            };
         }
         Ok(())
     }
@@ -462,6 +462,12 @@ impl SearchRuntime {
         })
     }
 
+    pub fn active_room_identity_format(&self) -> bool {
+        matches!(self.active.load_full().as_deref(),
+            Some(ActiveSearchIndex::OpenClast(index))
+                if index.format == crate::manifest::INDEX_FORMAT_VERSION && crate::source::ROOM_INCLUSIVE_IDS)
+    }
+
     fn install_desktop(&self, generation: Arc<SearchIndex>) {
         self.active
             .store(Some(Arc::new(ActiveSearchIndex::Desktop(generation))));
@@ -510,17 +516,19 @@ fn effective_resources<'a>(
 ) -> BTreeSet<&'a ResourceKey> {
     resources
         .iter()
-        .filter(|resource| {
-            filters
-                .vault_id
-                .as_deref()
-                .is_none_or(|id| id == resource.vault_id)
-                && filters
-                    .room
-                    .as_deref()
-                    .is_none_or(|room| room == resource.room_id)
-        })
+        .filter(|resource| matches_resource_filters(filters, resource))
         .collect()
+}
+
+fn matches_resource_filters(filters: &SearchFilters, resource: &ResourceKey) -> bool {
+    filters
+        .vault_id
+        .as_deref()
+        .is_none_or(|id| id == resource.vault_id)
+        && filters
+            .room
+            .as_deref()
+            .is_none_or(|room| room == resource.room_id)
 }
 
 fn worse_freshness(a: IndexFreshnessState, b: IndexFreshnessState) -> IndexFreshnessState {
@@ -579,6 +587,7 @@ enum ActiveSearchIndex {
 }
 
 struct PartitionedSearchIndex {
+    format: u32,
     generation: String,
     partition_dirs: BTreeMap<ResourceKey, PathBuf>,
     revisions: BTreeMap<ResourceKey, [u8; 32]>,
@@ -623,10 +632,31 @@ impl PartitionedSearchIndex {
         }
         Ok(Self {
             generation: active.id.clone(),
+            format: manifest.index_format_version,
             partition_dirs,
             revisions,
             readers: std::sync::Mutex::new(BTreeMap::new()),
         })
+    }
+
+    fn check_resources(&self, filters: &SearchFilters, resources: &[ResourceKey]) -> Result<()> {
+        let indexes: Vec<_> = resources
+            .iter()
+            .enumerate()
+            .filter_map(|(index, resource)| {
+                (matches_resource_filters(filters, resource)
+                    && !self.partition_dirs.contains_key(resource))
+                .then_some(index)
+            })
+            .collect();
+        if !indexes.is_empty() {
+            return Err(if crate::source::ROOM_INCLUSIVE_IDS {
+                Error::UnavailableResourceIndexes(indexes)
+            } else {
+                Error::ResourceUnavailable
+            });
+        }
+        Ok(())
     }
 
     fn scoped_generation(
@@ -634,6 +664,7 @@ impl PartitionedSearchIndex {
         filters: &SearchFilters,
         resources: &[ResourceKey],
     ) -> Result<String> {
+        self.check_resources(filters, resources)?;
         let effective = effective_resources(filters, resources);
         let mut digest = Sha256::new();
         digest.update(b"L");
@@ -699,34 +730,12 @@ impl PartitionedSearchIndex {
         filters: &SearchFilters,
         resources: &[ResourceKey],
     ) -> Result<LexicalSearchOutcome> {
-        let mut selected = Vec::new();
-        let mut unique = BTreeSet::new();
-        for resource in resources {
-            if !unique.insert(resource) {
-                continue;
-            }
-            if filters
-                .vault_id
-                .as_deref()
-                .is_some_and(|vault_id| vault_id != resource.vault_id)
-                || filters
-                    .room
-                    .as_deref()
-                    .is_some_and(|room| room != resource.room_id)
-            {
-                continue;
-            }
-            // A signed resource without a partition is refused before any
-            // partition opens: answering from the rest would silently
-            // understate coverage (CONTRACT: no silent skip).
-            let Some(index_dir) = self.partition_dirs.get(resource) else {
-                return Err(Error::ResourceUnavailable);
-            };
-            selected.push((resource, index_dir));
-        }
+        self.check_resources(filters, resources)?;
+        let selected = effective_resources(filters, resources)
+            .into_iter()
+            .map(|resource| (resource, &self.partition_dirs[resource]));
 
         let opened = selected
-            .into_iter()
             .map(|(resource, index_dir)| {
                 Ok((resource, self.authorized_reader(resource, index_dir)?))
             })
@@ -757,34 +766,12 @@ impl PartitionedSearchIndex {
             return self.search(query, limit, filters, resources);
         }
 
-        let mut selected = Vec::new();
-        let mut unique = BTreeSet::new();
-        for resource in resources {
-            if !unique.insert(resource) {
-                continue;
-            }
-            if filters
-                .vault_id
-                .as_deref()
-                .is_some_and(|vault_id| vault_id != resource.vault_id)
-                || filters
-                    .room
-                    .as_deref()
-                    .is_some_and(|room| room != resource.room_id)
-            {
-                continue;
-            }
-            // A signed resource without a partition is refused before any
-            // partition opens: answering from the rest would silently
-            // understate coverage (CONTRACT: no silent skip).
-            let Some(index_dir) = self.partition_dirs.get(resource) else {
-                return Err(Error::ResourceUnavailable);
-            };
-            selected.push((resource, index_dir));
-        }
+        self.check_resources(filters, resources)?;
+        let selected = effective_resources(filters, resources)
+            .into_iter()
+            .map(|resource| (resource, &self.partition_dirs[resource]));
 
         let opened = selected
-            .into_iter()
             .map(|(resource, index_dir)| {
                 Ok((resource, self.authorized_reader(resource, index_dir)?))
             })
@@ -926,6 +913,7 @@ struct VaultObservationContext<'a> {
     /// Watcher-evidence relative paths for this vault. Forces byte reads
     /// for matching sources; never restricts enumeration or deletion.
     read_scope: Option<&'a BTreeSet<String>>,
+    room_roots: Option<&'a crate::room_walk::RoomRoots>,
 }
 
 fn observe_vault(
@@ -934,12 +922,16 @@ fn observe_vault(
     context: &VaultObservationContext<'_>,
     audit: &mut AuditBudget,
 ) -> VaultObservations {
-    let enumeration = discover_vault(vault);
+    let (enumeration, secure_read) = match context.room_roots {
+        Some(roots) => roots.walk(vault),
+        None => (discover_vault(vault), None),
+    };
     let mut decisions = Vec::with_capacity(enumeration.files.len());
     let mut audit_candidates = Vec::new();
 
     for file in &enumeration.files {
-        let key = source_key(&vault.id, &file.relative_path);
+        let key =
+            crate::source::room_source_key(&vault.id, vault.room.as_deref(), &file.relative_path);
         let previous_file = previous.files.get(&key);
         let previous_scope = previous_file.map(|file| match context.scope {
             PartitionScope::Whole => PartitionScope::Whole,
@@ -1004,7 +996,8 @@ fn observe_vault(
             ObservationDecision::ReuseMetadata => None,
         };
         if read_reason.is_some() {
-            let outcome = ingest_file(vault, file);
+            let outcome =
+                crate::chunk::ingest_file_with_room_handle(vault, file, secure_read.as_ref());
             source_files_read += 1;
             if outcome.content_hash.is_some() {
                 source_bytes_read += outcome.byte_length;
@@ -1223,6 +1216,7 @@ impl DesktopIndexManager {
                     policy: observation_policy,
                     semantic: semantic_runtime.as_deref(),
                     read_scope: vault_read_scope.as_ref(),
+                    room_roots: None,
                 },
                 &mut audit,
             );
@@ -1235,7 +1229,11 @@ impl DesktopIndexManager {
             let mut seen_keys = observed.reused_keys;
 
             for outcome in observed.outcomes {
-                let key = source_key(&outcome.vault_id, &outcome.path);
+                let key = crate::source::room_source_key(
+                    &outcome.vault_id,
+                    outcome.room.as_deref(),
+                    &outcome.path,
+                );
                 if let Some(warning) = outcome.warning.clone() {
                     warnings.push(warning);
                 }
@@ -1532,7 +1530,7 @@ impl OpenClastIndexManager {
         &mut self,
         config: Config,
         scope: &ReconcileScope,
-        incomplete: &mut BTreeSet<String>,
+        incomplete: &mut BTreeSet<ResourceKey>,
     ) -> Result<ReconcileReport> {
         let mut plan = ReconcilePlan::new(&self.manifest);
         let mut next_resources: BTreeSet<_> = self
@@ -1564,36 +1562,37 @@ impl OpenClastIndexManager {
             ReconcileScope::Paths(_) => AuditBudget::new(self.audit_cursor, 0, 0),
         };
         self.runtime.set_freshness_basis(config.indexing.basis);
-        let configured_ids: HashSet<_> = config
-            .vaults
-            .iter()
-            .map(|vault| vault.id.as_str())
-            .collect();
-        let previous_resources = resources_by_vault(&self.layout)?;
         let current_fingerprints: BTreeMap<_, _> = config
             .vaults
             .iter()
-            .map(|vault| (vault.id.clone(), registration_fingerprint(vault)))
-            .collect();
-
+            .map(|vault| {
+                config
+                    .resource_key(vault)
+                    .map(|resource| (resource, registration_fingerprint(vault)))
+                    .ok_or_else(|| {
+                        Error::State("registered OpenClast vault has no exact room".to_owned())
+                    })
+            })
+            .collect::<Result<_>>()?;
+        let room_roots = crate::source::ROOM_INCLUSIVE_IDS
+            .then(|| crate::room_walk::RoomRoots::capture(&config.vaults));
+        // Removed registrations never retain content, including the other room
+        // of a repeated vault. Removing a layout entry drops the full partition.
         let removed_keys: Vec<_> = self
             .manifest
             .files
             .iter()
-            .filter(|(_, file)| !configured_ids.contains(file.vault_id.as_str()))
+            .filter(|(_, file)| {
+                file.resource
+                    .as_ref()
+                    .is_none_or(|resource| !current_fingerprints.contains_key(resource))
+            })
             .map(|(key, _)| key.clone())
             .collect();
         for key in removed_keys {
-            let previous_file = &self.manifest.files[&key];
             plan.remove_manifest_source(&key);
-            if let Some(resource) = previous_file.resource.clone() {
-                plan.remove_index_source(key.clone(), PartitionScope::Resource(resource));
-            }
-            if let Some(resource) = previous_resources.get(&previous_file.vault_id).cloned() {
-                plan.remove_index_source(key.clone(), PartitionScope::Resource(resource));
-            }
         }
-        next_resources.retain(|resource| configured_ids.contains(resource.vault_id.as_str()));
+        next_resources.retain(|resource| current_fingerprints.contains_key(resource));
 
         for vault in &config.vaults {
             let resource = config.resource_key(vault).ok_or_else(|| {
@@ -1602,29 +1601,22 @@ impl OpenClastIndexManager {
                     vault.id
                 ))
             })?;
-            let previous_resource = previous_resources.get(&vault.id).cloned();
-            let fingerprint = &current_fingerprints[&vault.id];
-            let resource_reclassified = previous_resource
-                .as_ref()
-                .is_some_and(|previous| previous != &resource);
-            let registration_reclassified = self
+            let previous_resource = next_resources.get(&resource).cloned();
+            let fingerprint = &current_fingerprints[&resource];
+            let vault_reclassified = self
                 .manifest
                 .files
                 .values()
-                .filter(|file| file.vault_id == vault.id)
-                .any(|file| {
-                    file.registration_fingerprint != fingerprint.as_str()
-                        || file.resource.as_ref() != Some(&resource)
-                });
-            let vault_reclassified = resource_reclassified || registration_reclassified;
-            if vault_reclassified && let Some(previous) = previous_resource.as_ref() {
-                next_resources.remove(previous);
+                .filter(|file| file.resource.as_ref() == Some(&resource))
+                .any(|file| file.registration_fingerprint != *fingerprint);
+            if vault_reclassified {
+                next_resources.remove(&resource);
             }
             if !vault.path.is_dir() {
-                incomplete.insert(vault.id.clone());
+                incomplete.insert(resource.clone());
                 unavailable_vaults.push(vault.id.clone());
                 for (key, file) in &self.manifest.files {
-                    if file.vault_id == vault.id {
+                    if file.resource.as_ref() == Some(&resource) {
                         plan.retain_source(key, file, RetentionReason::VaultUnavailable);
                     }
                 }
@@ -1644,7 +1636,7 @@ impl OpenClastIndexManager {
                 .manifest
                 .files
                 .iter()
-                .filter(|(_, file)| file.vault_id == vault.id)
+                .filter(|(_, file)| file.resource.as_ref() == Some(&resource))
                 .map(|(key, _)| key.clone())
                 .collect();
             let vault_read_scope = vault_read_scope(scope, &vault.id);
@@ -1658,16 +1650,18 @@ impl OpenClastIndexManager {
                     policy: observation_policy,
                     semantic: None,
                     read_scope: vault_read_scope.as_ref(),
+                    room_roots: room_roots.as_ref(),
                 },
                 &mut audit,
             );
             let discovery_incomplete = !observed.enumeration.completeness.may_infer_deletions();
             if discovery_incomplete {
-                incomplete.insert(vault.id.clone());
+                incomplete.insert(resource.clone());
             }
             // A rolling audit backlog is not dirty state under metadata_audit:
             // the configured evidence basis already describes metadata reuse.
             // Its shared budget must not couple one room's freshness to another.
+            let excluded_paths = observed.enumeration.excluded;
             warnings.extend(observed.enumeration.warnings);
             source_files_read += observed.source_files_read;
             source_bytes_read += observed.source_bytes_read;
@@ -1676,14 +1670,25 @@ impl OpenClastIndexManager {
             let mut seen_keys = observed.reused_keys;
 
             for outcome in observed.outcomes {
-                let key = source_key(&outcome.vault_id, &outcome.path);
+                let key = crate::source::room_source_key(
+                    &outcome.vault_id,
+                    outcome.room.as_deref(),
+                    &outcome.path,
+                );
                 if let Some(warning) = outcome.warning.clone() {
                     warnings.push(warning);
                 }
                 if outcome.kind == FileOutcomeKind::TransientError {
-                    incomplete.insert(vault.id.clone());
+                    incomplete.insert(resource.clone());
                     if let Some(previous) = self.manifest.files.get(&key) {
-                        plan.retain_source(&key, previous, RetentionReason::TransientReadError);
+                        if room_roots.is_some() {
+                            plan.remove_source(
+                                key.clone(),
+                                PartitionScope::Resource(resource.clone()),
+                            );
+                        } else {
+                            plan.retain_source(&key, previous, RetentionReason::TransientReadError);
+                        }
                     }
                     seen_keys.insert(key);
                     continue;
@@ -1724,7 +1729,10 @@ impl OpenClastIndexManager {
                     continue;
                 }
                 let previous_file = &self.manifest.files[&key];
-                if discovery_incomplete {
+                let excluded = excluded_paths.iter().any(|path| {
+                    path.is_empty() || Path::new(&previous_file.path).starts_with(path)
+                });
+                if discovery_incomplete && !excluded {
                     plan.retain_source(&key, previous_file, RetentionReason::IncompleteEnumeration);
                     continue;
                 }
@@ -1751,7 +1759,7 @@ impl OpenClastIndexManager {
                 continue;
             };
             if file.outcome == ManifestFileOutcome::Indexed
-                && current_fingerprints.get(&file.vault_id) == Some(&file.registration_fingerprint)
+                && current_fingerprints.get(resource) == Some(&file.registration_fingerprint)
             {
                 expected_source_keys
                     .entry(resource.clone())
@@ -2081,22 +2089,6 @@ fn holds_resident_deletions(index_dir: &Path) -> Result<bool> {
 fn repair_inherited_generation(index_dir: &Path) -> Result<()> {
     let (index, _) = open_index_dir(index_dir)?;
     expunge_resident_deletions(&index)
-}
-
-fn resources_by_vault(layout: &GenerationLayout) -> Result<BTreeMap<String, ResourceKey>> {
-    let mut resources = BTreeMap::new();
-    for partition in &layout.partitions {
-        let vault_id = partition.resource.vault_id.clone();
-        if resources
-            .insert(vault_id.clone(), partition.resource.clone())
-            .is_some()
-        {
-            return Err(Error::State(format!(
-                "generation layout contains multiple resources for vault {vault_id}"
-            )));
-        }
-    }
-    Ok(resources)
 }
 
 fn partition_source_keys(index: &Index, source_key_field: Field) -> Result<BTreeSet<String>> {
@@ -2745,6 +2737,10 @@ mod tests {
         fresh_manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn a_vanished_partition_returns_a_typed_retriable_state() {
         let temporary = tempdir().unwrap();
@@ -2776,6 +2772,10 @@ mod tests {
         assert!(matches!(error, Error::IndexBuilding));
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_metadata_audit_reuses_unchanged_partition_sources() {
         let temporary = tempdir().unwrap();
@@ -2987,6 +2987,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn semantic_unavailable_without_model_while_lexical_serves() {
         let temporary = tempdir().unwrap();
@@ -3036,6 +3040,10 @@ mod tests {
         config
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn authorized_partitions_match_a_physical_baseline() {
         let temporary = tempdir().unwrap();
@@ -3121,6 +3129,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn unauthorized_partition_cannot_change_support_prefixes_or_order() {
         let temporary = tempdir().unwrap();
@@ -3248,6 +3260,10 @@ mod tests {
     }
 
     #[cfg(feature = "internal-d5c-preview")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn d5c_openclast_hydrates_and_reranks_only_authorized_partitions() {
         let temporary = tempdir().unwrap();
@@ -3386,6 +3402,10 @@ mod tests {
         assert!(runtime.generation().is_none());
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_opens_only_request_authorized_partitions() {
         let temporary = tempdir().unwrap();
@@ -3470,11 +3490,15 @@ mod tests {
     fn withheld(result: Result<Vec<SearchHit>>) -> bool {
         match result {
             Ok(hits) => hits.is_empty(),
-            Err(Error::ResourceUnavailable) => true,
+            Err(Error::ResourceUnavailable | Error::UnavailableResourceIndexes(_)) => true,
             Err(error) => panic!("unexpected search error: {error:?}"),
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_refuses_a_signed_resource_without_a_partition() {
         let temporary = tempdir().unwrap();
@@ -3507,7 +3531,13 @@ mod tests {
             else {
                 panic!("an unindexed signed resource must be refused");
             };
-            assert!(matches!(error, Error::ResourceUnavailable), "{error:?}");
+            assert!(
+                matches!(
+                    error,
+                    Error::ResourceUnavailable | Error::UnavailableResourceIndexes(_)
+                ),
+                "{error:?}"
+            );
             assert!(
                 !error.to_string().contains("room-not-indexed"),
                 "refusal must not name the resource"
@@ -3537,6 +3567,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn authorized_partition_readers_are_cached_for_the_generation() {
         let temporary = tempdir().unwrap();
@@ -3579,6 +3613,10 @@ mod tests {
         assert_eq!(second, first);
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_reconcile_edits_renames_and_deletes_within_one_partition() {
         let temporary = tempdir().unwrap();
@@ -3654,6 +3692,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_restart_reclassifies_vault_from_persisted_layout() {
         let temporary = tempdir().unwrap();
@@ -3701,6 +3743,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_restart_reclassifies_tenant_from_persisted_layout() {
         let temporary = tempdir().unwrap();
@@ -3740,6 +3786,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_reconcile_recovers_a_partial_cross_resource_commit() {
         let temporary = tempdir().unwrap();
@@ -3875,6 +3925,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_reconcile_removes_orphans_from_an_unpublished_new_resource() {
         let temporary = tempdir().unwrap();
@@ -3980,6 +4034,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_reclassification_withholds_unavailable_content_until_reindexed() {
         let temporary = tempdir().unwrap();
@@ -4071,6 +4129,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_path_change_withholds_unavailable_previous_content() {
         let temporary = tempdir().unwrap();
@@ -4133,6 +4195,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_unregisters_a_vault_after_its_content_was_withheld() {
         let temporary = tempdir().unwrap();
@@ -4192,6 +4258,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_restart_removes_unregistered_vault_from_persisted_layout() {
         let temporary = tempdir().unwrap();
@@ -4236,6 +4306,10 @@ mod tests {
         manager.shutdown().unwrap();
     }
 
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_reconcile_initializes_an_empty_resource_partition() {
         let temporary = tempdir().unwrap();
@@ -4635,6 +4709,10 @@ mod tests {
 
     /// The OpenClast profile evicts per partition, and an evicted row's
     /// postings are gone from the authorized partition before the first search.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_evicts_a_stale_format_from_its_partition_before_serving() {
         let temporary = tempdir().unwrap();
@@ -4837,7 +4915,7 @@ mod tests {
         let mut manager = IndexManager::open(config.clone(), &data_root, runtime.clone()).unwrap();
         manager.reconcile(config.clone()).unwrap();
 
-        let key = source_key("fixture", "log.txt");
+        let key = crate::source::source_key("fixture", "log.txt");
         let content_hash = manager.manifest().files[&key].content_hash.clone();
         let bound = embedding_source_identity(&content_hash, SourceFormat::Text);
         assert_ne!(
@@ -5227,6 +5305,10 @@ mod tests {
 
     /// The OpenClast profile addresses deletions per partition, so the same
     /// invariant has to hold for each partition index it publishes.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn openclast_eviction_leaves_no_resident_deleted_documents_in_its_partition() {
         let temporary = tempdir().unwrap();
@@ -5492,6 +5574,10 @@ mod tests {
     ///
     /// Mutation check: delete the `holds_resident_deletions` branch from
     /// `DesktopIndexManager::open` and this fails on both assertions.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "secure OpenClast ingestion is Linux-only pending platform guidance"
+    )]
     #[test]
     fn an_inherited_generation_is_repaired_before_it_is_served() {
         let temporary = tempdir().unwrap();
@@ -5772,7 +5858,7 @@ mod tests {
         let epochs = runtime.begin_resource_pass(&config, &scope).unwrap();
         assert_eq!(state(), IndexFreshnessState::Reconciling);
         runtime
-            .finish_resource_pass(epochs, &BTreeSet::from(["a".into()]), true)
+            .finish_resource_pass(epochs, &BTreeSet::from([a.clone()]), true)
             .unwrap();
         assert_eq!(state(), IndexFreshnessState::Stale);
         let epochs = runtime.begin_resource_pass(&config, &scope).unwrap();
@@ -5844,7 +5930,7 @@ mod tests {
         manager.reconcile(unmapped).unwrap();
         assert!(matches!(
             runtime.authorized_freshness(&filters, &resources, &generation),
-            Err(Error::ResourceUnavailable)
+            Err(Error::ResourceUnavailable | Error::UnavailableResourceIndexes(_))
         ));
         manager.shutdown().unwrap();
     }
@@ -5873,7 +5959,7 @@ mod tests {
             .search_authorized_with_generation(query, 20, &filters, &resource)
             .unwrap();
         assert_eq!(before.hits.len(), 1);
-        let hash = manager.manifest().files[&source_key("a", "note.md")]
+        let hash = manager.manifest().files[&crate::source::source_key("a", "note.md")]
             .content_hash
             .clone();
         // Reconciliation is also a rebuild of the mtime-bearing index document.
@@ -5886,7 +5972,7 @@ mod tests {
         assert_ne!(before.generation, after_reconcile.generation);
         assert_eq!(
             hash,
-            manager.manifest().files[&source_key("a", "note.md")].content_hash
+            manager.manifest().files[&crate::source::source_key("a", "note.md")].content_hash
         );
         assert_eq!(
             runtime
@@ -5981,5 +6067,209 @@ mod tests {
         expected.update([7; 300]);
         assert_eq!(framed.finalize(), expected.finalize());
         manager.shutdown().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn same_vault_room_identity_and_scoped_lexical_vectors() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        let data = root.join("data");
+        let vault = |name: &str, room: &str, text: &str| {
+            let path = root.join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("index.md"), text).unwrap();
+            VaultRegistration {
+                id: "VaultOne_0123456789abc".into(),
+                path,
+                room: Some(room.into()),
+            }
+        };
+        let a = vault(
+            "a",
+            "RoomAaaa_0123456789abc",
+            "---\nstatus: alpha\n---\nalpha shared",
+        );
+        let b = vault(
+            "b",
+            "RoomBbbb_0123456789abc",
+            "---\nstatus: beta\n---\nbeta shared",
+        );
+        let mut config = openclast_config(vec![a.clone(), b.clone()]);
+        let ra = config.resource_key(&a).unwrap();
+        let rb = config.resource_key(&b).unwrap();
+        let resources = [ra.clone(), rb.clone()];
+        let runtime = SearchRuntime::new();
+        build_index(&config, &data).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        manager.reconcile(config.clone()).unwrap();
+        assert!(runtime.active_room_identity_format());
+        let filters = SearchFilters::default();
+        let search = |filters: &SearchFilters, resources: &[ResourceKey], limit| {
+            runtime
+                .search_authorized_with_generation("shared", limit, filters, resources)
+                .unwrap()
+        };
+        let a_only = search(&filters, std::slice::from_ref(&ra), 20);
+        let b_only = search(&filters, std::slice::from_ref(&rb), 20);
+        assert_eq!(a_only.hits.len(), 1); // P1
+        let baseline = search(&filters, &resources, 20);
+        assert_eq!(baseline.hits.len(), 2); // P2
+        assert_ne!(baseline.hits[0].chunk_id, baseline.hits[1].chunk_id);
+        assert_eq!(
+            baseline
+                .hits
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            ["index.md", "index.md"]
+        );
+        for hit in &baseline.hits {
+            let expected = if hit.room_id.as_deref() == Some(ra.room_id.as_str()) {
+                "alpha"
+            } else {
+                assert_eq!(hit.room_id.as_deref(), Some(rb.room_id.as_str()));
+                "beta"
+            };
+            assert_eq!(hit.vault_id, ra.vault_id);
+            assert_eq!(hit.frontmatter.status.as_deref(), Some(expected)); // P13
+            assert!(hit.excerpt.contains(expected));
+        }
+        let revision_a = a_only.generation.clone();
+        let freshness_a = runtime
+            .authorized_freshness(&filters, std::slice::from_ref(&ra), &revision_a)
+            .unwrap();
+        let room = |id: &str| SearchFilters {
+            room: Some(id.into()),
+            ..SearchFilters::default()
+        };
+        assert_eq!(
+            search(&room(&rb.room_id), &resources, 20).generation,
+            b_only.generation
+        ); // P6
+        let outside = search(&room("RoomZzzz_0123456789abc"), &resources, 20);
+        assert!(outside.hits.is_empty());
+        assert_eq!(outside, search(&filters, &[], 20)); // P7 empty-set digest
+        assert_eq!(
+            outside,
+            search(
+                &SearchFilters {
+                    room: Some(ra.room_id.clone()),
+                    vault_id: Some("VaultTwo_0123456789abc".into()),
+                    ..SearchFilters::default()
+                },
+                &resources,
+                20
+            )
+        ); // P14
+        assert_eq!(search(&filters, &resources, 1).hits.len(), 1); // P10
+
+        let c = vault("c", "RoomCccc_0123456789abc", "gamma alone");
+        config.vaults.push(c.clone());
+        manager.reconcile(config.clone()).unwrap();
+        assert_eq!(
+            outside,
+            search(&room(c.room.as_deref().unwrap()), &resources, 20)
+        ); // P7 existence invariance
+        let bytes = |result: &GenerationSearchResult| serde_json::to_vec(&result.hits).unwrap();
+        assert_eq!(bytes(&baseline), bytes(&search(&filters, &resources, 20))); // P8 add
+        fs::write(c.path.join("index.md"), "shared gamma").unwrap();
+        manager.reconcile(config.clone()).unwrap();
+        assert_eq!(baseline, search(&filters, &resources, 20)); // P8 mutate
+        config.vaults.pop();
+        manager.reconcile(config.clone()).unwrap();
+        assert_eq!(bytes(&baseline), bytes(&search(&filters, &resources, 20))); // P8 remove
+
+        fs::write(b.path.join("index.md"), "beta shared changed").unwrap();
+        manager
+            .reconcile_scoped(
+                config.clone(),
+                ReconcileScope::Paths(BTreeSet::from([(rb.vault_id.clone(), "index.md".into())])),
+            )
+            .unwrap();
+        assert_eq!(a_only, search(&filters, std::slice::from_ref(&ra), 20)); // P11
+        assert_eq!(
+            freshness_a,
+            runtime
+                .authorized_freshness(&filters, std::slice::from_ref(&ra), &revision_a)
+                .unwrap()
+        );
+        config.vaults.remove(0);
+        let report = manager.reconcile(config).unwrap();
+        let b_key = crate::source::room_source_key(&rb.vault_id, Some(&rb.room_id), "index.md");
+        assert!(report.manifest.files.contains_key(&b_key)); // P12
+        assert_eq!(search(&filters, &[rb], 20).hits[0].path, "index.md");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn room_ingestion_n20_n25_never_retains_hard_linked_content() {
+        use std::os::unix::fs::symlink;
+        let temporary = tempdir().unwrap();
+        let a = temporary.path().join("a");
+        let b = temporary.path().join("b");
+        let data = temporary.path().join("data");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(b.join("index.md"), "beta shared").unwrap();
+        symlink(b.join("index.md"), a.join("link.md")).unwrap();
+        let config = openclast_config(vec![
+            VaultRegistration {
+                id: "vault".into(),
+                path: a.clone(),
+                room: Some("room-a".into()),
+            },
+            VaultRegistration {
+                id: "vault".into(),
+                path: b.clone(),
+                room: Some("room-b".into()),
+            },
+        ]);
+        let resources: Vec<_> = config
+            .vaults
+            .iter()
+            .map(|vault| config.resource_key(vault).unwrap())
+            .collect();
+        let runtime = SearchRuntime::new();
+        build_index(&config, &data).unwrap();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let filters = SearchFilters::default();
+        let search = |resource| {
+            runtime
+                .search_authorized_with_generation(
+                    "beta",
+                    20,
+                    &filters,
+                    std::slice::from_ref(resource),
+                )
+                .unwrap()
+        };
+        assert!(search(&resources[0]).hits.is_empty()); // N20
+        assert_eq!(search(&resources[1]).hits.len(), 1);
+        fs::hard_link(b.join("index.md"), a.join("hard.md")).unwrap();
+        let report = manager.reconcile(config).unwrap();
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|warning| warning.message == "hard-linked file excluded")
+                .count(),
+            2
+        );
+        for resource in &resources {
+            let after = search(resource);
+            assert!(after.hits.is_empty(), "N25");
+            assert_eq!(
+                runtime
+                    .authorized_freshness(
+                        &filters,
+                        std::slice::from_ref(resource),
+                        &after.generation
+                    )
+                    .unwrap()
+                    .state,
+                IndexFreshnessState::Stale
+            );
+        }
     }
 }

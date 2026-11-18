@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", features = ["fs"], optional = true }
+
 [dependencies]
 arc-swap = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
@@ -72,6 +75,7 @@ native = [
   "dep:ignore",
   "dep:libc",
   "dep:rusqlite",
+  "dep:rustix",
   "dep:sqlite-vec",
   "dep:subtle",
   "dep:tantivy",

@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "67a13bc654d9b97bde0260a68e6001f94224e85eeea2926bc9f7bb096ef2d6b3",
+  "schema_version": 11,
+  "source_key": "f05755e7d9edb7a3bd006a168ccb264c5f23c5363b5fc1801dff9692b2f8fefe",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Shared Key Integer.md",
@@ -31,7 +31,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "5bb47dcc51e43b5f3f21d09208d16bf3e042a12a366004cc2a9b37e56f19c3f8",
+        "chunk_id": "ab676c382a82ba14097a52b7a1ff43c02f1f7c4794a090dfb9bb0a7123a6ca2e",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Shared Key Integer.md",
