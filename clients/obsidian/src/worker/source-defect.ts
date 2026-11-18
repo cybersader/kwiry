@@ -5,7 +5,7 @@
 // free of the WASM import so it is directly testable. The adapter cannot be
 // imported in a unit test because it pulls in the Rust binary.
 
-const SOURCE_SCHEMA_VERSION = 10;
+import { SOURCE_PREPARATION_SCHEMA_VERSION } from "../source-formats";
 
 // This mirrors Rust's call-stack safety boundary. It is deliberately the only
 // property-bag bound: source byte limits already protect allocation, while a
@@ -45,7 +45,7 @@ export function sourcePreparationDefect(value: unknown): string | null {
   }
 
   const checks: readonly (readonly [string, () => boolean])[] = [
-    ["schema_version", () => value.schema_version === SOURCE_SCHEMA_VERSION],
+    ["schema_version", () => value.schema_version === SOURCE_PREPARATION_SCHEMA_VERSION],
     ["source_key", () => isBoundedString(value.source_key, 128)],
     ["vault_id", () => isBoundedString(value.vault_id, 1_024)],
     ["room", () => value.room === undefined || isBoundedString(value.room, 1_024)],

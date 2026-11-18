@@ -51,7 +51,10 @@ fn registry_identity_and_navigation_policy_are_closed_and_pinned() {
 fn title_only_html_uses_an_empty_metadata_carrier_without_body_copy() {
     let prepared = prepare("title-only.html", b"<title>Canonical only</title>");
     assert_eq!(prepared.schema_version, SOURCE_PREPARATION_SCHEMA_VERSION);
-    assert_eq!(prepared.schema_version, 10);
+    assert_eq!(
+        prepared.schema_version,
+        kwiry_core::SOURCE_PREPARATION_SCHEMA_VERSION
+    );
     assert_eq!(prepared.kind, SourcePreparationKind::Indexed);
     assert_eq!(prepared.coverage, ExtractionCoverage::IndexedComplete);
     assert_eq!(

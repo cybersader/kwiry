@@ -181,7 +181,7 @@ function sourceAt(
   frontmatter: PropertyBag = { title, tags: ["test"] },
 ): SourcePreparation {
   return {
-    schema_version: 10,
+    schema_version: 11,
     source_key: sourceKey,
     vault_id: "active",
     path,

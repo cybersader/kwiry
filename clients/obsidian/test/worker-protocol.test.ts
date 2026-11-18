@@ -228,7 +228,7 @@ describe("Worker protocol", () => {
   it("accepts only the fresh Rust query, FTS5 plan, and lexical rank identities", () => {
     const fresh = {
       rustAbiVersion: 3,
-      sourceSchemaVersion: 10,
+      sourceSchemaVersion: 11,
       querySchemaVersion: 12,
       matchPlanSchemaVersion: 11,
       rankSchemaVersion: 2,

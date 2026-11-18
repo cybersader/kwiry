@@ -4,7 +4,7 @@ use std::fs::{File, Metadata};
 use std::io;
 use std::path::Path;
 
-use crate::model::{DiscoveredFile, IngestWarning, VaultRegistration};
+use crate::model::{IngestWarning, VaultRegistration};
 use crate::reconcile::EnumerationCompleteness;
 use crate::walk::EnumerationResult;
 
@@ -20,6 +20,7 @@ mod platform {
 
     use super::*;
     use crate::format::SourceFormat;
+    use crate::model::DiscoveredFile;
 
     const NO_LINKS: ResolveFlags = ResolveFlags::NO_SYMLINKS.union(ResolveFlags::NO_MAGICLINKS);
     const ROOM_ONLY: ResolveFlags = NO_LINKS

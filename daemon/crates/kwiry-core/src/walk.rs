@@ -164,7 +164,6 @@ fn normalized_extension(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::fs;
 
     use tempfile::tempdir;

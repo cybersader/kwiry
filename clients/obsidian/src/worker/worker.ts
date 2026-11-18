@@ -16,6 +16,7 @@ import {
   SQLITE_WASM_SIZE,
 } from "virtual:kwiry-artifact-identities";
 
+import { SOURCE_PREPARATION_SCHEMA_VERSION } from "../source-formats";
 import { BlockVfsUnavailableError } from "./block-vfs";
 import {
   isD5cOwnerWorkerOperation,
@@ -1377,8 +1378,8 @@ async function quarantinedPreparation(source: SourceUpsert): Promise<SourcePrepa
   const filename = descriptor.path.split("/").at(-1) ?? descriptor.path;
   const separator = filename.lastIndexOf(".");
   return {
-    schema_version: 10,
-    source_key: await sourceKey(descriptor.vault_id, descriptor.path),
+    schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
+    source_key: await sourceKey(descriptor.vault_id, descriptor.room, descriptor.path),
     vault_id: descriptor.vault_id,
     ...(descriptor.room === undefined ? {} : { room: descriptor.room }),
     path: descriptor.path,
@@ -1432,10 +1433,10 @@ function updateQuarantinedSources(
 // A later successful retry arrives with Rust's path-derived key. Reproducing
 // that contract here lets it replace the quarantine row instead of tripping the
 // index's source-key/identity conflict check.
-async function sourceKey(vaultId: string, path: string): Promise<string> {
+async function sourceKey(vaultId: string, room: string | undefined, path: string): Promise<string> {
   const encoder = new TextEncoder();
-  const parts = [encoder.encode("kwiry-source-v1\0")];
-  for (const component of [encoder.encode(vaultId), encoder.encode(path)]) {
+  const parts = [encoder.encode("kwiry-source-v2\0")];
+  for (const component of [encoder.encode(vaultId), encoder.encode(room ?? ""), encoder.encode(path)]) {
     const length = new Uint8Array(8);
     new DataView(length.buffer).setBigUint64(0, BigInt(component.byteLength), true);
     parts.push(length, component);

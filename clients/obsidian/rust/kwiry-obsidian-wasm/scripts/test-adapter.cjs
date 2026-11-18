@@ -114,7 +114,7 @@ if (nativeJson !== wasmJson) {
 
 const byName = Object.fromEntries(wasmOutput.map((fixture) => [fixture.name, fixture.output]));
 if (byName["abi-identity"].abi_version !== 3
-  || byName["abi-identity"].source_preparation_schema_version !== 10
+  || byName["abi-identity"].source_preparation_schema_version !== 11
   // The shipped plugin compiles the portable PDF tier and never the enhanced
   // one. This is the artifact the user installs, so it is the right place to
   // assert it: a build that had picked up `native-pdf-extractor` would report
@@ -132,7 +132,7 @@ if (byName["abi-identity"].abi_version !== 3
   || byName["abi-identity"].section_link_formats.pdf !== false
   || byName["abi-identity"].section_link_formats.excel !== false
   || byName["abi-identity"].section_link_formats.html !== false
-  || byName["html-source"].result.preparation.schema_version !== 10
+  || byName["html-source"].result.preparation.schema_version !== 11
   || byName["html-source"].result.preparation.format !== "html"
   || byName["html-source"].result.preparation.canonical_frontmatter.title !== "Canonical Portal"
   || Object.keys(byName["html-source"].result.preparation.frontmatter).length !== 0

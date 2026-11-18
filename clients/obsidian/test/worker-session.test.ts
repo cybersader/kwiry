@@ -64,7 +64,7 @@ function resultFor(message: WorkerRequest): WorkerResult {
     case "initialize":
       return {
         rustAbiVersion: 3,
-        sourceSchemaVersion: 10,
+        sourceSchemaVersion: 11,
         querySchemaVersion: 12,
         matchPlanSchemaVersion: 11,
         rankSchemaVersion: 2,

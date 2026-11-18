@@ -2222,7 +2222,7 @@ describe("exact generated production Worker", () => {
         ok: true,
         result: {
           rustAbiVersion: 3,
-          sourceSchemaVersion: 10,
+          sourceSchemaVersion: 11,
           querySchemaVersion: 12,
           matchPlanSchemaVersion: 11,
           rankSchemaVersion: 2,

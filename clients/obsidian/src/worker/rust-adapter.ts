@@ -16,6 +16,7 @@ import {
   FORMAT_IDENTITIES,
   FORMAT_IDENTITY_SCHEMA_VERSION,
   SECTION_LINK_FORMATS,
+  SOURCE_PREPARATION_SCHEMA_VERSION,
 } from "../source-formats";
 import {
   EXTRACTION_PROFILES,
@@ -35,7 +36,6 @@ import type {
 } from "./protocol";
 
 const ABI_VERSION = 3;
-const SOURCE_SCHEMA_VERSION = 10;
 const QUERY_SCHEMA_VERSION = 12;
 const MATCH_PLAN_SCHEMA_VERSION = 11;
 export const LEXICAL_V2_RANK_SCHEMA_VERSION = 2;
@@ -44,7 +44,7 @@ export interface RustIdentity {
   abi_version: 3;
   adapter: "kwiry-obsidian-wasm";
   adapter_version: string;
-  source_preparation_schema_version: 10;
+  source_preparation_schema_version: typeof SOURCE_PREPARATION_SCHEMA_VERSION;
   /**
    * The extraction-policy identity the adapter compiles. Mirrored in
    * `source-formats.ts` because the host needs it before the adapter exists;
@@ -135,7 +135,7 @@ export interface PreparedChunk {
 }
 
 export interface SourcePreparation {
-  schema_version: 10;
+  schema_version: typeof SOURCE_PREPARATION_SCHEMA_VERSION;
   source_key: string;
   vault_id: string;
   room?: string;
@@ -698,7 +698,7 @@ function isRustIdentity(value: unknown): value is RustIdentity {
     && value.abi_version === ABI_VERSION
     && value.adapter === "kwiry-obsidian-wasm"
     && isBoundedString(value.adapter_version, 128)
-    && value.source_preparation_schema_version === SOURCE_SCHEMA_VERSION
+    && value.source_preparation_schema_version === SOURCE_PREPARATION_SCHEMA_VERSION
     // The adapter's own policy identity, checked for shape here. The host's
     // mirrored constant is what the cache is keyed on; a Rust test asserts the
     // two agree, so this only has to reject a malformed identity.

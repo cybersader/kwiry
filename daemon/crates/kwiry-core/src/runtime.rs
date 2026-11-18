@@ -6184,7 +6184,7 @@ mod tests {
         manager
             .reconcile_scoped(
                 config.clone(),
-                ReconcileScope::Paths(BTreeSet::from([(rb.vault_id.clone(), "index.md".into())])),
+                &ReconcileScope::Paths(BTreeSet::from([(rb.vault_id.clone(), "index.md".into())])),
             )
             .unwrap();
         assert_eq!(a_only, search(&filters, std::slice::from_ref(&ra), 20)); // P11
