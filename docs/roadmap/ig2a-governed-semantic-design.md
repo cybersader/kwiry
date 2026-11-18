@@ -1,6 +1,6 @@
 # IG-2A design — governed semantic and hybrid retrieval
 
-Status: **design, revision 8 (row repair), independent review pending.** The room lifecycle is specified normatively by the [§5.8 transition table](#58-lifecycle-transition-table-normative). Nothing here is implemented or approved. This page expands [IG-2](governed-semantic-hybrid.md) and is bound by [`CONTRACT.md`](../../CONTRACT.md), which this design does not edit. The amendments it needs are in [§13](#13-contract-amendment-package-a1a7). Room lifecycle follows the frozen OpenClast Holdings wire contract (§5). What remains to ask of OpenClast is in [§14](#14-openclast-seam-asks).
+Status: **design, revision 9 (executable model), independent review pending.** The room lifecycle is specified normatively by an executable, model-checked state machine, `daemon/crates/kwiry-lifecycle`; the [§5.8 transition table](#58-lifecycle-transition-table-normative-generated-from-the-model) is generated from it. Nothing here is implemented or approved. This page expands [IG-2](governed-semantic-hybrid.md) and is bound by [`CONTRACT.md`](../../CONTRACT.md), which this design does not edit. The amendments it needs are in [§13](#13-contract-amendment-package-a1a7). Room lifecycle follows the frozen OpenClast Holdings wire contract (§5). What remains to ask of OpenClast is in [§14](#14-openclast-seam-asks).
 
 ## Revision history
 
@@ -13,7 +13,24 @@ Status: **design, revision 8 (row repair), independent review pending.** The roo
 | 5 | `a69b1e6e` | Replaced the bespoke custody seam (§5, §14) with Kwiry as a consumer of the owner-approved, frozen Holdings contract. Review: NO-SHIP. Confirmed closed: R4-1, R4-2, R4-4, R4-5, R4-6 and R4-7. R4-3's recovery depends on the reporting fixes F5-1 and F5-2. Open: F5-1 to F5-9, all in the consumer state machine; the architecture is kept. |
 | 6 | `0dddc353` | Fixed F5-1 to F5-9 and consumed HW §14 D, E and F. Review: NO-SHIP. Confirmed closed: F5-1, F5-3, F5-5, F5-7 (within its assumptions), F5-8, F5-9. Open: R6-1 to R6-9. |
 | 7 | `aabc0922` | Added a normative lifecycle transition table (§5.8, 105 rows) that wins over prose, with unlisted transitions refused. Fixes R6-1 to R6-9 and adopts HW §14 G. The architecture and the frozen contract are unchanged. Review: NO-SHIP as written, but judged bounded enough for a focused conformance pass. Closed: R6-5, R6-7, R6-8. Open: R7-1 to R7-8 plus four completeness pairs. |
-| 8 | this page | Row repair only. Changes or adds §5.8 rows for R7-1 to R7-8 and the completeness pairs; prose follows the rows. No restructuring. |
+| 8 | `69d8a3b4` | Row repair only. Changes or adds §5.8 rows for R7-1 to R7-8 and the completeness pairs; prose follows the rows. No restructuring. Review: NO-SHIP, round-8 findings 1–7 below. |
+| 9 | this page | The lifecycle becomes an executable model (`daemon/crates/kwiry-lifecycle`), which is normative; §5.8 is generated from it. A bounded model checker reproduced all seven round-8 findings and two more (M-1, M-2) as counterexample traces, and proves I1–I9 and L1 for the repaired machine (§5.8). The architecture and the frozen contract are unchanged. |
+
+**Revision 9: what the model checker found in revision 8.** Each line is the shortest counterexample within the stated bounds (BFS), with the rows it passes through. Removing the fix from revision 9 reproduces it; `cargo test -p kwiry-lifecycle` keeps every one as a regression.
+
+| Finding | Counterexample in the revision-8 encoding | Property | Revision-9 fix (rows) |
+|---|---|---|---|
+| Round-8 #1 | R1 → R2 (W: `armed`) → crash → S6–S11 → H2, A1–A4: R2 and R3 require `ready` or `sent`, and `sent` is never durable, so the report never moves again | I7 (and L1) | A restored `armed` is *sent, outcome unknown*: **R4a**, **T2r** |
+| Round-8 #2 | R2 → R2h (queued) → H2, A1, A3, A4 drop R1 from the list (C4, R1's unit now unattributed) → the transport sends `complete` claiming `quarantined_unattributed: 0`. Also: an attempt queued past its JWS `exp` draws a correct `401` and halts every route (R11, N1) | I3; I8 | Dispatch is the linearization point; stale or aged queued attempts are cancelled: **R2d**, **R2q**, **T2d**, **T2q** |
+| Round-8 #3 | Volume full; a list drops R1; A1 commits on the reserve (K2, the high-water advances), A3 fails (K2x): R1 is still servable until its lease lapses. With the reserve already used, A1 itself fails (K2x) with the same effect | I1 | Narrowing is applied in memory at admission, before any write: **A0**; K5 allows it |
+| Round-8 #4 | A `409 state_regression` minted in epoch E0 is delivered late, after the operator's `accept-epoch` restart; R14 has invalidated the report, R6 accepts the receipt from `invalidated` and raises the E1 floor to `complete`, which E1 never accepted | I5 | A convergence ack minted in another epoch is audit only and forces a relist: **R6e** (R6 requires the current epoch) |
+| Round-8 #5 | `409 idempotency_conflict` → R9 `halted`: no row leaves `halted` (N4 covers auth halts only) | I7 (and L1) | Audited operator `resume-report`: **N5** |
+| Round-8 #6 | A duplicated list request's copy gets `401 replay`, a correct answer; F8 → N1 halts every route until an operator restart | I8 | `401 replay` retries with a fresh `jti`: **F8r**, **R11r**, **T6r** |
+| Round-8 #7 | GC revokes R0's superseded object (O4(b)); its unlink fails; O7 has no GC owner, so the entry is unattributed while R0 is listed active, and blocks every `complete` until a human release | I9 | A quarantine owner is derived from the descriptor's current class; GC-owned entries are retried: **O7**, **O11g**, O14 |
+| Model M-1 (new) | GC revokes R0's superseded object; a list drops R0 (unknown); O5 lets GC claim what it revoked, so GC deletes data of a resource that is no longer active | I2 | GC claims only while the resource is active; otherwise A5 or O8 takes the object: **O5**, **O8**, **A5** |
+| Model M-2 (new) | L1's W reserves the units, then its G fails (K2x): nothing in the process retries the detach (only S10 at the next start), so L4 never runs and the release is stuck | I7 | **L1d** retries the detach in process |
+
+The model also made three things explicit that the paper table left open: R15's time clause is the only way to retire uncertain keys from an earlier epoch (R14 puts them there; the model's bound shows they accumulate across a restore); a retired room is already refused once A1's tombstone is durable, because `pin_and_lease` checks committed tombstones, so finding #3's exposure is the non-tombstoned narrowing (a room dropped from the list); and with the frozen contract's validation order (idempotency, then `list_ref`, then monotonicity) and R13 batched into H6's commit, finding #4 needs a response that outlives the holder process, which R18 and R19 already assume.
 
 §16 lists the properties that are closed in the design but can only be proven by tests.
 
@@ -291,7 +308,7 @@ If any object is `revoked` or `doomed`, nothing is leased. The call releases L3 
 - **Cache-only eviction (withholding, F5-3).** When a resource moves to the withheld map, its objects' cells are detached under L3 and their readers dropped outside it, exactly as in revocation, **but the object stays `live`**. A later re-initialization is allowed once the resource is servable again. Withholding therefore frees memory without making the object deletable, and reversal needs no rebuild.
 - **Deletable** (`revoked → doomed`, the claim). Under L3, an object may be claimed only if **all** of these hold:
   - its state is `revoked`;
-  - the claimant owns the revocation reason: the obligation for its resource, GC, or the release that reserved it (§5.8 O5);
+  - the claimant owns the revocation reason: the obligation for its resource, GC (only while the resource is still active; revision 9), or the release that reserved it (§5.8 O5);
   - its lease count, cache-handle count, external-handle count and init-in-progress count are all zero;
   - no active generation, retained generation, withheld map or build root references it.
 
@@ -560,7 +577,7 @@ Elapsed time also depends on contention from queries and reconciliation. That is
 
 ## 5. Holder lifecycle: Kwiry as a `Holdings` consumer
 
-Kwiry consumes the engine-neutral lifecycle contract that the owner approved and OpenClast froze on 2026-11-17. Kwiry is one **holder** of kind `engine`. It pulls a signed, complete list of what it holds (`Holdings.List`), reports purge progress (`Obligation.Report`), and reports its holder-wide quarantine (`holders/status`). The authority owns every obligation and every release decision. Kwiry keeps only refusal state, and that state can never widen access. Revisions 6 and 7 keep that architecture and the contract, and correct the consumer state machine. **Revision 7 makes it normative: §5.8 is a mechanically checkable transition table. Anything it does not list is refused, and where prose disagrees, the table wins.**
+Kwiry consumes the engine-neutral lifecycle contract that the owner approved and OpenClast froze on 2026-11-17. Kwiry is one **holder** of kind `engine`. It pulls a signed, complete list of what it holds (`Holdings.List`), reports purge progress (`Obligation.Report`), and reports its holder-wide quarantine (`holders/status`). The authority owns every obligation and every release decision. Kwiry keeps only refusal state, and that state can never widen access. Revisions 6 and 7 keep that architecture and the contract, and correct the consumer state machine. **Revision 7 makes it normative: §5.8 is a mechanically checkable transition table. Anything it does not list is refused, and where prose disagrees, the table wins. Revision 9 makes the table executable: the model in `daemon/crates/kwiry-lifecycle` is normative, it is model-checked, and §5.8 is generated from it.**
 
 **Binding inputs:**
 - **The contract:** *OpenClast Holdings wire contract*, FROZEN 2026-11-17, `.workspace/kwiry-integration/HOLDINGS-WIRE.md` in the OpenClast workspace. It is cited as **HW §n**.
@@ -630,7 +647,7 @@ Kwiry consumes the engine-neutral lifecycle contract that the owner approved and
 | `tombstones` | `{resource_id, holding_id}` ever seen `terminating` or `retired` (HW §3.4 rule 6) | union only (`apply_list`) |
 | `floors` | per obligation: `{epoch, state, receipt_key}`, the highest state the authority **accepted** in the current epoch | raised within an epoch (R5, R6, R13); removed when the obligation leaves the list (R12); moved to `floor_history` on an epoch change (R14) |
 | `floor_history` | floors from earlier epochs | append only; audit only |
-| `pending` | per obligation: at most one current report, with status `ready`, `armed`, `sent`, `invalidated`, `rejected` or `halted`; plus its key, canonical business body, `derived_at` and `attempts` | `put_pending` (R1, R1r), `append_attempt` (R2, which arms; R2x prunes a never-transmitted attempt), `invalidate` (R3, R14), `reject` (R7, R8), `halt` (R9), `clear` (R5, R6, R12, R13) |
+| `pending` | per obligation: at most one current report, with status `ready`, `armed`, `sent`, `invalidated`, `rejected` or `halted`; plus its key, canonical business body, `derived_at` and `attempts` | `put_pending` (R1, R1r), `append_attempt` (R2, which arms; R2x prunes a never-transmitted attempt), `invalidate` (R3, R14), `reject` (R7, R8, R6e), `halt` (R9), `resume` (N5), `clear` (R5, R6, R12, R13) |
 | `uncertain` | per idempotency key: attempts of an **invalidated** report that may have been accepted, kept as evidence until resolved | moved in by `invalidate`; pruned by R15 |
 | `status` | the current holder status report (same sub-states as `pending`) and the last accepted one | rows T1–T6 |
 | `instructions` | per `instruction_id`: `reserved{units, manifest_digest}`, `draining`, `deleted`, `result_sent`, `done`, `mismatch{observed_manifest_digest}` or `mismatch_reported` | rows L1–L11 |
@@ -759,6 +776,7 @@ It changes only in one L3 swap at the end of a publisher transaction. It carries
 A lease-only renewal bumps only `lease_ver`, so it never invalidates a completion or a pending report.
 
 **Apply transaction** (rows A1–A6, executed by the publisher actor after verification, which happens outside it):
+0. **A0 (revision 9).** At admission, under L3, every resource the list does not show active, or that is tombstoned, is refused for serving at once, before any durable write. If A1–A3 then fail for lack of space (K2x), the refusal stays until a later apply reaches A4.
 1. **A1.** The writer commits `apply_list`: tombstones ∪ the new terminating and retired IDs; the high-water; consuming or voiding an armed epoch acceptance where H6 or H7 applies.
 2. **A2.** If A1 added the first tombstone ever: write `rollback.json`, delete `current.v2.json`, fsync both (§4.10).
 3. **A3.** Publish the generation record:
@@ -793,7 +811,8 @@ A resource `r` in `E` is **servable** only while all of these hold:
 |---|---|
 | Network failure, a deadline, `429`, `503 lifecycle_unavailable` | `lifecycle_unreachable` |
 | `503 authority_epoch_mismatch` | `authority_rollback_suspected` (H10) |
-| `401` on any route | `lifecycle_unauthorized`. M10 `AuthHalted(401)`: no lifecycle traffic until an operator restart (N1, N4) |
+| `401 invalid_holder_proof` on any route | `lifecycle_unauthorized`. M10 `AuthHalted(401)`: no lifecycle traffic until an operator restart (N1, N4) |
+| `401 replay` on any route | None: a fresh `jti` and a retry (HW §4.5; F8r, R11r, T6r). Never a halt |
 | `403 holder_not_authorized` on any route | M10 `AuthHalted(403)`: nothing is served until an operator restart (N2, C11, N4) |
 
 **Epoch acceptance is a one-use transition (R6-5, HW §14 G.4).** OpenClast's restore runbook makes holder-side acceptance a **required** step.
@@ -829,6 +848,7 @@ HW S2's signed epoch chain removes the residual. The lease bounds how long Kwiry
   - *Quarantined* data has been revoked, drained, renamed into `quarantine/<random>/` and recorded in `quarantine/ledger.json`. That covers unreadable artifacts, failed deletions, the remaining units of tombstoned-unlisted resources, and garbage GC could not attribute (§4.5).
   
   Neither kind is ever leased, opened for a request, built from or served.
+  - **A quarantine entry's owner is derived, not stored (revision 9).** It follows the descriptor's current class: GC for an active resource (retried, O11g), the obligation for an obligated or retired one (O11), unattributed for an unknown or tombstoned-unlisted one. Only a release pin is stored (O13).
 - **Units** carry random IDs and no resource ID: an object ID, a staging build ID, a quarantine entry name, or a `(v2-tree, partition)` pair.
 - **Unattributed inventory.** This is the set of units counted "yes" in the §5.3 class table, plus quarantine entries not attributed to a listed obligation, plus **reserved units until they are deleted**. Its size is `quarantined_unattributed` (HW §4.1). While it is non-empty, no `complete` is enqueued or transmitted (R1, R2).
 - **`quarantine_manifest_digest` (HW §14 D):** `qm1.` + base64url(SHA-256(`"kwiry-quarantine-manifest/v1"` ‖ 0x00 ‖ JCS(`{"holder_id", "count", "units": [sorted unit IDs]}`))). Before the first transmission of any report carrying it, the writer stores `manifests/<idempotency_key>.json`.
@@ -866,7 +886,7 @@ HW S2's signed epoch chain removes the residual. The lease bounds how long Kwiry
   - **Build admission** counts every retained byte: layout, withheld, quarantined and staging bytes, plus the estimated build, plus both reserve targets. These must fit within `data_root_max_bytes` and within free space (K3). If they don't, builders pause and Kwiry raises `disk_pressure`. Serving, listing, reporting and obligation purges continue. **Disk pressure never authorizes deleting withheld or quarantined data.**
   - **Reserve states** (§5.8 M9):
     - **Insufficient** (K1i): startup could not preallocate the target, and continues anyway.
-    - **Exhausted** (K2x): a lifecycle write needed more than remained, so that row fails with no state change. While Exhausted, only work that frees space or writes nothing may run (K5): serving within existing leases, lease lapse, and deletions of already-owned units. Everything that needs a new durable write is refused at that write.
+    - **Exhausted** (K2x): a lifecycle write needed more than remained, so that row fails with no state change. While Exhausted, only work that frees space or writes nothing may run (K5): serving within existing leases, lease lapse, A0's in-memory refusals, and deletions of already-owned units. Everything that needs a new durable write is refused at that write.
   - **Replenishment.** The reserves are re-preallocated as soon as space allows (K4).
 - **Operator actions are outside the holder.** An operator who deletes the whole data root (CONTRACT §1.1) has not been overridden by Kwiry. Holder state stays, and open obligations complete against the empty root.
 
@@ -908,7 +928,7 @@ Kwiry keeps no local history of what it owes. The obligation queue is rebuilt fr
 Every report carries `counts.quarantined_unattributed` and `quarantine_manifest_digest`.
 
 **Accepted floors and replaceable reports (R6-2).**
-- **Floors are monotone within an epoch.** `floors[o]` records the highest state the authority **accepted** in the current epoch. Evidence for it is a replay or convergence ack, or a verified list's `last_accepted`. It only rises, until a consumed epoch acceptance moves it to history (R14).
+- **Floors are monotone within an epoch.** `floors[o]` records the highest state the authority **accepted** in the current epoch. Evidence for it is a replay or convergence ack minted in the current epoch, or a verified list's `last_accepted`. A convergence ack minted in another epoch is audit only (R6e). It only rises, until a consumed epoch acceptance moves it to history (R14).
 - **The pending report is replaceable.** It is never a floor. It can be:
   - **sent**, while its proof still holds;
   - **invalidated**, when its proof no longer holds;
@@ -929,6 +949,8 @@ Every report carries `counts.quarantined_unattributed` and `quarantine_manifest_
 For `complete` after a restart, the proof requires a barrier and final scan completed **in this process**. The body itself is not changed, so the key stays stable.
 
 The guard records the versions it read. **The bytes are handed to the transport only inside a publisher-actor handoff transaction** (R2h, T2h) that re-checks those versions, serialized with every A4 swap. If they moved, the attempt is pruned as never transmitted and the report is invalidated (R2x, T2x). Transport attempts use the same deadlines as list fetches: 10 s to connect and 30 s for the response, under a cancellation token (R2c, T5).
+
+**Enqueue is not transmission (revision 9).** The handoff only queues the bytes. The transport's dispatch is the linearization point: in one L3 critical section immediately before the first byte is written it re-checks the versions R2 recorded and refuses an attempt queued for 30 s or more, well inside its JWS `exp`. A stale or aged attempt is cancelled as never transmitted and R2x or T2x follows (R2d, R2q, T2d, T2q). A report a restart left `armed` is *sent, outcome unknown*: R2 or R3 follows it (R4a, T2r).
 
 If any check fails, the report is **invalidated** (R3) and re-derived under a new key. Wherever an attempt of the invalidated key may already have been accepted, its exact sent bytes (`sent/<digest>.jws`) and attempt records move to `uncertain`, and stay there until resolved (R15). One of three things resolves them:
 - a replay or convergence ack;
@@ -974,8 +996,9 @@ An ack matching no path is rejected with `ack_unverifiable`, and the pending rep
 | `409 state_regression`, `200 already_complete` | R6 |
 | `409 complete_refused_unattributed`, `409 stale_list_ref` | R7: rejected, definitively not accepted, because idempotency is checked before these. Relist first for `stale_list_ref` |
 | `404 obligation_not_found` | R8 |
-| `409 idempotency_conflict`, `400 invalid_request`, `413` | R9: halt the obligation, raise a bug alert, never re-derive |
-| `401`, `403` | R11, M10: N1 or N2, until an operator restart (N4) |
+| `409 idempotency_conflict`, `400 invalid_request`, `413` | R9: halt the obligation and raise a bug alert; no automatic re-derivation. An audited operator `resume-report` re-derives under a new key after the cause is fixed (N5) |
+| `401 invalid_holder_proof`, `403` | R11, M10: N1 or N2, until an operator restart (N4) |
+| `401 replay` | R11r: a fresh `jti` and a retry; never a halt |
 | `503 authority_epoch_mismatch` | R10, plus H10 |
 | `429`, other `503`s, network failure, deadline | R10: back off |
 
@@ -1025,9 +1048,13 @@ The same list, plus `models/`, is the scope of the §5.2 "data lost" proof.
 - storage-medium remanence: `logical_delete` is unlink plus fsync, not sanitization (HW amendment A; Q6);
 - OpenClast's authority records.
 
-### 5.8 Lifecycle transition table (normative)
+### 5.8 Lifecycle transition table (normative, generated from the model)
 
-This table is the lifecycle contract. **Any state and event pair that no row lists is refused:** nothing is written, the state is unchanged, and Kwiry raises `lifecycle_transition_refused` with the machine and row context. Where prose in §4 or §5 disagrees with a row, **the row wins**, and the prose is a defect to fix.
+<!-- BEGIN GENERATED by daemon/crates/kwiry-lifecycle (cargo run -p kwiry-lifecycle --example lifecycle_table); do not edit by hand -->
+
+**The executable model is normative; this table is derived from it.** The model is `daemon/crates/kwiry-lifecycle`: a pure transition function over the holder's durable store and volatile state, with each of the eleven machines as Rust types, every durable write a separate step, and every step citing the rows below. A bounded model checker interleaves the holder's actors (list apply, report and status senders, transport, GC and purge, release, operator) with an authority that follows the frozen Holdings contract: it reorders, delays, duplicates and loses messages, returns every HW §4.5 error, changes lists, retires rooms and rolls the epoch back through the supported restore. Crashes fall between any two durable writes and keep only durable state. The checker proves the properties listed after the tables in every reachable state, and `cargo test -p kwiry-lifecycle` fails if this table differs from the model's row data. Where the table and the model disagree, the model wins and the table is regenerated.
+
+**Any state and event pair that no row lists is refused:** nothing is written, the state is unchanged, and Kwiry raises `lifecycle_transition_refused` with the machine and row context. Where prose in §4 or §5 disagrees with a row, **the row wins**, and the prose is a defect to fix.
 
 **Notation for durable writes**, listed in fsync order and separated by `→`:
 
@@ -1042,7 +1069,7 @@ This table is the lifecycle contract. **Any state and event pair that no row lis
 | **L3** | An in-memory change under L3, with no durability |
 | **—** | No write |
 
-In the *Crash after* column, "restart" means startup machine M1 from S1. *Reads* lists the versions, fields and rows each guard depends on.
+In the *Crash after* column, "restart" means startup machine M1 from S1. *Reads* lists the versions, fields and rows each guard depends on. After each machine, *Model* names the rows the model does not execute as a transition of their own, and why.
 
 #### M1 — Startup phases
 
@@ -1073,6 +1100,8 @@ States: `P0` start → `P0L` locks held → `P1` holder loaded → `P2` started 
 | S17 | `FC(holder_state_corrupt` or `holder_identity_mismatch)`, operator `--set-aside-corrupt` | The command holds both locks | Rename to `holder-state.corrupt-<t>`, fsync the directory | Restart, then S4 or S5 | Either name, and the next start classifies it | F5-6 |
 | S18 | P5–P7, shutdown | — | — (cancel F-rows and report and status transports, R2c and T5; builders stop at a yield; any in-progress W completes) | Exit | — | §4.4 |
 
+*Model:* every other row is a step of the model. Not a step of its own: S1 (not modeled: configuration is fixed and valid); S1L (not modeled: one process per data root; lock exclusion is a conformance-test concern); S2 (not modeled: enrollment and key loss); S3 (implicit: every boot loads valid holder state); S4, S5 (not modeled: holder-state loss and trust on first use); S9, S9n (not modeled: layout-v2 migration); S14, S15, S16, S17 (not modeled: fail-closed startup and offline recovery); S18 (implicit: a crash or operator stop discards all volatile state and the transport).
+
 #### M2 — Holder epoch and high-water
 
 States: `N` (`high_water: null`), `B(E,s)` (baseline), `A(E,s→E')` (one armed acceptance). The event `L(E_L,s_L)` is a list that passed F3.
@@ -1091,6 +1120,8 @@ States: `N` (`high_water: null`), `B(E,s)` (baseline), `A(E,s→E')` (one armed 
 | H10 | Any state + `503 authority_epoch_mismatch` on any route | — | — | Unchanged; `authority_rollback_suspected`; leases run down; back off | — | HW §14 F, F5-7 |
 | H11 | A, operator `accept-epoch --cancel` (daemon stopped) | The command holds `holder.lock` | W (acceptance voided into `epoch_history`) | B(E,s) | Either | R6-5 |
 
+*Model:* every other row is a step of the model. Not a step of its own: H3 (not modeled: needs a same-epoch rollback (raw restore), the stated residual); H7 (not modeled: needs the authority to serve the old epoch again after a supported restore); H8 (not modeled: needs a third epoch; the model has two); H9 (implicit: the operator arms only a different, alerted epoch); H11 (not modeled: cancelling an armed acceptance is never needed for progress).
+
 #### M3 — List fetch
 
 States: `Idle`, `InFlight(nonce, pages, deadlines)`.
@@ -1104,21 +1135,27 @@ States: `Idle`, `InFlight(nonce, pages, deadlines)`.
 | F5 | InFlight + `410 list_expired` | Fewer than 5 consecutive | — | InFlight with a fresh nonce from `cursor: null`. At 5: Idle, back off, `lifecycle_list_livelock` | — | HW §3.7 |
 | F6 | InFlight + deadline expiry, or cancellation | — | — | Idle; connection closed; partial pages discarded; slot freed; back off | — | R6-8 |
 | F7 | InFlight + network failure, `429`, or a `503` other than H10 | — | — | Idle; back off (from 10 s, capped at `relist_seconds / 2`) | — | HW §4.5 |
-| F8 | InFlight + `401` or `403` | — | — | Idle; N1 for `401`, N2 for `403` | — | HW §4.5, R7-7 |
+| F8 | InFlight + `401 invalid_holder_proof` or `403` | — | — | Idle; N1 for `401`, N2 for `403` | — | HW §4.5, R7-7 |
+| F8r | InFlight + `401 replay` | — | — | Idle; F1 retries at once with a fresh `jti` (HW §4.5: one retry; a second consecutive `replay` backs off as F7). Never a halt | — | HW §4.5, round-8 #6 |
 | F9 | InFlight + another trigger | — | — | Unchanged (coalesced) | — | Amendment B |
+
+*Model:* every other row is a step of the model. Not a step of its own: F2 (implicit: pages are collapsed: a list is verified whole); F4 (implicit: a list that fails verification is discarded like a transient failure (F7)); F5 (implicit: `410` restarts the fetch like a transient failure (F7)); F9 (implicit: F1 requires nothing in flight).
 
 #### M4a — Apply transaction (inside the publisher actor)
 
 | ID | Step | Guard (reads) | Durable writes | Next | Crash after write | Implements |
 |---|---|---|---|---|---|---|
-| A1 | Commit the list | The H row admitted it | W (`apply_list`: tombstones ∪; `hw`; the H6/H7 acceptance change; R14 where H6) | A2 or A2n | Restart: S8 and S10 enforce the tombstones; leases are not persisted, so nothing is served until the next list | HW §3.4 rule 6, §3.7 |
-| A2 | Markers needed | `tombstones ≠ ∅` and (`rollback.json` absent or `current.v2.json` present) | M | A3 or A3n | Restart: S8 | R4-7 |
+| A0 | Admission: an H row admitted the verified list, before A1 | — | L3 only: every resource the list does not show `active`, or that is tombstoned, is refused for serving at once (`pin_and_lease` and the end-of-request check read the refusal). Nothing is revoked or written | A1 | Nothing durable; restart serves nothing until S12 | Round-8 #3 |
+| A1 | Commit the list | The H row admitted it | W (`apply_list`: tombstones ∪; `hw`; the H6/H7 acceptance change; R14 where H6) | A2 or A2n. If the W fails (K2x), the transaction aborts; A0's refusals stay in force until a later apply reaches A4 | Restart: S8 and S10 enforce the tombstones; leases are not persisted, so nothing is served until the next list | HW §3.4 rule 6, §3.7 |
+| A2 | Markers needed | `tombstones ≠ ∅` and (`rollback.json` absent or `current.v2.json` present) | M | A3 or A3n. On K2x: aborted as in A1 | Restart: S8 | R4-7 |
 | A2n | Markers unnecessary or already durable | `tombstones = ∅`, or (`rollback.json` present and `current.v2.json` absent) | — | A3 or A3n | — | R7-4 |
-| A3 | Publish the classification | The new layout, withheld map, attribution or reservations differ from the current generation | G (layout = active and lapsed; withheld = unknown and active-unconfigured, with attribution; obligated, retired and tombstoned dropped; reserved units excluded) | A4 | Restart: the generation is durable; S10 or S10n is consistent | §5.3, R6-1 |
+| A3 | Publish the classification | The new layout, withheld map, attribution or reservations differ from the current generation | G (layout = active and lapsed; withheld = unknown and active-unconfigured, with attribution; obligated, retired and tombstoned dropped; reserved units excluded) | A4. On K2x: aborted as in A1 | Restart: the generation is durable; S10 or S10n is consistent | §5.3, R6-1 |
 | A3n | Classification unchanged | Layout, withheld map, attribution and reservations all equal the current generation (for example a lease-only renewal) | — | A4 | — | R7-4, R6-7 |
-| A4 | Swap the snapshot | — | L3 (pointer, leases, classes, inventory, reservations; bump `lease_ver`, `class_ver[r]`, `res_ver[r]`, `obl_ver[o]`, `inv_ver`, `layout_ver` as affected) | A5 | — | F5-4, R6-7 |
-| A5 | Revoke | — | L3 (revoke the objects of obligated and retired resources, O4; cache-only eviction for withheld ones, O3) | A6 | — | §4.3 |
+| A4 | Swap the snapshot | — | L3 (pointer, leases, classes, inventory, reservations; clear A0's refusals; bump `lease_ver`, `class_ver[r]`, `res_ver[r]`, `obl_ver[o]`, `inv_ver`, `layout_ver` as affected) | A5 | — | F5-4, R6-7 |
+| A5 | Revoke | — | L3 (revoke the objects of obligated, retired and tombstoned resources, O4; an object GC had revoked passes to the obligation, O5; cache-only eviction for withheld ones, O3) | A6 | — | §4.3 |
 | A6 | Queue work | — | — | Done; M6, M7 and M8 queues rebuilt from L | — | §5.6 |
+
+*Model:* every row is a step of the model.
 
 #### M4b — Resource class
 
@@ -1142,9 +1179,11 @@ Writes happen through A1–A6 unless stated. "Configured" and "tombstoned" are r
 | C14 | tombstoned-unlisted + L `terminating`, or `retired` with `escalated` | — | A3 (no mapping) → A4: `r`'s quarantined units are re-attributed to the obligation, leave the unattributed inventory, and `inv_ver` is bumped | obligated | As in A1–A3 | Completeness, HW §3.4 rule 3 |
 | C15 | retired-complete + L `retired` with `escalated` | — | A3 → A5 if objects remain | obligated (purge and reporting continue) | As in A3 | Completeness, HW §14 Q8 |
 
+*Model:* every other row is a step of the model. Not a step of its own: C2, C3 (not modeled: leases never lapse in the model (lapse only narrows serving)); C10, C13 (not modeled: every room is configured); C14 (not modeled: the authority model never re-terminates a dropped holding); C15 (not modeled: escalation is not modeled).
+
 #### M5 — Object lifetime
 
-States: `live`, `revoked`, `doomed`, `deleted`, and `quarantined` with an owner: an obligation `o`, a release `reserved_by = id`, or unattributed.
+States: `live`, `revoked`, `doomed`, `deleted`, and `quarantined`. A quarantine entry's owner is derived from its descriptor's current class (GC, an obligation `o`, or unattributed), except a release pin `reserved_by = id`, which is stored.
 
 | ID | State + event | Guard (reads) | Durable writes | Next | Crash after write | Implements |
 |---|---|---|---|---|---|---|
@@ -1152,46 +1191,56 @@ States: `live`, `revoked`, `doomed`, `deleted`, and `quarantined` with an owner:
 | O2 | live + publication referencing it | Publisher revalidation (§4.3) | G | live (layout or withheld reference) | — | §4.3 |
 | O3 | live + withholding (C4, C10) | — | G → L3 cache-only eviction | live | — | F5-3 |
 | O4 | live + revoke reason: (a) obligated or retired drop (A5); (b) unreferenced and attributed to an active resource (GC); (c) release reservation (L1) | The reason is already durable: W tombstone, G, or W reservation | L3 (`revoked`, cell detached, reader dropped outside L3) | revoked | Restart re-derives `revoked` from the durable reason (S10, GC scan) | §4.3, R4-1 |
-| O5 | revoked + claim | Lease, handle and init counts all zero; no layout, withheld, retained or build-root reference; the claimant owns the reason (obligation for `r`, GC, or the release that reserved it) | — (L3) | doomed | — | §4.3, R6-1 |
+| O5 | revoked + claim | Lease, handle and init counts all zero; no layout, withheld, retained or build-root reference; the claimant owns the reason (obligation for `r`, GC, or the release that reserved it). **GC claims only while `r` is still active in the current snapshot**; otherwise the object stays revoked and A5 (obligated) or O8 (unknown, tombstoned-unlisted) takes it | — (L3) | doomed | — | §4.3, R6-1, model M-1 |
 | O6 | doomed + delete | — | D | deleted | A partial tree remains with its reason still durable, so O4–O6 repeat | §5.6 step 5 |
-| O7 | doomed + delete failure | — | Q, keeping the owner: obligation `o` or `reserved_by = id` | quarantined (owned) | Restart: the quarantine scan rebuilds the ledger entry and its owner from the descriptor and from W reservations; otherwise unattributed | P-b, R7-6 |
-| O8 | live, unreferenced, attributed to an unknown, tombstoned-unlisted or unattributable resource | — | L3 revoke → drain → Q | quarantined (unattributed) | As in O7 | §4.5, amendment C |
+| O7 | doomed + delete failure | — | Q. The ledger entry keeps the descriptor and, for a reserved unit, the pin `reserved_by = id` (O13). Its owner is **derived** at every L3 update from the descriptor's current class: active → GC (O11g), obligated or retired → the obligation (O11), unknown or tombstoned-unlisted → unattributed | quarantined (owner derived) | Restart: the quarantine scan rebuilds the entry from its descriptor and the W reservations; the owner is derived again | P-b, R7-6, round-8 #7 |
+| O8 | live (or revoked by GC whose resource is no longer active, O5), unreferenced, attributed to an unknown, tombstoned-unlisted or unattributable resource | — | L3 revoke → drain → Q | quarantined (unattributed) | As in O7 | §4.5, amendment C |
 | O9 | revoked or doomed + lease or reader-init request | — | — | Refused (pin retries, then `index_building`) | — | F1, R4-1 |
 | O10 | live (withheld only) + lease request | Resource not servable | — | Refused (`resource_unavailable`) | — | §5.4 |
-| O11 | quarantined (owned by `o`) + retry timer | `o` is still listed (obligated or retired-complete); no registry entry, lease or handle exists for the entry; no process fd refers to it | D | deleted. On failure: unchanged, backoff | Partial delete: O11 retries | R7-6 |
+| O11 | quarantined (owner derived: obligation `o`) + retry timer | `o` is still listed (obligated or retired-complete); no registry entry, lease or handle exists for the entry; no process fd refers to it | D | deleted. On failure: unchanged, backoff | Partial delete: O11 retries | R7-6 |
+| O11g | quarantined (owner derived: GC; the descriptor's resource is listed `active`) + retry timer | The resource is still active; no registry entry, lease or handle exists for the entry; no process fd refers to it | D | deleted. On failure: unchanged, backoff | Partial delete: O11g retries | §4.5, round-8 #7 |
 | O12 | quarantined (`reserved_by = id`) + L5 drain step | Instruction `id` is `draining`; no process fd refers to the entry | D | deleted. On failure: unchanged, L5f | Partial delete: L5 retries | R7-6 |
 | O13 | quarantined (unattributed) + L1 reservation | L1's guard passed for this unit | Ledger mark `reserved_by = id` (ledger update, fsync), after L1's W | quarantined (`reserved_by = id`): the quarantined counterpart of O4(c) | A crash between L1's W and the ledger write is repaired by S10 or S10n | R7-6 |
-| O14 | quarantined (owned by `o`) + `o` leaves the list (C8, R12) | — | Ledger owner cleared, fsync; `inv_ver` bumped | quarantined (unattributed) | The restart scan treats an entry whose owner is no longer listed as unattributed | R7-6 |
+| O14 | quarantined (owner derived: obligation `o`) + `o` leaves the list (C8, R12) | — | — (the derived owner becomes unattributed in the A4 swap; `inv_ver` is bumped) | quarantined (unattributed) | — | R7-6, round-8 #7 |
+
+*Model:* every other row is a step of the model. Not a step of its own: O1, O2 (not modeled: builders); O3 (implicit: cache-only eviction has no state the properties read); O9 (implicit: `servable()` refuses revoked and doomed objects); O10 (implicit: `servable()` refuses withheld resources); O14 (implicit: derived in the A4 swap; no transition of its own).
 
 #### M6 — Obligation report (per obligation `o`)
 
-The floor is `F = floors[o]` in the current epoch. Pending states: `none`, `ready`, `armed` (attempt durable, not yet handed off), `sent`, `invalidated`, `rejected`, `halted`. The transmission guard and the enqueue guard are defined in §5.6.
+The floor is `F = floors[o]` in the current epoch. Pending states: `none`, `ready`, `armed` (attempt durable, not yet handed off), `queued` (handed to the transport, not yet on the wire; volatile), `sent` (on the wire; volatile, so a restart restores `armed`), `invalidated`, `rejected`, `halted`. The transmission guard and the enqueue guard are defined in §5.6.
 
 | ID | State + event | Guard (reads) | Durable writes | Next | Crash after write | Implements |
 |---|---|---|---|---|---|---|
 | R1 | none, invalidated or rejected (or ready or sent with a lower state) + a derived state `s` | Publisher transaction: `obl_ver[o]`, `res_ver[r]`, `inv_ver` and the epoch unchanged since the pass. Then **either** `s > F`, **or** `s == F` as a same-state update (counts or manifest digest differ from the last accepted report) or a reconfirmation (R1r, or after R14), at most once per 300 s per obligation. Plus the enqueue guard, and an empty inventory for `complete` | W[`receipts/<key>` scan record, for `complete`] → W[`manifests/<key>`] → W (`pending = ready{key, B}`) | ready | After a side file: an orphan, later pruned. After W: ready, re-validated by R2 after the restart | HW §4.1, §4.4, §14 Q3, Q7; F5-4; R6-7; R7-5 |
 | R1r | retired-complete whose data reappeared (C7 with artifacts) + a purge pass completes | As R1, with `s = complete == F` allowed as a reconfirmation | As R1 | ready (the authority answers `already_complete`, R6) | As R1 | HW §3.4 rule 4, R7-5 |
-| R2 | ready or sent + transmission (first send or retry) | The transmission guard passes against the current snapshot and **records the versions it read** (`obl_ver[o]`, `res_ver[r]`, `inv_ver`, epoch). For `complete` after a restart, a barrier and scan completed in this process | W[`sent/<d>.jws`] → W (append `{jti, d, exp}`; pending → `armed`) | armed | After W: the attempt counts as possibly accepted | F5-1, R6-3 |
-| R2h | armed + handoff | A **publisher-actor handoff transaction**, serialized with A4: the versions still equal those R2 recorded | — (a non-blocking enqueue of the exact bytes to the report transport: connect 10 s, response 30 s, under a cancellation token) | sent | — | R7-2, R7-8 |
-| R2x | armed + handoff | The versions differ | W (pending → invalidated; this attempt is marked `not_transmitted` and pruned with its `sent/` bytes; earlier attempts go to `uncertain`) | invalidated, then R1 | Restart before W: R4 treats `armed` as possibly transmitted | R7-2 |
+| R2 | ready, sent, or armed restored by a restart (R4a) + transmission (first send or retry) | The transmission guard passes against the current snapshot and **records the versions it read** (`obl_ver[o]`, `res_ver[r]`, `inv_ver`, epoch). For `complete` after a restart, a barrier and scan completed in this process | W[`sent/<d>.jws`] → W (append `{jti, d, exp}`; pending → `armed`) | armed | After W: the attempt counts as possibly accepted | F5-1, R6-3 |
+| R2h | armed + handoff | A **publisher-actor handoff transaction**, serialized with A4: the versions still equal those R2 recorded | — (a non-blocking enqueue of the exact bytes to the report transport). **Enqueue is not transmission**: the bytes leave only through R2d | queued | — | R7-2, R7-8 |
+| R2d | queued + dispatch (transport) | **The linearization point.** In one L3 critical section immediately before the first byte is written: the versions R2 recorded are unchanged, and the attempt has been queued for less than 30 s (well inside its JWS `exp`) | — (bytes on the wire: connect 10 s, response 30 s, under a cancellation token) | sent | — | Round-8 #2 |
+| R2q | queued + dispatch (transport) | The versions moved, or the attempt was queued for 30 s or more | — (the queued attempt is cancelled; nothing was transmitted) | armed, versions marked moved; then R2x | Restart: R4a | Round-8 #2 |
+| R2x | armed + handoff, or after R2q | The versions differ | W (pending → invalidated; this attempt is marked `not_transmitted` and pruned with its `sent/` bytes; earlier attempts go to `uncertain`) | invalidated, then R1 | Restart before W: R4 treats `armed` as possibly transmitted | R7-2 |
 | R2c | sent + transport cancellation (S18) | — | — | sent, outcome unknown: R4 on restart | — | R7-8 |
-| R3 | ready or sent + transmission | The transmission guard fails | W (`pending → invalidated`; any attempts and their `sent/` bytes move to `uncertain[key]`) | invalidated, then R1 | Either before or after | R6-3 |
-| R4 | ready, armed or sent, restart | — | — | Unchanged, with `armed` treated as possibly transmitted. Only R2 or R3 may follow, and only from P6 | — | F5-5, R7-2 |
+| R3 | ready, sent or armed restored by a restart (R4a) + transmission | The transmission guard fails | W (`pending → invalidated`; any attempts and their `sent/` bytes move to `uncertain[key]`) | invalidated, then R1 | Either before or after | R6-3 |
+| R4 | ready, armed or sent, restart | — | — | Unchanged. A restored `armed` is *sent, outcome unknown* (R4a). Only R2 or R3 may follow, and only from P7 | — | F5-5, R7-2, round-8 #1 |
+| R4a | armed restored by a restart (never handed off in this process) + transmission | As R2, or as R3 when the transmission guard fails | As R2 (the restored attempt counts as an earlier attempt that may have been accepted) or as R3 (it moves to `uncertain`) | armed (R2) or invalidated (R3) | As R2 or R3 | Round-8 #1 |
 | R5 | sent + replay receipt | Replay path (§5.6) | W[`receipts/<key>` ack] → W (`F = max(F, s)`; clear pending if `F > pending.state` or the receipt is for the pending key; prune the key's `sent/` and attempts) | none, or the remaining pending | After the receipt: the next retry gets the same original ack, so R5 again | HW §4.3, §4.4, R7-5 |
-| R6 | sent or invalidated + convergence receipt (`409 state_regression` body, `200 already_complete`) | Convergence path (§5.6) | W[`receipts/conv-<ack jti>`] → W (`F = max(F, accepted_state)`; clear pending and uncertain entries that are covered) | none, or pending | As in R5 | HW §4.4 |
+| R6 | sent or invalidated + convergence receipt (`409 state_regression` body, `200 already_complete`) **whose ack was minted in the current epoch** (ack `rev.epoch` equals the high-water's) | Convergence path (§5.6) | W[`receipts/conv-<ack jti>`] → W (`F = max(F, accepted_state)`; clear pending and uncertain entries that are covered) | none, or pending | As in R5 | HW §4.4 |
+| R6e | sent or invalidated + convergence receipt whose ack was minted in another epoch | Convergence path; ack `rev.epoch` ≠ the high-water's epoch | W[`receipts/conv-<ack jti>`] (audit) → W (if it answered the sent report: `pending → rejected`). **No floor change** | rejected or unchanged; a list must apply before R1 re-derives for `o` (R13 learns the current epoch's floor) | Either | R6-2, round-8 #4 |
 | R7 | sent + `409 complete_refused_unattributed` or `409 stale_list_ref` | Definitively not accepted: HW §4.1 checks idempotency before `list_ref` and before `complete` preconditions | W[`receipts/<key>` refusal] → W (`pending → rejected`; prune the key's `sent/`) | rejected, then R1 at any state above F. For `stale_list_ref`, F1 runs first | Either | HW §14 Q3, §4.5, R6-2 |
 | R8 | sent + `404 obligation_not_found` | — | W (`pending → rejected`) | rejected; F1. If `o` is then absent, R12 | Either | HW §4.5 |
-| R9 | sent + `409 idempotency_conflict`, `400 invalid_request` or `413` | — | W (`pending → halted`) | halted; bug alert; **never re-derived** | Either | HW §4.5, R7-7 |
+| R9 | sent + `409 idempotency_conflict`, `400 invalid_request` or `413` | — | W (`pending → halted`) | halted; bug alert; never re-derived automatically. N5 resumes after an operator fix | Either | HW §4.5, R7-7 |
 | R10 | sent + `429`, a `503`, network failure or deadline | — | — | Unchanged; back off; `authority_epoch_mismatch` also H10 | — | HW §4.5, §14 F |
-| R11 | sent + `401` or `403` | — | — | Unchanged; N1 for `401`, N2 for `403`. Never re-derived | — | HW §4.5, R7-7 |
+| R11 | sent + `401 invalid_holder_proof` or `403` | — | — | Unchanged; N1 for `401`, N2 for `403`. Never re-derived | — | HW §4.5, R7-7 |
+| R11r | sent + `401 replay` | — | — | sent, retry due: R2 retries at once with a fresh `jti` (HW §4.5). Never a halt | — | HW §4.5, round-8 #6 |
 | R12 | any + a verified list without `o` | — | W (pending archived to `receipts/`; `floors[o]` removed; uncertain kept for R15) | none (ended) | Either | HW §3.3 retention |
 | R13 | any + a verified list in which `o.last_accepted = a` and `a > F` | Same epoch | W (`F = a`, receipt `list:<list_id>`; clear pending only if `a > pending.state`) | — | Either | HW §3.3, R7-5 |
 | R14 | any + H6 (epoch acceptance consumed) | — | Inside H6's W: floors go to `floor_history`; pending and status are invalidated (attempts go to `uncertain`) | none (re-confirmation allowed) | As in H6 | R6-2, R6-5 |
 | R15 | `uncertain[k]` + a verified list | Either `last_accepted ≥ k.state`, or `list.iat > max(attempt.exp) + 420 s` with `last_accepted < k.state` | W (prune `uncertain[k]`) → D (`sent/` bytes) | resolved | Leftover `sent/` files pruned later | R6-3 |
 | R16 | any + a same-state derivation (`s == F`, or `s` equal to the invalidated or rejected state) | Less than 300 s since the last same-state report for `o` | — | Wait until the window opens, then R1 | — | HW §14 Q7, R7-5 |
-| R17 | sent + an ack with a valid signature that matches no path, **or** a replay receipt for a key R7 recorded as rejected | — | — | Unchanged; `ack_unverifiable` (`ack_contradiction` for a rejected key); after 3 in a row, halted | — | F5-1 |
+| R17 | sent + an ack with a valid signature that matches no path, **or** a replay receipt for a key R7 recorded as rejected | — | — | Unchanged; `ack_unverifiable` (`ack_contradiction` for a rejected key); after 3 in a row, halted (N5 resumes) | — | F5-1 |
 | R18 | any pending state (including none) + a replay receipt for a key in `uncertain` (a late receipt after invalidation, arriving outside `sent`) | Replay path against that key's attempts and body; the key's epoch is current | W[`receipts/<k>`] → W (`F = max(F, k.state)`; prune `uncertain[k]`; clear the current pending only if `F > pending.state`) | Pending unchanged or cleared | After the receipt: idempotent | Completeness, F5-1 |
 | R19 | any + a replay receipt for an `uncertain` key from an earlier epoch | The key's epoch ≠ the current epoch | W[`receipts/<k>`] (audit) → W (prune `uncertain[k]`); **no** floor change | Unchanged | Either | R6-2 |
+
+*Model:* every other row is a step of the model. Not a step of its own: R1r (not modeled: data never reappears after `complete` (no builders)); R2c (implicit: a crash or stop discards the transport; R4a resumes); R4 (implicit: durable pending reports survive every restart unchanged); R16 (not modeled: rate limits only delay; the model sends as early as allowed); R17 (not modeled: forged or mismatched acks).
 
 #### M7 — Release instruction (per `instruction_id`)
 
@@ -1200,9 +1249,10 @@ States: `unseen`, `reserved`, `draining`, `deleted`, `result_sent`, `done`, `mis
 | ID | State + event | Guard (reads) | Durable writes | Next | Crash after write | Implements |
 |---|---|---|---|---|---|---|
 | L1 | unseen + a `quarantine_release` entry on page 0 | A publisher transaction run **after A4** of the list that carried it, against that completed snapshot and its `inv_ver`. It requires: `issued_seq ≤ rev.seq`; a manifest retained for `bound_report_digest`; its count equal to `approved_count`; and **every** manifest unit in the current unattributed inventory, unreserved, with its attribution unchanged | W (`instructions[id] = reserved{units, digest}`) → G (withheld map without the object units) → ledger marks for quarantined units (O13) → L3 (revoke, `reserved_by = id`; bump `inv_ver`) | reserved | After W: S10 or S10n detaches and marks before any list applies. After G: complete | HW §14 D, G.5, R6-1, R7-3 |
+| L1d | reserved, not detached in this process (L1's G or ledger write failed with K2x) | Publisher transaction; P7 | G (withheld map without the object units) → ledger marks (O13) → L3 (revoke, `reserved_by = id`; bump `inv_ver`) | reserved (detached) | Restart: S10 or S10n detaches before any list | Model M-2 |
 | L2 | unseen + the same entry | Any L1 guard fails. This **includes a bound unit that has become attributed** (active-unconfigured, active, or obligated: C1, C13, C14) | W (`instructions[id] = mismatch{observed: current digest}`) | mismatch, then T1 with `release_result: mismatch` | Either | HW §14 G.2, G.5, R6-4, R7-3 |
 | L3 | unseen + an entry of unknown `kind` | — | — | Ignored and logged | — | HW §14 D |
-| L4 | reserved + start drain (outside the actor) | — | W (`draining`) | draining | Either | R6-1 |
+| L4 | reserved + start drain (outside the actor) | The reservation is detached in this process (L1, L1d, S10 or S10n) | W (`draining`) | draining | Either | R6-1 |
 | L5 | draining + a unit ready (an object with all counts zero, or a quarantine entry under O12) | The claimant is `id` | For each unit: L3 doom → D (objects), or O12 (quarantine entries). When all are gone, W (`deleted`) | deleted | Mid-way: S10 or S10n keeps the reservation and L5 resumes; units already deleted are absent | HW §14 G.5 |
 | L5f | draining + a unit's delete fails | — | — (the unit stays revoked and reserved; retried with backoff) | draining | — | P-b |
 | L6 | deleted | Publisher transaction | L3 (remove the units from the inventory, bump `inv_ver`) → T1 with `release_result: executed` | result_sent | Restart: the inventory is rebuilt from disk, and T1 is re-derived | HW §14 G.2 |
@@ -1212,24 +1262,32 @@ States: `unseen`, `reserved`, `draining`, `deleted`, `result_sent`, `done`, `mis
 | L10 | done or mismatch_reported + still listed | — | — | Unchanged; T1 only if no accepted status report carries the result | — | HW §14 G.2 |
 | L11 | reserved, draining or deleted + no longer listed | — | — | Continue to done | — | HW §14 G.5 |
 
+*Model:* every other row is a step of the model. Not a step of its own: L3 (not modeled: unknown instruction kinds); L9 (implicit: reserved units are excluded from every mapping (`generation.excluded`)); L10 (implicit: a listed result is re-reported until an accepted status carries it).
+
 #### M8 — Holder status report
 
-States: `none`, `ready`, `armed`, `sent`, `invalidated`, `rejected`, `halted`, plus `uncertain` keys.
+States: `none`, `ready`, `armed`, `queued`, `sent`, `invalidated`, `rejected`, `halted`, plus `uncertain` keys.
 
 | ID | State + event | Guard (reads) | Durable writes | Next | Crash after write | Implements |
 |---|---|---|---|---|---|---|
 | T1 | none, invalidated or rejected + a trigger (`reset_pending`, a digest change, a release outcome, daily while non-zero) | At least 60 s since the last send; publisher transaction reading `inv_ver` | W[`manifests/<key>`] → W (`status = ready{key, body}`) | ready | Either | HW §14 E, G.2 |
-| T2 | ready or sent + transmission | The re-derived count, digest, `holder_state` and `release_result` all equal the body; the versions read are recorded | W[`sent/<d>.jws`] → W (attempt; → `armed`) | armed | As in R2 | HW §14 G.1, R6-3 |
-| T2h | armed + handoff | A publisher-actor handoff transaction, serialized with A4: `inv_ver`, the release-outcome state and `reset_pending` are unchanged | — (non-blocking enqueue: connect 10 s, response 30 s, under a cancellation token) | sent | — | R7-2, R7-8 |
-| T2x | armed + handoff | Something changed | W (`invalidated`; this attempt pruned as `not_transmitted`; earlier ones go to `uncertain`) | invalidated, then T1 | As in R2x | R7-2 |
+| T2 | ready, sent, or armed restored by a restart (T2r) + transmission | The re-derived count, digest, `holder_state` and `release_result` all equal the body; the versions read are recorded | W[`sent/<d>.jws`] → W (attempt; → `armed`) | armed | As in R2 | HW §14 G.1, R6-3 |
+| T2r | armed restored by a restart + transmission | As T2, or as T3 when the guard fails | As T2 (the restored attempt counts as earlier) or as T3 (it moves to `uncertain`) | armed (T2) or invalidated (T3) | As T2 or T3 | Round-8 #1 |
+| T2h | armed + handoff | A publisher-actor handoff transaction, serialized with A4: `inv_ver`, the release-outcome state and `reset_pending` are unchanged | — (non-blocking enqueue; the bytes leave only through T2d) | queued | — | R7-2, R7-8 |
+| T2d | queued + dispatch (transport) | The linearization point: `inv_ver`, the release-outcome state and `reset_pending` are unchanged since T2, and the attempt has been queued for less than 30 s | — (bytes on the wire: connect 10 s, response 30 s, under a cancellation token) | sent | — | Round-8 #2 |
+| T2q | queued + dispatch (transport) | Something moved, or the attempt was queued for 30 s or more | — (cancelled; nothing was transmitted) | armed, versions marked moved; then T2x | Restart: T2r | Round-8 #2 |
+| T2x | armed + handoff, or after T2q | Something changed | W (`invalidated`; this attempt pruned as `not_transmitted`; earlier ones go to `uncertain`) | invalidated, then T1 | As in R2x | R7-2 |
 | T3 | ready or sent + transmission | The guard fails | W (`invalidated`; attempts go to `uncertain`) | invalidated, then T1 | Either | R6-3 |
 | T4 | sent + status receipt | Status path (§5.6) | W[`receipts/<key>`] → W (status accepted; `reset_pending = false` if the body said reset; L7 or L8 in the same commit) | none | After the receipt: the retry gets the same ack | HW §14 G.1 |
 | T5 | sent + `429`, a `503`, network failure, deadline, or transport cancellation (S18) | — | — | Back off, or exit; `authority_epoch_mismatch` also H10 | — | HW §14 E, F, R7-8 |
 | T6a | sent + `403 holder_not_authorized` | — | — | Unchanged; N2 (and C11) | — | HW §4.5, R7-7 |
-| T6b | sent + `401` | — | — | Unchanged; N1 | — | HW §4.5, R7-7 |
-| T6c | sent + `409 idempotency_conflict`, `400 invalid_request` or `413` | — | W (status → `halted`) | halted; bug alert; never re-derived | Either | HW §4.5, R7-7 |
+| T6b | sent + `401 invalid_holder_proof` | — | — | Unchanged; N1 | — | HW §4.5, R7-7 |
+| T6r | sent + `401 replay` | — | — | sent, retry due: T2 retries at once with a fresh `jti`. Never a halt | — | HW §4.5, round-8 #6 |
+| T6c | sent + `409 idempotency_conflict`, `400 invalid_request` or `413` | — | W (status → `halted`) | halted; bug alert; never re-derived automatically. N5 resumes | Either | HW §4.5, R7-7 |
 | T6d | sent + `409 stale_list_ref` or `404` | — | W (`rejected`) | rejected; F1, then T1 | Either | HW §4.5 |
 | T7 | any + a late status receipt for a key in `uncertain` | Status path against that key's attempts and body | W[`receipts/<k>`] → W (prune `uncertain[k]`; L7 or L8 if the body carried `release_result`; `reset_pending = false` if the body said reset) | — | After the receipt: idempotent | Completeness |
+
+*Model:* every row is a step of the model.
 
 #### M9 — Disk reserve and admission
 
@@ -1241,9 +1299,11 @@ States per reserve: `Full`, `Partial` (some consumed), `Insufficient` (the targe
 | K1i | S6 | Free space < a reserve target | Preallocate what fits, fsync | Insufficient; `disk_reserve_insufficient`; startup continues | Retried by K4 | R7-8 |
 | K2 | Full, Partial or Insufficient + a lifecycle write (W, W[x], G for A3/L1/S10, M, Q) gets `ENOSPC` | The matching reserve holds at least the needed bytes | Truncate the reserve by the needed amount, fsync → retry the write once | Partial (or Insufficient); `disk_reserve_used` | Smaller reserve; K4 refills it | R6-9 |
 | K2x | any + a lifecycle write gets `ENOSPC` | The reserve holds less than needed, or the retry failed | — | Exhausted. The calling row **fails with no state change**; its earlier durable writes stand per its crash column; `disk_reserve_exhausted` | — | R7-8 |
-| K5 | Exhausted + any work | Only work that frees space or writes nothing may run: serving within existing leases; lease lapse (L3); deletions of already-claimed or owned units (O6, O11, O12, L5); list fetches (F rows, whose A1 fails at its W until space returns). **Refused at their first W:** builders, A1, R1, R2, T1, T2, L1, O7, O8 and every Q | — | Exhausted until K4 | — | R7-8 |
+| K5 | Exhausted + any work | Only work that frees space or writes nothing may run: serving within existing leases; lease lapse (L3); A0's in-memory refusals; deletions of already-claimed or owned units (O6, O11, O12, L5); list fetches (F rows, whose A1 fails at its W until space returns). **Refused at their first W:** builders, A1, R1, R2, T1, T2, L1, O7, O8 and every Q | — | Exhausted until K4 | — | R7-8 |
 | K3 | A builder requests admission | Layout + withheld + quarantined + staging bytes + estimate + reserves ≤ `data_root_max_bytes`, and ≤ free space | — | Admitted; otherwise paused with `disk_pressure`. **Never** a deletion | — | R6-9 |
 | K4 | Partial, Insufficient or Exhausted + space available | — | Preallocate up to the target, fsync | Full, or Partial or Insufficient if still short | Retried | R6-9, R7-8 |
+
+*Model:* every other row is a step of the model. Not a step of its own: K5 (implicit: every lifecycle write is refused while Exhausted); K3 (not modeled: builders).
 
 #### M10 — Route health (all lifecycle routes)
 
@@ -1251,10 +1311,32 @@ States: `Normal`, `AuthHalted(401)`, `AuthHalted(403)`.
 
 | ID | State + event | Guard (reads) | Durable writes | Next | Crash after write | Implements |
 |---|---|---|---|---|---|---|
-| N1 | Normal + `401` on any route (F8, R11, T6b) | — | — | AuthHalted(401): no list, report or status traffic; serving continues until leases lapse; `lifecycle_unauthorized` | — | HW §4.5 ("stop, alert"), R7-7 |
+| N1 | Normal + `401 invalid_holder_proof` on any route (F8, R11, T6b). `401 replay` never halts (F8r, R11r, T6r) | — | — | AuthHalted(401): no list, report or status traffic; serving continues until leases lapse; `lifecycle_unauthorized` | — | HW §4.5 ("stop, alert"), R7-7 |
 | N2 | Normal or AuthHalted(401) + `403 holder_not_authorized` on any route (F8, R11, T6a) | — | — | AuthHalted(403), and C11: nothing servable | — | HW §4.5, R7-7 |
 | N3 | AuthHalted + any F1, R2, R2h, T2 or T2h trigger | — | — | Refused; unchanged | — | R7-7 |
 | N4 | AuthHalted + operator resume (a daemon restart after the operator fixes the key, enrollment or authorization; logged as `lifecycle_resume`) | — | — | Process exits; M1 restarts in Normal and F1 fires at S12 | — | R7-7 |
+| N5 | a report or the status `halted` (R9, R17, T6c) + operator `kwiry holder resume-report` (daemon stopped, audited, after the cause is fixed) | The command holds `holder.lock` | W (`halted → invalidated`; attempts that may have been transmitted go to `uncertain`) | Restart; R1 or T1 re-derives under a new key | Either | Round-8 #5 |
+
+*Model:* every other row is a step of the model. Not a step of its own: N3 (implicit: F1, R2, R2h, T2 and T2h check the route).
+
+#### Properties the model checker proves
+
+In every reachable state of every bounded run (`daemon/crates/kwiry-lifecycle/src/props.rs`):
+
+| Id | Property |
+|---|---|
+| I1 | A resource is servable only if the newest list an H row admitted shows it `active` and it is not tombstoned (whenever no apply is mid-flight; an apply linearizes at A4) |
+| I2 | A unit is deleted only under a listed obligation for its resource, a strict release reservation, or GC of an unreferenced object of an active resource |
+| I3 | `complete` is never dispatched while the unattributed inventory is non-empty or anything of the resource remains, nor while its proof is stale (the versions R2 recorded moved) |
+| I4 | Tombstones only grow |
+| I5 | Floors are monotone within an epoch, belong to the high-water's epoch, and evidence minted in another epoch never raises them |
+| I6 | Each armed epoch acceptance is consumed at most once |
+| I7 | Whenever work is outstanding, some healthy actor (holder, authority, network or operator) can move |
+| I8 | An operator wait (auth halt, bug halt) is entered only on an injected fault, never on a correct authority or network response |
+| I9 | The unattributed inventory never counts data attributable to a listed holding (units a release reserved excepted) |
+| L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every obligation reaches `complete` under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
+
+The bounds, the reductions and what they leave out are in the crate documentation.
 
 #### Conformance test plan
 
@@ -1262,15 +1344,18 @@ Every machine is tested by more than one positive test per row. The S3 suite mus
 
 | Kind | What it asserts |
 |---|---|
+| Model check | `cargo test -p kwiry-lifecycle` explores the model exhaustively within its bounds and proves I1–I9 and L1. Each review finding the model reproduced is a regression trace that must violate its property without its fix and hold with it |
 | Positive | Each row is exercised at its nominal case **and** at a guard boundary (for example `s == F` and `s == F + 1`; 299 s and 300 s; the last allowed `410`). The next state and writes match the row |
-| Negative guard | For each row, every guard conjunct is falsified in turn. The test asserts either the mutually exclusive sibling row (S8/S8n, S9/S9n, S10/S10n, A2/A2n, A3/A3n, R2h/R2x, T2h/T2x, K2/K2x) or `lifecycle_transition_refused`, with no write |
+| Negative guard | For each row, every guard conjunct is falsified in turn. The test asserts either the mutually exclusive sibling row (S8/S8n, S9/S9n, S10/S10n, A2/A2n, A3/A3n, R2h/R2x, R2d/R2q, T2h/T2x, T2d/T2q, K2/K2x) or `lifecycle_transition_refused`, with no write |
 | Forbidden pair | For each machine, the full state × event matrix is enumerated, and every pair without a row is driven. The test asserts refusal, no durable write, an unchanged state, and the alert |
 | Crash at every durability cut | For every row with writes, crashes are injected after each `write`, `fsync`, `rename` and directory `fsync` in its fsync order (including W[x] before W, M's two halves, G's record and pointer, L1's W, G and ledger). The restart outcome must equal the row's *Crash after* column |
-| Concurrent startup | Two daemons on one data root; a daemon racing an offline `recover-state`, `accept-epoch` or `--discard-data-root`; and holder-state appearing between S1L and S4. The test asserts that only the lock holder reads or writes, and that S4's pre-W re-check takes S3 or S5 instead |
-| Guard-to-send interleaving | A4 (a withholding, a quarantine move, a release reservation, an obligation change) is injected between R2 and R2h, and between T2 and T2h, both before and after a restart. The test asserts that R2x or T2x fires and no stale bytes are transmitted |
-| Randomized interleaving | A scheduler-controlled harness runs M3, M4a, M6, M7 and M8 concurrently. The test asserts that only listed transitions occur, that floors never decrease within an epoch, and that no unit is deleted without an owning obligation or reservation |
+| Concurrent startup | Two daemons on one data root; a daemon racing an offline `recover-state`, `accept-epoch`, `resume-report` or `--discard-data-root`; and holder-state appearing between S1L and S4. The test asserts that only the lock holder reads or writes, and that S4's pre-W re-check takes S3 or S5 instead |
+| Guard-to-dispatch interleaving | A4 (a withholding, a quarantine move, a release reservation, an obligation change) is injected between R2 and R2h, between R2h and R2d, and likewise for T2, T2h and T2d, both before and after a restart; and a queued attempt is held past 30 s. The test asserts that R2x, R2q, T2x or T2q fires and no stale or expired bytes are transmitted |
+| Implementation conformance | The implementation's lifecycle actors are driven by the model's traces (the same action sequences) and must take the same rows |
 
-**Size:** M1 22, M2 11, M3 9, M4a 8, M4b 15, M5 14, M6 23, M7 12, M8 12, M9 7, M10 4: **137 rows** in total (revision 7: 105).
+**Size:** M1 22, M2 11, M3 10, M4a 9, M4b 15, M5 15, M6 28, M7 13, M8 16, M9 7, M10 5: **151 rows** in total (revision 8: 137).
+
+<!-- END GENERATED by daemon/crates/kwiry-lifecycle -->
 
 ## 6. Readiness, errors and HTTP mapping
 
@@ -1789,7 +1874,7 @@ The design contract for these properties is closed above. Whether an implementat
 | Migration recovery | §4.10 marker protocol and recovery matrix | S2/S3 crash barrier after the pointer switch; every matrix row; the rollback-combination test |
 | Lifetime linearization | §4.3 pin-and-lease under L3; unconditional revocation separate from the doom claim; handle drain | S2 F1 interleaving; idle-reader revoke-then-drain on retirement and GC paths; init-races-revoke; lock tracker |
 | Publisher serialization | §4.3 single actor; no waits inside transactions | S2 concurrent-publisher test |
-| Lifecycle transition table | §5.8: 137 rows; unlisted transitions refused; prose subordinate | S3 row-conformance suite: every row exercised, crash-injected after each durable write, and a randomized interleaving harness that asserts only listed transitions occur |
+| Lifecycle transition table | §5.8: 151 rows generated from the normative model `daemon/crates/kwiry-lifecycle`; unlisted transitions refused; prose subordinate | The model check (`cargo test -p kwiry-lifecycle`: I1–I9 and L1 within its bounds, one regression per review finding). S3 row-conformance suite: every row exercised, crash-injected after each durable write, and the implementation driven by the model's traces |
 | Obligation purge and reporting | §5.6 state machine, validated enqueue against separate version counters, transmission-time validation, write-ahead attempts, floors, both ack paths, barrier and final scan; §5.7 residual | S3 crash injection at steps 0–7; lost ack with a post-restart retry; convergence acks; writer races; stale-inventory interleaving; unlink-then-fsync failure; H10–H12 |
 | Holdings consumption | §5.2 writer and loss table; §5.3 verification, apply transaction, high-water, epochs and classification; §5.4 leases and rollback handling; §5.5 releases and status | HW §9 golden vectors and reference fake extended for D, E and F: H1–H9, H13, H16, H17; withheld reversal; startup order; loss table; `accept-epoch`; `authority_epoch_mismatch`; release intersection and mismatch; jitter bound; key vectors |
 | Scheduler fairness | §4.9 bounded accounting turns and stated assumptions | S5 reused-room interleaving test, plus measurements (§11.3) |
