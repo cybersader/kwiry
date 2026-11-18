@@ -4032,10 +4032,8 @@ mod tests {
             .unwrap();
         assert_eq!(first.len(), 1);
 
-        // Removing the on-disk partition proves reuse: a cached reader keeps
-        // serving through its open handles, while a per-request reopen would
-        // fail on the missing meta.json.
-        fs::remove_dir_all(partition_index_dir(&active.partitions_dir, &resource)).unwrap();
+        // Verify reuse without requiring a removed partition to stay servable.
+        let cached = partitions.readers.lock().unwrap()[&resource].clone();
         let second = partitions
             .search(
                 "cachedneedle",
@@ -4045,6 +4043,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(second, first);
+        assert!(Arc::ptr_eq(
+            &cached,
+            &partitions.readers.lock().unwrap()[&resource]
+        ));
     }
 
     #[cfg_attr(

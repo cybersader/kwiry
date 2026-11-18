@@ -1784,7 +1784,8 @@ mod tests {
     fn rebuild_produces_identical_lexical_results() {
         let temporary = tempdir().unwrap();
         let vault_path = temporary.path().join("vault");
-        let index_path = temporary.path().join("index");
+        let first_index = temporary.path().join("first-index");
+        let second_index = temporary.path().join("second-index");
         fs::create_dir(&vault_path).unwrap();
         fs::write(
             vault_path.join("note.md"),
@@ -1805,11 +1806,11 @@ mod tests {
             vault_id: None,
         };
 
-        let first_stats = build_index(&config, &index_path).unwrap();
-        let first = search_index(&index_path, &request).unwrap();
-        fs::remove_dir_all(&index_path).unwrap();
-        let second_stats = build_index(&config, &index_path).unwrap();
-        let second = search_index(&index_path, &request).unwrap();
+        let first_stats = build_index(&config, &first_index).unwrap();
+        let first = search_index(&first_index, &request).unwrap();
+        // Build from nothing without racing a reader's background cleanup.
+        let second_stats = build_index(&config, &second_index).unwrap();
+        let second = search_index(&second_index, &request).unwrap();
 
         assert_eq!(first_stats.documents, 1);
         assert_eq!(first_stats, second_stats);
