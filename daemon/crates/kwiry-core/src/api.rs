@@ -213,6 +213,7 @@ impl ApiErrorEnvelope {
             error: ApiErrorBody {
                 code: code.into(),
                 message: message.into(),
+                resource_indexes: None,
             },
         }
     }
@@ -222,6 +223,8 @@ impl ApiErrorEnvelope {
 pub struct ApiErrorBody {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_indexes: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +343,7 @@ mod tests {
             hits: vec![SearchHit {
                 chunk_id: "chunk-1".into(),
                 vault_id: "notes".into(),
+                room_id: None,
                 path: "folder/note.md".into(),
                 heading_path: vec!["Heading".into()],
                 format: crate::format::SourceFormat::Markdown,

@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "789b00b5ee545ec741da8f08635a60d83730b1e33ecf7a350f1d5d12155e1896",
+  "schema_version": 11,
+  "source_key": "69e8928c991a4df25a0a060853b09ffc506541b5c0cdd7da37e1c5fac95c7b51",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Format Matrix/standard-source.md",
@@ -26,7 +26,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "0d1a26906131fa4d2458cb34cfc3f12c41df92e457fed58c44c0491e1c9f2c42",
+        "chunk_id": "b79f8f34e10589d22b6227ba6c6d5ecca6dd9bf0f11042b9c71ab8a95851c6bf",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/standard-source.md",

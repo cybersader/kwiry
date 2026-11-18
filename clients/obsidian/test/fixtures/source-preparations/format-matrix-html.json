@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "af983098df71f9cab681080dd1335051704276d1a07cceb1ef3223f9df8c521d",
+  "schema_version": 11,
+  "source_key": "e77754ebc0608fe3072284009323790358c0c01f0f597b9452785615a9eca662",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Format Matrix/oakfield-pineway.html",
@@ -29,7 +29,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "16ed07b3aaad6540bac779b79da86b54c150ed929dce61fcfae041f7b70b53b4",
+        "chunk_id": "38931caebdbe7aa4c8394b408a4da37b741a71300a019d375934b4ae2a3ed634",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/oakfield-pineway.html",

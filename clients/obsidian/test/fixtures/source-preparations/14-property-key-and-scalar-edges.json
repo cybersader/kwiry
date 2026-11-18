@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "3c47a35af57764e0226b2e2383dbbb3fcbba10ece8c83e27860aab44892beaeb",
+  "schema_version": 11,
+  "source_key": "baf3f1856124ace166c2bbae1de954830cde9fc0d5918afc100c8203836bfd15",
   "vault_id": "golden-vault",
   "path": "Golden/Property Key and Scalar Edges.md",
   "format": "markdown",
@@ -84,7 +84,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "448320896b310a5304315b1ccf86915db30c6ec1f7bb6e2b9bfd76a75bc9ea6b",
+        "chunk_id": "eb00adc286cc8dd05e0671d4468fc6aba01a5b1ab5e56c934662066b2fb8d9d5",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Property Key and Scalar Edges.md",

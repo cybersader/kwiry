@@ -19,7 +19,18 @@ use crate::model::{
 };
 use crate::policy::{ExtractionProfile, extraction_profile_for};
 
-pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = 10;
+#[cfg(feature = "native")]
+const ROOM_INCLUSIVE_INDEX_FORMAT: u32 = 13;
+/// The identity scheme and every native capability/registration gate must
+/// agree. A legacy build uses format 12 and preserves v1 identity.
+pub const ROOM_INCLUSIVE_IDS: bool = true;
+#[cfg(feature = "native")]
+pub(crate) const NATIVE_INDEX_FORMAT: u32 = if ROOM_INCLUSIVE_IDS {
+    ROOM_INCLUSIVE_INDEX_FORMAT
+} else {
+    12
+};
+pub const SOURCE_PREPARATION_SCHEMA_VERSION: u32 = if ROOM_INCLUSIVE_IDS { 11 } else { 10 };
 pub const MAX_PREPARED_CHUNKS_PER_SOURCE: usize = MAX_EXTRACTED_SECTIONS_PER_SOURCE;
 pub const MAX_PREPARED_HEADING_BYTES_PER_SOURCE: usize = MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE;
 
@@ -220,7 +231,11 @@ pub fn prepare_oversized_source(
     let retrieval = retrieval_metadata(&descriptor.path, Vec::new());
     Ok(SourcePreparation {
         schema_version: SOURCE_PREPARATION_SCHEMA_VERSION,
-        source_key: source_key(&descriptor.vault_id, &descriptor.path),
+        source_key: room_source_key(
+            &descriptor.vault_id,
+            descriptor.room.as_deref(),
+            &descriptor.path,
+        ),
         vault_id: descriptor.vault_id.clone(),
         room: descriptor.room.clone(),
         path: descriptor.path.clone(),
@@ -268,7 +283,11 @@ pub fn prepare_source_buffer(
         return prepare_oversized_source(descriptor);
     }
 
-    let source_key = source_key(&descriptor.vault_id, &descriptor.path);
+    let source_key = room_source_key(
+        &descriptor.vault_id,
+        descriptor.room.as_deref(),
+        &descriptor.path,
+    );
     let empty_retrieval = retrieval_metadata(&descriptor.path, Vec::new());
     let content_hash = hex_digest(bytes);
     // An extractor that hits its own budget describes one source, never the
@@ -339,6 +358,7 @@ pub fn prepare_source_buffer(
                 let chunk = Chunk {
                     chunk_id: chunk_id(
                         &descriptor.vault_id,
+                        descriptor.room.as_deref(),
                         &descriptor.path,
                         &section.heading_path,
                         chunk_ix,
@@ -389,6 +409,7 @@ pub fn prepare_source_buffer(
             let chunk = Chunk {
                 chunk_id: chunk_id(
                     &descriptor.vault_id,
+                    descriptor.room.as_deref(),
                     &descriptor.path,
                     &[],
                     0,
@@ -460,11 +481,41 @@ pub fn prepare_source_buffer(
 }
 
 pub fn source_key(vault_id: &str, path: &str) -> String {
+    room_source_key(vault_id, None, path)
+}
+
+pub fn room_source_key(vault_id: &str, room: Option<&str>, path: &str) -> String {
+    format!(
+        "{:x}",
+        identity_digest(vault_id, room, path, None).finalize()
+    )
+}
+
+fn identity_digest(
+    vault_id: &str,
+    room: Option<&str>,
+    path: &str,
+    chunk: Option<(&[String], u64)>,
+) -> Sha256 {
     let mut digest = Sha256::new();
-    digest.update(b"kwiry-source-v1\0");
+    let domain: &[u8] = match (ROOM_INCLUSIVE_IDS, chunk.is_some()) {
+        (true, true) => b"kwiry-chunk-v2\0",
+        (true, false) => b"kwiry-source-v2\0",
+        (false, true) => b"kwiry-chunk-v1\0",
+        (false, false) => b"kwiry-source-v1\0",
+    };
+    digest.update(domain);
     update_component(&mut digest, vault_id.as_bytes());
+    if ROOM_INCLUSIVE_IDS {
+        update_component(&mut digest, room.unwrap_or_default().as_bytes());
+    }
     update_component(&mut digest, path.as_bytes());
-    format!("{:x}", digest.finalize())
+    if let Some((heading, index)) = chunk {
+        let heading = serde_json::to_vec(heading).expect("heading paths serialize");
+        update_component(&mut digest, &heading);
+        digest.update(index.to_le_bytes());
+    }
+    digest
 }
 
 fn validate_descriptor(descriptor: &SourceDescriptor) -> Result<(), SourcePreparationError> {
@@ -670,21 +721,16 @@ fn find_split_byte(source: &str, start_byte: usize, target_byte: usize) -> usize
     paragraph.or(whitespace).unwrap_or(target_byte)
 }
 
-fn chunk_id(
+pub(crate) fn chunk_id(
     vault_id: &str,
+    room: Option<&str>,
     path: &str,
     heading_path: &[String],
     chunk_ix: u64,
     content_role_tag: Option<ContentRole>,
 ) -> String {
-    let heading_json = serde_json::to_vec(heading_path).expect("heading paths serialize");
-    let mut digest = Sha256::new();
-    digest.update(b"kwiry-chunk-v1\0");
-    update_component(&mut digest, vault_id.as_bytes());
-    update_component(&mut digest, path.as_bytes());
-    update_component(&mut digest, &heading_json);
-    digest.update(chunk_ix.to_le_bytes());
-    let mut digest = digest.finalize();
+    let mut digest =
+        identity_digest(vault_id, room, path, Some((heading_path, chunk_ix))).finalize();
     if let Some(role) = content_role_tag {
         let tag = match role {
             ContentRole::Primary => 0x00,
@@ -987,7 +1033,16 @@ mod tests {
         // supporting one, which outranks a latent one. If the tag values or
         // their position ever change, ranking silently loses that guarantee,
         // so the ordering is pinned here rather than assumed.
-        let id = |role| chunk_id("vault", "sheet.xlsx", &["Sheet1".to_owned()], 0, Some(role));
+        let id = |role| {
+            chunk_id(
+                "vault",
+                None,
+                "sheet.xlsx",
+                &["Sheet1".to_owned()],
+                0,
+                Some(role),
+            )
+        };
         let primary = id(ContentRole::Primary);
         let supporting = id(ContentRole::Supporting);
         let latent = id(ContentRole::Latent);
@@ -1011,7 +1066,7 @@ mod tests {
         assert_eq!(first.chunks[0].chunk_id, second.chunks[0].chunk_id);
         assert_eq!(
             first.chunks[0].chunk_id,
-            "a61e028408e29dd7c2e149c54d04780b797c7caed86a05550b9e395d65da6d99"
+            "d55eab3b9b7cfc214621a18e21f6cedf3d66df224b69d3a6f429353a5be40f3e"
         );
         assert_ne!(first.chunks[0].chunk_id, moved.chunks[0].chunk_id);
         let serialized = serde_json::to_value(&first).unwrap();

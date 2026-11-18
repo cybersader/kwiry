@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "1cf7799f26377840ecf0bd295af8c3d8b793b0d90b7208966341cb622da6e6ca",
+  "schema_version": 11,
+  "source_key": "e59892a8951344080eb43fdd4d5cc90372c9f3c7709849635673c00624e7c3ac",
   "vault_id": "golden-vault",
   "path": "Golden/Large Property Array.md",
   "format": "markdown",
@@ -4831,7 +4831,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "836f8a0d10c0112307bf8145888286bd9cb5667f8b681854636efbb9a768a748",
+        "chunk_id": "ff07af1adfeb65d691774e0a9f083ba675b5e08702fc5335bc49258c8c01401a",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Large Property Array.md",

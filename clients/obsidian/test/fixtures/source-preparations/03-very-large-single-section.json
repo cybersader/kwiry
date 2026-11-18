@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "2a376ae7f4ab462ccbd5a869e571e213d33c85fe7c702bdd355b0219dfea4535",
+  "schema_version": 11,
+  "source_key": "b4ea82ccdea77d6fee2ef02c1fef4aba1303262a61f19bbd7d624939ead6a6c7",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Very Large Single Section.md",
@@ -26,7 +26,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "602ce3cd32c60cb8558109d5f99f0582e0fb5a1b9c49b5f97ec32202cbc21baa",
+        "chunk_id": "35909eb0efceb85d02d202c2c701307a88d1f4cce99b43c20350cf541699885c",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Very Large Single Section.md",
@@ -353,7 +353,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "73eb6eb0ca3a6a1b444f511d8835398c5cc455fe4fd43f1f1207cbd2719ea29b",
+        "chunk_id": "5c40737deff53442b1e741e02548c4fe4bddf03a9efb762e46558fe92106f0d2",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Very Large Single Section.md",
@@ -681,7 +681,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "65c12fd15c8e9476bcfe7492427c73c315872801351eb2d004f0f77b9a3343c5",
+        "chunk_id": "ae32ece99307f8070620afdba5b860504c1bac1a07fecef27708d9b8cd1d1ecf",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Very Large Single Section.md",
@@ -1009,7 +1009,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "c483893757da6a35f4a43a628dd11d30cf6947fc8bc435904f88c91886b1fe08",
+        "chunk_id": "6ca3c93e5357655ec4ffc89f8cf3c03e2f2c09e96af3c54fafaaec864525285d",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Very Large Single Section.md",
@@ -1337,7 +1337,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "fd54e1b60f268f56cea578603ec05c79f99abe04278504d802960eea048916ab",
+        "chunk_id": "bdbe5407f1b765d406a6b909238ded1c5fe404e29e33138553bc0a9edf60096b",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Very Large Single Section.md",
@@ -1665,7 +1665,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "42ef7e4e7e636b481d178f1f15dc7499aaa00e20cd325a407897a37755840bba",
+        "chunk_id": "b2922cf469d827c6bad67ce9a3f8d3ffa1ebc01046d81cc879620ad60745d2c5",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Very Large Single Section.md",
@@ -1993,7 +1993,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "f17862979273e4d2d47bec0055333f86def89c9990c965493f31006ab7d58fe3",
+        "chunk_id": "0829eef6701a2f67b39cc8e02dfc102fc58a6e9c0045cce5fb90a2ba24c5b719",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Very Large Single Section.md",
@@ -2321,7 +2321,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "3ef29d108c77f1fd98e7a256dc4eed33d2ecfdba7e0d16b577972b866e889471",
+        "chunk_id": "302f6018f826929b197de699b6cc9e6fd6f391859171a943f7a521d206817ff1",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Very Large Single Section.md",

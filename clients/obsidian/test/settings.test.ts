@@ -231,7 +231,7 @@ describe("loadSettings", () => {
     // The whole point of the split. Under the old single fingerprint the
     // enabled set was digest material, so every one of these was a different
     // identity and every one of them discarded a complete cache.
-    expect(first).toBe("629adc7dd37b09cc9e452f5307199d3b5a6965fa0078f7a2b372aa397ae536a8");
+    expect(first).toBe("3b931c61a075477592d03713c283d7eca9691044e6cab8cfca512ed0012b8fff");
     expect(first).not.toBe("ed64b7acaeaa182997208b295449aa71ba8f436f382554612347d86fb55de7e9");
     // The `-v2` digest of the shipped default set, and of that set with PDF
     // turned on. Pinned as negatives: the material changed, so a cache written
@@ -354,7 +354,7 @@ describe("loadSettings", () => {
     // so this fingerprint is the only thing that refuses a pre-PDF cache image.
     expect(EXTRACTION_POLICY_FINGERPRINT)
       .not.toBe("1b393b155b0af728b1ec9c9131573c105c9e7aba41ff31a4d12c824d4c73adef");
-    expect(SOURCE_PREPARATION_SCHEMA_VERSION).toBe(10);
+    expect(SOURCE_PREPARATION_SCHEMA_VERSION).toBe(11);
   });
 
   it("keeps normal settings unaware of private-build namespaces", () => {

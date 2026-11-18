@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "89bdc68d2f9ba3c5d1f9d9c38eee2b045b994fafcf83ae9d0c805cfce412e058",
+  "schema_version": 11,
+  "source_key": "472dc224178bda91d148ac09c1f532c119f5a89c6b69d0c4ee347a7018f54b74",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Deep Property Map.md",
@@ -196,7 +196,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "8afeb27c8b23a2f0f4456ef2e8c7d86addd00d88c3c8ab97067e3e5ff6308411",
+        "chunk_id": "24fa48c9db18e46a3f53d9f0d89daebd72433848c1c047de3f83cbc4a78f6743",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Deep Property Map.md",

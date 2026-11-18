@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "7355fc5a771229cfc09ecc97863925716ab78d5c9d3e235d025b57ead16e3075",
+  "schema_version": 11,
+  "source_key": "af928a8b4c798c6dad61263fff137d6431074882acadbf0a304a8a6c3d28b843",
   "vault_id": "golden-vault",
   "path": "Golden/Deep Heading Nesting.md",
   "format": "markdown",
@@ -25,7 +25,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "9db72fc877a38e803385cd3878cb3a9dbd2a31f0144428af56983886a0c8c7ca",
+        "chunk_id": "63946aeca2158629176ed25016a85b22f367c5a742e144dcf0d9ff1006f1f928",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Deep Heading Nesting.md",
@@ -45,7 +45,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "b9ca958767f65ed27f48e30862c713fe56b24c7ee6cf42d5702476b5f19b8d7e",
+        "chunk_id": "745445c256ab78ae9b6355e25ecd3030bf044991e47dd65eee0f8e18ff8519c0",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Deep Heading Nesting.md",
@@ -66,7 +66,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "0ad1e2c3a9414521057fce81159d9e04f92e679ac447bd3129baa7ef819a04b4",
+        "chunk_id": "3586ed9777dc5408fccc4f7ec406223bb8c399b8a4d14d50a7151ee4dc14b0d5",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Deep Heading Nesting.md",
@@ -88,7 +88,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "117faed06666eb22b59b641177e7b1592e8fe050b2beb5d49daaef5f09acfa8d",
+        "chunk_id": "21e51a8e1d1ce175a8655f9ddcb6007008e937eb18c940564a7fe766cdffb301",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Deep Heading Nesting.md",
@@ -111,7 +111,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "06850acb28f0c481288859fdfc6b031118d5b1b9430eab216c4a0a973d3189d4",
+        "chunk_id": "686ceebc465dfd0d13b18da3499725041f5d4d3f404ea6ebb8041d6daf7f1f8e",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Deep Heading Nesting.md",
@@ -135,7 +135,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "24b6f64380b2aefcf420dd31bc91d4160d413ee89b48836fe6a5309a5504f928",
+        "chunk_id": "63898c1644016d7264e5994e4a60e0ea580968839c6c715c8e8b12150f849a23",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Deep Heading Nesting.md",

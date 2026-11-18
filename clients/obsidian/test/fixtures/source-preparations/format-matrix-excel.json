@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "fc314d940eee657cdf7af9e812bc4f63638c06820c6100f28d91a4f414bf7041",
+  "schema_version": 11,
+  "source_key": "e9c0dc187ae4bfc8c0582974478233c3aab9aa2fe6e2d545b33e9889ab417129",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Format Matrix/meadowstone-northway.xlsx",
@@ -26,7 +26,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "06095b2113fbbcc20d25f5e9be1523085e13eb9aeca1cc5f1cf294e86edca13a",
+        "chunk_id": "11a6b4b054ed7539ebb80faee186653a66d779b305c144c4f9473448995e680c",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/meadowstone-northway.xlsx",
@@ -46,7 +46,7 @@
     },
     {
       "chunk": {
-        "chunk_id": "2fc7ee97e8c464913e275bb373f1a4e377a83d230d684d8618cbae3a2cb7c83f",
+        "chunk_id": "363015822d2ec173c87e6c2c5fb2cad11ce6c7226d752e6e7d57e4390ebad19c",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/meadowstone-northway.xlsx",

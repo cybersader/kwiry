@@ -54,7 +54,10 @@ fn load_chunks(vault_path: &PathBuf) -> Result<(usize, Vec<String>)> {
         path: vault_path.clone(),
         room: None,
     };
-    let report = kwiry_core::ingest_vault(&registration);
+    let report = kwiry_core::ingest_config(&kwiry_core::Config {
+        vaults: vec![registration],
+        ..kwiry_core::Config::default()
+    })?;
     if report.chunks.is_empty() {
         bail!("no chunks produced from {}", vault_path.display());
     }

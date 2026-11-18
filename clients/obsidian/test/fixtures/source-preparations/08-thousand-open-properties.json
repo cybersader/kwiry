@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "3144f7b04de4201d925f067d8ec31119447cd51f61de46e21521922f114f5ab7",
+  "schema_version": 11,
+  "source_key": "9659be931128e0d401248a2dfad607a51da7b4a8dd635887e9254f6960b93f36",
   "vault_id": "golden-vault",
   "path": "Golden/Thousand Open Properties.md",
   "format": "markdown",
@@ -4026,7 +4026,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "1445bcb87741bf8cb8fdd8aec14fb0c475b4f45753a533f0c23f96c8ea98b1d0",
+        "chunk_id": "b37de24e1abdfdfb847eb4db34078fadf9e1abeebdd32f16cc7f2d02f1d2f839",
         "vault_id": "golden-vault",
         "room": null,
         "path": "Golden/Thousand Open Properties.md",

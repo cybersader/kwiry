@@ -1062,6 +1062,7 @@ fn collect_stable_lexical_v2_hits(
             context.fields,
             ranked.score,
             Some(&snippet_generator),
+            context.resource,
         )?;
         hits.push(NativeLexicalV2Hit {
             source: QualifiedSourceId {
@@ -1359,6 +1360,7 @@ fn collect_stable_rerank_hits(
             context.fields,
             ranked.score,
             Some(&snippet_generator),
+            context.resource,
         )?;
         hits.push(NativeRerankHit {
             source: QualifiedSourceId {
@@ -2704,6 +2706,7 @@ fn collect_stable_hits(
             fields,
             ranked.score,
             Some(&snippet_generator),
+            resource,
         )?);
     }
     Ok(hits)
@@ -2730,6 +2733,7 @@ fn hit_from_document(
     fields: &Fields,
     score: f32,
     snippets: Option<&SnippetGenerator>,
+    resource: Option<&ResourceKey>,
 ) -> Result<SearchHit> {
     let content = text(document, fields.content)?;
     let excerpt = match snippets {
@@ -2746,6 +2750,9 @@ fn hit_from_document(
     Ok(SearchHit {
         chunk_id: text(document, fields.chunk_id)?.to_owned(),
         vault_id: text(document, fields.vault_id)?.to_owned(),
+        room_id: resource
+            .filter(|_| crate::source::ROOM_INCLUSIVE_IDS)
+            .map(|resource| resource.room_id.clone()),
         path: text(document, fields.path)?.to_owned(),
         heading_path: decode_json(text(document, fields.heading_path)?, "heading_path")?,
         format: decode_json(text(document, fields.source_format)?, "source_format")?,
@@ -2804,7 +2811,7 @@ pub(crate) fn hydrate_ordered(
         let document = searcher
             .doc::<TantivyDocument>(address)
             .map_err(|error| Error::Index(error.to_string()))?;
-        let hit = hit_from_document(&document, fields, 0.0, snippets.as_ref())?;
+        let hit = hit_from_document(&document, fields, 0.0, snippets.as_ref(), None)?;
         by_id.insert(hit.chunk_id.clone(), hit);
     }
 

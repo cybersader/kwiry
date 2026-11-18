@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "1014d252dd55fc7c258fa472977be1689ef6fe49855e9a02a948333e8c4be8c4",
+  "schema_version": 11,
+  "source_key": "4e298cbb1640903e72a9ffe2c45d697431b414b71e445da52d464d8f5b0b01d2",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Format Matrix/harborstone-islandway.docx",
@@ -26,7 +26,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "bc4bde865175ec1c15cb9b5c5178629200e5fb86c8abe56e27806b71d3045cc0",
+        "chunk_id": "fc05ca0c3fd69027fcbb90b693d75114c793f7cd032c17052c41417cccfbac46",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Format Matrix/harborstone-islandway.docx",

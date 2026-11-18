@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 use crate::format::SourceFormat;
 use crate::generation::DataRoot;
 use crate::lexical::{fold_lexical, normalize_raw};
-use crate::manifest::{Manifest, registration_fingerprint, source_key};
+use crate::manifest::{Manifest, registration_fingerprint};
 use crate::model::{
     Config, HostProfile, IndexStats, PreparedChunk, PropertyBag, PropertyValue, ResourceKey,
     RetrievalMetadata, VaultRegistration,
@@ -211,6 +211,12 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
         return Err(Error::NoVaults);
     }
 
+    if config.server.profile == HostProfile::OpenClast {
+        #[cfg(not(target_os = "linux"))]
+        crate::room_walk::probe_openclast_ingestion(data_dir, &config.vaults)?;
+        crate::room_boundary::validate_ingestion_roots(config, &[])?;
+        crate::room_boundary::validate_data_root(config, data_dir)?;
+    }
     let data_root = DataRoot::new(data_dir);
     let _lock = data_root.acquire_writer_lock()?;
     let candidate = data_root.create_candidate()?;
@@ -223,6 +229,7 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
             &candidate.partitions_dir,
             &candidate.manifest_path(),
             &candidate.layout_path(),
+            data_dir,
         ),
     };
     let stats = match result {
@@ -318,6 +325,7 @@ fn build_openclast_candidate(
     partitions_dir: &Path,
     manifest_path: &Path,
     layout_path: &Path,
+    data_dir: &Path,
 ) -> Result<IndexStats> {
     let resources: Vec<_> = config
         .vaults
@@ -336,6 +344,7 @@ fn build_openclast_candidate(
     let mut stats = IndexStats::default();
 
     for vault in &config.vaults {
+        let room_roots = crate::room_walk::RoomRoots::capture(config, Some(data_dir));
         let resource = config.resource_key(vault).ok_or_else(|| {
             Error::State(format!(
                 "openclast vault {} is missing an exact resource classification",
@@ -345,7 +354,14 @@ fn build_openclast_candidate(
         let index_dir = partition_index_dir(partitions_dir, &resource);
         fs::create_dir_all(&index_dir)
             .map_err(|error| crate::error::io_error(&index_dir, error))?;
-        build_partition(vault, &resource, &index_dir, &mut manifest, &mut stats)?;
+        build_partition(
+            vault,
+            &resource,
+            &index_dir,
+            &mut manifest,
+            &mut stats,
+            &room_roots,
+        )?;
     }
 
     manifest.mark_synced()?;
@@ -395,10 +411,8 @@ fn build_partition(
     index_dir: &Path,
     manifest: &mut Manifest,
     stats: &mut IndexStats,
+    room_roots: &crate::room_walk::RoomRoots,
 ) -> Result<()> {
-    if !vault.path.is_dir() {
-        return Err(Error::InvalidVaultPath(vault.path.clone()));
-    }
     if vault.id != resource.vault_id || vault.room.as_deref() != Some(resource.room_id.as_str()) {
         return Err(Error::State(format!(
             "vault {} does not match its resource partition",
@@ -415,7 +429,22 @@ fn build_partition(
         .writer(WRITER_MEMORY_BYTES)
         .map_err(|error| Error::Index(error.to_string()))?;
     let fingerprint = registration_fingerprint(vault);
-    let (outcomes, enumeration) = ingest_vault_files(vault);
+    let (mut enumeration, room) = room_roots.walk(vault);
+    let mut outcomes: Vec<_> = room.as_ref().map_or_else(Vec::new, |room| {
+        enumeration
+            .files
+            .iter()
+            .take_while(|_| !room.nesting_detected())
+            .map(|file| crate::chunk::ingest_file_with_room_handle(vault, file, Some(room)))
+            .collect()
+    });
+    if room
+        .as_ref()
+        .is_some_and(crate::room_walk::RoomRead::nesting_detected)
+    {
+        enumeration = crate::room_walk::nesting_failure(vault);
+        outcomes.clear();
+    }
     stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
@@ -538,9 +567,9 @@ pub(crate) fn chunk_document(
     let mut document = TantivyDocument::default();
     document.add_text(
         required_optional_field(fields.source_key, "source_key")?,
-        source_key(&chunk.vault_id, &chunk.path),
+        crate::source::room_source_key(&chunk.vault_id, chunk.room.as_deref(), &chunk.path),
     );
-    let owns_source_properties = owns_source_properties(prepared)?;
+    let owns_source_properties = owns_source_properties(prepared);
     document.add_u64(
         fields.source_property_owner,
         u64::from(owns_source_properties),
@@ -1020,17 +1049,22 @@ fn escape_json_pointer_component(component: &str) -> String {
 // Source-level property signals belong to chunk zero only. Reusing the stable chunk-id contract
 // avoids repeating note-authored metadata across every chunk while keeping incremental writers,
 // which receive chunks one at a time, on the same projection rule as full rebuilds.
-fn owns_source_properties(prepared: &PreparedChunk) -> Result<bool> {
+fn owns_source_properties(prepared: &PreparedChunk) -> bool {
     let chunk = &prepared.chunk;
-    let heading_json =
-        serde_json::to_vec(&chunk.heading_path).map_err(|error| Error::Index(error.to_string()))?;
-    let mut digest = Sha256::new();
-    digest.update(b"kwiry-chunk-v1\0");
-    update_digest_component(&mut digest, chunk.vault_id.as_bytes());
-    update_digest_component(&mut digest, chunk.path.as_bytes());
-    update_digest_component(&mut digest, &heading_json);
-    digest.update(0_u64.to_le_bytes());
-    Ok(chunk.chunk_id == format!("{:x}", digest.finalize()))
+    let role_tag = (crate::source::ROOM_INCLUSIVE_IDS
+        && prepared
+            .source_format
+            .is_some_and(|format| format.spec().policy.role_tagged_chunk_ids))
+    .then_some(prepared.content_role);
+    chunk.chunk_id
+        == crate::source::chunk_id(
+            &chunk.vault_id,
+            chunk.room.as_deref(),
+            &chunk.path,
+            &chunk.heading_path,
+            0,
+            role_tag,
+        )
 }
 
 fn update_digest_component(digest: &mut Sha256, bytes: &[u8]) {
@@ -1282,11 +1316,11 @@ mod tests {
         };
         let preparation = prepare_source_buffer(&descriptor, body.as_bytes()).unwrap();
         assert!(preparation.chunks.len() > 1);
-        assert!(owns_source_properties(&preparation.chunks[0]).unwrap());
+        assert!(owns_source_properties(&preparation.chunks[0]));
         assert!(
             preparation.chunks[1..]
                 .iter()
-                .all(|chunk| !owns_source_properties(chunk).unwrap())
+                .all(|chunk| !owns_source_properties(chunk))
         );
 
         let schema = build_schema();
@@ -1751,7 +1785,8 @@ mod tests {
     fn rebuild_produces_identical_lexical_results() {
         let temporary = tempdir().unwrap();
         let vault_path = temporary.path().join("vault");
-        let index_path = temporary.path().join("index");
+        let first_index = temporary.path().join("first-index");
+        let second_index = temporary.path().join("second-index");
         fs::create_dir(&vault_path).unwrap();
         fs::write(
             vault_path.join("note.md"),
@@ -1772,11 +1807,11 @@ mod tests {
             vault_id: None,
         };
 
-        let first_stats = build_index(&config, &index_path).unwrap();
-        let first = search_index(&index_path, &request).unwrap();
-        fs::remove_dir_all(&index_path).unwrap();
-        let second_stats = build_index(&config, &index_path).unwrap();
-        let second = search_index(&index_path, &request).unwrap();
+        let first_stats = build_index(&config, &first_index).unwrap();
+        let first = search_index(&first_index, &request).unwrap();
+        // Build from nothing without racing a reader's background cleanup.
+        let second_stats = build_index(&config, &second_index).unwrap();
+        let second = search_index(&second_index, &request).unwrap();
 
         assert_eq!(first_stats.documents, 1);
         assert_eq!(first_stats, second_stats);

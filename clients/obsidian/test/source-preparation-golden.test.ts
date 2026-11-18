@@ -80,7 +80,7 @@ describe("Rust SourcePreparation golden fixtures", () => {
       } | undefined;
 
     expect(canvas).toMatchObject({
-      schema_version: 10,
+      schema_version: 11,
       format: "canvas",
       coverage: "indexed-complete",
       normalized_exact: { title: null },

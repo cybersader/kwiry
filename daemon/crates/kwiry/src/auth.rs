@@ -6,13 +6,14 @@ use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use kwiry_core::{ApiErrorEnvelope, Principal, token_matches};
+use kwiry_core::{ApiErrorEnvelope, Principal, SearchRuntime, token_matches};
 
 use crate::capability::{CapabilityFailure, CapabilityVerifier};
 
 #[derive(Clone)]
 pub(crate) struct AuthState {
     method: AuthMethod,
+    runtime: SearchRuntime,
 }
 
 #[derive(Clone)]
@@ -25,13 +26,20 @@ impl AuthState {
     pub(crate) fn desktop(token: String) -> Self {
         Self {
             method: AuthMethod::Desktop(Arc::from(token)),
+            runtime: SearchRuntime::new(),
         }
     }
 
     pub(crate) fn openclast(verifier: CapabilityVerifier) -> Self {
         Self {
             method: AuthMethod::OpenClast(Arc::new(verifier)),
+            runtime: SearchRuntime::new(),
         }
+    }
+
+    pub(crate) fn with_runtime(mut self, runtime: SearchRuntime) -> Self {
+        self.runtime = runtime;
+        self
     }
 }
 
@@ -49,7 +57,18 @@ pub(crate) async fn require_auth(
         (AuthMethod::Desktop(expected), Some(supplied)) if token_matches(expected, supplied) => {
             Ok(Principal::desktop())
         }
-        (AuthMethod::OpenClast(verifier), Some(supplied)) => verifier.verify(supplied),
+        (AuthMethod::OpenClast(verifier), Some(supplied)) => {
+            let verifier = verifier.clone();
+            let supplied = supplied.to_owned();
+            // Do not open repeated-vault admission before the production
+            // Holdings lease/tombstone consumer can enforce R17.
+            let active_room_format = auth.runtime.active_room_identity_format();
+            tokio::task::spawn_blocking(move || {
+                verifier.verify_with_format(&supplied, active_room_format)
+            })
+            .await
+            .unwrap_or(Err(CapabilityFailure::ReplayStateUnavailable))
+        }
         _ => Err(CapabilityFailure::Unauthorized),
     };
 
@@ -67,6 +86,14 @@ pub(crate) async fn require_auth(
         )
             .into_response(),
         Err(CapabilityFailure::Unauthorized) => unauthorized(),
+        Err(CapabilityFailure::ReplayStateUnavailable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorEnvelope::new(
+                "replay_state_unavailable",
+                "replay protection is temporarily unavailable",
+            )),
+        )
+            .into_response(),
     }
 }
 

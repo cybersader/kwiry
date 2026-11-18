@@ -1,6 +1,6 @@
 {
-  "schema_version": 10,
-  "source_key": "4aa6fadab99c7e1fd2cc3f3343548909300f1b6a59600863479b8843616d9f83",
+  "schema_version": 11,
+  "source_key": "e6c1670b6e97291e56615949da767d2d2389ab0c12fa8dffd8a7f39eba511851",
   "vault_id": "golden-vault",
   "room": "fixture-room",
   "path": "Golden/Unusual Valid UTF-8.md",
@@ -26,7 +26,7 @@
   "chunks": [
     {
       "chunk": {
-        "chunk_id": "de7d070af178525e826ae3314631abfc6e3a3d229c85849d09fc578cc6a6d057",
+        "chunk_id": "d947edf10d28c75cfd461fb0101a8e4aaf1e47cdb9b1754f6ad18240c8d0950b",
         "vault_id": "golden-vault",
         "room": "fixture-room",
         "path": "Golden/Unusual Valid UTF-8.md",

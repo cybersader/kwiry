@@ -82,7 +82,7 @@ const get = (name) => {
   return value;
 };
 
-assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 10);
+assert.equal(get("markdown-frontmatter-links-identifiers").preparation.schema_version, 11);
 assert.equal(get("markdown-frontmatter-links-identifiers").preparation.retrieval.aliases.length, 2);
 assert.ok(
   get("markdown-frontmatter-links-identifiers").preparation.chunks.some((chunk) =>
@@ -96,7 +96,7 @@ assert.deepEqual(get("crlf-frontmatter").preparation.frontmatter.title, {
 assert.ok(get("malformed-frontmatter").preparation.warning);
 assert.equal(get("plain-text").preparation.format, "text");
 const htmlTitle = get("html-title-carrier").preparation;
-assert.equal(htmlTitle.schema_version, 10);
+assert.equal(htmlTitle.schema_version, 11);
 assert.equal(htmlTitle.format, "html");
 assert.deepEqual(htmlTitle.frontmatter, {});
 assert.equal(htmlTitle.canonical_frontmatter.title, "Canonical Portal");
