@@ -10,6 +10,7 @@ use crate::walk::EnumerationResult;
 
 #[cfg(target_os = "linux")]
 mod platform {
+    use std::cell::Cell;
     use std::collections::{BTreeMap, VecDeque};
     use std::ffi::OsStr;
     use std::os::unix::fs::MetadataExt;
@@ -155,10 +156,7 @@ mod platform {
                     OPEN,
                 );
                 if matches!(dir, Ok(None)) {
-                    return (
-                        failed_walk(vault, "walk encountered another registered room root"),
-                        None,
-                    );
+                    return (nesting_failure(vault), None);
                 }
                 let dir = dir.and_then(|file| {
                     let file = file.expect("boundary miss handled above");
@@ -235,10 +233,7 @@ mod platform {
                     if metadata.is_dir() {
                         let found = identity(&metadata);
                         if found != *inode && self.identities.contains(&found) {
-                            return (
-                                failed_walk(vault, "walk encountered another registered room root"),
-                                None,
-                            );
+                            return (nesting_failure(vault), None);
                         }
                         pending.push_back((path, found));
                         continue;
@@ -298,6 +293,7 @@ mod platform {
                     root,
                     files,
                     identities: &self.identities,
+                    nesting_detected: Cell::new(false),
                 }),
             )
         }
@@ -347,9 +343,14 @@ mod platform {
         root: &'a File,
         files: BTreeMap<String, Inode>,
         identities: &'a BTreeSet<Inode>,
+        nesting_detected: Cell<bool>,
     }
 
     impl RoomRead<'_> {
+        pub(crate) fn nesting_detected(&self) -> bool {
+            self.nesting_detected.get()
+        }
+
         pub(crate) fn open(&self, relative: &str) -> io::Result<File> {
             let (directory, name) = relative
                 .rsplit_once('/')
@@ -365,6 +366,7 @@ mod platform {
                         OFlags::PATH | OFlags::CLOEXEC,
                     )?
                     .ok_or_else(|| {
+                        self.nesting_detected.set(true);
                         io::Error::other("source is no longer within the room boundary")
                     })?,
                 )
@@ -459,6 +461,10 @@ mod platform {
     }
 
     impl RoomRead<'_> {
+        pub(crate) fn nesting_detected(&self) -> bool {
+            false
+        }
+
         pub(crate) fn open(&self, _: &str) -> io::Result<File> {
             Err(io::ErrorKind::Unsupported.into())
         }
@@ -472,7 +478,6 @@ mod platform {
 pub use platform::probe_openclast_ingestion;
 pub(crate) use platform::{RoomRead, RoomRoots, single_link};
 
-#[cfg(target_os = "linux")]
 fn failed_walk(vault: &VaultRegistration, message: &str) -> EnumerationResult {
     let mut enumeration = empty_enumeration();
     skip(&mut enumeration, vault, "", message);
@@ -480,6 +485,10 @@ fn failed_walk(vault: &VaultRegistration, message: &str) -> EnumerationResult {
     // retain the last committed artifacts; no candidates from this pass survive.
     enumeration.excluded.clear();
     enumeration
+}
+
+pub(crate) fn nesting_failure(vault: &VaultRegistration) -> EnumerationResult {
+    failed_walk(vault, "walk encountered another registered room root")
 }
 
 fn empty_enumeration() -> EnumerationResult {
@@ -627,6 +636,11 @@ mod tests {
         std::os::unix::fs::symlink(&b, a.join("d")).unwrap();
         assert!(reader.open("x.md").is_err());
         assert!(reader.open("d/x.md").is_err());
+        assert!(!reader.nesting_detected());
+        std::fs::remove_file(a.join("d")).unwrap();
+        std::fs::rename(&b, a.join("d")).unwrap();
+        assert!(reader.open("d/x.md").is_err());
+        assert!(reader.nesting_detected());
     }
 
     #[test]
@@ -722,19 +736,22 @@ mod tests {
                     "room roots overlap through a mount"
                 );
             }
-            let roots = RoomRoots::capture(&config, None);
-            assert_eq!(roots.walk(&config.vaults[2]).0.files.len(), 1);
-            let only_a = Config {
-                vaults: vec![config.vaults[0].clone()],
-                ..Config::default()
-            };
-            let roots = RoomRoots::capture(&only_a, Some(&source));
-            let (enumeration, reader) = roots.walk(&only_a.vaults[0]);
-            assert!(reader.is_none());
-            assert_eq!(
-                enumeration.warnings[0].message,
-                "room root overlaps Kwiry state through a mount"
-            );
+            {
+                let roots = RoomRoots::capture(&config, None);
+                assert_eq!(roots.walk(&config.vaults[2]).0.files.len(), 1);
+                let only_a = Config {
+                    vaults: vec![config.vaults[0].clone()],
+                    ..Config::default()
+                };
+                let roots = RoomRoots::capture(&only_a, Some(&source));
+                let (enumeration, reader) = roots.walk(&only_a.vaults[0]);
+                assert!(reader.is_none());
+                assert_eq!(
+                    enumeration.warnings[0].message,
+                    "room root overlaps Kwiry state through a mount"
+                );
+            }
+            // The captures own open handles to the alias; drop them first.
             assert!(Command::new("umount").arg(&a).status().unwrap().success());
         }
     }

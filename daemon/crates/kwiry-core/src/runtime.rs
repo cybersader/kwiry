@@ -1043,7 +1043,7 @@ fn observe_vault(
     context: &VaultObservationContext<'_>,
     audit: &mut AuditBudget,
 ) -> VaultObservations {
-    let (enumeration, secure_read) = match context.room_roots {
+    let (mut enumeration, secure_read) = match context.room_roots {
         Some(roots) => roots.walk(vault),
         None => (discover_vault(vault), None),
     };
@@ -1124,14 +1124,29 @@ fn observe_vault(
                 source_bytes_read += outcome.byte_length;
             }
             outcomes.push(outcome);
+            if secure_read
+                .as_ref()
+                .is_some_and(crate::room_walk::RoomRead::nesting_detected)
+            {
+                break;
+            }
         } else {
             reused_keys.insert(key);
         }
     }
 
+    let nesting_detected = secure_read
+        .as_ref()
+        .is_some_and(crate::room_walk::RoomRead::nesting_detected);
+    if nesting_detected {
+        enumeration = crate::room_walk::nesting_failure(vault);
+        outcomes.clear();
+        reused_keys.clear();
+    }
     VaultObservations {
         outcomes,
-        whole_walk_failed: context.room_roots.is_some() && secure_read.is_none(),
+        whole_walk_failed: nesting_detected
+            || (context.room_roots.is_some() && secure_read.is_none()),
         reused_keys,
         enumeration,
         source_files_read,

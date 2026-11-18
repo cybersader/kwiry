@@ -426,14 +426,22 @@ fn build_partition(
         .writer(WRITER_MEMORY_BYTES)
         .map_err(|error| Error::Index(error.to_string()))?;
     let fingerprint = registration_fingerprint(vault);
-    let (enumeration, room) = room_roots.walk(vault);
-    let outcomes: Vec<_> = room.map_or_else(Vec::new, |room| {
+    let (mut enumeration, room) = room_roots.walk(vault);
+    let mut outcomes: Vec<_> = room.as_ref().map_or_else(Vec::new, |room| {
         enumeration
             .files
             .iter()
-            .map(|file| crate::chunk::ingest_file_with_room_handle(vault, file, Some(&room)))
+            .take_while(|_| !room.nesting_detected())
+            .map(|file| crate::chunk::ingest_file_with_room_handle(vault, file, Some(room)))
             .collect()
     });
+    if room
+        .as_ref()
+        .is_some_and(crate::room_walk::RoomRead::nesting_detected)
+    {
+        enumeration = crate::room_walk::nesting_failure(vault);
+        outcomes.clear();
+    }
     stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
