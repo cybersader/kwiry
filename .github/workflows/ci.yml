@@ -35,9 +35,32 @@ jobs:
           workspaces: daemon
       - name: Local daemon quality gate
         run: make check COMPONENT=daemon
-      - name: Test all workspace features
+      - name: Test all workspace features (component harnesses force Holdings on)
         working-directory: daemon
         run: cargo test --locked --workspace --all-features
+      - name: Verify N30 and N31 against the release binary
+        working-directory: daemon
+        run: cargo test --release --locked -p kwiry --test daemon format_release_
+
+  daemon-openclast-platform:
+    name: OpenClast platform refusal (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1961bfc0c4a8bf07e0a0c98e1e2459c642ea70a0 # v1.95.0
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: daemon
+      - name: Verify N33 on a non-Linux target
+        run: cargo test --locked -p kwiry --no-default-features --test daemon n33_non_linux_rejects_openclast_before_data_root_but_serves_desktop
 
   daemon-room-rollback:
     name: Room identity rollback (4ba5ba94)

@@ -47,6 +47,12 @@ impl ReplayState {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_entry_state(&self, jti: &str) -> (bool, usize) {
+        let entries = self.entries.lock().unwrap();
+        (entries.by_jti.contains_key(jti), entries.by_jti.len())
+    }
+
     pub(crate) fn record(
         &self,
         jti: &str,

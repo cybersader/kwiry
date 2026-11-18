@@ -48,6 +48,8 @@ mod ranking_eval;
 #[cfg(feature = "native")]
 mod reconcile;
 #[cfg(feature = "native")]
+mod room_format;
+#[cfg(feature = "native")]
 mod room_walk;
 #[cfg(feature = "native")]
 mod runtime;
@@ -256,3 +258,7 @@ pub fn ingest_config(config: &Config) -> Result<IngestReport> {
 
 #[cfg(feature = "native")]
 pub use config::{valid_room_identifier, valid_tenant_identifier};
+#[cfg(feature = "native")]
+pub use room_format::{HOLDINGS_SERVING_IMPLEMENTED, OpenClastRoomFormat};
+#[cfg(feature = "native")]
+pub use room_walk::probe_openclast_ingestion;

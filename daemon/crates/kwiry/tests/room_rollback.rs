@@ -5,9 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use kwiry_core::{
-    Config, HostProfile, OpenClastAuthConfig, VaultRegistration, build_index, save_config,
-};
+use kwiry_core::{Config, HostProfile, OpenClastAuthConfig, VaultRegistration, build_index};
 
 const VAULT: &str = "VaultOne_0123456789abc";
 const JWKS: &str = r#"{"keys":[{"kty":"OKP","crv":"Ed25519","x":"2-Jj2UvNCvQiUPNYRgSi0cJSPiJI6Rs6D0UTeEpQVj8","use":"sig","key_ops":["verify"],"alg":"EdDSA","kid":"ed01"}]}"#;
@@ -45,7 +43,8 @@ fn pre_spec_binary_refuses_room_identity_generation_rb1_rb2() {
                 room: Some(format!("Room_{index:017}")),
             });
         }
-        save_config(&config_path, &config).unwrap();
+        // Encode the admission config directly; the format config loader refuses it.
+        fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
         build_index(&config, &data).unwrap();
         let pointer = data.join("current.json");
         let original = fs::read(&pointer).unwrap();

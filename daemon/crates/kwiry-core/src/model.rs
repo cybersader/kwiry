@@ -44,6 +44,9 @@ pub struct Config {
     pub indexing: IndexingConfig,
     #[serde(default)]
     pub vaults: Vec<VaultRegistration>,
+    /// Kwiry-local pins, held durably outside the editable registration TOML.
+    #[serde(skip)]
+    pub room_root_identities: BTreeMap<String, String>,
 }
 
 #[cfg(feature = "native")]
@@ -56,6 +59,7 @@ impl Default for Config {
             semantic: SemanticConfig::default(),
             indexing: IndexingConfig::default(),
             vaults: Vec::new(),
+            room_root_identities: BTreeMap::new(),
         }
     }
 }
@@ -70,11 +74,6 @@ impl Config {
             vault.id.clone(),
             room_id.clone(),
         ))
-    }
-
-    pub fn has_repeated_vault_registration(&self) -> bool {
-        let mut ids = std::collections::BTreeSet::new();
-        self.vaults.iter().any(|vault| !ids.insert(&vault.id))
     }
 
     pub fn requires_restart_for(&self, next: &Self) -> bool {

@@ -373,15 +373,13 @@ async fn run_watcher(
                         match load_config(&paths.config) {
                             Ok(next) => {
                                 config_invalid = false;
-                                if startup_config.requires_restart_for(&next)
-                                    || (!crate::capability::HOLDINGS_SERVING_IMPLEMENTED
-                                        && next.server.profile == kwiry_core::HostProfile::OpenClast
-                                        && next.has_repeated_vault_registration()) {
+                                if startup_config.requires_restart_for(&next) {
                                     restart_required = true;
                                     mark_degraded(&status).await;
                                 } else {
                                     restart_required = false;
                                     if next != config {
+                                        manager.update_openclast_registrations(&next);
                                         reconfigure_roots(&mut watcher, &next, &mut watched_roots);
                                         config = next;
                                         roots = watch_roots(&config);

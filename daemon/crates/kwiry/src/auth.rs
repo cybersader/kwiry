@@ -8,7 +8,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use kwiry_core::{ApiErrorEnvelope, Principal, SearchRuntime, token_matches};
 
-use crate::capability::{CapabilityFailure, CapabilityVerifier, HOLDINGS_SERVING_IMPLEMENTED};
+use crate::capability::{CapabilityFailure, CapabilityVerifier};
 
 #[derive(Clone)]
 pub(crate) struct AuthState {
@@ -62,8 +62,7 @@ pub(crate) async fn require_auth(
             let supplied = supplied.to_owned();
             // Do not open repeated-vault admission before the production
             // Holdings lease/tombstone consumer can enforce R17.
-            let active_room_format =
-                auth.runtime.active_room_identity_format() && HOLDINGS_SERVING_IMPLEMENTED;
+            let active_room_format = auth.runtime.active_room_identity_format();
             tokio::task::spawn_blocking(move || {
                 verifier.verify_with_format(&supplied, active_room_format)
             })

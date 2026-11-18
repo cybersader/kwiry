@@ -335,8 +335,7 @@ fn build_openclast_candidate(
     let mut manifest = Manifest::default();
     let mut stats = IndexStats::default();
 
-    let room_roots = crate::source::ROOM_INCLUSIVE_IDS
-        .then(|| crate::room_walk::RoomRoots::capture(&config.vaults));
+    let room_roots = crate::room_walk::RoomRoots::capture(config);
     for vault in &config.vaults {
         let resource = config.resource_key(vault).ok_or_else(|| {
             Error::State(format!(
@@ -353,7 +352,7 @@ fn build_openclast_candidate(
             &index_dir,
             &mut manifest,
             &mut stats,
-            room_roots.as_ref(),
+            &room_roots,
         )?;
     }
 
@@ -404,7 +403,7 @@ fn build_partition(
     index_dir: &Path,
     manifest: &mut Manifest,
     stats: &mut IndexStats,
-    room_roots: Option<&crate::room_walk::RoomRoots>,
+    room_roots: &crate::room_walk::RoomRoots,
 ) -> Result<()> {
     if !vault.path.is_dir() {
         return Err(Error::InvalidVaultPath(vault.path.clone()));
@@ -425,22 +424,14 @@ fn build_partition(
         .writer(WRITER_MEMORY_BYTES)
         .map_err(|error| Error::Index(error.to_string()))?;
     let fingerprint = registration_fingerprint(vault);
-    let (outcomes, enumeration) = match room_roots {
-        Some(roots) => {
-            let (enumeration, room) = roots.walk(vault);
-            let outcomes = room.map_or_else(Vec::new, |room| {
-                enumeration
-                    .files
-                    .iter()
-                    .map(|file| {
-                        crate::chunk::ingest_file_with_room_handle(vault, file, Some(&room))
-                    })
-                    .collect()
-            });
-            (outcomes, enumeration)
-        }
-        None => ingest_vault_files(vault),
-    };
+    let (enumeration, room) = room_roots.walk(vault);
+    let outcomes: Vec<_> = room.map_or_else(Vec::new, |room| {
+        enumeration
+            .files
+            .iter()
+            .map(|file| crate::chunk::ingest_file_with_room_handle(vault, file, Some(&room)))
+            .collect()
+    });
     stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {

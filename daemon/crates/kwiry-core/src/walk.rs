@@ -9,7 +9,7 @@ use crate::format::SourceFormat;
 use crate::model::{DiscoveredFile, IngestWarning, MAX_FILE_BYTES, VaultRegistration};
 use crate::reconcile::EnumerationCompleteness;
 
-pub(crate) const SKIPPED_DIRECTORIES: &[&str] = &[
+const SKIPPED_DIRECTORIES: &[&str] = &[
     ".git",
     ".hg",
     ".svn",

@@ -17,13 +17,13 @@ use kwiry_core::{
     ApiErrorEnvelope, ApiSearchRequest, ApiSearchResponse, Config, ConnectionDescriptor,
     DaemonState, DaemonStatus, DataRoot, HealthResponse, HostProfile, IndexFreshness,
     IndexFreshnessBasis, IndexFreshnessState, IndexManager, LexicalMatchQuality, Manifest,
-    ManifestFileOutcome, ModelStatus, Paths, Principal, ROOM_INCLUSIVE_IDS, ReconcileScope, Scope,
-    SearchMode, SearchRuntime, VaultStatus, bootstrap_desktop, build_index, load_config,
-    write_connection_descriptor,
+    ManifestFileOutcome, ModelStatus, Paths, Principal, ReconcileScope, Scope, SearchMode,
+    SearchRuntime, VaultStatus, bootstrap_desktop, build_index, load_config,
+    probe_openclast_ingestion, write_connection_descriptor,
 };
 
 use crate::auth::{AuthState, require_auth};
-use crate::capability::{CapabilityVerifier, HOLDINGS_SERVING_IMPLEMENTED};
+use crate::capability::{CapabilityVerifier, ROOM_FORMAT};
 use crate::logging::Redacted;
 use crate::runtime::{ManagerHandle, spawn_manager};
 use crate::watcher::spawn_watcher;
@@ -52,27 +52,17 @@ pub(crate) async fn serve(
     bind_override: Option<String>,
     semantic: bool,
 ) -> Result<()> {
+    let initial_config = load_config(&paths.config)?;
+    let profile = initial_config.server.profile;
+    if profile == HostProfile::OpenClast {
+        probe_openclast_ingestion(&paths.data_dir, &initial_config.vaults)?;
+    }
     let _logging = crate::logging::init(&paths.logs_dir())?;
     tracing::info!(
         config = %paths.config.display(),
         data_dir = %paths.data_dir.display(),
         "starting kwiry daemon"
     );
-    let initial_config = load_config(&paths.config)?;
-    let profile = initial_config.server.profile;
-    if ROOM_INCLUSIVE_IDS && profile == HostProfile::OpenClast && !cfg!(target_os = "linux") {
-        return Err(anyhow!(
-            "secure OpenClast room ingestion is unavailable on this platform"
-        ));
-    }
-    if !HOLDINGS_SERVING_IMPLEMENTED
-        && profile == HostProfile::OpenClast
-        && initial_config.has_repeated_vault_registration()
-    {
-        return Err(anyhow!(
-            "multi-room serving requires the Holdings search admission integration"
-        ));
-    }
     let (config, auth, identity) = match profile {
         HostProfile::Desktop => {
             let bootstrap = bootstrap_desktop(&paths)?;
@@ -140,6 +130,9 @@ pub(crate) async fn serve(
     }
 
     let runtime = SearchRuntime::new();
+    if profile == HostProfile::OpenClast {
+        runtime.set_openclast_registrations(&config);
+    }
     let semantic_enabled = profile == HostProfile::Desktop && (semantic || config.semantic.enabled);
     if semantic_enabled && cfg!(not(feature = "semantic-onnx")) {
         return Err(anyhow!(
@@ -287,9 +280,10 @@ pub(crate) async fn serve(
                 .await;
                 *status.write().await = next;
             }
-            // A failed boot pass must not kill a daemon holding a complete
-            // serviceable generation: serve it, report degraded/stale, and
-            // let the watcher's retry and safety passes recover.
+            // OpenClast must not serve an inherited generation unless the
+            // boot pass checked its registrations and ingestion boundaries.
+            Err(error) if profile == HostProfile::OpenClast => return Err(error.into()),
+            // Desktop can serve its prior generation as degraded/stale.
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -474,8 +468,8 @@ pub(crate) fn build_router(state: AppState, auth: AuthState, profile: HostProfil
             auth.with_runtime(state.runtime.clone()),
             require_auth,
         ));
-    if profile == HostProfile::OpenClast && ROOM_INCLUSIVE_IDS {
-        protected = protected.route_layer(middleware::from_fn(id_scheme_header));
+    if profile == HostProfile::OpenClast {
+        protected = protected.route_layer(middleware::from_fn(room_format_headers));
     }
     Router::new()
         .route("/v0/health", get(health))
@@ -486,21 +480,24 @@ pub(crate) fn build_router(state: AppState, auth: AuthState, profile: HostProfil
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    if state.profile == HostProfile::OpenClast && ROOM_INCLUSIVE_IDS {
+    if state.profile == HostProfile::OpenClast {
         return (
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            r#"{"status":"ok","id_scheme":"room-v1"}"#,
+            ROOM_FORMAT.health_body(),
         )
             .into_response();
     }
     Json(HealthResponse::default()).into_response()
 }
 
-async fn id_scheme_header(request: axum::extract::Request, next: middleware::Next) -> Response {
+async fn room_format_headers(request: axum::extract::Request, next: middleware::Next) -> Response {
     let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert("kwiry-id-scheme", HeaderValue::from_static("room-v1"));
+    let headers = response.headers_mut();
+    headers.insert("kwiry-id-scheme", HeaderValue::from_static("room-v1"));
+    headers.insert(
+        "kwiry-multi-room",
+        HeaderValue::from_static(ROOM_FORMAT.multi_room_header()),
+    );
     response
 }
 
@@ -916,6 +913,43 @@ mod tests {
             &EncodingKey::from_ed_der(ED25519_PRIVATE_DER),
         )
         .unwrap()
+    }
+
+    fn assert_open_room_headers(response: &Response) {
+        let headers = response.headers();
+        assert_eq!(
+            headers
+                .get_all("kwiry-id-scheme")
+                .iter()
+                .collect::<Vec<_>>(),
+            ["room-v1"]
+        );
+        assert_eq!(
+            headers
+                .get_all("kwiry-multi-room")
+                .iter()
+                .collect::<Vec<_>>(),
+            ["open"]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn assert_open_health(app: &Router) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v0/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            r#"{"status":"ok","id_scheme":"room-v1","multi_room":"open"}"#
+        );
     }
 
     fn test_state() -> AppState {
@@ -1389,7 +1423,7 @@ mod tests {
         assert_eq!(health.status(), StatusCode::OK);
         assert_eq!(
             health.into_body().collect().await.unwrap().to_bytes(),
-            r#"{"status":"ok","id_scheme":"room-v1"}"#
+            r#"{"status":"ok","id_scheme":"room-v1","multi_room":"open"}"#
         );
 
         let status = app
@@ -1419,6 +1453,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(desktop_token.status(), StatusCode::UNAUTHORIZED);
+        assert_open_room_headers(&desktop_token); // N32: 401 inside admission component
 
         let semantic = app
             .oneshot(
@@ -1564,6 +1599,167 @@ mod tests {
             .to_bytes();
         let error: ApiErrorEnvelope = serde_json::from_slice(&body).unwrap();
         assert_eq!(error.error.code, "limit_exceeded");
+        manager.shutdown().unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn component_holdings_format_p1_to_p4_p9_p15_p17_p18_n32() {
+        let directory = tempdir().unwrap();
+        let data = directory.path().join("data");
+        let mut config = Config::default();
+        config.server.profile = HostProfile::OpenClast;
+        let mut auth_config = openclast_auth_config(directory.path());
+        auth_config.legacy_identity_accept_until = Some(0);
+        auth_config.workload_subject_allowlist = vec!["workload:synthetic-search".into()];
+        config.auth.openclast = Some(auth_config.clone());
+        for index in 0..256 {
+            let path = directory.path().join(format!("room-{index}"));
+            fs::create_dir(&path).unwrap();
+            if index < 7 {
+                fs::write(
+                    path.join("index.md"),
+                    format!("shared synthetic room {index}"),
+                )
+                .unwrap();
+            }
+            let (vault, room) = match index {
+                0 => (
+                    "VaultOne_0123456789abc".into(),
+                    "RoomAaaa_0123456789abc".into(),
+                ),
+                1 => (
+                    "VaultOne_0123456789abc".into(),
+                    "RoomBbbb_0123456789abc".into(),
+                ),
+                2 => (
+                    "VaultTwo_0123456789abc".into(),
+                    "RoomDddd_0123456789abc".into(),
+                ),
+                3 => (
+                    "VaultOne_0123456789abc".into(),
+                    "roomAaaa_0123456789abc".into(),
+                ),
+                4 => (
+                    "VaultOne_0123456789abc".into(),
+                    "RoomXxxx_0123456789abc".into(),
+                ),
+                5 => (
+                    "VaultOne_0123456789abc".into(),
+                    "RoomXxxx_0123456789abd".into(),
+                ),
+                _ => ("VaultTwo_0123456789abc".into(), format!("Room_{index:017}")),
+            };
+            config.vaults.push(VaultRegistration {
+                id: vault,
+                path,
+                room: Some(room),
+            });
+        }
+        let resources: Vec<_> = config
+            .vaults
+            .iter()
+            .map(|vault| config.resource_key(vault).unwrap())
+            .collect();
+        build_index(&config, &data).unwrap();
+        let runtime = SearchRuntime::new();
+        runtime.set_openclast_registrations(&config);
+        let manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        let status = Arc::new(RwLock::new(DaemonStatus::starting("0.1.0")));
+        let verifier = CapabilityVerifier::load(&auth_config, &data).unwrap();
+        let epoch: u64 = fs::read_to_string(data.join("replay-epoch"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let app = build_router(
+            AppState {
+                profile: HostProfile::OpenClast,
+                runtime: runtime.clone(),
+                status: status.clone(),
+            },
+            AuthState::openclast(verifier),
+            HostProfile::OpenClast,
+        );
+        assert_open_health(&app).await; // P17: populated generation
+        status.write().await.rebuilding = true;
+        assert_open_health(&app).await; // P17: rebuilding, not a production Holdings integration
+        let iat = loop {
+            let now = crate::capability::unix_time().unwrap();
+            if now > epoch {
+                break now;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        let sign = |set: &[ResourceKey], jti: usize| {
+            let mut set = set.to_vec();
+            set.sort();
+            let claims = json!({
+                "iss": "issuer", "aud": "kwiry-search", "sub": "workload:synthetic-search",
+                "jti": format!("component-{jti}"), "iat": iat, "nbf": iat, "exp": iat + 60,
+                "tenant": "tenant_AAAAAAAAAAAAAAAAAAAA", "actions": ["search:lexical"],
+                "resources": set, "constraints": {"max_limit": 20},
+            });
+            let mut header = Header::new(Algorithm::EdDSA);
+            header.kid = Some("ed01".into());
+            header.typ = Some("kwiry-cap+jwt".into());
+            encode(
+                &header,
+                &claims,
+                &EncodingKey::from_ed_der(ED25519_PRIVATE_DER),
+            )
+            .unwrap()
+        };
+        let request = |set: &[ResourceKey], jti, limit| {
+            Request::builder()
+                .method("POST")
+                .uri("/v0/search")
+                .header(AUTHORIZATION, format!("Bearer {}", sign(set, jti)))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"q":"shared", "mode":"lexical", "limit":limit}).to_string(),
+                ))
+                .unwrap()
+        };
+        for (jti, set, hits) in [
+            (1, resources[..1].to_vec(), 1),
+            (2, resources[..2].to_vec(), 2),
+            (3, resources[..3].to_vec(), 3),
+            (4, resources.clone(), 7),
+            (9, vec![resources[0].clone(), resources[3].clone()], 2),
+            (15, resources[4..=5].to_vec(), 2),
+        ] {
+            let response = app.clone().oneshot(request(&set, jti, 20)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "P{jti}");
+            assert_open_room_headers(&response);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let response: ApiSearchResponse = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response.hits.len(), hits);
+            let ids: std::collections::BTreeSet<_> =
+                response.hits.iter().map(|hit| &hit.chunk_id).collect();
+            assert_eq!(ids.len(), hits); // P2 ties verifier admission to the real id derivation.
+            for hit in response.hits {
+                assert!(set.iter().any(|key| hit.vault_id == key.vault_id
+                    && hit.room_id.as_ref() == Some(&key.room_id)));
+                assert_eq!(hit.path, "index.md");
+            }
+        }
+        let response = app
+            .clone()
+            .oneshot(request(&resources[..2], 40, 21))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_open_room_headers(&response);
+        // R17: removing a registration refuses the whole set even while the
+        // prior generation still has that partition and a hit from another room.
+        config.vaults.remove(1);
+        runtime.set_openclast_registrations(&config);
+        let response = app.oneshot(request(&resources[..2], 41, 20)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_open_room_headers(&response);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            r#"{"error":{"code":"resource_unavailable","message":"an authorized resource is not available for search","resource_indexes":[1]}}"#
+        );
         manager.shutdown().unwrap();
     }
 }

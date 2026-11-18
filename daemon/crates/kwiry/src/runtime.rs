@@ -15,6 +15,12 @@ impl ManagerHandle {
         }
     }
 
+    pub(crate) fn update_openclast_registrations(&self, config: &Config) {
+        if config.server.profile == kwiry_core::HostProfile::OpenClast {
+            self.runtime.set_openclast_registrations(config);
+        }
+    }
+
     pub(crate) async fn reconcile_scoped(
         &self,
         config: Config,

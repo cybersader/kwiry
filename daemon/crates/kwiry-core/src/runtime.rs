@@ -74,6 +74,7 @@ pub struct SearchRuntime {
     semantic: Arc<ArcSwapOption<SemanticRuntime>>,
     freshness_basis: Arc<AtomicU8>,
     resource_freshness: Arc<Mutex<BTreeMap<ResourceKey, ResourceFreshness>>>,
+    registered_resources: Arc<ArcSwapOption<BTreeSet<ResourceKey>>>,
 }
 
 impl Default for SearchRuntime {
@@ -89,6 +90,7 @@ impl SearchRuntime {
             semantic: Arc::new(ArcSwapOption::empty()),
             freshness_basis: Arc::new(AtomicU8::new(0)),
             resource_freshness: Arc::new(Mutex::new(BTreeMap::new())),
+            registered_resources: Arc::new(ArcSwapOption::empty()),
         }
     }
 
@@ -164,6 +166,19 @@ impl SearchRuntime {
         }
     }
 
+    /// Apply an accepted OpenClast registration snapshot before reconciliation.
+    /// Old generation partitions are not proof that a tuple is still registered.
+    pub fn set_openclast_registrations(&self, config: &Config) {
+        debug_assert_eq!(config.server.profile, HostProfile::OpenClast);
+        self.registered_resources.store(Some(Arc::new(
+            config
+                .vaults
+                .iter()
+                .filter_map(|vault| config.resource_key(vault))
+                .collect(),
+        )));
+    }
+
     pub fn search_authorized(
         &self,
         query: &str,
@@ -191,14 +206,21 @@ impl SearchRuntime {
             ActiveSearchIndex::Desktop(_) => Err(Error::Auth(
                 "authorized resource search is unavailable in the desktop profile".to_owned(),
             )),
-            ActiveSearchIndex::OpenClast(index) => index.search_with_profile(
-                query,
-                limit,
-                filters,
-                resources,
-                profile,
-                query_time_epoch_seconds,
-            ),
+            ActiveSearchIndex::OpenClast(index) => {
+                index.check_resources_against(
+                    filters,
+                    resources,
+                    self.registered_resources.load().as_deref(),
+                )?;
+                index.search_with_profile(
+                    query,
+                    limit,
+                    filters,
+                    resources,
+                    profile,
+                    query_time_epoch_seconds,
+                )
+            }
         }
     }
 
@@ -215,6 +237,11 @@ impl SearchRuntime {
                 "authorized resource search is unavailable in the desktop profile".to_owned(),
             )),
             ActiveSearchIndex::OpenClast(index) => {
+                index.check_resources_against(
+                    filters,
+                    resources,
+                    self.registered_resources.load().as_deref(),
+                )?;
                 let outcome = index.search_with_quality(query, limit, filters, resources)?;
                 Ok(GenerationSearchResult {
                     generation: index.scoped_generation(filters, resources)?,
@@ -423,6 +450,11 @@ impl SearchRuntime {
             ));
         };
         let effective = effective_resources(filters, resources);
+        index.check_resources_against(
+            filters,
+            resources,
+            self.registered_resources.load().as_deref(),
+        )?;
         let current_generation = index.scoped_generation(filters, resources)?;
         let mut worst = IndexFreshnessState::Current;
         for resource in effective {
@@ -641,12 +673,22 @@ impl PartitionedSearchIndex {
     }
 
     fn check_resources(&self, filters: &SearchFilters, resources: &[ResourceKey]) -> Result<()> {
+        self.check_resources_against(filters, resources, None)
+    }
+
+    fn check_resources_against(
+        &self,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+        registered: Option<&BTreeSet<ResourceKey>>,
+    ) -> Result<()> {
         let indexes: Vec<_> = resources
             .iter()
             .enumerate()
             .filter_map(|(index, resource)| {
                 (matches_resource_filters(filters, resource)
-                    && !self.partition_dirs.contains_key(resource))
+                    && (!self.partition_dirs.contains_key(resource)
+                        || registered.is_some_and(|keys| !keys.contains(resource))))
                 .then_some(index)
             })
             .collect();
@@ -1593,8 +1635,7 @@ impl OpenClastIndexManager {
                     })
             })
             .collect::<Result<_>>()?;
-        let room_roots = crate::source::ROOM_INCLUSIVE_IDS
-            .then(|| crate::room_walk::RoomRoots::capture(&config.vaults));
+        let room_roots = crate::room_walk::RoomRoots::capture(&config);
         // Removed registrations never retain content, including the other room
         // of a repeated vault. Removing a layout entry drops the full partition.
         let removed_keys: Vec<_> = self
@@ -1631,7 +1672,8 @@ impl OpenClastIndexManager {
             if vault_reclassified {
                 next_resources.remove(&resource);
             }
-            if !vault.path.is_dir() {
+            if !vault.path.is_dir() && !config.room_root_identities.contains_key(&resource.room_id)
+            {
                 incomplete.insert(resource.clone());
                 unavailable_vaults.push(vault.id.clone());
                 for (key, file) in &self.manifest.files {
@@ -1676,7 +1718,7 @@ impl OpenClastIndexManager {
                     policy: observation_policy,
                     semantic: None,
                     read_scope: vault_read_scope.as_ref(),
-                    room_roots: room_roots.as_ref(),
+                    room_roots: Some(&room_roots),
                 },
                 &mut audit,
             );
@@ -1706,18 +1748,9 @@ impl OpenClastIndexManager {
                 }
                 if outcome.kind == FileOutcomeKind::TransientError {
                     incomplete.insert(resource.clone());
-                    if room_roots.is_some() {
-                        next_room_retries.insert((resource.clone(), outcome.path.clone()));
-                    }
-                    if let Some(previous) = self.manifest.files.get(&key) {
-                        if room_roots.is_some() {
-                            plan.remove_source(
-                                key.clone(),
-                                PartitionScope::Resource(resource.clone()),
-                            );
-                        } else {
-                            plan.retain_source(&key, previous, RetentionReason::TransientReadError);
-                        }
+                    next_room_retries.insert((resource.clone(), outcome.path.clone()));
+                    if self.manifest.files.contains_key(&key) {
+                        plan.remove_source(key.clone(), PartitionScope::Resource(resource.clone()));
                     }
                     seen_keys.insert(key);
                     continue;

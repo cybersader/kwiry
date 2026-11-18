@@ -18,9 +18,8 @@ use crate::replay::ReplayState;
 use serde::de::{Error as _, IgnoredAny};
 use serde::{Deserialize, Serialize};
 
-// Release gate: the lifecycle model is not a production Holdings consumer.
-// Until it is wired to search admission and R17, don't serve expanded scope.
-pub(crate) const HOLDINGS_SERVING_IMPLEMENTED: bool = false;
+pub(crate) const ROOM_FORMAT: kwiry_core::OpenClastRoomFormat =
+    kwiry_core::openclast_room_format!();
 
 const MAX_RESOURCES: usize = 256;
 const MAX_SEARCH_LIMIT: usize = 100;
@@ -50,6 +49,7 @@ pub(crate) struct CapabilityVerifier {
     legacy_identity_accept_until: Option<u64>,
     keys: HashMap<String, VerificationKey>,
     replay: Option<Arc<ReplayState>>,
+    room_format: kwiry_core::OpenClastRoomFormat,
 }
 
 #[derive(Deserialize)]
@@ -224,6 +224,7 @@ impl CapabilityVerifier {
             legacy_identity_accept_until: config.legacy_identity_accept_until,
             keys,
             replay: None,
+            room_format: ROOM_FORMAT,
         })
     }
 
@@ -381,7 +382,8 @@ impl CapabilityVerifier {
         }
 
         let workload = claims.actor.is_none();
-        let repeated_vault_allowed = ROOM_INCLUSIVE_IDS && active_room_format && workload;
+        let repeated_vault_allowed =
+            self.room_format.admits_repeated_vault() && active_room_format && workload;
         let resources: Vec<ResourceKey> = claims.resources.into_iter().map(Into::into).collect();
         let mut vault_ids = BTreeSet::new();
         let mut room_ids = BTreeSet::new();
@@ -1283,6 +1285,33 @@ mod tests {
                 1,
             ),
         );
+    }
+
+    #[test]
+    fn n30_format_gate_leaves_exact_replay_jti_and_count_unchanged() {
+        let (mut verifier, mut claims) = workload_fixture();
+        verifier.room_format = kwiry_core::OpenClastRoomFormat::from_build_flags(
+            ROOM_INCLUSIVE_IDS,
+            kwiry_core::HOLDINGS_SERVING_IMPLEMENTED,
+        );
+        let directory = tempfile::tempdir().unwrap();
+        claims.jti = "synthetic-n30-exact-jti".into();
+        let replay = Arc::new(ReplayState::start(directory.path(), claims.iat - 2).unwrap());
+        verifier.replay = Some(replay.clone());
+        let before = replay.test_entry_state(&claims.jti);
+        assert_eq!(before, (false, 0));
+        assert_eq!(
+            verifier.verify_with_format(&sign(&claims, Some("ed01")), true),
+            Err(CapabilityFailure::Forbidden)
+        );
+        assert_eq!(replay.test_entry_state(&claims.jti), before);
+        claims.resources.pop();
+        assert!(
+            verifier
+                .verify_with_format(&sign(&claims, Some("ed01")), true)
+                .is_ok()
+        );
+        assert_eq!(replay.test_entry_state(&claims.jti), (true, 1));
     }
 
     #[test]

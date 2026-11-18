@@ -34,3 +34,6 @@ assert_cmd.workspace = true
 http-body-util.workspace = true
 predicates.workspace = true
 tower.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc.workspace = true
