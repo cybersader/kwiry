@@ -240,6 +240,8 @@ fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
         audience: "kwiry-search".into(),
         jwks_file,
         max_token_ttl_seconds: 60,
+        workload_subject_allowlist: Vec::new(),
+        legacy_identity_accept_until: None,
     });
     config.vaults = vec![VaultRegistration {
         id: "fixture".into(),
@@ -290,6 +292,140 @@ fn vaultless_daemon_serves_health_and_typed_index_building_instead_of_exiting() 
     daemon.stop();
 }
 
+#[test]
+fn governed_headers_survive_real_forbidden_watcher_and_logs_discard_identity() {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    const PRIVATE_DER: &[u8] = &[
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20, 0x6a, 0xc3, 0xfd, 0xee, 0xee, 0x29, 0x8a, 0x92, 0x63, 0x8b, 0x70, 0x0c, 0x4b, 0x11,
+        0x7c, 0xc3, 0x2e, 0x2d, 0x2a, 0xce, 0x0d, 0xfd, 0x78, 0x76, 0x94, 0xe2, 0x4c, 0xae, 0x8a,
+        0xd5, 0x82, 0x34,
+    ];
+    let temp = tempdir().unwrap();
+    let config_path = temp.path().join("config.toml");
+    let data = temp.path().join("data");
+    let a = temp.path().join("a");
+    let b = temp.path().join("b");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    fs::write(a.join("note.md"), "# Visible\nvisibleprobe").unwrap();
+    fs::write(b.join("note.md"), "# Hidden\noldhiddenprobe").unwrap();
+    let jwks_file = temp.path().join("jwks.json");
+    fs::write(&jwks_file, r#"{"keys":[{"kty":"OKP","crv":"Ed25519","x":"2-Jj2UvNCvQiUPNYRgSi0cJSPiJI6Rs6D0UTeEpQVj8","use":"sig","key_ops":["verify"],"alg":"EdDSA","kid":"ed01"}]}"#).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut config = Config::default();
+    config.server.profile = HostProfile::OpenClast;
+    config.auth.openclast = Some(OpenClastAuthConfig {
+        tenant_id: "tenant-a".into(),
+        issuer: "issuer".into(),
+        audience: "kwiry-search".into(),
+        jwks_file,
+        max_token_ttl_seconds: 60,
+        workload_subject_allowlist: vec!["workload:synthetic-search".into()],
+        legacy_identity_accept_until: Some(now + 300),
+    });
+    config.vaults = vec![
+        VaultRegistration {
+            id: "a".into(),
+            path: a,
+            room: Some("room-a".into()),
+        },
+        VaultRegistration {
+            id: "b".into(),
+            path: b.clone(),
+            room: Some("room-b".into()),
+        },
+    ];
+    save_config(&config_path, &config).unwrap();
+    let token = |vault: &str, legacy: bool| {
+        let mut claims = serde_json::json!({
+            "iss": "issuer", "aud": "kwiry-search", "sub": "workload:synthetic-search",
+            "jti": "synthetic-request-nonce", "iat": now, "nbf": now, "exp": now + 60,
+            "tenant": "tenant-a", "actions": ["search:lexical"],
+            "resources": [{"tenant_id": "tenant-a", "vault_id": vault, "room_id": format!("room-{vault}")}],
+            "constraints": {"max_limit": 20}
+        });
+        if legacy {
+            claims["sub"] = serde_json::json!("synthetic-user-sentinel");
+            claims["actor"] = serde_json::json!("synthetic-actor-sentinel");
+            claims["subject_revision"] = serde_json::json!("synthetic-identity-revision");
+        }
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("ed01".into());
+        encode(&header, &claims, &EncodingKey::from_ed_der(PRIVATE_DER)).unwrap()
+    };
+    let daemon = Daemon::start_openclast(&config_path, &data);
+    let legacy = token("a", true);
+    let workload = token("a", false);
+    let hidden = token("b", false);
+    let body = r#"{"q":"visibleprobe","mode":"lexical","limit":20}"#;
+    let snapshot = |token: &str| {
+        let (code, body, headers) =
+            request_with_headers(&daemon.address, token, "POST", "/v0/search", Some(body));
+        assert_eq!(code, 200, "{body}");
+        let header = |name: &str| {
+            headers
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        (
+            header("x-kwiry-generation:"),
+            header("x-kwiry-index-freshness:"),
+            body,
+        )
+    };
+    let baseline = snapshot(&legacy);
+    assert!(baseline.0.starts_with("v1-"));
+    assert_eq!(baseline.1, "current; basis=strict_hash");
+    assert_eq!(snapshot(&workload), baseline);
+    fs::write(b.join("note.md"), "# Hidden changed\nnewhiddenprobe").unwrap();
+    wait_for(|| {
+        // Sample A while the actual notify watcher dirties and reconciles B.
+        assert_eq!(snapshot(&legacy), baseline);
+        !search(&daemon.address, &hidden, "newhiddenprobe").is_empty()
+    });
+    assert_eq!(snapshot(&workload), baseline);
+    // A failed bearer also must not reach diagnostics with its token contents.
+    let (code, _) = request(
+        &daemon.address,
+        "synthetic-rejected-token",
+        "POST",
+        "/v0/search",
+        Some(body),
+    );
+    assert_eq!(code, 401);
+    daemon.stop();
+    let logs = fs::read_dir(data.join("logs"))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(
+        logs.contains("OpenClast search enforced"),
+        "expected captured audit output"
+    );
+    for forbidden in [
+        "synthetic-user-sentinel",
+        "synthetic-actor-sentinel",
+        "synthetic-identity-revision",
+        "workload:synthetic-search",
+        "synthetic-rejected-token",
+        "\"subject\"",
+        "\"actor\"",
+        "subject_revision",
+    ] {
+        assert!(
+            !logs.contains(forbidden),
+            "captured logs retained {forbidden}"
+        );
+    }
+}
+
 fn vault_add(config: &Path, data: &Path, id: &str, vault: &Path) {
     let status = Command::new(cargo_bin("kwiry"))
         .args([
@@ -336,6 +472,17 @@ fn request(
     path: &str,
     body: Option<&str>,
 ) -> (u16, String) {
+    let (status, body, _) = request_with_headers(address, token, method, path, body);
+    (status, body)
+}
+
+fn request_with_headers(
+    address: &str,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, String, String) {
     let body = body.unwrap_or_default();
     let timeout = Duration::from_secs(2);
     let mut stream = TcpStream::connect_timeout(&address.parse().unwrap(), timeout).unwrap();
@@ -359,7 +506,7 @@ fn request(
         .unwrap()
         .parse()
         .unwrap();
-    (status, body.to_owned())
+    (status, body.to_owned(), headers.to_owned())
 }
 
 fn wait_for(mut condition: impl FnMut() -> bool) {

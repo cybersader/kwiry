@@ -28,6 +28,7 @@ impl EnumerationCompleteness {
 pub(crate) enum ChangeReason {
     New,
     ContentHashChanged,
+    MtimeChanged,
     RegistrationFingerprintChanged,
     ResourceChanged,
     OutcomeChanged,
@@ -334,6 +335,11 @@ pub(crate) fn plan_source(
     }
     if previous.content_hash != next.content_hash {
         return SourceDecision::Reingest(ChangeReason::ContentHashChanged);
+    }
+    // Governed mtime range queries must describe the same snapshot as v1
+    // headers, even when bytes are unchanged. Desktop behavior stays unchanged.
+    if matches!(scope, PartitionScope::Resource(_)) && previous.mtime_nanos != next.mtime_nanos {
+        return SourceDecision::Reingest(ChangeReason::MtimeChanged);
     }
     SourceDecision::Unchanged
 }
