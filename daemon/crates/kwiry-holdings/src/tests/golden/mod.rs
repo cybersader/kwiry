@@ -19,6 +19,7 @@
 
 mod lists;
 mod reports;
+mod status;
 
 use crate::b64;
 use crate::canonical::sha256_tagged;
@@ -141,32 +142,11 @@ pub const REGISTRY: &[(&str, Disposition)] = &[
     ),
     (
         "cases.V6.status_and_release",
-        Disposition::Later {
-            slice: "S3",
-            reason: "status route and quarantine_release execution (release_result, manifest binding)",
-        },
+        Disposition::Run("status::v6_status_and_release"),
     ),
-    (
-        "cases.V7",
-        Disposition::Later {
-            slice: "S3",
-            reason: "release execution against a retained manifest whose approved_count differs",
-        },
-    ),
-    (
-        "cases.V8",
-        Disposition::Later {
-            slice: "S3",
-            reason: "release execution against a manifest with a reclassified unit (G.5 strict)",
-        },
-    ),
-    (
-        "cases.V9",
-        Disposition::Later {
-            slice: "S3",
-            reason: "status report release_result for an unknown instruction",
-        },
-    ),
+    ("cases.V7", Disposition::Run("status::v7")),
+    ("cases.V8", Disposition::Run("status::v8")),
+    ("cases.V9", Disposition::Run("status::v9")),
     ("cases.V10", Disposition::Run("reports::v10")),
     ("cases.V11", Disposition::Run("reports::v11_*")),
     (
@@ -182,10 +162,7 @@ pub const REGISTRY: &[(&str, Disposition)] = &[
     ),
     (
         "cases.V12.first_new_epoch_status",
-        Disposition::Later {
-            slice: "S3",
-            reason: "status route",
-        },
+        Disposition::Run("status::v12_first_new_epoch_status"),
     ),
     (
         "cases.V12.expect.new_mint",
@@ -203,10 +180,7 @@ pub const REGISTRY: &[(&str, Disposition)] = &[
     ),
     (
         "H53.refused.status",
-        Disposition::Later {
-            slice: "S3",
-            reason: "status route",
-        },
+        Disposition::Run("status::h53_refused_status"),
     ),
     (
         "H53.accepted_current.report",
@@ -214,10 +188,7 @@ pub const REGISTRY: &[(&str, Disposition)] = &[
     ),
     (
         "H53.accepted_current.status",
-        Disposition::Later {
-            slice: "S3",
-            reason: "status route",
-        },
+        Disposition::Run("status::h53_accepted_current_status"),
     ),
     (
         "H53.first_current_list",
@@ -581,6 +552,8 @@ pub fn profile(engine: bool) -> WireProfile {
         typ_keyset: wire("typ_keyset").into(),
         typ_report_request: wire("typ_report_request").into(),
         typ_report_ack: wire("typ_report_ack").into(),
+        typ_status_request: wire("typ_status_request").into(),
+        typ_status_ack: wire("typ_status_ack").into(),
         outcome_header: wire("outcome_header").into(),
         audience_prefix: wire("audience_prefix").into(),
         authority_key_id_prefix: wire("authority_key_id_prefix").into(),
@@ -663,6 +636,7 @@ fn the_wire_profile_agrees_with_the_fixture() {
     let known_requests = [
         wire.list_request_content_type(),
         wire.report_request_content_type(),
+        wire.status_request_content_type(),
     ];
     let mut checked = 0;
     for exchange in exchanges {
@@ -672,10 +646,10 @@ fn the_wire_profile_agrees_with_the_fixture() {
             request_type,
             format!("application/{}", text(&request_header["typ"]))
         );
-        if !known_requests.iter().any(|known| known == request_type) {
-            // The status route (a later slice) has its own media types.
-            continue;
-        }
+        assert!(
+            known_requests.iter().any(|known| known == request_type),
+            "unknown request media type {request_type}"
+        );
         checked += 1;
         let request_claims = claims(text(&exchange["request"]));
         assert_eq!(text(&request_claims["aud"]), issuer());
@@ -689,7 +663,9 @@ fn the_wire_profile_agrees_with_the_fixture() {
             let content_type = text(&response["content_type"]);
             assert_eq!(content_type, format!("application/{typ}"));
             assert!(
-                typ == wire.typ_list_page || typ == wire.typ_report_ack,
+                typ == wire.typ_list_page
+                    || typ == wire.typ_report_ack
+                    || typ == wire.typ_status_ack,
                 "unexpected answer typ {typ}"
             );
             let answer = claims(body);

@@ -186,7 +186,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         )
     }
 
-    fn high_water_epoch(&self) -> Option<String> {
+    pub(crate) fn high_water_epoch(&self) -> Option<String> {
         self.writer
             .state()
             .high_water
@@ -358,6 +358,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.apply_failed_since_admit = false;
         self.rollback_suspected = false;
         self.prune_sent(prune);
+        self.resolve_status_uncertain();
     }
 
     /// Removes sent bytes nothing refers to any more (best effort).
@@ -909,7 +910,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let record = channel.pending.as_mut()?;
         record.attempts.push(attempt.clone());
         record.status = PendingStatus::Armed;
-        if !self.commit_book(next) {
+        // G.3: a release may bind to these exact bytes; the manifest their
+        // body names is indexed by their digest in the same commit.
+        let mut status = self.writer.state().status.clone();
+        status.manifests.insert(
+            attempt.digest.clone(),
+            crate::status::ManifestRef {
+                key: pending.key.clone(),
+                manifest_digest: pending.body.counts.quarantine_manifest_digest.clone(),
+                recorded_ms: self.clock.wall_ms(),
+            },
+        );
+        if !self.commit_lifecycle(Some(next), Some(status), false) {
             return None;
         }
         Some(Armed {
@@ -1082,13 +1094,36 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 invalidate(&mut next, &ob);
             }
         }
+        let mut status = self.writer.state().status.clone();
+        if crate::status::cancel_status_on_403(&mut status) {
+            cancelled += 1;
+        }
         // The route halt above already stops every send in memory; the
         // durable record only matters across the operator restart.
         if cancelled > 0 {
-            self.commit_book(next);
+            self.commit_lifecycle(Some(next), Some(status), false);
             self.events
                 .emit(HolderEvent::ReportsCancelled { count: cancelled });
         }
+    }
+
+    /// N5: an audited operator resume of a bug-halted report channel. Its
+    /// report moves to `invalidated` (attempts that may have been sent
+    /// become uncertain) and the next pass re-derives it under a new key.
+    /// Returns whether the channel was halted.
+    pub fn resume_report(&mut self, obligation_id: &str) -> bool {
+        let mut next = self.writer.state().obligations.clone();
+        let Some(channel) = next.channels.get_mut(obligation_id).filter(|c| c.halted) else {
+            return false;
+        };
+        channel.halted = false;
+        invalidate(&mut next, obligation_id);
+        if !self.commit_book(next) {
+            return false;
+        }
+        self.unverifiable.remove(obligation_id);
+        self.events.emit(HolderEvent::ReportResumed);
+        true
     }
 
     /// Stores an ack's bytes under `name` in the holder directory.
@@ -1264,16 +1299,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.commit_book(next)
     }
 
-    /// v2 H.27 hook (S3 calls it): a verified status ack minted in `epoch`.
+    /// v2 H.27: a verified status ack minted in `epoch`. The status channel
+    /// records this itself, in the receipt's own commit; the hook stays for
+    /// hosts and tests.
     pub fn record_status_ack(&mut self, epoch: &str) -> bool {
         let mut next = self.writer.state().obligations.clone();
         next.status_gate.acked_epoch = Some(epoch.to_owned());
         self.commit_book(next)
     }
 
-    /// v2 H.22.3, H.27 hook (S3 calls it): the status channel entered a bug
-    /// halt (opens the gate) or an operator resume invalidated it (closes it
-    /// again until a current-epoch ack).
+    /// v2 H.22.3, H.27: the status channel entered a bug halt (opens the
+    /// gate) or an operator resume invalidated it (closes it again until a
+    /// current-epoch ack). `status` records both itself, in the same commit
+    /// as the halt or resume.
     pub fn record_status_halted(&mut self, halted: bool) -> bool {
         let mut next = self.writer.state().obligations.clone();
         next.status_gate.status_halted = halted;

@@ -52,6 +52,8 @@ pub fn neutral_profile() -> WireProfile {
         typ_keyset: "example-lifecycle-keyset+jwt".into(),
         typ_report_request: "example-obligation-report+jwt".into(),
         typ_report_ack: "example-obligation-ack+jwt".into(),
+        typ_status_request: "example-holder-status+jwt".into(),
+        typ_status_ack: "example-holder-status-ack+jwt".into(),
         outcome_header: "Example-Lifecycle-Outcome".into(),
         audience_prefix: "example-lifecycle:".into(),
         authority_key_id_prefix: "ak-".into(),
@@ -285,6 +287,28 @@ impl Rig {
     ) -> Result<crate::report::ReportSummary, crate::purge::ObligationsRefused> {
         let purger = self.purger.clone();
         self.holder().report_once(&purger)
+    }
+
+    /// One status pass against the rig's purger.
+    pub fn status(
+        &mut self,
+    ) -> Result<crate::status::StatusSummary, crate::purge::ObligationsRefused> {
+        let purger = self.purger.clone();
+        self.holder().status_once(&purger)
+    }
+
+    /// One release pass against the rig's purger.
+    pub fn release(
+        &mut self,
+    ) -> Result<crate::release::ReleaseSummary, crate::purge::ObligationsRefused> {
+        let mut purger = self.purger.clone();
+        self.holder().release_once(&mut purger)
+    }
+
+    /// Confirms recorded release reservations with the rig's purger.
+    pub fn honor(&mut self) -> Result<usize, crate::purge::ObligationsRefused> {
+        let mut purger = self.purger.clone();
+        self.holder().honor_reservations(&mut purger)
     }
 
     /// Advances both clocks, past the list-start spacing by default.

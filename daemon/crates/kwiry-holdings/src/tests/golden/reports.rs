@@ -342,7 +342,8 @@ fn v5_an_ack_under_another_key_is_convergence_without_the_header() {
 
 /// V6's list and report half: the incomplete report's receipt, the
 /// instruction parsed and bound to that report's digest, nothing deleted.
-/// The status report and release execution are S3.
+/// The status report and release execution run in
+/// `status::v6_status_and_release`.
 #[test]
 fn v6_lists_and_report() {
     let case = at("cases.V6");

@@ -8,7 +8,7 @@
 //!   `escalated`, or `retired` with `complete` and residual data (§3.4.4);
 //! - the resource is durably tombstoned;
 //! - the purger's independent census attributes the unit to that resource,
-//!   the unit has no open handle and no release reserved it;
+//!   the unit has no open handle, and no release reserved or holds it;
 //! - the claim was durably recorded first, and the holder has not
 //!   fail-stopped (H.45).
 //!
@@ -87,10 +87,18 @@ pub struct Inventory {
 
 impl Inventory {
     pub fn new(census: &Census, plan: &PublishPlan) -> Self {
+        Self::with_held(census, plan, &BTreeSet::new())
+    }
+
+    /// As [`new`](Self::new), with `held` units a release holds: whatever
+    /// the census says, they are counted unattributed and no obligation
+    /// can claim them.
+    pub fn with_held(census: &Census, plan: &PublishPlan, held: &BTreeSet<String>) -> Self {
         let mut inventory = Self::default();
         for unit in &census.units {
             let attributed = unit.attribution.as_ref().filter(|key| {
                 !unit.reserved
+                    && !held.contains(&unit.unit_id)
                     && plan
                         .dispositions
                         .get(*key)
@@ -204,7 +212,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &self,
         purger: &dyn ArtifactPurger,
     ) -> Result<Inventory, crate::store::StoreError> {
-        Ok(Inventory::new(&purger.census()?, &self.plan()))
+        Ok(self.inventory_of(&purger.census()?))
+    }
+
+    /// `census` against the current classification and the units releases
+    /// hold.
+    pub(crate) fn inventory_of(&self, census: &Census) -> Inventory {
+        Inventory::with_held(
+            census,
+            &self.plan(),
+            &self.writer.state().status.release_held_units(),
+        )
     }
 
     /// Every obligation of the applied list that authorizes a purge now.
@@ -380,7 +398,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 return Ok(summary);
             }
         };
-        let inventory = Inventory::new(&census, &self.plan());
+        let inventory = self.inventory_of(&census);
         for target in passed {
             let scan = self.final_scan(&target, &census, &inventory, barrier_ok);
             self.verified.insert(target.obligation_id.clone(), scan);

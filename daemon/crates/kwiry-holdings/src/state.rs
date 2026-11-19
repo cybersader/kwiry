@@ -244,8 +244,8 @@ pub struct HolderState {
     pub committed_at_ms: i64,
     pub high_water: Option<Rev>,
     pub last_list_ref: Option<ListRef>,
-    /// Set by trust on first use; cleared only by an accepted status report
-    /// carrying `holder_state: "reset"` (a later slice).
+    /// Set by trust on first use; cleared only by a current-epoch status
+    /// receipt for a report carrying `holder_state: "reset"` (`status`).
     pub reset_pending: bool,
     pub tombstones: BTreeSet<Tombstone>,
     /// v2 H.40: a list request got `400`/`413` and no list has applied
@@ -256,6 +256,10 @@ pub struct HolderState {
     /// Obligation report channels, purge progress and uncertain attempts.
     #[serde(default)]
     pub obligations: ObligationBook,
+    /// The status report channel, release instructions and the manifest
+    /// index (v2 §11).
+    #[serde(default)]
+    pub status: crate::status::StatusBook,
     /// Reserve files this holder created, by name: the nonce in each file's
     /// header is the only proof that a file is the holder's own.
     #[serde(default)]
@@ -275,6 +279,7 @@ impl HolderState {
             list_request_invalid: false,
             engine: EngineState::default(),
             obligations: ObligationBook::default(),
+            status: crate::status::StatusBook::default(),
             reserves: std::collections::BTreeMap::new(),
         }
     }
@@ -595,6 +600,34 @@ impl StateWriter {
         }
         let mut next = self.state.clone();
         next.obligations = book;
+        self.commit(next)
+    }
+
+    /// Replaces the obligation records, the status book, or both, in one
+    /// commit; `clear_reset` also clears `reset_pending` in it (a
+    /// current-epoch receipt for a `reset` status, v2 §11.3).
+    pub(crate) fn update_lifecycle(
+        &mut self,
+        obligations: Option<ObligationBook>,
+        status: Option<crate::status::StatusBook>,
+        clear_reset: bool,
+    ) -> Result<(), WriteError> {
+        if self.unwritable {
+            return Err(WriteError::Unwritable);
+        }
+        let mut next = self.state.clone();
+        if let Some(book) = obligations {
+            next.obligations = book;
+        }
+        if let Some(status) = status {
+            next.status = status;
+        }
+        if clear_reset {
+            next.reset_pending = false;
+        }
+        if next == self.state {
+            return Ok(());
+        }
         self.commit(next)
     }
 

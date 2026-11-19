@@ -2,7 +2,7 @@
 //!
 //! Normative source: the authority workspace file
 //! `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md` (sha256
-//! `b55bf6b2282a602c1574dd63e1b9e9b711b3a0f1cfd0bcb0da291b4ab90e8456`).
+//! `a3d5220c0a2f0a1114f0ca93247f3b8b705313e029c568afc751f9c837c25ea0`).
 //! Part I is the generic core every holder class implements; Part II is
 //! Profile S, the search-engine holder. Section and `H.n` citations in
 //! this crate are anchors in that file. Only the composition layer names
@@ -28,13 +28,18 @@
 //! - [`purge`]: crash-safe purge execution under listed obligations;
 //! - [`report`] and [`obligations`]: obligation reports, floors, uncertain
 //!   attempts, acks and convergence;
+//! - [`status`]: the holder status report, its manifest index, the
+//!   status-first gate and operator resume;
+//! - [`release`]: release instructions, executed only on an exact manifest
+//!   match against the holder's own census;
 //! - [`reserve`]: the disk reserve and the storage budget;
 //! - [`engine`]: the search-engine holder profile (storage pins, capability
 //!   bounds, the clock hold), used only when the wire profile asks for it.
 //!
 //! Holders plug in through small traits: [`store::ResourceStore`] (what is
 //! held, publish the classification, revoke), [`store::ArtifactPurger`]
-//! (detach, delete under an exact claimant, barrier, independent census),
+//! (detach, reserve for a release, delete under an exact claimant, barrier,
+//! independent census),
 //! [`reserve::DiskReserve`] and [`clock::Clock`]. The authority is reached through [`client::Transport`].
 //! Every wire constant that names a particular authority (`typ` values,
 //! audience prefix, resource kinds) arrives in a [`profile::WireProfile`]
@@ -55,11 +60,13 @@ pub mod keys;
 pub mod obligations;
 pub mod profile;
 pub mod purge;
+pub mod release;
 pub mod report;
 pub mod reserve;
 pub mod schedule;
 pub mod startup;
 pub mod state;
+pub mod status;
 pub mod store;
 mod strict_json;
 pub mod verify;

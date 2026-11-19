@@ -98,6 +98,9 @@ pub enum ListOutcome {
     RateLimited {
         until_mono_ms: u64,
     },
+    /// A recorded release reservation is not yet confirmed by the purger:
+    /// no list applies until `honor_reservations` confirms it.
+    ReservationPending,
 }
 
 pub struct Holder<S: ResourceStore, T: Transport> {
@@ -137,6 +140,10 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) rollback_suspected: bool,
     pub(crate) report_backoff_ms: u64,
     pub(crate) report_backoff_until: u64,
+    pub(crate) status_backoff_ms: u64,
+    pub(crate) status_backoff_until: u64,
+    /// Unverifiable status acks in a row (T6c after three).
+    pub(crate) status_unverifiable: u8,
 }
 
 /// The parts of the list last applied in this process that obligations and
@@ -148,6 +155,9 @@ pub struct Applied {
     /// Every item that is not `active`.
     pub items: Vec<Item>,
     pub plan: PublishPlan,
+    /// Page 0's `quarantine_release` instructions (unknown kinds were
+    /// skipped whole at verification).
+    pub instructions: Vec<crate::release::Instruction>,
 }
 
 impl<S: ResourceStore, T: Transport> Holder<S, T> {
@@ -219,6 +229,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             rollback_suspected: false,
             report_backoff_ms: 0,
             report_backoff_until: 0,
+            status_backoff_ms: 0,
+            status_backoff_until: 0,
+            status_unverifiable: 0,
         })
     }
 
@@ -281,6 +294,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }
         if self.route != RouteHealth::Normal {
             return ListOutcome::AuthHalted;
+        }
+        // Startup honours a recorded release reservation before any list
+        // applies, so no list can re-map a unit a human approved deleting.
+        if self.writer.state().status.reservation_pending() {
+            self.events.emit(HolderEvent::ReleaseReservationPending);
+            return ListOutcome::ReservationPending;
         }
         let now = self.clock.mono_ms();
         let start_at = self.scheduler.next_start_at();
@@ -665,6 +684,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 .map(|listed| listed.item.clone())
                 .collect(),
             plan: plan.clone(),
+            instructions: list
+                .instructions
+                .iter()
+                .filter_map(crate::release::Instruction::parse)
+                .collect(),
         });
         self.after_apply(&prune);
         self.emit_reserve_uses();

@@ -317,8 +317,14 @@ pub struct PurgerView {
     pub publications: Vec<(String, bool)>,
     /// `freeze_publications` refuses.
     pub fail_freeze: bool,
-    /// Every purger call in order: `detach`, `delete`, `barrier`, `census`.
+    /// Every purger call in order: `detach`, `delete`, `barrier`, `census`,
+    /// `reserve`, `freeze`.
     pub calls: Vec<&'static str>,
+    /// Units reserved for a release, with its instruction id. Durable in a
+    /// real adapter: it survives a holder restart here too.
+    pub reservations: BTreeMap<String, String>,
+    /// `reserve` refuses.
+    pub fail_reserve: bool,
 }
 
 /// TEST-ONLY purger over synthetic units. It checks every claim itself, as
@@ -431,14 +437,25 @@ impl ArtifactPurger for MemoryPurger {
         if !unit.present {
             return Ok(DeleteOutcome::Absent);
         }
-        let refusal = if unit.attribution.as_ref() != Some(claimant.resource()) {
-            Some("claimant does not own the unit")
-        } else if unit.reserved {
-            Some("reserved by a release")
-        } else if !view.detached.contains(claimant.resource()) {
-            Some("resource not detached")
-        } else {
-            None
+        let refusal = match claimant {
+            Claimant::Obligation { resource, .. } => {
+                if unit.attribution.as_ref() != Some(resource) {
+                    Some("claimant does not own the unit")
+                } else if unit.reserved {
+                    Some("reserved by a release")
+                } else if !view.detached.contains(resource) {
+                    Some("resource not detached")
+                } else {
+                    None
+                }
+            }
+            Claimant::Release { instruction_id } => {
+                if !unit.reserved || view.reservations.get(unit_id) != Some(instruction_id) {
+                    Some("not reserved by this release")
+                } else {
+                    None
+                }
+            }
         };
         if let Some(reason) = refusal {
             view.refused.push((unit_id.to_owned(), reason));
@@ -456,13 +473,42 @@ impl ArtifactPurger for MemoryPurger {
         if view.fail_delete.contains(unit_id) {
             return Ok(DeleteOutcome::Failed);
         }
-        let Claimant::Obligation { obligation_id, .. } = claimant;
-        view.deletions
-            .push((unit_id.to_owned(), obligation_id.clone()));
+        let by = match claimant {
+            Claimant::Obligation { obligation_id, .. } => obligation_id.clone(),
+            Claimant::Release { instruction_id } => instruction_id.clone(),
+        };
+        view.deletions.push((unit_id.to_owned(), by));
         if let Some(stored) = view.units.get_mut(unit_id) {
             stored.present = false;
         }
         Ok(DeleteOutcome::Deleted)
+    }
+
+    fn reserve(
+        &mut self,
+        instruction_id: &str,
+        units: &BTreeSet<String>,
+    ) -> Result<(), StoreError> {
+        let mut view = self.view();
+        view.calls.push("reserve");
+        if view.fail_reserve {
+            return Err(StoreError("injected reserve failure".into()));
+        }
+        if units.iter().any(|unit| {
+            view.reservations
+                .get(unit)
+                .is_some_and(|other| other != instruction_id)
+        }) {
+            return Err(StoreError("reserved by another release".into()));
+        }
+        for unit in units {
+            view.reservations
+                .insert(unit.clone(), instruction_id.to_owned());
+            if let Some(stored) = view.units.get_mut(unit) {
+                stored.reserved = true;
+            }
+        }
+        Ok(())
     }
 
     fn barrier(&mut self) -> Result<(), StoreError> {

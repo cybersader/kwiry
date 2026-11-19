@@ -14,6 +14,9 @@ pub const ROUTE_LIST: &str = "/holdings/list";
 pub const ROUTE_KEYSET: &str = "/keyset";
 /// Route of an obligation report, appended to the authority base URL.
 pub const ROUTE_REPORT: &str = "/obligations/report";
+/// Route of a holder status report, appended to the authority base URL
+/// (v2 §11.3, H.4).
+pub const ROUTE_STATUS: &str = "/holders/status";
 /// Content type of RFC 9457 problem bodies.
 pub const PROBLEM_CONTENT_TYPE: &str = "application/problem+json";
 
@@ -29,6 +32,10 @@ pub struct WireProfile {
     pub typ_report_request: String,
     /// `typ` of an authority-signed report ack (v2 §4.3).
     pub typ_report_ack: String,
+    /// `typ` of a holder-signed status report (v2 §11.4.1).
+    pub typ_status_request: String,
+    /// `typ` of an authority-signed status ack (v2 §11.4.1).
+    pub typ_status_ack: String,
     /// Response header that marks a convergence answer to a report (v2
     /// H.5, value `already_complete`).
     pub outcome_header: String,
@@ -70,6 +77,14 @@ impl WireProfile {
         format!("application/{}", self.typ_report_ack)
     }
 
+    pub fn status_request_content_type(&self) -> String {
+        format!("application/{}", self.typ_status_request)
+    }
+
+    pub fn status_ack_content_type(&self) -> String {
+        format!("application/{}", self.typ_status_ack)
+    }
+
     pub fn holder_audience(&self, holder_id: &str) -> String {
         format!("{}{holder_id}", self.audience_prefix)
     }
@@ -94,6 +109,8 @@ impl WireProfile {
             &self.typ_keyset,
             &self.typ_report_request,
             &self.typ_report_ack,
+            &self.typ_status_request,
+            &self.typ_status_ack,
         ];
         if typs
             .iter()

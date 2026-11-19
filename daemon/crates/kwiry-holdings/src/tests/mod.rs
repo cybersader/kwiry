@@ -19,6 +19,7 @@ mod review_round2;
 mod review_round3;
 mod review_round4;
 mod state_startup;
+mod status_release;
 
 use crate::client::FetchFailure;
 use crate::engine::EngineRefusal;

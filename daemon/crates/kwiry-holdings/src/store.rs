@@ -7,7 +7,7 @@
 //! listed obligation (the `purge` module).
 
 pub use crate::wire::ResourceKey;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldResource {
@@ -80,9 +80,9 @@ pub trait ResourceStore {
     fn revoke(&mut self, plan: &PublishPlan);
 }
 
-/// The one authority a deletion may cite (v2 §3.4 rule 5). A purger checks
-/// the claimant against its own attribution of the unit and refuses any
-/// mismatch: no other reason can stand in for it.
+/// The only authorities a deletion may cite (v2 §3.4 rule 5, §11.2 D). A
+/// purger checks the claimant against its own records of the unit and
+/// refuses any mismatch: no other reason can stand in for either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Claimant {
     /// A listed obligation for exactly this resource.
@@ -90,12 +90,19 @@ pub enum Claimant {
         obligation_id: String,
         resource: ResourceKey,
     },
+    /// An operator release whose strict manifest match the holder proved
+    /// (v2 §11.2 D, §11.4 G.5): exactly the units this instruction reserved
+    /// through [`ArtifactPurger::reserve`], and nothing else.
+    Release { instruction_id: String },
 }
 
 impl Claimant {
-    pub fn resource(&self) -> &ResourceKey {
+    /// The resource an obligation claim names; `None` for a release, which
+    /// names units, never a resource.
+    pub fn resource(&self) -> Option<&ResourceKey> {
         match self {
-            Self::Obligation { resource, .. } => resource,
+            Self::Obligation { resource, .. } => Some(resource),
+            Self::Release { .. } => None,
         }
     }
 }
@@ -115,8 +122,9 @@ pub struct ObservedUnit {
     /// Open handles, including handles to an unlinked file. A unit with an
     /// open handle is never deleted, and it still counts as remaining.
     pub open_handles: u32,
-    /// Reserved by an operator release (a later slice): never claimed by an
-    /// obligation, and counted unattributed until deleted.
+    /// Reserved by an operator release ([`ArtifactPurger::reserve`]): never
+    /// claimed by an obligation, never re-mapped, and counted unattributed
+    /// until deleted.
     pub reserved: bool,
 }
 
@@ -164,10 +172,11 @@ impl<'a> PublicationFreeze<'a> {
     }
 }
 
-/// Deletes retained data under a listed obligation (v2 §3.4 rules 3 to 5).
+/// Deletes retained data under a listed obligation (v2 §3.4 rules 3 to 5)
+/// or an executed operator release (v2 §11.2 D, G.5).
 ///
-/// The holder drives it in a fixed, crash-safe order, with a durable
-/// holder-state write before and after every step:
+/// For an obligation, the holder drives it in a fixed, crash-safe order,
+/// with a durable holder-state write before and after every step:
 ///
 /// 1. [`detach`](Self::detach): the resource can no longer be opened, leased
 ///    or built from. Idempotent; deletes nothing.
@@ -177,11 +186,36 @@ impl<'a> PublicationFreeze<'a> {
 /// 3. [`barrier`](Self::barrier) then [`census`](Self::census): sync every
 ///    location, then observe everything that remains.
 ///
+/// For a release (the `release` module) the order is: a durable record of
+/// the exact units, then [`reserve`](Self::reserve), a durable `draining`
+/// mark, the exact claimed units recorded, one deletion per unit under
+/// [`Claimant::Release`], the deleted units recorded, and a barrier and
+/// census proving every reserved unit gone.
+///
 /// Nothing else ever calls `delete`. Lease expiry, unknown data, authority
-/// errors, regression, disk pressure and absence from a list never reach it.
+/// errors, regression, disk pressure, a declined release (`blocked`) and
+/// absence from a list never reach it.
 pub trait ArtifactPurger {
     fn detach(&mut self, resource: &ResourceKey) -> Result<(), StoreError>;
+    /// Deletes one unit under `claimant`. The purger refuses (`Err`) a unit
+    /// it does not attribute to an obligation claimant's resource, a unit a
+    /// release reserved when the claimant is an obligation, and a unit not
+    /// reserved by exactly that release when the claimant is a release. A
+    /// unit with an open handle is `Busy`, never deleted.
     fn delete(&mut self, unit_id: &str, claimant: &Claimant) -> Result<DeleteOutcome, StoreError>;
+    /// Reserves `units` for the release `instruction_id` (v2 §11.2 D).
+    ///
+    /// **Adapter obligation.** Idempotent for the same instruction and
+    /// units. Once it returns `Ok`, and across restarts until each unit is
+    /// deleted: the census reports every one of them `reserved`; no
+    /// obligation claim may delete them; no publication, mapping, build or
+    /// list may re-map or reuse them; and only [`Claimant::Release`] with
+    /// the same `instruction_id` may delete them. It deletes nothing. It
+    /// returns `Err` if any unit is reserved by another instruction or the
+    /// reservation cannot be made durable; the holder then retries later
+    /// and deletes nothing meanwhile.
+    fn reserve(&mut self, instruction_id: &str, units: &BTreeSet<String>)
+    -> Result<(), StoreError>;
     /// Syncs every storage location; an error means the barrier failed.
     fn barrier(&mut self) -> Result<(), StoreError>;
     fn census(&self) -> Result<Census, StoreError>;

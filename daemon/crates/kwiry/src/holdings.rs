@@ -2,7 +2,7 @@
 //! authority, OpenClast.
 //!
 //! Normative source: OpenClast `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md`
-//! (sha256 `b55bf6b2282a602c1574dd63e1b9e9b711b3a0f1cfd0bcb0da291b4ab90e8456`).
+//! (sha256 `a3d5220c0a2f0a1114f0ca93247f3b8b705313e029c568afc751f9c837c25ea0`).
 //! Kwiry implements Part I (generic core) and Part II (Profile S, the
 //! search-engine holder); Annex K maps Kwiry's ids to the generic states.
 //!
@@ -27,6 +27,9 @@ pub(crate) fn openclast_profile() -> WireProfile {
         typ_keyset: "openclast-lifecycle-keyset+jwt".into(),
         typ_report_request: "openclast-obligation-report+jwt".into(),
         typ_report_ack: "openclast-obligation-ack+jwt".into(),
+        // v2 §11.4.1: the status route.
+        typ_status_request: "openclast-holder-status+jwt".into(),
+        typ_status_ack: "openclast-holder-status-ack+jwt".into(),
         // v2 H.5: marks `200 already_complete`.
         outcome_header: "OpenClast-Lifecycle-Outcome".into(),
         audience_prefix: "openclast-lifecycle:".into(),
