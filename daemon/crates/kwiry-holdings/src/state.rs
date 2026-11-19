@@ -256,6 +256,10 @@ pub struct HolderState {
     /// Obligation report channels, purge progress and uncertain attempts.
     #[serde(default)]
     pub obligations: ObligationBook,
+    /// Reserve files this holder created, by name: the only regular files
+    /// it may ever unlink at a reserve path.
+    #[serde(default)]
+    pub reserves: std::collections::BTreeMap<String, crate::reserve::ReserveIdentity>,
 }
 
 impl HolderState {
@@ -271,6 +275,7 @@ impl HolderState {
             list_request_invalid: false,
             engine: EngineState::default(),
             obligations: ObligationBook::default(),
+            reserves: std::collections::BTreeMap::new(),
         }
     }
 
@@ -371,6 +376,9 @@ pub struct StateWriter {
     unwritable: bool,
     reserve: Option<Box<dyn DiskReserve>>,
     reserve_uses: Vec<ReserveUse>,
+    /// Runs once, synchronously, the moment the writer becomes unwritable:
+    /// the holder revokes every gate and raises `holder_state_unwritable`.
+    fail_stop_hook: Option<Box<dyn Fn() + Send>>,
 }
 
 impl StateWriter {
@@ -390,7 +398,14 @@ impl StateWriter {
             unwritable: false,
             reserve: None,
             reserve_uses: Vec::new(),
+            fail_stop_hook: None,
         }
+    }
+
+    /// Installs what must happen the instant durable state can no longer be
+    /// trusted (v2 H.45). It runs inside the write that discovered it.
+    pub(crate) fn set_fail_stop_hook(&mut self, hook: Box<dyn Fn() + Send>) {
+        self.fail_stop_hook = Some(hook);
     }
 
     /// Lets durable writes consume `reserve` on `ENOSPC` (K2).
@@ -482,7 +497,12 @@ impl StateWriter {
     /// Records that the durable state may claim more than memory and could
     /// not be corrected: the holder must fail-stop.
     pub(crate) fn mark_unwritable(&mut self) {
-        self.unwritable = true;
+        if std::mem::replace(&mut self.unwritable, true) {
+            return;
+        }
+        if let Some(hook) = &self.fail_stop_hook {
+            hook();
+        }
     }
 
     /// The holder state could not be made to agree with memory, and nothing
@@ -538,6 +558,20 @@ impl StateWriter {
                 Err(WriteError::Io(failure.error))
             }
         }
+    }
+
+    /// Records the identity of a reserve file this holder created.
+    pub(crate) fn record_reserve(
+        &mut self,
+        name: &str,
+        identity: crate::reserve::ReserveIdentity,
+    ) -> Result<(), WriteError> {
+        if self.state.reserves.get(name) == Some(&identity) {
+            return Ok(());
+        }
+        let mut next = self.state.clone();
+        next.reserves.insert(name.to_owned(), identity);
+        self.commit(next)
     }
 
     /// Replaces the obligation records in one commit.

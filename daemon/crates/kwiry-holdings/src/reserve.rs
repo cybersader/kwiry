@@ -12,7 +12,36 @@
 //!   (`disk_pressure`) and stops the write. It never evicts, quarantines or
 //!   deletes anything: protected data stays exactly where it is.
 
+use serde::{Deserialize, Serialize};
 use std::io;
+
+/// The inode a holder created as a reserve, recorded in holder state so a
+/// later start can prove the file at the reserve path is its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReserveIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReserveError {
+    /// The reserve path holds something this holder cannot prove it owns.
+    /// Nothing was removed; an operator must clear the path.
+    #[error("reserve_path_foreign: the reserve path holds a {0} this holder does not own")]
+    Foreign(&'static str),
+    #[error("reserve: {0}")]
+    Io(#[from] io::Error),
+}
+
+impl ReserveError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Foreign(_) => "reserve_path_foreign",
+            Self::Io(_) => "reserve_io",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReserveLevel {
@@ -35,7 +64,7 @@ pub use file_reserve::FileReserve;
 
 #[cfg(unix)]
 mod file_reserve {
-    use super::{DiskReserve, ReserveLevel};
+    use super::{DiskReserve, ReserveError, ReserveIdentity, ReserveLevel};
     use std::fs::{self, File, OpenOptions};
     use std::io;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -44,9 +73,11 @@ mod file_reserve {
     /// A reserve kept as one preallocated file, bound to the descriptor it
     /// was created with.
     ///
-    /// The path is used once, at [`FileReserve::open`]. Whatever was at it
-    /// (an earlier run's reserve, a link, anything else) is unlinked, which
-    /// never follows a link and never changes another file's data. The
+    /// The path is used once, at [`FileReserve::open`]. A leaf already at it
+    /// is unlinked only when it is a symbolic link (removing a link never
+    /// touches data) or the regular file this holder created before, proven
+    /// by the identity recorded in holder state with one link. Anything else
+    /// is refused with [`ReserveError::Foreign`] and left in place. The
     /// reserve is then created exclusively with `O_NOFOLLOW`, mode 0600, and
     /// its identity checked: a regular file with one link, and the path
     /// still names that same inode. Every later release and refill acts on
@@ -58,14 +89,33 @@ mod file_reserve {
     }
 
     impl FileReserve {
-        pub fn open(path: &Path, target: u64) -> io::Result<(Self, ReserveLevel)> {
+        pub fn open(
+            path: &Path,
+            target: u64,
+            owned: Option<ReserveIdentity>,
+        ) -> Result<(Self, ReserveLevel), ReserveError> {
             match fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.is_dir() => {
-                    return Err(io::Error::other("the reserve path is a directory"));
+                Ok(metadata) => {
+                    let kind = metadata.file_type();
+                    let ours = kind.is_file()
+                        && metadata.nlink() == 1
+                        && owned
+                            == Some(ReserveIdentity {
+                                dev: metadata.dev(),
+                                ino: metadata.ino(),
+                            });
+                    if kind.is_symlink() || ours {
+                        fs::remove_file(path)?;
+                    } else if kind.is_file() {
+                        return Err(ReserveError::Foreign("regular file"));
+                    } else if kind.is_dir() {
+                        return Err(ReserveError::Foreign("directory"));
+                    } else {
+                        return Err(ReserveError::Foreign("special file"));
+                    }
                 }
-                Ok(_) => fs::remove_file(path)?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
             let file = OpenOptions::new()
                 .read(true)
@@ -81,11 +131,33 @@ mod file_reserve {
                 || bound.dev() != named.dev()
                 || bound.ino() != named.ino()
             {
-                return Err(io::Error::other("the reserve file is not the one created"));
+                return Err(io::Error::other("the reserve file is not the one created").into());
             }
             let mut reserve = Self { file, target };
             let level = reserve.replenish()?;
             Ok((reserve, level))
+        }
+
+        /// The created inode, for holder state.
+        pub fn identity(&self) -> io::Result<ReserveIdentity> {
+            let metadata = self.file.metadata()?;
+            Ok(ReserveIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            })
+        }
+
+        /// Unlinks the reserve only if the path still names this inode.
+        pub(crate) fn remove_if_ours(&self, path: &Path) -> io::Result<()> {
+            let bound = self.file.metadata()?;
+            let named = fs::symlink_metadata(path)?;
+            if named.file_type().is_file()
+                && named.dev() == bound.dev()
+                && named.ino() == bound.ino()
+            {
+                fs::remove_file(path)?;
+            }
+            Ok(())
         }
 
         /// Bytes currently held, read from the bound descriptor.
@@ -164,7 +236,8 @@ mod tests {
     #[test]
     fn file_reserve_releases_only_what_it_holds() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut reserve, level) = FileReserve::open(&dir.path().join(".reserve"), 4096).unwrap();
+        let (mut reserve, level) =
+            FileReserve::open(&dir.path().join(".reserve"), 4096, None).unwrap();
         assert_eq!(level, ReserveLevel::Full);
         assert_eq!(reserve.len().unwrap(), 4096);
         assert!(reserve.release(1000).unwrap());
@@ -186,7 +259,7 @@ mod tests {
         let path = dir.path().join(".reserve");
         std::os::unix::fs::symlink(&victim, &path).unwrap();
 
-        let (mut reserve, _) = FileReserve::open(&path, 4096).unwrap();
+        let (mut reserve, _) = FileReserve::open(&path, 4096, None).unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious operator data");
         assert!(
             !std::fs::symlink_metadata(&path)
@@ -203,12 +276,55 @@ mod tests {
         reserve.replenish().unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious operator data");
 
-        // A hard link at the path is unlinked, never truncated through.
+        // A hard link to other data at the path is refused, never unlinked
+        // or truncated through.
         let other = dir.path().join(".reserve-2");
         std::fs::hard_link(&victim, &other).unwrap();
-        let (mut second, _) = FileReserve::open(&other, 2048).unwrap();
-        assert!(second.release(2048).unwrap());
+        assert!(matches!(
+            FileReserve::open(&other, 2048, None),
+            Err(ReserveError::Foreign("regular file"))
+        ));
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious operator data");
+    }
+
+    /// Re-check finding 3: a regular file at the reserve path that the
+    /// holder cannot prove it created is refused by name and left in place;
+    /// the holder's own earlier reserve is replaced.
+    #[cfg(unix)]
+    #[test]
+    fn a_reserve_path_holding_an_unowned_regular_file_is_refused_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".reserve");
+        std::fs::write(&path, b"operator file").unwrap();
+        let foreign = FileReserve::open(&path, 4096, None).err().unwrap();
+        assert_eq!(foreign.code(), "reserve_path_foreign");
+        assert_eq!(std::fs::read(&path).unwrap(), b"operator file");
+        // A recorded identity of another inode proves nothing either.
+        let elsewhere = dir.path().join(".other");
+        let (other, _) = FileReserve::open(&elsewhere, 1024, None).unwrap();
+        let wrong = other.identity().unwrap();
+        assert!(matches!(
+            FileReserve::open(&path, 4096, Some(wrong)),
+            Err(ReserveError::Foreign("regular file"))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"operator file");
+        // A directory is refused, never removed.
+        let directory = dir.path().join(".reserve-dir");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(matches!(
+            FileReserve::open(&directory, 4096, None),
+            Err(ReserveError::Foreign("directory"))
+        ));
+        assert!(directory.is_dir());
+
+        // The holder's own reserve, proven by its recorded identity, is
+        // replaced on the next start.
+        let own = dir.path().join(".own");
+        let (first, _) = FileReserve::open(&own, 2048, None).unwrap();
+        let recorded = first.identity().unwrap();
+        drop(first);
+        let (second, _) = FileReserve::open(&own, 2048, Some(recorded)).unwrap();
+        assert_eq!(second.len().unwrap(), 2048);
     }
 
     #[test]

@@ -181,6 +181,10 @@ pub enum ObligationsRefused {
     /// `503 authority_epoch_mismatch` (H.12 steps 2 and 4): nothing is
     /// deleted until a verified list applies (§4.5).
     AuthorityRollbackSuspected,
+    /// A list committed its A1 write but its apply did not complete: the
+    /// earlier list is superseded and the new one is not in force, so
+    /// nothing is purged or reported until an apply fully succeeds.
+    ApplyIncomplete,
 }
 
 fn file_safe(text: &str) -> bool {
@@ -249,7 +253,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return Err(ObligationsRefused::HolderStateUnwritable);
         }
         if self.applied.is_none() {
-            return Err(ObligationsRefused::NoListThisProcess);
+            return Err(if self.apply_failed_since_admit {
+                ObligationsRefused::ApplyIncomplete
+            } else {
+                ObligationsRefused::NoListThisProcess
+            });
         }
         Ok(())
     }

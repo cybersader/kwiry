@@ -184,9 +184,21 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if engine.is_some() && state.reset_pending {
             events.emit(HolderEvent::Engine(EngineEvent::PinHistoryUnavailable));
         }
+        let mut writer = started.writer;
+        {
+            // v2 H.45: the instant durable state becomes untrustworthy, every
+            // gate clone is revoked (the B1 path) and the alert is raised,
+            // inside the failing write, without waiting for a later poll.
+            let gate = gate.clone();
+            let events = events.clone();
+            writer.set_fail_stop_hook(Box::new(move || {
+                gate.revoke();
+                events.emit(HolderEvent::HolderStateUnwritable);
+            }));
+        }
         Ok(Self {
             config,
-            writer: started.writer,
+            writer,
             key: started.key,
             store,
             transport,
@@ -447,6 +459,39 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.writer.set_reserve(reserve);
     }
 
+    /// K1: creates the named reserve file at `path`, records its identity in
+    /// holder state before any write may consume it, and installs it. A
+    /// leaf already at `path` is replaced only if it is a symbolic link or
+    /// the reserve this holder recorded under `name`; anything else is
+    /// refused (`reserve_path_foreign`) and left in place.
+    #[cfg(unix)]
+    pub fn install_file_reserve(
+        &mut self,
+        name: &str,
+        path: &std::path::Path,
+        target: u64,
+    ) -> Result<crate::reserve::ReserveLevel, crate::reserve::ReserveError> {
+        use crate::reserve::{FileReserve, ReserveError};
+        let owned = self.writer.state().reserves.get(name).copied();
+        let (reserve, level) = FileReserve::open(path, target, owned)?;
+        let recorded = reserve
+            .identity()
+            .map_err(ReserveError::Io)
+            .and_then(|identity| {
+                self.writer
+                    .record_reserve(name, identity)
+                    .map_err(|e| ReserveError::Io(std::io::Error::other(e.to_string())))
+            });
+        if let Err(error) = recorded {
+            // Never leave an unrecorded file behind: it would be refused as
+            // foreign on the next start.
+            let _ = reserve.remove_if_ours(path);
+            return Err(error);
+        }
+        self.writer.set_reserve(Box::new(reserve));
+        Ok(level)
+    }
+
     /// K3: whether a new artifact write may start. A refusal alerts
     /// (`disk_pressure`) and stops the write; it never evicts or deletes.
     pub fn admit_artifact_write(
@@ -570,6 +615,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if let Err(error) = self.writer.apply_list(mutation) {
             return self.apply_failed("A1", Some(&error));
         }
+        // A1 superseded the list applied before: nothing may be purged or
+        // reported on its strength any more. Until this apply reaches A4,
+        // obligations refuse (`ApplyIncomplete`). Final scans stay: each is
+        // bound to the classification it read and lapses when that moves.
+        self.applied = None;
         if self.store.publish(&plan).is_err() {
             return self.apply_failed("A3", None);
         }

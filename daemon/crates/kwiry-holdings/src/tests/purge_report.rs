@@ -1347,3 +1347,97 @@ fn h50_a_lower_state_waits_until_page_zero_iat_passes_d() {
     assert_eq!(rig.report().unwrap().receipts, 1);
     assert_eq!(accepted_states(rig), ["revoked", "incomplete"]);
 }
+
+// ------------------------------------------------- independent review, round 2
+
+/// Re-check item 1: the instant durable state becomes ambiguous, every gate
+/// clone refuses and `holder_state_unwritable` is raised, with no later poll.
+#[test]
+fn r2_1_a_fail_stop_revokes_every_gate_clone_at_once() {
+    let mut w = world(false);
+    let rig = &mut w.rig;
+    let gate = rig.gate();
+    assert_eq!(gate.check(A), Ok(()));
+    rig.io_faults
+        .plan(vec![Fault::AfterRename, Fault::BeforeRename]);
+    assert_eq!(rig.relist(), ListOutcome::ApplyFailed { step: "A1" });
+    rig.io_faults.clear();
+    // Nothing has called `fail_stopped()` since the failing write.
+    assert_eq!(gate.check(A), Err(Refusal::Revoked));
+    assert!(codes(rig).contains(&"holder_state_unwritable"));
+}
+
+/// Re-check item 2: once A1 commits a newer list, the list applied before is
+/// superseded: an A3 or A4 failure leaves nothing to purge or report on.
+#[test]
+fn r2_2_a_list_superseded_by_a1_authorizes_no_purge() {
+    for step in ["A3", "A4"] {
+        let mut w = world(false);
+        let rig = &mut w.rig;
+        // The newer list no longer carries B's obligation.
+        rig.authority.state().remove(&w.b_holding);
+        match step {
+            "A3" => rig.store.view().fail_publish = true,
+            _ => rig.io_faults.plan(vec![Fault::Pass, Fault::BeforeRename]),
+        }
+        assert_eq!(rig.relist(), ListOutcome::ApplyFailed { step }, "{step}");
+        rig.store.view().fail_publish = false;
+        rig.io_faults.clear();
+        assert_eq!(
+            rig.purge(),
+            Err(ObligationsRefused::ApplyIncomplete),
+            "{step}"
+        );
+        assert_eq!(
+            rig.report(),
+            Err(ObligationsRefused::ApplyIncomplete),
+            "{step}"
+        );
+        assert!(rig.purger.view().deletions.is_empty(), "{step}");
+        // A full apply: B is unlisted, its data unattributed and kept.
+        applied(rig.relist());
+        assert_eq!(rig.purge().unwrap().deleted, 0, "{step}");
+        assert_eq!(rig.purger.present_of(PLAIN, B), 3, "{step}");
+    }
+}
+
+/// Re-check item 3: the holder records each reserve's identity in holder
+/// state and reclaims only that file; any other file at a reserve path is
+/// refused by name and kept.
+#[test]
+fn r2_3_the_holder_reclaims_only_the_reserve_it_recorded() {
+    use crate::reserve::ReserveLevel;
+    let mut w = world(false);
+    let rig = &mut w.rig;
+    let data = tempfile::tempdir().unwrap();
+    let path = data.path().join(".reserve");
+    assert_eq!(
+        rig.holder()
+            .install_file_reserve("data", &path, 8192)
+            .unwrap(),
+        ReserveLevel::Full
+    );
+    assert!(rig.holder().state().reserves.contains_key("data"));
+    // A new process reclaims its own reserve.
+    rig.restart().unwrap();
+    rig.holder()
+        .install_file_reserve("data", &path, 8192)
+        .unwrap();
+    // Anything it cannot prove is its own is refused and left alone.
+    let foreign = data.path().join(".reserve-2");
+    std::fs::write(&foreign, b"operator file").unwrap();
+    let refused = rig
+        .holder()
+        .install_file_reserve("holder", &foreign, 4096)
+        .unwrap_err();
+    assert_eq!(refused.code(), "reserve_path_foreign");
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"operator file");
+    // Another reserve's recorded identity does not cover this name.
+    let len = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        rig.holder()
+            .install_file_reserve("holder", &path, 4096)
+            .is_err()
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
+}
