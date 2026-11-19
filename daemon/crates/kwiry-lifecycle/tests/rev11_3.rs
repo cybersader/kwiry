@@ -433,7 +433,7 @@ fn h33_an_operator_epoch_advances_holder_rev() {
     assert!(f.s.auth.core.holder_rev > rev);
     assert_eq!(f.s.peers[0].seat, Seat::Pending);
     let out = f.step(PeerListPage(0));
-    assert!(out.rows.iter().any(|r| r == RowId::H18), "410 list_expired");
+    assert!(out.rows.iter().any(|r| r == RowId::H21), "410 list_expired");
     assert!(!out.obs.contains(&Some(Obs::EarlierEpochListAfterStop)));
     assert!(!f.s.peers[0].late);
     f.holder_reports();

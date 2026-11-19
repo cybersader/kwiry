@@ -13,7 +13,7 @@ use kwiry_lifecycle::row_id::RowId;
 use kwiry_lifecycle::state::*;
 use kwiry_lifecycle::step::{CapabilityRefusal, Config, Obs, Outcome, PinRefusal, exec, servable};
 
-const D: Design = Design::REV11_3;
+const D: Design = Design::REV11_4;
 const BUDGET: Budget = Budget {
     retire_rooms: 0b11,
     change_rooms: 0b10,

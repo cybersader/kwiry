@@ -30,7 +30,7 @@
 //! - [`checker`]: bounded explicit-state BFS with crash injection, plus a
 //!   strong-fairness SCC analysis for L1.
 //! - [`design`]: revision 8 as written ([`design::Design::REV8`]) and each
-//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_3`] has
+//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_4`] has
 //!   all.
 //!
 //! # Universe and bounds
@@ -124,10 +124,16 @@
 //!   backup or journaled copy exists and its signing key matches its roster
 //!   entry (only that equality is read). The shared restore fixture leaves
 //!   out a `403` the peer receives, by simulation: it only drops an
-//!   earlier-epoch lease. The H.33 operator epoch and
-//!   its list cursors are explored in a fixture of their own, without the
-//!   restore, and the restore fixture leaves cursors out: a restore's
-//!   confirmed stop ends the old instance's cursors (H19).
+//!   earlier-epoch lease. The H.33 operator epoch and its list cursors are
+//!   explored in a fixture of their own, without the restore. The shared
+//!   restore fixture leaves cursors out; the holders keep them across a
+//!   restore, and a restore-cursor fixture (`tests/rev11_4.rs`) presents
+//!   them to the restored authority with one old-lineage `holder_rev`
+//!   advance after the backup (H.41, H21). The H.44 raw restore has a
+//!   fixture of its own: the raw-restored instance's suspected start (H20),
+//!   the old instance still issuing lists, the confirmation by tooling or
+//!   attestation (H19), and the operator's procedure or
+//!   `restore_journal_lost`.
 //! - States are stored as 128-bit fingerprints (hash compaction).
 //!
 //! # Coverage limits
@@ -165,7 +171,10 @@
 //! aged-refusal step, and the lease timeout is one fair step to `T_stop +
 //! 1051 s`. In the gate fixtures a restore's confirmed stop (H19) and its
 //! first transaction are separate steps, so the lease timeout can fall
-//! between them (H.33.3). The core profiles
+//! between them (H.33.3). The old instance is abstracted to the lists it
+//! issues the other holders after `T_stop` (none under H.44), and a
+//! confirmation is true: a false `old_instance_stopped` attestation is the
+//! named residual. The core profiles
 //! check the gate with the modeled holder as the only member: minting stays
 //! closed after a supported restore until the holder's current-epoch report,
 //! and L1 requires it to reopen when the holder held a high-water at the
@@ -179,7 +188,8 @@
 //! holder's own list pagination and cursors, real dual clocks, in-flight query
 //! drains, general builders and staging, filesystem/lock failure modes,
 //! migration and launcher deployment, the journal's encoding and fsync
-//! failures, actual raw restore beyond a synthetic witness, rate
+//! failures, a raw restore outside the gate fixtures (beyond a synthetic witness), a false
+//! old-instance-stopped attestation, rate
 //! scheduling/cursor churn, R15's time clause, escalation, more than two of
 //! anything, or H.11 alert delivery. The S3 conformance gate adds these where
 //! Kwiry owns the implementation.

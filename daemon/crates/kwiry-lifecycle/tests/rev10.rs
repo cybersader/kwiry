@@ -27,7 +27,7 @@ const BUDGET: Budget = Budget {
     restores: 1,
 };
 const REV: Rev = Rev { epoch: 0, seq: 1 };
-const D: Design = Design::REV11_3;
+const D: Design = Design::REV11_4;
 
 fn profile(name: &'static str, design: Design) -> Profile {
     Profile {
@@ -1213,7 +1213,13 @@ fn h14_replay_carries_bindings_in_one_transaction_and_never_reexecutes() {
         },
         "same id, bound digest and count from the entry; issued_seq is the replay seq"
     );
-    assert_eq!(f.s.auth.core.seq, baseline + 1, "one replay transaction");
+    // One replay transaction, then the epoch-minting transaction, which
+    // advances every `holder_rev` with a `seq` of its own (HW v2 H.41).
+    assert_eq!(
+        f.s.auth.core.seq,
+        baseline + 2,
+        "one replay transaction, then the epoch mint"
+    );
     f.list();
     f.step(OpAcceptEpoch);
     f.boot();

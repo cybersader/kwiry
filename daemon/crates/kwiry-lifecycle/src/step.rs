@@ -96,9 +96,12 @@ pub enum Obs {
         holder: bool,
         peers: u8,
     },
-    /// H.33 (rejected readings): an earlier-epoch list or page was issued
-    /// after `T_stop`.
+    /// H.33, H.41, H.44 (rejected readings): an earlier-epoch list or page
+    /// was issued after `T_stop`.
     EarlierEpochListAfterStop,
+    /// H.44.3(b): the audited `old_instance_stopped` attestation, an
+    /// unsampled security event.
+    OldInstanceStoppedAttested,
     /// H.30.3: no admin override clears a member early.
     MintOverrideRefused,
     ListWitnessOmitted,
@@ -856,7 +859,12 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         AuthRelist(r) => auth_relist(s, r as usize),
         AuthDrop(r) => auth_drop(s, r as usize),
         AuthBackup => auth_backup(s),
-        AuthRestore => auth_restore(s, d, false),
+        // H.44: a raw-restored instance is completed by the operator's
+        // procedure (`OpRestore`), never by the scenario step.
+        AuthRestore if s.auth.raw == Raw::No => auth_restore(s, d, false),
+        AuthRestore => Ok(None),
+        OpRestore if s.auth.raw != Raw::No => auth_restore(s, d, false),
+        OpRestore => Ok(None),
         OpRestoreJournalLost => auth_restore(s, d, true),
         TickExposure(t) => tick_exposure(s, t),
         AnswerCapability {
@@ -884,10 +892,13 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         PeerForbidden { p, received } => peer_forbidden(s, d, p as usize, received),
         PeerRefusalAged(p) => peer_refusal_aged(s, d, p as usize),
         PeerListStart(p) => peer_list_start(s, p as usize),
-        PeerListPage(p) => peer_list_page(s, p as usize),
+        PeerListPage(p) => peer_list_page(s, d, p as usize),
         PeerOldList(p) => peer_old_list(s, p as usize),
         OpEpoch => op_epoch(s, d),
-        RestoreBegin => restore_begin(s),
+        RestoreBegin => confirm_old_stopped(s, d, false),
+        AttestOldStopped => confirm_old_stopped(s, d, true),
+        RawRestore => raw_restore(s, d),
+        AuthTouch => auth_touch(s),
         AttestRoot { room, dir, stale } => attest_root(s, room, dir, stale),
         RepointRoot { room, dir } => repoint_root(s, room as usize, dir),
         PinRebuild(r) => pin_rebuild(s, d, r as usize),
@@ -3396,14 +3407,21 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
         return Ok(None);
     }
     let gate_probe = s.env.probe == Probe::EpochMint;
-    // H.33.2: a restore proceeds only after H19 confirmed the old authority
-    // stopped. The reading H.33.2 rejects proceeds without it, and the old
-    // instance keeps running.
-    if gate_probe && !s.auth.restoring && d.has(Fix::StoppedOldAuthority) {
+    // H.33.2, H.44.3: a restore proceeds only after H19 confirmed the old
+    // authority stopped, a raw-restored instance's included. The readings
+    // H.33.2 and H.44 reject proceed without it, and the old instance keeps
+    // running.
+    let confirmed = s.auth.restoring || s.auth.raw == Raw::Confirmed;
+    let required = if s.auth.raw == Raw::Unconfirmed {
+        d.has(Fix::NoSelfConfirmation)
+    } else {
+        d.has(Fix::StoppedOldAuthority)
+    };
+    if gate_probe && !confirmed && required {
         return Ok(None);
     }
     let mut o = Out::new(s);
-    if gate_probe && !s.auth.restoring {
+    if gate_probe && !confirmed {
         o.n.env.old_running = true;
     }
     if gate_probe && s.ghost.mint_stop.is_none() {
@@ -3411,9 +3429,10 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
         o.n.ghost.mint_stop = Some(s.env.exposure_elapsed);
     }
     if gate_probe && s.auth.lists_stopped_at.is_none() {
-        // H.30.2: `T_stop` for `restore_journal_lost` and a raw restore is the
-        // restored authority's first start (this step); H19 recorded it for
-        // a supported restore. Suspicion refuses lists from now on.
+        // Only without a recorded `T_stop`: H19 records it under H.44.4. The
+        // H.30.2 reading H.44 replaces takes the restored authority's first
+        // start for `restore_journal_lost` (this step), and a restore without
+        // a confirmation has no other instant.
         o.n.auth.lists_stopped_at = Some(s.env.exposure_elapsed);
     }
     if s.env.bad_journal && !override_lost {
@@ -3511,6 +3530,15 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
     if roster_replayed {
         o.row(H17);
     }
+    if d.has(Fix::EpochRevBumpEveryCause) {
+        // H.41: the epoch-minting transaction advances every holder's
+        // `holder_rev`, never coalesced or delayed. It commits after the
+        // replay (H.1.4: replay comes "before minting the new epoch") and
+        // the pin reset, with a `seq` of its own.
+        let c = &mut o.n.auth.core;
+        c.seq += 1;
+        c.holder_rev = c.seq;
+    }
     if d.has(Fix::EpochMintGate) {
         start_gate(
             &mut o,
@@ -3522,6 +3550,7 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
     o.n.auth.rollback_suspected = false;
     o.n.auth.failed_restore = false;
     o.n.auth.restoring = false;
+    o.n.auth.raw = Raw::No;
     o.n.auth.backup = None;
     o.done()
 }
@@ -4361,12 +4390,17 @@ fn peer_list_start(s: &State, i: usize) -> Step {
     o.done()
 }
 
-/// H.33.1: the peer presents its cursor. The authority honours it only while
-/// the holder's `holder_rev` is unchanged; otherwise `410 list_expired` and
-/// the peer discards the list (its earlier lease keeps running). A page of
-/// an earlier epoch served after `T_stop` renews that epoch's lease beyond
-/// the lease timeout.
-fn peer_list_page(s: &State, i: usize) -> Step {
+/// H.33.1, H.41 (H21): the peer presents its cursor to whichever instance
+/// answers now: the holder keeps it across a restore. The authority honours
+/// it only while the holder's `holder_rev` is unchanged and, under H.41, its
+/// sealed `rev.epoch` is the store's current epoch; otherwise `410
+/// list_expired` and the peer discards the list (its earlier lease keeps
+/// running). A page of an earlier epoch served after `T_stop` renews that
+/// epoch's lease beyond the lease timeout. A restore rolls `holder_rev` back
+/// to the backup's, so even with H.41's advance it can equal a cursor the
+/// old lineage sealed after the backup: only the epoch check refuses that
+/// cursor.
+fn peer_list_page(s: &State, d: Design, i: usize) -> Step {
     let p = s.peers[i];
     let Some((epoch, rev)) = p.cursor else {
         return Ok(None);
@@ -4375,30 +4409,34 @@ fn peer_list_page(s: &State, i: usize) -> Step {
         return Ok(None);
     }
     let mut o = Out::new(s);
+    o.row(H21);
+    let cur = s.auth.core.epoch;
+    let foreign = epoch != cur && d.has(Fix::CrossEpochCursor);
     let n = &mut o.n.peers[i];
     n.cursor = None;
-    if rev == s.auth.core.holder_rev && peer_listable(&p) {
+    if rev == s.auth.core.holder_rev && !foreign && peer_listable(&p) {
         n.lease = Some(epoch);
-        if epoch < s.auth.core.epoch {
+        if epoch < cur {
             n.late = true;
             o.obs(Obs::EarlierEpochListAfterStop);
         }
-    } else if rev != s.auth.core.holder_rev {
-        // `410 list_expired`: H18 advanced `holder_rev`.
-        o.row(H18);
     }
     o.done()
 }
 
-/// The reading H.33.2 rejects: a restore proceeded while the old authority
-/// instance still runs, and it renews a peer's earlier-epoch list after
-/// `T_stop`, beyond the lease timeout.
+/// The old authority instance still runs after `T_stop` was recorded and
+/// renews a peer's list of the old lineage (epoch 0) beyond the lease
+/// timeout. Before `T_stop` a renewal changes nothing the model tracks: its
+/// `iat` is at most `T_stop`, so the lease timeout bounds it. Reachable only
+/// under the rejected readings: a restore without the confirmation (H.33.2,
+/// H.44.3), or `T_stop` recorded before the confirmation (H.44.4).
 fn peer_old_list(s: &State, i: usize) -> Step {
     let p = s.peers[i];
     if s.env.probe != Probe::EpochMint
         || !s.env.old_running
+        || s.auth.lists_stopped_at.is_none()
         || p.late
-        || p.lease.is_none_or(|e| e >= s.auth.core.epoch)
+        || p.lease != Some(0)
     {
         return Ok(None);
     }
@@ -4442,33 +4480,103 @@ fn op_epoch(s: &State, d: Design) -> Step {
     o.done()
 }
 
-/// H.33.2 (H19): the restore tooling confirms that no process holds the
-/// governance store lock or serves the lifecycle routes on the source
-/// deployment, and that the old instance's start-up is disabled. Minting
-/// stops (H.15.1) and nothing is listed until the snapshot. For a supported
-/// restore `T_stop` is now, the start of the restore procedure; for
-/// `restore_journal_lost` it is the restored authority's first start.
-fn restore_begin(s: &State) -> Step {
+/// H.33.2, H.44.3 (H19): the old-instance-stopped confirmation. (a) The
+/// restore tooling verifies on the source deployment that no process holds
+/// the governance store lock or serves the lifecycle routes and that the old
+/// instance's start-up is disabled; or (b), when the source is unreachable,
+/// an admin records the audited `old_instance_stopped` attestation, with an
+/// unsampled security event. The model's confirmation is true: the old
+/// instance is stopped at or before it (a false attestation is the named
+/// residual). Minting stops (H.15.1). On the tooling path nothing is listed
+/// until the snapshot; a raw-restored instance stays suspected until its
+/// procedure completes. H.44.4: `T_stop` is the confirmation instant for
+/// every restore cause. The reading H.44 replaces takes a supported
+/// restore's procedure start (this instant too) and the restored
+/// authority's first start for `restore_journal_lost` and a raw restore.
+fn confirm_old_stopped(s: &State, d: Design, attested: bool) -> Step {
+    if s.env.probe != Probe::EpochMint || s.auth.backup.is_none() || s.budget.restores == 0 {
+        return Ok(None);
+    }
+    let raw = match s.auth.raw {
+        Raw::No if s.auth.restoring || !lists_served(s) => return Ok(None),
+        Raw::No => false,
+        Raw::Unconfirmed => true,
+        Raw::Confirmed => return Ok(None),
+    };
+    let mut o = Out::new(s);
+    let now = s.env.exposure_elapsed;
+    if raw {
+        o.n.auth.raw = Raw::Confirmed;
+    } else {
+        o.n.auth.restoring = true;
+    }
+    o.n.env.old_running = false;
+    if s.ghost.mint_stop.is_none() {
+        o.n.ghost.mint_stop = Some(now);
+    }
+    let records = d.has(Fix::TStopAtConfirmation) || (!raw && !s.env.bad_journal);
+    if records && s.auth.lists_stopped_at.is_none() {
+        o.n.auth.lists_stopped_at = Some(now);
+    }
+    if attested {
+        o.obs(Obs::OldInstanceStoppedAttested);
+    }
+    // The holders keep their cursors; H.41 refuses them at the restored
+    // authority (H21).
+    o.row(H19);
+    o.done()
+}
+
+/// H.44.1–2 (H20): an instance started from a raw restore of the backup,
+/// bypassing the tooling. The F startup check detects it while the off-store
+/// record survives (its loss is the stated residual), so it starts in
+/// `authority_rollback_suspected`: no list, no access grant, `503
+/// authority_epoch_mismatch` on every lifecycle route. It cannot see the
+/// source deployment, never infers that the old instance stopped, and does
+/// not refuse to start. The old instance may keep running and issuing lists
+/// (ground truth). Search for the id-space is down from here until the
+/// restored epoch's gate opens, so L1 starts waiting now; while no
+/// confirmation exists that wait is expected non-progress
+/// ([`crate::props::goal`]). The restored store is not read before the
+/// procedure re-applies the backup (H.1.4), so the model leaves it. The
+/// reading H.44.4 rejects records `T_stop` now, at the first start.
+fn raw_restore(s: &State, d: Design) -> Step {
     if s.env.probe != Probe::EpochMint
         || s.auth.backup.is_none()
         || s.budget.restores == 0
-        || s.auth.restoring
+        || s.auth.raw != Raw::No
         || !lists_served(s)
     {
         return Ok(None);
     }
     let mut o = Out::new(s);
-    let now = s.env.exposure_elapsed;
-    o.n.auth.restoring = true;
-    o.n.ghost.mint_stop = Some(now);
-    if !s.env.bad_journal {
-        o.n.auth.lists_stopped_at = Some(now);
+    o.n.auth.raw = Raw::Unconfirmed;
+    o.n.auth.rollback_suspected = true;
+    o.n.env.old_running = true;
+    o.n.ghost.search_due = s.dur.hw.is_some();
+    if !d.has(Fix::TStopAtConfirmation) {
+        o.n.auth.lists_stopped_at = Some(s.env.exposure_elapsed);
     }
-    // The old instance's cursors die with it.
-    for p in o.n.peers.iter_mut() {
-        p.cursor = None;
+    o.row(H20);
+    o.done()
+}
+
+/// H.41 (gate fixtures): the old lineage commits one ordinary
+/// holder-affecting write after the backup, outside the journal (an accepted
+/// report, a deadline). It advances every holder's `holder_rev`, so a cursor
+/// sealed after it carries a `holder_rev` that the restored store, rolled
+/// back to the backup, reaches again with H.41's own advance.
+fn auth_touch(s: &State) -> Step {
+    let Some(b) = s.auth.backup.as_deref() else {
+        return Ok(None);
+    };
+    if s.env.probe != Probe::EpochMint || !lists_served(s) || s.auth.core.seq != b.seq {
+        return Ok(None);
     }
-    o.row(H19);
+    let mut o = Out::new(s);
+    let c = &mut o.n.auth.core;
+    c.seq += 1;
+    c.holder_rev = c.seq;
     o.done()
 }
 

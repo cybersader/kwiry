@@ -12,7 +12,7 @@
 //! | I7 | Some healthy actor (holder, environment or operator) can move whenever any work is outstanding |
 //! | I8 | An operator wait (auth halt, bug halt) is entered only on a fault, never on a correct authority or network response |
 //! | I9 | The unattributed inventory never counts data attributable to a listed holding (except units a release reserved) |
-//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes, through member reports or the lease timeout, including for a member that never reports, disabled ones included (H.25, H.30, H.32), under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
+//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes, through member reports or the lease timeout, including for a member that never reports, disabled ones included (H.25, H.30, H.32), and after a raw restore once the old-instance-stopped confirmation exists (H.44; without one, staying suspected is expected non-progress), under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
 
 use crate::state::*;
 use crate::step::{Obs, Outcome, delete_authorized, mintable, reserving, room_class, servable};
@@ -288,9 +288,21 @@ pub fn settled(s: &State) -> bool {
 /// A retirement cannot disappear from the goal when the authority is restored.
 /// An epoch acceptance is answered by a status accepted in the new epoch
 /// (HW §15 H.19), whatever its count, and minting resumes after an epoch
-/// change, through member reports or the lease timeout (H.25, H.30).
+/// change, through member reports or the lease timeout (H.25, H.30). A
+/// raw-restored instance without the old-instance-stopped confirmation owes
+/// no resumption: it stays suspected indefinitely, fail-closed (H.44.3), so
+/// that wait is [`expected_non_progress`], not an L1 violation. Once the
+/// confirmation exists, minting must resume.
 pub fn goal(s: &State) -> bool {
-    !s.ghost.status_due && !s.ghost.search_due && retirements_done(s)
+    !s.ghost.status_due && (!s.ghost.search_due || expected_non_progress(s)) && retirements_done(s)
+}
+
+/// H.44.3: a raw-restored instance that has no old-instance-stopped
+/// confirmation stays in `authority_rollback_suspected` indefinitely. Only a
+/// scenario step (the tooling's verification or the audited attestation)
+/// leaves it, so no fair execution has to.
+pub fn expected_non_progress(s: &State) -> bool {
+    s.auth.raw == Raw::Unconfirmed
 }
 
 /// Every ghost retirement reached `complete` or `blocked`: the obligation

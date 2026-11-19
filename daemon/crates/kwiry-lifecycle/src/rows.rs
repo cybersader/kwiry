@@ -446,9 +446,9 @@ pub const MACHINES: &[Machine] = &[
                 r#"Authority: the first transaction of a new epoch (supported restore, `restore_journal_lost`, or operator), after H.1 and H.31 replay (H17)"#,
                 r#"—"#,
                 r#"—"#,
-                r#"OpenClast mints no search capability for any room of the custody id-space until H15 or H16 opens the gate. **Members are frozen now:** every engine holder in the id-space roster, whatever its state: enabled, disabled or decommissioned. The only exclusion is a holder whose lifecycle credential has been refused on every route since an instant `t_r` with `t_r + serve_seconds_ceiling + 150 s < T_stop`: it can't have received a list after `t_r`, so any lease it holds lapsed before the gate began. The set never grows: a holder enrolled during this epoch is not a member. Disabling, re-enabling or decommissioning a member changes nothing: it may serve its earlier-epoch list until its lease lapses, because a disabled holder with open obligations never receives `403`, and one disabled within a relist interval of `T_stop` may not have received it yet. After `restore_journal_lost` the snapshot may miss a holder, so minting also waits for the id-space-wide lease timeout (H16). A holder still on an earlier-epoch list is served only under capabilities minted before minting stopped: at most 90 s after the stop (H.15, H.21), whatever remains of its lease"#,
+                r#"The transaction advances every holder's `holder_rev`, never coalesced or delayed, whatever the epoch's cause (H.41; H21). OpenClast mints no search capability for any room of the custody id-space until H15 or H16 opens the gate. **Members are frozen now:** every engine holder in the id-space roster, whatever its state: enabled, disabled or decommissioned. The only exclusion is a holder whose lifecycle credential has been refused on every route since an instant `t_r` with `t_r + serve_seconds_ceiling + 150 s < T_stop`: it can't have received a list after `t_r`, so any lease it holds lapsed before the gate began. The set never grows: a holder enrolled during this epoch is not a member. Disabling, re-enabling or decommissioning a member changes nothing: it may serve its earlier-epoch list until its lease lapses, because a disabled holder with open obligations never receives `403`, and one disabled within a relist interval of `T_stop` may not have received it yet. After `restore_journal_lost` the snapshot may miss a holder, so minting also waits for the id-space-wide lease timeout (H16). A holder still on an earlier-epoch list is served only under capabilities minted before minting stopped: at most 90 s after the stop (H.15, H.21), whatever remains of its lease"#,
                 r#"—"#,
-                r#"HW §15 H.25, H.30.1, H.32.1, H.32.2, H.30.4, H.1.4, H.15.1, H.19.5, G.4"#,
+                r#"HW §15 H.25, H.30.1, H.32.1, H.32.2, H.30.4, H.1.4, H.15.1, H.19.5, G.4; HW v2 H.41"#,
                 Step
             ),
             row!(
@@ -464,11 +464,11 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 H16,
                 r#"Authority, gate closed: `now > T_stop + serve_seconds_ceiling + 150 s`, with `T_stop` the epoch link's `lists_stopped_at`"#,
-                r#"`T_stop`: for an operator epoch, the commit instant of the epoch-minting transaction (H18); for a supported restore, the start of the restore procedure; for `restore_journal_lost` and a raw restore, the restored authority's first start. A restore records it only after H19 confirms the old authority stopped. `serve_seconds_ceiling` comes from deployment configuration, default 900, and enrollment refuses an engine `serve_seconds` above it: at most 1050 s by default"#,
+                r#"`T_stop`: for an operator epoch, the commit instant of the epoch-minting transaction (H18); for every restore cause (`restore`, `restore-journal-lost`, and a raw restore resolved through either), the instant of the old-instance-stopped confirmation (H19), never a raw-restored instance's first start. `serve_seconds_ceiling` comes from deployment configuration, default 900, and enrollment refuses an engine `serve_seconds` above it: at most 1050 s by default"#,
                 r#"—"#,
                 r#"Every earlier-epoch lease has lapsed. Each pending member, disabled and decommissioned ones included, clears by lease with the unsampled `lifecycle.mint_gate.cleared_by_lease` event (`holder_id`, `provider_scope`) and the H.11 silence alert, and the id-space-wide wait ends, so minting resumes even if a member never contacts the authority. If the new epoch's first transaction comes after this instant (a restore that outlasts the timeout), every member clears by lease in it and minting may resume at once: no earlier-epoch list was issued after `T_stop`, so every earlier-epoch lease has lapsed. **No admin override** clears a member earlier; an admin investigates the alert and disables or decommissions a holder that is gone"#,
                 r#"—"#,
-                r#"HW §15 H.30.2(b), H.32.4, H.33.3, H.30.3, H.30.4, H.11"#,
+                r#"HW §15 H.30.2(b), H.32.4, H.33.3, H.30.3, H.30.4, H.11; HW v2 H.44.4"#,
                 Focused("mint-gate fixture with other holders")
             ),
             row!(
@@ -484,22 +484,42 @@ pub const MACHINES: &[Machine] = &[
             row!(
                 H18,
                 r#"Authority: an operator epoch (`cause: "operator"`)"#,
-                r#"The epoch-minting transaction holds the store lock that list projection takes (H.13), so no earlier-epoch projection is read after it commits"#,
-                r#"One governance transaction: the new epoch, every holder's `holder_rev` advanced, `lists_stopped_at` = `T_stop` = its commit instant, and the H14 gate"#,
-                r#"Lists are issued in the new epoch from this transaction on, and holders refuse them with `unexpected_epoch` until `accept-epoch` (H4). What stops at `T_stop` is the issuing of earlier-epoch lists: an in-flight earlier-epoch cursor answers `410 list_expired` (§3.7), so no earlier-epoch page 1 or later is served after `T_stop`. An earlier-epoch page 0 signed around the commit has `iat ≤ T_stop` and reaches the holder by `T_stop + 30 s`; H16's `+150 s` covers that delay and the clock skew"#,
+                r#"The epoch-minting transaction holds the store lock that list projection takes (H.13), and every page 0 reads its `iat` from the authority's monotone clock before its projection, inside that lock section (H.42), so no earlier-epoch projection is read after the commit and every earlier-epoch page 0 has `iat` ≤ `T_stop`"#,
+                r#"One governance transaction: the new epoch, every holder's `holder_rev` advanced (never coalesced or delayed, H.41), `lists_stopped_at` = `T_stop` = its commit instant, and the H14 gate"#,
+                r#"Lists are issued in the new epoch from this transaction on, and holders refuse them with `unexpected_epoch` until `accept-epoch` (H4). What stops at `T_stop` is the issuing of earlier-epoch lists: an in-flight earlier-epoch cursor answers `410 list_expired` (H21), so no earlier-epoch page after page 0 is served after `T_stop`. An earlier-epoch page 0 signed around the commit has `iat ≤ T_stop` and reaches the holder by `T_stop + 30 s`; H16's `+150 s` covers that delay and the clock skew. Every item of a list carries its lease start at page 0's `iat` (`quarantine_after = iat + serve_seconds`); a holder may compute the monotonic deadline from a later carrying page's `iat`, which only makes it earlier (H.42)"#,
                 r#"The transaction commits or not"#,
-                r#"HW §15 H.33.1, H.30.2, H.13, §3.7"#,
+                r#"HW §15 H.33.1, H.30.2, H.13, §3.7; HW v2 H.41, H.42"#,
                 Focused("operator-epoch mint-gate fixture with other holders")
             ),
             row!(
                 H19,
-                r#"Authority restore tooling (`restore`, `restore-journal-lost`, raw restore), before it records `T_stop`"#,
-                r#"No process holds the governance store lock or serves the lifecycle routes on the source deployment, and the old instance's start-up is disabled"#,
+                r#"Authority: the restore procedure or the audited `restore_journal_lost` decision, for every restore cause (`restore`, `restore-journal-lost`, and a raw-restored instance's exit, H20), before it records `T_stop`"#,
+                r#"An old-instance-stopped confirmation: (a) the tooling verifies on the source deployment that no process holds the governance store lock or serves the lifecycle routes, and that the old instance's start-up is disabled; or (b) when the source is unreachable, the audited admin attestation `old_instance_stopped`, recording the deciding level, the actor and how the instance was stopped (for example host powered off, volume detached), which raises an unsampled security event"#,
+                r#"`lists_stopped_at` = `T_stop` = the confirmation instant, for every restore cause"#,
+                r#"Confirmed: the restore proceeds. Nothing is listed or minted until the restored epoch's first transaction (H14), and H16 counts from the confirmation: the old instance stopped at or before it, so every list it issued has `iat` ≤ `T_stop`, and the new instance issued none while suspected. Not confirmed: **the restore does not proceed**, and a raw-restored instance stays in `authority_rollback_suspected` (H20) indefinitely, fail-closed. A false attestation leaves the old instance issuing lists and minting: the residual class of a raw restore with record loss, named in the runbook"#,
                 r#"—"#,
-                r#"Confirmed: the restore proceeds and records `T_stop` (H16); nothing is listed or minted until the restored epoch's first transaction (H14). Not confirmed: **the restore does not proceed**, because a concurrently running old instance would keep issuing lists and no `T_stop` would be valid"#,
+                r#"HW v2 H.44.3, H.44.4; HW §15 H.33.2, H.30.2, H.15.1"#,
+                Focused("restore and raw-restore mint-gate fixtures with other holders")
+            ),
+            row!(
+                H20,
+                r#"Authority: the first start of a raw-restored instance (a restore that bypassed the tooling)"#,
+                r#"The F startup check (the store's `{epoch, seq}` and `journal_head` against the off-store record) detects it while that record survives; otherwise the first tag-valid holder witness does (H.2). It cannot see the source deployment"#,
                 r#"—"#,
-                r#"HW §15 H.33.2, H.30.2, H.15.1"#,
-                Focused("mint-gate fixture with other holders")
+                r#"`authority_rollback_suspected`: no list, no access grant, and every lifecycle route answers `503 authority_epoch_mismatch` (H10 at the holder), so it never joins a still-running old instance in issuing anything. It MUST NOT infer that the old instance stopped and records no `T_stop`; it does not refuse to start either, which would hide the state from the console and the audit trail. The only exits are H19's confirmation, then the supported restore (H17, H14) or `restore_journal_lost` (H12j, H13j). Without a confirmation it stays suspected indefinitely: fail-closed, and expected non-progress rather than an L1 failure"#,
+                r#"—"#,
+                r#"HW v2 H.44.1–3, §12.2 F, H.2"#,
+                Focused("raw-restore mint-gate fixture with other holders")
+            ),
+            row!(
+                H21,
+                r#"Authority: a list request presents a cursor (`next_cursor` of the previous page)"#,
+                r#"The cursor's sealed `rev.epoch` is the store's current epoch, the holder's `holder_rev` is unchanged since the cursor was sealed, and the cursor is within its 300 s and 1800 s lives"#,
+                r#"—"#,
+                r#"Honoured: the next page. Otherwise `410 list_expired`: the holder discards every page of that list and relists from `cursor: null` with a fresh nonce. **The epoch check stands on its own:** a cursor from another epoch is refused whatever `holder_rev` says, because a restore rolls `holder_rev` back to the backup's, and the epoch-minting transaction's own advance (H14, H18) can reach a value that a cursor sealed by the old lineage after the backup already carries. With it, no earlier-epoch page after page 0 is served after `T_stop`, whatever the epoch's cause"#,
+                r#"—"#,
+                r#"HW v2 H.41, H.42.3; HW §3.7, §15 H.33.1"#,
+                Focused("operator-epoch and restore-cursor mint-gate fixtures with other holders")
             ),
         ],
     },

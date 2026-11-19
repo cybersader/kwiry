@@ -269,6 +269,29 @@ pub struct Auth {
     /// disabled; nothing is listed or minted until the restored epoch's first
     /// transaction.
     pub restoring: bool,
+    /// H.44 (H.25 probe): this instance was raw-restored, bypassing the
+    /// restore tooling, and has not left `authority_rollback_suspected` yet.
+    pub raw: Raw,
+}
+
+/// H.44: where a raw-restored instance stands on its way out of
+/// `authority_rollback_suspected`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Raw {
+    /// Not a raw-restored instance, or it has left suspicion.
+    #[default]
+    No,
+    /// Started from a raw restore and suspected. It cannot see the source
+    /// deployment, never infers that the old instance stopped, issues no list
+    /// and no access grant, and answers `503 authority_epoch_mismatch` on
+    /// every lifecycle route. Without a confirmation it stays here
+    /// indefinitely: expected non-progress, not an L1 violation.
+    Unconfirmed,
+    /// Still suspected, but the old-instance-stopped confirmation has been
+    /// recorded ((a) the tooling verified the source, or (b) the audited
+    /// `old_instance_stopped` attestation), with `T_stop` = its instant. The
+    /// supported restore procedure or `restore_journal_lost` may now proceed.
+    Confirmed,
 }
 
 /// H.30: one holder's seat at the epoch-change mint gate.
@@ -306,10 +329,16 @@ pub struct MintGate {
 pub struct Roster {
     pub enabled: bool,
     pub key: u8,
-    /// H.32.2: the authority has refused the holder's lifecycle credential on
-    /// every route since an instant `t_r` with `t_r + serve_seconds_ceiling +
-    /// 150 s` already past. Derived from the journaled `holder_disabled` and
-    /// the open obligations, so it is backed up and replayed with the entry.
+    /// H.32.2, H.43: the authority has refused the holder's lifecycle
+    /// credential on every route since an instant `t_r` with `t_r +
+    /// serve_seconds_ceiling + 150 s` already past. `t_r` is the later of the
+    /// disable (or decommission) and the closing of the holder's last open
+    /// obligation, so a holder with any open obligation has none. The
+    /// authority records it durably as `refused_since`, derived from the
+    /// journaled `holder_disabled` and the obligations, so it is backed up and
+    /// replayed with the entry. When the current lineage's durable state
+    /// cannot establish it (its source was lost in a restore), it is false
+    /// and the holder is a member.
     pub refused_aged: bool,
 }
 
@@ -336,9 +365,9 @@ pub struct Peer {
     /// Ground truth: the epoch of the list it serves under a live lease
     /// (`None`: serves nothing).
     pub lease: Option<u8>,
-    /// Ground truth (rejected H.33 readings only): its earlier-epoch lease
-    /// was renewed by a list issued after `T_stop`, so the lease timeout does
-    /// not bound it.
+    /// Ground truth (rejected H.33, H.41 and H.44 readings only): its
+    /// earlier-epoch lease was renewed by a list or page issued after
+    /// `T_stop`, so the lease timeout does not bound it.
     pub late: bool,
     /// H.33.1: a list in flight, `(epoch, holder_rev)` as sealed in its
     /// cursor at page 0; later pages are still to be fetched.
@@ -875,9 +904,11 @@ pub struct Env {
     /// H.30.2(b): the authority clock passed `T_stop + serve_seconds_ceiling
     /// + 150 s`, so every earlier-epoch lease has lapsed.
     pub lease_timeout: bool,
-    /// Rejected H.33.2 reading only: a restore proceeded while the old
-    /// authority instance still runs, so it keeps issuing earlier-epoch
-    /// lists after `T_stop`.
+    /// Ground truth: the old authority instance may still be running and
+    /// issuing lists. A raw restore starts with it set (the source may still
+    /// run, H.44.1); the old-instance-stopped confirmation clears it. Under
+    /// the rejected H.33.2 and H.44 readings a restore proceeds while it is
+    /// set, so the old instance issues earlier-epoch lists after `T_stop`.
     pub old_running: bool,
     /// Checker reduction switch: peers are sorted in the canonical state
     /// (`step::canonical`). Fixed for a run.
@@ -994,6 +1025,7 @@ impl State {
                 mint_gate: None,
                 lists_stopped_at: None,
                 restoring: false,
+                raw: Raw::No,
             },
             peers: [Peer::default(); PEERS],
             env: Env {

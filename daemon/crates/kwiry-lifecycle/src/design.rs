@@ -1,7 +1,7 @@
 //! Which revision of the lifecycle the model executes.
 //!
 //! [`Design::REV8`] is the revision-8 table encoded as written (with the
-//! interpretations listed in the crate docs). [`Design::REV11_3`] adds every
+//! interpretations listed in the crate docs). [`Design::REV11_4`] adds every
 //! [`Fix`]. Each fix is a separate flag so the checker can show that it is
 //! necessary: removing any single fix from the corresponding revision must reproduce the
 //! counterexample it closes (`tests/model_check.rs`).
@@ -154,6 +154,21 @@ pub enum Fix {
     /// H.34: the clock-hold clear writes holder state before it drops the
     /// in-memory hold.
     ClockClearWriteFirst,
+    /// H.41 (v2): a cursor whose sealed `rev.epoch` differs from the store's
+    /// current epoch answers `410 list_expired`, whatever `holder_rev` says.
+    CrossEpochCursor,
+    /// H.41 (v2): the epoch-minting transaction of every cause, a restore's
+    /// included, advances every holder's `holder_rev` in that transaction,
+    /// never coalesced or delayed.
+    EpochRevBumpEveryCause,
+    /// H.44.1–3 (v2): a raw-restored instance never confirms by itself that
+    /// the old instance stopped. It leaves `authority_rollback_suspected` only
+    /// through a restore procedure or `restore_journal_lost` that includes an
+    /// old-instance-stopped confirmation.
+    NoSelfConfirmation,
+    /// H.44.4 (v2): `T_stop` for every restore cause is the instant of the
+    /// old-instance-stopped confirmation.
+    TStopAtConfirmation,
 }
 
 impl Fix {
@@ -229,6 +244,13 @@ impl Fix {
         Fix::OperatorEpochRevBump,
         Fix::StoppedOldAuthority,
         Fix::ClockClearWriteFirst,
+    ];
+
+    pub const REV11_4: [Fix; 4] = [
+        Fix::CrossEpochCursor,
+        Fix::EpochRevBumpEveryCause,
+        Fix::NoSelfConfirmation,
+        Fix::TStopAtConfirmation,
     ];
 
     const fn bit(self) -> u64 {
@@ -308,6 +330,14 @@ impl Fix {
                 "H.33.2: a restore proceeds only with the old authority stopped"
             }
             Fix::ClockClearWriteFirst => "H.34: the clock-hold clear writes first",
+            Fix::CrossEpochCursor => "H.41: a cursor from another epoch answers 410",
+            Fix::EpochRevBumpEveryCause => {
+                "H.41: every epoch-minting transaction advances every holder_rev"
+            }
+            Fix::NoSelfConfirmation => {
+                "H.44: a raw restore leaves suspicion only through a confirmation"
+            }
+            Fix::TStopAtConfirmation => "H.44: T_stop is the old-instance-stopped confirmation",
             Fix::LeaseAndRollbackFence => {
                 "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
             }
@@ -391,12 +421,26 @@ impl Design {
         d
     };
 
-    /// Revision 11.3: HOLDINGS-WIRE §15 H.32–H.34.
+    /// Revision 11.3: HOLDINGS-WIRE §15 H.32–H.34. The H.41 and H.44 flags
+    /// are off, so it executes the readings those amendments reject (the
+    /// ablations reproduce them).
     pub const REV11_3: Design = {
         let mut d = Self::REV11_2;
         let mut i = 0;
         while i < Fix::REV11_3.len() {
             d = d.with(Fix::REV11_3[i]);
+            i += 1;
+        }
+        d
+    };
+
+    /// Revision 11.4: HOLDINGS-WIRE-v2 H.41–H.44 (H.42 and H.43 confirm
+    /// readings and add no flag).
+    pub const REV11_4: Design = {
+        let mut d = Self::REV11_3;
+        let mut i = 0;
+        while i < Fix::REV11_4.len() {
+            d = d.with(Fix::REV11_4[i]);
             i += 1;
         }
         d
@@ -441,6 +485,9 @@ impl fmt::Debug for Design {
         if *self == Design::REV11_3 {
             return write!(f, "REV11.3");
         }
+        if *self == Design::REV11_4 {
+            return write!(f, "REV11.4");
+        }
         let missing: Vec<_> = Fix::REV9
             .iter()
             .chain(&Fix::REV10)
@@ -449,8 +496,9 @@ impl fmt::Debug for Design {
             .chain(&Fix::REV11_1)
             .chain(&Fix::REV11_2)
             .chain(&Fix::REV11_3)
+            .chain(&Fix::REV11_4)
             .filter(|x| !self.has(**x))
             .collect();
-        write!(f, "REV11.3 without {missing:?}")
+        write!(f, "REV11.4 without {missing:?}")
     }
 }

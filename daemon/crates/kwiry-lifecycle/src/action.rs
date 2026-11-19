@@ -237,15 +237,38 @@ pub enum Action {
     PeerListStart(u8),
     /// H.33.1: peer `p` presents its cursor for the remaining pages.
     PeerListPage(u8),
-    /// Rejected H.33.2 reading only: the old authority instance, still
-    /// running after a restore, issues peer `p` an earlier-epoch list.
+    /// The old authority instance, still running after `T_stop` was
+    /// recorded, issues peer `p` an earlier-epoch list. Reachable only under
+    /// the rejected H.33.2 and H.44 readings: a restore without the
+    /// confirmation, or `T_stop` taken before it.
     PeerOldList(u8),
     /// H.33.1: an operator epoch (`cause: "operator"`). Its transaction is
     /// `T_stop`.
     OpEpoch,
-    /// H.33.2: the restore tooling confirms that the old authority instance
-    /// is stopped and its start-up disabled, then records `T_stop`.
+    /// H.33.2, H.44.3(a): the restore tooling verifies on the source
+    /// deployment that the old authority instance is stopped and its
+    /// start-up disabled, then records `T_stop` (H.44.4: the confirmation
+    /// instant). On a raw-restored instance it is the confirmation of its
+    /// exit.
     RestoreBegin,
+    /// H.44.3(b): the source is unreachable, so an admin records the audited
+    /// `old_instance_stopped` attestation (deciding level, actor, how it was
+    /// stopped), with an unsampled security event. `T_stop` is its instant.
+    AttestOldStopped,
+    /// H.44.1–2: an instance started from a raw restore of the authority
+    /// backup, bypassing the tooling. The F startup check detects it, so it
+    /// starts in `authority_rollback_suspected`; the old instance may still
+    /// run.
+    RawRestore,
+    /// H.44.3: the operator runs the supported restore procedure on a
+    /// raw-restored instance (after its confirmation). A corrupt journal ends
+    /// in H12j, and `OpRestoreJournalLost` follows.
+    OpRestore,
+    /// H.41 (gate fixtures): an ordinary holder-affecting write after the
+    /// backup (an accepted report, a deadline), outside the journal. It
+    /// advances every holder's `holder_rev` (coalesced at most once per 5 s,
+    /// §3.7; the model takes one).
+    AuthTouch,
     /// H.16 focused inputs. `dir: None` is `--pin-id none`; `stale` is a
     /// stale `--expect-current`.
     AttestRoot {
@@ -320,8 +343,15 @@ impl Action {
             | PeerListPage(_)
             | PeerOldList(_)
             | OpEpoch
-            | RestoreBegin => Kind::Scenario,
-            BeginRecovery | CommitRecovery | OpClearClock | OpMintOverride => Kind::Operator,
+            | RestoreBegin
+            | AttestOldStopped
+            | RawRestore
+            | AuthTouch => Kind::Scenario,
+            // H.44: once the confirmation is recorded, the operator completes
+            // the restore procedure; L1 requires that it does.
+            BeginRecovery | CommitRecovery | OpClearClock | OpMintOverride | OpRestore => {
+                Kind::Operator
+            }
             // Another holder's progress and the passage of time are fair.
             PeerMove(_) | PeerReport(_) | LeaseTimeout => Kind::Env,
             AuthRetire(_) | AuthUnlist(_) | AuthRelist(_) | AuthDrop(_) | AuthBackup
