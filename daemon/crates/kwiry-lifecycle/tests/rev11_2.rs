@@ -33,7 +33,7 @@ const NONE: Budget = Budget {
     drops: 0,
     restores: 0,
 };
-const D: Design = Design::REV11_4;
+const D: Design = Design::REV11_5;
 
 fn profile(name: &'static str) -> Profile {
     Profile {

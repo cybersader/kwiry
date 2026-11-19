@@ -3,16 +3,16 @@
 //!
 //! | Id | Property |
 //! |---|---|
-//! | I1 | A resource is servable only if the newest list admitted by an H row shows it `active` and it is not tombstoned (including during apply); retirements cannot be minted or resurrected in a newer list |
+//! | I1 | A resource is servable only if the newest list admitted by an H row shows it `active` and it is not tombstoned (including during apply); retirements cannot be minted or resurrected in a newer list; after an exit by attestation, no engine that has cleared the gate answers a capability the old instance minted (HW v2 H.49.3) |
 //! | I2 | A unit is deleted only under a listed obligation for its resource, that exact release claimant and reservation, or GC of an unreferenced object of an active resource |
 //! | I3 | `complete` is never dispatched while the unattributed inventory is non-empty, while anything of the resource remains, or while its proof is stale |
 //! | I4 | Tombstones only grow |
 //! | I5 | Floors are monotone within an epoch, belong to the high-water's epoch, and evidence minted in another epoch never raises them |
 //! | I6 | Each armed epoch acceptance is consumed at most once |
 //! | I7 | Some healthy actor (holder, environment or operator) can move whenever any work is outstanding |
-//! | I8 | An operator wait (auth halt, bug halt) is entered only on a fault, never on a correct authority or network response |
+//! | I8 | An operator wait (auth halt, bug halt) is entered only on a fault, never on a correct authority or network response; an `old_instance_stopped` attestation is accepted only after a recorded failed source check no older than 1 h (HW v2 H.48.1) |
 //! | I9 | The unattributed inventory never counts data attributable to a listed holding (except units a release reserved) |
-//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes, through member reports or the lease timeout, including for a member that never reports, disabled ones included (H.25, H.30, H.32), and after a raw restore once the old-instance-stopped confirmation exists (H.44; without one, staying suspected is expected non-progress), under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
+//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes, through member reports or the lease timeout, including for a member that never reports, disabled ones included (H.25, H.30, H.32), and after a raw restore once the old-instance-stopped confirmation exists (H.44; without one, staying suspected is expected non-progress), a false attestation included, under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
 
 use crate::state::*;
 use crate::step::{Obs, Outcome, delete_authorized, mintable, reserving, room_class, servable};
@@ -49,6 +49,7 @@ pub enum Prop {
     I8ReplayTarget,
     I1RootPin,
     I1EpochExposure,
+    I8AttestationPrecondition,
     /// A model bound was hit; the result would not be exhaustive.
     Bound,
 }
@@ -123,6 +124,9 @@ impl Prop {
             }
             Prop::I1EpochExposure => {
                 "I1: a holder's earlier-epoch list released results more than 90 s after minting stopped"
+            }
+            Prop::I8AttestationPrecondition => {
+                "I8: an old_instance_stopped attestation was accepted without a recorded failed source check no older than 1 h"
             }
             Prop::I8ReplayTarget => {
                 "I8: a replayed finalization or clear left its restored target outstanding"
@@ -238,7 +242,10 @@ fn step_violations(prev: &State, out: &Outcome) -> Vec<Prop> {
             Obs::ValidationPrecedence => Some(Prop::I8ValidationPrecedence),
             Obs::ProofDeadlineMissed => Some(Prop::I8ProofDeadline),
             Obs::UnverifiedRestore => Some(Prop::I1UnverifiedRestore),
-            Obs::CapabilityOverexposed => Some(Prop::I1CapabilityExposure),
+            Obs::CapabilityOverexposed | Obs::OldKeyCapabilityAnswered => {
+                Some(Prop::I1CapabilityExposure)
+            }
+            Obs::AttestedWithoutFailedCheck => Some(Prop::I8AttestationPrecondition),
             Obs::EpochOverexposed => Some(Prop::I1EpochExposure),
             Obs::AdvisoryWitnessRejected => Some(Prop::I8AdvisoryListWitness),
             Obs::CommitInvariantMissed => Some(Prop::I8CommitInvariant),

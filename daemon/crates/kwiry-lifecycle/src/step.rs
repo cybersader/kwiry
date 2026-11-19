@@ -102,6 +102,32 @@ pub enum Obs {
     /// H.44.3(b): the audited `old_instance_stopped` attestation, an
     /// unsampled security event.
     OldInstanceStoppedAttested,
+    /// HW v2 H.47 (H21): a cursor answered `410 list_expired`, and which
+    /// control refused it: the cross-epoch check (`epoch`), the `holder_rev`
+    /// check (`holder_rev`), or both.
+    ListExpired {
+        epoch: bool,
+        holder_rev: bool,
+    },
+    /// HW v2 H.48.1: `attestation_precondition_unmet`. The restore session
+    /// has no recorded failed source check no older than 1 h, so the tooling
+    /// must verify (H.44.3(a)).
+    AttestationPreconditionUnmet,
+    /// The reading H.48.1 rejects: an `old_instance_stopped` attestation was
+    /// accepted without a recorded failed source check no older than 1 h,
+    /// while the tooling could still have verified the source.
+    AttestedWithoutFailedCheck,
+    /// The named residual of a false attestation (H.44.4, H.48.3, H.49.4):
+    /// the old instance renewed a holder's earlier-epoch list before the
+    /// holder applied the key-set statement, or an old-instance artefact
+    /// reached an engine that has not cleared the gate, or such a holder
+    /// answered. Recorded, never a violation.
+    AttestationResidual,
+    /// HW v2 H.49.3: an engine that has cleared the gate answered a capability
+    /// the old instance minted after an exit by attestation. That instance
+    /// mints for rooms the restored lineage retired, so the exposure outlasts
+    /// the H.49.2 bound.
+    OldKeyCapabilityAnswered,
     /// H.30.3: no admin override clears a member early.
     MintOverrideRefused,
     ListWitnessOmitted,
@@ -883,7 +909,7 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         PeerDisable(p) => peer_set_enabled(s, d, p as usize, false),
         PeerEnable(p) => peer_set_enabled(s, d, p as usize, true),
         PeerRotate(p) => peer_rotate(s, d, p as usize),
-        PeerMove(p) => peer_move(s, p as usize),
+        PeerMove(p) => peer_move(s, d, p as usize),
         PeerReport(p) => peer_report(s, d, p as usize),
         PeerSilent(p) => peer_silent(s, p as usize),
         PeerAnswer(p) => peer_answer(s, p as usize),
@@ -893,10 +919,15 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         PeerRefusalAged(p) => peer_refusal_aged(s, d, p as usize),
         PeerListStart(p) => peer_list_start(s, p as usize),
         PeerListPage(p) => peer_list_page(s, d, p as usize),
-        PeerOldList(p) => peer_old_list(s, p as usize),
+        PeerOldList(p) => peer_old_list(s, d, p as usize),
+        PeerSeesEpoch(p) => peer_sees_epoch(s, p as usize),
+        PeerOldCapability(p) => peer_old_capability(s, d, p as usize),
         OpEpoch => op_epoch(s, d),
-        RestoreBegin => confirm_old_stopped(s, d, false),
-        AttestOldStopped => confirm_old_stopped(s, d, true),
+        RestoreBegin => confirm_old_stopped(s, d, None),
+        AttestOldStopped => confirm_old_stopped(s, d, Some(true)),
+        FalseAttestation => confirm_old_stopped(s, d, Some(false)),
+        SourceCheckFails => source_check_fails(s),
+        SourceCheckAges => source_check_ages(s),
         RawRestore => raw_restore(s, d),
         AuthTouch => auth_touch(s),
         AttestRoot { room, dir, stale } => attest_root(s, room, dir, stale),
@@ -3547,6 +3578,18 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
             s.dur.hw.is_some(),
         );
     }
+    // H.48.3, H.49.3: the first transaction after an exit by attestation
+    // issues the lifecycle key-set statement (a fresh `lc-*` key, every
+    // previously pinned kid in `retire_kids`) and rotates the
+    // search-capability signing key, each where the design has it. Every
+    // list, ack and link of the new epoch is signed with the new key, and
+    // minting uses only the new capability key. The failed-check record
+    // belongs to the session that ends here.
+    if s.auth.attest == Attest::Pending {
+        o.n.auth.attest = Attest::Exited;
+        o.row(H23);
+    }
+    o.n.auth.source_check = SourceCheck::None;
     o.n.auth.rollback_suspected = false;
     o.n.auth.failed_restore = false;
     o.n.auth.restoring = false;
@@ -4106,6 +4149,12 @@ fn peer_enroll(s: &State, d: Design, i: usize) -> Step {
         refused_aged: false,
     });
     p.lease = Some(s.auth.core.epoch);
+    if rotation_tracked(s) {
+        // H.48.3, H.49.3: it enrolls under the current key set and capability
+        // key, so it never trusted the retired ones.
+        p.lc_rotated = true;
+        p.cap_rotated = d.has(Fix::CapabilityKeyRotation);
+    }
     journal_roster(p, has_backup, d);
     o.done()
 }
@@ -4160,8 +4209,11 @@ fn peer_rotate(s: &State, d: Design, i: usize) -> Step {
 }
 
 /// The peer's operator accepts the new epoch and the peer applies a list of
-/// it, so it stops serving its earlier-epoch list.
-fn peer_move(s: &State, i: usize) -> Step {
+/// it, so it stops serving its earlier-epoch list. After an exit by
+/// attestation it applies the key-set statement before it verifies that
+/// list (H.48.3) and, under Kwiry's reading of H.49.3, the capability key
+/// rotation before it admits it.
+fn peer_move(s: &State, d: Design, i: usize) -> Step {
     let p = s.peers[i];
     let cur = s.auth.core.epoch;
     if s.env.probe != Probe::EpochMint
@@ -4177,7 +4229,15 @@ fn peer_move(s: &State, i: usize) -> Step {
     let n = &mut o.n.peers[i];
     n.lease = Some(cur);
     n.late = false;
+    n.residual = false;
     n.cursor = None;
+    if rotation_tracked(s) {
+        n.lc_rotated = true;
+        if d.has(Fix::CapabilityKeyRotation) && d.has(Fix::CapabilityRotationBeforeList) {
+            n.cap_rotated = true;
+        }
+        o.row(H24);
+    }
     o.done()
 }
 
@@ -4195,6 +4255,13 @@ fn peer_report(s: &State, d: Design, i: usize) -> Step {
         return Ok(None);
     }
     let mut o = Out::new(s);
+    // H.49.3: an engine applies the capability key rotation before it sends
+    // any report in the new epoch. As written that is the latest point it
+    // may; Kwiry's reading already applied it with the first new-epoch list.
+    if rotation_tracked(s) && d.has(Fix::CapabilityKeyRotation) {
+        o.n.peers[i].cap_rotated = true;
+        o.row(H24);
+    }
     o.n.peers[i].seat = Seat::Cleared;
     o.row(H15);
     settle_gate(&mut o, d);
@@ -4225,7 +4292,13 @@ fn peer_answer(s: &State, i: usize) -> Step {
         return Ok(None);
     }
     let mut o = Out::new(s);
-    o.obs(Obs::EpochOverexposed);
+    // A lease a false attestation's old instance renewed before the peer
+    // applied the key-set statement is the named residual (H.44.4, H.48.3).
+    o.obs(if s.peers[i].residual {
+        Obs::AttestationResidual
+    } else {
+        Obs::EpochOverexposed
+    });
     o.done()
 }
 
@@ -4246,9 +4319,10 @@ fn lease_timeout(s: &State, d: Design) -> Step {
     o.n.env.lease_timeout = true;
     o.n.env.exposure_elapsed = s.env.exposure_elapsed.max(t + 1051);
     // Every lease from a list issued before `T_stop` has lapsed. A lease a
-    // rejected H.33 reading renewed after `T_stop` has not.
+    // rejected H.33 reading renewed after `T_stop` has not, nor one a false
+    // attestation's old instance renewed (the named residual).
     for p in o.n.peers.iter_mut() {
-        if p.lease.is_some_and(|e| e < s.auth.core.epoch || e == 0) && !p.late {
+        if p.lease.is_some_and(|e| e < s.auth.core.epoch || e == 0) && !p.late && !p.residual {
             p.lease = None;
         }
     }
@@ -4335,6 +4409,7 @@ fn peer_forbidden(s: &State, d: Design, i: usize, received: bool) -> Step {
     if received {
         n.lease = None;
         n.late = false;
+        n.residual = false;
         n.cursor = None;
     }
     if clears {
@@ -4411,10 +4486,20 @@ fn peer_list_page(s: &State, d: Design, i: usize) -> Step {
     let mut o = Out::new(s);
     o.row(H21);
     let cur = s.auth.core.epoch;
+    // H.47: the two controls are evaluated independently. The cross-epoch
+    // check is the normative guarantee and never reads `holder_rev`; the
+    // `holder_rev` check is the §3.7 snapshot control, the only one within
+    // an epoch, and after a restore a redundant one.
     let foreign = epoch != cur && d.has(Fix::CrossEpochCursor);
+    let moved = rev != s.auth.core.holder_rev;
     let n = &mut o.n.peers[i];
     n.cursor = None;
-    if rev == s.auth.core.holder_rev && !foreign && peer_listable(&p) {
+    if foreign || moved {
+        o.obs(Obs::ListExpired {
+            epoch: foreign,
+            holder_rev: moved,
+        });
+    } else if peer_listable(&p) {
         n.lease = Some(epoch);
         if epoch < cur {
             n.late = true;
@@ -4427,22 +4512,94 @@ fn peer_list_page(s: &State, d: Design, i: usize) -> Step {
 /// The old authority instance still runs after `T_stop` was recorded and
 /// renews a peer's list of the old lineage (epoch 0) beyond the lease
 /// timeout. Before `T_stop` a renewal changes nothing the model tracks: its
-/// `iat` is at most `T_stop`, so the lease timeout bounds it. Reachable only
-/// under the rejected readings: a restore without the confirmation (H.33.2,
-/// H.44.3), or `T_stop` recorded before the confirmation (H.44.4).
-fn peer_old_list(s: &State, i: usize) -> Step {
+/// `iat` is at most `T_stop`, so the lease timeout bounds it. Reachable under
+/// the rejected readings, a restore without the confirmation (H.33.2,
+/// H.44.3) or `T_stop` recorded before the confirmation (H.44.4), and after a
+/// false attestation. H.48.3: a holder that applied the exit's key-set
+/// statement refuses the list, which is signed under a retired kid. Before
+/// that application the renewal is the false attestation's named residual
+/// (H.44.4): the holder can't tell the instances apart.
+fn peer_old_list(s: &State, d: Design, i: usize) -> Step {
     let p = s.peers[i];
     if s.env.probe != Probe::EpochMint
         || !s.env.old_running
         || s.auth.lists_stopped_at.is_none()
         || p.late
+        || p.residual
         || p.lease != Some(0)
+        || (p.lc_rotated && d.has(Fix::LifecycleKeyRotation))
     {
         return Ok(None);
     }
     let mut o = Out::new(s);
-    o.n.peers[i].late = true;
-    o.obs(Obs::EarlierEpochListAfterStop);
+    if s.auth.attest != Attest::No && !p.lc_rotated {
+        o.n.peers[i].residual = true;
+        o.obs(Obs::AttestationResidual);
+    } else {
+        o.n.peers[i].late = true;
+        o.obs(Obs::EarlierEpochListAfterStop);
+    }
+    o.done()
+}
+
+/// H.48.3, H.49.3: an exit by attestation left the old instance running (the
+/// attestation was false), so the holders' key rotations are what refuse its
+/// artefacts. After a true confirmation no such artefact exists.
+fn rotation_tracked(s: &State) -> bool {
+    s.env.old_running && s.auth.attest == Attest::Exited
+}
+
+/// H.48.3: after an exit by attestation, peer `p` fetches a list of the new
+/// epoch while it still serves its earlier-epoch list. It must apply the
+/// key-set statement before it can verify that list; it then answers
+/// `unexpected_epoch` until its operator's `accept-epoch` ([`peer_move`]) and
+/// keeps serving the earlier list. From now on it refuses every artefact
+/// under a retired kid. A stuck peer may do this too: fetching is not
+/// reporting.
+fn peer_sees_epoch(s: &State, i: usize) -> Step {
+    let p = s.peers[i];
+    let cur = s.auth.core.epoch;
+    if s.env.probe != Probe::EpochMint
+        || !rotation_tracked(s)
+        || !authority_up(s)
+        || p.lc_rotated
+        || p.lease.is_none_or(|e| e >= cur)
+        || !peer_listable(&p)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.peers[i].lc_rotated = true;
+    o.row(H24);
+    o.done()
+}
+
+/// H.49: after an exit by attestation, the old instance (still running: the
+/// attestation was false) mints a search capability that engine `p`, which
+/// holds a lease, is presented. The old instance mints for rooms the restored
+/// lineage retired, so an answer outlasts the H.49.2 bound. H.49.3: an engine
+/// that applied the capability key rotation refuses it. One that has cleared
+/// the gate must have: by a report (it applied the rotation first) or by the
+/// lease timeout (it then holds no lease). An engine that has not cleared,
+/// or whose lease the old instance renewed before it applied the key-set
+/// statement, is the named residual.
+fn peer_old_capability(s: &State, d: Design, i: usize) -> Step {
+    let p = s.peers[i];
+    if s.env.probe != Probe::EpochMint
+        || !rotation_tracked(s)
+        || !authority_up(s)
+        || p.lease.is_none()
+        || (p.cap_rotated && d.has(Fix::CapabilityKeyRotation))
+    {
+        return Ok(None);
+    }
+    let cleared = s.auth.mint_gate.is_none() || p.seat == Seat::Cleared;
+    let mut o = Out::new(s);
+    o.obs(if cleared && !p.residual {
+        Obs::OldKeyCapabilityAnswered
+    } else {
+        Obs::AttestationResidual
+    });
     o.done()
 }
 
@@ -4480,37 +4637,61 @@ fn op_epoch(s: &State, d: Design) -> Step {
     o.done()
 }
 
+/// The restore session in which an old-instance-stopped confirmation can be
+/// recorded: a supported restore about to begin, or a raw-restored instance
+/// still suspected without one. `Some(raw)` names which.
+fn confirmation_session(s: &State) -> Option<bool> {
+    if s.env.probe != Probe::EpochMint || s.auth.backup.is_none() || s.budget.restores == 0 {
+        return None;
+    }
+    match s.auth.raw {
+        Raw::No if s.auth.restoring || !lists_served(s) => None,
+        Raw::No => Some(false),
+        Raw::Unconfirmed => Some(true),
+        Raw::Confirmed => None,
+    }
+}
+
 /// H.33.2, H.44.3 (H19): the old-instance-stopped confirmation. (a) The
 /// restore tooling verifies on the source deployment that no process holds
 /// the governance store lock or serves the lifecycle routes and that the old
-/// instance's start-up is disabled; or (b), when the source is unreachable,
-/// an admin records the audited `old_instance_stopped` attestation, with an
-/// unsampled security event. The model's confirmation is true: the old
-/// instance is stopped at or before it (a false attestation is the named
-/// residual). Minting stops (H.15.1). On the tooling path nothing is listed
-/// until the snapshot; a raw-restored instance stays suspected until its
-/// procedure completes. H.44.4: `T_stop` is the confirmation instant for
-/// every restore cause. The reading H.44 replaces takes a supported
-/// restore's procedure start (this instant too) and the restored
-/// authority's first start for `restore_journal_lost` and a raw restore.
-fn confirm_old_stopped(s: &State, d: Design, attested: bool) -> Step {
-    if s.env.probe != Probe::EpochMint || s.auth.backup.is_none() || s.budget.restores == 0 {
+/// instance's start-up is disabled (`attested: None`); or (b), when the
+/// source is unreachable, an admin records the audited `old_instance_stopped`
+/// attestation, with an unsampled security event (`Some(truthful)`). A
+/// verification and a true attestation stop the old instance at or before
+/// the confirmation; a false attestation leaves it running (the named
+/// residual, H.44.4). H.48.1: the authority accepts the attestation only in
+/// a session whose tooling recorded a failed source check no older than 1 h;
+/// otherwise it answers `attestation_precondition_unmet` and changes nothing,
+/// so the tooling must verify. Minting stops (H.15.1). On the tooling path
+/// nothing is listed until the snapshot; a raw-restored instance stays
+/// suspected until its procedure completes. H.44.4: `T_stop` is the
+/// confirmation instant for every restore cause. The reading H.44 replaces
+/// takes a supported restore's procedure start (this instant too) and the
+/// restored authority's first start for `restore_journal_lost` and a raw
+/// restore.
+fn confirm_old_stopped(s: &State, d: Design, attested: Option<bool>) -> Step {
+    let Some(raw) = confirmation_session(s) else {
         return Ok(None);
-    }
-    let raw = match s.auth.raw {
-        Raw::No if s.auth.restoring || !lists_served(s) => return Ok(None),
-        Raw::No => false,
-        Raw::Unconfirmed => true,
-        Raw::Confirmed => return Ok(None),
     };
     let mut o = Out::new(s);
+    if attested.is_some() {
+        o.row(H22);
+    }
+    if attested.is_some() && s.auth.source_check != SourceCheck::Fresh {
+        if d.has(Fix::AttestationPrecondition) {
+            o.obs(Obs::AttestationPreconditionUnmet);
+            return o.done();
+        }
+        o.obs(Obs::AttestedWithoutFailedCheck);
+    }
     let now = s.env.exposure_elapsed;
     if raw {
         o.n.auth.raw = Raw::Confirmed;
     } else {
         o.n.auth.restoring = true;
     }
-    o.n.env.old_running = false;
+    o.n.env.old_running = attested == Some(false);
     if s.ghost.mint_stop.is_none() {
         o.n.ghost.mint_stop = Some(now);
     }
@@ -4518,12 +4699,38 @@ fn confirm_old_stopped(s: &State, d: Design, attested: bool) -> Step {
     if records && s.auth.lists_stopped_at.is_none() {
         o.n.auth.lists_stopped_at = Some(now);
     }
-    if attested {
+    if attested.is_some() {
+        o.n.auth.attest = Attest::Pending;
         o.obs(Obs::OldInstanceStoppedAttested);
     }
     // The holders keep their cursors; H.41 refuses them at the restored
     // authority (H21).
     o.row(H19);
+    o.done()
+}
+
+/// H.48.1: the restore tooling tries the source deployment's targets (host,
+/// store-lock path, lifecycle URL) and fails. The audited record names each
+/// target, its error and the time. Only the record is checkable: whether the
+/// source was truly unreachable, or the targets right, stays the admin's
+/// judgement (H.48.2).
+fn source_check_fails(s: &State) -> Step {
+    if confirmation_session(s).is_none() || s.auth.source_check == SourceCheck::Fresh {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.auth.source_check = SourceCheck::Fresh;
+    o.done()
+}
+
+/// H.48.1: the recorded failed check becomes older than 1 h. The model keeps
+/// the age as this flag: nothing else reads the hour.
+fn source_check_ages(s: &State) -> Step {
+    if confirmation_session(s).is_none() || s.auth.source_check != SourceCheck::Fresh {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.auth.source_check = SourceCheck::Stale;
     o.done()
 }
 

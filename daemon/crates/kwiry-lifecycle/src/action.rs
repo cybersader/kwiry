@@ -238,10 +238,21 @@ pub enum Action {
     /// H.33.1: peer `p` presents its cursor for the remaining pages.
     PeerListPage(u8),
     /// The old authority instance, still running after `T_stop` was
-    /// recorded, issues peer `p` an earlier-epoch list. Reachable only under
-    /// the rejected H.33.2 and H.44 readings: a restore without the
-    /// confirmation, or `T_stop` taken before it.
+    /// recorded, issues peer `p` an earlier-epoch list. Reachable under the
+    /// rejected H.33.2 and H.44 readings (a restore without the confirmation,
+    /// or `T_stop` taken before it) and after a false attestation (H.44.4's
+    /// residual, which H.48.3 narrows).
     PeerOldList(u8),
+    /// HW v2 H.48.3: peer `p` fetches a list of the new epoch after an exit
+    /// by attestation. It applies the key-set statement before it verifies
+    /// the list, then refuses the list with `unexpected_epoch` until its
+    /// operator's `accept-epoch`, so it keeps serving its earlier-epoch list.
+    PeerSeesEpoch(u8),
+    /// HW v2 H.49: the old instance, still running after a false attestation,
+    /// mints a search capability that is presented to engine `p` after the
+    /// exit. It mints for rooms the restored lineage retired, which it does
+    /// not know about, so an answer is exposure past the H.49.2 bound.
+    PeerOldCapability(u8),
     /// H.33.1: an operator epoch (`cause: "operator"`). Its transaction is
     /// `T_stop`.
     OpEpoch,
@@ -254,7 +265,18 @@ pub enum Action {
     /// H.44.3(b): the source is unreachable, so an admin records the audited
     /// `old_instance_stopped` attestation (deciding level, actor, how it was
     /// stopped), with an unsampled security event. `T_stop` is its instant.
+    /// The attestation is true. H.48.1: accepted only after a recorded failed
+    /// source check no older than 1 h, otherwise `attestation_precondition_unmet`.
     AttestOldStopped,
+    /// H.44.4 residual: the same attestation, but false. The old instance is
+    /// still running and keeps issuing lists and minting (H.48.3, H.49.3).
+    FalseAttestation,
+    /// HW v2 H.48.1: the restore tooling tries the source deployment (host,
+    /// store-lock path, lifecycle URL) and fails. The audited record names
+    /// each target, its error and the time.
+    SourceCheckFails,
+    /// HW v2 H.48.1: the recorded failed check becomes older than 1 h.
+    SourceCheckAges,
     /// H.44.1–2: an instance started from a raw restore of the authority
     /// backup, bypassing the tooling. The F startup check detects it, so it
     /// starts in `authority_rollback_suspected`; the old instance may still
@@ -342,9 +364,14 @@ impl Action {
             | PeerListStart(_)
             | PeerListPage(_)
             | PeerOldList(_)
+            | PeerSeesEpoch(_)
+            | PeerOldCapability(_)
             | OpEpoch
             | RestoreBegin
             | AttestOldStopped
+            | FalseAttestation
+            | SourceCheckFails
+            | SourceCheckAges
             | RawRestore
             | AuthTouch => Kind::Scenario,
             // H.44: once the confirmation is recorded, the operator completes

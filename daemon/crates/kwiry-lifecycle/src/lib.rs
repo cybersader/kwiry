@@ -30,7 +30,7 @@
 //! - [`checker`]: bounded explicit-state BFS with crash injection, plus a
 //!   strong-fairness SCC analysis for L1.
 //! - [`design`]: revision 8 as written ([`design::Design::REV8`]) and each
-//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_4`] has
+//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_5`] has
 //!   all.
 //!
 //! # Universe and bounds
@@ -133,7 +133,12 @@
 //!   fixture of its own: the raw-restored instance's suspected start (H20),
 //!   the old instance still issuing lists, the confirmation by tooling or
 //!   attestation (H19), and the operator's procedure or
-//!   `restore_journal_lost`.
+//!   `restore_journal_lost`. Two attestation fixtures (`tests/rev11_5.rs`)
+//!   add the H.48.1 precondition, with failed source checks that may age
+//!   past 1 h (H22), and a false attestation after which the old instance
+//!   keeps issuing lists and minting, the exit's key rotations (H23), and
+//!   the other holders applying them, fetching a new-epoch list while they
+//!   still serve the earlier one (H24).
 //! - States are stored as 128-bit fingerprints (hash compaction).
 //!
 //! # Coverage limits
@@ -172,9 +177,19 @@
 //! 1051 s`. In the gate fixtures a restore's confirmed stop (H19) and its
 //! first transaction are separate steps, so the lease timeout can fall
 //! between them (H.33.3). The old instance is abstracted to the lists it
-//! issues the other holders after `T_stop` (none under H.44), and a
-//! confirmation is true: a false `old_instance_stopped` attestation is the
-//! named residual. The core profiles
+//! issues the other holders after `T_stop` and, after a false attestation,
+//! the capabilities it mints for them. A verification and a true attestation
+//! stop it (none under H.44). A false attestation is explored in its own
+//! fixture: with every H.48 and H.49 fix, the exposure that remains is the
+//! named residual (a holder that has not applied the exit's key-set
+//! statement, or an engine that has not cleared the gate), which the
+//! fixture shows is reachable and records rather than counts as a
+//! violation. The key rotations are abstracted to whether each other holder
+//! applied them; the modeled holder's own key-set machinery (H.6, H.37) is
+//! not driven by an attestation exit, and the old instance reaches only the
+//! other holders. A failed source check's age is a flag. The model delivers
+//! a list in one step, which is page 0's receipt: the lease deadline is fixed
+//! there and carried through A4 (H.46). The core profiles
 //! check the gate with the modeled holder as the only member: minting stays
 //! closed after a supported restore until the holder's current-epoch report,
 //! and L1 requires it to reopen when the holder held a high-water at the
@@ -189,7 +204,8 @@
 //! drains, general builders and staging, filesystem/lock failure modes,
 //! migration and launcher deployment, the journal's encoding and fsync
 //! failures, a raw restore outside the gate fixtures (beyond a synthetic witness), a false
-//! old-instance-stopped attestation, rate
+//! old-instance-stopped attestation outside its fixture, the engine-side
+//! distribution of capability keys (an open seam item, H.49.4), rate
 //! scheduling/cursor churn, R15's time clause, escalation, more than two of
 //! anything, or H.11 alert delivery. The S3 conformance gate adds these where
 //! Kwiry owns the implementation.

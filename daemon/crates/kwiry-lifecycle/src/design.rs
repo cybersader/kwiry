@@ -1,7 +1,7 @@
 //! Which revision of the lifecycle the model executes.
 //!
 //! [`Design::REV8`] is the revision-8 table encoded as written (with the
-//! interpretations listed in the crate docs). [`Design::REV11_4`] adds every
+//! interpretations listed in the crate docs). [`Design::REV11_5`] adds every
 //! [`Fix`]. Each fix is a separate flag so the checker can show that it is
 //! necessary: removing any single fix from the corresponding revision must reproduce the
 //! counterexample it closes (`tests/model_check.rs`).
@@ -169,6 +169,24 @@ pub enum Fix {
     /// H.44.4 (v2): `T_stop` for every restore cause is the instant of the
     /// old-instance-stopped confirmation.
     TStopAtConfirmation,
+    /// H.48.1 (v2): the authority accepts `old_instance_stopped` only in a
+    /// restore session whose tooling recorded a failed source check no older
+    /// than 1 h; otherwise `attestation_precondition_unmet`.
+    AttestationPrecondition,
+    /// H.48.3 (v2): the first transaction after an exit by attestation issues
+    /// a key-set statement that adds a fresh `lc-*` key and retires every
+    /// previously pinned kid. A holder applies it before it verifies any
+    /// new-epoch list and then refuses every artefact under a retired kid.
+    LifecycleKeyRotation,
+    /// H.49.3 (v2): an exit by attestation rotates the search-capability
+    /// signing key; minting uses only the new key, and every engine applies
+    /// the rotation before it sends any report in the new epoch.
+    CapabilityKeyRotation,
+    /// Kwiry's stricter reading of H.49.3: an engine applies the capability
+    /// key rotation before it admits any new-epoch list, not only before its
+    /// first report. A member that applied a new-epoch list and never
+    /// reported clears by the lease timeout while it still holds a lease.
+    CapabilityRotationBeforeList,
 }
 
 impl Fix {
@@ -251,6 +269,13 @@ impl Fix {
         Fix::EpochRevBumpEveryCause,
         Fix::NoSelfConfirmation,
         Fix::TStopAtConfirmation,
+    ];
+
+    pub const REV11_5: [Fix; 4] = [
+        Fix::AttestationPrecondition,
+        Fix::LifecycleKeyRotation,
+        Fix::CapabilityKeyRotation,
+        Fix::CapabilityRotationBeforeList,
     ];
 
     const fn bit(self) -> u64 {
@@ -338,6 +363,18 @@ impl Fix {
                 "H.44: a raw restore leaves suspicion only through a confirmation"
             }
             Fix::TStopAtConfirmation => "H.44: T_stop is the old-instance-stopped confirmation",
+            Fix::AttestationPrecondition => {
+                "H.48.1: an attestation needs a recorded failed source check no older than 1 h"
+            }
+            Fix::LifecycleKeyRotation => {
+                "H.48.3: an exit by attestation rotates the lifecycle key and retires the old kids"
+            }
+            Fix::CapabilityKeyRotation => {
+                "H.49.3: an exit by attestation rotates the search-capability key"
+            }
+            Fix::CapabilityRotationBeforeList => {
+                "H.49.3 (Kwiry reading): the capability rotation precedes any new-epoch list"
+            }
             Fix::LeaseAndRollbackFence => {
                 "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
             }
@@ -435,12 +472,26 @@ impl Design {
     };
 
     /// Revision 11.4: HOLDINGS-WIRE-v2 H.41–H.44 (H.42 and H.43 confirm
-    /// readings and add no flag).
+    /// readings and add no flag). The H.48 and H.49 flags are off, so it
+    /// executes the readings those amendments reject (the ablations
+    /// reproduce them).
     pub const REV11_4: Design = {
         let mut d = Self::REV11_3;
         let mut i = 0;
         while i < Fix::REV11_4.len() {
             d = d.with(Fix::REV11_4[i]);
+            i += 1;
+        }
+        d
+    };
+
+    /// Revision 11.5: HOLDINGS-WIRE-v2 H.46–H.49 (H.46 confirms a reading
+    /// and H.47 keeps both H.41 controls, so neither adds a flag).
+    pub const REV11_5: Design = {
+        let mut d = Self::REV11_4;
+        let mut i = 0;
+        while i < Fix::REV11_5.len() {
+            d = d.with(Fix::REV11_5[i]);
             i += 1;
         }
         d
@@ -488,6 +539,9 @@ impl fmt::Debug for Design {
         if *self == Design::REV11_4 {
             return write!(f, "REV11.4");
         }
+        if *self == Design::REV11_5 {
+            return write!(f, "REV11.5");
+        }
         let missing: Vec<_> = Fix::REV9
             .iter()
             .chain(&Fix::REV10)
@@ -497,8 +551,9 @@ impl fmt::Debug for Design {
             .chain(&Fix::REV11_2)
             .chain(&Fix::REV11_3)
             .chain(&Fix::REV11_4)
+            .chain(&Fix::REV11_5)
             .filter(|x| !self.has(**x))
             .collect();
-        write!(f, "REV11.4 without {missing:?}")
+        write!(f, "REV11.5 without {missing:?}")
     }
 }

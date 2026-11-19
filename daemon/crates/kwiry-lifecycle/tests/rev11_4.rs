@@ -1,7 +1,9 @@
 //! HOLDINGS-WIRE-v2 H.41–H.44 (design revision 11.4). H.41 and H.44 are
 //! model fixes: removing one reproduces the counterexample it closes, and
 //! the same exploration holds with it. H.42 and H.43 confirm readings the
-//! model already took; their tests pin those readings.
+//! model already took; their tests pin those readings. The tests run the
+//! latest design: from revision 11.5 an attestation needs a recorded failed
+//! source check first (HW v2 H.48.1), so the fixtures include that step.
 
 use kwiry_lifecycle::action::{Action, Action::*, faults};
 use kwiry_lifecycle::checker::{Counterexample, Profile, Report, check_from, check_from_with_goal};
@@ -21,7 +23,7 @@ const NONE: Budget = Budget {
     drops: 0,
     restores: 0,
 };
-const D: Design = Design::REV11_4;
+const D: Design = Design::REV11_5;
 
 fn gate_profile(name: &'static str) -> Profile {
     Profile {
@@ -240,13 +242,15 @@ fn cursor_candidates() -> Vec<Action> {
 }
 
 /// H.44: a raw restore, the old instance still issuing lists, the
-/// confirmation by tooling (a) or attestation (b), and the operator's
-/// supported procedure or `restore_journal_lost`.
+/// confirmation by tooling (a) or attestation (b) after a failed source
+/// check (H.48.1), and the operator's supported procedure or
+/// `restore_journal_lost`.
 fn raw_candidates() -> Vec<Action> {
     let mut c = shared_candidates();
     c.extend([
         RawRestore,
         RestoreBegin,
+        SourceCheckFails,
         AttestOldStopped,
         OpRestore,
         OpRestoreJournalLost,
@@ -517,7 +521,7 @@ fn h44_a_raw_restore_starts_suspected_and_leaves_only_through_a_confirmation() {
     assert!(props::expected_non_progress(&f.s));
     assert!(f.s.ghost.search_due && props::goal(&f.s));
 
-    f.step(TickExposure(91));
+    f.run(&[TickExposure(91), SourceCheckFails]);
     let out = f.step(AttestOldStopped);
     assert!(out.rows.iter().any(|r| r == RowId::H19));
     assert!(out.obs.contains(&Some(Obs::OldInstanceStoppedAttested)));
@@ -597,7 +601,7 @@ fn h44_t_stop_is_the_confirmation_not_the_first_start() {
     assert_eq!(f.s.auth.lists_stopped_at, Some(0), "the first start");
     f.run(&[TickExposure(60), PeerOldList(0), TickExposure(91)]);
     assert!(f.s.peers[0].late, "issued after that T_stop");
-    f.run(&[AttestOldStopped, OpRestore]);
+    f.run(&[SourceCheckFails, AttestOldStopped, OpRestore]);
     f.holder_reports();
     let out = f.step(LeaseTimeout);
     assert!(out.obs.contains(&Some(Obs::MintGateClearedByLease {

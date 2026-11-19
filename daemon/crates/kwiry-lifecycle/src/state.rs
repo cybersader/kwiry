@@ -272,6 +272,43 @@ pub struct Auth {
     /// H.44 (H.25 probe): this instance was raw-restored, bypassing the
     /// restore tooling, and has not left `authority_rollback_suspected` yet.
     pub raw: Raw,
+    /// HW v2 H.48.1 (H.25 probe): the restore session's audited record of a
+    /// failed source check. It is the session's, so the exit clears it.
+    pub source_check: SourceCheck,
+    /// HW v2 H.48, H.49 (H.25 probe): whether the old-instance-stopped
+    /// confirmation was the `old_instance_stopped` attestation, and whether
+    /// the exit it allowed has happened.
+    pub attest: Attest,
+}
+
+/// HW v2 H.48.1: the restore tooling's record of a failed check of the
+/// source deployment. The audited record names the targets tried (host,
+/// store-lock path, lifecycle URL), each error and the time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SourceCheck {
+    /// No failed check is recorded in this restore session: the tooling may
+    /// still verify the source (H.44.3(a)).
+    #[default]
+    None,
+    /// A failed check no older than 1 h.
+    Fresh,
+    /// A failed check older than 1 h at the attestation.
+    Stale,
+}
+
+/// HW v2 H.48.3, H.49.3: where the attestation path stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Attest {
+    /// The confirmation, if any, was the tooling's verification (H.44.3(a)).
+    #[default]
+    No,
+    /// The `old_instance_stopped` attestation was accepted; the restore
+    /// procedure has not exited suspicion yet.
+    Pending,
+    /// The procedure exited by attestation. Its first transaction issued the
+    /// lifecycle key-set statement (H.48.3) and rotated the search-capability
+    /// signing key (H.49.3), each where the design has it.
+    Exited,
 }
 
 /// H.44: where a raw-restored instance stands on its way out of
@@ -365,8 +402,8 @@ pub struct Peer {
     /// Ground truth: the epoch of the list it serves under a live lease
     /// (`None`: serves nothing).
     pub lease: Option<u8>,
-    /// Ground truth (rejected H.33, H.41 and H.44 readings only): its
-    /// earlier-epoch lease was renewed by a list or page issued after
+    /// Ground truth (rejected H.33, H.41, H.44 and H.48.3 readings only):
+    /// its earlier-epoch lease was renewed by a list or page issued after
     /// `T_stop`, so the lease timeout does not bound it.
     pub late: bool,
     /// H.33.1: a list in flight, `(epoch, holder_rev)` as sealed in its
@@ -374,6 +411,19 @@ pub struct Peer {
     pub cursor: Option<(u8, u8)>,
     /// Ground truth: it will never report again (gone or stuck).
     pub silent: bool,
+    /// HW v2 H.48.3: it applied the key-set statement of an exit by
+    /// attestation, as it must before it verifies any new-epoch list. Tracked
+    /// only while the old instance still runs (a false attestation): otherwise
+    /// no artefact under the retired key exists, so nothing reads it.
+    pub lc_rotated: bool,
+    /// HW v2 H.49.3: it applied the search-capability key rotation of an exit
+    /// by attestation and refuses the old key. Tracked like `lc_rotated`.
+    pub cap_rotated: bool,
+    /// Ground truth, the named residual of a false attestation (H.44.4,
+    /// H.48.3): the old instance renewed its earlier-epoch list after
+    /// `T_stop`, before it applied the key-set statement. The lease timeout
+    /// does not bound that lease.
+    pub residual: bool,
 }
 
 // -------------------------------------------------------------------- lists
@@ -904,11 +954,13 @@ pub struct Env {
     /// H.30.2(b): the authority clock passed `T_stop + serve_seconds_ceiling
     /// + 150 s`, so every earlier-epoch lease has lapsed.
     pub lease_timeout: bool,
-    /// Ground truth: the old authority instance may still be running and
-    /// issuing lists. A raw restore starts with it set (the source may still
-    /// run, H.44.1); the old-instance-stopped confirmation clears it. Under
-    /// the rejected H.33.2 and H.44 readings a restore proceeds while it is
-    /// set, so the old instance issues earlier-epoch lists after `T_stop`.
+    /// Ground truth: the old authority instance may still be running, issuing
+    /// lists and minting. A raw restore starts with it set (the source may
+    /// still run, H.44.1); a true old-instance-stopped confirmation clears it,
+    /// and a false attestation leaves it set (the named residual, H.44.4,
+    /// narrowed by H.48.3 and H.49.3). Under the rejected H.33.2 and H.44
+    /// readings a restore proceeds while it is set, so the old instance
+    /// issues earlier-epoch lists after `T_stop`.
     pub old_running: bool,
     /// Checker reduction switch: peers are sorted in the canonical state
     /// (`step::canonical`). Fixed for a run.
@@ -1026,6 +1078,8 @@ impl State {
                 lists_stopped_at: None,
                 restoring: false,
                 raw: Raw::No,
+                source_check: SourceCheck::None,
+                attest: Attest::No,
             },
             peers: [Peer::default(); PEERS],
             env: Env {
