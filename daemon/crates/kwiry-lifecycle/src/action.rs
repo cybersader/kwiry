@@ -207,9 +207,15 @@ pub enum Action {
     PeerEnable(u8),
     /// An admin rotates peer `p`'s key (the holder signs with the new key).
     PeerRotate(u8),
-    /// Peer `p` accepts the new epoch and applies a list of it (needs an
-    /// enrollment the authority recognizes).
+    /// Peer `p`'s operator runs `accept-epoch`, which carries the capability
+    /// key set the new epoch requires (HW v2 H.52), and the peer applies a
+    /// list of the new epoch (needs an enrollment the authority recognizes).
     PeerMove(u8),
+    /// HW v2 H.52.4: after an exit by attestation, peer `p`'s operator
+    /// wrongly confirms `unchanged` at `accept-epoch`, and the peer applies a
+    /// list of the new epoch while it still accepts the old capability key.
+    /// Audited, detectable from the restore record: the named residual.
+    PeerUnchanged(u8),
     /// Peer `p`'s status report with a current-epoch `list_ref`.
     PeerReport(u8),
     /// Peer `p` is gone or stuck: it never reports again.
@@ -366,6 +372,7 @@ impl Action {
             | PeerOldList(_)
             | PeerSeesEpoch(_)
             | PeerOldCapability(_)
+            | PeerUnchanged(_)
             | OpEpoch
             | RestoreBegin
             | AttestOldStopped

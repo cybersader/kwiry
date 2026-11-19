@@ -1,7 +1,7 @@
 //! Which revision of the lifecycle the model executes.
 //!
 //! [`Design::REV8`] is the revision-8 table encoded as written (with the
-//! interpretations listed in the crate docs). [`Design::REV11_5`] adds every
+//! interpretations listed in the crate docs). [`Design::REV11_6`] adds every
 //! [`Fix`]. Each fix is a separate flag so the checker can show that it is
 //! necessary: removing any single fix from the corresponding revision must reproduce the
 //! counterexample it closes (`tests/model_check.rs`).
@@ -182,11 +182,25 @@ pub enum Fix {
     /// signing key; minting uses only the new key, and every engine applies
     /// the rotation before it sends any report in the new epoch.
     CapabilityKeyRotation,
-    /// Kwiry's stricter reading of H.49.3: an engine applies the capability
-    /// key rotation before it admits any new-epoch list, not only before its
-    /// first report. A member that applied a new-epoch list and never
-    /// reported clears by the lease timeout while it still holds a lease.
-    CapabilityRotationBeforeList,
+    /// HW v2 H.52.1 (revision 11.5's reading of H.49.3, adopted): an engine
+    /// puts the capability verification key set the new epoch requires into
+    /// effect before it admits any new-epoch list, not only before its first
+    /// report. From revision 11.6 that happens in the accept-epoch commit
+    /// that delivers the set ([`Fix::AcceptEpochKeySet`]). A member that
+    /// applied a new-epoch list and never reported clears by the lease
+    /// timeout while it still holds a lease.
+    KeySetBeforeAdmit,
+    /// HW v2 H.50.1: "sent" includes every possibly-sent attempt until it is
+    /// resolved. R1 derives no state lower than an unresolved `uncertain`
+    /// attempt of the same obligation; a refused attempt is resolved (Q3).
+    LowerWaitsForUncertain,
+    /// HW v2 H.52.2–3: the one-use, audited `accept-epoch` carries the
+    /// capability verification key set the new epoch requires (the new key,
+    /// the old removed, after an exit by attestation; an explicit `unchanged`
+    /// otherwise), persisted in the commit that arms the acceptance. Arming
+    /// without it is refused, and if it can't be supplied the engine fails
+    /// closed: no arming, no new-epoch admit, nothing deleted.
+    AcceptEpochKeySet,
 }
 
 impl Fix {
@@ -275,8 +289,10 @@ impl Fix {
         Fix::AttestationPrecondition,
         Fix::LifecycleKeyRotation,
         Fix::CapabilityKeyRotation,
-        Fix::CapabilityRotationBeforeList,
+        Fix::KeySetBeforeAdmit,
     ];
+
+    pub const REV11_6: [Fix; 2] = [Fix::LowerWaitsForUncertain, Fix::AcceptEpochKeySet];
 
     const fn bit(self) -> u64 {
         1 << self as u64
@@ -372,8 +388,14 @@ impl Fix {
             Fix::CapabilityKeyRotation => {
                 "H.49.3: an exit by attestation rotates the search-capability key"
             }
-            Fix::CapabilityRotationBeforeList => {
-                "H.49.3 (Kwiry reading): the capability rotation precedes any new-epoch list"
+            Fix::KeySetBeforeAdmit => {
+                "H.52.1: the capability key set is in effect before any new-epoch list is admitted"
+            }
+            Fix::LowerWaitsForUncertain => {
+                "H.50.1: no lower state while a higher-state attempt is uncertain"
+            }
+            Fix::AcceptEpochKeySet => {
+                "H.52.2: accept-epoch carries the capability key set; no arming without it"
             }
             Fix::LeaseAndRollbackFence => {
                 "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
@@ -486,7 +508,9 @@ impl Design {
     };
 
     /// Revision 11.5: HOLDINGS-WIRE-v2 H.46–H.49 (H.46 confirms a reading
-    /// and H.47 keeps both H.41 controls, so neither adds a flag).
+    /// and H.47 keeps both H.41 controls, so neither adds a flag). The H.50
+    /// and H.52 flags are off, so it executes the readings those amendments
+    /// reject (the ablations reproduce them).
     pub const REV11_5: Design = {
         let mut d = Self::REV11_4;
         let mut i = 0;
@@ -496,6 +520,12 @@ impl Design {
         }
         d
     };
+
+    /// Revision 11.6: HOLDINGS-WIRE-v2 H.50–H.52 (H.51 renames journal
+    /// members the model does not carry, so it adds no flag).
+    pub const REV11_6: Design = Self::REV11_5
+        .with(Fix::LowerWaitsForUncertain)
+        .with(Fix::AcceptEpochKeySet);
 
     pub const fn has(self, f: Fix) -> bool {
         self.0 & f.bit() != 0
@@ -542,6 +572,9 @@ impl fmt::Debug for Design {
         if *self == Design::REV11_5 {
             return write!(f, "REV11.5");
         }
+        if *self == Design::REV11_6 {
+            return write!(f, "REV11.6");
+        }
         let missing: Vec<_> = Fix::REV9
             .iter()
             .chain(&Fix::REV10)
@@ -552,8 +585,9 @@ impl fmt::Debug for Design {
             .chain(&Fix::REV11_3)
             .chain(&Fix::REV11_4)
             .chain(&Fix::REV11_5)
+            .chain(&Fix::REV11_6)
             .filter(|x| !self.has(**x))
             .collect();
-        write!(f, "REV11.5 without {missing:?}")
+        write!(f, "REV11.6 without {missing:?}")
     }
 }

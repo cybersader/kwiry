@@ -160,6 +160,26 @@ pub enum Obs {
     AcceptanceConsumed {
         reused: bool,
     },
+    /// HW v2 H.50: the authority committed a higher-state report of
+    /// obligation `o` after it accepted a lower one the holder sent while
+    /// that higher attempt was unresolved. The authority holds a claim the
+    /// holder no longer makes (for example a stale `complete`).
+    StaleClaimCommitted {
+        o: u8,
+    },
+    /// HW v2 H.52.3: `accept-epoch` refused because the capability
+    /// verification key set the new epoch requires was not supplied. Nothing
+    /// is armed or consumed and nothing is deleted.
+    AcceptEpochRefused,
+    /// HW v2 H.52.4: an operator confirmed `unchanged` at `accept-epoch`
+    /// after an exit by attestation. The engine audits the choice, and the
+    /// authority's restore record, which names the rotation, lets the
+    /// mismatch be detected.
+    UnchangedAfterAttestation,
+    /// HW v2 H.52.4: an engine whose operator wrongly confirmed `unchanged`
+    /// answered a capability the old instance minted. The named residual;
+    /// recorded, never a violation, and no gate guarantee covers it.
+    UnchangedResidual,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -841,7 +861,7 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         Boot => boot(s, d),
         Markers => markers(s),
         Narrow => narrow(s),
-        FetchStart => fetch_start(s, d),
+        FetchStart => fetch_start(s, d, cfg.same_state),
         ListDeliver => list_deliver(s, d),
         Apply => apply(s, d),
         RelBind(i) => rel_bind(s, i as usize),
@@ -910,6 +930,7 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         PeerEnable(p) => peer_set_enabled(s, d, p as usize, true),
         PeerRotate(p) => peer_rotate(s, d, p as usize),
         PeerMove(p) => peer_move(s, d, p as usize),
+        PeerUnchanged(p) => peer_unchanged(s, d, p as usize),
         PeerReport(p) => peer_report(s, d, p as usize),
         PeerSilent(p) => peer_silent(s, p as usize),
         PeerAnswer(p) => peer_answer(s, p as usize),
@@ -934,7 +955,7 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         RepointRoot { room, dir } => repoint_root(s, room as usize, dir),
         PinRebuild(r) => pin_rebuild(s, d, r as usize),
         StaleDeadline => stale_deadline(s),
-        OpAcceptEpoch => op_accept_epoch(s),
+        OpAcceptEpoch => op_accept_epoch(s, d),
         OpRestart => op_restart(s),
         OpClearHalt(c) => op_clear_halt(s, d, c as usize),
         SwapHolder
@@ -1277,7 +1298,7 @@ fn narrow(s: &State) -> Step {
 /// State-space reduction: a relist whose result would equal the applied
 /// list is a no-op (same high-water, tombstones, floors, classes and
 /// queues), so it is explored only when something could change.
-fn fetch_useful(s: &State) -> bool {
+fn fetch_useful(s: &State, d: Design, same_state: bool) -> bool {
     let Some(applied) = s.vol.applied else {
         return true;
     };
@@ -1293,6 +1314,46 @@ fn fetch_useful(s: &State) -> bool {
         || next.instr != applied.instr
         || next.pins != applied.pins
         || s.vol.admitted != Some(applied)
+        || resolving_relist(s, d, same_state)
+}
+
+/// HW v2 H.50.4: R1 holds back a lower state for an unresolved
+/// higher-state attempt whose deadline has passed ([`absent`]), so an early
+/// relist (counted under H.8) can resolve it.
+fn resolving_relist(s: &State, d: Design, same_state: bool) -> bool {
+    d.has(Fix::LowerWaitsForUncertain)
+        && (0..OBLS).any(|c| {
+            derived_report(s, d, c, same_state).is_some_and(|k| {
+                s.dur.uncertain[c]
+                    .iter()
+                    .any(|u| u.obl().is_some_and(|u| u.state > k.state) && absent(s, c, u))
+            })
+        })
+}
+
+/// R15's time clause (HW v2 H.50.2, H.13): a verified, nonce-bound list
+/// whose page 0 `iat` exceeds `D = exp + 120 s` of every attempt of `k`
+/// proves, with a `last_accepted` below `k.state`, that `k` was not
+/// committed. Both values are authority-clock values. The model has no
+/// clock, so it reads "page 0 is past `D`" as: no copy of `k` is still on
+/// its way to the authority (one in flight may still commit before `D`),
+/// and the current lineage never committed `k` (nothing commits after `D`,
+/// and page 0's `iat` is read before the projection on the commit clock).
+fn absent(s: &State, c: usize, k: Key) -> bool {
+    !s.net.reqs[c].iter().any(|q| q.key == k)
+        && k.obl().is_none_or(|k| {
+            s.auth.core.rooms[k.o as usize]
+                .obl
+                .is_none_or(|o| !o.receipts.iter().any(|(rk, _, _)| rk == k))
+        })
+}
+
+/// HW v2 H.50.1: an attempt of a higher state than `state` for obligation
+/// `c` is possibly sent and unresolved.
+fn higher_uncertain(dur: &Durable, c: usize, state: RState) -> bool {
+    dur.uncertain[c]
+        .iter()
+        .any(|k| k.obl().is_some_and(|k| k.state > state))
 }
 
 fn preflight(o: &mut Out, d: Design, envelope: Envelope) -> Result<(), Refusal> {
@@ -1326,12 +1387,12 @@ fn list_refusal(r: Refusal) -> ListErr {
     }
 }
 
-fn fetch_start(s: &State, d: Design) -> Step {
+fn fetch_start(s: &State, d: Design, same_state: bool) -> Step {
     if !matches!(s.vol.phase, Phase::P5 | Phase::P7)
         || s.vol.fetching
         || s.vol.proof_backoff & bit(CHANS) != 0
         || s.vol.apply.is_some()
-        || !fetch_useful(s)
+        || !fetch_useful(s, d, same_state)
     {
         return Ok(None);
     }
@@ -1599,12 +1660,13 @@ fn apply_a1(s: &State, d: Design, l: &ListMsg) -> Step {
                     clear_slot(&mut o.n, ob);
                 }
             }
-            // R15, first clause. The time clause (`iat` beyond every attempt's
-            // `exp + 420 s`) is not modeled: such keys stay as evidence.
+            // R15 (HW v2 H.50.2): a covering `last_accepted`, or the time
+            // clause, page 0's `iat` past `D = exp + 120 s` of every attempt
+            // with `last_accepted` below the attempt ([`absent`]).
             let before = o.n.dur.uncertain[ob].len();
             o.n.dur.uncertain[ob].retain(|k| {
                 let st = k.obl().map_or(RState::Complete, |k| k.state);
-                last.is_none_or(|a| a < st)
+                last.is_none_or(|a| a < st) && !absent(s, ob, *k)
             });
             if o.n.dur.uncertain[ob].len() != before {
                 o.row(R15);
@@ -2139,6 +2201,63 @@ fn purge_scan(s: &State, d: Design, ob: usize) -> Step {
 
 // ------------------------------------------------- M6 / M8 report actors
 
+/// The obligation report R1 would derive on channel `c` now, with every R1
+/// guard except H.50.1's.
+fn derived_report(s: &State, d: Design, c: usize, same_state: bool) -> Option<OKey> {
+    if c >= OBLS || s.vol.phase != Phase::P7 || !publisher_idle(s) || s.vol.relist {
+        return None;
+    }
+    let hw = s.dur.hw?;
+    let p = s.dur.slots[c];
+    // H.19 "first opportunity": after an epoch acceptance the fresh status
+    // goes first; new-epoch obligation reports wait for its current-epoch
+    // receipt (H.22.1), unless it bug-halted (H.22.3).
+    if !s.vol.class[c].obligated() || status_gate_shut(s, d) {
+        return None;
+    }
+    let (state, rem, inv) = match s.vol.scans[c] {
+        Some(sc) if sc.clean => (sc.state, sc.remaining, sc.inv),
+        Some(_) => return None, // the pass repeats steps 6–7
+        None => (RState::Revoked, remaining(s, c), s.vol.inv),
+    };
+    if (state == RState::Revoked && !rem) || (state == RState::Complete && inv != 0) {
+        return None;
+    }
+    let k = OKey {
+        o: c as u8,
+        state,
+        list_ref: hw,
+        manifest: inv,
+        remaining: rem,
+    };
+    let floor_ok = s.dur.floors[c].is_none_or(|f| {
+        state > f.state
+            || (same_state
+                && state == f.state
+                && state != RState::Complete
+                && f.key.is_none_or(|prev| {
+                    prev.manifest != k.manifest || prev.remaining != k.remaining
+                }))
+    });
+    // The current slot's own attempts: a ready, queued or sent report is
+    // replaced only by a higher state; a refused one is resolved (Q3).
+    let pend_ok = p.is_none_or(|p| {
+        let pst = p.key.obl().map_or(RState::Complete, |k| k.state);
+        match p.st {
+            DurSt::Invalidated | DurSt::Rejected => true,
+            DurSt::Ready => state > pst,
+            DurSt::Armed => {
+                matches!(
+                    s.vol.slotv[c],
+                    SlotVol::Queued { .. } | SlotVol::Sent { .. }
+                ) && state > pst
+            }
+            DurSt::Halted => false,
+        }
+    });
+    (floor_ok && pend_ok).then_some(k)
+}
+
 fn enqueue(s: &State, d: Design, c: usize, same_state: bool) -> Step {
     if s.vol.phase != Phase::P7 || !publisher_idle(s) || s.vol.relist {
         return Ok(None);
@@ -2148,51 +2267,14 @@ fn enqueue(s: &State, d: Design, c: usize, same_state: bool) -> Step {
     };
     let p = s.dur.slots[c];
     let key = if c < OBLS {
-        // H.19 "first opportunity": after an epoch acceptance the fresh
-        // status goes first; new-epoch obligation reports wait for its
-        // current-epoch receipt (H.22.1), unless it bug-halted (H.22.3).
-        if !s.vol.class[c].obligated() || status_gate_shut(s, d) {
+        let Some(k) = derived_report(s, d, c, same_state) else {
             return Ok(None);
-        }
-        let (state, rem, inv) = match s.vol.scans[c] {
-            Some(sc) if sc.clean => (sc.state, sc.remaining, sc.inv),
-            Some(_) => return Ok(None), // the pass repeats steps 6–7
-            None => (RState::Revoked, remaining(s, c), s.vol.inv),
         };
-        if (state == RState::Revoked && !rem) || (state == RState::Complete && inv != 0) {
-            return Ok(None);
-        }
-        let k = OKey {
-            o: c as u8,
-            state,
-            list_ref: hw,
-            manifest: inv,
-            remaining: rem,
-        };
-        let floor_ok = s.dur.floors[c].is_none_or(|f| {
-            state > f.state
-                || (same_state
-                    && state == f.state
-                    && state != RState::Complete
-                    && f.key.is_none_or(|prev| {
-                        prev.manifest != k.manifest || prev.remaining != k.remaining
-                    }))
-        });
-        let pend_ok = p.is_none_or(|p| {
-            let pst = p.key.obl().map_or(RState::Complete, |k| k.state);
-            match p.st {
-                DurSt::Invalidated | DurSt::Rejected => true,
-                DurSt::Ready => state > pst,
-                DurSt::Armed => {
-                    matches!(
-                        s.vol.slotv[c],
-                        SlotVol::Queued { .. } | SlotVol::Sent { .. }
-                    ) && state > pst
-                }
-                DurSt::Halted => false,
-            }
-        });
-        if !floor_ok || !pend_ok {
+        // H.50.1: "sent" includes every possibly-sent attempt until it is
+        // resolved (R6, R15, R18, R19). The current slot's attempts are
+        // covered above; earlier ones are in `uncertain`, whatever their
+        // epoch, and a lower state waits for them.
+        if d.has(Fix::LowerWaitsForUncertain) && higher_uncertain(&s.dur, c, k.state) {
             return Ok(None);
         }
         Key::O(k)
@@ -2225,6 +2307,11 @@ fn enqueue(s: &State, d: Design, c: usize, same_state: bool) -> Step {
         Some(true) => {}
     }
     replace_slot(&mut o.n, c, key)?;
+    if let Key::O(k) = key {
+        // Ghost (H.50): the holder claims this state, and every lower one,
+        // again.
+        o.n.ghost.stale_claims[c] &= !((2u8 << k.state as u8) - 1);
+    }
     o.done()
 }
 
@@ -2399,6 +2486,15 @@ fn dispatch(s: &State, d: Design, c: usize) -> Step {
     if s.vol.route == Route::Halted403 {
         o.obs(Obs::SentWhileForbidden);
     }
+    // Ghost (H.50): higher-state attempts of this obligation still possibly
+    // sent and unresolved as these bytes leave.
+    let retracts = p.key.obl().map_or(0, |k| {
+        s.dur.uncertain[c]
+            .iter()
+            .filter_map(Key::obl)
+            .filter(|u| u.state > k.state)
+            .fold(0, |m, u| m | 1 << u.state as u8)
+    });
     o.n.net.reqs[c].push(
         Req {
             key: p.key,
@@ -2406,6 +2502,7 @@ fn dispatch(s: &State, d: Design, c: usize) -> Step {
             aged,
             commit_late: false,
             alive: true,
+            retracts,
         },
         "requests in flight per channel",
     )?;
@@ -2942,6 +3039,19 @@ fn auth_process(s: &State, d: Design, c: usize, idx: usize) -> Step {
     }
     if o.n.auth.core.seq > pre.seq && d.has(Fix::AtomicJournalReplay) {
         record_report_journal(&mut o.n.auth, pre, req.key, kind);
+    }
+    // H.50 ghost: a lower report accepted while higher attempts were
+    // unresolved retracts them; committing one afterwards is stale.
+    if let (Key::O(k), RespKind::Accepted { .. }) = (req.key, kind)
+        && !pre.rooms[k.o as usize]
+            .obl
+            .is_some_and(|x| x.receipts.iter().any(|(rk, _, _)| rk == k))
+    {
+        let ob = k.o as usize;
+        if o.n.ghost.stale_claims[ob] & (1 << k.state as u8) != 0 {
+            o.obs(Obs::StaleClaimCommitted { o: k.o });
+        }
+        o.n.ghost.stale_claims[ob] |= req.retracts;
     }
     // H.25, H.30.2(a): an accepted report (status or obligation) whose
     // `list_ref` is a tag-valid list of the current epoch proves the holder
@@ -4208,36 +4318,88 @@ fn peer_rotate(s: &State, d: Design, i: usize) -> Step {
     o.done()
 }
 
-/// The peer's operator accepts the new epoch and the peer applies a list of
-/// it, so it stops serving its earlier-epoch list. After an exit by
-/// attestation it applies the key-set statement before it verifies that
-/// list (H.48.3) and, under Kwiry's reading of H.49.3, the capability key
-/// rotation before it admits it.
+/// Whether peer `p`'s operator can run `accept-epoch` for the current epoch
+/// and the peer then admit a list of it.
+fn peer_can_accept(s: &State, p: &Peer) -> bool {
+    let cur = s.auth.core.epoch;
+    s.env.probe == Probe::EpochMint
+        && cur != 0
+        && !s.auth.rollback_suspected
+        && !p.silent
+        && p.lease != Some(cur)
+        && peer_authorized(p)
+}
+
+/// The peer's operator runs the one-use, audited `accept-epoch` (H25) and
+/// the peer admits and applies a list of the new epoch, so it stops serving
+/// its earlier-epoch list. The model takes the arming commit and the admit
+/// as one step: under H.52 the key set is persisted in the arming commit,
+/// which precedes any admit, so nothing between them is observable.
+///
+/// HW v2 H.52: the acceptance carries the capability verification key set
+/// the new epoch requires: after an exit by attestation the new key with
+/// the old removed, otherwise an explicit `unchanged`. If that set can't be
+/// supplied the engine does not arm (fail closed): no new-epoch list is
+/// admitted, its earlier lease runs out, and nothing is deleted. H.52.1:
+/// the set is in effect before the list is admitted. The rejected readings:
+/// without H.52.2 the acceptance carries no set, so the engine keeps its
+/// current one; without H.52.1 the persisted set takes effect only at the
+/// first new-epoch report (H.49.3 as written). After an exit by attestation
+/// the peer also applies the key-set statement before it verifies the list
+/// (H.48.3).
 fn peer_move(s: &State, d: Design, i: usize) -> Step {
     let p = s.peers[i];
-    let cur = s.auth.core.epoch;
-    if s.env.probe != Probe::EpochMint
-        || cur == 0
-        || s.auth.rollback_suspected
-        || p.silent
-        || p.lease == Some(cur)
-        || !peer_authorized(&p)
-    {
+    if !peer_can_accept(s, &p) {
+        return Ok(None);
+    }
+    let rotates = s.auth.attest == Attest::Exited;
+    if rotates && d.has(Fix::AcceptEpochKeySet) && s.env.key_set_unavailable {
         return Ok(None);
     }
     let mut o = Out::new(s);
+    o.row(H25);
     let n = &mut o.n.peers[i];
-    n.lease = Some(cur);
+    n.lease = Some(s.auth.core.epoch);
     n.late = false;
     n.residual = false;
     n.cursor = None;
     if rotation_tracked(s) {
         n.lc_rotated = true;
-        if d.has(Fix::CapabilityKeyRotation) && d.has(Fix::CapabilityRotationBeforeList) {
+        if d.has(Fix::CapabilityKeyRotation)
+            && d.has(Fix::AcceptEpochKeySet)
+            && d.has(Fix::KeySetBeforeAdmit)
+        {
             n.cap_rotated = true;
         }
         o.row(H24);
     }
+    o.done()
+}
+
+/// HW v2 H.52.4, the named residual: after an exit by attestation the
+/// peer's operator wrongly confirms `unchanged` at `accept-epoch` (H25). The
+/// engine arms, records the choice in its audit trail and admits a
+/// new-epoch list while it still accepts the old capability key. The
+/// authority's restore record names the rotation and the new key's
+/// thumbprint, so the mismatch is detectable; no gate guarantee covers it.
+/// Explored only while the old instance runs (a false attestation):
+/// otherwise no capability under the old key exists.
+fn peer_unchanged(s: &State, d: Design, i: usize) -> Step {
+    let p = s.peers[i];
+    if !d.has(Fix::AcceptEpochKeySet) || !rotation_tracked(s) || !peer_can_accept(s, &p) {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.row(H25);
+    o.row(H24);
+    o.obs(Obs::UnchangedAfterAttestation);
+    let n = &mut o.n.peers[i];
+    n.lease = Some(s.auth.core.epoch);
+    n.late = false;
+    n.residual = false;
+    n.cursor = None;
+    n.lc_rotated = true;
+    n.unchanged = true;
     o.done()
 }
 
@@ -4255,10 +4417,12 @@ fn peer_report(s: &State, d: Design, i: usize) -> Step {
         return Ok(None);
     }
     let mut o = Out::new(s);
-    // H.49.3: an engine applies the capability key rotation before it sends
-    // any report in the new epoch. As written that is the latest point it
-    // may; Kwiry's reading already applied it with the first new-epoch list.
-    if rotation_tracked(s) && d.has(Fix::CapabilityKeyRotation) {
+    // H.49.3 as written: an engine applies the capability key rotation
+    // before it sends any report in the new epoch. H.52 already put it in
+    // effect at `accept-epoch`; the rejected readings that defer it (no key
+    // set at arming, or none in effect before the admit) get it here at the
+    // latest, the most charitable reading of either.
+    if rotation_tracked(s) && d.has(Fix::CapabilityKeyRotation) && !s.peers[i].unchanged {
         o.n.peers[i].cap_rotated = true;
         o.row(H24);
     }
@@ -4579,10 +4743,12 @@ fn peer_sees_epoch(s: &State, i: usize) -> Step {
 /// holds a lease, is presented. The old instance mints for rooms the restored
 /// lineage retired, so an answer outlasts the H.49.2 bound. H.49.3: an engine
 /// that applied the capability key rotation refuses it. One that has cleared
-/// the gate must have: by a report (it applied the rotation first) or by the
-/// lease timeout (it then holds no lease). An engine that has not cleared,
-/// or whose lease the old instance renewed before it applied the key-set
-/// statement, is the named residual.
+/// the gate must have: by a report, or by the lease timeout, which leaves it
+/// either no lease or a new-epoch lease held under the new key set (H.52.1).
+/// An engine that has not cleared, or whose lease the old instance renewed
+/// before it applied the key-set statement, is the named false-attestation
+/// residual; one whose operator wrongly confirmed `unchanged` is the H.52.4
+/// residual.
 fn peer_old_capability(s: &State, d: Design, i: usize) -> Step {
     let p = s.peers[i];
     if s.env.probe != Probe::EpochMint
@@ -4595,7 +4761,9 @@ fn peer_old_capability(s: &State, d: Design, i: usize) -> Step {
     }
     let cleared = s.auth.mint_gate.is_none() || p.seat == Seat::Cleared;
     let mut o = Out::new(s);
-    o.obs(if cleared && !p.residual {
+    o.obs(if p.unchanged {
+        Obs::UnchangedResidual
+    } else if cleared && !p.residual {
         Obs::OldKeyCapabilityAnswered
     } else {
         Obs::AttestationResidual
@@ -4914,7 +5082,14 @@ fn stale_deadline(s: &State) -> Step {
 
 // ---------------------------------------------------------------- operator
 
-fn op_accept_epoch(s: &State) -> Step {
+/// H5, H25: the operator's one-use `accept-epoch` arms the acceptance. HW v2
+/// H.52: the same commit persists the capability verification key set the
+/// new epoch requires (the new key after an exit by attestation, an explicit
+/// `unchanged` otherwise; the modeled holder's capability keys are not
+/// tracked, because the old instance reaches only the other holders). If the
+/// set can't be supplied it refuses to arm: nothing changes, so no new-epoch
+/// list is admitted (H4), the earlier lease runs out and nothing is deleted.
+fn op_accept_epoch(s: &State, d: Design) -> Step {
     let (Some(e), Some(hw)) = (s.vol.alert_epoch, s.dur.hw) else {
         return Ok(None);
     };
@@ -4923,6 +5098,12 @@ fn op_accept_epoch(s: &State) -> Step {
         return Ok(None);
     }
     let mut o = Out::new(s);
+    o.row(H25);
+    if s.auth.attest == Attest::Exited && d.has(Fix::AcceptEpochKeySet) && s.env.key_set_unavailable
+    {
+        o.obs(Obs::AcceptEpochRefused);
+        return o.done();
+    }
     stop(&mut o.n);
     o.n.dur.accept = Some(acc);
     o.row(H5);

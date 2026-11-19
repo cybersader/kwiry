@@ -5,7 +5,7 @@
 //! |---|---|
 //! | I1 | A resource is servable only if the newest list admitted by an H row shows it `active` and it is not tombstoned (including during apply); retirements cannot be minted or resurrected in a newer list; after an exit by attestation, no engine that has cleared the gate answers a capability the old instance minted (HW v2 H.49.3) |
 //! | I2 | A unit is deleted only under a listed obligation for its resource, that exact release claimant and reservation, or GC of an unreferenced object of an active resource |
-//! | I3 | `complete` is never dispatched while the unattributed inventory is non-empty, while anything of the resource remains, or while its proof is stale |
+//! | I3 | `complete` is never dispatched while the unattributed inventory is non-empty, while anything of the resource remains, or while its proof is stale; the authority never commits a higher state after accepting a lower one the holder sent while that higher attempt was uncertain (HW v2 H.50) |
 //! | I4 | Tombstones only grow |
 //! | I5 | Floors are monotone within an epoch, belong to the high-water's epoch, and evidence minted in another epoch never raises them |
 //! | I6 | Each armed epoch acceptance is consumed at most once |
@@ -50,6 +50,7 @@ pub enum Prop {
     I1RootPin,
     I1EpochExposure,
     I8AttestationPrecondition,
+    I3StaleClaim,
     /// A model bound was hit; the result would not be exhaustive.
     Bound,
 }
@@ -130,6 +131,9 @@ impl Prop {
             }
             Prop::I8ReplayTarget => {
                 "I8: a replayed finalization or clear left its restored target outstanding"
+            }
+            Prop::I3StaleClaim => {
+                "I3: a higher state committed after the authority accepted a lower one the holder sent while that attempt was uncertain"
             }
             Prop::Bound => "a model bound was exceeded",
         }
@@ -246,6 +250,7 @@ fn step_violations(prev: &State, out: &Outcome) -> Vec<Prop> {
                 Some(Prop::I1CapabilityExposure)
             }
             Obs::AttestedWithoutFailedCheck => Some(Prop::I8AttestationPrecondition),
+            Obs::StaleClaimCommitted { .. } => Some(Prop::I3StaleClaim),
             Obs::EpochOverexposed => Some(Prop::I1EpochExposure),
             Obs::AdvisoryWitnessRejected => Some(Prop::I8AdvisoryListWitness),
             Obs::CommitInvariantMissed => Some(Prop::I8CommitInvariant),

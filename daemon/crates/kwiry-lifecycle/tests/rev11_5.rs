@@ -1,4 +1,7 @@
-//! HOLDINGS-WIRE-v2 H.46–H.49 (design revision 11.5).
+//! HOLDINGS-WIRE-v2 H.46–H.49 (design revision 11.5). The tests run the
+//! latest design: from revision 11.6 the capability key set arrives with
+//! `accept-epoch` (H.52, `tests/rev11_6.rs`), and the H.47 runs no longer
+//! count the journal-lost pin reset as a cursor control (H.52 note 2).
 //!
 //! - H.46 confirms the lease pair the model already uses; a test pins it.
 //! - H.47 keeps both H.41 cursor controls. The tests exercise each one on
@@ -29,7 +32,7 @@ const NONE: Budget = Budget {
     drops: 0,
     restores: 0,
 };
-const D: Design = Design::REV11_5;
+const D: Design = Design::REV11_6;
 
 fn gate_profile(name: &'static str) -> Profile {
     Profile {
@@ -408,16 +411,17 @@ fn h47_each_cursor_control_refuses_on_its_own() {
 /// `restore_journal_lost`, an operator epoch) with no old-lineage advance,
 /// every fix holds, ablating the cross-epoch check alone holds, ablating the
 /// every-cause advance alone holds, and ablating both splices an
-/// earlier-epoch page after `T_stop` (I1). `restore_journal_lost` is the
-/// exception to the last: its H.19.5 pin reset nulls the active pins in a
-/// transaction of its own, which advances `holder_rev` too, so it masks the
-/// splice; removing that reset as well reproduces it. Neither H.41 control
-/// is what refuses the cursor there. With an old-lineage advance the
-/// advance alone does not hold (`tests/rev11_4.rs`) and the check alone does.
+/// earlier-epoch page after `T_stop` (I1). HW v2 H.52 note 2: the
+/// journal-lost pin reset (H.19.5) happens to advance `holder_rev` in a
+/// transaction of its own, but it is neither H.41 control and no test may
+/// count it as one. So the `restore_journal_lost` runs remove it, and skip
+/// I1's root-pin clause, which is that reset's own property (`tests/h16.rs`):
+/// each control is then exercised on its own there too. With an old-lineage
+/// advance the advance alone does not hold (`tests/rev11_4.rs`) and the check
+/// alone does.
 #[test]
 fn h47_ablating_either_control_alone_holds_and_both_splices() {
     let p = gate_profile("h47-controls");
-    let neither = without_advance(D).without(Fix::CrossEpochCursor);
     let fixtures = [
         (
             "supported",
@@ -433,18 +437,27 @@ fn h47_ablating_either_control_alone_holds_and_both_splices() {
         ),
         ("operator", two_holders(false), operator_candidates(), false),
     ];
-    for (name, s, candidates, masked) in fixtures {
-        let mut designs = vec![
-            (D, true),
-            (D.without(Fix::CrossEpochCursor), true),
-            (without_advance(D), true),
-            (neither, masked),
-        ];
-        if masked {
-            designs.push((neither.without(Fix::JournalLostPinReset), false));
-        }
-        for (design, holds) in designs {
-            let r = check_from(&Profile { design, ..p }, s.clone(), candidates.clone());
+    for (name, s, candidates, lost) in fixtures {
+        let (base, skip) = if lost {
+            (
+                D.without(Fix::JournalLostPinReset),
+                p.skip | Prop::I1RootPin.bit(),
+            )
+        } else {
+            (D, p.skip)
+        };
+        let neither = without_advance(base).without(Fix::CrossEpochCursor);
+        for (design, holds) in [
+            (base, true),
+            (base.without(Fix::CrossEpochCursor), true),
+            (without_advance(base), true),
+            (neither, false),
+        ] {
+            let r = check_from(
+                &Profile { design, skip, ..p },
+                s.clone(),
+                candidates.clone(),
+            );
             eprintln!("{name} {design:?}: {}", r.render());
             if holds {
                 assert!(r.violation.is_none(), "{name}: {}", r.render());
@@ -704,7 +717,7 @@ fn h49_the_rotation_precedes_the_first_new_epoch_list() {
     f.run(&[PeerMove(0), PeerSilent(0)]);
     assert!(f.s.peers[0].cap_rotated, "applied with the list");
 
-    let text = D.without(Fix::CapabilityRotationBeforeList);
+    let text = D.without(Fix::KeySetBeforeAdmit);
     let mut f = false_exit(text);
     f.run(&[PeerMove(0), PeerSilent(0)]);
     assert!(!f.s.peers[0].cap_rotated);
@@ -723,7 +736,7 @@ fn h49_the_rotation_precedes_the_first_new_epoch_list() {
         Some(Prop::I1CapabilityExposure)
     );
     let cex = ablate(
-        Fix::CapabilityRotationBeforeList,
+        Fix::KeySetBeforeAdmit,
         Prop::I1CapabilityExposure,
         gate_profile("h49-before-list"),
         two_holders(false),
@@ -801,7 +814,7 @@ fn h48_h49_peer_symmetry_preserves_verdicts() {
         None,
         Some(Fix::LifecycleKeyRotation),
         Some(Fix::CapabilityKeyRotation),
-        Some(Fix::CapabilityRotationBeforeList),
+        Some(Fix::KeySetBeforeAdmit),
     ] {
         let p = Profile {
             design: fix.map_or(D, |x| D.without(x)),

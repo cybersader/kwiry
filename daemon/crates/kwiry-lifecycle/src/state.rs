@@ -424,6 +424,11 @@ pub struct Peer {
     /// `T_stop`, before it applied the key-set statement. The lease timeout
     /// does not bound that lease.
     pub residual: bool,
+    /// HW v2 H.52.4: its operator confirmed `unchanged` at `accept-epoch`
+    /// after an exit by attestation, so it accepts the old capability key
+    /// under its new-epoch lease. Audited by the engine and detectable from
+    /// the restore record; a named residual, not a gate guarantee.
+    pub unchanged: bool,
 }
 
 // -------------------------------------------------------------------- lists
@@ -548,6 +553,11 @@ pub struct Req {
     pub commit_late: bool,
     /// The holder's connection is still open (a response can be delivered).
     pub alive: bool,
+    /// Ghost (HW v2 H.50): for an obligation report, the states (`1 <<
+    /// state`) of higher-state attempts of the same obligation that were
+    /// still possibly sent, unresolved, when these bytes left. Always zero
+    /// under H.50.1.
+    pub retracts: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -965,6 +975,10 @@ pub struct Env {
     /// Checker reduction switch: peers are sorted in the canonical state
     /// (`step::canonical`). Fixed for a run.
     pub peer_symmetry: bool,
+    /// HW v2 H.52.3: the capability verification key set an exit by
+    /// attestation requires can't be supplied at `accept-epoch` (the restore
+    /// record's new key is unavailable to the operators). Fixed for a run.
+    pub key_set_unavailable: bool,
 }
 
 /// Focused profiles opt in to independent boundaries without multiplying
@@ -1018,6 +1032,12 @@ pub struct Ghost {
     /// survive replay (the authority's refusal is the control; a holder that
     /// never saw the attestation cannot exclude them).
     pub orphan_dirs: (u8, u8),
+    /// HW v2 H.50, per obligation: states (`1 << state`) the holder no longer
+    /// claims, because the authority accepted a lower report the holder sent
+    /// while attempts of those states were unresolved. Committing one of them
+    /// afterwards leaves a stale higher claim at the authority. A state the
+    /// holder derives again (R1) is claimed again and leaves the set.
+    pub stale_claims: [u8; OBLS],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -23,7 +23,7 @@ const NONE: Budget = Budget {
     drops: 0,
     restores: 0,
 };
-const D: Design = Design::REV11_5;
+const D: Design = Design::REV11_6;
 
 fn gate_profile(name: &'static str) -> Profile {
     Profile {

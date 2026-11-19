@@ -27,7 +27,7 @@ const BUDGET: Budget = Budget {
     restores: 1,
 };
 const REV: Rev = Rev { epoch: 0, seq: 1 };
-const D: Design = Design::REV11_5;
+const D: Design = Design::REV11_6;
 
 fn profile(name: &'static str, design: Design) -> Profile {
     Profile {
@@ -400,6 +400,7 @@ fn v09_unknown_instruction_status_is_accepted_and_replays() {
                     aged: false,
                     commit_late: false,
                     alive: true,
+                    retracts: 0,
                 },
                 "fixture",
             )
@@ -442,6 +443,7 @@ fn v10_tag_valid_ahead_reference_latches_restore_alarm() {
                     aged: false,
                     commit_late: false,
                     alive: true,
+                    retracts: 0,
                 },
                 "fixture",
             )
@@ -1043,6 +1045,7 @@ fn h12_every_route_preserves_a_verified_witness_before_later_errors() {
                     aged: false,
                     commit_late: false,
                     alive: true,
+                    retracts: 0,
                 },
                 "fixture",
             )

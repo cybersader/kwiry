@@ -30,7 +30,7 @@
 //! - [`checker`]: bounded explicit-state BFS with crash injection, plus a
 //!   strong-fairness SCC analysis for L1.
 //! - [`design`]: revision 8 as written ([`design::Design::REV8`]) and each
-//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_5`] has
+//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_6`] has
 //!   all.
 //!
 //! # Universe and bounds
@@ -138,7 +138,12 @@
 //!   past 1 h (H22), and a false attestation after which the old instance
 //!   keeps issuing lists and minting, the exit's key rotations (H23), and
 //!   the other holders applying them, fetching a new-epoch list while they
-//!   still serve the earlier one (H24).
+//!   still serve the earlier one (H24). From revision 11.6 an engine's
+//!   `accept-epoch` carries the capability key set (H.52, H25): the other
+//!   holders' arming and their first new-epoch admit are one step, since the
+//!   set is persisted in the arming commit, before any admit. A fixture flag
+//!   makes the set unavailable (fail closed), and a scenario step lets an
+//!   operator wrongly confirm `unchanged` (the H.52.4 residual).
 //! - States are stored as 128-bit fingerprints (hash compaction).
 //!
 //! # Coverage limits
@@ -187,7 +192,12 @@
 //! violation. The key rotations are abstracted to whether each other holder
 //! applied them; the modeled holder's own key-set machinery (H.6, H.37) is
 //! not driven by an attestation exit, and the old instance reaches only the
-//! other holders. A failed source check's age is a flag. The model delivers
+//! other holders. A failed source check's age is a flag. R15's time clause
+//! (HW v2 H.50.2, page 0's `iat` past `D = exp + 120 s`) is read as: no copy
+//! of the attempt is still in flight to the authority, and the current
+//! lineage never committed it. The model has no clock, so it may resolve an
+//! attempt earlier than a real holder could, never one that can still
+//! commit. The model delivers
 //! a list in one step, which is page 0's receipt: the lease deadline is fixed
 //! there and carried through A4 (H.46). The core profiles
 //! check the gate with the modeled holder as the only member: minting stays
@@ -205,9 +215,9 @@
 //! migration and launcher deployment, the journal's encoding and fsync
 //! failures, a raw restore outside the gate fixtures (beyond a synthetic witness), a false
 //! old-instance-stopped attestation outside its fixture, the engine-side
-//! distribution of capability keys (an open seam item, H.49.4), rate
-//! scheduling/cursor churn, R15's time clause, escalation, more than two of
-//! anything, or H.11 alert delivery. The S3 conformance gate adds these where
+//! distribution of capability keys beyond the operator's `accept-epoch`
+//! (H.52.2; automating it is a seam item, H.49.4), rate scheduling/cursor
+//! churn, escalation, more than two of anything, or H.11 alert delivery. The S3 conformance gate adds these where
 //! Kwiry owns the implementation.
 
 pub mod action;
