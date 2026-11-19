@@ -16,6 +16,7 @@ base64.workspace = true
 clap.workspace = true
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 kwiry-core = { path = "../kwiry-core" }
+kwiry-holdings = { path = "../kwiry-holdings" }
 notify.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
@@ -32,6 +33,7 @@ windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 [dev-dependencies]
 assert_cmd.workspace = true
 http-body-util.workspace = true
+kwiry-holdings = { path = "../kwiry-holdings", features = ["testkit"] }
 predicates.workspace = true
 tower.workspace = true
 

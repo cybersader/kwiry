@@ -1793,6 +1793,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "kwiry-core",
+ "kwiry-holdings",
  "libc",
  "notify",
  "predicates",
@@ -1845,6 +1846,24 @@ dependencies = [
  "unicode-normalization",
  "windows-sys 0.59.0",
  "zerocopy",
+]
+
+[[package]]
+name = "kwiry-holdings"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "fs2",
+ "getrandom 0.3.4",
+ "hkdf",
+ "hmac",
+ "p256",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

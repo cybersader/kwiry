@@ -1,0 +1,30 @@
+[package]
+name = "kwiry-holdings"
+description = "Holder side of a generic signed resource-lifecycle protocol: verified holdings lists, durable refusal state and a serving gate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Test-only fakes (authority, clock, store, data root). Never enabled by a
+# deployable build; the composition layer enables it for dev-dependencies only.
+testkit = ["dep:hkdf", "dep:hmac"]
+
+[dependencies]
+base64.workspace = true
+ed25519-dalek = "2"
+fs2.workspace = true
+getrandom.workspace = true
+hkdf = { version = "0.12", optional = true }
+hmac = { version = "0.12", optional = true }
+p256 = { version = "0.13", features = ["ecdsa"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hkdf = "0.12"
+hmac = "0.12"
+tempfile.workspace = true
