@@ -94,9 +94,7 @@ impl StartupError {
 impl From<crate::state::WriteError> for StartupError {
     fn from(error: crate::state::WriteError) -> Self {
         match error {
-            crate::state::WriteError::Io(error) | crate::state::WriteError::Poisoned(error) => {
-                Self::Io(error)
-            }
+            crate::state::WriteError::Io(error) => Self::Io(error),
             crate::state::WriteError::Refused(reason) => Self::EnrollmentRefused(reason),
             crate::state::WriteError::Unwritable => {
                 Self::Io(std::io::Error::other("holder_state_unwritable"))

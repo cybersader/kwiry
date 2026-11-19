@@ -138,6 +138,7 @@ fn the_writer_refuses_regressions_and_foreign_epochs_and_unions_only_grow() {
         },
         tombstones: Vec::new(),
         pin_pairs: Vec::new(),
+        obligations: None,
     };
     assert!(matches!(
         started.writer.apply_list(lower),
@@ -150,6 +151,7 @@ fn the_writer_refuses_regressions_and_foreign_epochs_and_unions_only_grow() {
         },
         tombstones: Vec::new(),
         pin_pairs: Vec::new(),
+        obligations: None,
     };
     assert!(matches!(
         started.writer.apply_list(foreign),
@@ -167,12 +169,14 @@ fn the_writer_refuses_regressions_and_foreign_epochs_and_unions_only_grow() {
             pin_id: crate::testkit::pin_id("x"),
             resource_id: "res-t".into(),
         }],
+        obligations: None,
     };
     started.writer.apply_list(grow).unwrap();
     let empty = ApplyMutation {
         rev,
         tombstones: Vec::new(),
         pin_pairs: Vec::new(),
+        obligations: None,
     };
     started.writer.apply_list(empty).unwrap();
     assert_eq!(started.writer.state().tombstones.len(), 1);

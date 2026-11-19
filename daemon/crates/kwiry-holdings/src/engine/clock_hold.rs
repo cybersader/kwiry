@@ -83,8 +83,7 @@ impl StateWriter {
     /// Any failure after the seal's rename returns `Err` (the caller keeps
     /// the hold raised in memory) and invalidates the possibly visible seal:
     /// first by committing a fresh raised record, else by removing the seal,
-    /// else by poisoning the writer so every commit is refused until the
-    /// committed state is rewritten.
+    /// else by fail-stopping the holder (H.45).
     pub fn clear_clock_hold(&mut self) -> Result<(), WriteError> {
         if !durable_hold(self) {
             return Ok(());
@@ -113,18 +112,21 @@ impl StateWriter {
         if self.commit(raised).is_ok() {
             return;
         }
-        if self.remove_side_file(SEAL_FILE).is_ok() {
+        // Removing the seal can only make the hold read raised, so it runs
+        // even when that commit just left the file ambiguous and fail-stopped
+        // the writer (H.45): it is the last narrowing step of the stop.
+        if self.remove_seal_narrowing().is_ok() {
             return;
         }
         // H.34 residual. The seal may be visible, the raised record could not
         // be written and the seal could not be removed, so a load may read the
         // hold as cleared while memory keeps it raised. A poison flag held
         // only in memory cannot protect a restart, so the holder fail-stops
-        // instead (`holder_state_unwritable`): every gate is revoked and no
-        // further lifecycle work runs. A restart that then reads "cleared" is
-        // accepted: the clear came from a genuine confirmed correction, and
-        // the first list after the restart measures the clock again and
-        // re-raises the hold if the lag is back (H.36).
+        // instead (`holder_state_unwritable`, H.45): every gate is revoked and
+        // no further lifecycle work runs. A restart that then reads "cleared"
+        // is the accepted residual: the clear came from a genuine confirmed
+        // correction, and the first list after the restart measures the clock
+        // again before anything can serve (H.36, H.45.2-3).
         self.mark_unwritable();
     }
 }

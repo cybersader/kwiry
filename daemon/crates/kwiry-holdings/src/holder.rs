@@ -128,6 +128,13 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     /// A report answer said the list is stale (`stale_list_ref`, `404`, an
     /// other-epoch ack): nothing is re-derived until a list applies.
     pub(crate) relist_before_report: bool,
+    /// An admitted list failed to apply: its floors are not durable, so no
+    /// report is derived or sent until a list applies (K2x).
+    pub(crate) apply_failed_since_admit: bool,
+    /// `503 authority_epoch_mismatch` on any route (H.12 steps 2 and 4):
+    /// treated as unreachable, and no purge runs until a verified list
+    /// applies (§4.5).
+    pub(crate) rollback_suspected: bool,
     pub(crate) report_backoff_ms: u64,
     pub(crate) report_backoff_until: u64,
 }
@@ -196,6 +203,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             report_sends: std::collections::VecDeque::new(),
             unverifiable: HashMap::new(),
             relist_before_report: false,
+            apply_failed_since_admit: false,
+            rollback_suspected: false,
             report_backoff_ms: 0,
             report_backoff_until: 0,
         })
@@ -390,7 +399,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             FetchFailure::UnexpectedEpoch => HolderEvent::UnexpectedEpoch,
             FetchFailure::UnknownKid => HolderEvent::UnknownKid,
             FetchFailure::Livelock => HolderEvent::ListLivelock,
-            FetchFailure::RollbackSuspected => HolderEvent::AuthorityRollbackSuspected,
+            FetchFailure::RollbackSuspected => {
+                self.rollback_suspected = true;
+                HolderEvent::AuthorityRollbackSuspected
+            }
             FetchFailure::ProofExpiredTwice => HolderEvent::ProofExpiredClockAlert,
             FetchFailure::Unauthorized => {
                 self.route = RouteHealth::AuthHalt(AuthHalt::InvalidProof);
@@ -450,6 +462,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     fn apply_failed(&mut self, step: &'static str, error: Option<&WriteError>) -> ListOutcome {
+        // The admitted list may carry floors that are not durable: no report
+        // runs until a list applies (K2x).
+        self.apply_failed_since_admit = true;
         self.emit_reserve_uses();
         if let Some(error) = error {
             report_write_failure(self.events.as_ref(), error);
@@ -543,10 +558,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     }));
             }
         }
+        // Floors, ended channels and resolved attempts ride in A1 (R12, R13,
+        // R15): if they cannot be made durable, the apply fails whole.
+        let (book, prune) = self.adopted_book(&list);
         let mutation = ApplyMutation {
             rev: rev.clone(),
             tombstones: new_tombstones,
             pin_pairs: new_pairs,
+            obligations: Some(book),
         };
         if let Err(error) = self.writer.apply_list(mutation) {
             return self.apply_failed("A1", Some(&error));
@@ -577,12 +596,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 .collect(),
             plan: plan.clone(),
         });
-        // Floors, dropped obligations and uncertain attempts follow the
-        // verified list (R12, R13, R15). A failed write leaves floors lower,
-        // which only ever makes the holder send more.
-        if let Err(error) = self.adopt_list_obligations() {
-            report_write_failure(self.events.as_ref(), &error);
-        }
+        self.after_apply(&prune);
         self.emit_reserve_uses();
         ListOutcome::Applied(ApplyReport {
             rev,
@@ -767,7 +781,7 @@ impl<S: ResourceStore, T: Transport> Drop for Holder<S, T> {
 /// The calling step fails with no state change; admit refusals stay in
 /// force; nothing is deleted.
 pub(crate) fn report_write_failure(events: &dyn EventSink, error: &WriteError) {
-    if let WriteError::Io(io) | WriteError::Poisoned(io) = error
+    if let WriteError::Io(io) = error
         && io.kind() == std::io::ErrorKind::StorageFull
     {
         events.emit(HolderEvent::StorageExhausted);

@@ -142,6 +142,28 @@ pub enum DeleteOutcome {
     Failed,
 }
 
+/// Anything an adapter's publication lock guard is made of.
+pub trait FreezeHold {}
+impl<T> FreezeHold for T {}
+
+/// Proof that new publications are held back. While it lives, no artifact
+/// may become visible to [`ArtifactPurger::census`]; dropping it lets held
+/// publications proceed. See [`ArtifactPurger::freeze_publications`].
+#[must_use = "publications resume as soon as the freeze is dropped"]
+pub struct PublicationFreeze<'a> {
+    _hold: Box<dyn FreezeHold + 'a>,
+}
+
+impl<'a> PublicationFreeze<'a> {
+    /// Wraps the adapter's exclusive publication lock guard (or any value
+    /// whose drop releases it).
+    pub fn new(hold: impl FreezeHold + 'a) -> Self {
+        Self {
+            _hold: Box::new(hold),
+        }
+    }
+}
+
 /// Deletes retained data under a listed obligation (v2 §3.4 rules 3 to 5).
 ///
 /// The holder drives it in a fixed, crash-safe order, with a durable
@@ -163,4 +185,28 @@ pub trait ArtifactPurger {
     /// Syncs every storage location; an error means the barrier failed.
     fn barrier(&mut self) -> Result<(), StoreError>;
     fn census(&self) -> Result<Census, StoreError>;
+
+    /// Holds every new publication back until the returned guard drops.
+    ///
+    /// **Adapter obligation.** A *publication* is anything that can make an
+    /// artifact observable to [`census`](Self::census): a builder renaming
+    /// output into place, a registry or manifest insert, a cache fill, a
+    /// restore. The adapter MUST:
+    ///
+    /// 1. make every publication take the **shared** side of one
+    ///    publication lock for its whole visible step, and hold it until the
+    ///    artifact is fully observable;
+    /// 2. make this method take the **exclusive** side, waiting for every
+    ///    publication already holding the shared side to finish;
+    /// 3. while the guard lives, make a publication that wants the lock
+    ///    **wait** (never drop it, and never apply it out of view of the
+    ///    census);
+    /// 4. return `Err` if it cannot give that guarantee. The holder then
+    ///    cancels the report as never transmitted.
+    ///
+    /// The holder takes the freeze immediately before the final census of a
+    /// report, keeps it across the first byte of the transmission and until
+    /// the send completes, then drops it. A report's claim therefore never
+    /// misses an artifact published before its first byte.
+    fn freeze_publications(&self) -> Result<PublicationFreeze<'_>, StoreError>;
 }

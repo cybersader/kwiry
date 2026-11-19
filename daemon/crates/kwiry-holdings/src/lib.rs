@@ -2,7 +2,7 @@
 //!
 //! Normative source: the authority workspace file
 //! `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md` (sha256
-//! `44a5723525b1b7db2e07e4e3767b8a639730b680009636e46b4bf253c396c42c`).
+//! `b55bf6b2282a602c1574dd63e1b9e9b711b3a0f1cfd0bcb0da291b4ab90e8456`).
 //! Part I is the generic core every holder class implements; Part II is
 //! Profile S, the search-engine holder. Section and `H.n` citations in
 //! this crate are anchors in that file. Only the composition layer names

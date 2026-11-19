@@ -70,6 +70,11 @@ pub struct Channel {
     /// Counts and manifest of the last report the authority accepted.
     pub last_accepted_counts: Option<Counts>,
     pub purge: PurgeRecord,
+    /// §3.4 rule 4: residual data of a retired-complete holding is being
+    /// purged, and `complete` is owed again. Written before the residual
+    /// claim; cleared only once a covering `complete` is acknowledged.
+    #[serde(default)]
+    pub reconfirm_pending: bool,
 }
 
 impl Channel {
@@ -84,6 +89,7 @@ impl Channel {
             last_same_state_ms: None,
             last_accepted_counts: None,
             purge: PurgeRecord::default(),
+            reconfirm_pending: false,
         }
     }
 

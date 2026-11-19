@@ -68,7 +68,18 @@ fn b3_every_fault_in_a_clear_leaves_a_restart_agreeing_with_memory() {
         // A probe applies nothing: the clear sequence is all it writes.
         rig.io_faults.plan(plan.clone());
         rig.advance(5_000);
-        assert_eq!(rig.holder().probe_clock(), Some(Ok(())), "{plan:?}");
+        let probe = rig.holder().probe_clock();
+        // A write that cannot be put back leaves durable state ambiguous: the
+        // holder fail-stops (v2 H.45) instead of carrying on.
+        if rig.holder().fail_stopped() {
+            assert_eq!(
+                probe,
+                Some(Err(crate::client::FetchFailure::HolderStateUnwritable)),
+                "{plan:?}"
+            );
+        } else {
+            assert_eq!(probe, Some(Ok(())), "{plan:?}");
+        }
         let in_memory = rig.engine_gate().clock_hold();
         // Unless a rollback itself failed, a failed write was put back: the
         // state file equals the committed state.

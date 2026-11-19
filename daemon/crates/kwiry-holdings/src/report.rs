@@ -45,6 +45,7 @@ use crate::obligations::{
 use crate::profile::ROUTE_REPORT;
 use crate::purge::{Inventory, ObligationsRefused, Target};
 use crate::store::{ArtifactPurger, ResourceStore};
+use crate::verify::VerifiedList;
 use crate::wire::{ObligationState, Phase, ReportState, Rev};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -53,10 +54,10 @@ use std::collections::BTreeSet;
 pub const REPORTS_PER_SECOND: usize = 10;
 /// An attempt held this long before its first byte is cancelled (R2q).
 pub const QUEUE_CAP_MS: u64 = 30_000;
-/// Absence inference margin: an attempt is proven not committed by a list
-/// whose page-0 `iat` exceeds its `exp` by more than this (H.13 allows any
-/// margin of at least 120 s; the larger bound is used).
-pub const ABSENCE_MARGIN_S: i64 = 420;
+/// Absence inference (H.13, H.50.3): an attempt is proven not committed by
+/// a verified list whose page-0 `iat` is greater than `D = exp + 120 s`.
+/// Both sides are authority-clock values.
+pub const ABSENCE_BOUND_S: i64 = 120;
 /// Unverifiable acks in a row before the channel halts (R17).
 pub const UNVERIFIABLE_HALT: u8 = 3;
 const BACKOFF_START_MS: u64 = 10_000;
@@ -276,22 +277,22 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         })
     }
 
-    /// Floors, dropped obligations and uncertain attempts after a verified
-    /// list applied (R12, R13, R15).
-    pub(crate) fn adopt_list_obligations(&mut self) -> Result<(), crate::state::WriteError> {
-        self.relist_before_report = false;
-        let Some(applied) = &self.applied else {
-            return Ok(());
-        };
-        let epoch = applied.list_ref.rev.epoch.clone();
-        let page0_iat_s = applied.page0_iat_ms.div_euclid(1000);
+    /// The obligation records a verified list implies (R12, R13, R15),
+    /// computed without writing: the apply commits them with the high-water
+    /// and tombstones in its one A1 write, so a floor learned from the list
+    /// is durable before anything can be reported against it. Returns the
+    /// book and the attempts whose sent bytes are no longer needed.
+    pub(crate) fn adopted_book(&self, list: &VerifiedList) -> (ObligationBook, Vec<Attempt>) {
+        let epoch = list.head.rev.epoch.clone();
+        let page0_iat_s = list.page0_iat_ms.div_euclid(1000);
         let listed: std::collections::HashMap<
             String,
             (crate::wire::Item, crate::wire::Obligation),
-        > = applied
+        > = list
             .items
             .iter()
-            .filter_map(|item| {
+            .filter_map(|listed| {
+                let item = &listed.item;
                 item.obligation
                     .clone()
                     .map(|o| (o.obligation_id.clone(), (item.clone(), o)))
@@ -330,25 +331,32 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 channel.pending = None;
             }
         }
-        // R15: resolve uncertain attempts.
+        // R15, H.50.2: an uncertain attempt is resolved by a list whose
+        // `last_accepted` covers it, or whose page-0 `iat` is past its `D`
+        // while `last_accepted` is still below it.
         book.uncertain.retain(|_, uncertain| {
             let Some((_, obligation)) = listed.get(&uncertain.obligation_id) else {
                 return true;
             };
             let accepted = obligation.last_accepted.map(|(state, _)| state);
             let covered = accepted.is_some_and(|a| a >= uncertain.state);
-            let not_committed = page0_iat_s > uncertain.latest_exp_s() + ABSENCE_MARGIN_S;
+            let not_committed = page0_iat_s > uncertain.latest_exp_s() + ABSENCE_BOUND_S;
             let resolved = covered || not_committed;
             if resolved {
                 prune.extend(uncertain.attempts.iter().cloned());
             }
             !resolved
         });
-        let result = self.writer.update_obligations(book);
-        if result.is_ok() {
-            self.prune_sent(&prune);
-        }
-        result
+        (book, prune)
+    }
+
+    /// After a successful apply: sent bytes nothing refers to are removed,
+    /// and reports may run again.
+    pub(crate) fn after_apply(&mut self, prune: &[Attempt]) {
+        self.relist_before_report = false;
+        self.apply_failed_since_admit = false;
+        self.rollback_suspected = false;
+        self.prune_sent(prune);
     }
 
     /// Removes sent bytes nothing refers to any more (best effort).
@@ -366,7 +374,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     ) -> Result<ReportSummary, ObligationsRefused> {
         self.obligations_allowed()?;
         let mut summary = ReportSummary::default();
-        if self.route != RouteHealth::Normal {
+        if self.route != RouteHealth::Normal || self.apply_failed_since_admit {
             return Ok(summary);
         }
         let Ok(inventory) = self.inventory(purger) else {
@@ -497,10 +505,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if self.high_water_epoch().as_deref() != Some(pending.epoch.as_str()) {
             return Guard::Fail;
         }
-        let Some(current) = self.derive(target, inventory) else {
-            return Guard::Fail;
-        };
         let body = &pending.body;
+        let Some(current) = self.derive(target, inventory) else {
+            // Nothing of the resource remains and no scan of this process
+            // covers it yet. That falsifies `revoked`; any other claim waits
+            // for a scan rather than being invalidated by absent bytes.
+            return if body.state == ReportState::Revoked {
+                Guard::Fail
+            } else {
+                Guard::Wait
+            };
+        };
         if current.counts != body.counts {
             return Guard::Fail;
         }
@@ -789,9 +804,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 return;
             };
             // R2d: the linearization point, immediately before the first
-            // byte. A moved inventory, an auth halt, a fail-stop or an aged
-            // attempt cancels it as never transmitted.
-            let first_byte_ok = !self.fail_stopped()
+            // byte. New publications are frozen from this census until the
+            // send completes, so nothing can appear in between. A moved
+            // inventory, an auth halt, a fail-stop, an aged attempt or a
+            // freeze the adapter cannot give cancels it as never transmitted.
+            let freeze = purger.freeze_publications().ok();
+            let first_byte_ok = freeze.is_some()
+                && !self.fail_stopped()
                 && self.route == RouteHealth::Normal
                 && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS
                 && self.inventory(purger).is_ok_and(|now| {
@@ -801,6 +820,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                             .is_some_and(|c| c.counts == pending.body.counts)
                 });
             if !first_byte_ok {
+                drop(freeze);
                 self.cancel_attempt(&ob, &sent.attempt);
                 summary.cancelled += 1;
                 return;
@@ -814,6 +834,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 sent.compact.as_bytes(),
                 LIST_TIMEOUTS,
             );
+            drop(freeze);
             let answer = self.classify(&ob, &pending, response);
             match answer {
                 Answer::Receipt => {
@@ -980,6 +1001,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Answer::AuthHalted
             }
             (503, Some("authority_epoch_mismatch")) => {
+                // H.12 step 2 or 4: no purge until a verified list applies.
+                self.rollback_suspected = true;
                 self.events.emit(HolderEvent::AuthorityRollbackSuspected);
                 Answer::BackOff
             }
@@ -1077,16 +1100,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     fn on_ack(&mut self, ob: &str, pending: &Pending, ack: Ack, convergence: bool) -> Answer {
         let answer = self.on_ack_inner(ob, pending, ack, convergence);
         let epoch = self.high_water_epoch().unwrap_or_default();
-        let complete = self
-            .writer
-            .state()
-            .obligations
-            .channels
-            .get(ob)
-            .and_then(|c| c.floor_in(&epoch))
-            == Some(ReportState::Complete);
+        let channel = self.writer.state().obligations.channels.get(ob);
+        let complete = channel.and_then(|c| c.floor_in(&epoch)) == Some(ReportState::Complete);
+        let owed = channel.is_some_and(|c| c.reconfirm_pending);
         if complete {
             self.verified.remove(ob);
+            if owed && channel.is_some_and(|c| c.pending.is_none()) {
+                let mut next = self.writer.state().obligations.clone();
+                if let Some(channel) = next.channels.get_mut(ob) {
+                    channel.reconfirm_pending = false;
+                }
+                self.commit_book(next);
+            }
         }
         answer
     }
@@ -1096,7 +1121,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return self.unverifiable(ob);
         };
         let book = self.writer.state().obligations.clone();
-        if !convergence && ack.idempotency_key == pending.key {
+        // H.5: a replay path is taken only when both the key and the
+        // obligation are the ones this request reported; anything else is
+        // convergence (which itself requires the reported obligation).
+        let own_obligation = ack.obligation_id == ob && pending.body.obligation_id == ob;
+        if !convergence && own_obligation && ack.idempotency_key == pending.key {
             // Replay path (R5): a receipt for this key's own claims.
             let matches = pending
                 .attempts
@@ -1132,7 +1161,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             }
             return Answer::Receipt;
         }
-        if !convergence && let Some(uncertain) = book.uncertain.get(&ack.idempotency_key).cloned() {
+        if !convergence
+            && own_obligation
+            && let Some(uncertain) = book
+                .uncertain
+                .get(&ack.idempotency_key)
+                .filter(|u| u.obligation_id == ob)
+                .cloned()
+        {
             // R18, R19: a late receipt for one of this holder's earlier keys.
             let matches = uncertain.obligation_id == ack.obligation_id
                 && uncertain.holding_id == ack.holding_id

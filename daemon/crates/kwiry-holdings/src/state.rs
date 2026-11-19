@@ -326,8 +326,6 @@ pub enum WriteError {
     Refused(&'static str),
     /// An earlier failure after a rename left the file possibly ahead of
     /// memory, and rewriting the committed state has not succeeded yet.
-    #[error("holder state poisoned until the committed state is rewritten: {0}")]
-    Poisoned(io::Error),
     /// v2 H.45: the holder fail-stopped; no lifecycle write runs again in
     /// this process.
     #[error("holder state unwritable: the holder fail-stopped")]
@@ -348,6 +346,9 @@ pub struct ApplyMutation {
     pub rev: Rev,
     pub tombstones: Vec<Tombstone>,
     pub pin_pairs: Vec<PinPair>,
+    /// The obligation records the list implies (floors, ended channels,
+    /// resolved attempts), committed in the same write; `None` keeps them.
+    pub obligations: Option<ObligationBook>,
 }
 
 /// Result of a committed A1 mutation.
@@ -365,9 +366,6 @@ pub struct StateWriter {
     clock: Arc<dyn Clock>,
     state: HolderState,
     enrollment: Enrollment,
-    /// Set when a failed commit may have left uncommitted bytes on disk and
-    /// rewriting the committed state also failed.
-    poisoned: bool,
     /// Set when durable state may read less restrictive than memory and no
     /// write could correct it. The holder fail-stops.
     unwritable: bool,
@@ -389,7 +387,6 @@ impl StateWriter {
             clock,
             state,
             enrollment,
-            poisoned: false,
             unwritable: false,
             reserve: None,
             reserve_uses: Vec::new(),
@@ -450,8 +447,10 @@ impl StateWriter {
         }
     }
 
+    /// Durable state may differ from memory (an ambiguous write that could
+    /// not be put back). Since v2 H.45 this is the fail-stop itself.
     pub fn poisoned(&self) -> bool {
-        self.poisoned
+        self.unwritable
     }
 
     /// Replaces a profile-owned side file in the holder directory, through
@@ -465,6 +464,13 @@ impl StateWriter {
         self.write_reserved(name, bytes)
     }
 
+    /// Removes the clock-hold seal even after a fail-stop: without the seal
+    /// the hold reads raised, so this write can only narrow (H.34, H.45).
+    pub(crate) fn remove_seal_narrowing(&self) -> io::Result<()> {
+        self.io
+            .remove(self.dir.path(), crate::engine::clock_hold::SEAL_FILE)
+    }
+
     pub(crate) fn remove_side_file(&self, name: &str) -> io::Result<()> {
         // v2 H.45: no lifecycle write after a fail-stop.
         if self.unwritable {
@@ -476,7 +482,6 @@ impl StateWriter {
     /// Records that the durable state may claim more than memory and could
     /// not be corrected: the holder must fail-stop.
     pub(crate) fn mark_unwritable(&mut self) {
-        self.poisoned = true;
         self.unwritable = true;
     }
 
@@ -512,19 +517,12 @@ impl StateWriter {
 
     /// Writes `next` whole and only then adopts it. If the write failed after
     /// its rename, the file may hold `next` although the commit never became
-    /// durable: the committed state is written back at once, and if that also
-    /// fails the writer is poisoned and refuses every commit until the
-    /// committed state has been rewritten.
+    /// durable: the committed state is written back at once. If that also
+    /// fails, durable state is ambiguous and the holder fail-stops (v2 H.45):
+    /// every later commit, side-file write and removal is refused.
     pub(crate) fn commit(&mut self, mut next: HolderState) -> Result<(), WriteError> {
-        // v2 H.45: after a fail-stop no lifecycle write runs in this process.
         if self.unwritable {
             return Err(WriteError::Unwritable);
-        }
-        if self.poisoned {
-            let committed = self.state.clone();
-            self.write_state(&committed)
-                .map_err(|failure| WriteError::Poisoned(failure.error))?;
-            self.poisoned = false;
         }
         next.committed_at_ms = self.clock.wall_ms();
         match self.write_state(&next) {
@@ -535,7 +533,7 @@ impl StateWriter {
             Err(failure) => {
                 let committed = self.state.clone();
                 if failure.replaced && self.write_state(&committed).is_err() {
-                    self.poisoned = true;
+                    self.mark_unwritable();
                 }
                 Err(WriteError::Io(failure.error))
             }
@@ -544,6 +542,9 @@ impl StateWriter {
 
     /// Replaces the obligation records in one commit.
     pub(crate) fn update_obligations(&mut self, book: ObligationBook) -> Result<(), WriteError> {
+        if self.unwritable {
+            return Err(WriteError::Unwritable);
+        }
         if self.state.obligations == book {
             return Ok(());
         }
@@ -567,6 +568,9 @@ impl StateWriter {
         let mut next = self.state.clone();
         next.high_water = Some(mutation.rev);
         next.tombstones.extend(mutation.tombstones);
+        if let Some(book) = mutation.obligations {
+            next.obligations = book;
+        }
         let engine = &mut next.engine;
         engine.pin_history.extend(mutation.pin_pairs);
         let size = u64::try_from(engine.pin_history.len()).unwrap_or(u64::MAX);
@@ -604,6 +608,9 @@ impl StateWriter {
     /// Persists an accepted key-set statement's pins before any key it adds
     /// is trusted.
     pub fn pin_keys(&mut self, pinned: PinnedKeys) -> Result<(), WriteError> {
+        if self.unwritable {
+            return Err(WriteError::Unwritable);
+        }
         if let (Some(current), Some(next)) = (self.enrollment.pinned.keyset_seq, pinned.keyset_seq)
             && next <= current
         {
@@ -617,11 +624,18 @@ impl StateWriter {
             .write_atomic(self.dir.path(), ENROLLMENT_FILE, &bytes)
         {
             if failure.replaced {
-                let current =
-                    serde_json::to_vec_pretty(&self.enrollment).map_err(io::Error::other)?;
-                let _ = self
-                    .io
-                    .write_atomic(self.dir.path(), ENROLLMENT_FILE, &current);
+                // The file may hold the new pins: put the old ones back, or
+                // fail-stop if that is impossible (v2 H.45).
+                let restored = serde_json::to_vec_pretty(&self.enrollment)
+                    .ok()
+                    .is_some_and(|current| {
+                        self.io
+                            .write_atomic(self.dir.path(), ENROLLMENT_FILE, &current)
+                            .is_ok()
+                    });
+                if !restored {
+                    self.mark_unwritable();
+                }
             }
             return Err(WriteError::Io(failure.error));
         }

@@ -5,8 +5,8 @@ use crate::reserve::{DiskReserve, ReserveLevel};
 use crate::startup::{ContentState, DataRoot, DataRootEvidence, MarkerState};
 use crate::state::{DurableIo, FsIo, WriteFailure};
 use crate::store::{
-    ArtifactPurger, Census, Claimant, DeleteOutcome, HeldResource, ObservedUnit, PublishPlan,
-    ResourceKey, ResourceStore, StoreError,
+    ArtifactPurger, Census, Claimant, DeleteOutcome, HeldResource, ObservedUnit, PublicationFreeze,
+    PublishPlan, ResourceKey, ResourceStore, StoreError,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -309,6 +309,14 @@ pub struct PurgerView {
     /// Stops (as a crashing process would) once this many units were
     /// deleted: every later delete fails until cleared.
     pub crash_after_deletes: Option<usize>,
+    /// Freezes currently held; publications wait while it is non-zero.
+    pub frozen: usize,
+    /// Publications that arrived during a freeze, applied when it ends.
+    pub waiting: Vec<(String, PurgerUnit)>,
+    /// Every publication, with whether a freeze held it back.
+    pub publications: Vec<(String, bool)>,
+    /// `freeze_publications` refuses.
+    pub fail_freeze: bool,
     /// Every purger call in order: `detach`, `delete`, `barrier`, `census`.
     pub calls: Vec<&'static str>,
 }
@@ -378,6 +386,20 @@ impl MemoryPurger {
             .values()
             .filter(|u| u.present && u.attribution.as_ref() == Some(&key))
             .count()
+    }
+
+    /// A builder publishes `unit` now. While a freeze is held it waits
+    /// (the shared side of the publication lock) and becomes visible only
+    /// when the freeze ends.
+    pub fn publish(&self, unit_id: &str, unit: PurgerUnit) {
+        let mut view = self.view();
+        let held = view.frozen > 0;
+        view.publications.push((unit_id.to_owned(), held));
+        if held {
+            view.waiting.push((unit_id.to_owned(), unit));
+        } else {
+            view.units.insert(unit_id.to_owned(), unit);
+        }
     }
 
     pub fn deleted(&self) -> Vec<String> {
@@ -453,6 +475,17 @@ impl ArtifactPurger for MemoryPurger {
         Ok(())
     }
 
+    fn freeze_publications(&self) -> Result<PublicationFreeze<'_>, StoreError> {
+        let mut view = self.view();
+        view.calls.push("freeze");
+        if view.fail_freeze {
+            return Err(StoreError("injected freeze refusal".into()));
+        }
+        view.frozen += 1;
+        drop(view);
+        Ok(PublicationFreeze::new(Thaw(self.clone())))
+    }
+
     fn census(&self) -> Result<Census, StoreError> {
         let mut view = self.view();
         view.calls.push("census");
@@ -482,6 +515,22 @@ impl ArtifactPurger for MemoryPurger {
                 })
                 .collect(),
         })
+    }
+}
+
+/// The fake's exclusive publication lock: dropping it lets waiting
+/// publications through.
+struct Thaw(MemoryPurger);
+
+impl Drop for Thaw {
+    fn drop(&mut self) {
+        let mut view = self.0.view();
+        view.frozen = view.frozen.saturating_sub(1);
+        if view.frozen == 0 {
+            for (unit_id, unit) in std::mem::take(&mut view.waiting) {
+                view.units.insert(unit_id, unit);
+            }
+        }
     }
 }
 

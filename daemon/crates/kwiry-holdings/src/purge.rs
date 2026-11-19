@@ -178,6 +178,9 @@ pub enum ObligationsRefused {
     HolderStateUnwritable,
     /// No list was applied in this process: nothing is known to be owed.
     NoListThisProcess,
+    /// `503 authority_epoch_mismatch` (H.12 steps 2 and 4): nothing is
+    /// deleted until a verified list applies (§4.5).
+    AuthorityRollbackSuspected,
 }
 
 fn file_safe(text: &str) -> bool {
@@ -216,12 +219,16 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     return None;
                 }
                 let obligated = item.is_obligated();
-                // §3.4 rule 4: residual data, or a residual pass of this
-                // process whose reconfirmation is still owed.
+                // §3.4 rule 4: residual data, or a residual purge whose
+                // reconfirmation is still owed (durable, survives restart).
+                let owed = state
+                    .obligations
+                    .channels
+                    .get(&obligation.obligation_id)
+                    .is_some_and(|c| c.reconfirm_pending);
                 let residual = item.phase == Phase::Retired
                     && obligation.state == ObligationState::Complete
-                    && (inventory.remaining(&item.resource) > 0
-                        || self.verified.contains_key(&obligation.obligation_id));
+                    && (inventory.remaining(&item.resource) > 0 || owed);
                 let disposition = applied.plan.dispositions.get(&item.resource);
                 let classified = matches!(
                     disposition,
@@ -243,6 +250,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }
         if self.applied.is_none() {
             return Err(ObligationsRefused::NoListThisProcess);
+        }
+        Ok(())
+    }
+
+    /// Deletion needs everything reporting needs, and no rollback suspicion.
+    pub(crate) fn purge_allowed(&self) -> Result<(), ObligationsRefused> {
+        self.obligations_allowed()?;
+        if self.rollback_suspected {
+            return Err(ObligationsRefused::AuthorityRollbackSuspected);
         }
         Ok(())
     }
@@ -274,7 +290,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &mut dyn ArtifactPurger,
     ) -> Result<usize, ObligationsRefused> {
-        self.obligations_allowed()?;
+        self.purge_allowed()?;
         let Ok(inventory) = self.inventory(purger) else {
             self.events
                 .emit(HolderEvent::PurgeStepFailed { step: "census" });
@@ -282,7 +298,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         let mut detached = 0;
         for target in self.targets(&inventory) {
-            self.obligations_allowed()?;
+            self.purge_allowed()?;
             let step = self
                 .writer
                 .state()
@@ -324,7 +340,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &mut dyn ArtifactPurger,
     ) -> Result<PurgeSummary, ObligationsRefused> {
-        self.obligations_allowed()?;
+        self.purge_allowed()?;
         let mut summary = PurgeSummary::default();
         let Ok(inventory) = self.inventory(purger) else {
             self.events
@@ -424,9 +440,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if claims.is_empty() && recovered.is_empty() && channel.purge.step == PurgeStep::Deleted {
             return Ok(true);
         }
-        // Before: the exact claim.
+        // Before: the exact claim, and for residual data the durable marker
+        // that a reconfirmation is owed once it is gone.
         let mut book = self.book();
-        let record = &mut Self::channel_mut(&mut book, target).purge;
+        let channel = Self::channel_mut(&mut book, target);
+        if target.residual && !claims.is_empty() {
+            channel.reconfirm_pending = true;
+        }
+        let record = &mut channel.purge;
         record.deleted.extend(recovered);
         record.claimed = claims.clone();
         record.step = PurgeStep::Deleting;
@@ -439,7 +460,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut failed = 0;
         for unit in &claims {
             // H.45: nothing runs after a fail-stop, deletions included.
-            self.obligations_allowed()?;
+            self.purge_allowed()?;
             match purger.delete(unit, &claimant) {
                 Ok(DeleteOutcome::Deleted | DeleteOutcome::Absent) => {
                     deleted.insert(unit.clone());
