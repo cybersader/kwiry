@@ -190,6 +190,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.writer.poisoned()
     }
 
+    /// Fail-stop (`holder_state_unwritable`): durable state could not be
+    /// made to agree with memory. Every gate is revoked and every entry point
+    /// refuses with [`FetchFailure::HolderStateUnwritable`]; the host must
+    /// terminate the holder. Returns whether the holder has stopped.
+    pub fn fail_stopped(&self) -> bool {
+        if self.writer.unwritable() {
+            self.gate.revoke();
+            return true;
+        }
+        false
+    }
+
     pub fn pinned_keys(&self) -> &PinnedKeys {
         &self.writer.enrollment().pinned
     }
@@ -212,6 +224,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     /// Fetches, verifies, admits and applies one list.
     pub fn list_once(&mut self) -> ListOutcome {
+        if self.fail_stopped() {
+            return ListOutcome::Failed(FetchFailure::HolderStateUnwritable);
+        }
         if self.route != RouteHealth::Normal {
             return ListOutcome::AuthHalted;
         }
@@ -223,7 +238,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             };
         }
         self.scheduler.on_start(now);
-        let outcome = match self.fetch(false) {
+        let fetched = self.fetch(false);
+        if self.fail_stopped() {
+            return ListOutcome::Failed(FetchFailure::HolderStateUnwritable);
+        }
+        let outcome = match fetched {
             Ok(Some(list)) => self.admit_and_apply(list),
             Ok(None) => ListOutcome::Failed(FetchFailure::Local("probe result")),
             Err(failure) => {
@@ -365,6 +384,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             FetchFailure::Local(reason) => HolderEvent::ListInvalid {
                 reason: (*reason).to_owned(),
             },
+            FetchFailure::HolderStateUnwritable => HolderEvent::HolderStateUnwritable,
         };
         self.events.emit(event);
     }

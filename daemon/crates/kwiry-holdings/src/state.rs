@@ -349,6 +349,9 @@ pub struct StateWriter {
     /// Set when a failed commit may have left uncommitted bytes on disk and
     /// rewriting the committed state also failed.
     poisoned: bool,
+    /// Set when durable state may read less restrictive than memory and no
+    /// write could correct it. The holder fail-stops.
+    unwritable: bool,
 }
 
 impl StateWriter {
@@ -366,6 +369,7 @@ impl StateWriter {
             state,
             enrollment,
             poisoned: false,
+            unwritable: false,
         }
     }
 
@@ -383,9 +387,17 @@ impl StateWriter {
         self.io.remove(self.dir.path(), name)
     }
 
-    /// Refuses every commit until the committed state is rewritten.
-    pub(crate) fn poison(&mut self) {
+    /// Records that the durable state may claim more than memory and could
+    /// not be corrected: the holder must fail-stop.
+    pub(crate) fn mark_unwritable(&mut self) {
         self.poisoned = true;
+        self.unwritable = true;
+    }
+
+    /// The holder state could not be made to agree with memory, and nothing
+    /// may run on memory-only state: `holder_state_unwritable`.
+    pub fn unwritable(&self) -> bool {
+        self.unwritable
     }
 
     fn write_state(&self, state: &HolderState) -> Result<(), WriteFailure> {

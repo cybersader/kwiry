@@ -101,6 +101,9 @@ pub enum FetchFailure {
     KeysetInvalid,
     /// Entropy or pin persistence failed locally.
     Local(&'static str),
+    /// Fatal: holder state could not be made durable and consistent; the
+    /// holder fail-stopped (`holder_state_unwritable`).
+    HolderStateUnwritable,
 }
 
 /// Clock measurements from one page. The client only measures; a holder

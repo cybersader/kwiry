@@ -198,3 +198,46 @@ fn holder_state_is_refused_without_a_real_directory_sync() {
     const { assert!(DIRECTORY_SYNC, "this suite runs on Unix only") };
     assert!(require_directory_sync(DIRECTORY_SYNC).is_ok());
 }
+
+#[test]
+fn b3_an_unpersistable_poison_fail_stops_the_holder() {
+    // The seal's directory fsync fails, the raised record cannot be written,
+    // and the seal cannot be removed.
+    let (_dir, mut rig) = rig_with(&["res-a"]);
+    raise_hold(&mut rig);
+    let gate = rig.gate();
+    let engine = rig.engine_gate();
+    assert_eq!(gate.check("res-a"), Ok(()));
+    rig.io_faults
+        .plan(vec![Fault::Pass, Fault::AfterRename, Fault::BeforeRename]);
+    rig.io_faults.fail_removes();
+    rig.advance(5_000);
+    assert_eq!(
+        rig.holder().probe_clock(),
+        Some(Err(FetchFailure::HolderStateUnwritable))
+    );
+    assert!(codes(&rig).contains(&"holder_state_unwritable"));
+    // Stopped serving at once, every gate revoked.
+    assert_eq!(gate.check("res-a"), Err(Refusal::Revoked));
+    let query = EngineQuery {
+        resource_id: "res-a",
+        capability: None,
+        artifact: None,
+        root: crate::engine::RootObservation::Unobserved,
+    };
+    assert_eq!(engine.check(&query, Cut::Release), Err(Refusal::Revoked));
+    assert_eq!(rig.gate().check("res-a"), Err(Refusal::Revoked));
+    // No further lifecycle work runs on memory-only state.
+    assert!(rig.holder().fail_stopped());
+    let posts = rig.authority.state().posts();
+    rig.advance(300_000);
+    assert_eq!(
+        rig.holder().list_once(),
+        ListOutcome::Failed(FetchFailure::HolderStateUnwritable)
+    );
+    assert_eq!(
+        rig.holder().probe_clock(),
+        Some(Err(FetchFailure::HolderStateUnwritable))
+    );
+    assert_eq!(rig.authority.state().posts(), posts);
+}

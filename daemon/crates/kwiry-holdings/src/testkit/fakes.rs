@@ -212,6 +212,7 @@ pub enum Fault {
 #[derive(Clone, Default)]
 pub struct IoFaults {
     plan: Arc<Mutex<std::collections::VecDeque<Fault>>>,
+    fail_removes: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl IoFaults {
@@ -227,6 +228,12 @@ impl IoFaults {
 
     pub fn clear(&self) {
         lock(&self.plan).clear();
+        self.fail_removes.store(false, Ordering::SeqCst);
+    }
+
+    /// Makes every file removal fail until cleared.
+    pub fn fail_removes(&self) {
+        self.fail_removes.store(true, Ordering::SeqCst);
     }
 
     pub fn io(&self) -> FaultyIo {
@@ -257,5 +264,12 @@ impl DurableIo for FaultyIo {
                 })
             }
         }
+    }
+
+    fn remove(&self, dir: &Path, name: &str) -> io::Result<()> {
+        if self.faults.fail_removes.load(Ordering::SeqCst) {
+            return Err(io::Error::other("injected unlink failure"));
+        }
+        FsIo.remove(dir, name)
     }
 }

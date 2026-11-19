@@ -116,7 +116,16 @@ impl StateWriter {
         if self.remove_side_file(SEAL_FILE).is_ok() {
             return;
         }
-        self.poison();
+        // H.34 residual. The seal may be visible, the raised record could not
+        // be written and the seal could not be removed, so a load may read the
+        // hold as cleared while memory keeps it raised. A poison flag held
+        // only in memory cannot protect a restart, so the holder fail-stops
+        // instead (`holder_state_unwritable`): every gate is revoked and no
+        // further lifecycle work runs. A restart that then reads "cleared" is
+        // accepted: the clear came from a genuine confirmed correction, and
+        // the first list after the restart measures the clock again and
+        // re-raises the hold if the lag is back (H.36).
+        self.mark_unwritable();
     }
 }
 
@@ -207,6 +216,11 @@ pub(crate) fn observe_verified(
         Err(error) => {
             report_write_failure(events, &error);
             emit(events, EngineEvent::ClockHoldWriteFailed);
+            if writer.unwritable() {
+                // Fail-stop at once, before anything else can serve.
+                gate.revoke();
+                events.emit(HolderEvent::HolderStateUnwritable);
+            }
         }
     }
 }
@@ -234,6 +248,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// counted as a list start, never applied. `None` when no probe is
     /// needed or allowed now.
     pub fn probe_clock(&mut self) -> Option<Result<(), FetchFailure>> {
+        if self.fail_stopped() {
+            return Some(Err(FetchFailure::HolderStateUnwritable));
+        }
         let now = self.clock.mono_ms();
         if self.engine.is_none()
             || self.route != RouteHealth::Normal
@@ -244,6 +261,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }
         self.scheduler.on_probe(now);
         let result = self.fetch(true).map(|_| ());
+        if self.fail_stopped() {
+            return Some(Err(FetchFailure::HolderStateUnwritable));
+        }
         if let Err(failure) = &result {
             self.on_failure(failure);
             // H.40: a failed probe backs off exactly like a list attempt.

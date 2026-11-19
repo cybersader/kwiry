@@ -51,6 +51,9 @@ pub enum HolderEvent {
     ApplyFailed { step: &'static str },
     /// Storage exhaustion: a durable lifecycle write failed for lack of space.
     StorageExhausted,
+    /// Fatal: durable state could not be made to agree with memory. The
+    /// holder fail-stopped; the host must terminate it.
+    HolderStateUnwritable,
     /// The whole-list deadline expired or the fetch was cancelled.
     ListDeadline,
     /// A holder-class profile alert.
@@ -81,6 +84,7 @@ impl HolderEvent {
             Self::ReasonUnrecognised { .. } => "lifecycle_reason_unrecognised",
             Self::ApplyFailed { .. } => "lifecycle_apply_failed",
             Self::StorageExhausted => "disk_reserve_exhausted",
+            Self::HolderStateUnwritable => "holder_state_unwritable",
             Self::ListDeadline => "lifecycle_list_deadline",
             Self::Engine(event) => event.code(),
         }
