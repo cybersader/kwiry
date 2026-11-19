@@ -103,9 +103,9 @@ pub enum ListOutcome {
 pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) config: HolderConfig,
     pub(crate) writer: StateWriter,
-    key: HolderKey,
-    store: S,
-    transport: T,
+    pub(crate) key: HolderKey,
+    pub(crate) store: S,
+    pub(crate) transport: T,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) events: Arc<dyn EventSink>,
     pub(crate) gate: ServingGate,
@@ -117,6 +117,37 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     /// holding id. Empty at process start.
     baseline: HashMap<String, Option<RootPin>>,
     pub(crate) scheduler: RelistScheduler,
+    /// The list last applied in this process: what obligations exist now.
+    pub(crate) applied: Option<Applied>,
+    /// Final scans verified in this process, by obligation id.
+    pub(crate) verified: HashMap<String, crate::purge::VerifiedScan>,
+    /// Report sends in the last second (≤ 10/s per holder, H.8).
+    pub(crate) report_sends: std::collections::VecDeque<u64>,
+    /// Unverifiable acks in a row, by obligation id (R17).
+    pub(crate) unverifiable: HashMap<String, u8>,
+    /// A report answer said the list is stale (`stale_list_ref`, `404`, an
+    /// other-epoch ack): nothing is re-derived until a list applies.
+    pub(crate) relist_before_report: bool,
+    /// An admitted list failed to apply: its floors are not durable, so no
+    /// report is derived or sent until a list applies (K2x).
+    pub(crate) apply_failed_since_admit: bool,
+    /// `503 authority_epoch_mismatch` on any route (H.12 steps 2 and 4):
+    /// treated as unreachable, and no purge runs until a verified list
+    /// applies (§4.5).
+    pub(crate) rollback_suspected: bool,
+    pub(crate) report_backoff_ms: u64,
+    pub(crate) report_backoff_until: u64,
+}
+
+/// The parts of the list last applied in this process that obligations and
+/// reports read.
+#[derive(Clone, Debug)]
+pub struct Applied {
+    pub list_ref: crate::wire::ListRef,
+    pub page0_iat_ms: i64,
+    /// Every item that is not `active`.
+    pub items: Vec<Item>,
+    pub plan: PublishPlan,
 }
 
 impl<S: ResourceStore, T: Transport> Holder<S, T> {
@@ -153,9 +184,21 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if engine.is_some() && state.reset_pending {
             events.emit(HolderEvent::Engine(EngineEvent::PinHistoryUnavailable));
         }
+        let mut writer = started.writer;
+        {
+            // v2 H.45: the instant durable state becomes untrustworthy, every
+            // gate clone is revoked (the B1 path) and the alert is raised,
+            // inside the failing write, without waiting for a later poll.
+            let gate = gate.clone();
+            let events = events.clone();
+            writer.set_fail_stop_hook(Box::new(move || {
+                gate.revoke();
+                events.emit(HolderEvent::HolderStateUnwritable);
+            }));
+        }
         Ok(Self {
             config,
-            writer: started.writer,
+            writer,
             key: started.key,
             store,
             transport,
@@ -167,6 +210,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             list_request_invalid,
             baseline: HashMap::new(),
             scheduler: RelistScheduler::new(300),
+            applied: None,
+            verified: HashMap::new(),
+            report_sends: std::collections::VecDeque::new(),
+            unverifiable: HashMap::new(),
+            relist_before_report: false,
+            apply_failed_since_admit: false,
+            rollback_suspected: false,
+            report_backoff_ms: 0,
+            report_backoff_until: 0,
         })
     }
 
@@ -359,16 +411,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             FetchFailure::UnexpectedEpoch => HolderEvent::UnexpectedEpoch,
             FetchFailure::UnknownKid => HolderEvent::UnknownKid,
             FetchFailure::Livelock => HolderEvent::ListLivelock,
-            FetchFailure::RollbackSuspected => HolderEvent::AuthorityRollbackSuspected,
+            FetchFailure::RollbackSuspected => {
+                self.rollback_suspected = true;
+                HolderEvent::AuthorityRollbackSuspected
+            }
             FetchFailure::ProofExpiredTwice => HolderEvent::ProofExpiredClockAlert,
             FetchFailure::Unauthorized => {
                 self.route = RouteHealth::AuthHalt(AuthHalt::InvalidProof);
                 HolderEvent::HolderUnauthorized
             }
             FetchFailure::NotAuthorized => {
-                self.route = RouteHealth::AuthHalt(AuthHalt::NotAuthorized);
-                self.gate.set_auth_halt();
-                HolderEvent::HolderNotAuthorized
+                // M10: also cancels every queued, unsent report.
+                self.on_not_authorized();
+                return;
             }
             FetchFailure::Rejected { status } => {
                 HolderEvent::ListRequestRejected { status: *status }
@@ -389,7 +444,93 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.events.emit(event);
     }
 
-    fn apply_failed(&self, step: &'static str, error: Option<&WriteError>) -> ListOutcome {
+    /// Emits what the disk reserve did since the last call (K2). Exhaustion
+    /// is reported where the failed write surfaces.
+    pub(crate) fn emit_reserve_uses(&mut self) {
+        for use_ in self.writer.take_reserve_uses() {
+            if use_ == crate::state::ReserveUse::Used {
+                self.events.emit(HolderEvent::DiskReserveUsed);
+            }
+        }
+    }
+
+    /// Lets durable lifecycle writes consume `reserve` on `ENOSPC` (K2).
+    pub fn set_disk_reserve(&mut self, reserve: Box<dyn crate::reserve::DiskReserve>) {
+        self.writer.set_reserve(reserve);
+    }
+
+    /// K1: installs the reserve file `name` in the private directory at
+    /// `dir` (created 0700 if absent, verified by descriptor), and lets
+    /// lifecycle writes consume it.
+    ///
+    /// Nothing is ever unlinked. An existing file is adopted only if its
+    /// header carries the nonce recorded (or staged) for `name` in holder
+    /// state; anything else is refused (`reserve_path_foreign`) and kept. A
+    /// new one follows: stage a fresh nonce (W), create the file exclusively
+    /// and fsync its header and the directory, record the nonce (W), then
+    /// allocate through the descriptor. A crash at any step leaves either a
+    /// file the next start adopts or one it refuses and keeps.
+    #[cfg(unix)]
+    pub fn install_file_reserve(
+        &mut self,
+        dir: &std::path::Path,
+        name: &str,
+        target: u64,
+    ) -> Result<crate::reserve::ReserveLevel, crate::reserve::ReserveError> {
+        use crate::reserve::{DiskReserve, FileReserve, ReserveDir, ReserveError};
+        let write_error = |e: WriteError| ReserveError::Io(std::io::Error::other(e.to_string()));
+        let dir = ReserveDir::open(dir)?;
+        let record = self
+            .writer
+            .state()
+            .reserves
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let mut reserve = match FileReserve::adopt(&dir, name, target, &record.accepted())? {
+            Some((reserve, nonce)) => {
+                self.writer
+                    .record_reserve(name, &nonce)
+                    .map_err(write_error)?;
+                reserve
+            }
+            None => {
+                let nonce = crate::b64::random_token(32)
+                    .map_err(|e| ReserveError::Io(std::io::Error::other(e.to_string())))?;
+                self.writer
+                    .stage_reserve(name, &nonce)
+                    .map_err(write_error)?;
+                let reserve = FileReserve::create(&dir, name, target, &nonce)?;
+                self.writer
+                    .record_reserve(name, &nonce)
+                    .map_err(write_error)?;
+                reserve
+            }
+        };
+        let level = reserve.replenish()?;
+        self.writer.set_reserve(Box::new(reserve));
+        Ok(level)
+    }
+
+    /// K3: whether a new artifact write may start. A refusal alerts
+    /// (`disk_pressure`) and stops the write; it never evicts or deletes.
+    pub fn admit_artifact_write(
+        &self,
+        budget: &crate::reserve::StorageBudget,
+        usage: crate::reserve::StorageUsage,
+    ) -> bool {
+        let admitted = budget.admits(usage);
+        if !admitted {
+            self.events.emit(HolderEvent::DiskPressure);
+        }
+        admitted
+    }
+
+    fn apply_failed(&mut self, step: &'static str, error: Option<&WriteError>) -> ListOutcome {
+        // The admitted list may carry floors that are not durable: no report
+        // runs until a list applies (K2x).
+        self.apply_failed_since_admit = true;
+        self.emit_reserve_uses();
         if let Some(error) = error {
             report_write_failure(self.events.as_ref(), error);
         }
@@ -482,14 +623,23 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     }));
             }
         }
+        // Floors, ended channels and resolved attempts ride in A1 (R12, R13,
+        // R15): if they cannot be made durable, the apply fails whole.
+        let (book, prune) = self.adopted_book(&list);
         let mutation = ApplyMutation {
             rev: rev.clone(),
             tombstones: new_tombstones,
             pin_pairs: new_pairs,
+            obligations: Some(book),
         };
         if let Err(error) = self.writer.apply_list(mutation) {
             return self.apply_failed("A1", Some(&error));
         }
+        // A1 superseded the list applied before: nothing may be purged or
+        // reported on its strength any more. Until this apply reaches A4,
+        // obligations refuse (`ApplyIncomplete`). Final scans stay: each is
+        // bound to the classification it read and lapses when that moves.
+        self.applied = None;
         if self.store.publish(&plan).is_err() {
             return self.apply_failed("A3", None);
         }
@@ -505,6 +655,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.scheduler
             .set_relist_seconds(list.head.lease.relist_seconds);
         self.store.revoke(&plan);
+        self.applied = Some(Applied {
+            list_ref: list.list_ref(),
+            page0_iat_ms: list.page0_iat_ms,
+            items: list
+                .items
+                .iter()
+                .filter(|listed| !listed.item.is_active())
+                .map(|listed| listed.item.clone())
+                .collect(),
+            plan: plan.clone(),
+        });
+        self.after_apply(&prune);
+        self.emit_reserve_uses();
         ListOutcome::Applied(ApplyReport {
             rev,
             plan,
@@ -581,13 +744,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .iter()
             .map(|listed| {
                 let item = &listed.item;
-                // H.39, H.42: the monotonic deadline counts from the `iat` of
-                // the page that carried the item. `quarantine_after` starts
-                // at page 0's `iat`, so this is never later than H.42's
-                // reading, which v2 allows.
+                // H.39, H.46: the monotonic deadline is
+                // `t_recv(page 0) + (quarantine_after − iat(page 0))`. A later
+                // page's own receipt time is never paired with its own `iat`:
+                // its longer transit would push the deadline later.
                 let remaining = item
                     .quarantine_after_ms
-                    .saturating_sub(listed.page_iat_ms)
+                    .saturating_sub(list.page0_iat_ms)
                     .clamp(0, serve_ms);
                 let entry = GateEntry {
                     active: item.is_active() && !tombstoned.contains(&item.resource.id),
@@ -596,8 +759,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         Some(Disposition::Mapped { .. })
                     ),
                     lease_wall_ms: item.quarantine_after_ms,
-                    lease_mono_ms: listed
-                        .received_mono_ms
+                    lease_mono_ms: list
+                        .page0_received_mono_ms
                         .saturating_add(u64::try_from(remaining).unwrap_or(0)),
                     pin: item.root_pin.clone(),
                 };
@@ -688,7 +851,7 @@ impl<S: ResourceStore, T: Transport> Drop for Holder<S, T> {
 /// The calling step fails with no state change; admit refusals stay in
 /// force; nothing is deleted.
 pub(crate) fn report_write_failure(events: &dyn EventSink, error: &WriteError) {
-    if let WriteError::Io(io) | WriteError::Poisoned(io) = error
+    if let WriteError::Io(io) = error
         && io.kind() == std::io::ErrorKind::StorageFull
     {
         events.emit(HolderEvent::StorageExhausted);

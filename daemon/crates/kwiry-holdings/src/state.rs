@@ -20,6 +20,8 @@
 use crate::clock::Clock;
 use crate::engine::{EngineState, PinPair};
 use crate::keys::PinnedKeys;
+use crate::obligations::ObligationBook;
+use crate::reserve::DiskReserve;
 use crate::wire::{ListRef, Rev};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -251,6 +253,13 @@ pub struct HolderState {
     pub list_request_invalid: bool,
     /// Engine-profile fields; default for every other holder.
     pub engine: EngineState,
+    /// Obligation report channels, purge progress and uncertain attempts.
+    #[serde(default)]
+    pub obligations: ObligationBook,
+    /// Reserve files this holder created, by name: the nonce in each file's
+    /// header is the only proof that a file is the holder's own.
+    #[serde(default)]
+    pub reserves: std::collections::BTreeMap<String, crate::reserve::ReserveRecord>,
 }
 
 impl HolderState {
@@ -265,6 +274,8 @@ impl HolderState {
             tombstones: BTreeSet::new(),
             list_request_invalid: false,
             engine: EngineState::default(),
+            obligations: ObligationBook::default(),
+            reserves: std::collections::BTreeMap::new(),
         }
     }
 
@@ -320,8 +331,19 @@ pub enum WriteError {
     Refused(&'static str),
     /// An earlier failure after a rename left the file possibly ahead of
     /// memory, and rewriting the committed state has not succeeded yet.
-    #[error("holder state poisoned until the committed state is rewritten: {0}")]
-    Poisoned(io::Error),
+    /// v2 H.45: the holder fail-stopped; no lifecycle write runs again in
+    /// this process.
+    #[error("holder state unwritable: the holder fail-stopped")]
+    Unwritable,
+}
+
+/// What the disk reserve did for a write (Annex K.1 K2, K2x).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReserveUse {
+    /// A write got `ENOSPC`, consumed reserve bytes and succeeded on retry.
+    Used,
+    /// A write got `ENOSPC` and the reserve could not cover it.
+    Exhausted,
 }
 
 /// What one admitted list adds to durable state (row A1).
@@ -329,6 +351,9 @@ pub struct ApplyMutation {
     pub rev: Rev,
     pub tombstones: Vec<Tombstone>,
     pub pin_pairs: Vec<PinPair>,
+    /// The obligation records the list implies (floors, ended channels,
+    /// resolved attempts), committed in the same write; `None` keeps them.
+    pub obligations: Option<ObligationBook>,
 }
 
 /// Result of a committed A1 mutation.
@@ -346,12 +371,14 @@ pub struct StateWriter {
     clock: Arc<dyn Clock>,
     state: HolderState,
     enrollment: Enrollment,
-    /// Set when a failed commit may have left uncommitted bytes on disk and
-    /// rewriting the committed state also failed.
-    poisoned: bool,
     /// Set when durable state may read less restrictive than memory and no
     /// write could correct it. The holder fail-stops.
     unwritable: bool,
+    reserve: Option<Box<dyn DiskReserve>>,
+    reserve_uses: Vec<ReserveUse>,
+    /// Runs once, synchronously, the moment the writer becomes unwritable:
+    /// the holder revokes every gate and raises `holder_state_unwritable`.
+    fail_stop_hook: Option<Box<dyn Fn() + Send>>,
 }
 
 impl StateWriter {
@@ -368,30 +395,114 @@ impl StateWriter {
             clock,
             state,
             enrollment,
-            poisoned: false,
             unwritable: false,
+            reserve: None,
+            reserve_uses: Vec::new(),
+            fail_stop_hook: None,
         }
     }
 
+    /// Installs what must happen the instant durable state can no longer be
+    /// trusted (v2 H.45). It runs inside the write that discovered it.
+    pub(crate) fn set_fail_stop_hook(&mut self, hook: Box<dyn Fn() + Send>) {
+        self.fail_stop_hook = Some(hook);
+    }
+
+    /// Lets durable writes consume `reserve` on `ENOSPC` (K2).
+    pub fn set_reserve(&mut self, reserve: Box<dyn DiskReserve>) {
+        self.reserve = Some(reserve);
+    }
+
+    /// Refills the reserve as space allows (K4).
+    pub(crate) fn replenish_reserve(&mut self) {
+        if let Some(reserve) = &mut self.reserve {
+            let _ = reserve.replenish();
+        }
+    }
+
+    /// Reserve outcomes since the last call, in order.
+    pub(crate) fn take_reserve_uses(&mut self) -> Vec<ReserveUse> {
+        std::mem::take(&mut self.reserve_uses)
+    }
+
+    /// One durable replacement. On `ENOSPC` before the rename, the needed
+    /// bytes come out of the reserve and the write is retried once (K2);
+    /// otherwise the failure stands (K2x) and nothing changed.
+    fn write_reserved(&mut self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
+        let first = self.io.write_atomic(self.dir.path(), name, bytes);
+        let Err(failure) = first else {
+            return Ok(());
+        };
+        if failure.replaced || failure.error.kind() != io::ErrorKind::StorageFull {
+            return Err(failure);
+        }
+        // Room for the temporary file, plus a page for directory metadata.
+        let needed = u64::try_from(bytes.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(4096);
+        let released = self
+            .reserve
+            .as_mut()
+            .is_some_and(|reserve| reserve.release(needed).unwrap_or(false));
+        if !released {
+            self.reserve_uses.push(ReserveUse::Exhausted);
+            return Err(failure);
+        }
+        match self.io.write_atomic(self.dir.path(), name, bytes) {
+            Ok(()) => {
+                self.reserve_uses.push(ReserveUse::Used);
+                Ok(())
+            }
+            Err(retry) => {
+                if retry.error.kind() == io::ErrorKind::StorageFull {
+                    self.reserve_uses.push(ReserveUse::Exhausted);
+                }
+                Err(retry)
+            }
+        }
+    }
+
+    /// Durable state may differ from memory (an ambiguous write that could
+    /// not be put back). Since v2 H.45 this is the fail-stop itself.
     pub fn poisoned(&self) -> bool {
-        self.poisoned
+        self.unwritable
     }
 
     /// Replaces a profile-owned side file in the holder directory, through
     /// the same durable replacement as the state file.
-    pub(crate) fn write_side_file(&self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
-        self.io.write_atomic(self.dir.path(), name, bytes)
+    pub(crate) fn write_side_file(&mut self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
+        if self.unwritable {
+            return Err(WriteFailure::before_rename(io::Error::other(
+                "holder_state_unwritable",
+            )));
+        }
+        self.write_reserved(name, bytes)
+    }
+
+    /// Removes the clock-hold seal even after a fail-stop: without the seal
+    /// the hold reads raised, so this write can only narrow (H.34, H.45).
+    pub(crate) fn remove_seal_narrowing(&self) -> io::Result<()> {
+        self.io
+            .remove(self.dir.path(), crate::engine::clock_hold::SEAL_FILE)
     }
 
     pub(crate) fn remove_side_file(&self, name: &str) -> io::Result<()> {
+        // v2 H.45: no lifecycle write after a fail-stop.
+        if self.unwritable {
+            return Err(io::Error::other("holder_state_unwritable"));
+        }
         self.io.remove(self.dir.path(), name)
     }
 
     /// Records that the durable state may claim more than memory and could
     /// not be corrected: the holder must fail-stop.
     pub(crate) fn mark_unwritable(&mut self) {
-        self.poisoned = true;
-        self.unwritable = true;
+        if std::mem::replace(&mut self.unwritable, true) {
+            return;
+        }
+        if let Some(hook) = &self.fail_stop_hook {
+            hook();
+        }
     }
 
     /// The holder state could not be made to agree with memory, and nothing
@@ -400,10 +511,10 @@ impl StateWriter {
         self.unwritable
     }
 
-    fn write_state(&self, state: &HolderState) -> Result<(), WriteFailure> {
+    fn write_state(&mut self, state: &HolderState) -> Result<(), WriteFailure> {
         let bytes = serde_json::to_vec_pretty(state)
             .map_err(|e| WriteFailure::before_rename(io::Error::other(e)))?;
-        self.io.write_atomic(self.dir.path(), STATE_FILE, &bytes)
+        self.write_reserved(STATE_FILE, &bytes)
     }
 
     pub fn state(&self) -> &HolderState {
@@ -426,14 +537,12 @@ impl StateWriter {
 
     /// Writes `next` whole and only then adopts it. If the write failed after
     /// its rename, the file may hold `next` although the commit never became
-    /// durable: the committed state is written back at once, and if that also
-    /// fails the writer is poisoned and refuses every commit until the
-    /// committed state has been rewritten.
+    /// durable: the committed state is written back at once. If that also
+    /// fails, durable state is ambiguous and the holder fail-stops (v2 H.45):
+    /// every later commit, side-file write and removal is refused.
     pub(crate) fn commit(&mut self, mut next: HolderState) -> Result<(), WriteError> {
-        if self.poisoned {
-            self.write_state(&self.state)
-                .map_err(|failure| WriteError::Poisoned(failure.error))?;
-            self.poisoned = false;
+        if self.unwritable {
+            return Err(WriteError::Unwritable);
         }
         next.committed_at_ms = self.clock.wall_ms();
         match self.write_state(&next) {
@@ -442,12 +551,51 @@ impl StateWriter {
                 Ok(())
             }
             Err(failure) => {
-                if failure.replaced && self.write_state(&self.state).is_err() {
-                    self.poisoned = true;
+                let committed = self.state.clone();
+                if failure.replaced && self.write_state(&committed).is_err() {
+                    self.mark_unwritable();
                 }
                 Err(WriteError::Io(failure.error))
             }
         }
+    }
+
+    /// Makes `nonce` durable for the reserve `name` before its file is
+    /// created, so a crash after the header is written still lets the next
+    /// start adopt that file. File reserves exist only on Unix.
+    #[cfg(unix)]
+    pub(crate) fn stage_reserve(&mut self, name: &str, nonce: &str) -> Result<(), WriteError> {
+        let mut next = self.state.clone();
+        next.reserves.entry(name.to_owned()).or_default().staged = Some(nonce.to_owned());
+        self.commit(next)
+    }
+
+    /// Records the nonce of the reserve file `name` now holds.
+    #[cfg(unix)]
+    pub(crate) fn record_reserve(&mut self, name: &str, nonce: &str) -> Result<(), WriteError> {
+        let record = crate::reserve::ReserveRecord {
+            nonce: Some(nonce.to_owned()),
+            staged: None,
+        };
+        if self.state.reserves.get(name) == Some(&record) {
+            return Ok(());
+        }
+        let mut next = self.state.clone();
+        next.reserves.insert(name.to_owned(), record);
+        self.commit(next)
+    }
+
+    /// Replaces the obligation records in one commit.
+    pub(crate) fn update_obligations(&mut self, book: ObligationBook) -> Result<(), WriteError> {
+        if self.unwritable {
+            return Err(WriteError::Unwritable);
+        }
+        if self.state.obligations == book {
+            return Ok(());
+        }
+        let mut next = self.state.clone();
+        next.obligations = book;
+        self.commit(next)
     }
 
     /// Row A1: advance the high-water and union tombstones and (engine
@@ -465,6 +613,9 @@ impl StateWriter {
         let mut next = self.state.clone();
         next.high_water = Some(mutation.rev);
         next.tombstones.extend(mutation.tombstones);
+        if let Some(book) = mutation.obligations {
+            next.obligations = book;
+        }
         let engine = &mut next.engine;
         engine.pin_history.extend(mutation.pin_pairs);
         let size = u64::try_from(engine.pin_history.len()).unwrap_or(u64::MAX);
@@ -502,6 +653,9 @@ impl StateWriter {
     /// Persists an accepted key-set statement's pins before any key it adds
     /// is trusted.
     pub fn pin_keys(&mut self, pinned: PinnedKeys) -> Result<(), WriteError> {
+        if self.unwritable {
+            return Err(WriteError::Unwritable);
+        }
         if let (Some(current), Some(next)) = (self.enrollment.pinned.keyset_seq, pinned.keyset_seq)
             && next <= current
         {
@@ -515,11 +669,18 @@ impl StateWriter {
             .write_atomic(self.dir.path(), ENROLLMENT_FILE, &bytes)
         {
             if failure.replaced {
-                let current =
-                    serde_json::to_vec_pretty(&self.enrollment).map_err(io::Error::other)?;
-                let _ = self
-                    .io
-                    .write_atomic(self.dir.path(), ENROLLMENT_FILE, &current);
+                // The file may hold the new pins: put the old ones back, or
+                // fail-stop if that is impossible (v2 H.45).
+                let restored = serde_json::to_vec_pretty(&self.enrollment)
+                    .ok()
+                    .is_some_and(|current| {
+                        self.io
+                            .write_atomic(self.dir.path(), ENROLLMENT_FILE, &current)
+                            .is_ok()
+                    });
+                if !restored {
+                    self.mark_unwritable();
+                }
             }
             return Err(WriteError::Io(failure.error));
         }

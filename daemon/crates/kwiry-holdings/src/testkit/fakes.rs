@@ -1,10 +1,14 @@
 //! Fake clock, store, data root and I/O faults.
 
 use crate::clock::Clock;
+use crate::reserve::{DiskReserve, ReserveLevel};
 use crate::startup::{ContentState, DataRoot, DataRootEvidence, MarkerState};
 use crate::state::{DurableIo, FsIo, WriteFailure};
-use crate::store::{HeldResource, PublishPlan, ResourceKey, ResourceStore, StoreError};
-use std::collections::BTreeMap;
+use crate::store::{
+    ArtifactPurger, Census, Claimant, DeleteOutcome, HeldResource, ObservedUnit, PublicationFreeze,
+    PublishPlan, ResourceKey, ResourceStore, StoreError,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -271,5 +275,290 @@ impl DurableIo for FaultyIo {
             return Err(io::Error::other("injected unlink failure"));
         }
         FsIo.remove(dir, name)
+    }
+}
+
+/// One unit of synthetic retained data in [`MemoryPurger`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PurgerUnit {
+    pub attribution: Option<ResourceKey>,
+    pub open_handles: u32,
+    pub reserved: bool,
+    /// Linked in its storage location. A unit that is unlinked but still
+    /// open stays visible to the census through its descriptor.
+    pub present: bool,
+}
+
+#[derive(Default)]
+pub struct PurgerView {
+    pub units: BTreeMap<String, PurgerUnit>,
+    pub detached: BTreeSet<ResourceKey>,
+    /// Every unit deleted, with the obligation that claimed it.
+    pub deletions: Vec<(String, String)>,
+    /// Every deletion the purger refused, with its reason.
+    pub refused: Vec<(String, &'static str)>,
+    pub fail_delete: BTreeSet<String>,
+    pub fail_detach: bool,
+    pub fail_barrier: bool,
+    pub fail_census: bool,
+    /// Builder outputs published once the census has run this many times:
+    /// `(after_census_calls, unit_id, unit)`.
+    pub late: Vec<(usize, String, PurgerUnit)>,
+    pub census_calls: usize,
+    pub barriers: usize,
+    /// Stops (as a crashing process would) once this many units were
+    /// deleted: every later delete fails until cleared.
+    pub crash_after_deletes: Option<usize>,
+    /// Freezes currently held; publications wait while it is non-zero.
+    pub frozen: usize,
+    /// Publications that arrived during a freeze, applied when it ends.
+    pub waiting: Vec<(String, PurgerUnit)>,
+    /// Every publication, with whether a freeze held it back.
+    pub publications: Vec<(String, bool)>,
+    /// `freeze_publications` refuses.
+    pub fail_freeze: bool,
+    /// Every purger call in order: `detach`, `delete`, `barrier`, `census`.
+    pub calls: Vec<&'static str>,
+}
+
+/// TEST-ONLY purger over synthetic units. It checks every claim itself, as
+/// a real adapter must: a unit is deleted only for a claimant whose resource
+/// it belongs to, only after that resource was detached, never while a
+/// handle is open and never when a release reserved it.
+#[derive(Clone, Default)]
+pub struct MemoryPurger(pub Arc<Mutex<PurgerView>>);
+
+impl MemoryPurger {
+    pub fn view(&self) -> MutexGuard<'_, PurgerView> {
+        lock(&self.0)
+    }
+
+    /// Adds `count` units attributed to `(kind, id)`; returns their ids.
+    pub fn add(&self, kind: &str, id: &str, count: usize) -> Vec<String> {
+        let mut view = self.view();
+        (0..count)
+            .map(|_| {
+                let unit_id = format!("u{:04}", view.units.len());
+                view.units.insert(
+                    unit_id.clone(),
+                    PurgerUnit {
+                        attribution: Some(ResourceKey {
+                            kind: kind.into(),
+                            id: id.into(),
+                        }),
+                        open_handles: 0,
+                        reserved: false,
+                        present: true,
+                    },
+                );
+                unit_id
+            })
+            .collect()
+    }
+
+    /// Adds a unit the census cannot attribute to any resource.
+    pub fn add_unattributable(&self) -> String {
+        let mut view = self.view();
+        let unit_id = format!("u{:04}", view.units.len());
+        view.units.insert(
+            unit_id.clone(),
+            PurgerUnit {
+                attribution: None,
+                open_handles: 0,
+                reserved: false,
+                present: true,
+            },
+        );
+        unit_id
+    }
+
+    pub fn present(&self, unit_id: &str) -> bool {
+        self.view().units.get(unit_id).is_some_and(|u| u.present)
+    }
+
+    pub fn present_of(&self, kind: &str, id: &str) -> usize {
+        let key = ResourceKey {
+            kind: kind.into(),
+            id: id.into(),
+        };
+        self.view()
+            .units
+            .values()
+            .filter(|u| u.present && u.attribution.as_ref() == Some(&key))
+            .count()
+    }
+
+    /// A builder publishes `unit` now. While a freeze is held it waits
+    /// (the shared side of the publication lock) and becomes visible only
+    /// when the freeze ends.
+    pub fn publish(&self, unit_id: &str, unit: PurgerUnit) {
+        let mut view = self.view();
+        let held = view.frozen > 0;
+        view.publications.push((unit_id.to_owned(), held));
+        if held {
+            view.waiting.push((unit_id.to_owned(), unit));
+        } else {
+            view.units.insert(unit_id.to_owned(), unit);
+        }
+    }
+
+    pub fn deleted(&self) -> Vec<String> {
+        self.view()
+            .deletions
+            .iter()
+            .map(|(u, _)| u.clone())
+            .collect()
+    }
+}
+
+impl ArtifactPurger for MemoryPurger {
+    fn detach(&mut self, resource: &ResourceKey) -> Result<(), StoreError> {
+        let mut view = self.view();
+        view.calls.push("detach");
+        if view.fail_detach {
+            return Err(StoreError("injected detach failure".into()));
+        }
+        view.detached.insert(resource.clone());
+        Ok(())
+    }
+
+    fn delete(&mut self, unit_id: &str, claimant: &Claimant) -> Result<DeleteOutcome, StoreError> {
+        let mut view = self.view();
+        view.calls.push("delete");
+        let Some(unit) = view.units.get(unit_id).cloned() else {
+            return Ok(DeleteOutcome::Absent);
+        };
+        if !unit.present {
+            return Ok(DeleteOutcome::Absent);
+        }
+        let refusal = if unit.attribution.as_ref() != Some(claimant.resource()) {
+            Some("claimant does not own the unit")
+        } else if unit.reserved {
+            Some("reserved by a release")
+        } else if !view.detached.contains(claimant.resource()) {
+            Some("resource not detached")
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            view.refused.push((unit_id.to_owned(), reason));
+            return Err(StoreError(reason.into()));
+        }
+        if view
+            .crash_after_deletes
+            .is_some_and(|limit| view.deletions.len() >= limit)
+        {
+            return Err(StoreError("injected crash".into()));
+        }
+        if unit.open_handles > 0 {
+            return Ok(DeleteOutcome::Busy);
+        }
+        if view.fail_delete.contains(unit_id) {
+            return Ok(DeleteOutcome::Failed);
+        }
+        let Claimant::Obligation { obligation_id, .. } = claimant;
+        view.deletions
+            .push((unit_id.to_owned(), obligation_id.clone()));
+        if let Some(stored) = view.units.get_mut(unit_id) {
+            stored.present = false;
+        }
+        Ok(DeleteOutcome::Deleted)
+    }
+
+    fn barrier(&mut self) -> Result<(), StoreError> {
+        let mut view = self.view();
+        view.calls.push("barrier");
+        view.barriers += 1;
+        if view.fail_barrier {
+            return Err(StoreError("injected barrier failure".into()));
+        }
+        Ok(())
+    }
+
+    fn freeze_publications(&self) -> Result<PublicationFreeze<'_>, StoreError> {
+        let mut view = self.view();
+        view.calls.push("freeze");
+        if view.fail_freeze {
+            return Err(StoreError("injected freeze refusal".into()));
+        }
+        view.frozen += 1;
+        drop(view);
+        Ok(PublicationFreeze::new(Thaw(self.clone())))
+    }
+
+    fn census(&self) -> Result<Census, StoreError> {
+        let mut view = self.view();
+        view.calls.push("census");
+        view.census_calls += 1;
+        if view.fail_census {
+            return Err(StoreError("injected census failure".into()));
+        }
+        let calls = view.census_calls;
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut view.late)
+            .into_iter()
+            .partition(|(n, _, _)| *n < calls);
+        view.late = later;
+        for (_, unit_id, unit) in due {
+            view.units.insert(unit_id, unit);
+        }
+        Ok(Census {
+            locations: vec!["objects".into(), "staging".into(), "quarantine".into()],
+            units: view
+                .units
+                .iter()
+                .filter(|(_, u)| u.present || u.open_handles > 0)
+                .map(|(unit_id, u)| ObservedUnit {
+                    unit_id: unit_id.clone(),
+                    attribution: u.attribution.clone(),
+                    open_handles: u.open_handles,
+                    reserved: u.reserved,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// The fake's exclusive publication lock: dropping it lets waiting
+/// publications through.
+struct Thaw(MemoryPurger);
+
+impl Drop for Thaw {
+    fn drop(&mut self) {
+        let mut view = self.0.view();
+        view.frozen = view.frozen.saturating_sub(1);
+        if view.frozen == 0 {
+            for (unit_id, unit) in std::mem::take(&mut view.waiting) {
+                view.units.insert(unit_id, unit);
+            }
+        }
+    }
+}
+
+/// TEST-ONLY disk reserve holding a byte count.
+#[derive(Clone, Default)]
+pub struct FakeReserve(pub Arc<Mutex<u64>>);
+
+impl FakeReserve {
+    pub fn with(bytes: u64) -> Self {
+        Self(Arc::new(Mutex::new(bytes)))
+    }
+
+    pub fn bytes(&self) -> u64 {
+        *lock(&self.0)
+    }
+}
+
+impl DiskReserve for FakeReserve {
+    fn release(&mut self, bytes: u64) -> io::Result<bool> {
+        let mut held = lock(&self.0);
+        if *held < bytes {
+            return Ok(false);
+        }
+        *held -= bytes;
+        Ok(true)
+    }
+
+    fn replenish(&mut self) -> io::Result<ReserveLevel> {
+        Ok(ReserveLevel::Full)
     }
 }

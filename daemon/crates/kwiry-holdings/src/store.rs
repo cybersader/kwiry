@@ -4,7 +4,7 @@
 //! [`ResourceStore`] has no deletion method. Nothing in the apply path can
 //! delete: unknown data is withheld or quarantined, lease expiry only stops
 //! serving. Deletion happens solely through [`ArtifactPurger`], under a
-//! listed obligation, in a later slice.
+//! listed obligation (the `purge` module).
 
 pub use crate::wire::ResourceKey;
 use std::collections::BTreeMap;
@@ -80,18 +80,133 @@ pub trait ResourceStore {
     fn revoke(&mut self, plan: &PublishPlan);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PurgeProgress {
-    pub units_purged: u64,
-    pub units_remaining: u64,
+/// The one authority a deletion may cite (v2 §3.4 rule 5). A purger checks
+/// the claimant against its own attribution of the unit and refuses any
+/// mismatch: no other reason can stand in for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Claimant {
+    /// A listed obligation for exactly this resource.
+    Obligation {
+        obligation_id: String,
+        resource: ResourceKey,
+    },
 }
 
-/// Deletes a resource's artifacts under a listed obligation. Defined here to
-/// fix the boundary; the apply path of this slice never calls it.
+impl Claimant {
+    pub fn resource(&self) -> &ResourceKey {
+        match self {
+            Self::Obligation { resource, .. } => resource,
+        }
+    }
+}
+
+/// One unit of retained data, as the purger's independent census observed it.
+///
+/// Unit ids are random and holder-defined (an object id, a staging build id,
+/// a quarantine entry name). They MUST NOT encode a resource id: they appear
+/// in quarantine manifests and in final-scan records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedUnit {
+    pub unit_id: String,
+    /// The resource the census derived this unit belongs to, from the bytes
+    /// it found and not from any registry, or `None` when it cannot tell.
+    /// An unattributable unit is never deleted by an obligation.
+    pub attribution: Option<ResourceKey>,
+    /// Open handles, including handles to an unlinked file. A unit with an
+    /// open handle is never deleted, and it still counts as remaining.
+    pub open_handles: u32,
+    /// Reserved by an operator release (a later slice): never claimed by an
+    /// obligation, and counted unattributed until deleted.
+    pub reserved: bool,
+}
+
+/// Everything the purger physically observed, independently of its own
+/// registry: every storage location, open descriptors (unlinked files
+/// included) and builder outputs behind the publication barrier.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Census {
+    /// Names of the locations scanned (no paths, no ids).
+    pub locations: Vec<String>,
+    pub units: Vec<ObservedUnit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// Unlinked, and every parent directory synced.
+    Deleted,
+    /// Already gone: nothing to do.
+    Absent,
+    /// An open handle or lease still refers to it; retried on a later pass.
+    Busy,
+    /// The deletion failed; the unit stays attributed and is retried.
+    Failed,
+}
+
+/// Anything an adapter's publication lock guard is made of.
+pub trait FreezeHold {}
+impl<T> FreezeHold for T {}
+
+/// Proof that new publications are held back. While it lives, no artifact
+/// may become visible to [`ArtifactPurger::census`]; dropping it lets held
+/// publications proceed. See [`ArtifactPurger::freeze_publications`].
+#[must_use = "publications resume as soon as the freeze is dropped"]
+pub struct PublicationFreeze<'a> {
+    _hold: Box<dyn FreezeHold + 'a>,
+}
+
+impl<'a> PublicationFreeze<'a> {
+    /// Wraps the adapter's exclusive publication lock guard (or any value
+    /// whose drop releases it).
+    pub fn new(hold: impl FreezeHold + 'a) -> Self {
+        Self {
+            _hold: Box::new(hold),
+        }
+    }
+}
+
+/// Deletes retained data under a listed obligation (v2 §3.4 rules 3 to 5).
+///
+/// The holder drives it in a fixed, crash-safe order, with a durable
+/// holder-state write before and after every step:
+///
+/// 1. [`detach`](Self::detach): the resource can no longer be opened, leased
+///    or built from. Idempotent; deletes nothing.
+/// 2. [`delete`](Self::delete): one unit at a time, each under the exact
+///    [`Claimant`]. The purger refuses a unit it does not attribute to the
+///    claimant's resource, a unit with an open handle and a reserved unit.
+/// 3. [`barrier`](Self::barrier) then [`census`](Self::census): sync every
+///    location, then observe everything that remains.
+///
+/// Nothing else ever calls `delete`. Lease expiry, unknown data, authority
+/// errors, regression, disk pressure and absence from a list never reach it.
 pub trait ArtifactPurger {
-    fn purge(
-        &mut self,
-        resource: &ResourceKey,
-        obligation_id: &str,
-    ) -> Result<PurgeProgress, StoreError>;
+    fn detach(&mut self, resource: &ResourceKey) -> Result<(), StoreError>;
+    fn delete(&mut self, unit_id: &str, claimant: &Claimant) -> Result<DeleteOutcome, StoreError>;
+    /// Syncs every storage location; an error means the barrier failed.
+    fn barrier(&mut self) -> Result<(), StoreError>;
+    fn census(&self) -> Result<Census, StoreError>;
+
+    /// Holds every new publication back until the returned guard drops.
+    ///
+    /// **Adapter obligation.** A *publication* is anything that can make an
+    /// artifact observable to [`census`](Self::census): a builder renaming
+    /// output into place, a registry or manifest insert, a cache fill, a
+    /// restore. The adapter MUST:
+    ///
+    /// 1. make every publication take the **shared** side of one
+    ///    publication lock for its whole visible step, and hold it until the
+    ///    artifact is fully observable;
+    /// 2. make this method take the **exclusive** side, waiting for every
+    ///    publication already holding the shared side to finish;
+    /// 3. while the guard lives, make a publication that wants the lock
+    ///    **wait** (never drop it, and never apply it out of view of the
+    ///    census);
+    /// 4. return `Err` if it cannot give that guarantee. The holder then
+    ///    cancels the report as never transmitted.
+    ///
+    /// The holder takes the freeze immediately before the final census of a
+    /// report, keeps it across the first byte of the transmission and until
+    /// the send completes, then drops it. A report's claim therefore never
+    /// misses an artifact published before its first byte.
+    fn freeze_publications(&self) -> Result<PublicationFreeze<'_>, StoreError>;
 }

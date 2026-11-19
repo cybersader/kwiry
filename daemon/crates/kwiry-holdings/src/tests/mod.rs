@@ -10,6 +10,7 @@ mod core_only;
 mod epoch;
 mod list_client;
 mod must_reject;
+mod purge_report;
 mod review_round2;
 mod review_round3;
 mod review_round4;

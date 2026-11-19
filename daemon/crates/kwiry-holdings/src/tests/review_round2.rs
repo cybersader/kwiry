@@ -343,6 +343,7 @@ fn h40_a_list_request_error_backs_off_to_relist_seconds_until_a_list_applies() {
                 status,
                 content_type: Some(PROBLEM_CONTENT_TYPE.into()),
                 retry_after_s: None,
+                headers: Vec::new(),
                 body: json!({ "status": status, "code": "invalid_request" })
                     .to_string()
                     .into_bytes(),

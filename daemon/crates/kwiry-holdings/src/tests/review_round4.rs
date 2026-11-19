@@ -35,6 +35,7 @@ fn request_error(status: u16) -> Forced {
         status,
         content_type: Some(PROBLEM_CONTENT_TYPE.into()),
         retry_after_s: None,
+        headers: Vec::new(),
         body: json!({"status": status, "code": "invalid_request"})
             .to_string()
             .into_bytes(),

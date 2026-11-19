@@ -13,6 +13,7 @@ fn problem(status: u16, code: &str) -> Forced {
         status,
         content_type: Some(PROBLEM_CONTENT_TYPE.into()),
         retry_after_s: (status == 429).then_some(7),
+        headers: Vec::new(),
         body: json!({ "status": status, "code": code })
             .to_string()
             .into_bytes(),
