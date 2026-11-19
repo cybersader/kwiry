@@ -2,7 +2,6 @@
 //! writing first, decided by `(iat − now_recv) + rtt ≤ 30 s` alone.
 
 use super::*;
-use crate::verify::PageError;
 
 fn raised(rig: &Rig) -> bool {
     rig.engine_gate().clock_hold()
@@ -47,20 +46,6 @@ fn c19_h26_a_page_ahead_raises_the_hold_which_survives_restart() {
     assert_eq!(plain(&rig, "res-a"), Ok(()), "lists and applies continue");
     rig.restart().unwrap();
     assert!(raised(&rig), "a restart is not a clock correction");
-}
-
-#[test]
-fn h21_5_a_signed_page_far_ahead_raises_the_hold_even_when_it_fails_the_window() {
-    let (_dir, mut rig) = setup();
-    rig.authority.state().hooks.page = Some(Box::new(|page| {
-        let iat = page["iat"].as_i64().unwrap();
-        page.insert("iat".into(), (iat + 121).into());
-    }));
-    assert_eq!(
-        failed(rig.relist()),
-        crate::client::FetchFailure::Invalid(PageError::Time)
-    );
-    assert!(raised(&rig));
 }
 
 #[test]

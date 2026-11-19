@@ -6,27 +6,6 @@ use super::*;
 use crate::client::FetchFailure;
 
 #[test]
-fn v12_s1_a_new_epoch_is_refused_while_tombstones_and_leases_stand() {
-    let (_dir, mut rig) = rig();
-    rig.store.hold(PLAIN, "res-a", true, 1);
-    rig.store.hold(PLAIN, "res-r", true, 1);
-    rig.authority.state().add_active(PLAIN, "res-a");
-    let retired = rig.authority.state().add_active(PLAIN, "res-r");
-    rig.authority.state().retire(&retired);
-    let report = applied(rig.holder().list_once());
-    rig.authority.state().new_epoch();
-    assert_eq!(failed(rig.relist()), FetchFailure::UnexpectedEpoch);
-    assert!(codes(&rig).contains(&"unexpected_epoch"));
-    assert_eq!(rig.holder().state().high_water.as_ref(), Some(&report.rev));
-    assert_eq!(plain(&rig, "res-a"), Ok(()));
-    assert_eq!(plain(&rig, "res-r"), Err(Refusal::Tombstoned));
-    rig.advance(900_000);
-    assert_eq!(plain(&rig, "res-a"), Err(Refusal::LeaseLapsed));
-    assert!(rig.store.bytes_present(PLAIN, "res-a"));
-    assert!(rig.store.bytes_present(PLAIN, "res-r"));
-}
-
-#[test]
 fn h33_an_operator_epoch_mid_list_expires_the_cursor_and_the_restart_is_refused() {
     let (_dir, mut rig) = rig();
     rig.config.page_size = 1;

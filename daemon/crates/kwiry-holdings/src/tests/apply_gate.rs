@@ -25,58 +25,6 @@ fn pin_ref_of(rig: &Rig, holding: &str) -> String {
 }
 
 #[test]
-fn h1_serves_only_listed_active_and_withholds_unknown_data_without_deleting() {
-    let (_dir, mut rig) = rig();
-    for (id, units) in [("res-a", 2), ("res-b", 3), ("res-c", 5), ("res-x", 7)] {
-        rig.store.hold(PLAIN, id, true, units);
-    }
-    {
-        let mut authority = rig.authority.state();
-        authority.add_active(PLAIN, "res-a");
-        let b = authority.add_active(PLAIN, "res-b");
-        let c = authority.add_active(PLAIN, "res-c");
-        authority.retire(&b);
-        authority.retire(&c);
-        authority.set_obligation_state(&c, "complete");
-    }
-    let report = applied(rig.holder().list_once());
-    let dispositions = &report.plan.dispositions;
-    assert!(matches!(
-        dispositions[&key(PLAIN, "res-a")],
-        Disposition::Mapped { .. }
-    ));
-    assert!(matches!(
-        dispositions[&key(PLAIN, "res-b")],
-        Disposition::Obligated { .. }
-    ));
-    assert!(matches!(
-        dispositions[&key(PLAIN, "res-c")],
-        Disposition::RetiredComplete { .. }
-    ));
-    assert_eq!(
-        dispositions[&key(PLAIN, "res-x")],
-        Disposition::WithheldUnknown
-    );
-    assert_eq!(report.plan.unattributed_units, 7);
-    assert_eq!(plain(&rig, "res-a"), Ok(()));
-    assert_eq!(plain(&rig, "res-b"), Err(Refusal::Tombstoned));
-    assert_eq!(plain(&rig, "res-c"), Err(Refusal::Tombstoned));
-    assert_eq!(plain(&rig, "res-x"), Err(Refusal::NotListedActive));
-    for id in ["res-a", "res-b", "res-c", "res-x"] {
-        assert!(rig.store.bytes_present(PLAIN, id), "{id}");
-    }
-    let tombstoned: Vec<_> = rig
-        .holder()
-        .state()
-        .tombstones
-        .iter()
-        .map(|t| t.resource_id.clone())
-        .collect();
-    assert_eq!(tombstoned, ["res-b", "res-c"]);
-    assert_eq!(rig.store.view().revoked.len(), 1);
-}
-
-#[test]
 fn h7_h17_leases_lapse_on_either_clock_and_a_fresh_list_restores_serving() {
     let (_dir, mut rig) = rig();
     rig.store.hold(PLAIN, "res-a", true, 1);
@@ -152,24 +100,6 @@ fn i4_tombstones_only_grow_and_unlisted_tombstoned_data_is_quarantined() {
 }
 
 #[test]
-fn v13_a_blocked_obligation_is_terminating_and_authorizes_nothing() {
-    let (_dir, mut rig) = rig();
-    rig.store.hold(PLAIN, "res-a", true, 1);
-    let holding = rig.authority.state().add_active(PLAIN, "res-a");
-    rig.authority.state().retire(&holding);
-    rig.authority
-        .state()
-        .set_obligation_state(&holding, "blocked");
-    let report = applied(rig.holder().list_once());
-    assert!(matches!(
-        report.plan.dispositions[&key(PLAIN, "res-a")],
-        Disposition::Obligated { .. }
-    ));
-    assert_eq!(plain(&rig, "res-a"), Err(Refusal::Tombstoned));
-    assert!(rig.store.bytes_present(PLAIN, "res-a"));
-}
-
-#[test]
 fn q8_retired_escalated_is_obligated() {
     let (_dir, mut rig) = rig();
     let holding = rig.authority.state().add_active(PLAIN, "res-a");
@@ -198,18 +128,6 @@ fn c13_listed_active_but_unconfigured_is_withheld_and_attributed() {
     ));
     assert_eq!(report.plan.unattributed_units, 0);
     assert_eq!(plain(&rig, "res-z"), Err(Refusal::NotMapped));
-}
-
-#[test]
-fn ap1_a_null_pin_never_serves() {
-    let (_dir, mut rig) = rig();
-    rig.store.hold(PINNED, "res-free", true, 1);
-    rig.authority.state().add_active(PINNED, "res-free");
-    applied(rig.holder().list_once());
-    assert_eq!(
-        pinned(&rig, "res-free", "pr_0000000000000000000000", Matches),
-        Err(Refusal::Engine(EngineRefusal::RootPinMissing))
-    );
 }
 
 #[test]

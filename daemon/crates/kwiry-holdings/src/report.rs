@@ -122,7 +122,8 @@ enum Guard {
 }
 
 /// How an answer was classified.
-enum Answer {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
     Receipt,
     Converged,
     Rejected,
@@ -167,7 +168,7 @@ fn valid_pair(accepted: ReportState, state: ObligationState, phase: Phase) -> bo
     }
 }
 
-fn sent_file(digest: &str) -> String {
+pub(crate) fn sent_file(digest: &str) -> String {
     format!("sent.{}.jws", digest.trim_start_matches("sha256:"))
 }
 
@@ -930,7 +931,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }
     }
 
-    fn classify(
+    pub(crate) fn classify(
         &mut self,
         ob: &str,
         pending: &Pending,

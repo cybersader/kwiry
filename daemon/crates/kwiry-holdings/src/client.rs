@@ -191,6 +191,44 @@ fn token(bytes: usize) -> Result<String, FetchFailure> {
     b64::random_token(bytes).map_err(|_| FetchFailure::Local("entropy"))
 }
 
+/// A fresh list nonce (§3.1: one per list, never reused).
+fn list_nonce() -> Result<String, FetchFailure> {
+    #[cfg(all(test, unix))]
+    if let Some(nonce) = scripted_nonces::next() {
+        return Ok(nonce);
+    }
+    token(32)
+}
+
+/// TEST-ONLY. Authority-signed golden pages echo the nonce of the request
+/// they were generated for, and nobody but the authority can re-sign them.
+/// A conformance test queues those nonces here, per thread, so the real
+/// fetch path can verify the real bytes. Compiled only with the conformance
+/// suite (Unix, like `crate::tests`); out of every other build.
+#[cfg(all(test, unix))]
+pub(crate) mod scripted_nonces {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    thread_local! {
+        static QUEUE: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    /// Queues the nonce of the next list session started on this thread.
+    pub(crate) fn push(nonce: &str) {
+        QUEUE.with(|queue| queue.borrow_mut().push_back(nonce.to_owned()));
+    }
+
+    pub(super) fn next() -> Option<String> {
+        QUEUE.with(|queue| queue.borrow_mut().pop_front())
+    }
+
+    /// Nonces queued but never used.
+    pub(crate) fn pending() -> usize {
+        QUEUE.with(|queue| queue.borrow().len())
+    }
+}
+
 pub(crate) fn problem_code(response: &HttpResponse) -> Option<String> {
     if response.content_type.as_deref() != Some(PROBLEM_CONTENT_TYPE) {
         return None;
@@ -399,7 +437,7 @@ fn reverify(
 
 fn fresh_session(env: &FetchEnv) -> Result<Session, FetchFailure> {
     Ok(Session {
-        nonce: token(32)?,
+        nonce: list_nonce()?,
         cursor: None,
         route_fetched: false,
         pins: env.pins.clone(),
@@ -483,7 +521,7 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                     compacts.clear();
                     session.evidence.clear();
                     session.cursor = None;
-                    session.nonce = token(32)?;
+                    session.nonce = list_nonce()?;
                 }
                 (401, Some("replay")) if !replay_retried => replay_retried = true,
                 (401, Some("replay")) => {
