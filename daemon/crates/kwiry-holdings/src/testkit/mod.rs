@@ -125,7 +125,8 @@ impl Rig {
             .expect("enroll");
         }
         let engine = profile.engine.as_ref().map(|_| {
-            EngineSettings::new(30, crate::engine::DEFAULT_STALE_SERVE_S).expect("engine settings")
+            EngineSettings::new(30, crate::engine::stale_serve::DEFAULT_STALE_SERVE_S)
+                .expect("engine settings")
         });
         let config = HolderConfig {
             profile,

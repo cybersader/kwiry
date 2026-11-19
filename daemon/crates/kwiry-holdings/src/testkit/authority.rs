@@ -1,6 +1,6 @@
 //! A reference fake authority for the list route and the key-set route.
 //!
-//! It evaluates a list request in the frozen single validation order: size →
+//! It evaluates a list request in the v2 H.12 single validation order: size →
 //! authority state → signature → rollback witness → time → replay → scope →
 //! rate → grammar → cursor. It signs pages with ES256, computes
 //! `state_digest` and `list_tag` with HKDF/HMAC over canonical JSON, seals
@@ -42,11 +42,14 @@ pub enum Forced {
     Timeout,
 }
 
+/// Rewrites one JSON object of an artefact before it is signed.
+pub type MapHook = Box<dyn Fn(&mut Map<String, Value>) + Send>;
+
 /// Ways to make the fake emit artefacts a correct authority never would.
 #[derive(Default)]
 pub struct Hooks {
-    pub item: Option<Box<dyn Fn(&mut Map<String, Value>) + Send>>,
-    pub page: Option<Box<dyn Fn(&mut Map<String, Value>) + Send>>,
+    pub item: Option<MapHook>,
+    pub page: Option<MapHook>,
     pub typ: Option<String>,
     pub alg: Option<String>,
     pub kid: Option<String>,

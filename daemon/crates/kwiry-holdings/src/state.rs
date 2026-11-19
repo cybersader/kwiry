@@ -1,4 +1,5 @@
-//! The holder directory and its single, fsynced writer.
+//! The holder directory and its single, fsynced writer (v2 Part I §3.4
+//! rule 6, §3.7; Annex K.2 §13 "Holder state" and "Keys").
 //!
 //! The directory lives next to the operator configuration and never inside
 //! a disposable data or index directory. It holds:
@@ -6,8 +7,8 @@
 //! ```text
 //! holder.key         Ed25519 private JWK (0600)
 //! holder.json        enrollment: holder id, kind, issuer, pinned authority keys
-//! holder-state.json  high-water, last list ref, grow-only tombstones and
-//!                    pin-history pairs, the clock hold, the reset flag
+//! holder-state.json  high-water, last list ref, grow-only tombstones, the
+//!                    reset flag, and the engine profile's section (S.4, S.6)
 //! holder.lock        flock held by the one writer for its whole lifetime
 //! ```
 //!
@@ -342,8 +343,9 @@ impl StateWriter {
         let engine = &mut next.engine;
         engine.pin_history.extend(mutation.pin_pairs);
         let size = u64::try_from(engine.pin_history.len()).unwrap_or(u64::MAX);
-        let ceiling_raised = crate::engine::pin::raised_ceiling(size, engine.pin_history_ceiling)
-            .map(|raised| (engine.pin_history_ceiling, raised));
+        let ceiling_raised =
+            crate::engine::pin_history::raised_ceiling(size, engine.pin_history_ceiling)
+                .map(|raised| (engine.pin_history_ceiling, raised));
         if let Some((_, raised)) = ceiling_raised {
             engine.pin_history_ceiling = raised;
         }

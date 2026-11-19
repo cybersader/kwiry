@@ -13,6 +13,7 @@ mod must_reject;
 mod state_startup;
 
 use crate::client::FetchFailure;
+use crate::engine::EngineRefusal;
 use crate::engine::{ArtifactStamp, CapabilityTimes, Cut, EngineQuery, RootObservation};
 use crate::gate::Refusal;
 use crate::holder::{ApplyReport, ListOutcome};

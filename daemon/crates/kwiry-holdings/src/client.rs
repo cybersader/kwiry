@@ -1,4 +1,5 @@
-//! Fetching one complete, verified list.
+//! Fetching one complete, verified list (v2 Part I §3.1, §3.7, §4.5, §7,
+//! H.2, H.3, H.6, H.8, H.12, H.13, H.17).
 //!
 //! - Each request is a holder-signed request object (`EdDSA`, `kid` = the
 //!   enrolled thumbprint, `exp = iat + 300`, fresh `jti`), with one nonce for

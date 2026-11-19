@@ -38,11 +38,11 @@ fn c19_h26_a_page_ahead_raises_the_hold_which_survives_restart() {
     let now = now_s(&rig);
     assert_eq!(
         with_capability(&rig, "res-a", now, now + 60, Cut::Admission),
-        Err(Refusal::ClockBehindAuthority)
+        Err(Refusal::Engine(EngineRefusal::ClockHold))
     );
     assert_eq!(
         with_capability(&rig, "res-a", now, now + 60, Cut::Release),
-        Err(Refusal::ClockBehindAuthority)
+        Err(Refusal::Engine(EngineRefusal::ClockHold))
     );
     assert_eq!(plain(&rig, "res-a"), Ok(()), "lists and applies continue");
     rig.restart().unwrap();

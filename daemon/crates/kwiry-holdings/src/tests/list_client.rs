@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::client::{FetchFailure, HttpResponse};
-use crate::holder::{ListOutcome, RouteHealth};
+use crate::holder::{AuthHalt, ListOutcome, RouteHealth};
 use crate::profile::PROBLEM_CONTENT_TYPE;
 use crate::testkit::Forced;
 use crate::verify::PageError;
@@ -375,9 +375,12 @@ fn h12_a_bad_holder_proof_halts_traffic_but_serving_runs_down_its_lease() {
         .forced
         .push_back(problem(401, "invalid_holder_proof"));
     assert_eq!(failed(rig.relist()), FetchFailure::Unauthorized);
-    assert_eq!(rig.holder().route_health(), RouteHealth::Unauthorized);
+    assert_eq!(
+        rig.holder().route_health(),
+        RouteHealth::AuthHalt(AuthHalt::InvalidProof)
+    );
     let posts = rig.authority.state().posts();
-    assert_eq!(rig.relist(), ListOutcome::Halted);
+    assert_eq!(rig.relist(), ListOutcome::AuthHalted);
     assert_eq!(rig.authority.state().posts(), posts, "no lifecycle traffic");
     assert_eq!(plain(&rig, "res-a"), Ok(()));
     rig.advance(900_000);
@@ -394,8 +397,8 @@ fn h12_403_makes_nothing_servable_until_restart() {
     applied(rig.holder().list_once());
     rig.authority.state().disabled = true;
     assert_eq!(failed(rig.relist()), FetchFailure::NotAuthorized);
-    assert_eq!(plain(&rig, "res-a"), Err(Refusal::NotAuthorized));
-    assert_eq!(rig.relist(), ListOutcome::Halted);
+    assert_eq!(plain(&rig, "res-a"), Err(Refusal::AuthHalt));
+    assert_eq!(rig.relist(), ListOutcome::AuthHalted);
     assert!(codes(&rig).contains(&"holder_not_authorized"));
 }
 
@@ -558,7 +561,8 @@ fn statement_signer(statement: &str) -> String {
 #[test]
 fn h5_typ_alg_and_key_swaps_are_refused() {
     let foreign = p256::ecdsa::SigningKey::from_slice(&[0x71; 32]).unwrap();
-    let cases: Vec<(Box<dyn Fn(&mut crate::testkit::Hooks)>, FetchFailure)> = vec![
+    type HookCase = (Box<dyn Fn(&mut crate::testkit::Hooks)>, FetchFailure);
+    let cases: Vec<HookCase> = vec![
         (
             Box::new(|h| h.typ = Some("example-obligation-ack+jwt".into())),
             FetchFailure::Invalid(PageError::Typ),

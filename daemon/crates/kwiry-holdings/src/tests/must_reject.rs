@@ -270,7 +270,7 @@ fn item_and_obligation_grammar_is_closed() {
     };
     obligated(
         |o| {
-            o.insert("reason".into(), "access-lost".into());
+            o.insert("reason".into(), 7.into());
         },
         "obligation.reason",
     );
@@ -556,4 +556,29 @@ fn a_list_that_validates_after_a_refused_one_applies_normally() {
     rig.authority.state().hooks = Default::default();
     applied(rig.relist());
     assert_eq!(plain(&rig, "res-a"), Ok(()));
+}
+
+#[test]
+fn h7_an_unrecognised_reason_is_opaque_and_never_rejects_the_list() {
+    let (_dir, mut rig) = rig();
+    rig.store.hold(PLAIN, "res-b", true, 1);
+    let b = rig.authority.state().add_active(PLAIN, "res-b");
+    rig.authority.state().retire(&b);
+    for reason in ["access-lost", "key-rotation", "a-reason-from-the-future"] {
+        rig.authority.state().items.get_mut(&b).unwrap()["obligation"]["reason"] = reason.into();
+        rig.authority.state().commit();
+        let report = applied(rig.relist());
+        assert!(matches!(
+            report.plan.dispositions.values().next(),
+            Some(crate::store::Disposition::Obligated { .. })
+        ));
+        assert_eq!(plain(&rig, "res-b"), Err(Refusal::Tombstoned));
+    }
+    assert_eq!(
+        codes(&rig)
+            .iter()
+            .filter(|c| **c == "lifecycle_reason_unrecognised")
+            .count(),
+        3
+    );
 }

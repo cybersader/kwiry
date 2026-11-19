@@ -1,4 +1,5 @@
-//! List-page verification in the frozen checklist order, failing closed:
+//! List-page verification (v2 Part I §3.7, §3.8, §C.3, H.6, H.9, H.16.4) in
+//! the checklist order, failing closed:
 //! `typ` → `alg` → `kid` → signature → `iss` → `aud` → `sub` → `iat`/`exp` →
 //! nonce echo → `rev` against the high-water → page grammar → item grammar
 //! and phase/obligation combinations (including the storage-pin member).
@@ -464,11 +465,12 @@ fn parse_item(value: &Value, ctx: &VerifyContext, rev_seq: u64) -> Result<Item, 
         Some("retired") => Phase::Retired,
         _ => return Err(PageError::Grammar("phase")),
     };
-    let root_pin = crate::engine::pin::parse_member(item, ctx.profile.pins(ctx.holder_kind, kind))?;
+    let root_pin =
+        crate::engine::root_pin::parse_member(item, ctx.profile.pins(ctx.holder_kind, kind))?;
     let quarantine_after_ms = time(item, "quarantine_after", "quarantine_after")?;
     let obligation = match &item["obligation"] {
         Value::Null => None,
-        value => Some(parse_obligation(value, ctx, rev_seq)?),
+        value => Some(parse_obligation(value, rev_seq)?),
     };
     let combination_ok = matches!(
         (phase, obligation.as_ref().map(|o| o.state)),
@@ -504,11 +506,7 @@ fn parse_item(value: &Value, ctx: &VerifyContext, rev_seq: u64) -> Result<Item, 
     })
 }
 
-fn parse_obligation(
-    value: &Value,
-    ctx: &VerifyContext,
-    rev_seq: u64,
-) -> Result<Obligation, PageError> {
+fn parse_obligation(value: &Value, rev_seq: u64) -> Result<Obligation, PageError> {
     const REQUIRED: [&str; 8] = [
         "obligation_id",
         "reason",
@@ -527,17 +525,9 @@ fn parse_obligation(
         grammar::obligation_id,
         "obligation_id",
     )?;
-    let reason = checked_text(
-        object,
-        "reason",
-        |r| {
-            ctx.profile
-                .obligation_reasons
-                .iter()
-                .any(|known| known == r)
-        },
-        "obligation.reason",
-    )?;
+    // v2 §3.3, H.7 (core part): an unrecognised `reason` is opaque. It never
+    // changes what the holder does, so it never rejects the item or the list.
+    let reason = checked_text(object, "reason", |r| !r.is_empty(), "obligation.reason")?;
     let required = checked_text(object, "required", |r| r == "purge", "obligation.required")?;
     let state = match text(object, "state") {
         Some("open") => ObligationState::Open,

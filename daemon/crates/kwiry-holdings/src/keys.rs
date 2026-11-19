@@ -1,4 +1,5 @@
-//! The holder's Ed25519 key and the pinned set of authority keys.
+//! The holder's Ed25519 key and the pinned set of authority keys (v2 Part I
+//! §2.1–§2.3, H.6).
 //!
 //! Authority keys are pinned at enrollment from a bare JWKS. After that a new
 //! key is accepted only through a key-set statement signed by a currently

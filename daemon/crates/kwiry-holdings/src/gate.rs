@@ -1,51 +1,46 @@
-//! The serving gate: the generic question a holder asks before it serves,
-//! reports ready, or releases anything for a resource.
+//! The core serving gate (v2 Part I, §3.4; §C.0 admit, apply, auth halt).
 //!
 //! A resource is servable only when all of these hold:
 //! - a verified list was applied in this process;
-//! - the authority has not refused this holder (`403`);
+//! - the holder is not in an auth halt caused by `403`;
 //! - the resource is listed `active`, mapped (configured), not tombstoned
-//!   and not refused at admission (A0) of a newer list;
+//!   (the no-resurrection invariant) and not refused at the admit of a newer
+//!   list;
 //! - its lease holds on both the wall and the monotonic clock.
 //!
-//! Refusals narrow at once (A0); only a completed apply (A4) broadens.
-//! Resources that carry a storage pin are never servable through
-//! [`ServingGate::check`]: they need the engine profile's
-//! [`crate::engine::EngineGate`], which adds the pin and capability rules.
+//! Admit narrows at once; only a successful apply broadens. A resource that
+//! carries a class-defined member (§C.3) is never servable through
+//! [`ServingGate::check`]: its holder-class profile's gate must add that
+//! profile's rules (for Profile S, [`crate::engine::EngineGate`]).
 
 use crate::clock::Clock;
-use crate::engine::{EngineGateState, PinMember};
+use crate::engine::{EngineGateState, EngineRefusal, PinMember};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    NotAuthorized,
+    /// Auth halt after `403 holder_not_authorized`.
+    AuthHalt,
     NoListThisProcess,
+    /// The no-resurrection invariant: a tombstoned resource never serves.
     Tombstoned,
-    RefusedAtAdmission,
+    /// Refused at the admit of a newer list that has not yet applied.
+    RefusedAtAdmit,
     NotListedActive,
     NotMapped,
     LeaseLapsed,
-    /// A pinned resource asked through the core check.
-    EngineCheckRequired,
-    ClockBehindAuthority,
-    CapabilityLifetime,
-    CapabilityNotYetValid,
-    CapabilityExpired,
-    RootPinMissing,
-    RootPinPreviouslyListed,
-    ArtifactPinRef,
-    RootPinMismatch,
+    /// A resource with a class-defined member asked through the core check.
+    ProfileCheckRequired,
+    /// A Profile S rule.
+    Engine(EngineRefusal),
 }
 
 impl Refusal {
     /// The error class a host maps to its own response.
     pub fn code(self) -> &'static str {
         match self {
-            Self::CapabilityExpired => "capability_expired",
-            Self::CapabilityLifetime | Self::CapabilityNotYetValid => "capability_invalid",
-            Self::ClockBehindAuthority => "clock_behind_authority",
+            Self::Engine(refusal) => refusal.code(),
             _ => "resource_unavailable",
         }
     }
@@ -53,22 +48,15 @@ impl Refusal {
     /// A local reason code: carries no path, pin id or resource id.
     pub fn reason(self) -> &'static str {
         match self {
-            Self::NotAuthorized => "holder_not_authorized",
+            Self::AuthHalt => "auth_halt",
             Self::NoListThisProcess => "no_list_this_process",
             Self::Tombstoned => "tombstoned",
-            Self::RefusedAtAdmission => "refused_at_admission",
+            Self::RefusedAtAdmit => "refused_at_admit",
             Self::NotListedActive => "not_listed_active",
             Self::NotMapped => "not_mapped",
             Self::LeaseLapsed => "lease_lapsed",
-            Self::EngineCheckRequired => "engine_check_required",
-            Self::ClockBehindAuthority => "clock_behind_authority",
-            Self::CapabilityLifetime => "capability_lifetime",
-            Self::CapabilityNotYetValid => "capability_iat_in_future",
-            Self::CapabilityExpired => "capability_expired",
-            Self::RootPinMissing => "root_pin_missing",
-            Self::RootPinPreviouslyListed => "root_pin_previously_listed",
-            Self::ArtifactPinRef => "artifact_pin_ref_not_current",
-            Self::RootPinMismatch => "root_pin_mismatch",
+            Self::ProfileCheckRequired => "profile_check_required",
+            Self::Engine(refusal) => refusal.reason(),
         }
     }
 }
@@ -79,11 +67,11 @@ pub(crate) struct GateEntry {
     pub mapped: bool,
     pub lease_wall_ms: i64,
     pub lease_mono_ms: u64,
-    /// `NotApplicable` unless the engine profile pins this resource's kind.
+    /// `NotApplicable` unless a holder-class profile defines the member.
     pub pin: PinMember,
 }
 
-/// Everything A4 swaps in at once.
+/// Everything a successful apply swaps in at once.
 pub(crate) struct GateSnapshot {
     pub entries: HashMap<String, GateEntry>,
     pub tombstoned: HashSet<String>,
@@ -94,9 +82,9 @@ pub(crate) struct GateSnapshot {
 #[derive(Default)]
 pub(crate) struct GateState {
     list_applied_in_process: bool,
-    not_authorized: bool,
+    auth_halted: bool,
     pub entries: HashMap<String, GateEntry>,
-    refused_at_admission: HashSet<String>,
+    refused_at_admit: HashSet<String>,
     tombstoned: HashSet<String>,
     pub engine: EngineGateState,
 }
@@ -109,8 +97,8 @@ impl GateState {
         now_wall: i64,
         now_mono: u64,
     ) -> Result<&GateEntry, Refusal> {
-        if self.not_authorized {
-            return Err(Refusal::NotAuthorized);
+        if self.auth_halted {
+            return Err(Refusal::AuthHalt);
         }
         if !self.list_applied_in_process {
             return Err(Refusal::NoListThisProcess);
@@ -118,8 +106,8 @@ impl GateState {
         if self.tombstoned.contains(id) {
             return Err(Refusal::Tombstoned);
         }
-        if self.refused_at_admission.contains(id) {
-            return Err(Refusal::RefusedAtAdmission);
+        if self.refused_at_admit.contains(id) {
+            return Err(Refusal::RefusedAtAdmit);
         }
         let entry = self
             .entries
@@ -160,19 +148,19 @@ impl ServingGate {
         self.inner.write().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The core rules for one resource. A pinned resource is refused here
-    /// and must be asked through the engine gate.
+    /// The core rules for one resource. A resource with a class-defined
+    /// member is refused here and must be asked through its profile's gate.
     pub fn check(&self, resource_id: &str) -> Result<(), Refusal> {
         let state = self.read();
         let entry = state.listed_entry(resource_id, self.clock.wall_ms(), self.clock.mono_ms())?;
         if entry.pin != PinMember::NotApplicable {
-            return Err(Refusal::EngineCheckRequired);
+            return Err(Refusal::ProfileCheckRequired);
         }
         Ok(())
     }
 
-    pub fn not_authorized(&self) -> bool {
-        self.read().not_authorized
+    pub fn auth_halted(&self) -> bool {
+        self.read().auth_halted
     }
 
     pub fn list_applied_in_process(&self) -> bool {
@@ -183,19 +171,19 @@ impl ServingGate {
         self.read().engine.clock_hold
     }
 
-    /// A0: refuse at once, before any durable write.
-    pub(crate) fn refuse_at_admission(&self, ids: impl IntoIterator<Item = String>) {
-        self.write().refused_at_admission.extend(ids);
+    /// Admit: refuse at once, before any durable write.
+    pub(crate) fn refuse_at_admit(&self, ids: impl IntoIterator<Item = String>) {
+        self.write().refused_at_admit.extend(ids);
     }
 
-    /// A4: swap the snapshot in; the only step that broadens serving.
+    /// Apply: swap the snapshot in; the only step that broadens serving.
     pub(crate) fn swap(&self, snapshot: GateSnapshot) {
         let mut state = self.write();
         state.entries = snapshot.entries;
         state.tombstoned = snapshot.tombstoned;
         state.engine.pin_history = snapshot.pin_history;
         state.engine.history_available = snapshot.history_available;
-        state.refused_at_admission.clear();
+        state.refused_at_admit.clear();
         state.list_applied_in_process = true;
     }
 
@@ -203,8 +191,8 @@ impl ServingGate {
         self.read().entries.keys().cloned().collect()
     }
 
-    /// `403`: nothing is servable until restart.
-    pub(crate) fn set_not_authorized(&self) {
-        self.write().not_authorized = true;
+    /// Auth halt on `403`: nothing is servable until an operator restart.
+    pub(crate) fn set_auth_halt(&self) {
+        self.write().auth_halted = true;
     }
 }

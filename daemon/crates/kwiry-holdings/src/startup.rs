@@ -1,4 +1,5 @@
-//! Enrollment and startup: which holder state may be trusted.
+//! Enrollment and startup: which holder state may be trusted (v2 §2.1;
+//! Annex K.2 §13 "Holder state lost"; Kwiry IG-2A A6, rows S1–S5).
 //!
 //! | enrollment | holder state                 | data root                       | outcome |
 //! |------------|------------------------------|---------------------------------|---------|
@@ -238,9 +239,6 @@ pub fn start(
     }
     if marker == MarkerState::Absent {
         data_root.bind(&holder_id).map_err(StartupError::DataRoot)?;
-    }
-    if writer.state().reset_pending {
-        events.emit(HolderEvent::PinHistoryUnavailable);
     }
     Ok(Started { writer, key, reset })
 }

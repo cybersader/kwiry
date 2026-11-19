@@ -208,7 +208,7 @@ fn ap1_a_null_pin_never_serves() {
     applied(rig.holder().list_once());
     assert_eq!(
         pinned(&rig, "res-free", "pr_0000000000000000000000", Matches),
-        Err(Refusal::RootPinMissing)
+        Err(Refusal::Engine(EngineRefusal::RootPinMissing))
     );
 }
 
@@ -223,11 +223,11 @@ fn ap2_ap3_pinned_resources_serve_only_stamped_artifacts_from_a_matching_root() 
     assert_eq!(pinned(&rig, "res-a", &pr1, Matches), Ok(()));
     assert_eq!(
         pinned(&rig, "res-a", "pr_9999999999999999999999", Matches),
-        Err(Refusal::ArtifactPinRef)
+        Err(Refusal::Engine(EngineRefusal::ArtifactPinRef))
     );
     assert_eq!(
         pinned(&rig, "res-a", &pr1, Unobserved),
-        Err(Refusal::RootPinMismatch)
+        Err(Refusal::Engine(EngineRefusal::RootPinMismatch))
     );
     // AP3: root swapped; bounded stale service of validated same-ref artifacts.
     let detected = {
@@ -250,10 +250,13 @@ fn ap2_ap3_pinned_resources_serve_only_stamped_artifacts_from_a_matching_root() 
         },
         Cut::Admission,
     );
-    assert_eq!(unvalidated, Err(Refusal::RootPinMismatch));
+    assert_eq!(
+        unvalidated,
+        Err(Refusal::Engine(EngineRefusal::RootPinMismatch))
+    );
     assert_eq!(
         pinned(&rig, "res-a", "pr_9999999999999999999999", mismatch),
-        Err(Refusal::ArtifactPinRef),
+        Err(Refusal::Engine(EngineRefusal::ArtifactPinRef)),
         "another ref never serves, inside the stale bound included"
     );
     // Keep the lease alive while the stale window runs out.
@@ -264,7 +267,7 @@ fn ap2_ap3_pinned_resources_serve_only_stamped_artifacts_from_a_matching_root() 
     rig.advance(1);
     assert_eq!(
         pinned(&rig, "res-a", &pr1, mismatch),
-        Err(Refusal::RootPinMismatch),
+        Err(Refusal::Engine(EngineRefusal::RootPinMismatch)),
         "past max_stale_serve_seconds (3600 s)"
     );
 }
@@ -298,21 +301,21 @@ fn ap4_ap5_ap25_reattestation_refuses_the_old_ref_from_a0_even_when_apply_fails(
     let pr2 = pin_ref_of(&rig, &holding);
     rig.io_faults.fail_writes(1);
     assert_eq!(rig.relist(), ListOutcome::ApplyFailed { step: "A1" });
-    assert_eq!(in_flight(&rig, &pr1), Err(Refusal::RefusedAtAdmission));
+    assert_eq!(in_flight(&rig, &pr1), Err(Refusal::RefusedAtAdmit));
     assert_eq!(
         pinned(&rig, "res-a", &pr2, Matches),
-        Err(Refusal::RefusedAtAdmission)
+        Err(Refusal::RefusedAtAdmit)
     );
     // A3 fails on the retry: still refused.
     rig.store.view().fail_publish = true;
     assert_eq!(rig.relist(), ListOutcome::ApplyFailed { step: "A3" });
-    assert_eq!(in_flight(&rig, &pr1), Err(Refusal::RefusedAtAdmission));
+    assert_eq!(in_flight(&rig, &pr1), Err(Refusal::RefusedAtAdmit));
     rig.store.view().fail_publish = false;
     // A4 succeeds: only the new ref broadens.
     applied(rig.relist());
     assert_eq!(
         pinned(&rig, "res-a", &pr1, Matches),
-        Err(Refusal::ArtifactPinRef)
+        Err(Refusal::Engine(EngineRefusal::ArtifactPinRef))
     );
     assert_eq!(pinned(&rig, "res-a", &pr2, Matches), Ok(()));
 
@@ -322,12 +325,12 @@ fn ap4_ap5_ap25_reattestation_refuses_the_old_ref_from_a0_even_when_apply_fails(
     assert_eq!(rig.relist(), ListOutcome::ApplyFailed { step: "A1" });
     assert_eq!(
         pinned(&rig, "res-a", &pr2, Matches),
-        Err(Refusal::RefusedAtAdmission)
+        Err(Refusal::RefusedAtAdmit)
     );
     applied(rig.relist());
     assert_eq!(
         pinned(&rig, "res-a", &pr2, Matches),
-        Err(Refusal::RootPinMissing)
+        Err(Refusal::Engine(EngineRefusal::RootPinMissing))
     );
     assert!(codes(&rig).contains(&"lifecycle_apply_failed"));
 }
@@ -365,7 +368,7 @@ fn ap6_ap7_h24_after_restart_nothing_serves_until_a_list_of_this_process() {
     applied(rig.relist());
     assert_eq!(
         pinned(&rig, "res-a", &pr1, Matches),
-        Err(Refusal::ArtifactPinRef)
+        Err(Refusal::Engine(EngineRefusal::ArtifactPinRef))
     );
     assert_eq!(pinned(&rig, "res-a", &pr2, Matches), Ok(()));
 }
@@ -411,7 +414,7 @@ fn ap24_ap23_a_pin_held_under_another_resource_is_refused_without_stale_service(
     let pr = pin_ref_of(&rig, &a);
     assert_eq!(
         pinned(&rig, "res-a", &pr, Matches),
-        Err(Refusal::RootPinPreviouslyListed)
+        Err(Refusal::Engine(EngineRefusal::RootPinPreviouslyListed))
     );
     assert_eq!(
         pinned(
@@ -422,7 +425,7 @@ fn ap24_ap23_a_pin_held_under_another_resource_is_refused_without_stale_service(
                 detected_mono_ms: 0
             }
         ),
-        Err(Refusal::RootPinPreviouslyListed)
+        Err(Refusal::Engine(EngineRefusal::RootPinPreviouslyListed))
     );
     assert!(
         rig.engine_gate()
@@ -531,7 +534,9 @@ fn ap27_the_pin_history_ceiling_is_raised_before_persisting_and_never_evicts() {
     assert!(
         rig.events
             .events()
-            .contains(&crate::events::HolderEvent::PinHistoryCeilingRaised { from: 2, to: 4 })
+            .contains(&crate::events::HolderEvent::Engine(
+                crate::engine::EngineEvent::PinHistoryCeilingRaised { from: 2, to: 4 }
+            ))
     );
     assert_eq!(rig.holder().state().engine.pin_history.len(), 3);
     assert_eq!(rig.holder().state().engine.pin_history_ceiling, 4);
@@ -548,21 +553,21 @@ fn c17_c18_h21_capability_lifetime_future_iat_and_expiry_at_both_cuts() {
     assert_eq!(check(&rig, now, now + 60, Cut::Admission), Ok(()));
     assert_eq!(
         check(&rig, now, now + 61, Cut::Admission),
-        Err(Refusal::CapabilityLifetime)
+        Err(Refusal::Engine(EngineRefusal::CapabilityLifetime))
     );
     assert_eq!(check(&rig, now + 30, now + 60, Cut::Admission), Ok(()));
     assert_eq!(
         check(&rig, now + 31, now + 60, Cut::Admission),
-        Err(Refusal::CapabilityNotYetValid)
+        Err(Refusal::Engine(EngineRefusal::CapabilityNotYetValid))
     );
     assert_eq!(check(&rig, now - 90, now - 30, Cut::Release), Ok(()));
     assert_eq!(
         check(&rig, now - 91, now - 31, Cut::Release),
-        Err(Refusal::CapabilityExpired)
+        Err(Refusal::Engine(EngineRefusal::CapabilityExpired))
     );
     assert_eq!(
         check(&rig, now - 91, now - 31, Cut::Admission),
-        Err(Refusal::CapabilityExpired)
+        Err(Refusal::Engine(EngineRefusal::CapabilityExpired))
     );
     assert_eq!(
         EngineSettings::new(31, 3600),

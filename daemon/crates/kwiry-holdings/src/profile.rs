@@ -1,4 +1,5 @@
-//! Authority-specific wire constants, supplied by the composition layer.
+//! Authority-specific wire constants, supplied by the composition layer
+//! (v2 Part I §1, §2.3, §2.4, §3.3; §C.1 profile hooks).
 //!
 //! The protocol's routes, claim names, identifier grammar and state machines
 //! are fixed here. The values that name a particular authority, such as `typ`
@@ -31,7 +32,8 @@ pub struct WireProfile {
     pub resource_kinds: Vec<String>,
     /// The kinds this holder accepts; a list naming any other kind is refused.
     pub accepted_resource_kinds: Vec<String>,
-    /// Obligation reasons this holder kind may receive.
+    /// Obligation reasons this holder class declares (v2 §C.1). Others are
+    /// accepted as opaque (§3.3) and only counted in an alert.
     pub obligation_reasons: Vec<String>,
     /// The search-engine holder profile, or `None` for holders that use the
     /// generic core alone.

@@ -1,11 +1,15 @@
 //! Composition of the generic Holdings holder (`kwiry-holdings`) for its first
 //! authority, OpenClast.
 //!
+//! Normative source: OpenClast `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md`
+//! (sha256 `6b6d2e27d48b6d110a11477aebf17120fa5b190b1b1dea51016865d6db49f12c`).
+//! Kwiry implements Part I (generic core) and Part II (Profile S, the
+//! search-engine holder); Annex K maps Kwiry's ids to the generic states.
+//!
 //! The protocol logic is authority-neutral; this module supplies the
-//! authority's frozen wire constants (HOLDINGS-WIRE §2.3, §2.4, §3.3, H.7 and
-//! H.16). Slice 1 only defines them and proves the holder against the fake
-//! authority under them; slice S4 wires the holder into configuration, the
-//! CLI and the server.
+//! authority's wire constants (v2 §2.3, §2.4, §3.3, §C.1 and S.0). Slice 1
+//! only defines them and proves the holder against the fake authority under
+//! them; slice S4 wires the holder into configuration, the CLI and the server.
 
 use kwiry_holdings::engine::EngineProfile;
 use kwiry_holdings::profile::WireProfile;
@@ -24,7 +28,7 @@ pub(crate) fn openclast_profile() -> WireProfile {
         audience_prefix: "openclast-lifecycle:".into(),
         authority_key_id_prefix: "lc-".into(),
         resource_kinds: strings(&["room", "vault", "workspace", "file", "share", "backup"]),
-        // HOLDINGS-WIRE §13: an engine holder holds `{kind: room}` only.
+        // v2 S.0: Profile S receives `room` items only (S1).
         accepted_resource_kinds: strings(&["room"]),
         obligation_reasons: strings(&["retire", "holder-decommission"]),
         // The search-engine holder profile: room items carry root pins, and
@@ -46,7 +50,7 @@ mod tests {
     use kwiry_holdings::testkit::Rig;
     use kwiry_holdings::verify::PageError;
 
-    /// The authority's HKDF salt for `state_digest` (HOLDINGS-WIRE §3.5).
+    /// The authority's HKDF salt for `state_digest` (v2 §3.5).
     /// Only the test authority computes digests; the holder never does.
     const DIGEST_SALT: &str = "openclast-lifecycle/v1";
 

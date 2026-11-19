@@ -1,26 +1,30 @@
-//! Storage-root pins (engine profile).
+//! S.3: authority-held root pins (v2 Part II, H.16, H.24, H.28).
 //!
-//! For pinned resources the authority delivers `{pin_id, pin_ref}` in the
-//! list: `pin_id` is the engine's own observation of the storage root, and
-//! `pin_ref` is the authority's attestation id. The engine serves a pinned
-//! resource only:
-//! - when the pin is non-null and its `pin_id` is not in the history under
-//!   another resource;
+//! For items of the profile's pinned resource kind the authority delivers
+//! `root_pin: {pin_id, pin_ref} | null`, the class-defined member of Profile S (§C.3, H.16.4).
+//! `pin_id` is the engine's own observation of the storage root; `pin_ref`
+//! is the authority's attestation id. The engine serves a pinned resource
+//! only (H.16.5):
+//! - when the pin is non-null and its `pin_id` is not held under another
+//!   resource in the pin-history set (S.6);
 //! - from artifacts whose durable derivation record carries the listed
-//!   `pin_ref`; and
-//! - while it observes the root at `pin_id`, or within a bounded stale window
-//!   for artifacts that a walk validated under the same `pin_ref`.
+//!   `pin_ref` (H.24, H.28);
+//! - while it observes the root at `pin_id`, or inside the stale-serve
+//!   window (S.5);
+//! - from a list received in its current process lifetime (the core's
+//!   no-list-this-process rule).
 //!
-//! At admission, a pin that is null, changed since the list last applied in
-//! this process, or held under another resource is refused at once. Only a
-//! completed apply broadens serving again.
+//! At admit, a null pin, a pin changed since the list last applied in this
+//! process (H.24: empty at process start), or a pin held under another
+//! resource is refused at once; only a successful apply broadens serving.
 
-use super::{EngineGateState, EngineQuery, EngineSettings};
-use crate::gate::{GateEntry, Refusal};
+use super::{
+    EngineGateState, EngineQuery, EngineRefusal, EngineSettings, pin_history, stale_serve,
+};
+use crate::gate::GateEntry;
 use crate::grammar;
 use crate::verify::{ListedItem, PageError};
 use crate::wire::Item;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap};
 
@@ -30,10 +34,10 @@ pub struct RootPin {
     pub pin_ref: String,
 }
 
-/// The storage-pin member of a list item.
+/// The class-defined pin member of a list item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PinMember {
-    /// The item's kind carries no pin for this holder (member absent).
+    /// The holder's profile defines no pin for this item (member absent).
     NotApplicable,
     /// The member is `null`: not attested, never served.
     Unpinned,
@@ -47,15 +51,6 @@ impl PinMember {
             _ => None,
         }
     }
-}
-
-/// A `(pin_id, resource_id)` pair seen in an applied list. Pairs are never
-/// replaced or evicted; one pin id may appear under several resources.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PinPair {
-    pub pin_id: String,
-    pub resource_id: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,7 +68,7 @@ pub struct ArtifactStamp<'a> {
     /// `pin_ref` recorded in the artifact's durable derivation record.
     pub pin_ref: &'a str,
     /// Published by a walk whose root observation matched the listed
-    /// `pin_id` under this same `pin_ref`.
+    /// `pin_id` under this same `pin_ref` (S.5 "previously validated").
     pub validated_under_matching_root: bool,
 }
 
@@ -89,8 +84,8 @@ pub struct WalkInputs {
     pub history_available: bool,
 }
 
-/// Parses the storage-pin member. `pinned` says whether this holder kind and
-/// resource kind carry it; anywhere else the member is refused.
+/// Parses the member under the §C.3 presence rule: present exactly when
+/// `pinned`, refused anywhere else (H.16.4 must-reject shapes).
 pub fn parse_member(item: &Map<String, Value>, pinned: bool) -> Result<PinMember, PageError> {
     match (pinned, item.get("root_pin")) {
         (false, None) => Ok(PinMember::NotApplicable),
@@ -123,42 +118,8 @@ pub fn parse_member(item: &Map<String, Value>, pinned: bool) -> Result<PinMember
     }
 }
 
-/// Pairs in `items` that the history does not hold yet.
-pub(crate) fn new_pairs(items: &[ListedItem], history: &BTreeSet<PinPair>) -> Vec<PinPair> {
-    items
-        .iter()
-        .filter_map(|listed| {
-            listed.item.root_pin.pin().map(|pin| PinPair {
-                pin_id: pin.pin_id.clone(),
-                resource_id: listed.item.resource.id.clone(),
-            })
-        })
-        .filter(|pair| !history.contains(pair))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-pub(crate) fn history_map<'a>(
-    pairs: impl Iterator<Item = &'a PinPair>,
-) -> HashMap<String, BTreeSet<String>> {
-    let mut map: HashMap<String, BTreeSet<String>> = HashMap::new();
-    for pair in pairs {
-        map.entry(pair.pin_id.clone())
-            .or_default()
-            .insert(pair.resource_id.clone());
-    }
-    map
-}
-
-/// The raised ceiling when `size` pairs would exceed `ceiling`. The ceiling
-/// only ever rises; pairs are never evicted.
-pub fn raised_ceiling(size: u64, ceiling: u64) -> Option<u64> {
-    (size > ceiling).then(|| size.max(ceiling.saturating_mul(2)))
-}
-
-/// The pins of the list being applied, by holding id: the next process-local
-/// baseline for "changed".
+/// The pins of the list being applied, by holding id: the next
+/// process-local baseline for "changed" (H.24).
 pub(crate) fn baseline(items: &[ListedItem]) -> HashMap<String, Option<RootPin>> {
     items
         .iter()
@@ -172,11 +133,10 @@ pub(crate) fn baseline(items: &[ListedItem]) -> HashMap<String, Option<RootPin>>
         .collect()
 }
 
-/// Admission refusal for an active, untombstoned item: a null pin, a pin
-/// changed against the baseline (empty at process start, so every pin of a
-/// process's first list counts as changed), or a pin the history holds under
-/// another resource. The history includes the list's own pairs.
-pub(crate) fn refused_at_admission(
+/// Admit refusal for an active, untombstoned item (H.16.5 effective point):
+/// a null pin, a pin changed against the baseline, or a pin the history
+/// (including this list's own pairs) holds under another resource.
+pub(crate) fn refused_at_admit(
     item: &Item,
     baseline: &HashMap<String, Option<RootPin>>,
     history: &HashMap<String, BTreeSet<String>>,
@@ -186,19 +146,9 @@ pub(crate) fn refused_at_admission(
         PinMember::Unpinned => true,
         PinMember::Pinned(pin) => {
             let unchanged = baseline.get(&item.holding_id) == Some(&Some(pin.clone()));
-            let conflict = history
-                .get(&pin.pin_id)
-                .is_some_and(|ids| ids.iter().any(|other| other != &item.resource.id));
-            !unchanged || conflict
+            !unchanged || pin_history::conflicts(history, &pin.pin_id, &item.resource.id)
         }
     }
-}
-
-pub(crate) fn previously_listed(state: &EngineGateState, pin_id: &str, resource_id: &str) -> bool {
-    state
-        .pin_history
-        .get(pin_id)
-        .is_some_and(|ids| ids.iter().any(|id| id != resource_id))
 }
 
 /// The pin rules for one entry that passed every core rule.
@@ -208,28 +158,23 @@ pub(crate) fn check(
     query: &EngineQuery,
     now_mono: u64,
     settings: &EngineSettings,
-) -> Result<(), Refusal> {
+) -> Result<(), EngineRefusal> {
     let pin = match &entry.pin {
         PinMember::NotApplicable => return Ok(()),
-        PinMember::Unpinned => return Err(Refusal::RootPinMissing),
+        PinMember::Unpinned => return Err(EngineRefusal::RootPinMissing),
         PinMember::Pinned(pin) => pin,
     };
-    if previously_listed(state, &pin.pin_id, query.resource_id) {
-        return Err(Refusal::RootPinPreviouslyListed);
+    if pin_history::previously_listed(state, &pin.pin_id, query.resource_id) {
+        return Err(EngineRefusal::RootPinPreviouslyListed);
     }
     let artifact = query
         .artifact
         .filter(|a| a.pin_ref == pin.pin_ref)
-        .ok_or(Refusal::ArtifactPinRef)?;
-    match query.root {
-        RootObservation::Matches => Ok(()),
-        RootObservation::Mismatch { detected_mono_ms }
-            if artifact.validated_under_matching_root
-                && now_mono.saturating_sub(detected_mono_ms) <= settings.max_stale_serve_ms =>
-        {
-            Ok(())
-        }
-        _ => Err(Refusal::RootPinMismatch),
+        .ok_or(EngineRefusal::ArtifactPinRef)?;
+    if stale_serve::permits(query.root, artifact, now_mono, settings) {
+        Ok(())
+    } else {
+        Err(EngineRefusal::RootPinMismatch)
     }
 }
 

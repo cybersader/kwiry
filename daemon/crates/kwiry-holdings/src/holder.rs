@@ -1,32 +1,34 @@
-//! Admission and apply: from a verified list to a narrowed-then-broadened
-//! serving gate.
+//! Admit and apply (v2 Part I §C.0, §3.4, §3.7): from a verified list to a
+//! narrowed-then-broadened serving gate.
 //!
-//! - **Admission.** First contact accepts; the same epoch accepts a `seq` at
-//!   or above the high-water; a lower `seq` is `lifecycle_regressed` and any
-//!   other epoch is `unexpected_epoch`. Refused lists change nothing and
-//!   leases keep running down.
-//! - **A0.** Before any durable write, refuse every resource the list does
-//!   not show `active` and every tombstoned resource; with the engine
-//!   profile, also every pin that is null, changed or held under another
-//!   resource. These refusals survive any later failure.
-//! - **A1.** One atomic commit: high-water, tombstones ∪ newly terminating
-//!   or retired resources, and (engine profile) pin-history ∪ the list's pins.
-//! - **A2–A3.** The store publishes the classification. Nothing is deleted:
-//!   unknown data is withheld, tombstoned-unlisted data quarantined.
-//! - **A4.** Record the applied list, then swap the gate snapshot: the only
-//!   step that broadens serving.
-//! - **A5.** In-memory revocation in the store.
+//! - **High-water (§3.7, §5).** First contact accepts; the same epoch
+//!   accepts a `seq` at or above the high-water; a lower `seq` is
+//!   `lifecycle_regressed` and any other epoch is `unexpected_epoch`. A
+//!   refused list changes nothing and leases keep running down.
+//! - **Admit.** Before any durable write, refuse every resource the list does
+//!   not show `active` and every tombstoned resource, plus each holder-class
+//!   profile's narrowing (Profile S: changed, null or conflicting pins,
+//!   H.16.5). Admit refusals survive any later failure.
+//! - **Apply, durable part.** One atomic commit of the high-water, the
+//!   tombstones ∪ newly terminating or retired resources (§3.4 rule 6) and
+//!   (Profile S) the pin-history pairs (S.6); then the store publishes the
+//!   classification. Nothing is deleted: unknown data is withheld,
+//!   tombstoned-unlisted data quarantined (§3.4 rules 1 and 5).
+//! - **Apply, broadening part.** Record the applied list, then swap the gate
+//!   snapshot: the only step that broadens serving.
+//!
+//! Kwiry's row ids for these steps are A0–A5 (v2 Annex K.1).
 
 use crate::client::{self, ClockEvidence, FetchEnv, FetchFailure, FetchParams, Transport};
 use crate::clock::Clock;
-use crate::engine::{self, EngineGate, EngineSettings, RootPin};
+use crate::engine::{self, EngineEvent, EngineGate, EngineSettings, RootPin};
 use crate::events::{EventSink, HolderEvent};
 use crate::gate::{GateEntry, GateSnapshot, ServingGate};
 use crate::keys::{HolderKey, PinnedKeys};
 use crate::profile::WireProfile;
 use crate::schedule::{EarlyRelist, RelistScheduler};
 use crate::startup::Started;
-use crate::state::{ApplyMutation, HolderState, StateWriter, Tombstone};
+use crate::state::{ApplyMutation, HolderState, StateWriter, Tombstone, WriteError};
 use crate::store::{Disposition, HeldResource, PublishPlan, ResourceStore};
 use crate::verify::{VerifiedList, VerifyContext};
 use crate::wire::{Item, ResourceKey, Rev};
@@ -53,14 +55,21 @@ pub enum ConfigError {
     EngineSettings,
 }
 
+/// The cause of an auth halt (v2 §C.0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthHalt {
+    /// `401 invalid_holder_proof`: no lifecycle traffic; serving runs down
+    /// its leases.
+    InvalidProof,
+    /// `403 holder_not_authorized`: no traffic and nothing servable.
+    NotAuthorized,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteHealth {
     Normal,
-    /// `401 invalid_holder_proof`: no lifecycle traffic until restart;
-    /// serving continues until leases lapse.
-    Unauthorized,
-    /// `403 holder_not_authorized`: nothing servable until restart.
-    NotAuthorized,
+    /// Lasts until an operator restart (operator resume).
+    AuthHalt(AuthHalt),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,12 +84,12 @@ pub struct ApplyReport {
 pub enum ListOutcome {
     Applied(ApplyReport),
     Failed(FetchFailure),
-    /// An apply step failed; A0 refusals stay in force.
+    /// An apply step failed; admit refusals stay in force.
     ApplyFailed {
         step: &'static str,
     },
-    /// Route health forbids lifecycle traffic.
-    Halted,
+    /// An auth halt forbids lifecycle traffic.
+    AuthHalted,
     /// The next counted list start is not allowed before this instant.
     RateLimited {
         until_mono_ms: u64,
@@ -98,7 +107,7 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) gate: ServingGate,
     pub(crate) engine: Option<EngineGate>,
     pub(crate) route: RouteHealth,
-    /// Engine profile: pins of the list last applied in this process, by
+    /// Profile S (H.24): pins of the list last applied in this process, by
     /// holding id. Empty at process start.
     baseline: HashMap<String, Option<RootPin>>,
     pub(crate) scheduler: RelistScheduler,
@@ -120,11 +129,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if config.profile.engine.is_some() != config.engine.is_some() {
             return Err(ConfigError::EngineSettings);
         }
-        let hold = started.writer.state().engine.clock_behind_authority;
-        let gate = ServingGate::new(clock.clone(), hold);
+        let state = started.writer.state();
+        let gate = ServingGate::new(clock.clone(), state.engine.clock_behind_authority);
         let engine = config
             .engine
             .map(|settings| EngineGate::new(gate.clone(), settings));
+        if engine.is_some() && state.reset_pending {
+            events.emit(HolderEvent::Engine(EngineEvent::PinHistoryUnavailable));
+        }
         Ok(Self {
             config,
             writer: started.writer,
@@ -146,7 +158,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.gate.clone()
     }
 
-    /// The engine profile's gate, when the profile has one.
+    /// The Profile S gate, when the profile has an engine section.
     pub fn engine_gate(&self) -> Option<EngineGate> {
         self.engine.clone()
     }
@@ -178,7 +190,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// Fetches, verifies, admits and applies one list.
     pub fn list_once(&mut self) -> ListOutcome {
         if self.route != RouteHealth::Normal {
-            return ListOutcome::Halted;
+            return ListOutcome::AuthHalted;
         }
         let now = self.clock.mono_ms();
         if !self.scheduler.may_start(now) {
@@ -212,8 +224,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         outcome
     }
 
-    /// Amendment B: a request named a resource that is neither listed nor
-    /// tombstoned. The request itself is refused by the gate meanwhile.
+    /// v2 §11.1 B (early relist): a request named a resource that is neither
+    /// listed nor tombstoned. The request itself is refused meanwhile.
     pub fn request_early_relist(&mut self, resource_id: &str) -> Option<EarlyRelist> {
         if self.gate.listed_ids().contains(resource_id)
             || self.writer.state().is_tombstoned(resource_id)
@@ -250,7 +262,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         let mut on_clock = |observed: ClockEvidence| {
             if engine_on {
-                engine::capability::raise_on_signed_page(gate_view, &observed);
+                engine::clock_hold::raise_on_signed_page(gate_view, &observed);
                 evidence.push(observed);
             }
         };
@@ -298,12 +310,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             FetchFailure::RollbackSuspected => HolderEvent::AuthorityRollbackSuspected,
             FetchFailure::ProofExpiredTwice => HolderEvent::ProofExpiredClockAlert,
             FetchFailure::Unauthorized => {
-                self.route = RouteHealth::Unauthorized;
+                self.route = RouteHealth::AuthHalt(AuthHalt::InvalidProof);
                 HolderEvent::HolderUnauthorized
             }
             FetchFailure::NotAuthorized => {
-                self.route = RouteHealth::NotAuthorized;
-                self.gate.set_not_authorized();
+                self.route = RouteHealth::AuthHalt(AuthHalt::NotAuthorized);
+                self.gate.set_auth_halt();
                 HolderEvent::HolderNotAuthorized
             }
             FetchFailure::Rejected { status } => {
@@ -316,7 +328,21 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.events.emit(event);
     }
 
-    fn apply_failed(&self, step: &'static str) -> ListOutcome {
+    /// Storage exhaustion (v2 §C.0): a lifecycle write failed for lack of
+    /// space. The calling step fails with no state change; admit refusals
+    /// stay in force; nothing is deleted.
+    pub(crate) fn write_failed(&self, error: &WriteError) {
+        if let WriteError::Io(io) = error
+            && io.kind() == std::io::ErrorKind::StorageFull
+        {
+            self.events.emit(HolderEvent::StorageExhausted);
+        }
+    }
+
+    fn apply_failed(&self, step: &'static str, error: Option<&WriteError>) -> ListOutcome {
+        if let Some(error) = error {
+            self.write_failed(error);
+        }
         self.events.emit(HolderEvent::ApplyFailed { step });
         ListOutcome::ApplyFailed { step }
     }
@@ -341,6 +367,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 count: list.skipped_instructions,
             });
         }
+        let declared = &self.config.profile.obligation_reasons;
+        let unrecognised = list
+            .items
+            .iter()
+            .filter_map(|listed| listed.item.obligation.as_ref())
+            .filter(|obligation| !declared.contains(&obligation.reason))
+            .count();
+        if unrecognised > 0 {
+            self.events.emit(HolderEvent::ReasonUnrecognised {
+                count: unrecognised,
+            });
+        }
 
         let engine_on = self.engine.is_some();
         let state = self.writer.state();
@@ -362,35 +400,36 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .map(|t| t.resource_id.clone())
             .collect();
         let new_pairs = if engine_on {
-            engine::pin::new_pairs(&list.items, &state.engine.pin_history)
+            engine::pin_history::new_pairs(&list.items, &state.engine.pin_history)
         } else {
             Vec::new()
         };
 
-        // A0: narrow at once, before any durable write.
-        let (refuse, conflicts) = self.admission_refusals(&list, &tombstoned, &new_pairs);
-        self.gate.refuse_at_admission(refuse);
+        // Admit: narrow at once, before any durable write.
+        let (refuse, conflicts) = self.admit_refusals(&list, &tombstoned, &new_pairs);
+        self.gate.refuse_at_admit(refuse);
         if conflicts > 0 {
             self.events
                 .emit(HolderEvent::TombstoneConflict { count: conflicts });
         }
 
         let Ok(held) = self.store.held() else {
-            return self.apply_failed("held");
+            return self.apply_failed("held", None);
         };
         let plan = classify(&list, &held, &tombstoned);
 
-        // A1.
+        // Apply, durable part: one atomic commit.
         if engine_on {
             let engine_state = &self.writer.state().engine;
             let size = engine_state.pin_history.len() + new_pairs.len();
-            let ceiling = engine_state.pin_history_ceiling;
             let size = u64::try_from(size).unwrap_or(u64::MAX);
-            if let Some(raised) = engine::pin::raised_ceiling(size, ceiling) {
-                self.events.emit(HolderEvent::PinHistoryCeilingRaised {
-                    from: ceiling,
-                    to: raised,
-                });
+            let ceiling = engine_state.pin_history_ceiling;
+            if let Some(raised) = engine::pin_history::raised_ceiling(size, ceiling) {
+                self.events
+                    .emit(HolderEvent::Engine(EngineEvent::PinHistoryCeilingRaised {
+                        from: ceiling,
+                        to: raised,
+                    }));
             }
         }
         let mutation = ApplyMutation {
@@ -398,25 +437,23 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             tombstones: new_tombstones,
             pin_pairs: new_pairs,
         };
-        if self.writer.apply_list(mutation).is_err() {
-            return self.apply_failed("A1");
+        if let Err(error) = self.writer.apply_list(mutation) {
+            return self.apply_failed("A1", Some(&error));
         }
-        // A2–A3.
         if self.store.publish(&plan).is_err() {
-            return self.apply_failed("A3");
+            return self.apply_failed("A3", None);
         }
-        // A4.
-        if self.writer.record_applied(list.list_ref()).is_err() {
-            return self.apply_failed("A4");
+        // Apply, broadening part.
+        if let Err(error) = self.writer.record_applied(list.list_ref()) {
+            return self.apply_failed("A4", Some(&error));
         }
         let snapshot = self.snapshot(&list, &plan, &tombstoned);
         self.gate.swap(snapshot);
         if engine_on {
-            self.baseline = engine::pin::baseline(&list.items);
+            self.baseline = engine::root_pin::baseline(&list.items);
         }
         self.scheduler
             .set_relist_seconds(list.head.lease.relist_seconds);
-        // A5.
         self.store.revoke(&plan);
         ListOutcome::Applied(ApplyReport {
             rev,
@@ -426,7 +463,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         })
     }
 
-    fn admission_refusals(
+    fn admit_refusals(
         &self,
         list: &VerifiedList,
         tombstoned: &HashSet<String>,
@@ -448,7 +485,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             })
             .collect();
         let history = self.engine.as_ref().map(|_| {
-            engine::pin::history_map(
+            engine::pin_history::map(
                 self.writer
                     .state()
                     .engine
@@ -468,7 +505,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 true
             } else {
                 history.as_ref().is_some_and(|history| {
-                    engine::pin::refused_at_admission(item, &self.baseline, history)
+                    engine::root_pin::refused_at_admit(item, &self.baseline, history)
                 })
             };
             if refused {
@@ -515,13 +552,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         GateSnapshot {
             entries,
             tombstoned: tombstoned.clone(),
-            pin_history: engine::pin::history_map(state.engine.pin_history.iter()),
+            pin_history: engine::pin_history::map(state.engine.pin_history.iter()),
             history_available: !state.reset_pending,
         }
     }
 }
 
-/// Classifies everything held or listed. A listed item matches a held
+/// Classifies everything held or listed (§3.4). A listed item matches a held
 /// resource only on the full `(kind, id)` key; tombstones match on id alone.
 pub fn classify(
     list: &VerifiedList,

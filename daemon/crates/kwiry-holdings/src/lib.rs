@@ -1,5 +1,13 @@
 //! Holder side of a generic, signed resource-lifecycle protocol.
 //!
+//! Normative source: the authority workspace file
+//! `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md` (sha256
+//! `6b6d2e27d48b6d110a11477aebf17120fa5b190b1b1dea51016865d6db49f12c`).
+//! Part I is the generic core every holder class implements; Part II is
+//! Profile S, the search-engine holder. Section and `H.n` citations in
+//! this crate are anchors in that file. Only the composition layer names
+//! the authority.
+//!
 //! An **authority** publishes, for each **holder**, a signed and complete
 //! **list** of the **resources** that holder may hold. Each listed holding is
 //! `active` (servable under a lease), `terminating` (an open **obligation**
