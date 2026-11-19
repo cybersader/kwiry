@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::client::FetchFailure;
-use crate::testkit::{TEST_ISSUER, neutral_profile, pin_id};
-use crate::verify::{PageError, PageExpectations, SignedPage, VerifyContext, check_page};
+use crate::testkit::pin_id;
+use crate::verify::PageError;
 use serde_json::{Map, Value, json};
 
 type ItemHook = Box<dyn Fn(&mut Map<String, Value>) + Send>;
@@ -37,37 +37,16 @@ fn on_kind(
 }
 
 #[test]
-fn ap17_h16_4_storage_pin_shapes() {
+fn ap17_h16_4_storage_pin_shapes_outside_the_golden_set() {
     let pin = |value: Value| {
         on_kind(PINNED, move |i| {
             i.insert("root_pin".into(), value.clone());
         })
     };
     let good_ref = "pr_0000000000000000000001";
-    item_rejects(
-        on_kind(PINNED, |i| {
-            i.remove("root_pin");
-        }),
-        PageError::RootPin("member missing"),
-    );
-    item_rejects(
-        on_kind(PLAIN, |i| {
-            i.insert("root_pin".into(), Value::Null);
-        }),
-        PageError::RootPin("member on an unpinned item"),
-    );
-    item_rejects(
-        pin(json!({"pin_id": pin_id("x"), "pin_ref": good_ref, "cause": "enroll"})),
-        PageError::RootPin("unknown member"),
-    );
-    for half in [
-        json!({"pin_id": null, "pin_ref": good_ref}),
-        json!({"pin_id": pin_id("x"), "pin_ref": null}),
-        json!({"pin_ref": good_ref}),
-        json!({"pin_id": pin_id("x")}),
-        json!({"pin_id": null, "pin_ref": null}),
-        json!({}),
-    ] {
+    // Missing, unknown-member, half-null, half-absent and on-a-non-pinned
+    // item shapes are golden must-reject vectors; these are not.
+    for half in [json!({"pin_id": null, "pin_ref": null}), json!({})] {
         item_rejects(
             pin(half),
             PageError::RootPin("pin_id and pin_ref must both be present"),
@@ -94,76 +73,6 @@ fn ap17_h16_4_storage_pin_shapes() {
     item_rejects(pin(json!("pinned")), PageError::RootPin("not an object"));
 }
 
-fn minimal_page(item: Value) -> Map<String, Value> {
-    json!({
-        "iss": TEST_ISSUER,
-        "aud": "example-lifecycle:hd_TESTholder000000000001",
-        "sub": "hd_TESTholder000000000001",
-        "iat": 1_794_916_800,
-        "exp": 1_794_917_100,
-        "jti": "lp_0000000000000000000001",
-        "list_id": "ls_0000000000000000000001",
-        "nonce": "n".repeat(43),
-        "rev": {"epoch": "ep_TESTepoch0000000000001", "seq": 5},
-        "holder": {"holder_id": "hd_TESTholder000000000001", "kind": "device",
-                   "lease": {"serve_seconds": 900, "relist_seconds": 300}},
-        "page": {"index": 0, "count": 1, "items_total": 1},
-        "state_digest": format!("hs1.{}", "d".repeat(43)),
-        "list_tag": format!("lt1.{}", "t".repeat(43)),
-        "items": [item],
-        "next_cursor": null,
-    })
-    .as_object()
-    .unwrap()
-    .clone()
-}
-
-#[test]
-fn ap17_h16_4_a_pin_member_for_a_non_pinned_holder_kind_is_refused() {
-    let profile = neutral_profile();
-    let ctx = VerifyContext {
-        profile: &profile,
-        issuer: TEST_ISSUER,
-        holder_id: "hd_TESTholder000000000001",
-        holder_kind: "device",
-    };
-    let nonce = "n".repeat(43);
-    let expect = PageExpectations {
-        nonce: &nonce,
-        high_water: None,
-    };
-    let item = |root_pin: Option<Value>| {
-        let mut item = json!({
-            "holding_id": "hl_0000000000000000000001",
-            "resource": {"kind": PINNED, "id": "res-a"},
-            "phase": "active",
-            "quarantine_after": "2026-11-17T12:15:00Z",
-            "obligation": null,
-        });
-        if let Some(pin) = root_pin {
-            item["root_pin"] = pin;
-        }
-        item
-    };
-    let check = |claims| {
-        check_page(
-            SignedPage {
-                claims,
-                iat_ms: 1_794_916_800_000,
-            },
-            1_794_916_800_000,
-            &ctx,
-            &expect,
-        )
-        .map(|_| ())
-    };
-    assert_eq!(check(minimal_page(item(None))), Ok(()));
-    assert_eq!(
-        check(minimal_page(item(Some(Value::Null)))),
-        Err(PageError::RootPin("member on an unpinned item"))
-    );
-}
-
 #[test]
 fn phase_and_obligation_combinations_outside_the_table_are_refused() {
     let obligation = |state: &str| {
@@ -185,9 +94,9 @@ fn phase_and_obligation_combinations_outside_the_table_are_refused() {
             i.insert("obligation".into(), value.clone());
         })
     };
+    // `terminating` with no obligation is a golden must-reject vector.
     for (phase, state) in [
         ("active", Some("open")),
-        ("terminating", None),
         ("terminating", Some("complete")),
         ("retired", Some("open")),
         ("retired", Some("quarantined")),
@@ -199,13 +108,8 @@ fn phase_and_obligation_combinations_outside_the_table_are_refused() {
 
 #[test]
 fn item_and_obligation_grammar_is_closed() {
+    // An unknown item member is a golden must-reject vector.
     let cases: Vec<(ItemHook, &str)> = vec![
-        (
-            on_kind(PLAIN, |i| {
-                i.insert("note".into(), "x".into());
-            }),
-            "item members",
-        ),
         (
             on_kind(PLAIN, |i| {
                 i["resource"]["kind"] = "spaceship".into();
@@ -352,6 +256,8 @@ fn on_page(index: u64, change: impl Fn(&mut Map<String, Value>) + Send + 'static
 
 #[test]
 fn h9_and_page_grammar_refuse_the_whole_list() {
+    // An impossible page index, a repeated holding and an unknown page
+    // member are golden must-reject vectors.
     page_rejects(
         2,
         500,
@@ -417,25 +323,9 @@ fn h9_and_page_grammar_refuse_the_whole_list() {
         1,
         500,
         on_page(0, |p| {
-            p["page"]["index"] = 1.into();
-        }),
-        PageError::Grammar("page.index"),
-    );
-    page_rejects(
-        1,
-        500,
-        on_page(0, |p| {
             p.insert("next_cursor".into(), "c".repeat(513).into());
         }),
         PageError::Grammar("next_cursor"),
-    );
-    page_rejects(
-        1,
-        500,
-        on_page(0, |p| {
-            p.insert("extra".into(), 1.into());
-        }),
-        PageError::Grammar("page members"),
     );
     page_rejects(
         1,

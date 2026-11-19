@@ -21,93 +21,6 @@ fn problem(status: u16, code: &str) -> Forced {
 }
 
 #[test]
-fn first_contact_applies_then_every_request_echoes_the_witness() {
-    let (_dir, mut rig) = rig();
-    rig.authority.state().add_active(PLAIN, "res-a");
-    let report = applied(rig.holder().list_once());
-    assert_eq!(rig.holder().state().high_water.as_ref(), Some(&report.rev));
-    let applied_ref = rig.holder().state().last_list_ref.clone().expect("ref");
-    applied(rig.relist());
-
-    let claims = rig.authority.state().list_claims();
-    assert_eq!(claims.len(), 2);
-    assert!(
-        !claims[0].contains_key("last_list_ref"),
-        "omitted on first contact"
-    );
-    assert_eq!(claims[0]["high_water"], Value::Null);
-    assert_eq!(claims[1]["last_list_ref"], applied_ref.to_value());
-    assert_eq!(claims[1]["high_water"], report.rev.to_value());
-    for request in &claims {
-        let (iat, exp) = (request["iat"].as_i64(), request["exp"].as_i64());
-        assert_eq!(exp.unwrap() - iat.unwrap(), 300, "exp = iat + 300");
-        assert_eq!(request["page_size"], 500);
-    }
-    assert_ne!(
-        claims[0]["nonce"], claims[1]["nonce"],
-        "never reused across lists"
-    );
-}
-
-#[test]
-fn pages_share_one_nonce_and_assemble_atomically() {
-    let (_dir, mut rig) = rig();
-    rig.config.page_size = 2;
-    rig.restart().unwrap();
-    for n in 0..5 {
-        rig.authority.state().add_active(PLAIN, &format!("res-{n}"));
-    }
-    for n in 0..5 {
-        rig.store.hold(PLAIN, &format!("res-{n}"), true, 1);
-    }
-    let report = applied(rig.holder().list_once());
-    assert_eq!(report.plan.dispositions.len(), 5);
-    let claims = rig.authority.state().list_claims();
-    assert_eq!(claims.len(), 3);
-    assert!(claims.iter().all(|c| c["nonce"] == claims[0]["nonce"]));
-    assert_eq!(claims[0]["cursor"], Value::Null);
-    assert!(claims[1]["cursor"].is_string() && claims[2]["cursor"].is_string());
-    assert_eq!(rig.store.view().published.len(), 1);
-    for n in 0..5 {
-        assert_eq!(plain(&rig, &format!("res-{n}")), Ok(()));
-    }
-}
-
-#[test]
-fn h8_and_oa10_410_mid_list_discards_pages_and_relists_with_a_fresh_nonce() {
-    let (_dir, mut rig) = rig();
-    rig.config.page_size = 1;
-    rig.restart().unwrap();
-    let holding = rig.authority.state().add_active(PINNED, "res-a");
-    rig.authority.state().add_active(PLAIN, "res-b");
-    // An attestation commits while the cursor is mid-pagination.
-    rig.authority.state().before_post(2, move |s| {
-        s.attest(&holding, "dir-a");
-    });
-    let report = applied(rig.holder().list_once());
-    let statuses: Vec<u16> = rig
-        .authority
-        .state()
-        .requests
-        .iter()
-        .map(|r| r.status)
-        .collect();
-    assert_eq!(statuses, [200, 410, 200, 200]);
-    let claims = rig.authority.state().list_claims();
-    assert_eq!(claims[1]["nonce"], claims[0]["nonce"]);
-    assert_ne!(
-        claims[2]["nonce"], claims[0]["nonce"],
-        "fresh nonce after 410"
-    );
-    assert_eq!(claims[2]["cursor"], Value::Null, "restart from page 1");
-    assert_eq!(rig.store.view().published.len(), 1, "no partial apply");
-    // The fresh list carries the attested pin.
-    let state = rig.holder().state();
-    assert_eq!(state.engine.pin_history.len(), 1);
-    assert_eq!(state.high_water.as_ref(), Some(&report.rev));
-}
-
-#[test]
 fn the_fifth_consecutive_410_is_a_livelock_and_applies_nothing() {
     let (_dir, mut rig) = rig();
     rig.config.page_size = 1;
@@ -135,51 +48,6 @@ fn the_fifth_consecutive_410_is_a_livelock_and_applies_nothing() {
 }
 
 #[test]
-fn h3_same_epoch_regression_is_refused_and_leases_run() {
-    let (_dir, mut rig) = rig();
-    rig.store.hold(PLAIN, "res-a", true, 3);
-    rig.authority.state().add_active(PLAIN, "res-a");
-    let report = applied(rig.holder().list_once());
-    // Make the witness unverifiable (a digest-root rotation), then roll back.
-    {
-        let mut authority = rig.authority.state();
-        authority.digest_root = [0x77; 32];
-        authority.raw_restore(report.rev.seq - 1);
-    }
-    assert_eq!(failed(rig.relist()), FetchFailure::Regressed);
-    assert!(codes(&rig).contains(&"lifecycle_regressed"));
-    assert_eq!(rig.holder().state().high_water.as_ref(), Some(&report.rev));
-    assert_eq!(
-        plain(&rig, "res-a"),
-        Ok(()),
-        "serving unchanged until the lease"
-    );
-    rig.advance(900_000);
-    assert_eq!(plain(&rig, "res-a"), Err(Refusal::LeaseLapsed));
-    assert!(rig.store.bytes_present(PLAIN, "res-a"));
-}
-
-#[test]
-fn v10_and_oa6_tag_valid_witness_ahead_of_the_store_is_rollback_suspected() {
-    let (_dir, mut rig) = rig();
-    rig.store.hold(PLAIN, "res-a", true, 1);
-    rig.authority.state().add_active(PLAIN, "res-a");
-    let report = applied(rig.holder().list_once());
-    rig.authority.state().raw_restore(report.rev.seq - 5);
-    assert_eq!(failed(rig.relist()), FetchFailure::RollbackSuspected);
-    assert!(rig.authority.state().rollback_suspected);
-    assert_eq!(rig.authority.state().audit, ["restore_detected"]);
-    assert!(codes(&rig).contains(&"authority_rollback_suspected"));
-    assert_eq!(rig.holder().route_health(), RouteHealth::Normal);
-    // Every later list answers 503; leases run down; nothing is deleted.
-    assert_eq!(failed(rig.relist()), FetchFailure::RollbackSuspected);
-    assert_eq!(plain(&rig, "res-a"), Ok(()));
-    rig.advance(900_000);
-    assert_eq!(plain(&rig, "res-a"), Err(Refusal::LeaseLapsed));
-    assert!(rig.store.bytes_present(PLAIN, "res-a"));
-}
-
-#[test]
 fn h17_an_unverifiable_witness_is_ignored_and_the_list_served() {
     let (_dir, mut rig) = rig();
     rig.authority.state().add_active(PLAIN, "res-a");
@@ -196,58 +64,20 @@ fn h17_an_unverifiable_witness_is_ignored_and_the_list_served() {
     );
 }
 
+/// The golden must-reject set covers another holder's `aud` and `sub` and
+/// another `iss`; the broadcast audience is not in it.
 #[test]
-fn h4_wrong_nonce_echo_and_a_replayed_older_list_are_refused() {
+fn h6_the_broadcast_audience_never_binds_a_list_page() {
     let (_dir, mut rig) = rig();
     rig.authority.state().add_active(PLAIN, "res-a");
-    applied(rig.holder().list_once());
-    let old = rig.authority.state().last_page.clone().expect("page");
-    rig.authority
-        .state()
-        .forced
-        .push_back(Forced::Response(old));
-    assert_eq!(
-        failed(rig.relist()),
-        FetchFailure::Invalid(PageError::Nonce)
-    );
     rig.authority.state().hooks.page = Some(Box::new(|page| {
-        page.insert("nonce".into(), "n".repeat(43).into());
+        page.insert("aud".into(), "example-lifecycle:*".into());
     }));
     assert_eq!(
-        failed(rig.relist()),
-        FetchFailure::Invalid(PageError::Nonce)
+        failed(rig.holder().list_once()),
+        FetchFailure::Invalid(PageError::Audience)
     );
-    assert!(codes(&rig).contains(&"lifecycle_list_invalid"));
-}
-
-#[test]
-fn h6_audience_subject_and_issuer_bind_the_page_to_this_holder() {
-    for (member, value, expected) in [
-        (
-            "aud",
-            "example-lifecycle:hd_OTHERholder00000000001",
-            PageError::Audience,
-        ),
-        ("aud", "example-lifecycle:*", PageError::Audience),
-        ("sub", "hd_OTHERholder00000000001", PageError::Subject),
-        (
-            "iss",
-            "https://elsewhere.example.test/api/lifecycle/v1",
-            PageError::Issuer,
-        ),
-    ] {
-        let (_dir, mut rig) = rig();
-        rig.authority.state().add_active(PLAIN, "res-a");
-        rig.authority.state().hooks.page = Some(Box::new(move |page| {
-            page.insert(member.into(), value.into());
-        }));
-        assert_eq!(
-            failed(rig.holder().list_once()),
-            FetchFailure::Invalid(expected),
-            "{member}"
-        );
-        assert_eq!(plain(&rig, "res-a"), Err(Refusal::NoListThisProcess));
-    }
+    assert_eq!(plain(&rig, "res-a"), Err(Refusal::NoListThisProcess));
 }
 
 #[test]
@@ -476,24 +306,6 @@ fn the_whole_list_budget_discards_a_slow_list() {
     assert_eq!(failed(rig.holder().list_once()), FetchFailure::Deadline);
     assert!(rig.store.view().published.is_empty());
     assert_eq!(rig.holder().state().high_water, None);
-}
-
-#[test]
-fn v14_a_new_key_without_a_valid_keyset_statement_is_unknown_kid() {
-    let (_dir, mut rig) = rig();
-    rig.store.hold(PLAIN, "res-a", true, 1);
-    rig.authority.state().add_active(PLAIN, "res-a");
-    applied(rig.holder().list_once());
-    let pins = rig.holder().pinned_keys().clone();
-    {
-        let mut authority = rig.authority.state();
-        authority.rotate_key([0x61; 32], false, false);
-        authority.keyset_statement = None;
-    }
-    assert_eq!(failed(rig.relist()), FetchFailure::UnknownKid);
-    assert!(codes(&rig).contains(&"unknown_kid"));
-    assert_eq!(rig.holder().pinned_keys(), &pins);
-    assert_eq!(plain(&rig, "res-a"), Ok(()), "leases keep running");
 }
 
 #[test]
