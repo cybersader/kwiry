@@ -459,35 +459,55 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.writer.set_reserve(reserve);
     }
 
-    /// K1: creates the named reserve file at `path`, records its identity in
-    /// holder state before any write may consume it, and installs it. A
-    /// leaf already at `path` is replaced only if it is a symbolic link or
-    /// the reserve this holder recorded under `name`; anything else is
-    /// refused (`reserve_path_foreign`) and left in place.
+    /// K1: installs the reserve file `name` in the private directory at
+    /// `dir` (created 0700 if absent, verified by descriptor), and lets
+    /// lifecycle writes consume it.
+    ///
+    /// Nothing is ever unlinked. An existing file is adopted only if its
+    /// header carries the nonce recorded (or staged) for `name` in holder
+    /// state; anything else is refused (`reserve_path_foreign`) and kept. A
+    /// new one follows: stage a fresh nonce (W), create the file exclusively
+    /// and fsync its header and the directory, record the nonce (W), then
+    /// allocate through the descriptor. A crash at any step leaves either a
+    /// file the next start adopts or one it refuses and keeps.
     #[cfg(unix)]
     pub fn install_file_reserve(
         &mut self,
+        dir: &std::path::Path,
         name: &str,
-        path: &std::path::Path,
         target: u64,
     ) -> Result<crate::reserve::ReserveLevel, crate::reserve::ReserveError> {
-        use crate::reserve::{FileReserve, ReserveError};
-        let owned = self.writer.state().reserves.get(name).copied();
-        let (reserve, level) = FileReserve::open(path, target, owned)?;
-        let recorded = reserve
-            .identity()
-            .map_err(ReserveError::Io)
-            .and_then(|identity| {
+        use crate::reserve::{DiskReserve, FileReserve, ReserveDir, ReserveError};
+        let write_error = |e: WriteError| ReserveError::Io(std::io::Error::other(e.to_string()));
+        let dir = ReserveDir::open(dir)?;
+        let record = self
+            .writer
+            .state()
+            .reserves
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let mut reserve = match FileReserve::adopt(&dir, name, target, &record.accepted())? {
+            Some((reserve, nonce)) => {
                 self.writer
-                    .record_reserve(name, identity)
-                    .map_err(|e| ReserveError::Io(std::io::Error::other(e.to_string())))
-            });
-        if let Err(error) = recorded {
-            // Never leave an unrecorded file behind: it would be refused as
-            // foreign on the next start.
-            let _ = reserve.remove_if_ours(path);
-            return Err(error);
-        }
+                    .record_reserve(name, &nonce)
+                    .map_err(write_error)?;
+                reserve
+            }
+            None => {
+                let nonce = crate::b64::random_token(32)
+                    .map_err(|e| ReserveError::Io(std::io::Error::other(e.to_string())))?;
+                self.writer
+                    .stage_reserve(name, &nonce)
+                    .map_err(write_error)?;
+                let reserve = FileReserve::create(&dir, name, target, &nonce)?;
+                self.writer
+                    .record_reserve(name, &nonce)
+                    .map_err(write_error)?;
+                reserve
+            }
+        };
+        let level = reserve.replenish()?;
         self.writer.set_reserve(Box::new(reserve));
         Ok(level)
     }

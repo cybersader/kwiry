@@ -15,21 +15,39 @@
 use serde::{Deserialize, Serialize};
 use std::io;
 
-/// The inode a holder created as a reserve, recorded in holder state so a
-/// later start can prove the file at the reserve path is its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// What holder state records about one named reserve file. A reserve is
+/// proven to be the holder's own only by the random nonce in its header.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReserveIdentity {
-    pub dev: u64,
-    pub ino: u64,
+pub struct ReserveRecord {
+    /// The nonce of the reserve this holder created and recorded.
+    pub nonce: Option<String>,
+    /// A nonce made durable before its file was created: a crash after the
+    /// file's header was written but before `nonce` was recorded still lets
+    /// the next start adopt that file.
+    pub staged: Option<String>,
+}
+
+impl ReserveRecord {
+    /// Every nonce a file at the reserve path may carry and be adopted.
+    pub fn accepted(&self) -> Vec<&str> {
+        self.nonce
+            .iter()
+            .chain(self.staged.iter())
+            .map(String::as_str)
+            .collect()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReserveError {
-    /// The reserve path holds something this holder cannot prove it owns.
-    /// Nothing was removed; an operator must clear the path.
-    #[error("reserve_path_foreign: the reserve path holds a {0} this holder does not own")]
+    /// The reserve name holds something this holder cannot prove it
+    /// created. Nothing was changed; an operator must clear it.
+    #[error("reserve_path_foreign: the reserve name holds a {0} this holder did not create")]
     Foreign(&'static str),
+    /// The reserve directory is not a private directory of this user.
+    #[error("reserve_dir_unsafe: {0}")]
+    UnsafeDirectory(&'static str),
     #[error("reserve: {0}")]
     Io(#[from] io::Error),
 }
@@ -38,6 +56,7 @@ impl ReserveError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Foreign(_) => "reserve_path_foreign",
+            Self::UnsafeDirectory(_) => "reserve_dir_unsafe",
             Self::Io(_) => "reserve_io",
         }
     }
@@ -60,120 +79,186 @@ pub trait DiskReserve: Send {
 }
 
 #[cfg(unix)]
-pub use file_reserve::FileReserve;
+pub use file_reserve::{FileReserve, HEADER_LEN, ReserveDir};
 
 #[cfg(unix)]
 mod file_reserve {
-    use super::{DiskReserve, ReserveError, ReserveIdentity, ReserveLevel};
-    use std::fs::{self, File, OpenOptions};
+    use super::{DiskReserve, ReserveError, ReserveLevel};
+    use rustix::fs::{FileType, Mode, OFlags};
+    use std::fs::File;
     use std::io;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::fd::OwnedFd;
+    use std::os::unix::fs::FileExt;
     use std::path::Path;
 
-    /// A reserve kept as one preallocated file, bound to the descriptor it
-    /// was created with.
+    const MAGIC: &[u8] = b"holdings-reserve/1\n";
+    /// Header bytes at the start of every reserve file: the magic, the
+    /// nonce and zero padding. Releases never cut into it.
+    pub const HEADER_LEN: u64 = 128;
+
+    fn header(nonce: &str) -> Vec<u8> {
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(nonce.as_bytes());
+        bytes.push(b'\n');
+        bytes.resize(usize::try_from(HEADER_LEN).unwrap_or(128), 0);
+        bytes
+    }
+
+    /// The nonce a header carries, if it is a well-formed reserve header.
+    fn header_nonce(bytes: &[u8]) -> Option<&str> {
+        let rest = bytes.strip_prefix(MAGIC)?;
+        let end = rest.iter().position(|b| *b == b'\n')?;
+        let nonce = std::str::from_utf8(&rest[..end]).ok()?;
+        let padded = rest[end + 1..].iter().all(|b| *b == 0);
+        (padded && crate::grammar::is_b64url(nonce)).then_some(nonce)
+    }
+
+    /// A private directory for reserve files, held by descriptor.
     ///
-    /// The path is used once, at [`FileReserve::open`]. A leaf already at it
-    /// is unlinked only when it is a symbolic link (removing a link never
-    /// touches data) or the regular file this holder created before, proven
-    /// by the identity recorded in holder state with one link. Anything else
-    /// is refused with [`ReserveError::Foreign`] and left in place. The
-    /// reserve is then created exclusively with `O_NOFOLLOW`, mode 0600, and
-    /// its identity checked: a regular file with one link, and the path
-    /// still names that same inode. Every later release and refill acts on
-    /// that descriptor (`ftruncate`, `fallocate`), never on the path, so a
-    /// path swapped for a link to other data afterwards cannot be truncated.
+    /// It is created with mode 0700 if absent, then opened with
+    /// `O_DIRECTORY | O_NOFOLLOW` and checked through that descriptor: a
+    /// directory, owned by this process's effective user, mode exactly 0700.
+    /// Every reserve operation is relative to the descriptor, so the path is
+    /// never resolved again.
+    pub struct ReserveDir {
+        fd: OwnedFd,
+    }
+
+    impl ReserveDir {
+        pub fn open(path: &Path) -> Result<Self, ReserveError> {
+            let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC;
+            let (fd, created) =
+                match rustix::fs::openat(rustix::fs::CWD, path, flags, Mode::empty()) {
+                    Ok(fd) => (fd, false),
+                    Err(rustix::io::Errno::NOENT) => {
+                        rustix::fs::mkdirat(rustix::fs::CWD, path, Mode::RWXU)
+                            .map_err(io::Error::from)?;
+                        let fd = rustix::fs::openat(rustix::fs::CWD, path, flags, Mode::empty())
+                            .map_err(io::Error::from)?;
+                        (fd, true)
+                    }
+                    Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => {
+                        return Err(ReserveError::UnsafeDirectory("not a directory"));
+                    }
+                    Err(error) => return Err(io::Error::from(error).into()),
+                };
+            if created {
+                // Whatever the umask did, the directory this holder created
+                // is private.
+                rustix::fs::fchmod(&fd, Mode::RWXU).map_err(io::Error::from)?;
+            }
+            let stat = rustix::fs::fstat(&fd).map_err(io::Error::from)?;
+            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+                return Err(ReserveError::UnsafeDirectory("not a directory"));
+            }
+            if stat.st_uid != rustix::process::geteuid().as_raw() {
+                return Err(ReserveError::UnsafeDirectory("owned by another user"));
+            }
+            if Mode::from_raw_mode(stat.st_mode).bits() & 0o7777 != 0o700 {
+                return Err(ReserveError::UnsafeDirectory("mode is not 0700"));
+            }
+            Ok(Self { fd })
+        }
+
+        fn sync(&self) -> io::Result<()> {
+            rustix::fs::fsync(&self.fd).map_err(io::Error::from)
+        }
+    }
+
+    /// A reserve file, bound to its descriptor.
+    ///
+    /// The reserve code never unlinks, renames or replaces anything. A new
+    /// reserve is created with `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` in a
+    /// [`ReserveDir`], and its header (a random nonce) is written and
+    /// fsynced, with the directory, before the caller records the nonce.
+    /// An existing one is opened with `O_NOFOLLOW` and no `O_CREAT`, and
+    /// adopted only if it is a regular file whose header carries a nonce
+    /// the caller accepts; anything else is refused and left exactly as it
+    /// is. Sizes change only through the held descriptor.
     pub struct FileReserve {
         file: File,
         target: u64,
     }
 
     impl FileReserve {
-        pub fn open(
-            path: &Path,
+        /// Opens the reserve `name` if one exists. `Ok(None)` when the name
+        /// is free. A file is adopted only with a header nonce in
+        /// `accepted`; anything else is [`ReserveError::Foreign`].
+        pub fn adopt(
+            dir: &ReserveDir,
+            name: &str,
             target: u64,
-            owned: Option<ReserveIdentity>,
-        ) -> Result<(Self, ReserveLevel), ReserveError> {
-            match fs::symlink_metadata(path) {
-                Ok(metadata) => {
-                    let kind = metadata.file_type();
-                    let ours = kind.is_file()
-                        && metadata.nlink() == 1
-                        && owned
-                            == Some(ReserveIdentity {
-                                dev: metadata.dev(),
-                                ino: metadata.ino(),
-                            });
-                    if kind.is_symlink() || ours {
-                        fs::remove_file(path)?;
-                    } else if kind.is_file() {
-                        return Err(ReserveError::Foreign("regular file"));
-                    } else if kind.is_dir() {
-                        return Err(ReserveError::Foreign("directory"));
-                    } else {
-                        return Err(ReserveError::Foreign("special file"));
-                    }
+            accepted: &[&str],
+        ) -> Result<Option<(Self, String)>, ReserveError> {
+            let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+            let fd = match rustix::fs::openat(&dir.fd, name, flags, Mode::empty()) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::NOENT) => return Ok(None),
+                // `O_NOFOLLOW` on a link: ELOOP, or EMLINK on some BSDs.
+                Err(rustix::io::Errno::LOOP | rustix::io::Errno::MLINK) => {
+                    return Err(ReserveError::Foreign("symlink"));
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+                Err(rustix::io::Errno::ISDIR) => return Err(ReserveError::Foreign("directory")),
+                Err(error) => return Err(io::Error::from(error).into()),
+            };
+            let stat = rustix::fs::fstat(&fd).map_err(io::Error::from)?;
+            if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+                return Err(ReserveError::Foreign("special file"));
             }
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(path)?;
-            let bound = file.metadata()?;
-            let named = fs::symlink_metadata(path)?;
-            if !bound.file_type().is_file()
-                || bound.nlink() != 1
-                || bound.dev() != named.dev()
-                || bound.ino() != named.ino()
-            {
-                return Err(io::Error::other("the reserve file is not the one created").into());
+            let file = File::from(fd);
+            let mut bytes = vec![0u8; usize::try_from(HEADER_LEN).unwrap_or(128)];
+            if file.read_exact_at(&mut bytes, 0).is_err() {
+                return Err(ReserveError::Foreign("file without a reserve header"));
             }
-            let mut reserve = Self { file, target };
-            let level = reserve.replenish()?;
-            Ok((reserve, level))
+            let Some(nonce) = header_nonce(&bytes) else {
+                return Err(ReserveError::Foreign("file without a reserve header"));
+            };
+            if !accepted.contains(&nonce) {
+                return Err(ReserveError::Foreign("file with another reserve's header"));
+            }
+            let nonce = nonce.to_owned();
+            Ok(Some((Self { file, target }, nonce)))
         }
 
-        /// The created inode, for holder state.
-        pub fn identity(&self) -> io::Result<ReserveIdentity> {
-            let metadata = self.file.metadata()?;
-            Ok(ReserveIdentity {
-                dev: metadata.dev(),
-                ino: metadata.ino(),
-            })
+        /// Creates the reserve `name` exclusively and makes its header with
+        /// `nonce` durable (file, then directory). Space is allocated later
+        /// by [`DiskReserve::replenish`], once the caller recorded the nonce.
+        pub fn create(
+            dir: &ReserveDir,
+            name: &str,
+            target: u64,
+            nonce: &str,
+        ) -> Result<Self, ReserveError> {
+            let flags =
+                OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let fd = match rustix::fs::openat(&dir.fd, name, flags, Mode::RUSR | Mode::WUSR) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::EXIST) => {
+                    return Err(ReserveError::Foreign("existing entry"));
+                }
+                Err(error) => return Err(io::Error::from(error).into()),
+            };
+            let file = File::from(fd);
+            file.write_all_at(&header(nonce), 0)?;
+            file.sync_all()?;
+            dir.sync()?;
+            Ok(Self { file, target })
         }
 
-        /// Unlinks the reserve only if the path still names this inode.
-        pub(crate) fn remove_if_ours(&self, path: &Path) -> io::Result<()> {
-            let bound = self.file.metadata()?;
-            let named = fs::symlink_metadata(path)?;
-            if named.file_type().is_file()
-                && named.dev() == bound.dev()
-                && named.ino() == bound.ino()
-            {
-                fs::remove_file(path)?;
-            }
-            Ok(())
-        }
-
-        /// Bytes currently held, read from the bound descriptor.
+        /// Bytes currently held, header included, read from the descriptor.
         pub fn len(&self) -> io::Result<u64> {
             Ok(self.file.metadata()?.len())
         }
 
         pub fn is_empty(&self) -> io::Result<bool> {
-            Ok(self.len()? == 0)
+            Ok(self.len()? <= HEADER_LEN)
         }
     }
 
     impl DiskReserve for FileReserve {
         fn release(&mut self, bytes: u64) -> io::Result<bool> {
             let len = self.file.metadata()?.len();
-            if len < bytes {
+            if len.saturating_sub(HEADER_LEN) < bytes {
                 return Ok(false);
             }
             self.file.set_len(len - bytes)?;
@@ -182,7 +267,7 @@ mod file_reserve {
         }
 
         fn replenish(&mut self) -> io::Result<ReserveLevel> {
-            match fs2::FileExt::allocate(&self.file, self.target) {
+            match fs2::FileExt::allocate(&self.file, HEADER_LEN.saturating_add(self.target)) {
                 Ok(()) => {
                     self.file.sync_all()?;
                     Ok(ReserveLevel::Full)
@@ -195,7 +280,15 @@ mod file_reserve {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn header_for_tests(nonce: &str) -> Vec<u8> {
+        header(nonce)
+    }
 }
+
+#[cfg(all(test, unix))]
+pub(crate) use file_reserve::header_for_tests;
 
 /// Bytes a holder retains, by kind, when a new artifact write asks to start.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -233,98 +326,141 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    #[test]
-    fn file_reserve_releases_only_what_it_holds() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut reserve, level) =
-            FileReserve::open(&dir.path().join(".reserve"), 4096, None).unwrap();
-        assert_eq!(level, ReserveLevel::Full);
-        assert_eq!(reserve.len().unwrap(), 4096);
-        assert!(reserve.release(1000).unwrap());
-        assert_eq!(reserve.len().unwrap(), 3096);
-        assert!(!reserve.release(5000).unwrap());
-        assert_eq!(reserve.len().unwrap(), 3096);
-        assert_eq!(reserve.replenish().unwrap(), ReserveLevel::Full);
-        assert_eq!(reserve.len().unwrap(), 4096);
+    fn private_dir() -> (tempfile::TempDir, std::path::PathBuf, ReserveDir) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("reserves");
+        let dir = ReserveDir::open(&path).unwrap();
+        (root, path, dir)
     }
 
-    /// Review finding 2: a reserve path that is, or later becomes, a link to
-    /// other data never lets a release or refill touch that data.
+    #[cfg(unix)]
+    const NONCE: &str = "nonceAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
     #[cfg(unix)]
     #[test]
-    fn a_reserve_never_follows_a_link_and_releases_only_its_own_descriptor() {
-        let dir = tempfile::tempdir().unwrap();
-        let victim = dir.path().join("victim");
-        std::fs::write(&victim, b"precious operator data").unwrap();
-        let path = dir.path().join(".reserve");
-        std::os::unix::fs::symlink(&victim, &path).unwrap();
-
-        let (mut reserve, _) = FileReserve::open(&path, 4096, None).unwrap();
-        assert_eq!(std::fs::read(&victim).unwrap(), b"precious operator data");
+    fn a_reserve_is_created_adopted_by_its_nonce_and_resized_through_its_descriptor() {
+        let (_root, _path, dir) = private_dir();
+        assert!(matches!(
+            FileReserve::adopt(&dir, ".reserve", 4096, &[]),
+            Ok(None)
+        ));
+        let mut reserve = FileReserve::create(&dir, ".reserve", 4096, NONCE).unwrap();
+        assert_eq!(reserve.replenish().unwrap(), ReserveLevel::Full);
+        assert_eq!(reserve.len().unwrap(), HEADER_LEN + 4096);
+        assert!(reserve.release(1000).unwrap());
+        assert_eq!(reserve.len().unwrap(), HEADER_LEN + 3096);
         assert!(
-            !std::fs::symlink_metadata(&path)
+            !reserve.release(3097).unwrap(),
+            "the header is never released"
+        );
+        assert!(reserve.release(3096).unwrap());
+        assert_eq!(reserve.len().unwrap(), HEADER_LEN);
+        drop(reserve);
+        let (mut adopted, nonce) = FileReserve::adopt(&dir, ".reserve", 4096, &[NONCE])
+            .unwrap()
+            .unwrap();
+        assert_eq!(nonce, NONCE);
+        assert_eq!(adopted.replenish().unwrap(), ReserveLevel::Full);
+        assert_eq!(adopted.len().unwrap(), HEADER_LEN + 4096);
+    }
+
+    /// Re-check item 3: the same inode with other content (a reused inode
+    /// number, or a file rewritten in place) proves nothing.
+    #[cfg(unix)]
+    #[test]
+    fn inode_reuse_is_refused_and_the_file_kept() {
+        let (_root, path, dir) = private_dir();
+        let reserve = FileReserve::create(&dir, ".reserve", 4096, NONCE).unwrap();
+        drop(reserve);
+        let file_path = path.join(".reserve");
+        let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&file_path).unwrap());
+        // Same inode, foreign content.
+        std::fs::write(&file_path, b"operator data").unwrap();
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&file_path).unwrap()),
+            inode
+        );
+        let refused = FileReserve::adopt(&dir, ".reserve", 4096, &[NONCE])
+            .err()
+            .unwrap();
+        assert_eq!(refused.code(), "reserve_path_foreign");
+        assert_eq!(std::fs::read(&file_path).unwrap(), b"operator data");
+        // Another holder's reserve header is not this holder's either.
+        let other = "nonceBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        std::fs::write(&file_path, header_for_tests(other)).unwrap();
+        assert!(matches!(
+            FileReserve::adopt(&dir, ".reserve", 4096, &[NONCE]),
+            Err(ReserveError::Foreign(_))
+        ));
+        assert_eq!(std::fs::read(&file_path).unwrap(), header_for_tests(other));
+    }
+
+    /// Re-check item 3: a symlink, a foreign file or a directory swapped in
+    /// at the reserve name is never touched, and nothing is ever unlinked.
+    #[cfg(unix)]
+    #[test]
+    fn a_swapped_in_symlink_file_or_directory_is_never_touched() {
+        let (root, path, dir) = private_dir();
+        let victim = root.path().join("victim");
+        std::fs::write(&victim, b"precious operator data").unwrap();
+        let name = path.join(".reserve");
+        std::os::unix::fs::symlink(&victim, &name).unwrap();
+        assert!(matches!(
+            FileReserve::adopt(&dir, ".reserve", 4096, &[NONCE]),
+            Err(ReserveError::Foreign("symlink"))
+        ));
+        assert!(matches!(
+            FileReserve::create(&dir, ".reserve", 4096, NONCE),
+            Err(ReserveError::Foreign(_))
+        ));
+        assert!(
+            std::fs::symlink_metadata(&name)
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
-
-        // The path is swapped for a link to the victim after binding.
-        std::fs::remove_file(&path).unwrap();
-        std::os::unix::fs::symlink(&victim, &path).unwrap();
-        assert!(reserve.release(1000).unwrap());
-        assert_eq!(reserve.len().unwrap(), 3096);
-        reserve.replenish().unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious operator data");
 
-        // A hard link to other data at the path is refused, never unlinked
-        // or truncated through.
-        let other = dir.path().join(".reserve-2");
-        std::fs::hard_link(&victim, &other).unwrap();
+        std::fs::remove_file(&name).unwrap();
+        std::fs::hard_link(&victim, &name).unwrap();
         assert!(matches!(
-            FileReserve::open(&other, 2048, None),
-            Err(ReserveError::Foreign("regular file"))
+            FileReserve::adopt(&dir, ".reserve", 4096, &[NONCE]),
+            Err(ReserveError::Foreign(_))
         ));
         assert_eq!(std::fs::read(&victim).unwrap(), b"precious operator data");
+        assert!(name.exists());
+
+        std::fs::remove_file(&name).unwrap();
+        std::fs::create_dir(&name).unwrap();
+        assert!(matches!(
+            FileReserve::adopt(&dir, ".reserve", 4096, &[NONCE]),
+            Err(ReserveError::Foreign(_))
+        ));
+        assert!(name.is_dir());
     }
 
-    /// Re-check finding 3: a regular file at the reserve path that the
-    /// holder cannot prove it created is refused by name and left in place;
-    /// the holder's own earlier reserve is replaced.
     #[cfg(unix)]
     #[test]
-    fn a_reserve_path_holding_an_unowned_regular_file_is_refused_and_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".reserve");
-        std::fs::write(&path, b"operator file").unwrap();
-        let foreign = FileReserve::open(&path, 4096, None).err().unwrap();
-        assert_eq!(foreign.code(), "reserve_path_foreign");
-        assert_eq!(std::fs::read(&path).unwrap(), b"operator file");
-        // A recorded identity of another inode proves nothing either.
-        let elsewhere = dir.path().join(".other");
-        let (other, _) = FileReserve::open(&elsewhere, 1024, None).unwrap();
-        let wrong = other.identity().unwrap();
-        assert!(matches!(
-            FileReserve::open(&path, 4096, Some(wrong)),
-            Err(ReserveError::Foreign("regular file"))
-        ));
-        assert_eq!(std::fs::read(&path).unwrap(), b"operator file");
-        // A directory is refused, never removed.
-        let directory = dir.path().join(".reserve-dir");
-        std::fs::create_dir(&directory).unwrap();
-        assert!(matches!(
-            FileReserve::open(&directory, 4096, None),
-            Err(ReserveError::Foreign("directory"))
-        ));
-        assert!(directory.is_dir());
-
-        // The holder's own reserve, proven by its recorded identity, is
-        // replaced on the next start.
-        let own = dir.path().join(".own");
-        let (first, _) = FileReserve::open(&own, 2048, None).unwrap();
-        let recorded = first.identity().unwrap();
-        drop(first);
-        let (second, _) = FileReserve::open(&own, 2048, Some(recorded)).unwrap();
-        assert_eq!(second.len().unwrap(), 2048);
+    fn the_reserve_directory_must_be_private_and_real() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let open = root.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            ReserveDir::open(&open).err().unwrap().code(),
+            "reserve_dir_unsafe"
+        );
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(root.path(), &link).unwrap();
+        assert_eq!(
+            ReserveDir::open(&link).err().unwrap().code(),
+            "reserve_dir_unsafe"
+        );
+        let created = root.path().join("fresh");
+        ReserveDir::open(&created).unwrap();
+        let mode = std::fs::metadata(&created).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700);
     }
 
     #[test]

@@ -256,10 +256,10 @@ pub struct HolderState {
     /// Obligation report channels, purge progress and uncertain attempts.
     #[serde(default)]
     pub obligations: ObligationBook,
-    /// Reserve files this holder created, by name: the only regular files
-    /// it may ever unlink at a reserve path.
+    /// Reserve files this holder created, by name: the nonce in each file's
+    /// header is the only proof that a file is the holder's own.
     #[serde(default)]
-    pub reserves: std::collections::BTreeMap<String, crate::reserve::ReserveIdentity>,
+    pub reserves: std::collections::BTreeMap<String, crate::reserve::ReserveRecord>,
 }
 
 impl HolderState {
@@ -560,19 +560,28 @@ impl StateWriter {
         }
     }
 
-    /// Records the identity of a reserve file this holder created. File
-    /// reserves exist only where `FileReserve` does (Unix).
+    /// Makes `nonce` durable for the reserve `name` before its file is
+    /// created, so a crash after the header is written still lets the next
+    /// start adopt that file. File reserves exist only on Unix.
     #[cfg(unix)]
-    pub(crate) fn record_reserve(
-        &mut self,
-        name: &str,
-        identity: crate::reserve::ReserveIdentity,
-    ) -> Result<(), WriteError> {
-        if self.state.reserves.get(name) == Some(&identity) {
+    pub(crate) fn stage_reserve(&mut self, name: &str, nonce: &str) -> Result<(), WriteError> {
+        let mut next = self.state.clone();
+        next.reserves.entry(name.to_owned()).or_default().staged = Some(nonce.to_owned());
+        self.commit(next)
+    }
+
+    /// Records the nonce of the reserve file `name` now holds.
+    #[cfg(unix)]
+    pub(crate) fn record_reserve(&mut self, name: &str, nonce: &str) -> Result<(), WriteError> {
+        let record = crate::reserve::ReserveRecord {
+            nonce: Some(nonce.to_owned()),
+            staged: None,
+        };
+        if self.state.reserves.get(name) == Some(&record) {
             return Ok(());
         }
         let mut next = self.state.clone();
-        next.reserves.insert(name.to_owned(), identity);
+        next.reserves.insert(name.to_owned(), record);
         self.commit(next)
     }
 

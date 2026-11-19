@@ -216,13 +216,10 @@ pub(crate) fn observe_verified(
             );
         }
         Err(error) => {
+            // A fail-stop has already revoked every gate and raised
+            // `holder_state_unwritable` inside the failing write (H.45).
             report_write_failure(events, &error);
             emit(events, EngineEvent::ClockHoldWriteFailed);
-            if writer.unwritable() {
-                // Fail-stop at once, before anything else can serve.
-                gate.revoke();
-                events.emit(HolderEvent::HolderStateUnwritable);
-            }
         }
     }
 }

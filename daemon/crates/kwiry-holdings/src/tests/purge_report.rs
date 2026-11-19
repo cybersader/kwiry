@@ -1401,43 +1401,95 @@ fn r2_2_a_list_superseded_by_a1_authorizes_no_purge() {
     }
 }
 
-/// Re-check item 3: the holder records each reserve's identity in holder
-/// state and reclaims only that file; any other file at a reserve path is
-/// refused by name and kept.
+/// Final check item 3: the reserve code never unlinks anything. A crash at
+/// each step of creating a reserve leaves a file the next start adopts, or
+/// one it refuses and keeps; nothing else in the directory is touched.
 #[test]
-fn r2_3_the_holder_reclaims_only_the_reserve_it_recorded() {
-    use crate::reserve::ReserveLevel;
+fn r3_a_crash_at_each_reserve_step_leaves_it_adoptable_or_refused_and_kept() {
+    use crate::reserve::{HEADER_LEN, ReserveLevel};
+    let listing = |dir: &std::path::Path| -> Vec<(String, Vec<u8>)> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                let bytes = std::fs::read(e.path()).unwrap();
+                let head = bytes[..bytes.len().min(16)].to_vec();
+                (e.file_name().into_string().unwrap(), head)
+            })
+            .collect();
+        entries.sort();
+        entries
+    };
+    // Faults planned for the stage and record writes of the first attempt.
+    let cases: [(&str, Vec<Fault>); 4] = [
+        ("stage fails", vec![Fault::BeforeRename]),
+        ("record fails", vec![Fault::Pass, Fault::BeforeRename]),
+        (
+            "record ambiguous",
+            vec![Fault::Pass, Fault::AfterRename, Fault::BeforeRename],
+        ),
+        ("completes", vec![]),
+    ];
+    for (case, faults) in cases {
+        let mut w = world(false);
+        let rig = &mut w.rig;
+        let data = tempfile::tempdir().unwrap();
+        let dir = data.path().join("reserves");
+        crate::reserve::ReserveDir::open(&dir).unwrap();
+        std::fs::write(dir.join("keep.me"), b"operator file").unwrap();
+        rig.io_faults.plan(faults.clone());
+        let first = rig.holder().install_file_reserve(&dir, ".reserve", 8192);
+        rig.io_faults.clear();
+        assert_eq!(first.is_ok(), faults.is_empty(), "{case}");
+        // Crash and restart.
+        rig.restart().unwrap();
+        let second = rig.holder().install_file_reserve(&dir, ".reserve", 8192);
+        assert_eq!(second.unwrap(), ReserveLevel::Full, "{case}: adoptable");
+        let record = rig.holder().state().reserves[".reserve"].clone();
+        assert!(record.nonce.is_some() && record.staged.is_none(), "{case}");
+        let entries = listing(&dir);
+        assert_eq!(entries.len(), 2, "{case}: {entries:?}");
+        assert_eq!(
+            std::fs::read(dir.join("keep.me")).unwrap(),
+            b"operator file"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.join(".reserve")).unwrap().len(),
+            HEADER_LEN + 8192,
+            "{case}"
+        );
+    }
+
+    // A crash mid-header leaves a file no nonce proves: refused and kept.
     let mut w = world(false);
     let rig = &mut w.rig;
     let data = tempfile::tempdir().unwrap();
-    let path = data.path().join(".reserve");
-    assert_eq!(
-        rig.holder()
-            .install_file_reserve("data", &path, 8192)
-            .unwrap(),
-        ReserveLevel::Full
-    );
-    assert!(rig.holder().state().reserves.contains_key("data"));
-    // A new process reclaims its own reserve.
-    rig.restart().unwrap();
+    let dir = data.path().join("reserves");
+    crate::reserve::ReserveDir::open(&dir).unwrap();
+    let staged = "stagedNonceAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     rig.holder()
-        .install_file_reserve("data", &path, 8192)
+        .writer
+        .stage_reserve(".reserve", staged)
         .unwrap();
-    // Anything it cannot prove is its own is refused and left alone.
-    let foreign = data.path().join(".reserve-2");
-    std::fs::write(&foreign, b"operator file").unwrap();
+    let torn = &crate::reserve::header_for_tests(staged)[..30];
+    std::fs::write(dir.join(".reserve"), torn).unwrap();
     let refused = rig
         .holder()
-        .install_file_reserve("holder", &foreign, 4096)
+        .install_file_reserve(&dir, ".reserve", 8192)
         .unwrap_err();
     assert_eq!(refused.code(), "reserve_path_foreign");
-    assert_eq!(std::fs::read(&foreign).unwrap(), b"operator file");
-    // Another reserve's recorded identity does not cover this name.
-    let len = std::fs::metadata(&path).unwrap().len();
-    assert!(
-        rig.holder()
-            .install_file_reserve("holder", &path, 4096)
-            .is_err()
-    );
-    assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
+    assert_eq!(std::fs::read(dir.join(".reserve")).unwrap(), torn);
+
+    // A copy of another name's reserve proves nothing for this name.
+    rig.holder()
+        .install_file_reserve(&dir, "data", 4096)
+        .unwrap();
+    std::fs::copy(dir.join("data"), dir.join("other")).unwrap();
+    let copied = std::fs::read(dir.join("other")).unwrap();
+    let refused = rig
+        .holder()
+        .install_file_reserve(&dir, "other", 4096)
+        .unwrap_err();
+    assert_eq!(refused.code(), "reserve_path_foreign");
+    assert_eq!(std::fs::read(dir.join("other")).unwrap(), copied);
 }
