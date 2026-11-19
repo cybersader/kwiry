@@ -2,23 +2,23 @@
 //!
 //! Normative source: Part II of the authority workspace file
 //! `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md` (sha256
-//! `6b6d2e27d48b6d110a11477aebf17120fa5b190b1b1dea51016865d6db49f12c`).
+//! `43a4d299caec1f9cb85f66f2a5ed78d0f5dda196cbea7b72a48003789fa54291`).
 //! One module per section that binds a holder:
 //!
 //! | Module | v2 section | What it adds to the core |
 //! |---|---|---|
 //! | [`access`] | S.1 (H.15, H.21) | the request-time access check: capability lifetime, future `iat`, expiry plus skew at both cuts |
-//! | [`root_pin`] | S.3 (H.16, H.24, H.28) | the `root_pin` member, admit refusals for changed or null pins, artifact and root checks, walk inputs |
-//! | [`clock_hold`] | S.4 (H.21.5, H.23, H.26, H.29, H.34) | the durable clock hold |
-//! | [`stale_serve`] | S.5 | the bounded stale-serve window |
+//! | [`root_pin`] | S.3 (H.16, H.24, H.28, H.38) | the `root_pin` member, admit refusals for changed, null or conflicting pins, artifact and root checks, walk inputs |
+//! | [`clock_hold`] | S.4 (H.21.5, H.23, H.26, H.29, H.34, H.36) | the durable clock hold |
+//! | [`stale_serve`] | S.5 | the bounded stale-serve window and its walk latch |
 //! | [`pin_history`] | S.6 | the refusal-only `(pin_id, resource.id)` set |
 //!
 //! The S.2 mint gate is authority-side and needs no holder code.
 //!
-//! The generic core (Part I) never depends on these rules. A holder whose
-//! wire profile has no engine section never reaches this module: every
-//! class-defined member is refused (§C.3), and the engine's durable section
-//! of the holder state stays empty.
+//! The generic core (Part I) never depends on these rules running. A holder
+//! whose wire profile has no engine section never reaches this module:
+//! every class-defined member is refused (§C.3), and the engine's durable
+//! section of the holder state stays empty.
 
 pub mod access;
 pub mod clock_hold;
@@ -49,11 +49,19 @@ impl EngineProfile {
     }
 }
 
-/// Operator settings of Profile S.
+/// Operator settings of Profile S. The fields are private: the only way to
+/// build one is [`EngineSettings::new`], which enforces every bound.
+///
+/// ```compile_fail
+/// let settings = kwiry_holdings::engine::EngineSettings {
+///     clock_skew_allowance_ms: 120_000,
+///     max_stale_serve_ms: 0,
+/// };
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EngineSettings {
-    pub clock_skew_allowance_ms: i64,
-    pub max_stale_serve_ms: u64,
+    clock_skew_allowance_ms: i64,
+    max_stale_serve_ms: u64,
 }
 
 impl EngineSettings {
@@ -71,6 +79,14 @@ impl EngineSettings {
             max_stale_serve_ms: u64::from(max_stale_serve_s) * 1000,
         })
     }
+
+    pub fn clock_skew_allowance_ms(&self) -> i64 {
+        self.clock_skew_allowance_ms
+    }
+
+    pub fn max_stale_serve_ms(&self) -> u64 {
+        self.max_stale_serve_ms
+    }
 }
 
 /// Profile S durable fields. They live in the holder-state file and change
@@ -83,6 +99,16 @@ pub struct EngineState {
     pub pin_history_ceiling: u64,
     /// S.4: the clock hold.
     pub clock_behind_authority: bool,
+    /// S.4, H.34: a clear written but not yet confirmed durable. Loading a
+    /// state with it set treats the hold as raised.
+    pub clock_clear_unconfirmed: bool,
+}
+
+impl EngineState {
+    /// Whether the hold is in force as far as durable state can tell.
+    pub fn clock_hold(&self) -> bool {
+        self.clock_behind_authority || self.clock_clear_unconfirmed
+    }
 }
 
 impl Default for EngineState {
@@ -91,6 +117,7 @@ impl Default for EngineState {
             pin_history: BTreeSet::new(),
             pin_history_ceiling: pin_history::DEFAULT_CEILING,
             clock_behind_authority: false,
+            clock_clear_unconfirmed: false,
         }
     }
 }
@@ -102,6 +129,10 @@ pub(crate) struct EngineGateState {
     /// `pin_id → resource ids`, from the durable pin-history set.
     pub pin_history: HashMap<String, BTreeSet<String>>,
     pub history_available: bool,
+    /// S.5: per resource, the `pin_ref` and monotonic instant at which its
+    /// root observation stopped matching. Cleared only by a successful walk
+    /// under that `pin_ref`.
+    pub root_mismatch: HashMap<String, (String, u64)>,
 }
 
 /// Profile S refusals.
@@ -192,6 +223,8 @@ pub struct EngineQuery<'a> {
     pub capability: Option<CapabilityTimes>,
     /// The artifact about to be used, for pinned resources.
     pub artifact: Option<ArtifactStamp<'a>>,
+    /// The engine's latest root observation. A mismatch is also latched in
+    /// the gate (see [`EngineGate::report_root_mismatch`]).
     pub root: RootObservation,
 }
 
@@ -218,21 +251,58 @@ impl EngineGate {
     /// The request-time access check (v2 §C.0; S.1), every core rule
     /// (§3.4), then the root-pin rules (S.3, S.5, S.6) for pinned resources.
     pub fn check(&self, query: &EngineQuery, cut: Cut) -> Result<(), Refusal> {
-        let state = self.gate.read();
-        let now_wall = self.gate.clock.wall_ms();
-        let now_mono = self.gate.clock.mono_ms();
-        if let Some(times) = query.capability {
-            access::check(
-                times,
-                cut,
-                state.engine.clock_hold,
-                now_wall,
-                &self.settings,
-            )?;
+        let (verdict, latch) = {
+            let state = self.gate.read();
+            let now_wall = self.gate.clock.wall_ms();
+            let now_mono = self.gate.clock.mono_ms();
+            if let Some(times) = query.capability {
+                access::check(
+                    times,
+                    cut,
+                    state.engine.clock_hold,
+                    now_wall,
+                    &self.settings,
+                )?;
+            }
+            let entry = state.listed_entry(query.resource_id, now_wall, now_mono)?;
+            root_pin::check(entry, &state.engine, query, now_mono, &self.settings)
+        };
+        if let Some((pin_ref, detected)) = latch {
+            self.latch_mismatch(query.resource_id, pin_ref, detected);
         }
-        let entry = state.listed_entry(query.resource_id, now_wall, now_mono)?;
-        root_pin::check(entry, &state.engine, query, now_mono, &self.settings)?;
-        Ok(())
+        verdict.map_err(Refusal::from)
+    }
+
+    fn latch_mismatch(&self, resource_id: &str, pin_ref: String, detected_mono_ms: u64) {
+        let mut state = self.gate.write();
+        let latched = state
+            .engine
+            .root_mismatch
+            .entry(resource_id.to_owned())
+            .or_insert((pin_ref.clone(), detected_mono_ms));
+        if latched.0 != pin_ref {
+            *latched = (pin_ref, detected_mono_ms);
+        }
+    }
+
+    /// S.5: the engine's walk found the root of `resource_id` no longer at
+    /// the listed `pin_id`. The earliest detection under a `pin_ref` stands.
+    pub fn report_root_mismatch(&self, resource_id: &str, pin_ref: &str, detected_mono_ms: u64) {
+        self.latch_mismatch(resource_id, pin_ref.to_owned(), detected_mono_ms);
+    }
+
+    /// S.5: a walk under `pin_ref` observed the root at the listed `pin_id`
+    /// and published. Only this ends a latched mismatch.
+    pub fn record_successful_walk(&self, resource_id: &str, pin_ref: &str) {
+        let mut state = self.gate.write();
+        if state
+            .engine
+            .root_mismatch
+            .get(resource_id)
+            .is_some_and(|(latched, _)| latched == pin_ref)
+        {
+            state.engine.root_mismatch.remove(resource_id);
+        }
     }
 
     /// Whether the clock hold is in force (S.4).

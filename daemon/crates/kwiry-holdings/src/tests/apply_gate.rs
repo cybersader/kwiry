@@ -325,7 +325,7 @@ fn ap4_ap5_ap25_reattestation_refuses_the_old_ref_from_a0_even_when_apply_fails(
     assert_eq!(rig.relist(), ListOutcome::ApplyFailed { step: "A1" });
     assert_eq!(
         pinned(&rig, "res-a", &pr2, Matches),
-        Err(Refusal::RefusedAtAdmit)
+        Err(Refusal::Engine(EngineRefusal::RootPinMissing))
     );
     applied(rig.relist());
     assert_eq!(

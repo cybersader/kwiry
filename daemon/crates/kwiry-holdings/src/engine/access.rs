@@ -55,7 +55,7 @@ pub(crate) fn check(
     let deadline = times
         .exp_s
         .saturating_mul(1000)
-        .saturating_add(settings.clock_skew_allowance_ms);
+        .saturating_add(settings.clock_skew_allowance_ms());
     if now_wall > deadline {
         return Err(EngineRefusal::CapabilityExpired);
     }

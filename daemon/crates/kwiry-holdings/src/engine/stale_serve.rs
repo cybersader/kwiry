@@ -6,7 +6,9 @@
 //! most `max_stale_serve_seconds` from detection (default 3600, at most
 //! 86,400). The window is never available after an admit refusal (the core
 //! refuses first), never for a pin held under another resource (S.6), and
-//! never for an artifact stamped with another `pin_ref` (H.28).
+//! never for an artifact stamped with another `pin_ref` (H.28). Once a
+//! mismatch is seen, only a successful walk under the current `pin_ref` ends
+//! it: a root that matches again later does not, by itself, resume service.
 
 use super::EngineSettings;
 use super::root_pin::{ArtifactStamp, RootObservation};
@@ -26,7 +28,7 @@ pub(crate) fn permits(
         RootObservation::Matches => true,
         RootObservation::Mismatch { detected_mono_ms } => {
             artifact.validated_under_matching_root
-                && now_mono.saturating_sub(detected_mono_ms) <= settings.max_stale_serve_ms
+                && now_mono.saturating_sub(detected_mono_ms) <= settings.max_stale_serve_ms()
         }
         RootObservation::Unobserved => false,
     }

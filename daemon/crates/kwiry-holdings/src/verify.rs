@@ -68,6 +68,10 @@ pub enum PageError {
     RootPin(&'static str),
     #[error("consistency: {0}")]
     Consistency(&'static str),
+    /// An attached key-set statement on a page signed by a pinned key was
+    /// refused; the list is refused with it.
+    #[error("attached key-set statement refused")]
+    Keyset,
 }
 
 /// A page whose signature and audience binding have verified. Its `iat` is
@@ -78,6 +82,20 @@ pub struct SignedPage {
 }
 
 pub fn verify_signed(
+    compact: &str,
+    pins: &PinnedKeys,
+    now_ms: i64,
+    ctx: &VerifyContext,
+) -> Result<SignedPage, PageError> {
+    let signed = verify_signature(compact, pins, now_ms, ctx)?;
+    check_audience(&signed, ctx)?;
+    Ok(signed)
+}
+
+/// The signature stage of §3.8: size, `typ`, `alg`, a pinned `kid`, the
+/// signature and an exact `iss`. A page that passes it is authority-signed,
+/// so its `iat` is clock evidence (v2 H.36) whatever later checks say.
+pub fn verify_signature(
     compact: &str,
     pins: &PinnedKeys,
     now_ms: i64,
@@ -103,18 +121,23 @@ pub fn verify_signed(
     if text(&claims, "iss") != Some(ctx.issuer) {
         return Err(PageError::Issuer);
     }
-    if text(&claims, "aud") != Some(ctx.profile.holder_audience(ctx.holder_id).as_str()) {
-        return Err(PageError::Audience);
-    }
-    if text(&claims, "sub") != Some(ctx.holder_id) {
-        return Err(PageError::Subject);
-    }
     let iat_ms = claims
         .get("iat")
         .and_then(Value::as_i64)
         .and_then(|s| s.checked_mul(1000))
         .ok_or(PageError::Time)?;
     Ok(SignedPage { claims, iat_ms })
+}
+
+/// The audience binding of §3.8: `aud` and `sub` name this holder.
+pub fn check_audience(signed: &SignedPage, ctx: &VerifyContext) -> Result<(), PageError> {
+    if text(&signed.claims, "aud") != Some(ctx.profile.holder_audience(ctx.holder_id).as_str()) {
+        return Err(PageError::Audience);
+    }
+    if text(&signed.claims, "sub") != Some(ctx.holder_id) {
+        return Err(PageError::Subject);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -20,6 +20,9 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
+    /// The holder that issued this gate was replaced or dropped; a gate never
+    /// outlives its holder.
+    Revoked,
     /// Auth halt after `403 holder_not_authorized`.
     AuthHalt,
     NoListThisProcess,
@@ -48,6 +51,7 @@ impl Refusal {
     /// A local reason code: carries no path, pin id or resource id.
     pub fn reason(self) -> &'static str {
         match self {
+            Self::Revoked => "holder_replaced",
             Self::AuthHalt => "auth_halt",
             Self::NoListThisProcess => "no_list_this_process",
             Self::Tombstoned => "tombstoned",
@@ -81,10 +85,12 @@ pub(crate) struct GateSnapshot {
 
 #[derive(Default)]
 pub(crate) struct GateState {
+    revoked: bool,
     list_applied_in_process: bool,
     auth_halted: bool,
     pub entries: HashMap<String, GateEntry>,
-    refused_at_admit: HashSet<String>,
+    /// Admit refusals of a list not yet applied, with their reasons.
+    refused_at_admit: HashMap<String, Refusal>,
     tombstoned: HashSet<String>,
     pub engine: EngineGateState,
 }
@@ -97,6 +103,9 @@ impl GateState {
         now_wall: i64,
         now_mono: u64,
     ) -> Result<&GateEntry, Refusal> {
+        if self.revoked {
+            return Err(Refusal::Revoked);
+        }
         if self.auth_halted {
             return Err(Refusal::AuthHalt);
         }
@@ -106,8 +115,8 @@ impl GateState {
         if self.tombstoned.contains(id) {
             return Err(Refusal::Tombstoned);
         }
-        if self.refused_at_admit.contains(id) {
-            return Err(Refusal::RefusedAtAdmit);
+        if let Some(refusal) = self.refused_at_admit.get(id) {
+            return Err(*refusal);
         }
         let entry = self
             .entries
@@ -171,9 +180,19 @@ impl ServingGate {
         self.read().engine.clock_hold
     }
 
-    /// Admit: refuse at once, before any durable write.
-    pub(crate) fn refuse_at_admit(&self, ids: impl IntoIterator<Item = String>) {
-        self.write().refused_at_admit.extend(ids);
+    /// Admit: refuse at once, before any durable write. A resource already
+    /// refused keeps its first reason.
+    pub(crate) fn refuse_at_admit(&self, refusals: impl IntoIterator<Item = (String, Refusal)>) {
+        let mut state = self.write();
+        for (id, refusal) in refusals {
+            state.refused_at_admit.entry(id).or_insert(refusal);
+        }
+    }
+
+    /// Invalidates this gate and every clone of it, for good. Called when its
+    /// holder is dropped, before the holder's writer lock is released.
+    pub(crate) fn revoke(&self) {
+        self.write().revoked = true;
     }
 
     /// Apply: swap the snapshot in; the only step that broadens serving.

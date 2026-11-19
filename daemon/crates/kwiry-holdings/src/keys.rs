@@ -22,6 +22,10 @@ pub enum KeyError {
     AuthorityKey(&'static str),
     #[error("key-set statement refused: {0}")]
     Keyset(&'static str),
+    /// v2 H.37.6: applying the statement would leave no pinned key, at once
+    /// or at `not_after_old` (`keyset_invalid`).
+    #[error("keyset_invalid: the statement would leave no pinned key")]
+    KeysetInvalid,
 }
 
 /// The holder's signing key. The private half never leaves the holder.
@@ -218,7 +222,8 @@ impl PinnedKeys {
         now_ms: i64,
     ) -> Option<p256::ecdsa::VerifyingKey> {
         let record = self.keys.get(kid)?;
-        if record.not_after_ms.is_some_and(|limit| now_ms > limit) {
+        // v2 H.37.4: retired at `not_after_old`, on the holder's wall clock.
+        if record.not_after_ms.is_some_and(|limit| now_ms >= limit) {
             return None;
         }
         parse_authority_jwk(&record.jwk, kid_prefix)
@@ -299,8 +304,11 @@ pub fn verify_keyset(
         .and_then(Value::as_array)
         .ok_or(refuse("retire_kids"))?;
 
+    // v2 H.37: `keys` adds; `not_after_old` retires every earlier kid that
+    // `keys` does not list, at that instant; `retire_kids` is immediate.
     let mut next = pins.clone();
     next.keyset_seq = Some(sequence);
+    let mut listed = std::collections::BTreeSet::new();
     for jwk in new_keys {
         let (kid, _) = parse_authority_jwk(jwk, &profile.authority_key_id_prefix)
             .map_err(|_| refuse("key"))?;
@@ -309,7 +317,7 @@ pub fn verify_keyset(
             Some(_) => {}
             None => {
                 next.keys.insert(
-                    kid,
+                    kid.clone(),
                     PinnedKey {
                         jwk: jwk.clone(),
                         not_after_ms: None,
@@ -317,22 +325,31 @@ pub fn verify_keyset(
                 );
             }
         }
+        listed.insert(kid);
     }
-    for kid in retire {
-        let kid = kid.as_str().ok_or(refuse("retire_kids"))?;
-        match not_after_old {
-            Some(limit) => {
-                if let Some(record) = next.keys.get_mut(kid) {
-                    record.not_after_ms = Some(record.not_after_ms.map_or(limit, |l| l.min(limit)));
-                }
-            }
-            None => {
-                next.keys.remove(kid);
+    if let Some(limit) = not_after_old {
+        for (kid, record) in &mut next.keys {
+            if pins.keys.contains_key(kid) && !listed.contains(kid) {
+                record.not_after_ms = Some(record.not_after_ms.map_or(limit, |l| l.min(limit)));
             }
         }
     }
-    if next.keys.is_empty() {
-        return Err(refuse("statement leaves no key pinned"));
+    for kid in retire {
+        let kid = kid.as_str().ok_or(refuse("retire_kids"))?;
+        next.keys.remove(kid);
+    }
+    // v2 H.37.6: never an empty set, now or at `not_after_old`.
+    let live_now = next
+        .keys
+        .values()
+        .any(|r| r.not_after_ms.is_none_or(|limit| now_ms < limit));
+    let live_after = not_after_old.is_none_or(|horizon| {
+        next.keys
+            .values()
+            .any(|r| r.not_after_ms.is_none_or(|limit| limit > horizon))
+    });
+    if !live_now || !live_after {
+        return Err(KeyError::KeysetInvalid);
     }
     Ok(next)
 }

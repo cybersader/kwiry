@@ -2,12 +2,12 @@
 
 use crate::clock::Clock;
 use crate::startup::{ContentState, DataRoot, DataRootEvidence, MarkerState};
-use crate::state::{DurableIo, FsIo};
+use crate::state::{DurableIo, FsIo, WriteFailure};
 use crate::store::{HeldResource, PublishPlan, ResourceKey, ResourceStore, StoreError};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// A clock the test moves. Wall and monotonic advance together unless the
@@ -196,16 +196,37 @@ impl DataRoot for FakeDataRoot {
     }
 }
 
-/// Shared switches that make holder-file writes fail.
+/// One planned outcome of an upcoming holder-file write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    /// The write succeeds.
+    Pass,
+    /// The write fails before its rename (`ENOSPC`); nothing changes on disk.
+    BeforeRename,
+    /// The rename happens, then the directory fsync fails: the file holds the
+    /// new bytes but the write reports failure.
+    AfterRename,
+}
+
+/// Shared plan of faults for upcoming holder-file writes, in order.
 #[derive(Clone, Default)]
 pub struct IoFaults {
-    /// Number of upcoming writes to fail.
-    pub fail_next: Arc<AtomicU32>,
+    plan: Arc<Mutex<std::collections::VecDeque<Fault>>>,
 }
 
 impl IoFaults {
+    /// The next `count` writes fail before their rename.
     pub fn fail_writes(&self, count: u32) {
-        self.fail_next.store(count, Ordering::SeqCst);
+        self.plan(vec![Fault::BeforeRename; count as usize]);
+    }
+
+    /// Appends outcomes for the upcoming writes.
+    pub fn plan(&self, faults: Vec<Fault>) {
+        lock(&self.plan).extend(faults);
+    }
+
+    pub fn clear(&self) {
+        lock(&self.plan).clear();
     }
 
     pub fn io(&self) -> FaultyIo {
@@ -220,18 +241,21 @@ pub struct FaultyIo {
 }
 
 impl DurableIo for FaultyIo {
-    fn write_atomic(&self, dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-        let failing = self
-            .faults
-            .fail_next
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok();
-        if failing {
-            return Err(io::Error::new(
+    fn write_atomic(&self, dir: &Path, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
+        let fault = lock(&self.faults.plan).pop_front().unwrap_or(Fault::Pass);
+        match fault {
+            Fault::Pass => FsIo.write_atomic(dir, name, bytes),
+            Fault::BeforeRename => Err(WriteFailure::before_rename(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "injected ENOSPC",
-            ));
+            ))),
+            Fault::AfterRename => {
+                FsIo.write_atomic(dir, name, bytes)?;
+                Err(WriteFailure {
+                    replaced: true,
+                    error: io::Error::other("injected directory fsync failure"),
+                })
+            }
         }
-        FsIo.write_atomic(dir, name, bytes)
     }
 }

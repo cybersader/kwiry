@@ -21,7 +21,7 @@
 use super::{
     EngineGateState, EngineQuery, EngineRefusal, EngineSettings, pin_history, stale_serve,
 };
-use crate::gate::GateEntry;
+use crate::gate::{GateEntry, Refusal};
 use crate::grammar;
 use crate::verify::{ListedItem, PageError};
 use crate::wire::Item;
@@ -133,49 +133,84 @@ pub(crate) fn baseline(items: &[ListedItem]) -> HashMap<String, Option<RootPin>>
         .collect()
 }
 
-/// Admit refusal for an active, untombstoned item (H.16.5 effective point):
-/// a null pin, a pin changed against the baseline, or a pin the history
-/// (including this list's own pairs) holds under another resource.
+/// Admit refusal for an active, untombstoned item (H.16.5 effective point,
+/// H.38): a null pin; a `pin_id` the history, including this list's own
+/// pairs from every phase, holds under another resource
+/// (`root_pin_previously_listed`, per item, never whole-list); or a pin
+/// changed against the baseline (H.24).
 pub(crate) fn refused_at_admit(
     item: &Item,
     baseline: &HashMap<String, Option<RootPin>>,
     history: &HashMap<String, BTreeSet<String>>,
-) -> bool {
+) -> Option<Refusal> {
     match &item.root_pin {
-        PinMember::NotApplicable => false,
-        PinMember::Unpinned => true,
+        PinMember::NotApplicable => None,
+        PinMember::Unpinned => Some(EngineRefusal::RootPinMissing.into()),
         PinMember::Pinned(pin) => {
+            if pin_history::conflicts(history, &pin.pin_id, &item.resource.id) {
+                return Some(EngineRefusal::RootPinPreviouslyListed.into());
+            }
             let unchanged = baseline.get(&item.holding_id) == Some(&Some(pin.clone()));
-            !unchanged || pin_history::conflicts(history, &pin.pin_id, &item.resource.id)
+            (!unchanged).then_some(Refusal::RefusedAtAdmit)
         }
     }
 }
 
-/// The pin rules for one entry that passed every core rule.
+/// A mismatch the gate should latch: the `pin_ref` and detection instant.
+pub(crate) type Latch = Option<(String, u64)>;
+
+/// The pin rules for one entry that passed every core rule. Returns the
+/// verdict, and a mismatch to latch when the query reports one first.
 pub(crate) fn check(
     entry: &GateEntry,
     state: &EngineGateState,
     query: &EngineQuery,
     now_mono: u64,
     settings: &EngineSettings,
-) -> Result<(), EngineRefusal> {
+) -> (Result<(), EngineRefusal>, Latch) {
     let pin = match &entry.pin {
-        PinMember::NotApplicable => return Ok(()),
-        PinMember::Unpinned => return Err(EngineRefusal::RootPinMissing),
+        PinMember::NotApplicable => return (Ok(()), None),
+        PinMember::Unpinned => return (Err(EngineRefusal::RootPinMissing), None),
         PinMember::Pinned(pin) => pin,
     };
     if pin_history::previously_listed(state, &pin.pin_id, query.resource_id) {
-        return Err(EngineRefusal::RootPinPreviouslyListed);
+        return (Err(EngineRefusal::RootPinPreviouslyListed), None);
     }
-    let artifact = query
-        .artifact
-        .filter(|a| a.pin_ref == pin.pin_ref)
-        .ok_or(EngineRefusal::ArtifactPinRef)?;
-    if stale_serve::permits(query.root, artifact, now_mono, settings) {
+    let Some(artifact) = query.artifact.filter(|a| a.pin_ref == pin.pin_ref) else {
+        return (Err(EngineRefusal::ArtifactPinRef), None);
+    };
+    let latched = state
+        .root_mismatch
+        .get(query.resource_id)
+        .filter(|(pin_ref, _)| pin_ref == &pin.pin_ref)
+        .map(|(_, since)| *since);
+    // S.5: once a mismatch is seen under this `pin_ref`, a later matching
+    // observation does not end it; only a successful walk does.
+    let (observation, latch) = match (query.root, latched) {
+        (RootObservation::Unobserved, _) => (RootObservation::Unobserved, None),
+        (RootObservation::Matches, Some(since)) => (
+            RootObservation::Mismatch {
+                detected_mono_ms: since,
+            },
+            None,
+        ),
+        (RootObservation::Mismatch { detected_mono_ms }, Some(since)) => (
+            RootObservation::Mismatch {
+                detected_mono_ms: detected_mono_ms.min(since),
+            },
+            None,
+        ),
+        (RootObservation::Mismatch { detected_mono_ms }, None) => {
+            (query.root, Some((pin.pin_ref.clone(), detected_mono_ms)))
+        }
+        (RootObservation::Matches, None) => (RootObservation::Matches, None),
+    };
+    let verdict = if stale_serve::permits(observation, artifact, now_mono, settings) {
         Ok(())
     } else {
         Err(EngineRefusal::RootPinMismatch)
-    }
+    };
+    (verdict, latch)
 }
 
 pub(crate) fn walk_inputs(

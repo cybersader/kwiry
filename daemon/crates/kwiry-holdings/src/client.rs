@@ -17,11 +17,11 @@
 
 use crate::b64;
 use crate::clock::Clock;
-use crate::keys::{HolderKey, PinnedKeys, verify_keyset};
+use crate::keys::{HolderKey, KeyError, PinnedKeys, verify_keyset};
 use crate::profile::{PROBLEM_CONTENT_TYPE, ROUTE_KEYSET, ROUTE_LIST};
 use crate::verify::{
-    PageError, PageExpectations, VerifiedList, VerifiedPage, VerifyContext, assemble, check_page,
-    verify_signed,
+    PageError, PageExpectations, SignedPage, VerifiedList, VerifiedPage, VerifyContext, assemble,
+    check_audience, check_page, verify_signature,
 };
 use crate::wire::{ListRef, ListRequest, Rev};
 use serde_json::Value;
@@ -89,10 +89,16 @@ pub enum FetchFailure {
     Unauthorized,
     /// `403 holder_not_authorized`.
     NotAuthorized,
-    /// `400`, `413`, or a `409` the list route never gives.
+    /// `400` or `413` (v2 H.40): back off and rebuild; never resend.
+    RequestInvalid {
+        status: u16,
+    },
+    /// An answer the list route never gives (`409`).
     Rejected {
         status: u16,
     },
+    /// A verified key-set statement would leave no pinned key (H.37.6).
+    KeysetInvalid,
     /// Entropy or pin persistence failed locally.
     Local(&'static str),
 }
@@ -101,8 +107,8 @@ pub enum FetchFailure {
 /// profile decides what they mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockEvidence {
-    /// A page whose signature and audience binding verified:
-    /// `lag_ms = iat − now_recv`.
+    /// A page whose signature and `iss` verified (v2 H.36), whatever its
+    /// later checks say: `lag_ms = iat − now_recv`.
     Signed { lag_ms: i64 },
     /// A page that fully verified and answers this process's own request
     /// with the matching nonce, with its monotonic round trip.
@@ -115,9 +121,16 @@ pub struct FetchEnv<'a> {
     pub key: &'a HolderKey,
     pub ctx: VerifyContext<'a>,
     pub pins: &'a PinnedKeys,
-    /// Persists an accepted key-set statement's pins durably.
-    pub accept_pins: &'a mut dyn FnMut(&PinnedKeys) -> bool,
-    pub on_clock: &'a mut dyn FnMut(ClockEvidence),
+    pub hooks: &'a mut dyn FetchHooks,
+}
+
+/// What a fetch hands back while it runs. One object takes both, so a
+/// holder can apply each in observation order with its single writer.
+pub trait FetchHooks {
+    /// Persists an accepted key-set statement's pins durably; false refuses.
+    fn accept_pins(&mut self, pins: &PinnedKeys) -> bool;
+    /// Each piece of clock evidence, exactly once, in observation order.
+    fn on_clock(&mut self, evidence: ClockEvidence);
 }
 
 pub struct FetchParams<'a> {
@@ -129,7 +142,8 @@ pub struct FetchParams<'a> {
 struct Session {
     nonce: String,
     cursor: Option<String>,
-    keyset_tried: bool,
+    /// The key-set route was already fetched in this list.
+    route_fetched: bool,
     pins: PinnedKeys,
 }
 
@@ -177,50 +191,88 @@ fn page_error(error: PageError) -> FetchFailure {
     }
 }
 
-/// Resolves an unknown `kid` once: the page's attached statement, else the
-/// key-set route. Returns the new pins after they were persisted.
-fn resolve_keyset(
+/// Applies a key-set statement (v2 H.6, H.37): skipped if its `keyset_seq`
+/// is not above the stored one, otherwise verified under the current pins
+/// and persisted before any key it adds is used.
+fn apply_statement(
+    env: &mut FetchEnv,
+    session: &mut Session,
+    statement: &str,
+) -> Result<(), KeyError> {
+    let claimed = crate::jws::parse(statement)
+        .ok()
+        .and_then(|s| s.claims.get("keyset_seq").and_then(Value::as_u64));
+    if let (Some(claimed), Some(current)) = (claimed, session.pins.keyset_seq)
+        && claimed <= current
+    {
+        return Ok(());
+    }
+    let next = verify_keyset(
+        statement,
+        &session.pins,
+        env.ctx.profile,
+        env.ctx.issuer,
+        env.clock.wall_ms(),
+    )?;
+    if !env.hooks.accept_pins(&next) {
+        return Err(KeyError::Keyset("pin persistence"));
+    }
+    session.pins = next;
+    Ok(())
+}
+
+fn fetch_route_statement(env: &FetchEnv) -> Option<String> {
+    let url = format!("{}{ROUTE_KEYSET}", env.ctx.issuer);
+    let response = env.transport.get(&url, LIST_TIMEOUTS).ok()?;
+    (response.status == 200
+        && response.content_type.as_deref() == Some(env.ctx.profile.keyset_content_type().as_str()))
+    .then(|| String::from_utf8(response.body).ok())
+    .flatten()
+}
+
+fn keyset_failure(error: &KeyError, page_kid_pinned: bool) -> FetchFailure {
+    match error {
+        KeyError::KeysetInvalid => FetchFailure::KeysetInvalid,
+        KeyError::Keyset("pin persistence") => FetchFailure::Local("pin persistence"),
+        _ if page_kid_pinned => FetchFailure::Invalid(PageError::Keyset),
+        _ => FetchFailure::UnknownKid,
+    }
+}
+
+/// Verifies the signature stage, first applying any attached key-set
+/// statement (always processed, even when the page's own key is pinned), and
+/// on an unknown `kid` without one, the key-set route once per list.
+fn verify_with_keysets(
     env: &mut FetchEnv,
     session: &mut Session,
     compact: &str,
-) -> Result<(), FetchFailure> {
-    session.keyset_tried = true;
-    let attached = crate::jws::parse(compact).ok().and_then(|page| {
+    now_recv: i64,
+) -> Result<SignedPage, FetchFailure> {
+    let unverified = crate::jws::parse(compact).ok();
+    let page_kid = unverified
+        .as_ref()
+        .map(|p| p.kid.clone())
+        .unwrap_or_default();
+    let prefix = &env.ctx.profile.authority_key_id_prefix;
+    let attached = unverified.and_then(|page| {
         page.claims
             .get("keyset")
             .and_then(Value::as_str)
             .map(str::to_owned)
     });
-    let statement = match attached {
-        Some(statement) => statement,
-        None => {
-            let url = format!("{}{ROUTE_KEYSET}", env.ctx.issuer);
-            let response = env
-                .transport
-                .get(&url, LIST_TIMEOUTS)
-                .map_err(|_| FetchFailure::UnknownKid)?;
-            if response.status != 200
-                || response.content_type.as_deref()
-                    != Some(env.ctx.profile.keyset_content_type().as_str())
-            {
-                return Err(FetchFailure::UnknownKid);
-            }
-            String::from_utf8(response.body).map_err(|_| FetchFailure::UnknownKid)?
-        }
-    };
-    let next = verify_keyset(
-        &statement,
-        &session.pins,
-        env.ctx.profile,
-        env.ctx.issuer,
-        env.clock.wall_ms(),
-    )
-    .map_err(|_| FetchFailure::UnknownKid)?;
-    if !(env.accept_pins)(&next) {
-        return Err(FetchFailure::Local("pin persistence"));
+    if let Some(statement) = &attached {
+        let pinned = session.pins.live(&page_kid, prefix, now_recv).is_some();
+        apply_statement(env, session, statement).map_err(|e| keyset_failure(&e, pinned))?;
     }
-    session.pins = next;
-    Ok(())
+    match verify_signature(compact, &session.pins, now_recv, &env.ctx) {
+        Err(PageError::UnknownKid) if attached.is_none() && !session.route_fetched => {
+            session.route_fetched = true;
+            let statement = fetch_route_statement(env).ok_or(FetchFailure::UnknownKid)?;
+            apply_statement(env, session, &statement).map_err(|e| keyset_failure(&e, false))?;
+            verify_signature(compact, &session.pins, now_recv, &env.ctx).map_err(page_error)
+        }
+        other => other.map_err(page_error),
+    }
 }
 
 fn exchange(
@@ -275,17 +327,10 @@ fn exchange(
     }
     let compact = String::from_utf8(response.body)
         .map_err(|_| FetchFailure::Invalid(PageError::Jws(crate::jws::JwsError::Malformed)))?;
-    let signed = match verify_signed(&compact, &session.pins, now_recv, &env.ctx) {
-        Err(PageError::UnknownKid) if !session.keyset_tried => {
-            resolve_keyset(env, session, &compact)?;
-            verify_signed(&compact, &session.pins, now_recv, &env.ctx)
-        }
-        other => other,
-    }
-    .map_err(page_error)?;
-
+    let signed = verify_with_keysets(env, session, &compact, now_recv)?;
     let lag_ms = signed.iat_ms - now_recv;
-    (env.on_clock)(ClockEvidence::Signed { lag_ms });
+    env.hooks.on_clock(ClockEvidence::Signed { lag_ms });
+    check_audience(&signed, &env.ctx).map_err(page_error)?;
     let expectations = PageExpectations {
         nonce: &session.nonce,
         high_water,
@@ -293,7 +338,8 @@ fn exchange(
     let mut page = check_page(signed, now_recv, &env.ctx, &expectations).map_err(page_error)?;
     page.received_mono_ms = received_mono;
     let rtt_ms = received_mono.saturating_sub(sent_mono);
-    (env.on_clock)(ClockEvidence::Answered { lag_ms, rtt_ms });
+    env.hooks
+        .on_clock(ClockEvidence::Answered { lag_ms, rtt_ms });
     Ok(Answer::Page(Box::new(page)))
 }
 
@@ -301,7 +347,7 @@ fn fresh_session(env: &FetchEnv) -> Result<Session, FetchFailure> {
     Ok(Session {
         nonce: token(32)?,
         cursor: None,
-        keyset_tried: false,
+        route_fetched: false,
         pins: env.pins.clone(),
     })
 }
@@ -380,7 +426,8 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                 (503, Some("authority_epoch_mismatch")) => {
                     return Err(FetchFailure::RollbackSuspected);
                 }
-                (400 | 409 | 413, _) => return Err(FetchFailure::Rejected { status }),
+                (400 | 413, _) => return Err(FetchFailure::RequestInvalid { status }),
+                (409, _) => return Err(FetchFailure::Rejected { status }),
                 _ => return Err(FetchFailure::Unreachable { retry_after_s }),
             },
         }
@@ -411,7 +458,8 @@ pub fn probe_clock(env: &mut FetchEnv, params: &FetchParams) -> Result<(), Fetch
             (401, _) => FetchFailure::Unauthorized,
             (403, _) => FetchFailure::NotAuthorized,
             (503, Some("authority_epoch_mismatch")) => FetchFailure::RollbackSuspected,
-            (400 | 409 | 413, _) => FetchFailure::Rejected { status },
+            (400 | 413, _) => FetchFailure::RequestInvalid { status },
+            (409, _) => FetchFailure::Rejected { status },
             _ => FetchFailure::Unreachable { retry_after_s },
         }),
     }

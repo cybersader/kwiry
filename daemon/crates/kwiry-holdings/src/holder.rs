@@ -19,11 +19,13 @@
 //!
 //! Kwiry's row ids for these steps are A0–A5 (v2 Annex K.1).
 
-use crate::client::{self, ClockEvidence, FetchEnv, FetchFailure, FetchParams, Transport};
+use crate::client::{
+    self, ClockEvidence, FetchEnv, FetchFailure, FetchHooks, FetchParams, Transport,
+};
 use crate::clock::Clock;
 use crate::engine::{self, EngineEvent, EngineGate, EngineSettings, RootPin};
 use crate::events::{EventSink, HolderEvent};
-use crate::gate::{GateEntry, GateSnapshot, ServingGate};
+use crate::gate::{GateEntry, GateSnapshot, Refusal, ServingGate};
 use crate::keys::{HolderKey, PinnedKeys};
 use crate::profile::WireProfile;
 use crate::schedule::{EarlyRelist, RelistScheduler};
@@ -53,6 +55,8 @@ pub enum ConfigError {
     PageSize,
     #[error("engine settings must accompany an engine profile, and only one")]
     EngineSettings,
+    #[error("the enrolled holder kind is not the kind the engine profile binds")]
+    HolderKind,
 }
 
 /// The cause of an auth halt (v2 §C.0).
@@ -107,6 +111,8 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) gate: ServingGate,
     pub(crate) engine: Option<EngineGate>,
     pub(crate) route: RouteHealth,
+    /// v2 H.40: raised on a list-route `400`/`413`, until a list applies.
+    list_request_invalid: bool,
     /// Profile S (H.24): pins of the list last applied in this process, by
     /// holding id. Empty at process start.
     baseline: HashMap<String, Option<RootPin>>,
@@ -129,8 +135,16 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if config.profile.engine.is_some() != config.engine.is_some() {
             return Err(ConfigError::EngineSettings);
         }
+        // A kind mismatch would make every pinned item look unpinned
+        // (`NotApplicable`) and skip the pin rules: refuse to start instead.
+        if let Some(engine) = &config.profile.engine
+            && engine.holder_kind != started.writer.enrollment().holder_kind
+        {
+            return Err(ConfigError::HolderKind);
+        }
         let state = started.writer.state();
-        let gate = ServingGate::new(clock.clone(), state.engine.clock_behind_authority);
+        // An unconfirmed clear on disk counts as raised (H.34).
+        let gate = ServingGate::new(clock.clone(), state.engine.clock_hold());
         let engine = config
             .engine
             .map(|settings| EngineGate::new(gate.clone(), settings));
@@ -148,6 +162,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             gate,
             engine,
             route: RouteHealth::Normal,
+            list_request_invalid: false,
             baseline: HashMap::new(),
             scheduler: RelistScheduler::new(300),
         })
@@ -214,6 +229,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     t.bytes().fold(0u64, |a, b| a.rotate_left(5) ^ u64::from(b))
                 });
                 self.scheduler.on_success(finished, jitter);
+                if std::mem::take(&mut self.list_request_invalid) {
+                    self.events.emit(HolderEvent::ListRequestInvalidCleared);
+                }
+            }
+            ListOutcome::Failed(FetchFailure::RequestInvalid { .. }) => {
+                self.scheduler.on_request_invalid(finished);
             }
             ListOutcome::Failed(FetchFailure::Unreachable { retry_after_s }) => {
                 let retry_ms = retry_after_s.map(|s| s.saturating_mul(1000));
@@ -250,21 +271,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let enrollment = writer.enrollment().clone();
         let high_water = writer.state().high_water.clone();
         let last_list_ref = writer.state().last_list_ref.clone();
-        let mut evidence = Vec::new();
-        let gate_view: &ServingGate = gate;
-        let sink: &dyn EventSink = events.as_ref();
-        let mut accept = |pins: &PinnedKeys| -> bool {
-            let accepted = writer.pin_keys(pins.clone()).is_ok();
-            if accepted && let Some(keyset_seq) = pins.keyset_seq {
-                sink.emit(HolderEvent::KeysetAccepted { keyset_seq });
-            }
-            accepted
-        };
-        let mut on_clock = |observed: ClockEvidence| {
-            if engine_on {
-                engine::clock_hold::raise_on_signed_page(gate_view, &observed);
-                evidence.push(observed);
-            }
+        let mut observer = Observer {
+            writer,
+            gate,
+            events: events.as_ref(),
+            engine_on,
         };
         let mut env = FetchEnv {
             transport: &*transport,
@@ -277,23 +288,30 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 holder_kind: &enrollment.holder_kind,
             },
             pins: &enrollment.pinned,
-            accept_pins: &mut accept,
-            on_clock: &mut on_clock,
+            hooks: &mut observer,
         };
         let params = FetchParams {
             high_water: high_water.as_ref(),
             last_list_ref: last_list_ref.as_ref(),
             page_size: config.page_size,
         };
-        let result = if probe {
+        if probe {
             client::probe_clock(&mut env, &params).map(|()| None)
         } else {
             client::fetch_list(&mut env, &params).map(Some)
-        };
-        for observed in evidence {
-            self.on_clock_evidence(observed);
         }
-        result
+    }
+
+    /// Alerts that stay raised until their cause clears.
+    pub fn raised_alerts(&self) -> Vec<&'static str> {
+        let mut alerts = Vec::new();
+        if self.list_request_invalid {
+            alerts.push("lifecycle_list_request_invalid");
+        }
+        if self.gate.clock_hold_raised() {
+            alerts.push("clock_behind_authority");
+        }
+        alerts
     }
 
     pub(crate) fn on_failure(&mut self, failure: &FetchFailure) {
@@ -321,6 +339,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             FetchFailure::Rejected { status } => {
                 HolderEvent::ListRequestRejected { status: *status }
             }
+            FetchFailure::RequestInvalid { status } => {
+                self.list_request_invalid = true;
+                HolderEvent::ListRequestInvalid { status: *status }
+            }
+            FetchFailure::KeysetInvalid => HolderEvent::KeysetInvalid,
             FetchFailure::Local(reason) => HolderEvent::ListInvalid {
                 reason: (*reason).to_owned(),
             },
@@ -328,20 +351,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.events.emit(event);
     }
 
-    /// Storage exhaustion (v2 §C.0): a lifecycle write failed for lack of
-    /// space. The calling step fails with no state change; admit refusals
-    /// stay in force; nothing is deleted.
-    pub(crate) fn write_failed(&self, error: &WriteError) {
-        if let WriteError::Io(io) = error
-            && io.kind() == std::io::ErrorKind::StorageFull
-        {
-            self.events.emit(HolderEvent::StorageExhausted);
-        }
-    }
-
     fn apply_failed(&self, step: &'static str, error: Option<&WriteError>) -> ListOutcome {
         if let Some(error) = error {
-            self.write_failed(error);
+            report_write_failure(self.events.as_ref(), error);
         }
         self.events.emit(HolderEvent::ApplyFailed { step });
         ListOutcome::ApplyFailed { step }
@@ -468,13 +480,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         list: &VerifiedList,
         tombstoned: &HashSet<String>,
         new_pairs: &[engine::PinPair],
-    ) -> (HashSet<String>, usize) {
+    ) -> (HashMap<String, Refusal>, usize) {
         let listed: HashMap<&str, &Item> = list
             .items
             .iter()
             .map(|listed| (listed.item.resource.id.as_str(), &listed.item))
             .collect();
-        let mut refuse: HashSet<String> = self
+        let mut refuse: HashMap<String, Refusal> = self
             .gate
             .listed_ids()
             .into_iter()
@@ -483,6 +495,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     .get(id.as_str())
                     .is_some_and(|item| item.is_active() && !tombstoned.contains(id))
             })
+            .map(|id| (id, Refusal::RefusedAtAdmit))
             .collect();
         let history = self.engine.as_ref().map(|_| {
             engine::pin_history::map(
@@ -498,18 +511,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         for listed in &list.items {
             let item = &listed.item;
             let id = &item.resource.id;
-            let refused = if !item.is_active() {
-                true
+            let refusal = if !item.is_active() {
+                Some(Refusal::RefusedAtAdmit)
             } else if tombstoned.contains(id) {
                 conflicts += 1;
-                true
+                Some(Refusal::Tombstoned)
             } else {
-                history.as_ref().is_some_and(|history| {
+                history.as_ref().and_then(|history| {
                     engine::root_pin::refused_at_admit(item, &self.baseline, history)
                 })
             };
-            if refused {
-                refuse.insert(id.clone());
+            if let Some(refusal) = refusal {
+                refuse.insert(id.clone(), refusal);
             }
         }
         (refuse, conflicts)
@@ -618,4 +631,49 @@ pub fn classify(
         plan.dispositions.insert(key.clone(), disposition);
     }
     plan
+}
+
+impl<S: ResourceStore, T: Transport> Drop for Holder<S, T> {
+    /// Revokes every outstanding clone of the gate before the writer, and
+    /// with it the holder lock, is released. A replacement holder can then
+    /// never race a gate that still shows the old snapshot.
+    fn drop(&mut self) {
+        self.gate.revoke();
+    }
+}
+
+/// Storage exhaustion (v2 §C.0): a lifecycle write failed for lack of space.
+/// The calling step fails with no state change; admit refusals stay in
+/// force; nothing is deleted.
+pub(crate) fn report_write_failure(events: &dyn EventSink, error: &WriteError) {
+    if let WriteError::Io(io) | WriteError::Poisoned(io) = error
+        && io.kind() == std::io::ErrorKind::StorageFull
+    {
+        events.emit(HolderEvent::StorageExhausted);
+    }
+}
+
+/// Everything a running fetch hands back, applied at once and in order with
+/// the single holder-state writer.
+struct Observer<'a> {
+    writer: &'a mut StateWriter,
+    gate: &'a ServingGate,
+    events: &'a dyn EventSink,
+    engine_on: bool,
+}
+
+impl FetchHooks for Observer<'_> {
+    fn accept_pins(&mut self, pins: &PinnedKeys) -> bool {
+        let accepted = self.writer.pin_keys(pins.clone()).is_ok();
+        if accepted && let Some(keyset_seq) = pins.keyset_seq {
+            self.events.emit(HolderEvent::KeysetAccepted { keyset_seq });
+        }
+        accepted
+    }
+
+    fn on_clock(&mut self, evidence: ClockEvidence) {
+        if self.engine_on {
+            engine::clock_hold::observe(self.writer, self.gate, self.events, evidence);
+        }
+    }
 }

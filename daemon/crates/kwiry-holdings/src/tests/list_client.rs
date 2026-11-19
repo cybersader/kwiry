@@ -335,13 +335,13 @@ fn h12_every_list_route_answer_has_one_holder_action() {
         ),
         (
             problem(400, "invalid_request"),
-            FetchFailure::Rejected { status: 400 },
-            "lifecycle_list_rejected",
+            FetchFailure::RequestInvalid { status: 400 },
+            "lifecycle_list_request_invalid",
         ),
         (
             problem(413, "payload_too_large"),
-            FetchFailure::Rejected { status: 413 },
-            "lifecycle_list_rejected",
+            FetchFailure::RequestInvalid { status: 413 },
+            "lifecycle_list_request_invalid",
         ),
         (
             problem(409, "stale_list_ref"),

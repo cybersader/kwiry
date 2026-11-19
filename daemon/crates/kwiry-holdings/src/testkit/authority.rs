@@ -104,6 +104,8 @@ pub struct FakeState {
     pub audit: Vec<&'static str>,
     /// The last page served, for replaying it later.
     pub last_page: Option<HttpResponse>,
+    /// Every POST body received, forced answers included.
+    pub bodies: Vec<Vec<u8>>,
     counter: u64,
 }
 
@@ -154,6 +156,7 @@ impl FakeAuthority {
             requests: Vec::new(),
             audit: Vec::new(),
             last_page: None,
+            bodies: Vec::new(),
             counter: 0,
         })))
     }
@@ -323,6 +326,54 @@ impl FakeState {
         self.keys.insert(kid.clone(), key);
         self.active_kid = kid.clone();
         kid
+    }
+
+    /// Publishes a key-set statement signed by the current key, adding a key
+    /// per seed, retiring `retire` at once and, with `not_after_old_s`, every
+    /// earlier key not added here at that instant. Pages keep their current
+    /// signing key until [`FakeState::use_key`]. Returns the added kids.
+    pub fn issue_keyset(
+        &mut self,
+        seeds: &[[u8; 32]],
+        retire: &[&str],
+        not_after_old_s: Option<i64>,
+        attach: bool,
+    ) -> Vec<String> {
+        self.keyset_seq += 1;
+        let mut kids = Vec::new();
+        let mut jwks = Vec::new();
+        for (index, seed) in seeds.iter().enumerate() {
+            let kid = format!(
+                "{}20261119-{:02x}{index:02x}",
+                self.config.profile.authority_key_id_prefix, self.keyset_seq
+            );
+            let key = signing_key(*seed);
+            jwks.push(authority_public_jwk(&kid, key.verifying_key()));
+            self.keys.insert(kid.clone(), key);
+            kids.push(kid);
+        }
+        let mut claims = json!({
+            "iss": self.config.issuer,
+            "aud": self.config.profile.broadcast_audience(),
+            "iat": self.now_ms().div_euclid(1000),
+            "keyset_seq": self.keyset_seq,
+            "keys": jwks,
+            "retire_kids": retire,
+        });
+        if let Some(limit) = not_after_old_s {
+            claims["not_after_old"] = limit.into();
+        }
+        let signer = self.active_kid.clone();
+        self.keyset_statement =
+            Some(self.sign_as(&signer, &self.config.profile.typ_keyset.clone(), &claims));
+        self.attach_keyset = attach;
+        kids
+    }
+
+    /// Signs pages with `kid` from now on.
+    pub fn use_key(&mut self, kid: &str) {
+        assert!(self.keys.contains_key(kid), "unknown test kid");
+        self.active_kid = kid.to_owned();
     }
 
     /// Signs arbitrary claims with the current key (key-set statements a
@@ -787,6 +838,7 @@ impl Transport for FakeAuthority {
     ) -> Result<HttpResponse, TransportError> {
         let mut state = self.state();
         state.posts += 1;
+        state.bodies.push(body.to_vec());
         let posts = state.posts;
         let due: Vec<Mutation> = {
             let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut state.scheduled)

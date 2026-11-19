@@ -29,8 +29,15 @@ pub enum HolderEvent {
     HolderNotAuthorized,
     /// Two consecutive `401 proof_expired`.
     ProofExpiredClockAlert,
-    /// `400`/`413` or an answer the list route never gives.
+    /// An answer the list route never gives (`409`).
     ListRequestRejected { status: u16 },
+    /// v2 H.40: `400`/`413` on the list route. The alert stays raised until a
+    /// list applies; every retry is rebuilt with a fresh nonce and `jti`.
+    ListRequestInvalid { status: u16 },
+    /// A list applied after `lifecycle_list_request_invalid`.
+    ListRequestInvalidCleared,
+    /// v2 H.37.6: a verified key-set statement would leave no pinned key.
+    KeysetInvalid,
     /// A key-set statement was verified and its keys pinned.
     KeysetAccepted { keyset_seq: u64 },
     /// An artefact named a key that no verifiable key-set statement adds.
@@ -65,6 +72,9 @@ impl HolderEvent {
             Self::HolderNotAuthorized => "holder_not_authorized",
             Self::ProofExpiredClockAlert => "lifecycle_proof_expired",
             Self::ListRequestRejected { .. } => "lifecycle_list_rejected",
+            Self::ListRequestInvalid { .. } => "lifecycle_list_request_invalid",
+            Self::ListRequestInvalidCleared => "lifecycle_list_request_invalid_cleared",
+            Self::KeysetInvalid => "keyset_invalid",
             Self::KeysetAccepted { .. } => "lifecycle_keyset_accepted",
             Self::UnknownKid => "unknown_kid",
             Self::InstructionsSkipped { .. } => "lifecycle_instruction_skipped",

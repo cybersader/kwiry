@@ -85,9 +85,10 @@ fn a_pin_member_is_refused_for_a_holder_without_the_engine_profile() {
 fn engine_settings_must_match_the_profile() {
     let (_dir, mut rig) = core_rig();
     rig.config.engine = Some(crate::engine::EngineSettings::new(30, 3_600).unwrap());
-    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.restart()));
-    assert!(
-        error.is_err(),
-        "a core-only profile refuses engine settings"
-    );
+    assert!(matches!(
+        rig.restart(),
+        Err(crate::testkit::RigError::Config(
+            crate::holder::ConfigError::EngineSettings
+        ))
+    ));
 }

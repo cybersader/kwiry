@@ -10,7 +10,7 @@ use crate::state::{
 use crate::wire::Rev;
 use std::fs;
 
-fn start_error(rig: &mut Rig) -> StartupError {
+fn start_error(rig: &mut Rig) -> crate::testkit::RigError {
     match rig.restart() {
         Err(error) => error,
         Ok(()) => panic!("start should have failed"),

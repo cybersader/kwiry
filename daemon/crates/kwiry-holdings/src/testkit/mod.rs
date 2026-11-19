@@ -10,7 +10,7 @@ mod fakes;
 mod jcs;
 
 pub use authority::{AuthorityConfig, FakeAuthority, FakeState, Forced, Hooks, RecordedRequest};
-pub use fakes::{DataRootView, FakeClock, FakeDataRoot, IoFaults, MemoryStore, StoreView};
+pub use fakes::{DataRootView, FakeClock, FakeDataRoot, Fault, IoFaults, MemoryStore, StoreView};
 pub use jcs::canonical as jcs;
 
 use crate::engine::{EngineGate, EngineProfile, EngineSettings};
@@ -64,6 +64,22 @@ pub fn pin_id(label: &str) -> String {
 }
 
 pub type TestHolder = Holder<MemoryStore, FakeAuthority>;
+
+/// Why a rig could not start its holder.
+#[derive(Debug)]
+pub enum RigError {
+    Startup(StartupError),
+    Config(crate::holder::ConfigError),
+}
+
+impl RigError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Startup(error) => error.code(),
+            Self::Config(_) => "holder_config",
+        }
+    }
+}
 
 /// One enrolled holder wired to a fake authority, fake clock, memory store
 /// and fake data root, all sharing state so tests can inspect and mutate.
@@ -150,11 +166,13 @@ impl Rig {
 
     /// Drops the running holder (its lock and all volatile state) and starts
     /// a new one from the holder directory.
-    pub fn restart(&mut self) -> Result<(), StartupError> {
+    pub fn restart(&mut self) -> Result<(), RigError> {
         self.holder = None;
-        let dir = HolderDir::open(&self.dir, &[]).map_err(|e| match e {
-            crate::state::DirError::Io(io) => StartupError::Io(io),
-            other => StartupError::DataRoot(other.to_string()),
+        let dir = HolderDir::open(&self.dir, &[]).map_err(|e| {
+            RigError::Startup(match e {
+                crate::state::DirError::Io(io) => StartupError::Io(io),
+                other => StartupError::DataRoot(other.to_string()),
+            })
         })?;
         let started = startup::start(
             dir,
@@ -162,7 +180,8 @@ impl Rig {
             self.clock.clone(),
             &self.data_root,
             self.events.as_ref(),
-        )?;
+        )
+        .map_err(RigError::Startup)?;
         let holder = Holder::new(
             started,
             self.config.clone(),
@@ -171,7 +190,7 @@ impl Rig {
             self.clock.clone(),
             self.events.clone(),
         )
-        .expect("holder config");
+        .map_err(RigError::Config)?;
         self.holder = Some(holder);
         Ok(())
     }

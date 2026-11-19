@@ -94,7 +94,9 @@ impl StartupError {
 impl From<crate::state::WriteError> for StartupError {
     fn from(error: crate::state::WriteError) -> Self {
         match error {
-            crate::state::WriteError::Io(error) => Self::Io(error),
+            crate::state::WriteError::Io(error) | crate::state::WriteError::Poisoned(error) => {
+                Self::Io(error)
+            }
             crate::state::WriteError::Refused(reason) => Self::EnrollmentRefused(reason),
         }
     }
@@ -115,7 +117,8 @@ pub fn create_key(dir: &HolderDir, io: &dyn DurableIo) -> Result<HolderKey, Star
 /// Stores an existing key (enrollment fixtures with fixed test seeds).
 pub fn write_key(dir: &HolderDir, io: &dyn DurableIo, key: &HolderKey) -> Result<(), StartupError> {
     let bytes = serde_json::to_vec(&key.private_jwk()).map_err(io::Error::other)?;
-    io.write_atomic(dir.path(), KEY_FILE, &bytes)?;
+    io.write_atomic(dir.path(), KEY_FILE, &bytes)
+        .map_err(io::Error::from)?;
     Ok(())
 }
 
@@ -157,7 +160,8 @@ pub fn enroll(
         initialized_at_ms: clock.wall_ms(),
     };
     let bytes = serde_json::to_vec_pretty(&enrollment).map_err(io::Error::other)?;
-    io.write_atomic(dir.path(), ENROLLMENT_FILE, &bytes)?;
+    io.write_atomic(dir.path(), ENROLLMENT_FILE, &bytes)
+        .map_err(io::Error::from)?;
     let state = HolderState::fresh(params.holder_id, false);
     StateWriter::new(dir, io, clock, state, enrollment).persist_initial()?;
     Ok(())

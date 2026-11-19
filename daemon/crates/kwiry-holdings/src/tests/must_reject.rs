@@ -510,7 +510,7 @@ fn h9_and_page_grammar_refuse_the_whole_list() {
         on_page(1, |p| {
             p.insert("keyset".into(), "x.y.z".into());
         }),
-        PageError::Grammar("keyset"),
+        PageError::Keyset,
     );
 }
 

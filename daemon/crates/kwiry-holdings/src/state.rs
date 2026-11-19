@@ -40,7 +40,31 @@ pub const DEFAULT_RETENTION_WINDOW_SECONDS: u64 = 30 * 24 * 3600;
 
 /// Durable file replacement. Production uses [`FsIo`]; tests inject faults.
 pub trait DurableIo: Send {
-    fn write_atomic(&self, dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()>;
+    fn write_atomic(&self, dir: &Path, name: &str, bytes: &[u8]) -> Result<(), WriteFailure>;
+}
+
+/// A failed durable replacement. `replaced` is true when the rename already
+/// happened (only the directory fsync failed): the file may now hold the new
+/// bytes even though the write never became durable.
+#[derive(Debug)]
+pub struct WriteFailure {
+    pub replaced: bool,
+    pub error: io::Error,
+}
+
+impl WriteFailure {
+    pub fn before_rename(error: io::Error) -> Self {
+        Self {
+            replaced: false,
+            error,
+        }
+    }
+}
+
+impl From<WriteFailure> for io::Error {
+    fn from(failure: WriteFailure) -> Self {
+        failure.error
+    }
 }
 
 pub struct FsIo;
@@ -73,21 +97,25 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 }
 
 impl DurableIo for FsIo {
-    fn write_atomic(&self, dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-        let suffix = crate::b64::random_token(9).map_err(|e| io::Error::other(e.to_string()))?;
+    fn write_atomic(&self, dir: &Path, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
+        let suffix = crate::b64::random_token(9)
+            .map_err(|e| WriteFailure::before_rename(io::Error::other(e.to_string())))?;
         let temporary = dir.join(format!(".{name}.{suffix}.tmp"));
-        let result = (|| {
+        let staged = (|| {
             let mut file = private_options().open(&temporary)?;
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
-            fs::rename(&temporary, dir.join(name))?;
-            sync_dir(dir)
+            fs::rename(&temporary, dir.join(name))
         })();
-        if result.is_err() {
+        if let Err(error) = staged {
             let _ = fs::remove_file(&temporary);
+            return Err(WriteFailure::before_rename(error));
         }
-        result
+        sync_dir(dir).map_err(|error| WriteFailure {
+            replaced: true,
+            error,
+        })
     }
 }
 
@@ -256,6 +284,10 @@ pub enum WriteError {
     Io(#[from] io::Error),
     #[error("mutation refused: {0}")]
     Refused(&'static str),
+    /// An earlier failure after a rename left the file possibly ahead of
+    /// memory, and rewriting the committed state has not succeeded yet.
+    #[error("holder state poisoned until the committed state is rewritten: {0}")]
+    Poisoned(io::Error),
 }
 
 /// What one admitted list adds to durable state (row A1).
@@ -280,6 +312,9 @@ pub struct StateWriter {
     clock: Arc<dyn Clock>,
     state: HolderState,
     enrollment: Enrollment,
+    /// Set when a failed commit may have left uncommitted bytes on disk and
+    /// rewriting the committed state also failed.
+    poisoned: bool,
 }
 
 impl StateWriter {
@@ -296,7 +331,18 @@ impl StateWriter {
             clock,
             state,
             enrollment,
+            poisoned: false,
         }
+    }
+
+    pub fn poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    fn write_state(&self, state: &HolderState) -> Result<(), WriteFailure> {
+        let bytes = serde_json::to_vec_pretty(state)
+            .map_err(|e| WriteFailure::before_rename(io::Error::other(e)))?;
+        self.io.write_atomic(self.dir.path(), STATE_FILE, &bytes)
     }
 
     pub fn state(&self) -> &HolderState {
@@ -317,12 +363,30 @@ impl StateWriter {
         self.commit(self.state.clone())
     }
 
+    /// Writes `next` whole and only then adopts it. If the write failed after
+    /// its rename, the file may hold `next` although the commit never became
+    /// durable: the committed state is written back at once, and if that also
+    /// fails the writer is poisoned and refuses every commit until the
+    /// committed state has been rewritten.
     pub(crate) fn commit(&mut self, mut next: HolderState) -> Result<(), WriteError> {
+        if self.poisoned {
+            self.write_state(&self.state)
+                .map_err(|failure| WriteError::Poisoned(failure.error))?;
+            self.poisoned = false;
+        }
         next.committed_at_ms = self.clock.wall_ms();
-        let bytes = serde_json::to_vec_pretty(&next).map_err(io::Error::other)?;
-        self.io.write_atomic(self.dir.path(), STATE_FILE, &bytes)?;
-        self.state = next;
-        Ok(())
+        match self.write_state(&next) {
+            Ok(()) => {
+                self.state = next;
+                Ok(())
+            }
+            Err(failure) => {
+                if failure.replaced && self.write_state(&self.state).is_err() {
+                    self.poisoned = true;
+                }
+                Err(WriteError::Io(failure.error))
+            }
+        }
     }
 
     /// Row A1: advance the high-water and union tombstones and (engine
@@ -374,8 +438,19 @@ impl StateWriter {
         let mut next = self.enrollment.clone();
         next.pinned = pinned;
         let bytes = serde_json::to_vec_pretty(&next).map_err(io::Error::other)?;
-        self.io
-            .write_atomic(self.dir.path(), ENROLLMENT_FILE, &bytes)?;
+        if let Err(failure) = self
+            .io
+            .write_atomic(self.dir.path(), ENROLLMENT_FILE, &bytes)
+        {
+            if failure.replaced {
+                let current =
+                    serde_json::to_vec_pretty(&self.enrollment).map_err(io::Error::other)?;
+                let _ = self
+                    .io
+                    .write_atomic(self.dir.path(), ENROLLMENT_FILE, &current);
+            }
+            return Err(WriteError::Io(failure.error));
+        }
         self.enrollment = next;
         Ok(())
     }

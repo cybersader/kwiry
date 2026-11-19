@@ -10,7 +10,8 @@
 //!   resource) never makes the request wait; at most one is pending and
 //!   further triggers coalesce.
 //! - Failures back off from 10 s, doubling, capped at `relist_seconds / 2`,
-//!   and never earlier than a `Retry-After`.
+//!   and never earlier than a `Retry-After`. A list-route `400`/`413` caps
+//!   at `relist_seconds` instead (v2 H.40).
 //! - A clock probe runs at most once per 60 s and counts as a list start.
 
 pub const LIST_START_SPACING_MS: u64 = 5_000;
@@ -102,8 +103,26 @@ impl RelistScheduler {
     }
 
     pub fn on_failure(&mut self, now: u64, retry_after_ms: Option<u64>) {
+        self.back_off(
+            now,
+            retry_after_ms,
+            (self.relist_ms / 2).max(BACKOFF_START_MS),
+        );
+    }
+
+    /// v2 H.40: a list-route `400`/`413` backs off from 10 s, doubling,
+    /// capped at `relist_seconds`; every retry is a counted list start.
+    pub fn on_request_invalid(&mut self, now: u64) {
+        self.back_off(now, None, self.relist_ms.max(BACKOFF_START_MS));
+    }
+
+    /// The instant before which no list may start after the last failure.
+    pub fn backoff_until(&self) -> u64 {
+        self.backoff_until
+    }
+
+    fn back_off(&mut self, now: u64, retry_after_ms: Option<u64>, cap: u64) {
         self.in_flight = false;
-        let cap = (self.relist_ms / 2).max(BACKOFF_START_MS);
         self.backoff_ms = if self.backoff_ms == 0 {
             BACKOFF_START_MS
         } else {

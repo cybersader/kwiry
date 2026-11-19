@@ -2,7 +2,7 @@
 //! authority, OpenClast.
 //!
 //! Normative source: OpenClast `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md`
-//! (sha256 `6b6d2e27d48b6d110a11477aebf17120fa5b190b1b1dea51016865d6db49f12c`).
+//! (sha256 `43a4d299caec1f9cb85f66f2a5ed78d0f5dda196cbea7b72a48003789fa54291`).
 //! Kwiry implements Part I (generic core) and Part II (Profile S, the
 //! search-engine holder); Annex K maps Kwiry's ids to the generic states.
 //!

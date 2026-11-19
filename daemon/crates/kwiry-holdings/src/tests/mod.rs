@@ -10,6 +10,7 @@ mod core_only;
 mod epoch;
 mod list_client;
 mod must_reject;
+mod review_round2;
 mod state_startup;
 
 use crate::client::FetchFailure;
