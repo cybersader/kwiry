@@ -291,6 +291,13 @@ impl FakeState {
         self.commit();
     }
 
+    /// Changes the epoch without advancing `holder_rev`, as a coalesced
+    /// write would; only the sealed epoch can then expire a cursor (H.41).
+    pub fn switch_epoch_quietly(&mut self) {
+        self.epoch = self.next_id("ep_");
+        self.lineage.push(self.epoch.clone());
+    }
+
     /// A raw restore: `seq` rolls back without a new epoch.
     pub fn raw_restore(&mut self, seq: u64) {
         self.seq = seq;
@@ -693,6 +700,7 @@ impl FakeState {
                     c["holder_id"] == self.holder_id.as_str()
                         && c["nonce"] == nonce.as_str()
                         && c["holder_rev"] == self.holder_rev
+                        && c["epoch"] == self.epoch.as_str()
                         && now_ms - c["issued_ms"].as_i64().unwrap_or(i64::MIN) <= 300_000
                         && now_ms - c["first_ms"].as_i64().unwrap_or(i64::MIN) <= 1_800_000
                 });
@@ -740,6 +748,7 @@ impl FakeState {
                 "list_id": list_id,
                 "nonce": nonce,
                 "holder_rev": self.holder_rev,
+                "epoch": self.epoch,
                 "issued_ms": now_ms,
                 "first_ms": first_ms,
                 "offset": end,

@@ -120,7 +120,10 @@ fn h23_nothing_but_a_confirmed_correction_clears_and_persistence_never_locks_out
     let (_dir, mut rig) = setup();
     raise(&mut rig);
     let now = now_s(&rig);
-    rig.holder().observe_capability_iat(now);
+    let capability = crate::testkit::TestCapabilityVerifier::issue(now, now + 60);
+    rig.holder()
+        .observe_capability(&crate::testkit::TestCapabilityVerifier, &capability)
+        .unwrap();
     rig.clock.step_wall(-5_000);
     rig.advance(3_600_000);
     rig.restart().unwrap();
@@ -137,9 +140,20 @@ fn c19_a_capability_dated_more_than_30_s_ahead_raises_the_hold() {
         use crate::clock::Clock;
         rig.clock.wall_ms()
     };
-    rig.holder().observe_capability_iat(now_ms / 1000 + 30);
+    let at = |iat: i64| crate::testkit::TestCapabilityVerifier::issue(iat, iat + 60);
+    rig.holder()
+        .observe_capability(
+            &crate::testkit::TestCapabilityVerifier,
+            &at(now_ms / 1000 + 30),
+        )
+        .unwrap();
     assert!(!raised(&rig));
-    rig.holder().observe_capability_iat(now_ms / 1000 + 31);
+    rig.holder()
+        .observe_capability(
+            &crate::testkit::TestCapabilityVerifier,
+            &at(now_ms / 1000 + 31),
+        )
+        .unwrap();
     assert!(raised(&rig));
     assert!(durable(&mut rig));
 }

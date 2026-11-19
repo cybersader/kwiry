@@ -62,7 +62,10 @@ fn a_core_only_holder_ignores_clock_evidence_and_keeps_no_engine_state() {
     rig.authority.state().offset_ms = 45_000;
     applied(rig.holder().list_once());
     let now = now_s(&rig);
-    rig.holder().observe_capability_iat(now + 3_600);
+    let capability = crate::testkit::TestCapabilityVerifier::issue(now + 3_600, now + 3_660);
+    rig.holder()
+        .observe_capability(&crate::testkit::TestCapabilityVerifier, &capability)
+        .unwrap();
     assert!(rig.holder().probe_clock().is_none());
     assert!(!codes(&rig).iter().any(|c| c.starts_with("clock_")));
     assert_eq!(rig.holder().state().engine, EngineState::default());

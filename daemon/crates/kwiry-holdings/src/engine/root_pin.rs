@@ -181,9 +181,8 @@ pub(crate) fn check(
     };
     let latched = state
         .root_mismatch
-        .get(query.resource_id)
-        .filter(|(pin_ref, _)| pin_ref == &pin.pin_ref)
-        .map(|(_, since)| *since);
+        .get(&(query.resource_id.to_owned(), pin.pin_ref.clone()))
+        .copied();
     // S.5: once a mismatch is seen under this `pin_ref`, a later matching
     // observation does not end it; only a successful walk does.
     let (observation, latch) = match (query.root, latched) {
@@ -211,6 +210,18 @@ pub(crate) fn check(
         Err(EngineRefusal::RootPinMismatch)
     };
     (verdict, latch)
+}
+
+/// Whether `pin_ref` is the listed pin of `resource_id` right now.
+pub(crate) fn is_current_pin(
+    entries: &HashMap<String, GateEntry>,
+    resource_id: &str,
+    pin_ref: &str,
+) -> bool {
+    entries
+        .get(resource_id)
+        .and_then(|e| e.pin.pin())
+        .is_some_and(|pin| pin.pin_ref == pin_ref)
 }
 
 pub(crate) fn walk_inputs(

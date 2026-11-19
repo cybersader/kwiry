@@ -17,7 +17,7 @@
 
 use crate::b64;
 use crate::clock::Clock;
-use crate::keys::{HolderKey, KeyError, PinnedKeys, verify_keyset};
+use crate::keys::{HolderKey, KeyError, PinnedKeys, parse_keyset, verify_keyset};
 use crate::profile::{PROBLEM_CONTENT_TYPE, ROUTE_KEYSET, ROUTE_LIST};
 use crate::verify::{
     PageError, PageExpectations, SignedPage, VerifiedList, VerifiedPage, VerifyContext, assemble,
@@ -145,10 +145,20 @@ struct Session {
     /// The key-set route was already fetched in this list.
     route_fetched: bool,
     pins: PinnedKeys,
+    /// A key-set statement changed the pins since buffered pages were last
+    /// verified (v2 H.37.3).
+    pins_changed: bool,
 }
 
 enum Answer {
-    Page(Box<VerifiedPage>),
+    /// A page that passed every page-level check, its compact form (kept to
+    /// re-verify it if the pins change) and its nonce-bound clock
+    /// measurement, delivered only once the whole list verifies (H.29).
+    Page {
+        page: Box<VerifiedPage>,
+        compact: String,
+        answered: ClockEvidence,
+    },
     Problem {
         status: u16,
         code: Option<String>,
@@ -199,11 +209,14 @@ fn apply_statement(
     session: &mut Session,
     statement: &str,
 ) -> Result<(), KeyError> {
-    let claimed = crate::jws::parse(statement)
-        .ok()
-        .and_then(|s| s.claims.get("keyset_seq").and_then(Value::as_u64));
-    if let (Some(claimed), Some(current)) = (claimed, session.pins.keyset_seq)
-        && claimed <= current
+    // v2 H.35: the whole grammar is checked first, so a malformed statement
+    // is refused whatever its sequence; only a well-formed stale one is
+    // skipped.
+    let parsed = parse_keyset(statement, env.ctx.profile, env.ctx.issuer)?;
+    if session
+        .pins
+        .keyset_seq
+        .is_some_and(|current| parsed.keyset_seq <= current)
     {
         return Ok(());
     }
@@ -218,6 +231,7 @@ fn apply_statement(
         return Err(KeyError::Keyset("pin persistence"));
     }
     session.pins = next;
+    session.pins_changed = true;
     Ok(())
 }
 
@@ -338,9 +352,28 @@ fn exchange(
     let mut page = check_page(signed, now_recv, &env.ctx, &expectations).map_err(page_error)?;
     page.received_mono_ms = received_mono;
     let rtt_ms = received_mono.saturating_sub(sent_mono);
-    env.hooks
-        .on_clock(ClockEvidence::Answered { lag_ms, rtt_ms });
-    Ok(Answer::Page(Box::new(page)))
+    Ok(Answer::Page {
+        page: Box::new(page),
+        compact,
+        answered: ClockEvidence::Answered { lag_ms, rtt_ms },
+    })
+}
+
+/// After a key-set statement changed the pins mid-fetch, every buffered
+/// page must still verify under the current pins (a retired signer fails).
+fn reverify(
+    env: &FetchEnv,
+    session: &mut Session,
+    compacts: &[String],
+) -> Result<(), FetchFailure> {
+    if !std::mem::take(&mut session.pins_changed) {
+        return Ok(());
+    }
+    let now = env.clock.wall_ms();
+    for compact in compacts {
+        verify_signature(compact, &session.pins, now, &env.ctx).map_err(page_error)?;
+    }
+    Ok(())
 }
 
 fn fresh_session(env: &FetchEnv) -> Result<Session, FetchFailure> {
@@ -349,6 +382,7 @@ fn fresh_session(env: &FetchEnv) -> Result<Session, FetchFailure> {
         cursor: None,
         route_fetched: false,
         pins: env.pins.clone(),
+        pins_changed: false,
     })
 }
 
@@ -358,6 +392,7 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
     let mut budget_ms = INITIAL_LIST_BUDGET_MS;
     let mut session = fresh_session(env)?;
     let mut pages: Vec<VerifiedPage> = Vec::new();
+    let mut compacts: Vec<String> = Vec::new();
     let mut expired_410s = 0;
     let mut replay_retried = false;
     let mut expiry_retried = false;
@@ -372,7 +407,11 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                     retry_after_s: None,
                 });
             }
-            Answer::Page(page) => {
+            Answer::Page {
+                page,
+                compact,
+                answered,
+            } => {
                 replay_retried = false;
                 expiry_retried = false;
                 match pages.first() {
@@ -394,8 +433,17 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                 }
                 let next = page.next_cursor.clone();
                 pages.push(*page);
+                compacts.push(compact);
+                reverify(env, &mut session, &compacts)?;
                 match next {
-                    None => return assemble(pages).map_err(FetchFailure::Invalid),
+                    None => {
+                        let list = assemble(pages).map_err(FetchFailure::Invalid)?;
+                        // Only now may the last page's measurement clear the
+                        // clock hold: the whole list verified (H.29), and
+                        // it is the latest evidence of this fetch.
+                        env.hooks.on_clock(answered);
+                        return Ok(list);
+                    }
                     Some(cursor) => session.cursor = Some(cursor),
                 }
             }
@@ -410,6 +458,7 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                         return Err(FetchFailure::Livelock);
                     }
                     pages.clear();
+                    compacts.clear();
                     session.cursor = None;
                     session.nonce = token(32)?;
                 }
@@ -444,7 +493,15 @@ pub fn probe_clock(env: &mut FetchEnv, params: &FetchParams) -> Result<(), Fetch
         page_size: 1,
     };
     match exchange(env, &probe, &mut session, params.high_water)? {
-        Answer::Page(_) => Ok(()),
+        Answer::Page { page, answered, .. } => {
+            if page.index != 0 {
+                return Err(FetchFailure::Invalid(PageError::Consistency(
+                    "first page index",
+                )));
+            }
+            env.hooks.on_clock(answered);
+            Ok(())
+        }
         Answer::Transport(TransportError::Timeout) => Err(FetchFailure::Deadline),
         Answer::Transport(TransportError::Unreachable) => Err(FetchFailure::Unreachable {
             retry_after_s: None,

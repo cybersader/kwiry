@@ -121,6 +121,13 @@ impl RelistScheduler {
         self.backoff_until
     }
 
+    /// The earliest instant any list may start: after the list-start
+    /// spacing and after the current backoff (v2 H.8, H.40). Only the
+    /// clock probe has its own spacing instead.
+    pub fn next_start_at(&self) -> u64 {
+        self.earliest_start().max(self.backoff_until)
+    }
+
     fn back_off(&mut self, now: u64, retry_after_ms: Option<u64>, cap: u64) {
         self.in_flight = false;
         self.backoff_ms = if self.backoff_ms == 0 {

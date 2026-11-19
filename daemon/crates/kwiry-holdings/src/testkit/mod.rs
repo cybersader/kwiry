@@ -57,6 +57,54 @@ pub fn neutral_profile() -> WireProfile {
     }
 }
 
+/// TEST-ONLY capability verifier. It "signs" a capability as
+/// `cap.<iat>.<exp>.<mac>` with a published test key and accepts only those;
+/// anything else, including a bare or forged timestamp, is rejected.
+pub struct TestCapabilityVerifier;
+
+impl TestCapabilityVerifier {
+    fn mac(iat_s: i64, exp_s: i64) -> String {
+        use sha2::{Digest, Sha256};
+        crate::b64::encode(&Sha256::digest(
+            format!("test-cap-key|{iat_s}|{exp_s}").as_bytes(),
+        ))
+    }
+
+    pub fn issue(iat_s: i64, exp_s: i64) -> Vec<u8> {
+        format!("cap.{iat_s}.{exp_s}.{}", Self::mac(iat_s, exp_s)).into_bytes()
+    }
+
+    pub fn forge(iat_s: i64, exp_s: i64) -> Vec<u8> {
+        format!("cap.{iat_s}.{exp_s}.{}", "f".repeat(43)).into_bytes()
+    }
+}
+
+impl crate::engine::CapabilityVerifier for TestCapabilityVerifier {
+    type Rejection = &'static str;
+
+    fn verify(&self, capability: &[u8]) -> Result<crate::engine::CapabilityTimes, &'static str> {
+        let text = std::str::from_utf8(capability).map_err(|_| "utf-8")?;
+        let mut parts = text.split('.');
+        let (Some("cap"), Some(iat), Some(exp), Some(mac), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            return Err("shape");
+        };
+        let (iat_s, exp_s) = (
+            iat.parse().map_err(|_| "iat")?,
+            exp.parse().map_err(|_| "exp")?,
+        );
+        if mac != Self::mac(iat_s, exp_s) {
+            return Err("signature");
+        }
+        Ok(crate::engine::CapabilityTimes { iat_s, exp_s })
+    }
+}
+
 /// A deterministic, valid 43-character pin id derived from a label.
 pub fn pin_id(label: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -217,9 +265,16 @@ impl Rig {
         self.clock.advance(ms);
     }
 
-    /// Advances past the list-start spacing and lists once.
+    /// Advances past the list-start spacing and any backoff, and lists once.
     pub fn relist(&mut self) -> crate::holder::ListOutcome {
-        self.advance(crate::schedule::LIST_START_SPACING_MS);
+        use crate::clock::Clock;
+        let now = self.clock.mono_ms();
+        let start_at = self.holder().scheduler().next_start_at();
+        self.advance(
+            start_at
+                .saturating_sub(now)
+                .max(crate::schedule::LIST_START_SPACING_MS),
+        );
         self.holder().list_once()
     }
 }

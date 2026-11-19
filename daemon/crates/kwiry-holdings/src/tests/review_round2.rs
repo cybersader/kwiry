@@ -7,7 +7,7 @@ use crate::engine::RootObservation::*;
 use crate::holder::{ConfigError, ListOutcome};
 use crate::profile::PROBLEM_CONTENT_TYPE;
 use crate::state::{ENROLLMENT_FILE, HolderState, STATE_FILE};
-use crate::testkit::{Fault, Forced, RigError};
+use crate::testkit::{Forced, RigError};
 use crate::verify::PageError;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -17,10 +17,6 @@ fn pin_ref_of(rig: &Rig, holding: &str) -> String {
         .as_str()
         .expect("pinned")
         .to_owned()
-}
-
-fn disk_state(rig: &Rig) -> HolderState {
-    HolderState::parse(&std::fs::read(rig.dir.join(STATE_FILE)).unwrap()).unwrap()
 }
 
 fn raise_hold(rig: &mut Rig) {
@@ -72,7 +68,8 @@ fn b2_clock_evidence_is_applied_once_in_observation_order() {
     }
     applied(rig.holder().list_once());
     raise_hold(&mut rig);
-    // Page 0 confirms a correction; page 1 proves a 40 s lag.
+    rig.events.clear();
+    // Page 0 would confirm a correction; page 1 proves a 40 s lag.
     rig.authority.state().hooks.page = Some(Box::new(|page| {
         if page["page"]["index"] == 1 {
             let iat = page["iat"].as_i64().unwrap();
@@ -85,71 +82,19 @@ fn b2_clock_evidence_is_applied_once_in_observation_order() {
     let posts = rig.authority.state().posts();
     rig.authority.state().before_post(posts + 2, move |_| {
         let state = HolderState::parse(&std::fs::read(&state_file).unwrap()).unwrap();
-        *seen.lock().unwrap() = Some(state.engine.clock_hold());
+        *seen.lock().unwrap() = Some(state.engine.clock_behind_authority);
     });
     applied(rig.relist());
     assert_eq!(
         *on_disk_when_page_1_was_requested.lock().unwrap(),
-        Some(false),
-        "page 0's evidence was applied when observed, before page 1 existed"
+        Some(true),
+        "earlier evidence never clears ahead of the whole list"
     );
     assert!(rig.engine_gate().clock_hold(), "the later raise stands");
-    assert!(rig.holder().state().engine.clock_hold());
-    let codes = codes(&rig);
-    let cleared = codes
-        .iter()
-        .rposition(|c| *c == "clock_behind_authority_cleared");
-    let raised = codes.iter().rposition(|c| *c == "clock_behind_authority");
-    assert!(cleared < raised, "{codes:?}");
-}
-
-#[test]
-fn b3_a_clear_that_fails_after_its_rename_is_still_raised_after_restart() {
-    let (_dir, mut rig) = rig();
-    rig.store.hold(PLAIN, "res-a", true, 1);
-    rig.authority.state().add_active(PLAIN, "res-a");
-    applied(rig.holder().list_once());
-    raise_hold(&mut rig);
-    // A clock probe applies nothing, so the clear is its only write. The
-    // clear's first write renames, then its directory fsync fails.
-    rig.io_faults.plan(vec![Fault::AfterRename]);
-    rig.advance(5_000);
-    assert_eq!(rig.holder().probe_clock(), Some(Ok(())));
-    assert!(rig.engine_gate().clock_hold());
-    // The committed (raised) state was written back over the half-written
-    // clear: disk equals memory and the writer is not poisoned.
-    let on_disk = disk_state(&rig);
-    assert!(on_disk.engine.clock_behind_authority);
-    assert!(!on_disk.engine.clock_clear_unconfirmed);
-    assert_eq!(&on_disk, rig.holder().state());
-    rig.restart().unwrap();
-    assert!(rig.engine_gate().clock_hold());
-}
-
-#[test]
-fn b3_an_unconfirmed_clear_on_disk_loads_as_raised() {
-    let (_dir, mut rig) = rig();
-    rig.store.hold(PLAIN, "res-a", true, 1);
-    rig.authority.state().add_active(PLAIN, "res-a");
-    applied(rig.holder().list_once());
-    raise_hold(&mut rig);
-    // The clear renames and fails; restoring the raised state fails too, so
-    // the writer is poisoned and the next commit (A1) refuses.
-    rig.io_faults.plan(vec![
-        Fault::AfterRename,
-        Fault::BeforeRename,
-        Fault::BeforeRename,
-    ]);
-    assert_eq!(rig.relist(), ListOutcome::ApplyFailed { step: "A1" });
-    rig.io_faults.clear();
-    let on_disk = disk_state(&rig);
-    assert!(!on_disk.engine.clock_behind_authority);
-    assert!(on_disk.engine.clock_clear_unconfirmed);
-    assert!(rig.engine_gate().clock_hold());
-    rig.restart().unwrap();
+    assert!(rig.holder().state().engine.clock_behind_authority);
     assert!(
-        rig.engine_gate().clock_hold(),
-        "an unconfirmed clear is raised"
+        !codes(&rig).contains(&"clock_behind_authority_cleared"),
+        "earlier evidence never undoes a later raise"
     );
 }
 

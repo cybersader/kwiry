@@ -216,6 +216,9 @@ pub struct HolderState {
     /// carrying `holder_state: "reset"` (a later slice).
     pub reset_pending: bool,
     pub tombstones: BTreeSet<Tombstone>,
+    /// v2 H.40: a list request got `400`/`413` and no list has applied
+    /// since. The alert survives restarts.
+    pub list_request_invalid: bool,
     /// Engine-profile fields; default for every other holder.
     pub engine: EngineState,
 }
@@ -230,6 +233,7 @@ impl HolderState {
             last_list_ref: None,
             reset_pending,
             tombstones: BTreeSet::new(),
+            list_request_invalid: false,
             engine: EngineState::default(),
         }
     }
@@ -339,6 +343,12 @@ impl StateWriter {
         self.poisoned
     }
 
+    /// Replaces a profile-owned side file in the holder directory, through
+    /// the same durable replacement as the state file.
+    pub(crate) fn write_side_file(&self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
+        self.io.write_atomic(self.dir.path(), name, bytes)
+    }
+
     fn write_state(&self, state: &HolderState) -> Result<(), WriteFailure> {
         let bytes = serde_json::to_vec_pretty(state)
             .map_err(|e| WriteFailure::before_rename(io::Error::other(e)))?;
@@ -424,6 +434,17 @@ impl StateWriter {
         }
         let mut next = self.state.clone();
         next.last_list_ref = Some(reference);
+        next.list_request_invalid = false;
+        self.commit(next)
+    }
+
+    /// v2 H.40: raises the durable `lifecycle_list_request_invalid` alert.
+    pub fn raise_list_request_invalid(&mut self) -> Result<(), WriteError> {
+        if self.state.list_request_invalid {
+            return Ok(());
+        }
+        let mut next = self.state.clone();
+        next.list_request_invalid = true;
         self.commit(next)
     }
 

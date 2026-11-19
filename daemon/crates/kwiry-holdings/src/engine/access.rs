@@ -34,6 +34,15 @@ pub struct CapabilityTimes {
     pub exp_s: i64,
 }
 
+/// The engine's capability verifier. It checks a presented capability's
+/// signature and `typ` and returns its times. Only a capability that passes
+/// it can raise the clock hold (v2 H.36): the holder takes clock evidence
+/// from its output, never from a bare timestamp.
+pub trait CapabilityVerifier {
+    type Rejection;
+    fn verify(&self, capability: &[u8]) -> Result<CapabilityTimes, Self::Rejection>;
+}
+
 pub(crate) fn check(
     times: CapabilityTimes,
     cut: Cut,

@@ -2,7 +2,7 @@
 //!
 //! Normative source: Part II of the authority workspace file
 //! `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md` (sha256
-//! `43a4d299caec1f9cb85f66f2a5ed78d0f5dda196cbea7b72a48003789fa54291`).
+//! `066a21ae48af6a8712bb0dddcc3da1a7c460bc6b2b6c31959d5bf3f69178d042`).
 //! One module per section that binds a holder:
 //!
 //! | Module | v2 section | What it adds to the core |
@@ -26,7 +26,7 @@ pub mod pin_history;
 pub mod root_pin;
 pub mod stale_serve;
 
-pub use access::{CapabilityTimes, Cut};
+pub use access::{CapabilityTimes, CapabilityVerifier, Cut};
 pub use pin_history::PinPair;
 pub use root_pin::{ArtifactStamp, PinMember, RootObservation, RootPin, WalkInputs};
 
@@ -99,15 +99,21 @@ pub struct EngineState {
     pub pin_history_ceiling: u64,
     /// S.4: the clock hold.
     pub clock_behind_authority: bool,
-    /// S.4, H.34: a clear written but not yet confirmed durable. Loading a
-    /// state with it set treats the hold as raised.
-    pub clock_clear_unconfirmed: bool,
+    /// S.4, H.34: the token of the last clear. A clear counts on load only
+    /// when the seal file holds the same token; the seal is written only
+    /// after this record's write was fully fsynced.
+    pub clock_clear_token: Option<String>,
 }
 
 impl EngineState {
-    /// Whether the hold is in force as far as durable state can tell.
-    pub fn clock_hold(&self) -> bool {
-        self.clock_behind_authority || self.clock_clear_unconfirmed
+    /// Whether the hold is in force, given the seal file's content. Anything
+    /// but a cleared record with a matching seal reads as raised.
+    pub fn clock_hold(&self, seal: Option<&str>) -> bool {
+        self.clock_behind_authority
+            || self
+                .clock_clear_token
+                .as_deref()
+                .is_some_and(|token| seal != Some(token))
     }
 }
 
@@ -117,7 +123,7 @@ impl Default for EngineState {
             pin_history: BTreeSet::new(),
             pin_history_ceiling: pin_history::DEFAULT_CEILING,
             clock_behind_authority: false,
-            clock_clear_unconfirmed: false,
+            clock_clear_token: None,
         }
     }
 }
@@ -129,10 +135,10 @@ pub(crate) struct EngineGateState {
     /// `pin_id → resource ids`, from the durable pin-history set.
     pub pin_history: HashMap<String, BTreeSet<String>>,
     pub history_available: bool,
-    /// S.5: per resource, the `pin_ref` and monotonic instant at which its
+    /// S.5: per `(resource, pin_ref)`, the monotonic instant at which the
     /// root observation stopped matching. Cleared only by a successful walk
-    /// under that `pin_ref`.
-    pub root_mismatch: HashMap<String, (String, u64)>,
+    /// under that same, current `pin_ref`.
+    pub root_mismatch: HashMap<(String, String), u64>,
 }
 
 /// Profile S refusals.
@@ -273,35 +279,39 @@ impl EngineGate {
         verdict.map_err(Refusal::from)
     }
 
+    /// Latches a mismatch for `(resource_id, pin_ref)` only if `pin_ref` is
+    /// the resource's current listed pin; a report about any other pin, for
+    /// example a delayed report from an earlier walk, is ignored. The
+    /// earliest detection stands.
     fn latch_mismatch(&self, resource_id: &str, pin_ref: String, detected_mono_ms: u64) {
         let mut state = self.gate.write();
-        let latched = state
+        if !root_pin::is_current_pin(&state.entries, resource_id, &pin_ref) {
+            return;
+        }
+        let since = state
             .engine
             .root_mismatch
-            .entry(resource_id.to_owned())
-            .or_insert((pin_ref.clone(), detected_mono_ms));
-        if latched.0 != pin_ref {
-            *latched = (pin_ref, detected_mono_ms);
-        }
+            .entry((resource_id.to_owned(), pin_ref))
+            .or_insert(detected_mono_ms);
+        *since = (*since).min(detected_mono_ms);
     }
 
     /// S.5: the engine's walk found the root of `resource_id` no longer at
-    /// the listed `pin_id`. The earliest detection under a `pin_ref` stands.
+    /// the listed `pin_id` under `pin_ref`. Ignored unless `pin_ref` is current.
     pub fn report_root_mismatch(&self, resource_id: &str, pin_ref: &str, detected_mono_ms: u64) {
         self.latch_mismatch(resource_id, pin_ref.to_owned(), detected_mono_ms);
     }
 
     /// S.5: a walk under `pin_ref` observed the root at the listed `pin_id`
-    /// and published. Only this ends a latched mismatch.
+    /// and published. Only this ends a latched mismatch, and only for the
+    /// current pin.
     pub fn record_successful_walk(&self, resource_id: &str, pin_ref: &str) {
         let mut state = self.gate.write();
-        if state
-            .engine
-            .root_mismatch
-            .get(resource_id)
-            .is_some_and(|(latched, _)| latched == pin_ref)
-        {
-            state.engine.root_mismatch.remove(resource_id);
+        if root_pin::is_current_pin(&state.entries, resource_id, pin_ref) {
+            state
+                .engine
+                .root_mismatch
+                .remove(&(resource_id.to_owned(), pin_ref.to_owned()));
         }
     }
 

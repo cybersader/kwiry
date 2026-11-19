@@ -240,13 +240,25 @@ fn claim<'a>(claims: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
 /// Verifies a key-set statement under the current pins and returns the pin
 /// set it produces. Nothing is changed on refusal; the caller persists the
 /// result through the single holder-state writer before trusting any new key.
-pub fn verify_keyset(
+/// A key-set statement whose whole closed grammar has been checked (v2
+/// H.35, H.6), before any signature or sequence decision.
+pub struct KeysetStatement {
+    statement: jws::Compact,
+    pub keyset_seq: u64,
+    not_after_old: Option<i64>,
+    keys: Vec<(String, Value)>,
+    retire: Vec<String>,
+}
+
+/// Checks a key-set statement's grammar: closed header, exact `typ`, `alg`,
+/// closed claims, exact `iss` and broadcast `aud`, every member's type, and
+/// every key's JWK grammar. A malformed statement is refused whatever its
+/// `keyset_seq`.
+pub fn parse_keyset(
     compact: &str,
-    pins: &PinnedKeys,
     profile: &WireProfile,
     issuer: &str,
-    now_ms: i64,
-) -> Result<PinnedKeys, KeyError> {
+) -> Result<KeysetStatement, KeyError> {
     let refuse = KeyError::Keyset;
     let statement = jws::parse(compact).map_err(|_| refuse("compact"))?;
     if statement.typ != profile.typ_keyset {
@@ -254,12 +266,6 @@ pub fn verify_keyset(
     }
     if statement.alg != "ES256" {
         return Err(refuse("alg"));
-    }
-    let signer = pins
-        .live(&statement.kid, &profile.authority_key_id_prefix, now_ms)
-        .ok_or(refuse("signer not pinned"))?;
-    if !statement.verify_es256(&signer) {
-        return Err(refuse("signature"));
     }
     let claims = &statement.claims;
     if claims.keys().any(|k| {
@@ -279,12 +285,9 @@ pub fn verify_keyset(
     claim(claims, "iat")
         .and_then(Value::as_i64)
         .ok_or(refuse("iat"))?;
-    let sequence = claim(claims, "keyset_seq")
+    let keyset_seq = claim(claims, "keyset_seq")
         .and_then(Value::as_u64)
         .ok_or(refuse("keyset_seq"))?;
-    if pins.keyset_seq.is_some_and(|current| sequence <= current) {
-        return Err(refuse("keyset_seq does not increase"));
-    }
     let not_after_old = match claim(claims, "not_after_old") {
         None => None,
         Some(Value::Number(n)) => Some(
@@ -297,29 +300,77 @@ pub fn verify_keyset(
         }
         Some(_) => return Err(refuse("not_after_old")),
     };
-    let new_keys = claim(claims, "keys")
+    let mut keys = Vec::new();
+    for jwk in claim(claims, "keys")
         .and_then(Value::as_array)
-        .ok_or(refuse("keys"))?;
-    let retire = claim(claims, "retire_kids")
+        .ok_or(refuse("keys"))?
+    {
+        let (kid, _) = parse_authority_jwk(jwk, &profile.authority_key_id_prefix)
+            .map_err(|_| refuse("key"))?;
+        keys.push((kid, jwk.clone()));
+    }
+    let mut retire = Vec::new();
+    for kid in claim(claims, "retire_kids")
         .and_then(Value::as_array)
-        .ok_or(refuse("retire_kids"))?;
+        .ok_or(refuse("retire_kids"))?
+    {
+        let kid = kid
+            .as_str()
+            .filter(|k| !k.is_empty())
+            .ok_or(refuse("retire_kids"))?;
+        retire.push(kid.to_owned());
+    }
+    Ok(KeysetStatement {
+        statement,
+        keyset_seq,
+        not_after_old,
+        keys,
+        retire,
+    })
+}
+
+/// Verifies a key-set statement under the current pins and returns the pin
+/// set it produces. Nothing is changed on refusal; the caller persists the
+/// result through the single holder-state writer before trusting any new key.
+pub fn verify_keyset(
+    compact: &str,
+    pins: &PinnedKeys,
+    profile: &WireProfile,
+    issuer: &str,
+    now_ms: i64,
+) -> Result<PinnedKeys, KeyError> {
+    let refuse = KeyError::Keyset;
+    let KeysetStatement {
+        statement,
+        keyset_seq: sequence,
+        not_after_old,
+        keys: new_keys,
+        retire,
+    } = parse_keyset(compact, profile, issuer)?;
+    let signer = pins
+        .live(&statement.kid, &profile.authority_key_id_prefix, now_ms)
+        .ok_or(refuse("signer not pinned"))?;
+    if !statement.verify_es256(&signer) {
+        return Err(refuse("signature"));
+    }
+    if pins.keyset_seq.is_some_and(|current| sequence <= current) {
+        return Err(refuse("keyset_seq does not increase"));
+    }
 
     // v2 H.37: `keys` adds; `not_after_old` retires every earlier kid that
     // `keys` does not list, at that instant; `retire_kids` is immediate.
     let mut next = pins.clone();
     next.keyset_seq = Some(sequence);
     let mut listed = std::collections::BTreeSet::new();
-    for jwk in new_keys {
-        let (kid, _) = parse_authority_jwk(jwk, &profile.authority_key_id_prefix)
-            .map_err(|_| refuse("key"))?;
+    for (kid, jwk) in new_keys {
         match next.keys.get(&kid) {
-            Some(existing) if existing.jwk != *jwk => return Err(refuse("kid reused")),
+            Some(existing) if existing.jwk != jwk => return Err(refuse("kid reused")),
             Some(_) => {}
             None => {
                 next.keys.insert(
                     kid.clone(),
                     PinnedKey {
-                        jwk: jwk.clone(),
+                        jwk,
                         not_after_ms: None,
                     },
                 );
@@ -334,8 +385,7 @@ pub fn verify_keyset(
             }
         }
     }
-    for kid in retire {
-        let kid = kid.as_str().ok_or(refuse("retire_kids"))?;
+    for kid in &retire {
         next.keys.remove(kid);
     }
     // v2 H.37.6: never an empty set, now or at `not_after_old`.

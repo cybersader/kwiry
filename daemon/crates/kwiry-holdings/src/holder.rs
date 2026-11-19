@@ -143,11 +143,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return Err(ConfigError::HolderKind);
         }
         let state = started.writer.state();
-        // An unconfirmed clear on disk counts as raised (H.34).
-        let gate = ServingGate::new(clock.clone(), state.engine.clock_hold());
+        // Anything but a sealed clear on disk counts as raised (H.34).
+        let hold = config.engine.is_some() && engine::clock_hold::durable_hold(&started.writer);
+        let gate = ServingGate::new(clock.clone(), hold);
         let engine = config
             .engine
             .map(|settings| EngineGate::new(gate.clone(), settings));
+        let list_request_invalid = state.list_request_invalid;
         if engine.is_some() && state.reset_pending {
             events.emit(HolderEvent::Engine(EngineEvent::PinHistoryUnavailable));
         }
@@ -162,7 +164,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             gate,
             engine,
             route: RouteHealth::Normal,
-            list_request_invalid: false,
+            list_request_invalid,
             baseline: HashMap::new(),
             scheduler: RelistScheduler::new(300),
         })
@@ -180,6 +182,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     pub fn state(&self) -> &HolderState {
         self.writer.state()
+    }
+
+    /// Whether the writer refuses commits until the committed state is
+    /// rewritten (a failure after a rename whose rollback also failed).
+    pub fn writer_poisoned(&self) -> bool {
+        self.writer.poisoned()
     }
 
     pub fn pinned_keys(&self) -> &PinnedKeys {
@@ -208,9 +216,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return ListOutcome::AuthHalted;
         }
         let now = self.clock.mono_ms();
-        if !self.scheduler.may_start(now) {
+        let start_at = self.scheduler.next_start_at();
+        if now < start_at {
             return ListOutcome::RateLimited {
-                until_mono_ms: self.scheduler.earliest_start(),
+                until_mono_ms: start_at,
             };
         }
         self.scheduler.on_start(now);
@@ -341,6 +350,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             }
             FetchFailure::RequestInvalid { status } => {
                 self.list_request_invalid = true;
+                if let Err(error) = self.writer.raise_list_request_invalid() {
+                    report_write_failure(self.events.as_ref(), &error);
+                }
                 HolderEvent::ListRequestInvalid { status: *status }
             }
             FetchFailure::KeysetInvalid => HolderEvent::KeysetInvalid,
@@ -543,6 +555,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .iter()
             .map(|listed| {
                 let item = &listed.item;
+                // H.39, H.42: the monotonic deadline counts from the `iat` of
+                // the page that carried the item. `quarantine_after` starts
+                // at page 0's `iat`, so this is never later than H.42's
+                // reading, which v2 allows.
                 let remaining = item
                     .quarantine_after_ms
                     .saturating_sub(listed.page_iat_ms)
