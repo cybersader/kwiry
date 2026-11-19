@@ -96,6 +96,9 @@ pub enum Obs {
         holder: bool,
         peers: u8,
     },
+    /// H.33 (rejected readings): an earlier-epoch list or page was issued
+    /// after `T_stop`.
+    EarlierEpochListAfterStop,
     /// H.30.3: no admin override clears a member early.
     MintOverrideRefused,
     ListWitnessOmitted,
@@ -306,13 +309,15 @@ pub fn servable(s: &State, r: usize) -> bool {
 }
 
 /// H.30.2(b): once the authority clock passes `T_stop +
-/// serve_seconds_ceiling + 150 s`, a lease from an earlier-epoch list has
-/// lapsed (it could not be renewed after `T_stop`).
+/// serve_seconds_ceiling + 150 s`, a lease from a list of the stopped lineage
+/// has lapsed (no such list was issued after `T_stop`, H.33). The model's
+/// lists stop only in epoch 0, so before a restore's first transaction the
+/// stopped lineage is the current epoch.
 fn earlier_epoch_lapsed(s: &State) -> bool {
     s.env.lease_timeout
         && s.vol
             .applied
-            .is_some_and(|l| l.rev.epoch < s.auth.core.epoch)
+            .is_some_and(|l| l.rev.epoch < s.auth.core.epoch || s.auth.core.epoch == 0)
 }
 
 /// H.16.5: a non-null pin from a list applied in this process, artifacts
@@ -331,10 +336,15 @@ pub fn pin_servable(s: &State, r: usize) -> bool {
         && (!mismatch || !s.env.stale_expired)
 }
 
-/// H.21.5, H.23, H.26: governed requests are refused while the in-memory
-/// hold is raised or holder state records it.
+/// H.21.5, H.23, H.26, H.34: the request path reads the in-memory hold,
+/// which every start loads from holder state; a stopped engine has only the
+/// durable flag.
 pub fn clock_held(s: &State) -> bool {
-    s.vol.clock_hold || s.dur.clock_behind
+    if s.vol.phase == Phase::Down {
+        s.dur.clock_behind
+    } else {
+        s.vol.clock_hold
+    }
 }
 
 /// The H.19 status-first gate (a holder choice H.22.1 permits): after an
@@ -871,6 +881,13 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
         PeerAnswer(p) => peer_answer(s, p as usize),
         LeaseTimeout => lease_timeout(s, d),
         OpMintOverride => op_mint_override(s, d),
+        PeerForbidden { p, received } => peer_forbidden(s, d, p as usize, received),
+        PeerRefusalAged(p) => peer_refusal_aged(s, d, p as usize),
+        PeerListStart(p) => peer_list_start(s, p as usize),
+        PeerListPage(p) => peer_list_page(s, p as usize),
+        PeerOldList(p) => peer_old_list(s, p as usize),
+        OpEpoch => op_epoch(s, d),
+        RestoreBegin => restore_begin(s),
         AttestRoot { room, dir, stale } => attest_root(s, room, dir, stale),
         RepointRoot { room, dir } => repoint_root(s, room as usize, dir),
         PinRebuild(r) => pin_rebuild(s, d, r as usize),
@@ -920,6 +937,14 @@ pub fn exec(s: &State, a: Action, cfg: &Config) -> Step {
 ///   `superseded_mismatch`, the journal-loss audit flag, and the journal
 ///   itself once no restore remains in the budget.
 /// - With `peer_symmetry` (the H.30 fixtures), the order of the peers.
+/// - The H.30 seats while no gate is closed: only a closed gate reads them
+///   (reports, `403`s, the lease timeout and the override all require one,
+///   and the next gate assigns every seat afresh).
+/// - The H.31 journaled roster entries when the journal is corrupt and H.14
+///   fences it: every supported restore then fails verification (H12j), and
+///   `restore_journal_lost` replays no journal.
+/// - A peer's key generation while no backup or journaled copy exists and
+///   its signing key matches its roster entry: only that equality is read.
 pub fn canonical(s: &mut State, cfg: &Config) {
     let core = &mut s.auth.core;
     core.superseded_mismatch = 0;
@@ -945,6 +970,29 @@ pub fn canonical(s: &mut State, cfg: &Config) {
     // H.30 peers are interchangeable: every fact about one is in its record,
     // every peer action exists for each index, and no property or
     // observation names a peer's position.
+    let dead_journal = s.env.bad_journal && cfg.design.has(Fix::AtomicJournalReplay);
+    let no_backup = s.auth.backup.is_none();
+    for p in s.peers.iter_mut() {
+        if s.auth.mint_gate.is_none() {
+            p.seat = Seat::Absent;
+        }
+        if dead_journal {
+            p.journaled = None;
+        }
+        // Without a backup or journaled copy, a peer's key generation is
+        // read only as the equality of its signing key with its roster key,
+        // so a rotation is a renaming (it leaves at most a rotation
+        // self-loop, which is a scenario step).
+        if no_backup
+            && p.backup.is_none()
+            && p.journaled.is_none()
+            && let Some(r) = p.roster.as_mut()
+            && r.key == p.key
+        {
+            r.key = 0;
+            p.key = 0;
+        }
+    }
     if s.env.peer_symmetry {
         s.peers.sort_unstable();
     }
@@ -1098,6 +1146,8 @@ fn boot(s: &State, d: Design) -> Step {
         o.obs(Obs::RootOpenedAsWrongHolder);
     }
     o.n.vol.phase = Phase::P3;
+    // H.26: the in-memory hold is loaded from holder state.
+    o.n.vol.clock_hold = o.n.dur.clock_behind;
     o.row(S6);
     o.row(S7);
     if o.n.dur.reserve {
@@ -1245,6 +1295,9 @@ fn fetch_start(s: &State, d: Design) -> Step {
     }
     if s.vol.route != Route::Normal {
         return Ok(None); // N3
+    }
+    if s.auth.restoring {
+        return Ok(None); // the old authority is stopped; nothing is listed
     }
     let mut o = Out::new(s);
     let view = list_view(&s.auth.core);
@@ -2556,19 +2609,56 @@ fn replenish(s: &State) -> Step {
 /// the holding is `active`.
 pub fn mintable(s: &State, room: usize) -> bool {
     !s.auth.rollback_suspected
+        && !s.auth.restoring
         && s.auth.mint_gate.is_none()
         && s.auth.core.rooms[room].phase == APhase::Active
 }
 
+/// H.32.2: whether a roster entry makes its holder a gate member: every
+/// engine holder in the roster, enabled, disabled or decommissioned, except
+/// one refused on every route since long before `T_stop`. The reading H.32
+/// rejects (H.30.1 as first written) counts only enabled holders.
+fn gate_member(r: Option<Roster>, d: Design) -> bool {
+    match r {
+        None => false,
+        Some(r) if d.has(Fix::RosterMintMembership) => !r.refused_aged,
+        Some(r) => r.enabled,
+    }
+}
+
 /// H.30.1: whether a peer still holds the gate shut. Frozen membership reads
-/// its seat; the reading H.30.1 rejects reads the live roster ("every
-/// enrolled, enabled engine holder"), so a member disabled during the gate
-/// stops counting and a later enrollee starts.
+/// its seat; the reading H.30.1 rejects reads the live roster, so a member
+/// that stops counting reopens minting and a later enrollee starts counting.
 fn peer_pending(p: &Peer, d: Design, timed_out: bool) -> bool {
     if d.has(Fix::FrozenMintMembership) {
         p.seat == Seat::Pending
     } else {
-        !timed_out && p.roster.is_some_and(|r| r.enabled) && p.seat != Seat::Cleared
+        !timed_out && gate_member(p.roster, d) && p.seat != Seat::Cleared
+    }
+}
+
+/// H14: the new epoch's first transaction closes minting for the id-space
+/// and freezes the members (H.25, H.30.1, H.32.2). After
+/// `restore_journal_lost` minting also waits for the id-space-wide timeout
+/// (H.30.4). L1 requires that minting resumes for a holder that held a
+/// high-water when the epoch changed. A first transaction after the lease
+/// timeout clears every member by lease in it (H.33.3).
+fn start_gate(o: &mut Out, d: Design, idspace_wait: bool, had_hw: bool) {
+    o.n.auth.mint_gate = Some(MintGate {
+        holder: Seat::Pending,
+        idspace_wait,
+    });
+    for p in o.n.peers.iter_mut() {
+        p.seat = if gate_member(p.roster, d) {
+            Seat::Pending
+        } else {
+            Seat::Absent
+        };
+    }
+    o.n.ghost.search_due = had_hw;
+    o.row(H14);
+    if o.n.env.lease_timeout {
+        clear_by_lease(o, d);
     }
 }
 
@@ -2739,6 +2829,9 @@ fn auth_process(s: &State, d: Design, c: usize, idx: usize) -> Step {
     let Some(req) = s.net.reqs[c].get(idx) else {
         return Ok(None);
     };
+    if s.auth.restoring {
+        return Ok(None); // the old authority is stopped (H19)
+    }
     let mut o = Out::new(s);
     o.n.net.reqs[c].remove_at(idx);
     let clock = if req.commit_late {
@@ -3302,13 +3395,25 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
     if s.budget.restores == 0 || override_lost != s.auth.failed_restore {
         return Ok(None);
     }
+    let gate_probe = s.env.probe == Probe::EpochMint;
+    // H.33.2: a restore proceeds only after H19 confirmed the old authority
+    // stopped. The reading H.33.2 rejects proceeds without it, and the old
+    // instance keeps running.
+    if gate_probe && !s.auth.restoring && d.has(Fix::StoppedOldAuthority) {
+        return Ok(None);
+    }
     let mut o = Out::new(s);
-    if s.env.probe == Probe::EpochMint && s.ghost.mint_stop.is_none() {
-        // H.15.1: minting stops when a restore begins. H.30.2: the old
-        // lineage stops serving lists then too (`lists_stopped_at`): the
-        // old authority is stopped first, or the restored authority's first
-        // start refuses lists under suspicion.
+    if gate_probe && !s.auth.restoring {
+        o.n.env.old_running = true;
+    }
+    if gate_probe && s.ghost.mint_stop.is_none() {
+        // H.15.1: minting stops when a restore begins.
         o.n.ghost.mint_stop = Some(s.env.exposure_elapsed);
+    }
+    if gate_probe && s.auth.lists_stopped_at.is_none() {
+        // H.30.2: `T_stop` for `restore_journal_lost` and a raw restore is the
+        // restored authority's first start (this step); H19 recorded it for
+        // a supported restore. Suspicion refuses lists from now on.
         o.n.auth.lists_stopped_at = Some(s.env.exposure_elapsed);
     }
     if s.env.bad_journal && !override_lost {
@@ -3407,32 +3512,16 @@ fn auth_restore(s: &State, d: Design, override_lost: bool) -> Step {
         o.row(H17);
     }
     if d.has(Fix::EpochMintGate) {
-        // H.25, H.30.1: nothing is minted for the id-space until every member
-        // has cleared. The members are frozen now, in the new epoch's first
-        // transaction after replay: the engine holders enrolled and enabled.
-        // H.30.4: after `restore_journal_lost` the snapshot may miss a
-        // holder, so minting also waits for the id-space-wide timeout. L1
-        // requires that minting resumes for a holder that held a high-water
-        // when the epoch changed.
-        o.n.auth.mint_gate = Some(MintGate {
-            holder: Seat::Pending,
-            idspace_wait: override_lost && d.has(Fix::JournalLostMintWait),
-        });
-        for p in o.n.peers.iter_mut() {
-            p.seat = if p.roster.is_some_and(|r| r.enabled) {
-                Seat::Pending
-            } else {
-                Seat::Absent
-            };
-        }
-        o.n.ghost.search_due = s.dur.hw.is_some();
-        o.row(H14);
-        if s.env.lease_timeout {
-            clear_by_lease(&mut o, d);
-        }
+        start_gate(
+            &mut o,
+            d,
+            override_lost && d.has(Fix::JournalLostMintWait),
+            s.dur.hw.is_some(),
+        );
     }
     o.n.auth.rollback_suspected = false;
     o.n.auth.failed_restore = false;
+    o.n.auth.restoring = false;
     o.n.auth.backup = None;
     o.done()
 }
@@ -3700,7 +3789,9 @@ fn start_capability(s: &State, d: Design, room: u8, iat: i16, exp: i16) -> Step 
             return Ok(None); // the probe bounds admitted work, not clock evidence
         }
         o.n.vol.capability = Some(InFlightCapability { room, deadline });
-        if future || long || o.n.ghost.lag_proven || now > deadline {
+        // H.34: holder state recording the hold also refuses: only a durable
+        // step broadens serving.
+        if future || long || o.n.ghost.lag_proven || now > deadline || o.n.dur.clock_behind {
             o.obs(Obs::CapabilityOverexposed);
         }
     }
@@ -3736,7 +3827,7 @@ fn finish_capability(s: &State, d: Design) -> Step {
         refuse_capability(&mut o, CapabilityRefusal::NotActive);
     } else {
         o.row(C17);
-        if expired || s.ghost.lag_proven {
+        if expired || s.ghost.lag_proven || s.dur.clock_behind {
             o.obs(Obs::CapabilityOverexposed);
         }
         // H.25: results released from an earlier-epoch list, beyond the
@@ -3848,8 +3939,16 @@ fn observe_list_clock(s: &State, d: Design, iat: i16, rtt: Option<u8>) -> Step {
         let bound = ahead + i32::from(r);
         o.row(C20);
         if bound <= 30 && (d.has(Fix::InequalityDecidesClear) || r <= 30) {
+            // H.34: write first, then drop the in-memory hold. The reading
+            // H.34 rejects drops it first, so a failed write leaves the
+            // engine serving while holder state still records the hold.
+            if !d.has(Fix::ClockClearWriteFirst) {
+                o.n.vol.clock_hold = false;
+            }
             match write(&mut o) {
                 None => return Ok(None),
+                // K2x: the hold stays raised in memory and durably; the next
+                // confirmed correction tries again.
                 Some(false) => return o.done(),
                 Some(true) => {}
             }
@@ -3925,9 +4024,19 @@ fn op_clear_clock(s: &State, d: Design) -> Step {
 
 // ------------------------------------------- H.30 / H.31 other holders
 
-/// The old lineage serves lists: no restore has begun.
+/// The old lineage issues lists: no epoch change or restore has begun, so
+/// `T_stop` is still ahead.
 fn lists_served(s: &State) -> bool {
-    s.auth.lists_stopped_at.is_none() && !s.auth.rollback_suspected && !s.auth.failed_restore
+    s.auth.lists_stopped_at.is_none()
+        && !s.auth.restoring
+        && !s.auth.rollback_suspected
+        && !s.auth.failed_restore
+}
+
+/// The authority answers lifecycle routes (and admin commands): no restore
+/// is in progress and no rollback is suspected.
+fn authority_up(s: &State) -> bool {
+    !s.auth.restoring && !s.auth.rollback_suspected && !s.auth.failed_restore
 }
 
 /// H.31: a roster change after the backup is a journal entry, appended
@@ -3945,15 +4054,18 @@ fn peer_authorized(p: &Peer) -> bool {
     p.roster.is_some_and(|r| r.enabled && r.key == p.key)
 }
 
+/// The authority may serve the peer a list: its key is enrolled and it is
+/// not refused on every route. A disabled holder with open obligations is
+/// still listed (HW §4.5), so disabled peers may list too.
+fn peer_listable(p: &Peer) -> bool {
+    p.roster.is_some_and(|r| r.key == p.key && !r.refused_aged)
+}
+
 /// `enroll-holder` (HW §2.1): a new engine holder of the id-space. It lists
 /// at once if lists are served. Enrolled after the new epoch's first
 /// transaction, it is not a mint-gate member (H.30.1).
 fn peer_enroll(s: &State, d: Design, i: usize) -> Step {
-    if s.env.probe != Probe::EpochMint
-        || s.peers[i] != Peer::default()
-        || s.auth.rollback_suspected
-        || s.auth.failed_restore
-    {
+    if s.env.probe != Probe::EpochMint || s.peers[i] != Peer::default() || !authority_up(s) {
         return Ok(None);
     }
     let mut o = Out::new(s);
@@ -3962,38 +4074,39 @@ fn peer_enroll(s: &State, d: Design, i: usize) -> Step {
     p.roster = Some(Roster {
         enabled: true,
         key: 0,
+        refused_aged: false,
     });
     p.lease = Some(s.auth.core.epoch);
     journal_roster(p, has_backup, d);
     o.done()
 }
 
-/// An admin disables or re-enables a peer. In the old lineage, a disabled
-/// holder's next request gets `403` and it halts, and a re-enabled one
-/// restarts and lists (H.30.1's premise for a holder disabled at the
-/// snapshot). During the gate a disabled member may still serve until its
-/// next request is refused, and a re-enabled one needs a restart that
-/// applies only current-epoch lists: neither changes what it serves.
+/// An admin disables (or decommissions) or re-enables a peer. Disabling
+/// changes nothing the peer serves: it stops only once it receives a `403`
+/// ([`peer_forbidden`]), which a holder with open obligations never does
+/// (H.32.1), or once its lease lapses. A re-enabled peer restarts and lists:
+/// in the old lineage it serves again; during the gate it applies only
+/// current-epoch lists, so what it serves does not change.
 fn peer_set_enabled(s: &State, d: Design, i: usize, enabled: bool) -> Step {
     let p = s.peers[i];
     let Some(r) = p.roster else {
         return Ok(None);
     };
-    if s.env.probe != Probe::EpochMint
-        || r.enabled == enabled
-        || s.auth.rollback_suspected
-        || s.auth.failed_restore
-    {
+    if s.env.probe != Probe::EpochMint || r.enabled == enabled || !authority_up(s) {
         return Ok(None);
     }
     let mut o = Out::new(s);
     let has_backup = s.auth.backup.is_some();
     let old_lineage = lists_served(s);
     let n = &mut o.n.peers[i];
-    n.roster = Some(Roster { enabled, ..r });
+    n.roster = Some(Roster {
+        enabled,
+        refused_aged: false,
+        ..r
+    });
     journal_roster(n, has_backup, d);
-    if old_lineage {
-        n.lease = enabled.then_some(s.auth.core.epoch);
+    if old_lineage && enabled {
+        n.lease = Some(s.auth.core.epoch);
     }
     // The reading H.30.1 rejects can open the gate when a member stops
     // counting.
@@ -4032,7 +4145,10 @@ fn peer_move(s: &State, i: usize) -> Step {
         return Ok(None);
     }
     let mut o = Out::new(s);
-    o.n.peers[i].lease = Some(cur);
+    let n = &mut o.n.peers[i];
+    n.lease = Some(cur);
+    n.late = false;
+    n.cursor = None;
     o.done()
 }
 
@@ -4100,8 +4216,10 @@ fn lease_timeout(s: &State, d: Design) -> Step {
     let mut o = Out::new(s);
     o.n.env.lease_timeout = true;
     o.n.env.exposure_elapsed = s.env.exposure_elapsed.max(t + 1051);
+    // Every lease from a list issued before `T_stop` has lapsed. A lease a
+    // rejected H.33 reading renewed after `T_stop` has not.
     for p in o.n.peers.iter_mut() {
-        if p.lease.is_some_and(|e| e < s.auth.core.epoch || e == 0) {
+        if p.lease.is_some_and(|e| e < s.auth.core.epoch || e == 0) && !p.late {
             p.lease = None;
         }
     }
@@ -4160,6 +4278,197 @@ fn op_mint_override(s: &State, d: Design) -> Step {
     }
     o.n.auth.mint_gate = None;
     o.n.ghost.search_due = false;
+    o.done()
+}
+
+/// H.32.3: a disabled peer's request is answered `403
+/// holder_not_authorized` and the authority records it. HW §4.5 refuses only
+/// a disabled holder with no open obligations, so this may never happen
+/// (decommissioned holders keep open obligations). `received`: the peer gets
+/// the `403` and halts, so it stops serving. A lost response changes nothing
+/// the peer serves, so under H.32.3 it changes nothing at all; the reading
+/// H.32.3 rejects clears the peer's seat on the recorded `403`.
+fn peer_forbidden(s: &State, d: Design, i: usize, received: bool) -> Step {
+    let p = s.peers[i];
+    if s.env.probe != Probe::EpochMint
+        || p.roster.is_none_or(|r| r.enabled)
+        || p.lease.is_none()
+        || !authority_up(s)
+    {
+        return Ok(None);
+    }
+    let clears = !d.has(Fix::NoForbiddenClear) && p.seat == Seat::Pending;
+    if !received && !clears {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let n = &mut o.n.peers[i];
+    if received {
+        n.lease = None;
+        n.late = false;
+        n.cursor = None;
+    }
+    if clears {
+        n.seat = Seat::Cleared;
+        settle_gate(&mut o, d);
+    }
+    o.done()
+}
+
+/// H.32.2: while lists are still served, a disabled peer has been refused on
+/// every route since an instant `t_r` and `serve_seconds_ceiling + 150 s`
+/// have passed since. It can't have received a list after `t_r`, so its lease
+/// has lapsed. The authority's record (derived from the journaled
+/// `holder_disabled` and the obligations) travels with the roster entry.
+fn peer_refusal_aged(s: &State, d: Design, i: usize) -> Step {
+    let p = s.peers[i];
+    let Some(r) = p.roster else {
+        return Ok(None);
+    };
+    if s.env.probe != Probe::EpochMint || r.enabled || r.refused_aged || !lists_served(s) {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let has_backup = s.auth.backup.is_some();
+    let n = &mut o.n.peers[i];
+    n.roster = Some(Roster {
+        refused_aged: true,
+        ..r
+    });
+    n.lease = None;
+    n.cursor = None;
+    journal_roster(n, has_backup, d);
+    o.done()
+}
+
+/// H.33.1: in the old lineage, a peer serving the current epoch receives
+/// page 0 of its next list. The cursor seals the list's epoch and the
+/// holder's `holder_rev` (§3.7); the list applies only once every page has
+/// arrived, so until then the peer keeps its current lease.
+fn peer_list_start(s: &State, i: usize) -> Step {
+    let p = s.peers[i];
+    let cur = s.auth.core.epoch;
+    if s.env.probe != Probe::EpochMint
+        || !lists_served(s)
+        || p.cursor.is_some()
+        || p.lease != Some(cur)
+        || !peer_listable(&p)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.peers[i].cursor = Some((cur, s.auth.core.holder_rev));
+    o.done()
+}
+
+/// H.33.1: the peer presents its cursor. The authority honours it only while
+/// the holder's `holder_rev` is unchanged; otherwise `410 list_expired` and
+/// the peer discards the list (its earlier lease keeps running). A page of
+/// an earlier epoch served after `T_stop` renews that epoch's lease beyond
+/// the lease timeout.
+fn peer_list_page(s: &State, i: usize) -> Step {
+    let p = s.peers[i];
+    let Some((epoch, rev)) = p.cursor else {
+        return Ok(None);
+    };
+    if s.env.probe != Probe::EpochMint || !authority_up(s) {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let n = &mut o.n.peers[i];
+    n.cursor = None;
+    if rev == s.auth.core.holder_rev && peer_listable(&p) {
+        n.lease = Some(epoch);
+        if epoch < s.auth.core.epoch {
+            n.late = true;
+            o.obs(Obs::EarlierEpochListAfterStop);
+        }
+    } else if rev != s.auth.core.holder_rev {
+        // `410 list_expired`: H18 advanced `holder_rev`.
+        o.row(H18);
+    }
+    o.done()
+}
+
+/// The reading H.33.2 rejects: a restore proceeded while the old authority
+/// instance still runs, and it renews a peer's earlier-epoch list after
+/// `T_stop`, beyond the lease timeout.
+fn peer_old_list(s: &State, i: usize) -> Step {
+    let p = s.peers[i];
+    if s.env.probe != Probe::EpochMint
+        || !s.env.old_running
+        || p.late
+        || p.lease.is_none_or(|e| e >= s.auth.core.epoch)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.peers[i].late = true;
+    o.obs(Obs::EarlierEpochListAfterStop);
+    o.done()
+}
+
+/// H.33.1: an operator epoch. One governance transaction, holding the store
+/// lock that list projection takes (H.13): the new epoch, every holder's
+/// `holder_rev` advanced, `lists_stopped_at` = its commit instant, and the
+/// H.25 gate. Lists are issued in the new epoch from now on, and holders
+/// refuse them with `unexpected_epoch` until `accept-epoch`. The reading
+/// H.33.1 rejects leaves `holder_rev` alone, because nothing projected into a
+/// holder's list changed (§3.7 lists no epoch change).
+fn op_epoch(s: &State, d: Design) -> Step {
+    if s.env.probe != Probe::EpochMint
+        || s.budget.restores == 0
+        || s.auth.core.epoch != 0
+        || s.auth.backup.is_some()
+        || !lists_served(s)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    o.n.budget.restores -= 1;
+    let now = s.env.exposure_elapsed;
+    o.n.ghost.mint_stop = Some(now);
+    o.n.auth.lists_stopped_at = Some(now);
+    let c = &mut o.n.auth.core;
+    c.epoch += 1;
+    c.seq += 1;
+    if d.has(Fix::OperatorEpochRevBump) {
+        c.holder_rev = c.seq;
+    }
+    o.row(H18);
+    if d.has(Fix::EpochMintGate) {
+        start_gate(&mut o, d, false, s.dur.hw.is_some());
+    }
+    o.done()
+}
+
+/// H.33.2 (H19): the restore tooling confirms that no process holds the
+/// governance store lock or serves the lifecycle routes on the source
+/// deployment, and that the old instance's start-up is disabled. Minting
+/// stops (H.15.1) and nothing is listed until the snapshot. For a supported
+/// restore `T_stop` is now, the start of the restore procedure; for
+/// `restore_journal_lost` it is the restored authority's first start.
+fn restore_begin(s: &State) -> Step {
+    if s.env.probe != Probe::EpochMint
+        || s.auth.backup.is_none()
+        || s.budget.restores == 0
+        || s.auth.restoring
+        || !lists_served(s)
+    {
+        return Ok(None);
+    }
+    let mut o = Out::new(s);
+    let now = s.env.exposure_elapsed;
+    o.n.auth.restoring = true;
+    o.n.ghost.mint_stop = Some(now);
+    if !s.env.bad_journal {
+        o.n.auth.lists_stopped_at = Some(now);
+    }
+    // The old instance's cursors die with it.
+    for p in o.n.peers.iter_mut() {
+        p.cursor = None;
+    }
+    o.row(H19);
     o.done()
 }
 

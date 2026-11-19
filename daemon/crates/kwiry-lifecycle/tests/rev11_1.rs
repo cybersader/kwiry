@@ -32,7 +32,7 @@ const NONE: Budget = Budget {
     drops: 0,
     restores: 0,
 };
-const D: Design = Design::REV11_2;
+const D: Design = Design::REV11_3;
 
 fn profile(name: &'static str) -> Profile {
     Profile {
@@ -489,8 +489,9 @@ fn h24_restart_baseline_is_empty_and_the_durable_record_gates_artifacts() {
 
 // ------------------------------------------------------------------ H.25
 
-/// The holder serves its epoch-0 list; a restore began at t = 0 and its
-/// journal failed verification (H12j), so minting stopped.
+/// The holder serves its epoch-0 list; a restore began at t = 0 (H19 confirmed
+/// the old authority stopped) and its journal failed verification (H12j), so
+/// minting stopped.
 fn minting_stopped() -> Fake {
     let mut f = Fake::new();
     f.s.env.probe = Probe::EpochMint;
@@ -499,7 +500,7 @@ fn minting_stopped() -> Fake {
     f.list();
     f.step(AuthBackup);
     f.s.env.bad_journal = true;
-    f.step(AuthRestore);
+    f.run(&[RestoreBegin, AuthRestore]);
     assert_eq!(f.s.ghost.mint_stop, Some(0));
     assert!(!mintable(&f.s, 0));
     f
@@ -606,8 +607,9 @@ fn h25_search_is_down_until_the_last_holder_reports() {
         f.step(AuthBackup);
         if lost {
             f.s.env.bad_journal = true;
-            f.run(&[AuthRestore, OpRestoreJournalLost]);
+            f.run(&[RestoreBegin, AuthRestore, OpRestoreJournalLost]);
         } else {
+            f.step(RestoreBegin);
             assert!(f.rows(AuthRestore).contains(&RowId::H14));
         }
         assert!(!mintable(&f.s, 0) && !mintable(&f.s, 1), "minting is down");

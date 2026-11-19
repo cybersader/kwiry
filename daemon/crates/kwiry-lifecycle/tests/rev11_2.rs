@@ -1,6 +1,7 @@
 //! HOLDINGS-WIRE §15 H.26–H.31 (design revision 11.2). Each load-bearing
 //! rule is a model fix; removing it reproduces the counterexample it closes,
-//! and the same exploration holds with it.
+//! and the same exploration holds with it. The fixtures run revision 11.3,
+//! so H.32's membership and H.33's confirmed stop apply (`tests/rev11_3.rs`).
 
 use kwiry_lifecycle::action::{Action, Action::*, FaultCode, faults};
 use kwiry_lifecycle::checker::{Profile, Report, check_from, check_from_with_goal};
@@ -32,7 +33,7 @@ const NONE: Budget = Budget {
     drops: 0,
     restores: 0,
 };
-const D: Design = Design::REV11_2;
+const D: Design = Design::REV11_3;
 
 fn profile(name: &'static str) -> Profile {
     Profile {
@@ -126,28 +127,6 @@ fn ablate(fix: Fix, expected: Prop, p: Profile, s: State, actions: &[Action]) ->
     );
     eprintln!("{}{}", with.render(), without.render());
     (with, without)
-}
-
-/// Run `actions` in order under `design` and return the first property any
-/// step violates. Every step must be enabled.
-fn first_violation(design: Design, s: &State, actions: &[Action]) -> Option<Prop> {
-    let cfg = Config {
-        design,
-        faults: faults::ALL,
-        same_state: false,
-    };
-    let mut s = s.clone();
-    for &a in actions {
-        let out = exec(&s, a, &cfg)
-            .unwrap()
-            .unwrap_or_else(|| panic!("{a:?} disabled under {design:?}"));
-        if let Some(p) = props::check_step(&s, &out, 0).or_else(|| props::check_state(&out.next, 0))
-        {
-            return Some(p);
-        }
-        s = out.next;
-    }
-    None
 }
 
 // ------------------------------------------------------------------ H.26
@@ -565,13 +544,22 @@ fn two_holders(bad_journal: bool, symmetry: bool) -> State {
     f.s
 }
 
-/// Every action of the H.30 fixture: the authority's backup and restore, the
-/// modeled holder's epoch acceptance and fresh status, the other holders'
-/// roster changes, epoch moves, reports, silence and answers, the clock, the
+/// Every action of the H.30 fixture: the authority's backup, the confirmed
+/// stop of the old authority and the restore, the modeled holder's epoch
+/// acceptance and fresh status, the other holders' roster changes, `403`s,
+/// aged refusals, epoch moves, reports, silence and answers, the clock, the
 /// lease timeout and the refused override.
+///
+/// A `403` the peer receives is left out, a reduction by simulation: it only
+/// drops the peer's earlier-epoch lease, and a peer without that lease has
+/// no move a peer still holding it lacks (moves and reports do not read it,
+/// and only a held lease can answer). `tests/rev11_3.rs` explores it with
+/// every fix. A lost `403` changes nothing under H.32.3 (it is the rejected
+/// reading's clearing step).
 fn gate_candidates() -> Vec<Action> {
     let mut c = vec![
         AuthBackup,
+        RestoreBegin,
         AuthRestore,
         OpRestoreJournalLost,
         FetchStart,
@@ -601,6 +589,9 @@ fn gate_candidates() -> Vec<Action> {
             PeerReport(p),
             PeerSilent(p),
             PeerAnswer(p),
+            PeerForbidden { p, received: false },
+            PeerRefusalAged(p),
+            PeerOldList(p),
         ]);
     }
     for t in [60, 91] {
@@ -623,11 +614,13 @@ fn gate_profile(name: &'static str) -> Profile {
     }
 }
 
-/// H.30 and H.31, exhaustively over the fixture: after a supported restore
+/// H.30–H.33, exhaustively over the fixture: after a supported restore
 /// and after `restore_journal_lost`, nothing is answered from an
 /// earlier-epoch list more than 90 s after minting stopped (I1), and minting
 /// resumes, through member reports or the lease timeout, including when a
-/// member never reports (L1).
+/// member, disabled or not, never reports (L1). Disabled holders keep
+/// serving until a `403` reaches them, and the old authority's confirmed
+/// stop (H19) precedes the snapshot.
 #[test]
 fn h30_gate_holds_exposure_and_always_resumes() {
     for lost in [false, true] {
@@ -642,7 +635,7 @@ fn h30_gate_holds_exposure_and_always_resumes() {
         );
         eprintln!("{}", r.render());
         assert!(r.violation.is_none(), "{}", r.render());
-        for row in [RowId::H14, RowId::H15, RowId::H16] {
+        for row in [RowId::H14, RowId::H15, RowId::H16, RowId::H19] {
             assert!(r.rows_seen[row.index()], "{}", row.name());
         }
         if !lost {
@@ -683,17 +676,42 @@ fn h30_peer_symmetry_preserves_verdicts() {
 }
 
 /// H.30.1: membership is frozen at the new epoch's first transaction. Under
-/// the reading that "every enrolled, enabled holder" is read live,
-/// disabling a member that never reports reopens minting while it still
-/// serves its earlier-epoch list (I1).
+/// the reading that "every enrolled, enabled holder" is read live (with
+/// H.30.1's original membership, which H.32 replaces), disabling a member
+/// that never reports reopens minting while it still serves its
+/// earlier-epoch list (I1). Under H.32 a disabled holder stays in the live
+/// roster too, so the live reading no longer reopens minting; frozen
+/// membership stays necessary for liveness (a later enrollee,
+/// `h30_a_later_enrollee_cannot_stall_minting`).
 #[test]
 fn h30_frozen_membership_is_necessary() {
-    ablate(
-        Fix::FrozenMintMembership,
-        Prop::I1EpochExposure,
-        gate_profile("h30-frozen"),
+    let p = gate_profile("h30-frozen");
+    let live = check_from(
+        &Profile {
+            design: D.without(Fix::FrozenMintMembership),
+            ..p
+        },
         two_holders(false, true),
-        &gate_candidates(),
+        gate_candidates(),
+    );
+    eprintln!("{}", live.render());
+    assert!(live.violation.is_none(), "{}", live.render());
+    let rev11_2 = check_from(
+        &Profile {
+            design: D
+                .without(Fix::FrozenMintMembership)
+                .without(Fix::RosterMintMembership),
+            ..p
+        },
+        two_holders(false, true),
+        gate_candidates(),
+    );
+    eprintln!("{}", rev11_2.render());
+    assert_eq!(
+        rev11_2.violation.as_ref().map(|v| v.prop),
+        Some(Prop::I1EpochExposure),
+        "{}",
+        rev11_2.render()
     );
 }
 
@@ -705,6 +723,7 @@ fn late_enrollee() -> Fake {
         ..Fake::new()
     };
     assert!(f.rows(AuthBackup).is_empty());
+    assert!(f.rows(RestoreBegin).contains(&RowId::H19));
     assert!(f.rows(AuthRestore).contains(&RowId::H14));
     f.run(&[PeerEnroll(0), PeerSilent(0)]);
     assert_eq!(f.s.peers[0].seat, Seat::Absent, "enrolled later: no member");
@@ -768,7 +787,13 @@ fn h30_the_lease_timeout_clears_a_member_that_never_reports() {
         s: two_holders(false, true),
         ..Fake::new()
     };
-    f.run(&[PeerEnroll(0), AuthBackup, AuthRestore, PeerSilent(0)]);
+    f.run(&[
+        PeerEnroll(0),
+        AuthBackup,
+        RestoreBegin,
+        AuthRestore,
+        PeerSilent(0),
+    ]);
     assert_eq!(f.s.peers[0].seat, Seat::Pending);
     assert_eq!(f.s.peers[0].lease, Some(0));
     f.run(&[FetchStart, ListDeliver, OpAcceptEpoch]);
@@ -804,7 +829,7 @@ fn h30_no_admin_override() {
         s: two_holders(false, true),
         ..Fake::new()
     };
-    f.run(&[AuthBackup, AuthRestore]);
+    f.run(&[AuthBackup, RestoreBegin, AuthRestore]);
     let out = f.step(OpMintOverride);
     assert!(out.obs.contains(&Some(Obs::MintOverrideRefused)));
     assert!(!mintable(&f.s, 0));
@@ -847,7 +872,7 @@ fn h31_the_roster_is_journaled_and_replayed() {
             ..Fake::new()
         };
         f.cfg.design = design;
-        f.run(&[PeerEnroll(0), AuthBackup, PeerRotate(0)]);
+        f.run(&[PeerEnroll(0), AuthBackup, PeerRotate(0), RestoreBegin]);
         let rows = f.rows(AuthRestore);
         let replayed = design.has(Fix::RosterJournal);
         assert_eq!(rows.contains(&RowId::H17), replayed);
@@ -858,35 +883,4 @@ fn h31_the_roster_is_journaled_and_replayed() {
             assert_eq!(f.s.peers[0].seat, Seat::Cleared);
         }
     }
-}
-
-/// The ambiguity reported to OpenClast: H.30.1 excludes a holder disabled at
-/// the snapshot because "a disabled holder receives `403` and halts". The
-/// model takes that premise (a holder disabled in the old lineage halts at
-/// once). If its `403` has not arrived when lists stop (disabled within one
-/// relist interval of `T_stop`, or a disabled holder with open obligations,
-/// which HW §4.5 does not refuse), it still serves its earlier-epoch list
-/// after the members clear.
-#[test]
-fn h30_ambiguity_a_holder_disabled_before_the_snapshot_without_its_403() {
-    let mut f = Fake {
-        s: two_holders(false, true),
-        ..Fake::new()
-    };
-    f.run(&[PeerEnroll(0), PeerDisable(0)]);
-    assert_eq!(f.s.peers[0].lease, None, "the premise: it halted on 403");
-    // Without the premise: its 403 has not arrived.
-    f.s.peers[0].lease = Some(0);
-    f.run(&[AuthBackup, AuthRestore]);
-    assert_eq!(f.s.peers[0].seat, Seat::Absent);
-    f.run(&[FetchStart, ListDeliver, OpAcceptEpoch]);
-    f.boot();
-    f.list();
-    f.request(2);
-    f.run(&[AuthProcess { c: 2, idx: 0 }, TickExposure(91)]);
-    assert!(mintable(&f.s, 0));
-    assert_eq!(
-        first_violation(D, &f.s, &[PeerAnswer(0)]),
-        Some(Prop::I1EpochExposure)
-    );
 }

@@ -1,7 +1,7 @@
 //! Which revision of the lifecycle the model executes.
 //!
 //! [`Design::REV8`] is the revision-8 table encoded as written (with the
-//! interpretations listed in the crate docs). [`Design::REV11_2`] adds every
+//! interpretations listed in the crate docs). [`Design::REV11_3`] adds every
 //! [`Fix`]. Each fix is a separate flag so the checker can show that it is
 //! necessary: removing any single fix from the corresponding revision must reproduce the
 //! counterexample it closes (`tests/model_check.rs`).
@@ -139,6 +139,21 @@ pub enum Fix {
     /// H.31: roster changes are journal entries replayed by a supported
     /// restore.
     RosterJournal,
+    /// H.32.2: every engine holder in the roster is a gate member, enabled,
+    /// disabled or decommissioned, except one refused on every route since
+    /// long before `T_stop`.
+    RosterMintMembership,
+    /// H.32.3: a recorded `403` clears no member.
+    NoForbiddenClear,
+    /// H.33.1: the operator epoch's transaction advances every holder's
+    /// `holder_rev`, so an in-flight earlier-epoch cursor answers `410`.
+    OperatorEpochRevBump,
+    /// H.33.2: a restore proceeds only once the old authority instance is
+    /// confirmed stopped with its start-up disabled.
+    StoppedOldAuthority,
+    /// H.34: the clock-hold clear writes holder state before it drops the
+    /// in-memory hold.
+    ClockClearWriteFirst,
 }
 
 impl Fix {
@@ -208,6 +223,14 @@ impl Fix {
         Fix::RosterJournal,
     ];
 
+    pub const REV11_3: [Fix; 5] = [
+        Fix::RosterMintMembership,
+        Fix::NoForbiddenClear,
+        Fix::OperatorEpochRevBump,
+        Fix::StoppedOldAuthority,
+        Fix::ClockClearWriteFirst,
+    ];
+
     const fn bit(self) -> u64 {
         1 << self as u64
     }
@@ -274,6 +297,17 @@ impl Fix {
             Fix::NoMintOverride => "H.30.3: no admin override clears a member early",
             Fix::JournalLostMintWait => "H.30.4: journal-lost minting waits for the lease timeout",
             Fix::RosterJournal => "H.31: the holder roster is journaled and replayed",
+            Fix::RosterMintMembership => {
+                "H.32.2: every roster holder is a gate member, disabled ones too"
+            }
+            Fix::NoForbiddenClear => "H.32.3: a recorded 403 clears no gate member",
+            Fix::OperatorEpochRevBump => {
+                "H.33.1: an operator epoch advances every holder_rev at T_stop"
+            }
+            Fix::StoppedOldAuthority => {
+                "H.33.2: a restore proceeds only with the old authority stopped"
+            }
+            Fix::ClockClearWriteFirst => "H.34: the clock-hold clear writes first",
             Fix::LeaseAndRollbackFence => {
                 "Astra: fence pre-lifecycle binaries and enforce lease/A0 during apply"
             }
@@ -344,12 +378,25 @@ impl Design {
         d
     };
 
-    /// Revision 11.2: HOLDINGS-WIRE §15 H.26–H.31.
+    /// Revision 11.2: HOLDINGS-WIRE §15 H.26–H.31. The H.32–H.34 flags are
+    /// off, so it executes the readings those amendments reject (the
+    /// ablations reproduce them).
     pub const REV11_2: Design = {
         let mut d = Self::REV11_1;
         let mut i = 0;
         while i < Fix::REV11_2.len() {
             d = d.with(Fix::REV11_2[i]);
+            i += 1;
+        }
+        d
+    };
+
+    /// Revision 11.3: HOLDINGS-WIRE §15 H.32–H.34.
+    pub const REV11_3: Design = {
+        let mut d = Self::REV11_2;
+        let mut i = 0;
+        while i < Fix::REV11_3.len() {
+            d = d.with(Fix::REV11_3[i]);
             i += 1;
         }
         d
@@ -391,6 +438,9 @@ impl fmt::Debug for Design {
         if *self == Design::REV11_2 {
             return write!(f, "REV11.2");
         }
+        if *self == Design::REV11_3 {
+            return write!(f, "REV11.3");
+        }
         let missing: Vec<_> = Fix::REV9
             .iter()
             .chain(&Fix::REV10)
@@ -398,8 +448,9 @@ impl fmt::Debug for Design {
             .chain(&Fix::REV11)
             .chain(&Fix::REV11_1)
             .chain(&Fix::REV11_2)
+            .chain(&Fix::REV11_3)
             .filter(|x| !self.has(**x))
             .collect();
-        write!(f, "REV11.2 without {missing:?}")
+        write!(f, "REV11.3 without {missing:?}")
     }
 }

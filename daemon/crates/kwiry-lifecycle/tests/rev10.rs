@@ -27,7 +27,7 @@ const BUDGET: Budget = Budget {
     restores: 1,
 };
 const REV: Rev = Rev { epoch: 0, seq: 1 };
-const D: Design = Design::REV11_2;
+const D: Design = Design::REV11_3;
 
 fn profile(name: &'static str, design: Design) -> Profile {
     Profile {

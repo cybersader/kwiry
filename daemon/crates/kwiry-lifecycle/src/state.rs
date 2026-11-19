@@ -261,16 +261,21 @@ pub struct Auth {
     /// H.25, H.30: a new epoch closed minting for the id-space. `None`: open.
     pub mint_gate: Option<MintGate>,
     /// H.30.2 `lists_stopped_at` (`T_stop`) in the epoch link: the instant the
-    /// old lineage stopped serving lists. Recorded in the H.25 probe only,
-    /// which models time.
+    /// old lineage stopped issuing earlier-epoch lists (H.33). Recorded in the
+    /// H.25 probe only, which models time.
     pub lists_stopped_at: Option<u16>,
+    /// H.15.1, H.33.2 (H.25 probe): a restore began. The restore tooling
+    /// confirmed that the old authority instance is stopped and its start-up
+    /// disabled; nothing is listed or minted until the restored epoch's first
+    /// transaction.
+    pub restoring: bool,
 }
 
 /// H.30: one holder's seat at the epoch-change mint gate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Seat {
-    /// Not a member: not enrolled and enabled in the new epoch's first
-    /// transaction (H.30.1).
+    /// Not a member: not in the roster in the new epoch's first transaction,
+    /// or refused on every route since long before `T_stop` (H.30.1, H.32.2).
     #[default]
     Absent,
     /// A member that has not cleared yet.
@@ -293,11 +298,19 @@ pub struct MintGate {
 }
 
 /// A holder's roster entry at the authority (HW §2.1): enabled, and the key
-/// generation it is enrolled with. Absent means not enrolled.
+/// generation it is enrolled with. Absent means not enrolled. A
+/// decommissioned holder stays in the roster and is refused like a disabled
+/// one, so the model folds it into `enabled: false` (H.32.2 makes both
+/// members).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Roster {
     pub enabled: bool,
     pub key: u8,
+    /// H.32.2: the authority has refused the holder's lifecycle credential on
+    /// every route since an instant `t_r` with `t_r + serve_seconds_ceiling +
+    /// 150 s` already past. Derived from the journaled `holder_disabled` and
+    /// the open obligations, so it is backed up and replayed with the entry.
+    pub refused_aged: bool,
 }
 
 /// Another engine holder of the id-space (HW §15 H.30, H.31). Its own
@@ -323,6 +336,13 @@ pub struct Peer {
     /// Ground truth: the epoch of the list it serves under a live lease
     /// (`None`: serves nothing).
     pub lease: Option<u8>,
+    /// Ground truth (rejected H.33 readings only): its earlier-epoch lease
+    /// was renewed by a list issued after `T_stop`, so the lease timeout does
+    /// not bound it.
+    pub late: bool,
+    /// H.33.1: a list in flight, `(epoch, holder_rev)` as sealed in its
+    /// cursor at page 0; later pages are still to be fetched.
+    pub cursor: Option<(u8, u8)>,
     /// Ground truth: it will never report again (gone or stuck).
     pub silent: bool,
 }
@@ -855,6 +875,10 @@ pub struct Env {
     /// H.30.2(b): the authority clock passed `T_stop + serve_seconds_ceiling
     /// + 150 s`, so every earlier-epoch lease has lapsed.
     pub lease_timeout: bool,
+    /// Rejected H.33.2 reading only: a restore proceeded while the old
+    /// authority instance still runs, so it keeps issuing earlier-epoch
+    /// lists after `T_stop`.
+    pub old_running: bool,
     /// Checker reduction switch: peers are sorted in the canonical state
     /// (`step::canonical`). Fixed for a run.
     pub peer_symmetry: bool,
@@ -969,6 +993,7 @@ impl State {
                 journal_lost_audited: false,
                 mint_gate: None,
                 lists_stopped_at: None,
+                restoring: false,
             },
             peers: [Peer::default(); PEERS],
             env: Env {

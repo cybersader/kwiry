@@ -30,7 +30,7 @@
 //! - [`checker`]: bounded explicit-state BFS with crash injection, plus a
 //!   strong-fairness SCC analysis for L1.
 //! - [`design`]: revision 8 as written ([`design::Design::REV8`]) and each
-//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_2`] has
+//!   repair as a separate [`design::Fix`]; [`design::Design::REV11_3`] has
 //!   all.
 //!
 //! # Universe and bounds
@@ -116,7 +116,18 @@
 //!   fact about one is in its [`state::Peer`] record, every peer action exists
 //!   for each index, and no property or observation names a position), so
 //!   the canonical state sorts them. `tests/rev11_2.rs` checks that the
-//!   verdicts and rows match the unreduced graph.
+//!   verdicts and rows match the unreduced graph. The quotient also erases
+//!   the peers' seats while no gate is closed (nothing reads them) and their
+//!   journaled roster entries when the journal is corrupt and H.14 fences it
+//!   (no supported restore can succeed, and `restore_journal_lost` replays
+//!   no journal), and it renames a peer's key generation to 0 while no
+//!   backup or journaled copy exists and its signing key matches its roster
+//!   entry (only that equality is read). The shared restore fixture leaves
+//!   out a `403` the peer receives, by simulation: it only drops an
+//!   earlier-epoch lease. The H.33 operator epoch and
+//!   its list cursors are explored in a fixture of their own, without the
+//!   restore, and the restore fixture leaves cursors out: a restore's
+//!   confirmed stop ends the old instance's cursors (H19).
 //! - States are stored as 128-bit fingerprints (hash compaction).
 //!
 //! # Coverage limits
@@ -130,25 +141,31 @@
 //! H.12 validation order (an injected request envelope), the H.13 clock
 //! boundaries, a corrupt retirement journal and the audited
 //! `restore_journal_lost` override (one symbolic flag, not a hash chain),
-//! the H.21 capability/clock rules at admission and release, the H.23 and
-//! H.26 clock hold (true lag, which may be negative, and round trip as
+//! the H.21 capability/clock rules at admission and release, the H.23, H.26
+//! and H.34 clock hold (true lag, which may be negative, and round trip as
 //! abstract seconds; the in-memory raise and its separate durable write; the
-//! probe and its 60 s window), the H.25 and H.30 mint gate with two other
+//! clear written first, its failed write and a crash after it; the probe and
+//! its 60 s window), the H.25, H.30, H.32 and H.33 mint gate with two other
 //! engine holders of the id-space, and the H.16 root pins (attestation,
 //! replay and orphan reservation, the journal-lost reset, storage moves and
 //! swaps, rebuilds and the stale bound; the core profiles carry static pins).
 //! The other holders are abstracted to what the gate reads: a roster entry
-//! (enrolled, enabled, key generation) with its backup copy and journaled
-//! entry (H.31), a seat, the epoch of the list each serves under a live
-//! lease, and whether it will ever report. Their own lifecycle is this
-//! machine. A holder's earlier-epoch list is served until it applies a
-//! current-epoch list or until the lease timeout, whatever its enable state
-//! (over-approximating the `403` that may stop it sooner), except that a
-//! holder disabled in the old lineage halts at once (H.30.1's premise). Lease
-//! policy changes are journaled but not modeled: the timeout uses the
-//! deployment ceiling, which every enrolled `serve_seconds` is below. Time is
-//! a probe clock in seconds from the instant lists and minting stopped, with
-//! the lease timeout as one fair step to `T_stop + 1051 s`. The core profiles
+//! (enrolled, enabled, key generation, and whether its refusal on every route
+//! is older than the lease timeout) with its backup copy and journaled entry
+//! (H.31), a seat, the epoch of the list each serves under a live lease, a
+//! list cursor in flight, and whether it will ever report. Their own
+//! lifecycle is this machine. A decommissioned holder is modeled as a
+//! disabled one. A holder's earlier-epoch list is served until it applies a
+//! current-epoch list, receives a `403`, or reaches the lease timeout,
+//! whatever its enable state: disabling it stops nothing by itself (H.32.1),
+//! and a `403` may never arrive. Lease policy changes are journaled but not
+//! modeled: the timeout uses the deployment ceiling, which every enrolled
+//! `serve_seconds` is below. Time is a probe clock in seconds from the
+//! instant lists and minting stopped; time before it is abstracted to the
+//! aged-refusal step, and the lease timeout is one fair step to `T_stop +
+//! 1051 s`. In the gate fixtures a restore's confirmed stop (H19) and its
+//! first transaction are separate steps, so the lease timeout can fall
+//! between them (H.33.3). The core profiles
 //! check the gate with the modeled holder as the only member: minting stays
 //! closed after a supported restore until the holder's current-epoch report,
 //! and L1 requires it to reopen when the holder held a high-water at the
@@ -158,8 +175,8 @@
 //! indexes; the real custody bytes and the escalation scheduler are not
 //! modeled. Not covered: the H.16 filesystem, walk, grammar, golden-vector,
 //! pagination, multi-holder and concurrency vectors (design §5.8, "H.16
-//! conformance obligations"), more than two other holders, operator epochs
-//! without a restore, real dual clocks, in-flight query
+//! conformance obligations"), more than two other holders, the modeled
+//! holder's own list pagination and cursors, real dual clocks, in-flight query
 //! drains, general builders and staging, filesystem/lock failure modes,
 //! migration and launcher deployment, the journal's encoding and fsync
 //! failures, actual raw restore beyond a synthetic witness, rate

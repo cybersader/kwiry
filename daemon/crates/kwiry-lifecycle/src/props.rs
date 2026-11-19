@@ -12,7 +12,7 @@
 //! | I7 | Some healthy actor (holder, environment or operator) can move whenever any work is outstanding |
 //! | I8 | An operator wait (auth halt, bug halt) is entered only on a fault, never on a correct authority or network response |
 //! | I9 | The unattributed inventory never counts data attributable to a listed holding (except units a release reserved) |
-//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes, through member reports or the lease timeout, including for a member that never reports (H.25, H.30), under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
+//! | L1 | Liveness: from every reachable state, once crashes, faults and scenario changes stop, every ghost retirement reaches `complete` or `blocked`, every consumed epoch acceptance is answered by a status accepted in the new epoch, and after an epoch change minting resumes, through member reports or the lease timeout, including for a member that never reports, disabled ones included (H.25, H.30, H.32), under strongly fair scheduling of the holder, the healthy authority and network, the human release decision and the operator |
 
 use crate::state::*;
 use crate::step::{Obs, Outcome, delete_authorized, mintable, reserving, room_class, servable};
@@ -114,7 +114,7 @@ impl Prop {
             Prop::I8ProofDeadline => "I8: a report committed beyond the proof deadline",
             Prop::I1UnverifiedRestore => "I1: a corrupt journal did not fence restore/minting",
             Prop::I1CapabilityExposure => {
-                "I1: a pre-retirement capability answered beyond its deadline"
+                "I1: a capability answered beyond its deadline, under a proven clock lag, or while holder state records the clock hold"
             }
             Prop::I8AdvisoryListWitness => "I8: an unverifiable advisory witness refused the list",
             Prop::I8CommitInvariant => "I8: an inconsistent static check did not abort the CAS",

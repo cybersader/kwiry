@@ -28,7 +28,7 @@ row_ids! {
     S1, S1L, S2, S3, S4, S5, S6, S7, S8, S8n, S9, S9n, S10, S10n, S11, S12, S13, S14, S15,
     S16, S17, S18,
     // M2
-    H1, H2, H3, H4, H5, H6, H7, H8, H9, H10, H11, H12j, H13j, H14, H15, H16, H17,
+    H1, H2, H3, H4, H5, H6, H7, H8, H9, H10, H11, H12j, H13j, H14, H15, H16, H17, H18, H19,
     // M3
     F1, F2, F3, F4, F5, F6, F7, F8, F8r, F8p, F8b, F9, F10, F11,
     // M4a

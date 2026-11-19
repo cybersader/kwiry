@@ -221,6 +221,31 @@ pub enum Action {
     LeaseTimeout,
     /// H.30.3: an admin asks to clear the mint gate early.
     OpMintOverride,
+    /// H.32.3: a disabled peer `p`'s request is answered `403
+    /// holder_not_authorized`, which the authority records. `received`: the
+    /// peer gets it and halts; otherwise the response is lost.
+    PeerForbidden {
+        p: u8,
+        received: bool,
+    },
+    /// H.32.2: while lists are still served, peer `p` has been refused on
+    /// every route since an instant more than `serve_seconds_ceiling + 150 s`
+    /// ago.
+    PeerRefusalAged(u8),
+    /// H.33.1: peer `p` receives page 0 of a list of the current epoch;
+    /// later pages are still to be fetched under its cursor.
+    PeerListStart(u8),
+    /// H.33.1: peer `p` presents its cursor for the remaining pages.
+    PeerListPage(u8),
+    /// Rejected H.33.2 reading only: the old authority instance, still
+    /// running after a restore, issues peer `p` an earlier-epoch list.
+    PeerOldList(u8),
+    /// H.33.1: an operator epoch (`cause: "operator"`). Its transaction is
+    /// `T_stop`.
+    OpEpoch,
+    /// H.33.2: the restore tooling confirms that the old authority instance
+    /// is stopped and its start-up disabled, then records `T_stop`.
+    RestoreBegin,
     /// H.16 focused inputs. `dir: None` is `--pin-id none`; `stale` is a
     /// stale `--expect-current`.
     AttestRoot {
@@ -288,7 +313,14 @@ impl Action {
             | PeerEnable(_)
             | PeerRotate(_)
             | PeerSilent(_)
-            | PeerAnswer(_) => Kind::Scenario,
+            | PeerAnswer(_)
+            | PeerForbidden { .. }
+            | PeerRefusalAged(_)
+            | PeerListStart(_)
+            | PeerListPage(_)
+            | PeerOldList(_)
+            | OpEpoch
+            | RestoreBegin => Kind::Scenario,
             BeginRecovery | CommitRecovery | OpClearClock | OpMintOverride => Kind::Operator,
             // Another holder's progress and the passage of time are fair.
             PeerMove(_) | PeerReport(_) | LeaseTimeout => Kind::Env,
