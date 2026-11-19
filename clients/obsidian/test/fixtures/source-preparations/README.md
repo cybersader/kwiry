@@ -10,12 +10,17 @@ same person who wrote the validator. Producer-owned adversarial cases expose
 Rust/TypeScript contract drift and TypeScript-only limits such as the former
 4,096-`links_out` cap.
 
-Regenerate and validate them from the repository root:
+Validate them from the repository root. The Rust test compares the tracked
+inventory and contents with the producer output; neither test writes fixtures.
+With `native-pdf-extractor`, the Rust test verifies the PDF's enhanced producer
+tag and compares the remaining output against this portable fixture:
 
 ```bash
 cargo test --manifest-path daemon/Cargo.toml -p kwiry-core --test source_preparation_golden -- --nocapture
 npm --prefix clients/obsidian test -- test/source-preparation-golden.test.ts
 ```
 
-Commit changed JSON alongside the Rust generator. Do not edit generated fixtures
+After a deliberate producer change, regenerate the portable fixtures (and remove
+stale ones) with `KWIRY_REGENERATE_GOLDENS=1` on the Rust command above, then
+commit the changed JSON with the producer change. Do not edit generated fixtures
 by hand.
