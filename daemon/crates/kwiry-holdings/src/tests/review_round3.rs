@@ -45,40 +45,46 @@ fn two_page_rig() -> (tempfile::TempDir, Rig) {
 
 #[test]
 fn b3_every_fault_in_a_clear_leaves_a_restart_agreeing_with_memory() {
+    // Every Pass/BeforeRename/AfterRename outcome for the clear's writes:
+    // the record, any rollback, the seal, and whatever invalidates a seal.
     let outcomes = [Fault::Pass, Fault::BeforeRename, Fault::AfterRename];
-    for first in outcomes {
-        for second in outcomes {
-            for third in outcomes {
-                let plan = vec![first, second, third];
-                let (_dir, mut rig) = rig();
-                hold_one(&mut rig);
-                raise_hold(&mut rig);
-                // A probe applies nothing: the clear sequence (record, any
-                // rollback, seal) is all it writes.
-                rig.io_faults.plan(plan.clone());
-                rig.advance(5_000);
-                assert_eq!(rig.holder().probe_clock(), Some(Ok(())), "{plan:?}");
-                let in_memory = rig.engine_gate().clock_hold();
-                // Unless the rollback itself failed, a failed write was put
-                // back: the state file equals the committed state.
-                if !rig.holder().writer_poisoned() {
-                    let on_disk = crate::state::HolderState::parse(
-                        &std::fs::read(rig.dir.join(STATE_FILE)).unwrap(),
-                    )
+    let mut plans = vec![Vec::new()];
+    for _ in 0..4 {
+        plans = plans
+            .into_iter()
+            .flat_map(|plan: Vec<Fault>| {
+                outcomes.iter().map(move |fault| {
+                    let mut next = plan.clone();
+                    next.push(*fault);
+                    next
+                })
+            })
+            .collect();
+    }
+    for plan in plans {
+        let (_dir, mut rig) = rig();
+        hold_one(&mut rig);
+        raise_hold(&mut rig);
+        // A probe applies nothing: the clear sequence is all it writes.
+        rig.io_faults.plan(plan.clone());
+        rig.advance(5_000);
+        assert_eq!(rig.holder().probe_clock(), Some(Ok(())), "{plan:?}");
+        let in_memory = rig.engine_gate().clock_hold();
+        // Unless a rollback itself failed, a failed write was put back: the
+        // state file equals the committed state.
+        if !rig.holder().writer_poisoned() {
+            let on_disk =
+                crate::state::HolderState::parse(&std::fs::read(rig.dir.join(STATE_FILE)).unwrap())
                     .unwrap();
-                    assert_eq!(&on_disk, rig.holder().state(), "{plan:?}");
-                }
-                rig.io_faults.clear();
-                rig.restart().unwrap();
-                assert_eq!(rig.engine_gate().clock_hold(), in_memory, "{plan:?}");
-                if !in_memory {
-                    assert_eq!(
-                        first,
-                        Fault::Pass,
-                        "cleared without a durable record: {plan:?}"
-                    );
-                }
-            }
+            assert_eq!(&on_disk, rig.holder().state(), "{plan:?}");
+        }
+        rig.io_faults.clear();
+        rig.restart().unwrap();
+        assert_eq!(rig.engine_gate().clock_hold(), in_memory, "{plan:?}");
+        if !in_memory {
+            // The clear counted only with a durable record and a seal whose
+            // directory fsync succeeded.
+            assert_eq!(plan[..2], [Fault::Pass, Fault::Pass], "{plan:?}");
         }
     }
 }

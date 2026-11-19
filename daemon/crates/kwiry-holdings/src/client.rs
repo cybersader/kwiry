@@ -129,8 +129,11 @@ pub struct FetchEnv<'a> {
 pub trait FetchHooks {
     /// Persists an accepted key-set statement's pins durably; false refuses.
     fn accept_pins(&mut self, pins: &PinnedKeys) -> bool;
-    /// Each piece of clock evidence, exactly once, in observation order.
+    /// Each signed page's evidence, at once, in observation order (raises).
     fn on_clock(&mut self, evidence: ClockEvidence);
+    /// The whole fetch's evidence, in observation order, once a complete
+    /// list (or a complete probe) verified (H.23, H.29). Only this may clear.
+    fn on_verified(&mut self, evidence: &[ClockEvidence]);
 }
 
 pub struct FetchParams<'a> {
@@ -148,6 +151,8 @@ struct Session {
     /// A key-set statement changed the pins since buffered pages were last
     /// verified (v2 H.37.3).
     pins_changed: bool,
+    /// Clock evidence of the current list attempt, in observation order.
+    evidence: Vec<ClockEvidence>,
 }
 
 enum Answer {
@@ -344,6 +349,7 @@ fn exchange(
     let signed = verify_with_keysets(env, session, &compact, now_recv)?;
     let lag_ms = signed.iat_ms - now_recv;
     env.hooks.on_clock(ClockEvidence::Signed { lag_ms });
+    session.evidence.push(ClockEvidence::Signed { lag_ms });
     check_audience(&signed, &env.ctx).map_err(page_error)?;
     let expectations = PageExpectations {
         nonce: &session.nonce,
@@ -383,6 +389,7 @@ fn fresh_session(env: &FetchEnv) -> Result<Session, FetchFailure> {
         route_fetched: false,
         pins: env.pins.clone(),
         pins_changed: false,
+        evidence: Vec::new(),
     })
 }
 
@@ -434,14 +441,14 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                 let next = page.next_cursor.clone();
                 pages.push(*page);
                 compacts.push(compact);
+                session.evidence.push(answered);
                 reverify(env, &mut session, &compacts)?;
                 match next {
                     None => {
                         let list = assemble(pages).map_err(FetchFailure::Invalid)?;
-                        // Only now may the last page's measurement clear the
-                        // clock hold: the whole list verified (H.29), and
-                        // it is the latest evidence of this fetch.
-                        env.hooks.on_clock(answered);
+                        // Only now may a measurement clear the clock hold:
+                        // the whole list verified (H.29).
+                        env.hooks.on_verified(&session.evidence);
                         return Ok(list);
                     }
                     Some(cursor) => session.cursor = Some(cursor),
@@ -459,6 +466,7 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                     }
                     pages.clear();
                     compacts.clear();
+                    session.evidence.clear();
                     session.cursor = None;
                     session.nonce = token(32)?;
                 }
@@ -499,7 +507,14 @@ pub fn probe_clock(env: &mut FetchEnv, params: &FetchParams) -> Result<(), Fetch
                     "first page index",
                 )));
             }
-            env.hooks.on_clock(answered);
+            // A probe clears only as a complete list that verifies under the
+            // normal rules, `items_total` included (H.29). A probe that sees
+            // only the first of several pages measures nothing it may use.
+            if page.next_cursor.is_none() {
+                assemble(vec![*page]).map_err(FetchFailure::Invalid)?;
+                session.evidence.push(answered);
+                env.hooks.on_verified(&session.evidence);
+            }
             Ok(())
         }
         Answer::Transport(TransportError::Timeout) => Err(FetchFailure::Deadline),

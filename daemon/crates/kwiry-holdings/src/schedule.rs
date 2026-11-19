@@ -140,8 +140,10 @@ impl RelistScheduler {
         self.backoff_until = now.saturating_add(wait);
     }
 
+    /// A probe waits out any active backoff as well as its own 60 s spacing.
     pub fn probe_due(&self, now: u64) -> bool {
         self.may_start(now)
+            && now >= self.backoff_until
             && self
                 .last_probe
                 .is_none_or(|last| now >= last.saturating_add(PROBE_SPACING_MS))

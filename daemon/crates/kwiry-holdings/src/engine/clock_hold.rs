@@ -75,13 +75,16 @@ impl StateWriter {
     }
 
     /// Persists a cleared hold (H.34). The cleared record, carrying a fresh
-    /// token, is committed first and must be fully durable, rename and
-    /// directory fsync included. Only then is the seal written with that
-    /// token; a load reads the hold as cleared only with a matching seal.
-    /// So every failure before the seal is visible leaves a load raised.
-    /// Once the seal's rename has happened the clear counts: the record it
-    /// attests is already durable, and losing the seal later only reads as
-    /// raised again.
+    /// token, is committed first and must be fully durable. Then the seal
+    /// with that token is written, and the clear counts only once the seal's
+    /// own directory fsync has succeeded. A load reads the hold as cleared
+    /// only with a matching seal.
+    ///
+    /// Any failure after the seal's rename returns `Err` (the caller keeps
+    /// the hold raised in memory) and invalidates the possibly visible seal:
+    /// first by committing a fresh raised record, else by removing the seal,
+    /// else by poisoning the writer so every commit is refused until the
+    /// committed state is rewritten.
     pub fn clear_clock_hold(&mut self) -> Result<(), WriteError> {
         if !durable_hold(self) {
             return Ok(());
@@ -94,9 +97,26 @@ impl StateWriter {
         self.commit(next)?;
         match self.write_side_file(SEAL_FILE, token.as_bytes()) {
             Ok(()) => Ok(()),
-            Err(failure) if failure.replaced => Ok(()),
-            Err(failure) => Err(WriteError::Io(failure.error)),
+            Err(failure) => {
+                if failure.replaced {
+                    self.invalidate_clear();
+                }
+                Err(WriteError::Io(failure.error))
+            }
         }
+    }
+
+    fn invalidate_clear(&mut self) {
+        let mut raised = self.state().clone();
+        raised.engine.clock_behind_authority = true;
+        raised.engine.clock_clear_token = None;
+        if self.commit(raised).is_ok() {
+            return;
+        }
+        if self.remove_side_file(SEAL_FILE).is_ok() {
+            return;
+        }
+        self.poison();
     }
 }
 
@@ -119,48 +139,75 @@ pub(crate) fn raise(
     }
 }
 
-/// Applies one piece of clock evidence, at the moment it is observed.
+/// Applies a signed page's evidence at once: a proven lag raises.
 pub(crate) fn observe(
     writer: &mut StateWriter,
     gate: &ServingGate,
     events: &dyn EventSink,
     evidence: ClockEvidence,
 ) {
-    match evidence {
-        ClockEvidence::Signed { lag_ms } if lag_ms > MAX_LAG_MS => {
-            raise(writer, gate, events, lag_ms);
-        }
-        ClockEvidence::Signed { .. } => {}
-        ClockEvidence::Answered { lag_ms, rtt_ms } if gate.clock_hold_raised() => {
-            let upper = lag_ms.saturating_add(i64::try_from(rtt_ms).unwrap_or(i64::MAX));
-            if upper > MAX_LAG_MS {
-                emit(
-                    events,
-                    EngineEvent::ClockHoldUnconfirmed {
-                        measured_lag_upper_bound_ms: upper,
-                        rtt_ms,
-                    },
-                );
-                return;
-            }
-            match writer.clear_clock_hold() {
-                Ok(()) => {
-                    gate.drop_clock_hold();
-                    emit(
-                        events,
-                        EngineEvent::ClockHoldCleared {
-                            measured_lag_upper_bound_ms: upper,
-                            rtt_ms,
-                        },
-                    );
+    if let ClockEvidence::Signed { lag_ms } = evidence
+        && lag_ms > MAX_LAG_MS
+    {
+        raise(writer, gate, events, lag_ms);
+    }
+}
+
+/// Applies the evidence of a whole list that verified (H.23, H.29), in
+/// observation order. Raises already took effect when observed. A
+/// nonce-bound measurement from any page confirms a correction unless a
+/// later page raised; the latest such confirmation clears the hold.
+pub(crate) fn observe_verified(
+    writer: &mut StateWriter,
+    gate: &ServingGate,
+    events: &dyn EventSink,
+    evidence: &[ClockEvidence],
+) {
+    if !gate.clock_hold_raised() {
+        return;
+    }
+    let mut confirmed = None;
+    let mut last = None;
+    for item in evidence {
+        match *item {
+            ClockEvidence::Signed { lag_ms } if lag_ms > MAX_LAG_MS => confirmed = None,
+            ClockEvidence::Signed { .. } => {}
+            ClockEvidence::Answered { lag_ms, rtt_ms } => {
+                let upper = lag_ms.saturating_add(i64::try_from(rtt_ms).unwrap_or(i64::MAX));
+                last = Some((upper, rtt_ms));
+                if upper <= MAX_LAG_MS {
+                    confirmed = Some((upper, rtt_ms));
                 }
-                Err(error) => {
-                    report_write_failure(events, &error);
-                    emit(events, EngineEvent::ClockHoldWriteFailed);
-                }
             }
         }
-        ClockEvidence::Answered { .. } => {}
+    }
+    let Some((upper, rtt_ms)) = confirmed else {
+        if let Some((upper, rtt_ms)) = last {
+            emit(
+                events,
+                EngineEvent::ClockHoldUnconfirmed {
+                    measured_lag_upper_bound_ms: upper,
+                    rtt_ms,
+                },
+            );
+        }
+        return;
+    };
+    match writer.clear_clock_hold() {
+        Ok(()) => {
+            gate.drop_clock_hold();
+            emit(
+                events,
+                EngineEvent::ClockHoldCleared {
+                    measured_lag_upper_bound_ms: upper,
+                    rtt_ms,
+                },
+            );
+        }
+        Err(error) => {
+            report_write_failure(events, &error);
+            emit(events, EngineEvent::ClockHoldWriteFailed);
+        }
     }
 }
 
@@ -196,8 +243,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return None;
         }
         self.scheduler.on_probe(now);
-        Some(self.fetch(true).map(|_| ()).inspect_err(|failure| {
+        let result = self.fetch(true).map(|_| ());
+        if let Err(failure) = &result {
             self.on_failure(failure);
-        }))
+            // H.40: a failed probe backs off exactly like a list attempt.
+            let finished = self.clock.mono_ms();
+            self.schedule_after_failure(failure, finished);
+        }
+        Some(result)
     }
 }

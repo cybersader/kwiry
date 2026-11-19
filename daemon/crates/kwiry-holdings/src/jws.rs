@@ -17,6 +17,11 @@ pub enum JwsError {
     HeaderMember,
     #[error("payload is not a strict JSON object")]
     Payload,
+    /// The signature lacks its algorithm's structure (v2 H.35): an ES256
+    /// signature must decode to a valid 64-byte `r || s`; an EdDSA signature
+    /// must be 64 bytes.
+    #[error("signature encoding does not match alg")]
+    SignatureEncoding,
 }
 
 pub struct Compact {
@@ -62,8 +67,18 @@ pub fn parse(compact: &str) -> Result<Compact, JwsError> {
     let Ok(Value::Object(claims)) = strict_json::parse(&payload_bytes) else {
         return Err(JwsError::Payload);
     };
+    let alg = header_field(&header, "alg")?;
+    let well_formed = match alg.as_str() {
+        "ES256" => p256::ecdsa::Signature::from_slice(&signature).is_ok(),
+        "EdDSA" => signature.len() == 64,
+        // Every verifier in this crate refuses any other `alg`.
+        _ => true,
+    };
+    if !well_formed {
+        return Err(JwsError::SignatureEncoding);
+    }
     Ok(Compact {
-        alg: header_field(&header, "alg")?,
+        alg,
         typ: header_field(&header, "typ")?,
         kid: header_field(&header, "kid")?,
         claims,

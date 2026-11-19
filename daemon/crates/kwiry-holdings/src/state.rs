@@ -41,6 +41,15 @@ pub const DEFAULT_RETENTION_WINDOW_SECONDS: u64 = 30 * 24 * 3600;
 /// Durable file replacement. Production uses [`FsIo`]; tests inject faults.
 pub trait DurableIo: Send {
     fn write_atomic(&self, dir: &Path, name: &str, bytes: &[u8]) -> Result<(), WriteFailure>;
+
+    /// Removes a file and syncs its directory; a missing file is success.
+    fn remove(&self, dir: &Path, name: &str) -> io::Result<()> {
+        match fs::remove_file(dir.join(name)) {
+            Ok(()) => sync_dir(dir),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// A failed durable replacement. `replaced` is true when the rename already
@@ -92,9 +101,27 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(not(unix))]
     {
         let _ = dir;
-        Ok(())
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no durable directory sync on this platform",
+        ))
     }
 }
+
+/// Holder state relies on directory fsync to order its writes (the cleared
+/// record before its seal, a rename before the next write). Platforms
+/// without a real directory sync are refused rather than given a weaker
+/// guarantee.
+pub fn require_directory_sync(available: bool) -> Result<(), DirError> {
+    if available {
+        Ok(())
+    } else {
+        Err(DirError::NoDirectorySync)
+    }
+}
+
+/// Whether this build has a real directory sync.
+pub const DIRECTORY_SYNC: bool = cfg!(unix);
 
 impl DurableIo for FsIo {
     fn write_atomic(&self, dir: &Path, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
@@ -125,6 +152,8 @@ pub enum DirError {
     Io(#[from] io::Error),
     #[error("holder directory overlaps a data or index directory")]
     Overlap,
+    #[error("this platform has no durable directory sync; holder state is refused")]
+    NoDirectorySync,
     #[error("another process holds the holder lock")]
     LockHeld,
 }
@@ -140,6 +169,7 @@ impl HolderDir {
     /// its exclusive lock. `forbidden` are the data and index directories: the
     /// holder directory may neither sit inside nor contain any of them.
     pub fn open(path: &Path, forbidden: &[&Path]) -> Result<Self, DirError> {
+        require_directory_sync(DIRECTORY_SYNC)?;
         if !path.exists() {
             create_private_dir(path)?;
         }
@@ -347,6 +377,15 @@ impl StateWriter {
     /// the same durable replacement as the state file.
     pub(crate) fn write_side_file(&self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
         self.io.write_atomic(self.dir.path(), name, bytes)
+    }
+
+    pub(crate) fn remove_side_file(&self, name: &str) -> io::Result<()> {
+        self.io.remove(self.dir.path(), name)
+    }
+
+    /// Refuses every commit until the committed state is rewritten.
+    pub(crate) fn poison(&mut self) {
+        self.poisoned = true;
     }
 
     fn write_state(&self, state: &HolderState) -> Result<(), WriteFailure> {

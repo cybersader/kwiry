@@ -242,16 +242,22 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     self.events.emit(HolderEvent::ListRequestInvalidCleared);
                 }
             }
-            ListOutcome::Failed(FetchFailure::RequestInvalid { .. }) => {
-                self.scheduler.on_request_invalid(finished);
-            }
-            ListOutcome::Failed(FetchFailure::Unreachable { retry_after_s }) => {
+            ListOutcome::Failed(failure) => self.schedule_after_failure(failure, finished),
+            _ => self.scheduler.on_failure(finished, None),
+        }
+        outcome
+    }
+
+    /// The backoff after a failed list attempt or probe (H.8, H.40).
+    pub(crate) fn schedule_after_failure(&mut self, failure: &FetchFailure, finished: u64) {
+        match failure {
+            FetchFailure::RequestInvalid { .. } => self.scheduler.on_request_invalid(finished),
+            FetchFailure::Unreachable { retry_after_s } => {
                 let retry_ms = retry_after_s.map(|s| s.saturating_mul(1000));
                 self.scheduler.on_failure(finished, retry_ms);
             }
             _ => self.scheduler.on_failure(finished, None),
         }
-        outcome
     }
 
     /// v2 §11.1 B (early relist): a request named a resource that is neither
@@ -690,6 +696,12 @@ impl FetchHooks for Observer<'_> {
     fn on_clock(&mut self, evidence: ClockEvidence) {
         if self.engine_on {
             engine::clock_hold::observe(self.writer, self.gate, self.events, evidence);
+        }
+    }
+
+    fn on_verified(&mut self, evidence: &[ClockEvidence]) {
+        if self.engine_on {
+            engine::clock_hold::observe_verified(self.writer, self.gate, self.events, evidence);
         }
     }
 }

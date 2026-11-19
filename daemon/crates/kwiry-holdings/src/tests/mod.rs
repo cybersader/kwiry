@@ -12,6 +12,7 @@ mod list_client;
 mod must_reject;
 mod review_round2;
 mod review_round3;
+mod review_round4;
 mod state_startup;
 
 use crate::client::FetchFailure;

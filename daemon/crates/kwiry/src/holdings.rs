@@ -16,7 +16,7 @@ use kwiry_holdings::profile::WireProfile;
 
 /// OpenClast's Holdings wire profile for an engine holder that holds rooms.
 #[cfg_attr(
-    not(test),
+    any(not(test), not(unix)),
     expect(dead_code, reason = "wired into the daemon in slice S4")
 )]
 pub(crate) fn openclast_profile() -> WireProfile {
@@ -40,7 +40,7 @@ pub(crate) fn openclast_profile() -> WireProfile {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::openclast_profile;
     use kwiry_holdings::client::FetchFailure;

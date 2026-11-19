@@ -59,7 +59,9 @@ pub mod wire;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 
-#[cfg(test)]
+// The conformance suite opens holder state, which needs a real directory
+// sync (Unix only).
+#[cfg(all(test, unix))]
 mod tests;
 
 pub use strict_json::parse as parse_strict_json;
