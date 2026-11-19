@@ -560,7 +560,9 @@ impl StateWriter {
         }
     }
 
-    /// Records the identity of a reserve file this holder created.
+    /// Records the identity of a reserve file this holder created. File
+    /// reserves exist only where `FileReserve` does (Unix).
+    #[cfg(unix)]
     pub(crate) fn record_reserve(
         &mut self,
         name: &str,
