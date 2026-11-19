@@ -193,7 +193,7 @@ fn token(bytes: usize) -> Result<String, FetchFailure> {
 
 /// A fresh list nonce (§3.1: one per list, never reused).
 fn list_nonce() -> Result<String, FetchFailure> {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if let Some(nonce) = scripted_nonces::next() {
         return Ok(nonce);
     }
@@ -203,8 +203,9 @@ fn list_nonce() -> Result<String, FetchFailure> {
 /// TEST-ONLY. Authority-signed golden pages echo the nonce of the request
 /// they were generated for, and nobody but the authority can re-sign them.
 /// A conformance test queues those nonces here, per thread, so the real
-/// fetch path can verify the real bytes. Compiled out of every other build.
-#[cfg(test)]
+/// fetch path can verify the real bytes. Compiled only with the conformance
+/// suite (Unix, like `crate::tests`); out of every other build.
+#[cfg(all(test, unix))]
 pub(crate) mod scripted_nonces {
     use std::cell::RefCell;
     use std::collections::VecDeque;
