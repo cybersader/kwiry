@@ -13,8 +13,9 @@ pub use authority::{AuthorityConfig, FakeAuthority, FakeState, Forced, Hooks, Re
 pub use fakes::{DataRootView, FakeClock, FakeDataRoot, IoFaults, MemoryStore, StoreView};
 pub use jcs::canonical as jcs;
 
+use crate::engine::{EngineGate, EngineProfile, EngineSettings};
 use crate::events::MemorySink;
-use crate::gate::{GateSettings, ServingGate};
+use crate::gate::ServingGate;
 use crate::holder::{Holder, HolderConfig};
 use crate::keys::HolderKey;
 use crate::profile::WireProfile;
@@ -48,8 +49,10 @@ pub fn neutral_profile() -> WireProfile {
         authority_key_id_prefix: "ak-".into(),
         resource_kinds: strings(&["collection", "archive", "volume"]),
         accepted_resource_kinds: strings(&["collection", "archive"]),
-        pinned_holder_kind: Some(TEST_HOLDER_KIND.into()),
-        pinned_resource_kind: Some("collection".into()),
+        engine: Some(EngineProfile {
+            holder_kind: TEST_HOLDER_KIND.into(),
+            pinned_resource_kind: "collection".into(),
+        }),
         obligation_reasons: strings(&["retire", "holder-decommission"]),
     }
 }
@@ -82,14 +85,20 @@ impl Rig {
         Self::with_profile(dir, neutral_profile(), "example-lifecycle/v1")
     }
 
+    /// Enrolls a holder under `profile`. Its kind is the engine section's
+    /// holder kind, or `device` for a profile without one.
     pub fn with_profile(dir: &Path, profile: WireProfile, digest_salt: &str) -> Self {
+        let holder_kind = profile
+            .engine
+            .as_ref()
+            .map_or_else(|| "device".to_owned(), |engine| engine.holder_kind.clone());
         let clock = Arc::new(FakeClock::new(TEST_START_WALL_MS, 1_000_000));
         let authority = FakeAuthority::new(
             AuthorityConfig {
                 profile: profile.clone(),
                 issuer: TEST_ISSUER.into(),
                 digest_salt: digest_salt.into(),
-                holder_kind: TEST_HOLDER_KIND.into(),
+                holder_kind: holder_kind.clone(),
                 serve_seconds: 900,
                 relist_seconds: 300,
             },
@@ -107,7 +116,7 @@ impl Rig {
                 clock.clone(),
                 &EnrollParams {
                     holder_id: &holder_id,
-                    holder_kind: TEST_HOLDER_KIND,
+                    holder_kind: &holder_kind,
                     issuer: TEST_ISSUER,
                     jwks: &jwks,
                     authority_key_id_prefix: &profile.authority_key_id_prefix,
@@ -115,10 +124,13 @@ impl Rig {
             )
             .expect("enroll");
         }
+        let engine = profile.engine.as_ref().map(|_| {
+            EngineSettings::new(30, crate::engine::DEFAULT_STALE_SERVE_S).expect("engine settings")
+        });
         let config = HolderConfig {
             profile,
             page_size: crate::holder::DEFAULT_PAGE_SIZE,
-            gate: GateSettings::new(30, crate::gate::DEFAULT_STALE_SERVE_S).expect("gate"),
+            engine,
         };
         let mut rig = Self {
             clock,
@@ -169,6 +181,15 @@ impl Rig {
 
     pub fn gate(&self) -> ServingGate {
         self.holder.as_ref().expect("holder running").gate()
+    }
+
+    /// The engine profile's gate; panics for a holder without one.
+    pub fn engine_gate(&self) -> EngineGate {
+        self.holder
+            .as_ref()
+            .expect("holder running")
+            .engine_gate()
+            .expect("engine profile")
     }
 
     /// Advances both clocks, past the list-start spacing by default.

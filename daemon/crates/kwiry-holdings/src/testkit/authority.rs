@@ -188,9 +188,7 @@ impl FakeState {
     }
 
     fn pinned(&self, kind: &str) -> bool {
-        self.config
-            .profile
-            .is_pinned(&self.config.holder_kind, kind)
+        self.config.profile.pins(&self.config.holder_kind, kind)
     }
 
     /// Adds an `active` holding; pinned kinds start with `root_pin: null`.

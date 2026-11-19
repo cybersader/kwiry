@@ -1,5 +1,6 @@
 //! Typed forms of the list wire. Parsing and validation live in `verify`.
 
+use crate::engine::PinMember;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -74,31 +75,6 @@ pub enum ReportState {
     Complete,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct RootPin {
-    pub pin_id: String,
-    pub pin_ref: String,
-}
-
-/// The storage-pin member of an item.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PinMember {
-    /// The item's kind carries no pin for this holder (member absent).
-    NotApplicable,
-    /// `root_pin: null`: not attested. Never served.
-    Unpinned,
-    Pinned(RootPin),
-}
-
-impl PinMember {
-    pub fn pin(&self) -> Option<&RootPin> {
-        match self {
-            Self::Pinned(pin) => Some(pin),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Blocked {
     pub at_ms: i64,
@@ -123,6 +99,8 @@ pub struct Item {
     pub holding_id: String,
     pub resource: ResourceKey,
     pub phase: Phase,
+    /// The engine profile's storage-pin member; `NotApplicable` for every
+    /// other holder and kind.
     pub root_pin: PinMember,
     pub quarantine_after_ms: i64,
     pub obligation: Option<Obligation>,

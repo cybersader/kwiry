@@ -10,8 +10,8 @@ use crate::jws::{self, JwsError};
 use crate::keys::PinnedKeys;
 use crate::profile::WireProfile;
 use crate::wire::{
-    Blocked, Item, Lease, ListRef, Obligation, ObligationState, Phase, PinMember, ReportState,
-    ResourceKey, Rev, RootPin,
+    Blocked, Item, Lease, ListRef, Obligation, ObligationState, Phase, ReportState, ResourceKey,
+    Rev,
 };
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -414,38 +414,6 @@ fn parse_instructions(value: &Value, rev_seq: u64) -> Result<(Vec<Value>, usize)
     Ok((kept, skipped))
 }
 
-fn parse_root_pin(item: &Map<String, Value>, pinned: bool) -> Result<PinMember, PageError> {
-    match (pinned, item.get("root_pin")) {
-        (false, None) => Ok(PinMember::NotApplicable),
-        (false, Some(_)) => Err(PageError::RootPin("member on an unpinned item")),
-        (true, None) => Err(PageError::RootPin("member missing")),
-        (true, Some(Value::Null)) => Ok(PinMember::Unpinned),
-        (true, Some(Value::Object(pin))) => {
-            if pin.keys().any(|k| k != "pin_id" && k != "pin_ref") {
-                return Err(PageError::RootPin("unknown member"));
-            }
-            let pin_id = pin.get("pin_id").and_then(Value::as_str);
-            let pin_ref = pin.get("pin_ref").and_then(Value::as_str);
-            let (Some(pin_id), Some(pin_ref)) = (pin_id, pin_ref) else {
-                return Err(PageError::RootPin(
-                    "pin_id and pin_ref must both be present",
-                ));
-            };
-            if !grammar::pin_id(pin_id) {
-                return Err(PageError::RootPin("pin_id"));
-            }
-            if !grammar::pin_ref(pin_ref) {
-                return Err(PageError::RootPin("pin_ref"));
-            }
-            Ok(PinMember::Pinned(RootPin {
-                pin_id: pin_id.to_owned(),
-                pin_ref: pin_ref.to_owned(),
-            }))
-        }
-        (true, Some(_)) => Err(PageError::RootPin("not an object")),
-    }
-}
-
 fn parse_item(value: &Value, ctx: &VerifyContext, rev_seq: u64) -> Result<Item, PageError> {
     let item = closed(
         value,
@@ -496,7 +464,7 @@ fn parse_item(value: &Value, ctx: &VerifyContext, rev_seq: u64) -> Result<Item, 
         Some("retired") => Phase::Retired,
         _ => return Err(PageError::Grammar("phase")),
     };
-    let root_pin = parse_root_pin(item, ctx.profile.is_pinned(ctx.holder_kind, kind))?;
+    let root_pin = crate::engine::pin::parse_member(item, ctx.profile.pins(ctx.holder_kind, kind))?;
     let quarantine_after_ms = time(item, "quarantine_after", "quarantine_after")?;
     let obligation = match &item["obligation"] {
         Value::Null => None,

@@ -10,14 +10,17 @@
 //!
 //! - [`keys`]: the holder's Ed25519 key and the pinned authority key set;
 //! - [`state`]: the durable holder-state file and its single fsynced writer
-//!   (high-water, grow-only tombstones, pin-history pairs, the clock hold);
+//!   (high-water, last applied list, grow-only tombstones, and the engine
+//!   profile's own section);
 //! - [`startup`]: enrollment and the loss/reset rules (trust on first use only
 //!   when both holder state and data are proven lost);
 //! - [`client`] and [`verify`]: fetching, verifying and assembling lists;
 //! - [`holder`]: admission and the A0–A4 apply sequence;
-//! - [`gate`]: the serving gate an engine consults before serving anything.
+//! - [`gate`]: the core serving gate;
+//! - [`engine`]: the search-engine holder profile (storage pins, capability
+//!   bounds, the clock hold), used only when the wire profile asks for it.
 //!
-//! Engines plug in through three small traits: [`store::ResourceStore`]
+//! Holders plug in through three small traits: [`store::ResourceStore`]
 //! (what is held, publish the classification, revoke), [`store::ArtifactPurger`]
 //! (deletion under an obligation; not used by this slice) and
 //! [`clock::Clock`]. The authority is reached through [`client::Transport`].
@@ -29,6 +32,7 @@
 pub mod b64;
 pub mod client;
 pub mod clock;
+pub mod engine;
 pub mod events;
 pub mod gate;
 pub mod grammar;

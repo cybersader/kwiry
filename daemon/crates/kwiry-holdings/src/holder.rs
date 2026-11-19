@@ -1,17 +1,16 @@
 //! Admission and apply: from a verified list to a narrowed-then-broadened
 //! serving gate.
 //!
-//! - **Admission (H rows).** First contact accepts; the same epoch accepts a
-//!   `seq` at or above the high-water; a lower `seq` is `lifecycle_regressed`
-//!   and any other epoch is `unexpected_epoch`. Refused lists change nothing
-//!   and leases keep running down.
+//! - **Admission.** First contact accepts; the same epoch accepts a `seq` at
+//!   or above the high-water; a lower `seq` is `lifecycle_regressed` and any
+//!   other epoch is `unexpected_epoch`. Refused lists change nothing and
+//!   leases keep running down.
 //! - **A0.** Before any durable write, refuse every resource the list does
-//!   not show `active`, every tombstoned resource, and every pinned resource
-//!   whose pin is null, changed since the list last applied in this process,
-//!   or held in the pin history under another resource. These refusals
-//!   survive any later failure.
+//!   not show `active` and every tombstoned resource; with the engine
+//!   profile, also every pin that is null, changed or held under another
+//!   resource. These refusals survive any later failure.
 //! - **A1.** One atomic commit: high-water, tombstones ∪ newly terminating
-//!   or retired resources, pin-history ∪ every pin in the list.
+//!   or retired resources, and (engine profile) pin-history ∪ the list's pins.
 //! - **A2–A3.** The store publishes the classification. Nothing is deleted:
 //!   unknown data is withheld, tombstoned-unlisted data quarantined.
 //! - **A4.** Record the applied list, then swap the gate snapshot: the only
@@ -20,16 +19,17 @@
 
 use crate::client::{self, ClockEvidence, FetchEnv, FetchFailure, FetchParams, Transport};
 use crate::clock::Clock;
+use crate::engine::{self, EngineGate, EngineSettings, RootPin};
 use crate::events::{EventSink, HolderEvent};
-use crate::gate::{GateEntry, GateSettings, GateSnapshot, ServingGate};
+use crate::gate::{GateEntry, GateSnapshot, ServingGate};
 use crate::keys::{HolderKey, PinnedKeys};
 use crate::profile::WireProfile;
 use crate::schedule::{EarlyRelist, RelistScheduler};
 use crate::startup::Started;
-use crate::state::{ApplyMutation, HolderState, PinPair, StateWriter, Tombstone, raised_ceiling};
+use crate::state::{ApplyMutation, HolderState, StateWriter, Tombstone};
 use crate::store::{Disposition, HeldResource, PublishPlan, ResourceStore};
 use crate::verify::{VerifiedList, VerifyContext};
-use crate::wire::{Item, PinMember, ResourceKey, Rev, RootPin};
+use crate::wire::{Item, ResourceKey, Rev};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -39,7 +39,8 @@ pub const DEFAULT_PAGE_SIZE: u16 = 500;
 pub struct HolderConfig {
     pub profile: WireProfile,
     pub page_size: u16,
-    pub gate: GateSettings,
+    /// Required exactly when the profile has an engine section.
+    pub engine: Option<EngineSettings>,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -48,6 +49,8 @@ pub enum ConfigError {
     Profile(&'static str),
     #[error("page_size must be 1–1000")]
     PageSize,
+    #[error("engine settings must accompany an engine profile, and only one")]
+    EngineSettings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,19 +88,20 @@ pub enum ListOutcome {
 }
 
 pub struct Holder<S: ResourceStore, T: Transport> {
-    config: HolderConfig,
-    writer: StateWriter,
+    pub(crate) config: HolderConfig,
+    pub(crate) writer: StateWriter,
     key: HolderKey,
     store: S,
     transport: T,
-    clock: Arc<dyn Clock>,
-    events: Arc<dyn EventSink>,
-    gate: ServingGate,
-    route: RouteHealth,
-    /// Pins of the list last applied in this process, by holding id. Empty at
-    /// process start, so every pin of the first list counts as changed.
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) events: Arc<dyn EventSink>,
+    pub(crate) gate: ServingGate,
+    pub(crate) engine: Option<EngineGate>,
+    pub(crate) route: RouteHealth,
+    /// Engine profile: pins of the list last applied in this process, by
+    /// holding id. Empty at process start.
     baseline: HashMap<String, Option<RootPin>>,
-    scheduler: RelistScheduler,
+    pub(crate) scheduler: RelistScheduler,
 }
 
 impl<S: ResourceStore, T: Transport> Holder<S, T> {
@@ -113,8 +117,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if !(1..=1000).contains(&config.page_size) {
             return Err(ConfigError::PageSize);
         }
-        let hold = started.writer.state().clock_behind_authority;
-        let gate = ServingGate::new(clock.clone(), config.gate, hold);
+        if config.profile.engine.is_some() != config.engine.is_some() {
+            return Err(ConfigError::EngineSettings);
+        }
+        let hold = started.writer.state().engine.clock_behind_authority;
+        let gate = ServingGate::new(clock.clone(), hold);
+        let engine = config
+            .engine
+            .map(|settings| EngineGate::new(gate.clone(), settings));
         Ok(Self {
             config,
             writer: started.writer,
@@ -124,15 +134,21 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             clock,
             events,
             gate,
+            engine,
             route: RouteHealth::Normal,
             baseline: HashMap::new(),
             scheduler: RelistScheduler::new(300),
         })
     }
 
-    /// The serving gate, for the engine's request path.
+    /// The core serving gate.
     pub fn gate(&self) -> ServingGate {
         self.gate.clone()
+    }
+
+    /// The engine profile's gate, when the profile has one.
+    pub fn engine_gate(&self) -> Option<EngineGate> {
+        self.engine.clone()
     }
 
     pub fn state(&self) -> &HolderState {
@@ -159,7 +175,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self.scheduler
     }
 
-    /// Fetches, verifies, admits and applies one list (row F1 onward).
+    /// Fetches, verifies, admits and applies one list.
     pub fn list_once(&mut self) -> ListOutcome {
         if self.route != RouteHealth::Normal {
             return ListOutcome::Halted;
@@ -196,42 +212,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         outcome
     }
 
-    /// One clock probe while the hold is raised (row C21): at most once per
-    /// 60 s, counted as a list start, never applied. `None` when no probe is
-    /// needed or allowed now.
-    pub fn probe_clock(&mut self) -> Option<Result<(), FetchFailure>> {
-        let now = self.clock.mono_ms();
-        if self.route != RouteHealth::Normal
-            || !self.gate.clock_hold()
-            || !self.scheduler.probe_due(now)
-        {
-            return None;
-        }
-        self.scheduler.on_probe(now);
-        Some(self.fetch(true).map(|_| ()).inspect_err(|failure| {
-            self.on_failure(failure);
-        }))
-    }
-
-    /// Clock evidence from a verified capability (row C19).
-    pub fn observe_capability_iat(&mut self, iat_s: i64) {
-        let lag = iat_s.saturating_mul(1000) - self.clock.wall_ms();
-        if lag > client::CLOCK_BEHIND_MS {
-            self.raise_clock_hold(lag);
-        }
-    }
-
-    /// Amendment B: a capability named a resource that is neither listed
-    /// nor tombstoned. The request itself is refused by the gate meanwhile.
+    /// Amendment B: a request named a resource that is neither listed nor
+    /// tombstoned. The request itself is refused by the gate meanwhile.
     pub fn request_early_relist(&mut self, resource_id: &str) -> Option<EarlyRelist> {
-        let listed = self.gate.entries_snapshot().contains_key(resource_id);
-        if listed || self.writer.state().is_tombstoned(resource_id) {
+        if self.gate.listed_ids().contains(resource_id)
+            || self.writer.state().is_tombstoned(resource_id)
+        {
             return None;
         }
         Some(self.scheduler.request_early(self.clock.mono_ms()))
     }
 
-    fn fetch(&mut self, probe: bool) -> Result<Option<VerifiedList>, FetchFailure> {
+    pub(crate) fn fetch(&mut self, probe: bool) -> Result<Option<VerifiedList>, FetchFailure> {
+        let engine_on = self.engine.is_some();
         let Self {
             config,
             writer,
@@ -256,10 +249,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             accepted
         };
         let mut on_clock = |observed: ClockEvidence| {
-            if matches!(observed, ClockEvidence::Behind { .. }) {
-                gate_view.raise_clock_hold();
+            if engine_on {
+                engine::capability::raise_on_signed_page(gate_view, &observed);
+                evidence.push(observed);
             }
-            evidence.push(observed);
         };
         let mut env = FetchEnv {
             transport: &*transport,
@@ -291,47 +284,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         result
     }
 
-    fn raise_clock_hold(&mut self, lag_lower_bound_ms: i64) {
-        self.gate.raise_clock_hold();
-        self.events
-            .emit(HolderEvent::ClockBehindRaised { lag_lower_bound_ms });
-        if self.writer.raise_clock_hold().is_err() {
-            self.events.emit(HolderEvent::ClockHoldWriteFailed);
-        }
-    }
-
-    /// Raising takes effect in memory first, then is written. Clearing is
-    /// written first, then the in-memory hold drops; a failed clearing write
-    /// leaves the hold raised in memory and durably.
-    fn on_clock_evidence(&mut self, observed: ClockEvidence) {
-        match observed {
-            ClockEvidence::Behind { lag_lower_bound_ms } => {
-                self.raise_clock_hold(lag_lower_bound_ms)
-            }
-            ClockEvidence::Measured {
-                upper_bound_ms,
-                rtt_ms,
-            } if self.gate.clock_hold() => {
-                if upper_bound_ms > client::CLOCK_BEHIND_MS {
-                    self.events.emit(HolderEvent::ClockBehindUnconfirmed {
-                        measured_lag_upper_bound_ms: upper_bound_ms,
-                        rtt_ms,
-                    });
-                } else if self.writer.clear_clock_hold().is_ok() {
-                    self.gate.drop_clock_hold();
-                    self.events.emit(HolderEvent::ClockBehindCleared {
-                        measured_lag_upper_bound_ms: upper_bound_ms,
-                        rtt_ms,
-                    });
-                } else {
-                    self.events.emit(HolderEvent::ClockHoldWriteFailed);
-                }
-            }
-            ClockEvidence::Measured { .. } => {}
-        }
-    }
-
-    fn on_failure(&mut self, failure: &FetchFailure) {
+    pub(crate) fn on_failure(&mut self, failure: &FetchFailure) {
         let event = match failure {
             FetchFailure::Unreachable { .. } => HolderEvent::AuthorityUnreachable,
             FetchFailure::Deadline => HolderEvent::ListDeadline,
@@ -389,6 +342,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             });
         }
 
+        let engine_on = self.engine.is_some();
         let state = self.writer.state();
         let new_tombstones: Vec<Tombstone> = list
             .items
@@ -407,23 +361,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .chain(&new_tombstones)
             .map(|t| t.resource_id.clone())
             .collect();
-        let new_pairs: Vec<PinPair> = list
-            .items
-            .iter()
-            .filter_map(|listed| {
-                listed.item.root_pin.pin().map(|pin| PinPair {
-                    pin_id: pin.pin_id.clone(),
-                    resource_id: listed.item.resource.id.clone(),
-                })
-            })
-            .filter(|pair| !state.pin_history.contains(pair))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let history = pin_history_map(state.pin_history.iter().chain(&new_pairs));
+        let new_pairs = if engine_on {
+            engine::pin::new_pairs(&list.items, &state.engine.pin_history)
+        } else {
+            Vec::new()
+        };
 
         // A0: narrow at once, before any durable write.
-        let (refuse, conflicts) = self.admission_refusals(&list, &tombstoned, &history);
+        let (refuse, conflicts) = self.admission_refusals(&list, &tombstoned, &new_pairs);
         self.gate.refuse_at_admission(refuse);
         if conflicts > 0 {
             self.events
@@ -436,13 +381,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let plan = classify(&list, &held, &tombstoned);
 
         // A1.
-        let size = self.writer.state().pin_history.len() + new_pairs.len();
-        let ceiling = self.writer.state().pin_history_ceiling;
-        if let Some(raised) = raised_ceiling(u64::try_from(size).unwrap_or(u64::MAX), ceiling) {
-            self.events.emit(HolderEvent::PinHistoryCeilingRaised {
-                from: ceiling,
-                to: raised,
-            });
+        if engine_on {
+            let engine_state = &self.writer.state().engine;
+            let size = engine_state.pin_history.len() + new_pairs.len();
+            let ceiling = engine_state.pin_history_ceiling;
+            let size = u64::try_from(size).unwrap_or(u64::MAX);
+            if let Some(raised) = engine::pin::raised_ceiling(size, ceiling) {
+                self.events.emit(HolderEvent::PinHistoryCeilingRaised {
+                    from: ceiling,
+                    to: raised,
+                });
+            }
         }
         let mutation = ApplyMutation {
             rev: rev.clone(),
@@ -462,17 +411,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }
         let snapshot = self.snapshot(&list, &plan, &tombstoned);
         self.gate.swap(snapshot);
-        self.baseline = list
-            .items
-            .iter()
-            .filter(|listed| listed.item.root_pin != PinMember::NotApplicable)
-            .map(|listed| {
-                (
-                    listed.item.holding_id.clone(),
-                    listed.item.root_pin.pin().cloned(),
-                )
-            })
-            .collect();
+        if engine_on {
+            self.baseline = engine::pin::baseline(&list.items);
+        }
         self.scheduler
             .set_relist_seconds(list.head.lease.relist_seconds);
         // A5.
@@ -489,7 +430,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &self,
         list: &VerifiedList,
         tombstoned: &HashSet<String>,
-        history: &HashMap<String, BTreeSet<String>>,
+        new_pairs: &[engine::PinPair],
     ) -> (HashSet<String>, usize) {
         let listed: HashMap<&str, &Item> = list
             .items
@@ -498,14 +439,24 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .collect();
         let mut refuse: HashSet<String> = self
             .gate
-            .entries_snapshot()
-            .into_keys()
+            .listed_ids()
+            .into_iter()
             .filter(|id| {
                 !listed
                     .get(id.as_str())
                     .is_some_and(|item| item.is_active() && !tombstoned.contains(id))
             })
             .collect();
+        let history = self.engine.as_ref().map(|_| {
+            engine::pin::history_map(
+                self.writer
+                    .state()
+                    .engine
+                    .pin_history
+                    .iter()
+                    .chain(new_pairs),
+            )
+        });
         let mut conflicts = 0;
         for listed in &list.items {
             let item = &listed.item;
@@ -516,18 +467,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 conflicts += 1;
                 true
             } else {
-                match &item.root_pin {
-                    PinMember::NotApplicable => false,
-                    PinMember::Unpinned => true,
-                    PinMember::Pinned(pin) => {
-                        let unchanged =
-                            self.baseline.get(&item.holding_id) == Some(&Some(pin.clone()));
-                        let conflict = history
-                            .get(&pin.pin_id)
-                            .is_some_and(|ids| ids.iter().any(|other| other != id));
-                        !unchanged || conflict
-                    }
-                }
+                history.as_ref().is_some_and(|history| {
+                    engine::pin::refused_at_admission(item, &self.baseline, history)
+                })
             };
             if refused {
                 refuse.insert(id.clone());
@@ -543,7 +485,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         tombstoned: &HashSet<String>,
     ) -> GateSnapshot {
         let state = self.writer.state();
-        let holder_kind = &self.writer.enrollment().holder_kind;
         let serve_ms = i64::try_from(list.head.lease.serve_seconds)
             .unwrap_or(i64::MAX)
             .saturating_mul(1000);
@@ -566,11 +507,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     lease_mono_ms: listed
                         .received_mono_ms
                         .saturating_add(u64::try_from(remaining).unwrap_or(0)),
-                    pinned: self
-                        .config
-                        .profile
-                        .is_pinned(holder_kind, &item.resource.kind),
-                    pin: item.root_pin.pin().cloned(),
+                    pin: item.root_pin.clone(),
                 };
                 (item.resource.id.clone(), entry)
             })
@@ -578,22 +515,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         GateSnapshot {
             entries,
             tombstoned: tombstoned.clone(),
-            pin_history: pin_history_map(state.pin_history.iter()),
+            pin_history: engine::pin::history_map(state.engine.pin_history.iter()),
             history_available: !state.reset_pending,
         }
     }
-}
-
-fn pin_history_map<'a>(
-    pairs: impl Iterator<Item = &'a PinPair>,
-) -> HashMap<String, BTreeSet<String>> {
-    let mut map: HashMap<String, BTreeSet<String>> = HashMap::new();
-    for pair in pairs {
-        map.entry(pair.pin_id.clone())
-            .or_default()
-            .insert(pair.resource_id.clone());
-    }
-    map
 }
 
 /// Classifies everything held or listed. A listed item matches a held

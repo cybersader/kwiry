@@ -17,6 +17,7 @@
 //! can authorise serving, building or deleting.
 
 use crate::clock::Clock;
+use crate::engine::{EngineState, PinPair};
 use crate::keys::PinnedKeys;
 use crate::wire::{ListRef, Rev};
 use serde::{Deserialize, Serialize};
@@ -35,7 +36,6 @@ pub const STATE_SCHEMA: &str = "holdings-holder-state/1";
 pub const ENROLLMENT_SCHEMA: &str = "holdings-holder/1";
 /// Holder-state backups older than this are refused on recovery.
 pub const DEFAULT_RETENTION_WINDOW_SECONDS: u64 = 30 * 24 * 3600;
-pub const DEFAULT_PIN_HISTORY_CEILING: u64 = 100_000;
 
 /// Durable file replacement. Production uses [`FsIo`]; tests inject faults.
 pub trait DurableIo: Send {
@@ -175,15 +175,6 @@ pub struct Tombstone {
     pub holding_id: String,
 }
 
-/// A `(pin_id, resource_id)` pair observed in an applied list. Pairs are
-/// never replaced or evicted; a pin id may appear under several resources.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PinPair {
-    pub pin_id: String,
-    pub resource_id: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HolderState {
@@ -196,9 +187,8 @@ pub struct HolderState {
     /// carrying `holder_state: "reset"` (a later slice).
     pub reset_pending: bool,
     pub tombstones: BTreeSet<Tombstone>,
-    pub pin_history: BTreeSet<PinPair>,
-    pub pin_history_ceiling: u64,
-    pub clock_behind_authority: bool,
+    /// Engine-profile fields; default for every other holder.
+    pub engine: EngineState,
 }
 
 impl HolderState {
@@ -211,9 +201,7 @@ impl HolderState {
             last_list_ref: None,
             reset_pending,
             tombstones: BTreeSet::new(),
-            pin_history: BTreeSet::new(),
-            pin_history_ceiling: DEFAULT_PIN_HISTORY_CEILING,
-            clock_behind_authority: false,
+            engine: EngineState::default(),
         }
     }
 
@@ -267,12 +255,6 @@ pub enum WriteError {
     Io(#[from] io::Error),
     #[error("mutation refused: {0}")]
     Refused(&'static str),
-}
-
-/// The raised pin-history ceiling when `size` pairs would exceed `ceiling`.
-/// The ceiling only ever rises; pairs are never evicted.
-pub fn raised_ceiling(size: u64, ceiling: u64) -> Option<u64> {
-    (size > ceiling).then(|| size.max(ceiling.saturating_mul(2)))
 }
 
 /// What one admitted list adds to durable state (row A1).
@@ -334,7 +316,7 @@ impl StateWriter {
         self.commit(self.state.clone())
     }
 
-    fn commit(&mut self, mut next: HolderState) -> Result<(), WriteError> {
+    pub(crate) fn commit(&mut self, mut next: HolderState) -> Result<(), WriteError> {
         next.committed_at_ms = self.clock.wall_ms();
         let bytes = serde_json::to_vec_pretty(&next).map_err(io::Error::other)?;
         self.io.write_atomic(self.dir.path(), STATE_FILE, &bytes)?;
@@ -342,8 +324,8 @@ impl StateWriter {
         Ok(())
     }
 
-    /// Row A1: advance the high-water and union tombstones and pin-history
-    /// pairs in one atomic commit. If the pairs would exceed the ceiling, the
+    /// Row A1: advance the high-water and union tombstones and (engine
+    /// profile) pin-history pairs in one atomic commit. If the pairs would exceed the ceiling, the
     /// ceiling is raised in the same commit; nothing is ever evicted.
     pub fn apply_list(&mut self, mutation: ApplyMutation) -> Result<ApplyCommitted, WriteError> {
         if let Some(high_water) = &self.state.high_water {
@@ -357,12 +339,13 @@ impl StateWriter {
         let mut next = self.state.clone();
         next.high_water = Some(mutation.rev);
         next.tombstones.extend(mutation.tombstones);
-        next.pin_history.extend(mutation.pin_pairs);
-        let size = u64::try_from(next.pin_history.len()).unwrap_or(u64::MAX);
-        let ceiling_raised = raised_ceiling(size, next.pin_history_ceiling)
-            .map(|raised| (next.pin_history_ceiling, raised));
+        let engine = &mut next.engine;
+        engine.pin_history.extend(mutation.pin_pairs);
+        let size = u64::try_from(engine.pin_history.len()).unwrap_or(u64::MAX);
+        let ceiling_raised = crate::engine::pin::raised_ceiling(size, engine.pin_history_ceiling)
+            .map(|raised| (engine.pin_history_ceiling, raised));
         if let Some((_, raised)) = ceiling_raised {
-            next.pin_history_ceiling = raised;
+            engine.pin_history_ceiling = raised;
         }
         self.commit(next)?;
         Ok(ApplyCommitted { ceiling_raised })
@@ -375,27 +358,6 @@ impl StateWriter {
         }
         let mut next = self.state.clone();
         next.last_list_ref = Some(reference);
-        self.commit(next)
-    }
-
-    /// Persists a raised clock hold. The caller has already refused in memory.
-    pub fn raise_clock_hold(&mut self) -> Result<(), WriteError> {
-        if self.state.clock_behind_authority {
-            return Ok(());
-        }
-        let mut next = self.state.clone();
-        next.clock_behind_authority = true;
-        self.commit(next)
-    }
-
-    /// Persists a cleared clock hold. The caller drops the in-memory hold only
-    /// after this returns `Ok`.
-    pub fn clear_clock_hold(&mut self) -> Result<(), WriteError> {
-        if !self.state.clock_behind_authority {
-            return Ok(());
-        }
-        let mut next = self.state.clone();
-        next.clock_behind_authority = false;
         self.commit(next)
     }
 

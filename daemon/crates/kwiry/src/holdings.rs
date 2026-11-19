@@ -7,6 +7,7 @@
 //! authority under them; slice S4 wires the holder into configuration, the
 //! CLI and the server.
 
+use kwiry_holdings::engine::EngineProfile;
 use kwiry_holdings::profile::WireProfile;
 
 /// OpenClast's Holdings wire profile for an engine holder that holds rooms.
@@ -25,9 +26,13 @@ pub(crate) fn openclast_profile() -> WireProfile {
         resource_kinds: strings(&["room", "vault", "workspace", "file", "share", "backup"]),
         // HOLDINGS-WIRE §13: an engine holder holds `{kind: room}` only.
         accepted_resource_kinds: strings(&["room"]),
-        pinned_holder_kind: Some("engine".into()),
-        pinned_resource_kind: Some("room".into()),
         obligation_reasons: strings(&["retire", "holder-decommission"]),
+        // The search-engine holder profile: room items carry root pins, and
+        // capability exposure is bounded.
+        engine: Some(EngineProfile {
+            holder_kind: "engine".into(),
+            pinned_resource_kind: "room".into(),
+        }),
     }
 }
 
@@ -35,7 +40,8 @@ pub(crate) fn openclast_profile() -> WireProfile {
 mod tests {
     use super::openclast_profile;
     use kwiry_holdings::client::FetchFailure;
-    use kwiry_holdings::gate::{ArtifactStamp, Cut, Refusal, RootObservation, ServeQuery};
+    use kwiry_holdings::engine::{ArtifactStamp, Cut, EngineQuery, RootObservation};
+    use kwiry_holdings::gate::Refusal;
     use kwiry_holdings::holder::ListOutcome;
     use kwiry_holdings::testkit::Rig;
     use kwiry_holdings::verify::PageError;
@@ -51,8 +57,8 @@ mod tests {
     }
 
     fn serve(rig: &Rig, room: &str, pin_ref: &str) -> Result<(), Refusal> {
-        rig.gate().check(
-            &ServeQuery {
+        rig.engine_gate().check(
+            &EngineQuery {
                 resource_id: room,
                 capability: None,
                 artifact: Some(ArtifactStamp {

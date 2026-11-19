@@ -1,10 +1,11 @@
 //! Holder directory, the single writer, enrollment and the loss/reset table.
 
 use super::*;
+use crate::engine::PinPair;
 use crate::startup::{ContentState, StartupError};
 use crate::state::{
-    ApplyMutation, DirError, ENROLLMENT_FILE, FsIo, HolderDir, KEY_FILE, PinPair, STATE_FILE,
-    Tombstone, WriteError,
+    ApplyMutation, DirError, ENROLLMENT_FILE, FsIo, HolderDir, KEY_FILE, STATE_FILE, Tombstone,
+    WriteError,
 };
 use crate::wire::Rev;
 use std::fs;
@@ -82,7 +83,7 @@ fn commits_are_whole_file_replacements_with_no_leftovers() {
     assert_eq!(&on_disk, rig.holder().state());
     assert_eq!(on_disk.high_water.as_ref(), Some(&report.rev));
     assert_eq!(on_disk.tombstones.len(), 1);
-    assert_eq!(on_disk.pin_history.len(), 1);
+    assert_eq!(on_disk.engine.pin_history.len(), 1);
     let leftovers: Vec<_> = fs::read_dir(&rig.dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -106,7 +107,7 @@ fn p2_high_water_tombstones_and_pin_pairs_commit_together_or_not_at_all() {
     let on_disk =
         crate::state::HolderState::parse(&fs::read(rig.dir.join(STATE_FILE)).unwrap()).unwrap();
     assert_eq!(on_disk.high_water, None);
-    assert!(on_disk.tombstones.is_empty() && on_disk.pin_history.is_empty());
+    assert!(on_disk.tombstones.is_empty() && on_disk.engine.pin_history.is_empty());
     assert_eq!(&on_disk, rig.holder().state(), "memory rolled back too");
 }
 
@@ -175,7 +176,7 @@ fn the_writer_refuses_regressions_and_foreign_epochs_and_unions_only_grow() {
     };
     started.writer.apply_list(empty).unwrap();
     assert_eq!(started.writer.state().tombstones.len(), 1);
-    assert_eq!(started.writer.state().pin_history.len(), 1);
+    assert_eq!(started.writer.state().engine.pin_history.len(), 1);
 }
 
 #[test]
@@ -195,14 +196,14 @@ fn ap11d_ii_trust_on_first_use_needs_state_and_data_both_proven_lost() {
     let state = rig.holder().state().clone();
     assert!(state.reset_pending);
     assert_eq!(state.high_water, None);
-    assert!(state.tombstones.is_empty() && state.pin_history.is_empty());
+    assert!(state.tombstones.is_empty() && state.engine.pin_history.is_empty());
     assert_eq!(
         rig.data_root.view().marker.as_deref(),
         Some(state.holder_id.as_str())
     );
     // The first verified list is trusted; the walk inputs say history is gone.
     applied(rig.relist());
-    assert!(!rig.gate().walk_inputs("res-a").history_available);
+    assert!(!rig.engine_gate().walk_inputs("res-a").history_available);
     // Every later start of a still-reset holder warns again.
     rig.events.clear();
     rig.restart().unwrap();

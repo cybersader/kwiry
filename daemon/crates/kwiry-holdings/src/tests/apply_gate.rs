@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::client::FetchFailure;
-use crate::gate::{CapabilityTimes, GateSettings, RootObservation::*};
+use crate::engine::{
+    ArtifactStamp, CapabilityTimes, EngineQuery, EngineSettings, RootObservation::*,
+};
 use crate::holder::ListOutcome;
 use crate::schedule::EarlyRelist;
 use crate::store::{Disposition, ResourceKey};
@@ -236,11 +238,11 @@ fn ap2_ap3_pinned_resources_serve_only_stamped_artifacts_from_a_matching_root() 
         detected_mono_ms: detected,
     };
     assert_eq!(pinned(&rig, "res-a", &pr1, mismatch), Ok(()));
-    let unvalidated = rig.gate().check(
-        &ServeQuery {
+    let unvalidated = rig.engine_gate().check(
+        &EngineQuery {
             resource_id: "res-a",
             capability: None,
-            artifact: Some(crate::gate::ArtifactStamp {
+            artifact: Some(ArtifactStamp {
                 pin_ref: &pr1,
                 validated_under_matching_root: false,
             }),
@@ -252,7 +254,7 @@ fn ap2_ap3_pinned_resources_serve_only_stamped_artifacts_from_a_matching_root() 
     assert_eq!(
         pinned(&rig, "res-a", "pr_9999999999999999999999", mismatch),
         Err(Refusal::ArtifactPinRef),
-        "H.28: another ref never serves, inside the stale bound included"
+        "another ref never serves, inside the stale bound included"
     );
     // Keep the lease alive while the stale window runs out.
     for _ in 0..4 {
@@ -276,11 +278,11 @@ fn ap4_ap5_ap25_reattestation_refuses_the_old_ref_from_a0_even_when_apply_fails(
     applied(rig.holder().list_once());
     let pr1 = pin_ref_of(&rig, &holding);
     let in_flight = |rig: &Rig, pin_ref: &str| {
-        rig.gate().check(
-            &ServeQuery {
+        rig.engine_gate().check(
+            &EngineQuery {
                 resource_id: "res-a",
                 capability: None,
-                artifact: Some(crate::gate::ArtifactStamp {
+                artifact: Some(ArtifactStamp {
                     pin_ref,
                     validated_under_matching_root: true,
                 }),
@@ -423,11 +425,11 @@ fn ap24_ap23_a_pin_held_under_another_resource_is_refused_without_stale_service(
         Err(Refusal::RootPinPreviouslyListed)
     );
     assert!(
-        rig.gate()
+        rig.engine_gate()
             .pin_previously_listed(&pin_id("dir-shared"), "res-a")
     );
     assert!(
-        !rig.gate()
+        !rig.engine_gate()
             .pin_previously_listed(&pin_id("dir-other"), "res-a")
     );
 }
@@ -440,7 +442,7 @@ fn ap11_walk_inputs_come_from_the_list_and_the_pin_history() {
     rig.authority.state().attest(&a, "dir-a0");
     rig.authority.state().attest(&b, "dir-b0");
     applied(rig.holder().list_once());
-    let inputs = rig.gate().walk_inputs("res-a");
+    let inputs = rig.engine_gate().walk_inputs("res-a");
     assert!(
         inputs.nesting_pins.contains(&pin_id("dir-b0")),
         "AP12 nesting"
@@ -451,7 +453,7 @@ fn ap11_walk_inputs_come_from_the_list_and_the_pin_history() {
     // AP11b: B re-attested; its old directory is skipped from history.
     rig.authority.state().attest(&b, "dir-b1");
     applied(rig.relist());
-    let inputs = rig.gate().walk_inputs("res-a");
+    let inputs = rig.engine_gate().walk_inputs("res-a");
     assert!(inputs.skip_pins.contains(&pin_id("dir-b0")));
     assert!(inputs.nesting_pins.contains(&pin_id("dir-b1")));
     assert!(!inputs.skip_pins.contains(&pin_id("dir-a0")));
@@ -460,7 +462,7 @@ fn ap11_walk_inputs_come_from_the_list_and_the_pin_history() {
     rig.authority.state().retire(&b);
     applied(rig.relist());
     assert!(
-        rig.gate()
+        rig.engine_gate()
             .walk_inputs("res-a")
             .skip_pins
             .contains(&pin_id("dir-b1"))
@@ -469,7 +471,7 @@ fn ap11_walk_inputs_come_from_the_list_and_the_pin_history() {
     // AP11c: B dropped off the list: the history still skips it.
     rig.authority.state().remove(&b);
     applied(rig.relist());
-    let inputs = rig.gate().walk_inputs("res-a");
+    let inputs = rig.engine_gate().walk_inputs("res-a");
     assert!(inputs.skip_pins.contains(&pin_id("dir-b1")));
     assert!(inputs.skip_pins.contains(&pin_id("dir-b0")));
 }
@@ -518,7 +520,7 @@ fn ap27_the_pin_history_ceiling_is_raised_before_persisting_and_never_evicts() {
     let path = rig.dir.join(crate::state::STATE_FILE);
     let mut state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    state["pin_history_ceiling"] = 2.into();
+    state["engine"]["pin_history_ceiling"] = 2.into();
     std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
     rig.restart().unwrap();
     for (id, dir) in [("res-a", "d-a"), ("res-b", "d-b"), ("res-c", "d-c")] {
@@ -531,8 +533,8 @@ fn ap27_the_pin_history_ceiling_is_raised_before_persisting_and_never_evicts() {
             .events()
             .contains(&crate::events::HolderEvent::PinHistoryCeilingRaised { from: 2, to: 4 })
     );
-    assert_eq!(rig.holder().state().pin_history.len(), 3);
-    assert_eq!(rig.holder().state().pin_history_ceiling, 4);
+    assert_eq!(rig.holder().state().engine.pin_history.len(), 3);
+    assert_eq!(rig.holder().state().engine.pin_history_ceiling, 4);
 }
 
 #[test]
@@ -563,11 +565,11 @@ fn c17_c18_h21_capability_lifetime_future_iat_and_expiry_at_both_cuts() {
         Err(Refusal::CapabilityExpired)
     );
     assert_eq!(
-        GateSettings::new(31, 3600),
+        EngineSettings::new(31, 3600),
         Err("clock_skew_allowance above 30 s")
     );
     assert_eq!(
-        GateSettings::new(30, 86_401),
+        EngineSettings::new(30, 86_401),
         Err("max_stale_serve_seconds above 86400")
     );
     let _ = CapabilityTimes { iat_s: 0, exp_s: 0 };
@@ -610,7 +612,7 @@ fn ap19_a_wiped_data_root_is_not_a_reset() {
     assert!(!codes(&rig).contains(&"holder_state_reset"));
     let after = rig.holder().state();
     assert_eq!(after.high_water, before.high_water);
-    assert_eq!(after.pin_history, before.pin_history);
+    assert_eq!(after.engine.pin_history, before.engine.pin_history);
     assert!(!after.reset_pending);
     let pr = pin_ref_of(&rig, &a);
     applied(rig.relist());

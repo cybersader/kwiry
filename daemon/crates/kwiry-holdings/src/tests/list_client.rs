@@ -102,7 +102,7 @@ fn h8_and_oa10_410_mid_list_discards_pages_and_relists_with_a_fresh_nonce() {
     assert_eq!(rig.store.view().published.len(), 1, "no partial apply");
     // The fresh list carries the attested pin.
     let state = rig.holder().state();
-    assert_eq!(state.pin_history.len(), 1);
+    assert_eq!(state.engine.pin_history.len(), 1);
     assert_eq!(state.high_water.as_ref(), Some(&report.rev));
 }
 

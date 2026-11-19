@@ -5,11 +5,11 @@ use super::*;
 use crate::verify::PageError;
 
 fn raised(rig: &Rig) -> bool {
-    rig.gate().clock_hold()
+    rig.engine_gate().clock_hold()
 }
 
 fn durable(rig: &mut Rig) -> bool {
-    rig.holder().state().clock_behind_authority
+    rig.holder().state().engine.clock_behind_authority
 }
 
 /// Lists once with the authority 45 s ahead, raising the hold.

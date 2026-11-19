@@ -6,13 +6,15 @@
 
 mod apply_gate;
 mod clock_hold;
+mod core_only;
 mod epoch;
 mod list_client;
 mod must_reject;
 mod state_startup;
 
 use crate::client::FetchFailure;
-use crate::gate::{ArtifactStamp, CapabilityTimes, Cut, Refusal, RootObservation, ServeQuery};
+use crate::engine::{ArtifactStamp, CapabilityTimes, Cut, EngineQuery, RootObservation};
+use crate::gate::Refusal;
 use crate::holder::{ApplyReport, ListOutcome};
 use crate::testkit::Rig;
 use tempfile::TempDir;
@@ -44,24 +46,16 @@ pub fn failed(outcome: ListOutcome) -> FetchFailure {
     }
 }
 
-/// A plain (unpinned) resource check with no capability.
+/// The core check, for resources without a storage pin.
 pub fn plain(rig: &Rig, id: &str) -> Result<(), Refusal> {
-    rig.gate().check(
-        &ServeQuery {
-            resource_id: id,
-            capability: None,
-            artifact: None,
-            root: RootObservation::Unobserved,
-        },
-        Cut::Admission,
-    )
+    rig.gate().check(id)
 }
 
 /// A pinned resource check with an artifact stamped `pin_ref` and a root
 /// observation.
 pub fn pinned(rig: &Rig, id: &str, pin_ref: &str, root: RootObservation) -> Result<(), Refusal> {
-    rig.gate().check(
-        &ServeQuery {
+    rig.engine_gate().check(
+        &EngineQuery {
             resource_id: id,
             capability: None,
             artifact: Some(ArtifactStamp {
@@ -82,8 +76,8 @@ pub fn with_capability(
     exp_s: i64,
     cut: Cut,
 ) -> Result<(), Refusal> {
-    rig.gate().check(
-        &ServeQuery {
+    rig.engine_gate().check(
+        &EngineQuery {
             resource_id: id,
             capability: Some(CapabilityTimes { iat_s, exp_s }),
             artifact: None,

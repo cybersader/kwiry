@@ -39,9 +39,6 @@ pub const LIST_TIMEOUTS: Timeouts = Timeouts {
 pub const INITIAL_LIST_BUDGET_MS: u64 = 120_000;
 pub const MAX_LIST_BUDGET_MS: u64 = 1_800_000;
 pub const LIVELOCK_410S: u32 = 5;
-/// A page whose `iat` is this far ahead of the holder clock proves the
-/// holder lags the authority.
-pub const CLOCK_BEHIND_MS: i64 = 30_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -99,14 +96,16 @@ pub enum FetchFailure {
     Local(&'static str),
 }
 
-/// Clock evidence from one page.
+/// Clock measurements from one page. The client only measures; a holder
+/// profile decides what they mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockEvidence {
-    /// A signed, audience-bound page with `iat − now_recv > 30 s`.
-    Behind { lag_lower_bound_ms: i64 },
-    /// A fully verified page answering this process's request with the
-    /// matching nonce: `upper_bound_ms = (iat − now_recv) + rtt`.
-    Measured { upper_bound_ms: i64, rtt_ms: u64 },
+    /// A page whose signature and audience binding verified:
+    /// `lag_ms = iat − now_recv`.
+    Signed { lag_ms: i64 },
+    /// A page that fully verified and answers this process's own request
+    /// with the matching nonce, with its monotonic round trip.
+    Answered { lag_ms: i64, rtt_ms: u64 },
 }
 
 pub struct FetchEnv<'a> {
@@ -284,12 +283,8 @@ fn exchange(
     }
     .map_err(page_error)?;
 
-    let lag = signed.iat_ms - now_recv;
-    if lag > CLOCK_BEHIND_MS {
-        (env.on_clock)(ClockEvidence::Behind {
-            lag_lower_bound_ms: lag,
-        });
-    }
+    let lag_ms = signed.iat_ms - now_recv;
+    (env.on_clock)(ClockEvidence::Signed { lag_ms });
     let expectations = PageExpectations {
         nonce: &session.nonce,
         high_water,
@@ -297,10 +292,7 @@ fn exchange(
     let mut page = check_page(signed, now_recv, &env.ctx, &expectations).map_err(page_error)?;
     page.received_mono_ms = received_mono;
     let rtt_ms = received_mono.saturating_sub(sent_mono);
-    (env.on_clock)(ClockEvidence::Measured {
-        upper_bound_ms: lag.saturating_add(i64::try_from(rtt_ms).unwrap_or(i64::MAX)),
-        rtt_ms,
-    });
+    (env.on_clock)(ClockEvidence::Answered { lag_ms, rtt_ms });
     Ok(Answer::Page(Box::new(page)))
 }
 

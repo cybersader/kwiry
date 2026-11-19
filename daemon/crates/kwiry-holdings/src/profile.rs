@@ -5,6 +5,8 @@
 //! strings, the audience prefix and the resource kinds, are not, so any
 //! authority that speaks this wire can be configured without code changes.
 
+use crate::engine::EngineProfile;
+
 /// Route of the list request, appended to the authority base URL.
 pub const ROUTE_LIST: &str = "/holdings/list";
 /// Route of the key-set statement, appended to the authority base URL.
@@ -29,12 +31,11 @@ pub struct WireProfile {
     pub resource_kinds: Vec<String>,
     /// The kinds this holder accepts; a list naming any other kind is refused.
     pub accepted_resource_kinds: Vec<String>,
-    /// Holder kind whose items of `pinned_resource_kind` carry a storage pin.
-    pub pinned_holder_kind: Option<String>,
-    /// Resource kind that carries the storage pin member for that holder kind.
-    pub pinned_resource_kind: Option<String>,
     /// Obligation reasons this holder kind may receive.
     pub obligation_reasons: Vec<String>,
+    /// The search-engine holder profile, or `None` for holders that use the
+    /// generic core alone.
+    pub engine: Option<EngineProfile>,
 }
 
 impl WireProfile {
@@ -58,11 +59,12 @@ impl WireProfile {
         format!("{}*", self.audience_prefix)
     }
 
-    /// Whether an item of `resource_kind` carries the storage-pin member for
-    /// a holder of `holder_kind`.
-    pub fn is_pinned(&self, holder_kind: &str, resource_kind: &str) -> bool {
-        self.pinned_holder_kind.as_deref() == Some(holder_kind)
-            && self.pinned_resource_kind.as_deref() == Some(resource_kind)
+    /// Whether items of `resource_kind` carry the storage-pin member for a
+    /// holder of `holder_kind`. Always false without the engine profile.
+    pub fn pins(&self, holder_kind: &str, resource_kind: &str) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|engine| engine.pins(holder_kind, resource_kind))
     }
 
     /// Refuses a profile whose values could not describe a coherent wire.
@@ -92,11 +94,14 @@ impl WireProfile {
         {
             return Err("accepted kinds must be a non-empty subset of the wire kinds");
         }
-        if self.pinned_holder_kind.is_some() != self.pinned_resource_kind.is_some() {
-            return Err("pinned holder kind and pinned resource kind go together");
-        }
         if self.obligation_reasons.is_empty() {
             return Err("at least one obligation reason is required");
+        }
+        if let Some(engine) = &self.engine
+            && (engine.holder_kind.is_empty()
+                || !self.resource_kinds.contains(&engine.pinned_resource_kind))
+        {
+            return Err("the engine section needs a holder kind and a wire resource kind");
         }
         Ok(())
     }
