@@ -1,10 +1,10 @@
 {
   "fixture": "openclast-lifecycle-vectors.v1.json",
-  "sha256": "a39716dbf393e729208544b4fea8817a9ade748c97bb61b2b12650dca83cd355",
+  "sha256": "6849181dbf41286ecdc18942a7b6194de3f843733c9d9431b0652600ccfe9da0",
   "source": {
     "repository": "https://github.com/cybersader/openclast",
     "branch": "feat/holdings-s1-20261119",
-    "commit": "49188d0c0e0baf972f6715ee3c173322acf0513e",
+    "commit": "0490f8f208072e7bc4eeec3242ae7e0f30947607",
     "path": "orchestrator/test/fixtures/holdings/lifecycle-vectors.v1.json",
     "generator": "orchestrator/test/fixtures/holdings/generate-lifecycle-vectors.ts"
   },

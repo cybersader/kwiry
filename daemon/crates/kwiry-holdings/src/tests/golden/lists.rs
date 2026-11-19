@@ -381,21 +381,24 @@ fn two_pages_share_one_nonce() {
     }
 }
 
+/// H8 across an attestation: the `410` discards page 0 and the restart
+/// begins at page 1 with a fresh nonce. The restart's own answer is not part
+/// of the vector, so the transport refuses it: nothing applies at all.
 #[test]
-fn h16_10_cursor_across_attestation_and_reattestation() {
-    let case = at("H16_10");
-    let first = &case["cursor_across_attestation"]["first_page"];
-    let continuation = &case["cursor_across_attestation"]["continuation"];
-    let relist = GoldenList::of(&case["reattestation"]["list"]);
+fn h16_10_cursor_across_attestation() {
+    let case = &at("H16_10")["cursor_across_attestation"];
+    let first = &case["first_page"];
     let first_page = claims(text(&first["response"]["body"]));
     let first_nonce = text(&first_page["nonce"]).to_owned();
-    let mut rig = GoldenRig::engine(&relist.holder_id(), relist.iat_s());
-    hold_listed(&rig, &case["reattestation"]["list"]);
-    let (relist_nonce, relist_iat) = (relist.nonce(), relist.iat_s());
-    let mut answers = vec![scripted(first), scripted(continuation)];
-    answers.extend(GoldenList::of(&case["reattestation"]["list"]).answers);
-    let report = applied(rig.list_with(&[&first_nonce, &relist_nonce], answers, relist_iat));
-    // H8: the 410 discards page 0 and relists from page 1 with a fresh nonce.
+    let holder_id = text(&first_page["sub"]).to_owned();
+    let iat = first_page["iat"].as_i64().unwrap();
+    let mut rig = GoldenRig::engine(&holder_id, iat);
+    let answers = vec![scripted(first), scripted(&case["continuation"])];
+    let failure = failed(rig.list_with(&[&first_nonce], answers, iat));
+    assert!(
+        matches!(failure, FetchFailure::Unreachable { .. }),
+        "{failure:?}"
+    );
     let sent = rig.transport.posted_claims();
     assert_eq!(sent.len(), 3);
     assert_eq!(
@@ -406,28 +409,180 @@ fn h16_10_cursor_across_attestation_and_reattestation() {
         (text(&sent[1]["nonce"]), &sent[1]["cursor"]),
         (first_nonce.as_str(), &first_page["next_cursor"])
     );
-    assert_eq!(
-        (text(&sent[2]["nonce"]), &sent[2]["cursor"]),
-        (relist.nonce().as_str(), &Value::Null)
+    assert_ne!(
+        text(&sent[2]["nonce"]),
+        first_nonce,
+        "fresh nonce after 410"
     );
-    assert_ne!(first_nonce, relist.nonce());
-    assert_eq!(report.rev, relist.rev());
-    assert_eq!(rig.store.view().published.len(), 1, "no partial apply");
-    assert_serving_follows(&rig, &report, &case["reattestation"]["list"]);
-    // The re-attested pin serves; the backup's ref never does again.
-    let expect = &case["reattestation"]["expect"];
-    assert_eq!(&case["cursor_across_attestation"]["new_pin"], expect);
-    let room = items(&case["reattestation"]["list"])
+    assert_eq!(sent[2]["cursor"], Value::Null, "restart from page 1");
+    assert!(rig.store.view().published.is_empty(), "no partial apply");
+    assert_eq!(rig.holder.state().high_water, None);
+}
+
+/// Only the pin the list names serves, and only from artifacts stamped
+/// with its `pin_ref`; `refs` never serve.
+fn assert_pin_serves(rig: &GoldenRig, list: &'static Value, pin: &Value, refs: &[&str]) {
+    let room = items(list)
         .into_iter()
-        .find(|i| i["root_pin"]["pin_id"] == expect["pin_id"])
-        .expect("the re-attested room");
-    assert_eq!(room["root_pin"]["pin_ref"], expect["pin_ref"]);
+        .find(|i| i["root_pin"]["pin_id"] == pin["pin_id"])
+        .expect("the listed pin");
+    assert_eq!(room["root_pin"]["pin_ref"], pin["pin_ref"]);
     let id = text(&room["resource"]["id"]);
-    assert_eq!(rig.serve_pinned(id, text(&expect["pin_ref"])), Ok(()));
+    assert_eq!(rig.serve_pinned(id, text(&pin["pin_ref"])), Ok(()));
+    for other in refs {
+        assert_eq!(
+            rig.serve_pinned(id, other),
+            Err(Refusal::Engine(EngineRefusal::ArtifactPinRef)),
+            "{other} never serves"
+        );
+    }
+}
+
+/// The list after a supported restore and re-attestation names the new
+/// pin; the backup's `pin_ref` never serves. First contact with the restored
+/// authority (the list's request carries no high-water).
+#[test]
+fn h16_10_reattestation() {
+    let case = &at("H16_10")["reattestation"];
+    let list = &case["list"];
     assert_eq!(
-        rig.serve_pinned(id, text(&case["reattestation"]["backup_pin"]["pin_ref"])),
-        Err(Refusal::Engine(EngineRefusal::ArtifactPinRef))
+        claims(exchange_request(&list["pages"][0]))["high_water"],
+        Value::Null
     );
+    let (rig, report) = held_and_applied(list);
+    assert_serving_follows(&rig, &report, list);
+    let expect = &case["expect"];
+    assert_eq!(
+        &at("H16_10")["cursor_across_attestation"]["new_pin"],
+        expect
+    );
+    assert_pin_serves(&rig, list, expect, &[text(&case["backup_pin"]["pin_ref"])]);
+}
+
+/// After an unpin the list carries `root_pin: null` for the room: nothing
+/// of it serves, under the old ref or any other.
+#[test]
+fn h16_10_unpin() {
+    let case = &at("H16_10")["unpin"];
+    let list = &case["list"];
+    assert_eq!(
+        claims(exchange_request(&list["pages"][0]))["high_water"],
+        Value::Null
+    );
+    let (rig, report) = held_and_applied(list);
+    assert_serving_follows(&rig, &report, list);
+    assert_eq!(case["expect"]["root_pin"], Value::Null);
+    let room = text(&case["expect"]["pin_reservation"]["room_id"]);
+    let item = items(list)
+        .into_iter()
+        .find(|i| i["resource"]["id"] == room)
+        .expect("the unpinned room is listed");
+    assert_eq!(item["root_pin"], Value::Null);
+    let previous: Vec<&str> = case["journal_suffix"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["pin_ref"].as_str())
+        .collect();
+    assert!(!previous.is_empty());
+    for pin_ref in previous {
+        assert_eq!(
+            rig.serve_pinned(room, pin_ref),
+            Err(Refusal::Engine(EngineRefusal::RootPinMissing)),
+            "{pin_ref}"
+        );
+    }
+}
+
+/// An attestation whose journal append was aborted never reaches a list:
+/// the restored list keeps the backup pin, and the aborted ref never serves.
+#[test]
+fn h16_10_aborted_append() {
+    let case = &at("H16_10")["aborted_append"];
+    let list = &case["list"];
+    assert_eq!(
+        claims(exchange_request(&list["pages"][0]))["high_water"],
+        Value::Null
+    );
+    let (rig, report) = held_and_applied(list);
+    assert_serving_follows(&rig, &report, list);
+    let suffix = case["journal_suffix"].as_array().unwrap();
+    assert_eq!(
+        text(&suffix.last().unwrap()["kind"]),
+        "root_pin_attest_aborted"
+    );
+    let aborted: Vec<&str> = suffix
+        .iter()
+        .filter_map(|e| e["pin_ref"].as_str())
+        .collect();
+    assert!(!aborted.is_empty());
+    assert_pin_serves(&rig, list, &case["expect"], &aborted);
+}
+
+/// A restore that lost the pin journal: the active room is listed unpinned
+/// (never served) and the retired room keeps its pin but is tombstoned.
+/// Taken by first contact here; the transition from the earlier epoch is
+/// epoch acceptance (S5), refused meanwhile (see the new-epoch test).
+#[test]
+fn h16_10_journal_lost_list() {
+    let case = &at("H16_10")["journal_lost"];
+    let list = &case["list"];
+    let (rig, report) = held_and_applied(list);
+    assert_serving_follows(&rig, &report, list);
+    let expect = &case["expect"];
+    let page = GoldenList::of(list).page0();
+    let active: Vec<&Value> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["phase"] == "active")
+        .collect();
+    assert!(!active.is_empty() && active.iter().all(|i| i["root_pin"] == expect["active_pin"]));
+    let retired = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["phase"] == "retired")
+        .expect("the retired room");
+    assert_eq!(retired["root_pin"], expect["retired_pin"]);
+    let id = text(&retired["resource"]["id"]);
+    assert_eq!(
+        rig.serve_pinned(id, text(&expect["retired_pin"]["pin_ref"])),
+        Err(Refusal::Tombstoned)
+    );
+}
+
+/// V12's first new-epoch list after a supported restore over a backup taken
+/// before retirement R: R is listed `terminating` under the journal's
+/// holding and obligation ids, so the holder refuses and tombstones it and
+/// deletes nothing. Taken by first contact; the transition from the backup
+/// epoch is epoch acceptance (S5), refused meanwhile.
+#[test]
+fn v12_first_new_epoch_list() {
+    let case = at("cases.V12");
+    let list = &case["first_new_epoch_list"];
+    let (rig, report) = held_and_applied(list);
+    assert_serving_follows(&rig, &report, list);
+    let expect = &case["expect"];
+    let item = items(list)
+        .into_iter()
+        .find(|i| i["holding_id"] == expect["holding_id"])
+        .expect("R is listed");
+    assert_eq!(item["phase"], expect["phase"]);
+    assert_eq!(item["obligation"]["obligation_id"], expect["obligation_id"]);
+    let key = resource(&item);
+    assert!(matches!(
+        report.plan.dispositions[&key],
+        Placement::Obligated { .. }
+    ));
+    assert!(rig.holder.state().is_tombstoned(&key.id));
+    assert_eq!(rig.serve_unstamped(&key.id), Err(Refusal::Tombstoned));
+    // Before the restore R was active in the backup list.
+    let backup = items(&case["backup_list"])
+        .into_iter()
+        .find(|i| i["holding_id"] == expect["holding_id"])
+        .expect("R in the backup");
+    assert_eq!(backup["phase"], "active");
 }
 
 // ------------------------------------------------------------------ V14
@@ -525,20 +680,14 @@ fn refusal_class(check: &str, failure: &FetchFailure, accept_every_kind: bool) -
 }
 
 /// The valid list a must-reject page was made from (same holder, list and
-/// revision), or the list at the vector's stated high-water.
-fn previous_list(vector: &Value, page: &Map<String, Value>) -> Option<&'static Value> {
+/// revision).
+fn previous_list(page: &Map<String, Value>) -> Option<&'static Value> {
     let holder = text(&page["holder"]["holder_id"]);
-    let wanted = vector["input"].get("high_water").map(rev_of);
     every_list().into_iter().map(|(_, list)| list).find(|list| {
         let golden = GoldenList::of(list);
         golden.holder_id() == holder
-            && match &wanted {
-                Some(rev) => golden.rev() == *rev,
-                None => {
-                    golden.page0()["list_id"] == page["list_id"]
-                        && golden.rev() == rev_of(&page["rev"])
-                }
-            }
+            && golden.page0()["list_id"] == page["list_id"]
+            && golden.rev() == rev_of(&page["rev"])
     })
 }
 
@@ -581,11 +730,24 @@ fn must_reject(name: &str, accept_every_kind: bool) {
     let mut rig = GoldenRig::enrolled(holder_id, holder_kind, wire, iat);
     // Profile S lists are the only valid lists the fixture has; a holder of
     // another class starts from its fresh state.
-    let previous = engine.then(|| previous_list(vector, &claims)).flatten();
+    let previous = engine.then(|| previous_list(&claims)).flatten();
     if engine {
         let previous = previous.expect("the valid list the page was made from");
         hold_listed(&rig, previous);
         applied(rig.deliver(previous));
+    }
+    // A vector that states the holder's stored high-water: recorded as
+    // holder state, exactly as an applied list at that revision leaves it.
+    if let Some(high_water) = vector["input"].get("high_water") {
+        rig.holder
+            .writer
+            .apply_list(crate::state::ApplyMutation {
+                rev: rev_of(high_water),
+                tombstones: Vec::new(),
+                pin_pairs: Vec::new(),
+                obligations: None,
+            })
+            .expect("record the stated high-water");
     }
     let before = rig.holder.state().clone();
     let serving_before = previous.map(|list| serving(&rig, list));
@@ -734,6 +896,7 @@ fn new_epoch_lists_fail_closed_until_epoch_acceptance() {
         ("cases.V12.backup_list", "cases.V12.first_new_epoch_list"),
         ("H53.prior_list", "H53.first_current_list"),
         ("cases.V1.initial_list", "cases.V4.current_list"),
+        ("fixed_lists.mixed_pins", "H16_10.journal_lost.list"),
     ] {
         let (mut rig, report) = held_and_applied(at(earlier));
         assert_ne!(GoldenList::of(at(later)).rev().epoch, report.rev.epoch);

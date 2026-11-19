@@ -55,7 +55,7 @@ const PROVENANCE: &str = include_str!(concat!(
 /// The sha256 the vendored fixture must have. A change to the fixture is a
 /// deliberate re-vendoring: update this, the provenance note and the
 /// registry together.
-const FIXTURE_SHA256: &str = "a39716dbf393e729208544b4fea8817a9ade748c97bb61b2b12650dca83cd355";
+const FIXTURE_SHA256: &str = "6849181dbf41286ecdc18942a7b6194de3f843733c9d9431b0652600ccfe9da0";
 
 // ------------------------------------------------------------- registry
 
@@ -170,11 +170,26 @@ pub const REGISTRY: &[(&str, Disposition)] = &[
     ("cases.V10", Disposition::Run("reports::v10")),
     ("cases.V11", Disposition::Run("reports::v11_*")),
     (
-        "cases.V12",
+        "cases.V12.first_new_epoch_list",
+        Disposition::Run("lists::v12_first_new_epoch_list"),
+    ),
+    (
+        "cases.V12.epoch_acceptance",
         Disposition::Later {
             slice: "S5",
-            reason: "new-epoch acceptance by epoch chain; interim fail-closed refusal checked by lists::new_epoch_lists_fail_closed_until_epoch_acceptance",
+            reason: "backup epoch to new epoch by verified chain; interim refusal checked by lists::new_epoch_lists_fail_closed_until_epoch_acceptance",
         },
+    ),
+    (
+        "cases.V12.first_new_epoch_status",
+        Disposition::Later {
+            slice: "S3",
+            reason: "status route",
+        },
+    ),
+    (
+        "cases.V12.expect.new_mint",
+        Disposition::AuthorityOnly("capability minting is authority-side (H.1)"),
     ),
     ("cases.V13", Disposition::Run("reports::v13")),
     ("cases.V14", Disposition::Run("lists::v14")),
@@ -225,18 +240,23 @@ pub const REGISTRY: &[(&str, Disposition)] = &[
     ),
     (
         "H16_10.cursor_across_attestation",
-        Disposition::Run("lists::h16_10_cursor_across_attestation_and_reattestation"),
+        Disposition::Run("lists::h16_10_cursor_across_attestation"),
     ),
     (
         "H16_10.reattestation",
-        Disposition::Run("lists::h16_10_cursor_across_attestation_and_reattestation"),
+        Disposition::Run("lists::h16_10_reattestation"),
+    ),
+    ("H16_10.unpin.list", Disposition::Run("lists::h16_10_unpin")),
+    (
+        "H16_10.unpin.journal_and_reservation",
+        Disposition::AuthorityOnly("pin journal and pin reservation"),
     ),
     (
-        "H16_10.unpin",
-        Disposition::AuthorityOnly("pin journal and reservation"),
+        "H16_10.aborted_append.list",
+        Disposition::Run("lists::h16_10_aborted_append"),
     ),
     (
-        "H16_10.aborted_append",
+        "H16_10.aborted_append.journal",
         Disposition::AuthorityOnly("pin journal replay"),
     ),
     (
@@ -248,9 +268,20 @@ pub const REGISTRY: &[(&str, Disposition)] = &[
         Disposition::AuthorityOnly("attestation refusals"),
     ),
     (
-        "H16_10.journal_lost",
+        "H16_10.journal_lost.list",
+        Disposition::Run("lists::h16_10_journal_lost_list"),
+    ),
+    (
+        "H16_10.journal_lost.epoch_acceptance",
+        Disposition::Later {
+            slice: "S5",
+            reason: "earlier epoch to the restore-journal-lost epoch by verified chain; interim refusal checked by lists::new_epoch_lists_fail_closed_until_epoch_acceptance",
+        },
+    ),
+    (
+        "H16_10.journal_lost.recovery",
         Disposition::AuthorityOnly(
-            "restore-journal-lost recovery; its list is a fixture-only new-epoch projection (S5 on the holder side)",
+            "restore record, reset journal, pin-history projection, prior completion and readiness",
         ),
     ),
     (
