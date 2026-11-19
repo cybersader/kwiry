@@ -98,6 +98,9 @@ impl From<crate::state::WriteError> for StartupError {
                 Self::Io(error)
             }
             crate::state::WriteError::Refused(reason) => Self::EnrollmentRefused(reason),
+            crate::state::WriteError::Unwritable => {
+                Self::Io(std::io::Error::other("holder_state_unwritable"))
+            }
         }
     }
 }

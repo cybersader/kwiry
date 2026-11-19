@@ -103,9 +103,9 @@ pub enum ListOutcome {
 pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) config: HolderConfig,
     pub(crate) writer: StateWriter,
-    key: HolderKey,
-    store: S,
-    transport: T,
+    pub(crate) key: HolderKey,
+    pub(crate) store: S,
+    pub(crate) transport: T,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) events: Arc<dyn EventSink>,
     pub(crate) gate: ServingGate,
@@ -117,6 +117,30 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     /// holding id. Empty at process start.
     baseline: HashMap<String, Option<RootPin>>,
     pub(crate) scheduler: RelistScheduler,
+    /// The list last applied in this process: what obligations exist now.
+    pub(crate) applied: Option<Applied>,
+    /// Final scans verified in this process, by obligation id.
+    pub(crate) verified: HashMap<String, crate::purge::VerifiedScan>,
+    /// Report sends in the last second (≤ 10/s per holder, H.8).
+    pub(crate) report_sends: std::collections::VecDeque<u64>,
+    /// Unverifiable acks in a row, by obligation id (R17).
+    pub(crate) unverifiable: HashMap<String, u8>,
+    /// A report answer said the list is stale (`stale_list_ref`, `404`, an
+    /// other-epoch ack): nothing is re-derived until a list applies.
+    pub(crate) relist_before_report: bool,
+    pub(crate) report_backoff_ms: u64,
+    pub(crate) report_backoff_until: u64,
+}
+
+/// The parts of the list last applied in this process that obligations and
+/// reports read.
+#[derive(Clone, Debug)]
+pub struct Applied {
+    pub list_ref: crate::wire::ListRef,
+    pub page0_iat_ms: i64,
+    /// Every item that is not `active`.
+    pub items: Vec<Item>,
+    pub plan: PublishPlan,
 }
 
 impl<S: ResourceStore, T: Transport> Holder<S, T> {
@@ -167,6 +191,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             list_request_invalid,
             baseline: HashMap::new(),
             scheduler: RelistScheduler::new(300),
+            applied: None,
+            verified: HashMap::new(),
+            report_sends: std::collections::VecDeque::new(),
+            unverifiable: HashMap::new(),
+            relist_before_report: false,
+            report_backoff_ms: 0,
+            report_backoff_until: 0,
         })
     }
 
@@ -366,9 +397,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 HolderEvent::HolderUnauthorized
             }
             FetchFailure::NotAuthorized => {
-                self.route = RouteHealth::AuthHalt(AuthHalt::NotAuthorized);
-                self.gate.set_auth_halt();
-                HolderEvent::HolderNotAuthorized
+                // M10: also cancels every queued, unsent report.
+                self.on_not_authorized();
+                return;
             }
             FetchFailure::Rejected { status } => {
                 HolderEvent::ListRequestRejected { status: *status }
@@ -389,7 +420,37 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.events.emit(event);
     }
 
-    fn apply_failed(&self, step: &'static str, error: Option<&WriteError>) -> ListOutcome {
+    /// Emits what the disk reserve did since the last call (K2). Exhaustion
+    /// is reported where the failed write surfaces.
+    pub(crate) fn emit_reserve_uses(&mut self) {
+        for use_ in self.writer.take_reserve_uses() {
+            if use_ == crate::state::ReserveUse::Used {
+                self.events.emit(HolderEvent::DiskReserveUsed);
+            }
+        }
+    }
+
+    /// Lets durable lifecycle writes consume `reserve` on `ENOSPC` (K2).
+    pub fn set_disk_reserve(&mut self, reserve: Box<dyn crate::reserve::DiskReserve>) {
+        self.writer.set_reserve(reserve);
+    }
+
+    /// K3: whether a new artifact write may start. A refusal alerts
+    /// (`disk_pressure`) and stops the write; it never evicts or deletes.
+    pub fn admit_artifact_write(
+        &self,
+        budget: &crate::reserve::StorageBudget,
+        usage: crate::reserve::StorageUsage,
+    ) -> bool {
+        let admitted = budget.admits(usage);
+        if !admitted {
+            self.events.emit(HolderEvent::DiskPressure);
+        }
+        admitted
+    }
+
+    fn apply_failed(&mut self, step: &'static str, error: Option<&WriteError>) -> ListOutcome {
+        self.emit_reserve_uses();
         if let Some(error) = error {
             report_write_failure(self.events.as_ref(), error);
         }
@@ -505,6 +566,24 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.scheduler
             .set_relist_seconds(list.head.lease.relist_seconds);
         self.store.revoke(&plan);
+        self.applied = Some(Applied {
+            list_ref: list.list_ref(),
+            page0_iat_ms: list.page0_iat_ms,
+            items: list
+                .items
+                .iter()
+                .filter(|listed| !listed.item.is_active())
+                .map(|listed| listed.item.clone())
+                .collect(),
+            plan: plan.clone(),
+        });
+        // Floors, dropped obligations and uncertain attempts follow the
+        // verified list (R12, R13, R15). A failed write leaves floors lower,
+        // which only ever makes the holder send more.
+        if let Err(error) = self.adopt_list_obligations() {
+            report_write_failure(self.events.as_ref(), &error);
+        }
+        self.emit_reserve_uses();
         ListOutcome::Applied(ApplyReport {
             rev,
             plan,
@@ -581,13 +660,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .iter()
             .map(|listed| {
                 let item = &listed.item;
-                // H.39, H.42: the monotonic deadline counts from the `iat` of
-                // the page that carried the item. `quarantine_after` starts
-                // at page 0's `iat`, so this is never later than H.42's
-                // reading, which v2 allows.
+                // H.39, H.46: the monotonic deadline is
+                // `t_recv(page 0) + (quarantine_after − iat(page 0))`. A later
+                // page's own receipt time is never paired with its own `iat`:
+                // its longer transit would push the deadline later.
                 let remaining = item
                     .quarantine_after_ms
-                    .saturating_sub(listed.page_iat_ms)
+                    .saturating_sub(list.page0_iat_ms)
                     .clamp(0, serve_ms);
                 let entry = GateEntry {
                     active: item.is_active() && !tombstoned.contains(&item.resource.id),
@@ -596,8 +675,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         Some(Disposition::Mapped { .. })
                     ),
                     lease_wall_ms: item.quarantine_after_ms,
-                    lease_mono_ms: listed
-                        .received_mono_ms
+                    lease_mono_ms: list
+                        .page0_received_mono_ms
                         .saturating_add(u64::try_from(remaining).unwrap_or(0)),
                     pin: item.root_pin.clone(),
                 };

@@ -2,7 +2,7 @@
 //!
 //! Normative source: Part II of the authority workspace file
 //! `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md` (sha256
-//! `066a21ae48af6a8712bb0dddcc3da1a7c460bc6b2b6c31959d5bf3f69178d042`).
+//! `44a5723525b1b7db2e07e4e3767b8a639730b680009636e46b4bf253c396c42c`).
 //! One module per section that binds a holder:
 //!
 //! | Module | v2 section | What it adds to the core |

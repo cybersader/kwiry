@@ -2,7 +2,7 @@
 //!
 //! Normative source: the authority workspace file
 //! `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md` (sha256
-//! `066a21ae48af6a8712bb0dddcc3da1a7c460bc6b2b6c31959d5bf3f69178d042`).
+//! `44a5723525b1b7db2e07e4e3767b8a639730b680009636e46b4bf253c396c42c`).
 //! Part I is the generic core every holder class implements; Part II is
 //! Profile S, the search-engine holder. Section and `H.n` citations in
 //! this crate are anchors in that file. Only the composition layer names
@@ -25,19 +25,24 @@
 //! - [`client`] and [`verify`]: fetching, verifying and assembling lists;
 //! - [`holder`]: admission and the A0–A4 apply sequence;
 //! - [`gate`]: the core serving gate;
+//! - [`purge`]: crash-safe purge execution under listed obligations;
+//! - [`report`] and [`obligations`]: obligation reports, floors, uncertain
+//!   attempts, acks and convergence;
+//! - [`reserve`]: the disk reserve and the storage budget;
 //! - [`engine`]: the search-engine holder profile (storage pins, capability
 //!   bounds, the clock hold), used only when the wire profile asks for it.
 //!
-//! Holders plug in through three small traits: [`store::ResourceStore`]
-//! (what is held, publish the classification, revoke), [`store::ArtifactPurger`]
-//! (deletion under an obligation; not used by this slice) and
-//! [`clock::Clock`]. The authority is reached through [`client::Transport`].
+//! Holders plug in through small traits: [`store::ResourceStore`] (what is
+//! held, publish the classification, revoke), [`store::ArtifactPurger`]
+//! (detach, delete under an exact claimant, barrier, independent census),
+//! [`reserve::DiskReserve`] and [`clock::Clock`]. The authority is reached through [`client::Transport`].
 //! Every wire constant that names a particular authority (`typ` values,
 //! audience prefix, resource kinds) arrives in a [`profile::WireProfile`]
 //! supplied by the composition layer.
 #![forbid(unsafe_code)]
 
 pub mod b64;
+pub mod canonical;
 pub mod client;
 pub mod clock;
 pub mod engine;
@@ -47,7 +52,11 @@ pub mod grammar;
 pub mod holder;
 pub mod jws;
 pub mod keys;
+pub mod obligations;
 pub mod profile;
+pub mod purge;
+pub mod report;
+pub mod reserve;
 pub mod schedule;
 pub mod startup;
 pub mod state;

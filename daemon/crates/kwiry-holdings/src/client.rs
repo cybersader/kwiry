@@ -46,7 +46,19 @@ pub struct HttpResponse {
     pub status: u16,
     pub content_type: Option<String>,
     pub retry_after_s: Option<u64>,
+    /// Other response headers the holder reads (v2 H.5's outcome header).
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    /// A header value, matched case-insensitively.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +191,7 @@ fn token(bytes: usize) -> Result<String, FetchFailure> {
     b64::random_token(bytes).map_err(|_| FetchFailure::Local("entropy"))
 }
 
-fn problem_code(response: &HttpResponse) -> Option<String> {
+pub(crate) fn problem_code(response: &HttpResponse) -> Option<String> {
     if response.content_type.as_deref() != Some(PROBLEM_CONTENT_TYPE) {
         return None;
     }

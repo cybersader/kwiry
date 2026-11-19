@@ -12,7 +12,7 @@ use super::{TEST_AUTHORITY_KEY_SEED, TEST_CURSOR_KEY, TEST_DIGEST_ROOT, jcs, pin
 use crate::client::{HttpResponse, Timeouts, Transport, TransportError};
 use crate::clock::{Clock, format_utc_seconds};
 use crate::keys::{HolderKey, authority_public_jwk, ed25519_public_from_jwk};
-use crate::profile::{PROBLEM_CONTENT_TYPE, ROUTE_KEYSET, ROUTE_LIST, WireProfile};
+use crate::profile::{PROBLEM_CONTENT_TYPE, ROUTE_KEYSET, ROUTE_LIST, ROUTE_REPORT, WireProfile};
 use crate::{b64, grammar, jws};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -107,6 +107,17 @@ pub struct FakeState {
     /// Every POST body received, forced answers included.
     pub bodies: Vec<Vec<u8>>,
     counter: u64,
+    /// Report route: idempotency receipts by key (claims without `jti`,
+    /// `iat`, `exp`; the original ack bytes).
+    pub report_receipts: BTreeMap<String, (Map<String, Value>, String)>,
+    /// The ack of the last accepted report, by obligation id.
+    pub current_acks: BTreeMap<String, String>,
+    /// Every report whose signature verified, with its HTTP answer.
+    pub reports: Vec<(Map<String, Value>, u16)>,
+    /// Time that passes between receipt checks and the commit (V11).
+    pub commit_delay_ms: u64,
+    /// The next N committed reports have their answer dropped (H10).
+    pub drop_acks: usize,
 }
 
 #[derive(Clone)]
@@ -158,6 +169,11 @@ impl FakeAuthority {
             last_page: None,
             bodies: Vec::new(),
             counter: 0,
+            report_receipts: BTreeMap::new(),
+            current_acks: BTreeMap::new(),
+            reports: Vec::new(),
+            commit_delay_ms: 0,
+            drop_acks: 0,
         })))
     }
 
@@ -511,6 +527,7 @@ impl FakeState {
             status,
             content_type: Some(PROBLEM_CONTENT_TYPE.into()),
             retry_after_s: (status == 429).then_some(5),
+            headers: Vec::new(),
             body: json!({ "type": "about:blank", "status": status, "code": code })
                 .to_string()
                 .into_bytes(),
@@ -832,8 +849,352 @@ impl FakeState {
                     .unwrap_or_else(|| self.config.profile.list_page_content_type()),
             ),
             retry_after_s: None,
+            headers: Vec::new(),
             body: compact.into_bytes(),
         }
+    }
+}
+
+const REPORT_STATES: [&str; 3] = ["revoked", "incomplete", "complete"];
+
+fn report_rank(state: &str) -> usize {
+    REPORT_STATES.iter().position(|s| *s == state).unwrap_or(0)
+}
+
+impl FakeState {
+    /// Seeds an obligation's `last_accepted`, as an authority that lost no
+    /// state would list it.
+    pub fn set_last_accepted(&mut self, holding_id: &str, state: &str) {
+        let at = format_utc_seconds(self.now_ms());
+        let item = self.items.get_mut(holding_id).expect("holding");
+        item["obligation"]["last_accepted"] = json!({ "state": state, "at": at });
+        self.commit();
+    }
+
+    /// The authority's current view of a holding's obligation state.
+    pub fn obligation_state(&self, holding_id: &str) -> String {
+        self.items[holding_id]["obligation"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn report_problem(
+        &mut self,
+        status: u16,
+        code: &str,
+        extra: Option<(&str, Value)>,
+    ) -> HttpResponse {
+        let mut body = json!({ "type": "about:blank", "status": status, "code": code });
+        if let Some((name, value)) = extra {
+            body[name] = value;
+        }
+        HttpResponse {
+            status,
+            content_type: Some(PROBLEM_CONTENT_TYPE.into()),
+            retry_after_s: (status == 429).then_some(5),
+            headers: Vec::new(),
+            body: body.to_string().into_bytes(),
+        }
+    }
+
+    fn ack_response(&self, ack: &str, outcome: Option<&str>) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            content_type: Some(self.config.profile.report_ack_content_type()),
+            retry_after_s: None,
+            headers: outcome
+                .map(|o| vec![(self.config.profile.outcome_header.clone(), o.to_owned())])
+                .unwrap_or_default(),
+            body: ack.as_bytes().to_vec(),
+        }
+    }
+
+    fn report_grammar(claims: &Map<String, Value>) -> bool {
+        const ALLOWED: [&str; 18] = [
+            "iss",
+            "sub",
+            "aud",
+            "htu",
+            "iat",
+            "exp",
+            "jti",
+            "idempotency_key",
+            "obligation_id",
+            "holding_id",
+            "state",
+            "list_ref",
+            "counts",
+            "quarantine_manifest_digest",
+            "method",
+            "completed_at",
+            "evidence",
+            "operator",
+        ];
+        let text = |name: &str| claims.get(name).and_then(Value::as_str);
+        let counts_ok = claims
+            .get("counts")
+            .and_then(Value::as_object)
+            .is_some_and(|c| {
+                c.len() == 3
+                    && [
+                        "units_purged",
+                        "units_remaining",
+                        "quarantined_unattributed",
+                    ]
+                    .iter()
+                    .all(|k| c.get(*k).is_some_and(Value::is_u64))
+            });
+        let complete = text("state") == Some("complete");
+        claims.keys().all(|k| ALLOWED.contains(&k.as_str()))
+            && ALLOWED[..13].iter().all(|k| claims.contains_key(*k))
+            && text("idempotency_key").is_some_and(grammar::idempotency_key)
+            && text("jti").is_some_and(grammar::jti)
+            && text("state").is_some_and(|s| REPORT_STATES.contains(&s))
+            && text("obligation_id").is_some_and(grammar::obligation_id)
+            && text("holding_id").is_some_and(grammar::holding_id)
+            && claims.get("list_ref").is_some_and(Self::well_formed_ref)
+            && counts_ok
+            && (!complete || (text("method").is_some() && text("completed_at").is_some()))
+            && claims.get("evidence").is_none_or(|e| {
+                e.as_object().is_some_and(|o| {
+                    o.len() == 2 && o.contains_key("kind") && o.contains_key("digest")
+                }) && e.to_string().len() <= 2048
+            })
+    }
+
+    fn handle_report(&mut self, content_type: &str, body: &[u8]) -> HttpResponse {
+        // H.12 1. Size.
+        if body.len() > REQUEST_MAX_BYTES {
+            return self.report_problem(413, "payload_too_large", None);
+        }
+        // 2. Authority state.
+        if self.rollback_suspected {
+            return self.report_problem(503, "authority_epoch_mismatch", None);
+        }
+        if self.custody_unreadable {
+            return self.report_problem(503, "lifecycle_unavailable", None);
+        }
+        // 3. Signature.
+        let issuer = self.config.issuer.clone();
+        let verified = std::str::from_utf8(body)
+            .ok()
+            .and_then(|text| jws::parse(text).ok())
+            .filter(|request| {
+                content_type == self.config.profile.report_request_content_type()
+                    && request.typ == self.config.profile.typ_report_request
+                    && request.alg == "EdDSA"
+                    && request.kid == self.holder_jkt
+                    && self
+                        .holder_key
+                        .is_some_and(|key| request.verify_eddsa(&key))
+            })
+            .map(|request| request.claims)
+            .filter(|claims| {
+                let text = |name: &str| claims.get(name).and_then(Value::as_str);
+                text("iss") == Some(self.holder_id.as_str())
+                    && text("sub") == Some(self.holder_id.as_str())
+                    && text("aud") == Some(issuer.as_str())
+                    && text("htu") == Some(format!("{issuer}{ROUTE_REPORT}").as_str())
+            });
+        let Some(claims) = verified else {
+            return self.report_problem(401, "invalid_holder_proof", None);
+        };
+        let answer = self.report_after_signature(body, &claims);
+        self.reports.push((claims, answer.status));
+        answer
+    }
+
+    fn report_after_signature(&mut self, body: &[u8], claims: &Map<String, Value>) -> HttpResponse {
+        // 4. Rollback witness.
+        if let Some(reference) = claims.get("list_ref")
+            && Self::well_formed_ref(reference)
+            && self.tag_valid(reference)
+        {
+            let epoch = reference["rev"]["epoch"].as_str().unwrap_or_default();
+            let seq = reference["rev"]["seq"].as_u64().unwrap_or_default();
+            if (epoch == self.epoch && seq > self.seq) || !self.lineage.iter().any(|e| e == epoch) {
+                self.rollback_suspected = true;
+                self.audit.push("restore_detected");
+                return self.report_problem(503, "authority_epoch_mismatch", None);
+            }
+        }
+        // 5. Time.
+        let now_s = self.now_ms().div_euclid(1000);
+        let iat = claims
+            .get("iat")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
+        let exp = claims
+            .get("exp")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
+        if now_s > exp.saturating_add(SKEW_S)
+            || (now_s - iat).abs() > SKEW_S
+            || !(60..=300).contains(&(exp - iat))
+        {
+            return self.report_problem(401, "proof_expired", None);
+        }
+        // 6. Replay.
+        if let Some(jti) = claims.get("jti").and_then(Value::as_str)
+            && !self.seen_jti.insert(jti.to_owned())
+        {
+            return self.report_problem(401, "replay", None);
+        }
+        // 7. Credential scope.
+        if self.disabled && !self.has_open_obligations() {
+            return self.report_problem(403, "holder_not_authorized", None);
+        }
+        // 9. Grammar.
+        if !Self::report_grammar(claims) {
+            return self.report_problem(400, "invalid_request", None);
+        }
+        // 10. Route checks: obligation for this holder.
+        let text = |name: &str| claims.get(name).and_then(Value::as_str).unwrap_or_default();
+        let obligation_id = text("obligation_id").to_owned();
+        let holding_id = text("holding_id").to_owned();
+        let state = text("state").to_owned();
+        let key = text("idempotency_key").to_owned();
+        let owns = self.items.get(&holding_id).is_some_and(|item| {
+            item["obligation"]["obligation_id"].as_str() == Some(obligation_id.as_str())
+        });
+        if !owns {
+            return self.report_problem(404, "obligation_not_found", None);
+        }
+        // Idempotency.
+        let mut business = claims.clone();
+        for volatile in ["jti", "iat", "exp"] {
+            business.remove(volatile);
+        }
+        if let Some((stored, ack)) = self.report_receipts.get(&key) {
+            return if *stored == business {
+                let ack = ack.clone();
+                self.ack_response(&ack, None)
+            } else {
+                self.report_problem(409, "idempotency_conflict", None)
+            };
+        }
+        // `list_ref`.
+        let reference = &claims["list_ref"];
+        let created_seq = self.items[&holding_id]["obligation"]["created_seq"]
+            .as_u64()
+            .unwrap_or(u64::MAX);
+        if !self.tag_valid(reference)
+            || reference["rev"]["epoch"] != self.epoch.as_str()
+            || reference["rev"]["seq"].as_u64().unwrap_or(0) < created_seq
+        {
+            return self.report_problem(409, "stale_list_ref", None);
+        }
+        // Monotonicity.
+        let obligation = self.items[&holding_id]["obligation"].clone();
+        let last = obligation["last_accepted"]["state"]
+            .as_str()
+            .map(str::to_owned);
+        if let Some(last) = &last {
+            if report_rank(&state) < report_rank(last) {
+                let current = self.current_acks.get(&obligation_id).cloned();
+                return self.report_problem(
+                    409,
+                    "state_regression",
+                    current.map(|ack| ("current_ack", Value::String(ack))),
+                );
+            }
+            if obligation["state"] == "complete"
+                && state == "complete"
+                && let Some(ack) = self.current_acks.get(&obligation_id).cloned()
+            {
+                return self.ack_response(&ack, Some("already_complete"));
+            }
+        }
+        // `complete` preconditions.
+        let counts = &claims["counts"];
+        if state == "complete"
+            && (counts["quarantined_unattributed"] != 0 || counts["units_remaining"] != 0)
+        {
+            return self.report_problem(409, "complete_refused_unattributed", None);
+        }
+        // 11. Commit, with the H.13 commit-time re-check.
+        self.clock.advance(self.commit_delay_ms);
+        if self.now_ms().div_euclid(1000) > exp + SKEW_S {
+            return self.report_problem(401, "proof_expired", None);
+        }
+        let at = format_utc_seconds(self.now_ms());
+        let unattributed_zero = counts["quarantined_unattributed"] == 0;
+        let item = self.items.get_mut(&holding_id).expect("holding");
+        let current_state = item["obligation"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let next_state = match state.as_str() {
+            "revoked" if current_state == "open" => "retrieval_revoked".to_owned(),
+            "incomplete" if current_state == "blocked" && !unattributed_zero => current_state,
+            "incomplete" if current_state == "escalated" => current_state,
+            "incomplete" => "quarantined".to_owned(),
+            "complete" => "complete".to_owned(),
+            _ => current_state,
+        };
+        let obligation = item["obligation"].as_object_mut().expect("obligation");
+        if next_state != "blocked" {
+            obligation.remove("blocked");
+        }
+        let keep_higher = last
+            .as_deref()
+            .is_some_and(|l| report_rank(l) > report_rank(&state));
+        if !keep_higher {
+            obligation.insert("last_accepted".into(), json!({ "state": state, "at": at }));
+        }
+        obligation.insert("state".into(), next_state.clone().into());
+        if next_state == "complete" {
+            item["phase"] = "retired".into();
+        }
+        let phase = item["phase"].clone();
+        self.commit();
+        let ack_jti = self.next_id("ak_");
+        let ack_claims = json!({
+            "iss": self.config.issuer,
+            "aud": self.config.profile.holder_audience(&self.holder_id),
+            "sub": self.holder_id,
+            "iat": self.now_ms().div_euclid(1000),
+            "jti": ack_jti,
+            "idempotency_key": key,
+            "report_jti": claims["jti"],
+            "report_digest": crate::canonical::sha256_tagged(body),
+            "obligation_id": obligation_id,
+            "holding_id": holding_id,
+            "accepted_state": state,
+            "obligation_state": next_state,
+            "phase": phase,
+            "rev": { "epoch": self.epoch, "seq": self.seq },
+            "receipt_label": "confirmed",
+        });
+        let ack = self.sign_with_active(&self.config.profile.typ_report_ack.clone(), &ack_claims);
+        self.report_receipts.insert(key, (business, ack.clone()));
+        self.current_acks.insert(obligation_id, ack.clone());
+        self.ack_response(&ack, None)
+    }
+
+    /// Signs an ack with arbitrary claims under the current key.
+    pub fn sign_ack(&self, claims: &Value) -> String {
+        self.sign_with_active(&self.config.profile.typ_report_ack.clone(), claims)
+    }
+
+    /// An ack response as the report route would send it.
+    pub fn ack_answer(&self, ack: &str, outcome: Option<&str>) -> HttpResponse {
+        self.ack_response(ack, outcome)
+    }
+
+    /// A problem response as the report route would send it.
+    pub fn problem_answer(
+        &mut self,
+        status: u16,
+        code: &str,
+        current_ack: Option<String>,
+    ) -> HttpResponse {
+        self.report_problem(
+            status,
+            code,
+            current_ack.map(|a| ("current_ack", Value::String(a))),
+        )
     }
 }
 
@@ -869,6 +1230,15 @@ impl Transport for FakeAuthority {
             None if url == format!("{}{ROUTE_LIST}", state.config.issuer) => {
                 Ok(state.handle_list(content_type, body))
             }
+            None if url == format!("{}{ROUTE_REPORT}", state.config.issuer) => {
+                let answer = state.handle_report(content_type, body);
+                if answer.status == 200 && state.drop_acks > 0 {
+                    state.drop_acks -= 1;
+                    Err(TransportError::Timeout)
+                } else {
+                    Ok(answer)
+                }
+            }
             None => Ok(state.problem(None, 404, "not_found")),
         };
         state.clock.advance(rest);
@@ -883,6 +1253,7 @@ impl Transport for FakeAuthority {
                     status: 200,
                     content_type: Some(state.config.profile.keyset_content_type()),
                     retry_after_s: None,
+                    headers: Vec::new(),
                     body: statement.clone().into_bytes(),
                 })
             }

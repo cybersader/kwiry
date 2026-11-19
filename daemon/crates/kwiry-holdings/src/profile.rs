@@ -12,6 +12,8 @@ use crate::engine::EngineProfile;
 pub const ROUTE_LIST: &str = "/holdings/list";
 /// Route of the key-set statement, appended to the authority base URL.
 pub const ROUTE_KEYSET: &str = "/keyset";
+/// Route of an obligation report, appended to the authority base URL.
+pub const ROUTE_REPORT: &str = "/obligations/report";
 /// Content type of RFC 9457 problem bodies.
 pub const PROBLEM_CONTENT_TYPE: &str = "application/problem+json";
 
@@ -23,6 +25,13 @@ pub struct WireProfile {
     pub typ_list_page: String,
     /// `typ` of an authority-signed key-set statement.
     pub typ_keyset: String,
+    /// `typ` of a holder-signed obligation report (v2 §4.1).
+    pub typ_report_request: String,
+    /// `typ` of an authority-signed report ack (v2 §4.3).
+    pub typ_report_ack: String,
+    /// Response header that marks a convergence answer to a report (v2
+    /// H.5, value `already_complete`).
+    pub outcome_header: String,
     /// Prefix of every authority-signed audience; the holder-specific
     /// audience is `prefix + holder_id`, the broadcast audience `prefix + "*"`.
     pub audience_prefix: String,
@@ -53,6 +62,14 @@ impl WireProfile {
         format!("application/{}", self.typ_keyset)
     }
 
+    pub fn report_request_content_type(&self) -> String {
+        format!("application/{}", self.typ_report_request)
+    }
+
+    pub fn report_ack_content_type(&self) -> String {
+        format!("application/{}", self.typ_report_ack)
+    }
+
     pub fn holder_audience(&self, holder_id: &str) -> String {
         format!("{}{holder_id}", self.audience_prefix)
     }
@@ -75,6 +92,8 @@ impl WireProfile {
             &self.typ_list_request,
             &self.typ_list_page,
             &self.typ_keyset,
+            &self.typ_report_request,
+            &self.typ_report_ack,
         ];
         if typs
             .iter()
@@ -82,8 +101,17 @@ impl WireProfile {
         {
             return Err("every typ must be a +jwt media subtype");
         }
-        if typs[0] == typs[1] || typs[1] == typs[2] || typs[0] == typs[2] {
+        let distinct: std::collections::HashSet<&&String> = typs.iter().collect();
+        if distinct.len() != typs.len() {
             return Err("typ values must be distinct");
+        }
+        if self.outcome_header.is_empty()
+            || !self
+                .outcome_header
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err("the outcome header must be a token");
         }
         if self.audience_prefix.is_empty() || self.authority_key_id_prefix.is_empty() {
             return Err("audience and key-id prefixes are required");

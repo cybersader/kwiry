@@ -56,6 +56,41 @@ pub enum HolderEvent {
     HolderStateUnwritable,
     /// The whole-list deadline expired or the fetch was cancelled.
     ListDeadline,
+    /// K2: a lifecycle write consumed reserve bytes and succeeded.
+    DiskReserveUsed,
+    /// K3: a new artifact write was refused by the storage budget. Nothing
+    /// was evicted or deleted.
+    DiskPressure,
+    /// Purge: deletions failed and will be retried; the units stay
+    /// attributed.
+    PurgeDeleteFailed { count: usize },
+    /// Purge: units still have open handles; deletion waits for them.
+    PurgeWaitingOnHandles { count: usize },
+    /// Purge: the purger refused a step or failed; nothing was assumed.
+    PurgeStepFailed { step: &'static str },
+    /// The remaining inventory moved after the final scan (a late builder
+    /// output, a handle, a reclassification): the scan no longer proves
+    /// anything and the pass repeats.
+    PurgeScanInvalidated,
+    /// A report channel bug halt (`400`, `413`, `409 idempotency_conflict`,
+    /// repeated unverifiable acks). An operator resume re-derives it.
+    ReportBugHalt { status: u16 },
+    /// A verified ack that matches no path; nothing was stored.
+    AckUnverifiable,
+    /// A replay receipt for a key the authority definitively refused.
+    AckContradiction,
+    /// A convergence ack (`409 state_regression` or `already_complete`, or a
+    /// mismatching key): the floor rose, never a receipt for the sent key.
+    ReportConverged,
+    /// An ack minted in another epoch: audit only, no floor change; relist.
+    AckOtherEpoch,
+    /// The authority definitively refused a report
+    /// (`complete_refused_unattributed`, `stale_list_ref`,
+    /// `obligation_not_found`); it is re-derived.
+    ReportRejected { status: u16 },
+    /// `403`: queued, unsent reports were cancelled (possibly sent attempts
+    /// are kept as uncertain).
+    ReportsCancelled { count: usize },
     /// A holder-class profile alert.
     Engine(EngineEvent),
 }
@@ -86,6 +121,19 @@ impl HolderEvent {
             Self::StorageExhausted => "disk_reserve_exhausted",
             Self::HolderStateUnwritable => "holder_state_unwritable",
             Self::ListDeadline => "lifecycle_list_deadline",
+            Self::DiskReserveUsed => "disk_reserve_used",
+            Self::DiskPressure => "disk_pressure",
+            Self::PurgeDeleteFailed { .. } => "lifecycle_purge_delete_failed",
+            Self::PurgeWaitingOnHandles { .. } => "lifecycle_purge_waiting_on_handles",
+            Self::PurgeStepFailed { .. } => "lifecycle_purge_step_failed",
+            Self::PurgeScanInvalidated => "lifecycle_purge_scan_invalidated",
+            Self::ReportBugHalt { .. } => "lifecycle_report_bug_halt",
+            Self::AckUnverifiable => "ack_unverifiable",
+            Self::AckContradiction => "ack_contradiction",
+            Self::ReportConverged => "lifecycle_report_converged",
+            Self::AckOtherEpoch => "lifecycle_ack_other_epoch",
+            Self::ReportRejected { .. } => "lifecycle_report_rejected",
+            Self::ReportsCancelled { .. } => "lifecycle_reports_cancelled",
             Self::Engine(event) => event.code(),
         }
     }

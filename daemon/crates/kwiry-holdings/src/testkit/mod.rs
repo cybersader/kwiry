@@ -10,7 +10,10 @@ mod fakes;
 mod jcs;
 
 pub use authority::{AuthorityConfig, FakeAuthority, FakeState, Forced, Hooks, RecordedRequest};
-pub use fakes::{DataRootView, FakeClock, FakeDataRoot, Fault, IoFaults, MemoryStore, StoreView};
+pub use fakes::{
+    DataRootView, FakeClock, FakeDataRoot, FakeReserve, Fault, IoFaults, MemoryPurger, MemoryStore,
+    PurgerUnit, PurgerView, StoreView,
+};
 pub use jcs::canonical as jcs;
 
 use crate::engine::{EngineGate, EngineProfile, EngineSettings};
@@ -45,6 +48,9 @@ pub fn neutral_profile() -> WireProfile {
         typ_list_request: "example-holdings-listreq+jwt".into(),
         typ_list_page: "example-holdings-list+jwt".into(),
         typ_keyset: "example-lifecycle-keyset+jwt".into(),
+        typ_report_request: "example-obligation-report+jwt".into(),
+        typ_report_ack: "example-obligation-ack+jwt".into(),
+        outcome_header: "Example-Lifecycle-Outcome".into(),
         audience_prefix: "example-lifecycle:".into(),
         authority_key_id_prefix: "ak-".into(),
         resource_kinds: strings(&["collection", "archive", "volume"]),
@@ -140,6 +146,7 @@ pub struct Rig {
     pub io_faults: IoFaults,
     pub dir: PathBuf,
     pub config: HolderConfig,
+    pub purger: MemoryPurger,
     holder: Option<TestHolder>,
 }
 
@@ -206,6 +213,7 @@ impl Rig {
             io_faults,
             dir: dir.to_path_buf(),
             config,
+            purger: MemoryPurger::default(),
             holder: None,
         };
         rig.restart().expect("start");
@@ -258,6 +266,23 @@ impl Rig {
             .expect("holder running")
             .engine_gate()
             .expect("engine profile")
+    }
+
+    /// One purge pass: detach, then delete and verify.
+    pub fn purge(
+        &mut self,
+    ) -> Result<crate::purge::PurgeSummary, crate::purge::ObligationsRefused> {
+        let mut purger = self.purger.clone();
+        self.holder().purge_detach(&mut purger)?;
+        self.holder().purge_delete_and_verify(&mut purger)
+    }
+
+    /// One report pass against the rig's purger.
+    pub fn report(
+        &mut self,
+    ) -> Result<crate::report::ReportSummary, crate::purge::ObligationsRefused> {
+        let purger = self.purger.clone();
+        self.holder().report_once(&purger)
     }
 
     /// Advances both clocks, past the list-start spacing by default.

@@ -618,12 +618,12 @@ fn parse_obligation(value: &Value, rev_seq: u64) -> Result<Obligation, PageError
     })
 }
 
-/// One listed item with the timing of the page that carried it.
+/// One listed item with the `iat` of the page that carried it. Its lease
+/// is timed from page 0 (v2 H.46), never from this page's own receipt.
 #[derive(Clone, Debug)]
 pub struct ListedItem {
     pub item: Item,
     pub page_iat_ms: i64,
-    pub received_mono_ms: u64,
 }
 
 /// A complete list whose every page verified and whose pages agree.
@@ -633,8 +633,11 @@ pub struct VerifiedList {
     pub items: Vec<ListedItem>,
     pub instructions: Vec<Value>,
     pub skipped_instructions: usize,
-    /// Only page 0's `iat` may support absence inference.
+    /// Only page 0's `iat` may support absence inference (H.13), and every
+    /// lease is timed from page 0 (H.46).
     pub page0_iat_ms: i64,
+    /// Monotonic receipt time of page 0 (`t_recv(page 0)`, H.46).
+    pub page0_received_mono_ms: u64,
 }
 
 impl VerifiedList {
@@ -654,6 +657,7 @@ pub fn assemble(pages: Vec<VerifiedPage>) -> Result<VerifiedList, PageError> {
     let first = pages.first().ok_or(PageError::Consistency("no pages"))?;
     let head = first.head.clone();
     let page0_iat_ms = first.iat_ms;
+    let page0_received_mono_ms = first.received_mono_ms;
     if usize::try_from(head.count).ok() != Some(pages.len()) {
         return Err(PageError::Consistency("page count"));
     }
@@ -684,7 +688,6 @@ pub fn assemble(pages: Vec<VerifiedPage>) -> Result<VerifiedList, PageError> {
             items.push(ListedItem {
                 item,
                 page_iat_ms: page.iat_ms,
-                received_mono_ms: page.received_mono_ms,
             });
         }
     }
@@ -697,5 +700,6 @@ pub fn assemble(pages: Vec<VerifiedPage>) -> Result<VerifiedList, PageError> {
         instructions,
         skipped_instructions,
         page0_iat_ms,
+        page0_received_mono_ms,
     })
 }

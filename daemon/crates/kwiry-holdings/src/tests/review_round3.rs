@@ -303,6 +303,7 @@ fn h40_every_list_start_waits_out_the_backoff() {
             status: 400,
             content_type: Some(PROBLEM_CONTENT_TYPE.into()),
             retry_after_s: None,
+            headers: Vec::new(),
             body: json!({"status": 400, "code": "invalid_request"})
                 .to_string()
                 .into_bytes(),
@@ -335,6 +336,7 @@ fn h40_the_request_invalid_alert_survives_a_restart_until_a_list_applies() {
             status: 413,
             content_type: Some(PROBLEM_CONTENT_TYPE.into()),
             retry_after_s: None,
+            headers: Vec::new(),
             body: json!({"status": 413, "code": "payload_too_large"})
                 .to_string()
                 .into_bytes(),

@@ -20,6 +20,8 @@
 use crate::clock::Clock;
 use crate::engine::{EngineState, PinPair};
 use crate::keys::PinnedKeys;
+use crate::obligations::ObligationBook;
+use crate::reserve::DiskReserve;
 use crate::wire::{ListRef, Rev};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -251,6 +253,9 @@ pub struct HolderState {
     pub list_request_invalid: bool,
     /// Engine-profile fields; default for every other holder.
     pub engine: EngineState,
+    /// Obligation report channels, purge progress and uncertain attempts.
+    #[serde(default)]
+    pub obligations: ObligationBook,
 }
 
 impl HolderState {
@@ -265,6 +270,7 @@ impl HolderState {
             tombstones: BTreeSet::new(),
             list_request_invalid: false,
             engine: EngineState::default(),
+            obligations: ObligationBook::default(),
         }
     }
 
@@ -322,6 +328,19 @@ pub enum WriteError {
     /// memory, and rewriting the committed state has not succeeded yet.
     #[error("holder state poisoned until the committed state is rewritten: {0}")]
     Poisoned(io::Error),
+    /// v2 H.45: the holder fail-stopped; no lifecycle write runs again in
+    /// this process.
+    #[error("holder state unwritable: the holder fail-stopped")]
+    Unwritable,
+}
+
+/// What the disk reserve did for a write (Annex K.1 K2, K2x).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReserveUse {
+    /// A write got `ENOSPC`, consumed reserve bytes and succeeded on retry.
+    Used,
+    /// A write got `ENOSPC` and the reserve could not cover it.
+    Exhausted,
 }
 
 /// What one admitted list adds to durable state (row A1).
@@ -352,6 +371,8 @@ pub struct StateWriter {
     /// Set when durable state may read less restrictive than memory and no
     /// write could correct it. The holder fail-stops.
     unwritable: bool,
+    reserve: Option<Box<dyn DiskReserve>>,
+    reserve_uses: Vec<ReserveUse>,
 }
 
 impl StateWriter {
@@ -370,6 +391,62 @@ impl StateWriter {
             enrollment,
             poisoned: false,
             unwritable: false,
+            reserve: None,
+            reserve_uses: Vec::new(),
+        }
+    }
+
+    /// Lets durable writes consume `reserve` on `ENOSPC` (K2).
+    pub fn set_reserve(&mut self, reserve: Box<dyn DiskReserve>) {
+        self.reserve = Some(reserve);
+    }
+
+    /// Refills the reserve as space allows (K4).
+    pub(crate) fn replenish_reserve(&mut self) {
+        if let Some(reserve) = &mut self.reserve {
+            let _ = reserve.replenish();
+        }
+    }
+
+    /// Reserve outcomes since the last call, in order.
+    pub(crate) fn take_reserve_uses(&mut self) -> Vec<ReserveUse> {
+        std::mem::take(&mut self.reserve_uses)
+    }
+
+    /// One durable replacement. On `ENOSPC` before the rename, the needed
+    /// bytes come out of the reserve and the write is retried once (K2);
+    /// otherwise the failure stands (K2x) and nothing changed.
+    fn write_reserved(&mut self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
+        let first = self.io.write_atomic(self.dir.path(), name, bytes);
+        let Err(failure) = first else {
+            return Ok(());
+        };
+        if failure.replaced || failure.error.kind() != io::ErrorKind::StorageFull {
+            return Err(failure);
+        }
+        // Room for the temporary file, plus a page for directory metadata.
+        let needed = u64::try_from(bytes.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(4096);
+        let released = self
+            .reserve
+            .as_mut()
+            .is_some_and(|reserve| reserve.release(needed).unwrap_or(false));
+        if !released {
+            self.reserve_uses.push(ReserveUse::Exhausted);
+            return Err(failure);
+        }
+        match self.io.write_atomic(self.dir.path(), name, bytes) {
+            Ok(()) => {
+                self.reserve_uses.push(ReserveUse::Used);
+                Ok(())
+            }
+            Err(retry) => {
+                if retry.error.kind() == io::ErrorKind::StorageFull {
+                    self.reserve_uses.push(ReserveUse::Exhausted);
+                }
+                Err(retry)
+            }
         }
     }
 
@@ -379,11 +456,20 @@ impl StateWriter {
 
     /// Replaces a profile-owned side file in the holder directory, through
     /// the same durable replacement as the state file.
-    pub(crate) fn write_side_file(&self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
-        self.io.write_atomic(self.dir.path(), name, bytes)
+    pub(crate) fn write_side_file(&mut self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
+        if self.unwritable {
+            return Err(WriteFailure::before_rename(io::Error::other(
+                "holder_state_unwritable",
+            )));
+        }
+        self.write_reserved(name, bytes)
     }
 
     pub(crate) fn remove_side_file(&self, name: &str) -> io::Result<()> {
+        // v2 H.45: no lifecycle write after a fail-stop.
+        if self.unwritable {
+            return Err(io::Error::other("holder_state_unwritable"));
+        }
         self.io.remove(self.dir.path(), name)
     }
 
@@ -400,10 +486,10 @@ impl StateWriter {
         self.unwritable
     }
 
-    fn write_state(&self, state: &HolderState) -> Result<(), WriteFailure> {
+    fn write_state(&mut self, state: &HolderState) -> Result<(), WriteFailure> {
         let bytes = serde_json::to_vec_pretty(state)
             .map_err(|e| WriteFailure::before_rename(io::Error::other(e)))?;
-        self.io.write_atomic(self.dir.path(), STATE_FILE, &bytes)
+        self.write_reserved(STATE_FILE, &bytes)
     }
 
     pub fn state(&self) -> &HolderState {
@@ -430,8 +516,13 @@ impl StateWriter {
     /// fails the writer is poisoned and refuses every commit until the
     /// committed state has been rewritten.
     pub(crate) fn commit(&mut self, mut next: HolderState) -> Result<(), WriteError> {
+        // v2 H.45: after a fail-stop no lifecycle write runs in this process.
+        if self.unwritable {
+            return Err(WriteError::Unwritable);
+        }
         if self.poisoned {
-            self.write_state(&self.state)
+            let committed = self.state.clone();
+            self.write_state(&committed)
                 .map_err(|failure| WriteError::Poisoned(failure.error))?;
             self.poisoned = false;
         }
@@ -442,12 +533,23 @@ impl StateWriter {
                 Ok(())
             }
             Err(failure) => {
-                if failure.replaced && self.write_state(&self.state).is_err() {
+                let committed = self.state.clone();
+                if failure.replaced && self.write_state(&committed).is_err() {
                     self.poisoned = true;
                 }
                 Err(WriteError::Io(failure.error))
             }
         }
+    }
+
+    /// Replaces the obligation records in one commit.
+    pub(crate) fn update_obligations(&mut self, book: ObligationBook) -> Result<(), WriteError> {
+        if self.state.obligations == book {
+            return Ok(());
+        }
+        let mut next = self.state.clone();
+        next.obligations = book;
+        self.commit(next)
     }
 
     /// Row A1: advance the high-water and union tombstones and (engine
