@@ -67,57 +67,93 @@ pub enum TransportError {
     Timeout,
 }
 
-/// Delayed responses for this holder process. Delivery of a 403 narrows all
-/// serving-gate clones before the response becomes visible to lifecycle passes.
+/// Bound by the holder at dispatch, never inferred from the response.
 #[derive(Clone)]
-pub struct ResponseInbox {
-    queue: std::sync::Arc<std::sync::Mutex<Vec<(String, HttpResponse)>>>,
-    gate: crate::gate::ServingGate,
+pub(crate) enum Origin {
+    Status,
+    Report(String),
 }
-
+pub(crate) type Delivery = (Origin, String, HttpResponse);
+#[derive(Clone)]
+pub(crate) struct ResponseInbox {
+    queue: std::sync::Arc<std::sync::Mutex<Vec<Delivery>>>,
+    gate: crate::gate::ServingGate,
+    events: std::sync::Arc<dyn crate::events::EventSink>,
+}
+/// An asynchronous transport retains this handle while its POST can still
+/// deliver. The holder need not retain an unbounded history of dispatched keys.
+#[derive(Clone)]
+pub struct ResponseDelivery {
+    inbox: ResponseInbox,
+    origin: Origin,
+    key: String,
+}
+impl ResponseDelivery {
+    pub fn request_key(&self) -> &str {
+        &self.key
+    }
+    pub fn deliver(&self, key: String, response: HttpResponse) {
+        if key != self.key {
+            self.inbox
+                .events
+                .emit(crate::events::HolderEvent::UnknownResponseKey);
+            return;
+        }
+        let mut queue = self.inbox.lock();
+        if response.status == 403 {
+            self.inbox.gate.set_auth_halt();
+        }
+        queue.push((self.origin.clone(), key, response));
+    }
+}
 impl ResponseInbox {
-    pub(crate) fn new(gate: crate::gate::ServingGate) -> Self {
+    pub(crate) fn new(
+        gate: crate::gate::ServingGate,
+        events: std::sync::Arc<dyn crate::events::EventSink>,
+    ) -> Self {
         Self {
             queue: Default::default(),
             gate,
+            events,
         }
     }
-
-    pub fn deliver(&self, key: String, response: HttpResponse) {
-        let mut queue = self
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if response.status == 403 {
-            self.gate.set_auth_halt();
+    pub(crate) fn bind(&self, origin: Origin, key: &str) -> ResponseDelivery {
+        ResponseDelivery {
+            inbox: self.clone(),
+            origin,
+            key: key.into(),
         }
-        queue.push((key, response));
     }
-
-    pub(crate) fn has_refusal(&self) -> bool {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Delivery>> {
         self.queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .any(|(_, r)| r.status != 200)
     }
-
-    pub(crate) fn drain(&self) -> Vec<(String, HttpResponse)> {
-        let mut queue = self
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::mem::take(&mut *queue)
+    #[cfg(test)]
+    pub(crate) fn delivery_blocked(&self) -> bool {
+        matches!(
+            self.queue.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+    pub(crate) fn has_refusal(&self) -> bool {
+        self.lock().iter().any(|(_, _, r)| r.status != 200)
     }
 }
 
-/// HTTP to the authority. Implementations enforce the connect and response
-/// timeouts they are given.
+/// HTTP to the authority. Implementations enforce the supplied timeouts.
 pub trait Transport {
-    /// An asynchronous adapter delivers to the inbox bound at request time,
-    /// with the original request key (not a claim taken from the response).
-    fn bind_response_inbox(&self, _inbox: ResponseInbox) {}
-
+    /// Asynchronous adapters retain the handle belonging to this POST.
+    fn post_lifecycle(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        timeouts: Timeouts,
+        _delivery: ResponseDelivery,
+    ) -> Result<HttpResponse, TransportError> {
+        self.post(url, content_type, body, timeouts)
+    }
     fn post(
         &self,
         url: &str,

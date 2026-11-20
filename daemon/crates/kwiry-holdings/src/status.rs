@@ -59,8 +59,6 @@ pub const STATUS_DAILY_MS: i64 = 86_400_000;
 /// Manifests of accepted reports are kept this long, and for as long as a
 /// release instruction binds them (design §5.5).
 pub const MANIFEST_RETENTION_MS: i64 = 30 * 86_400_000;
-const BACKOFF_START_MS: u64 = 10_000;
-const BACKOFF_MAX_MS: u64 = 300_000;
 
 /// `holder_state` (v2 §11.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +295,9 @@ pub struct ManifestRef {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusBook {
+    /// Full remaining wait when last backed off. On restart no elapsed time is trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) restart_wait_ms: Option<u64>,
     /// Write-ahead refusal records, consumed atomically with their effects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) owed: Vec<crate::transition::Owed>,
@@ -407,7 +408,7 @@ pub struct StatusSummary {
 }
 
 impl StatusSummary {
-    fn record(&mut self, answer: Answer) {
+    pub(crate) fn record(&mut self, answer: Answer) {
         match answer {
             Answer::Receipt => self.receipts += 1,
             Answer::Rejected => self.rejected += 1,
@@ -430,10 +431,7 @@ fn token(bytes: usize) -> Option<String> {
     crate::b64::random_token(bytes).ok()
 }
 
-enum StatusVerificationFailure {
-    Unverifiable,
-    PinWrite,
-}
+use crate::transition::ReceiptFailure;
 
 struct StatusArmed {
     compact: String,
@@ -579,38 +577,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         })
     }
 
-    /// Intake is local only. No key refresh or affirmative action runs while
-    /// consuming refusals. A weaker refusal never replaces a stronger halt.
-    pub(crate) fn drain_deliveries(&mut self) -> (bool, StatusSummary) {
-        let mut batch = self.inbox.drain();
-        batch.sort_by_cached_key(|(_, r)| match (r.status, problem_code(r).as_deref()) {
-            (403, _) => 0,
-            (503, Some("lifecycle_unavailable" | "authority_epoch_mismatch")) => 1,
-            (401, _) => 2,
-            _ => 3,
-        });
-        let mut summary = StatusSummary::default();
-        let mut refusal = false;
-        for (key, response) in batch {
-            if response.status == 200 {
-                self.late_acks.push_back((key, response));
-                continue;
-            }
-            refusal = true;
-            if self.route == RouteHealth::AuthHalt(AuthHalt::NotAuthorized)
-                && response.status == 401
-            {
-                continue;
-            }
-            let answer = self.classify_status(&key, Ok(response));
-            summary.record(answer);
-            if answer == Answer::BackOff && self.clock.mono_ms() >= self.status_backoff_until {
-                self.status_back_off(None);
-            }
-        }
-        (refusal, summary)
-    }
-
     /// One pass of the status channel: invalidate a stale status, derive a
     /// new one if anything triggers it, transmit what is due and classify
     /// the answer.
@@ -618,7 +584,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &dyn ArtifactPurger,
     ) -> Result<StatusSummary, ObligationsRefused> {
-        let (received, mut summary) = self.drain_deliveries();
+        let (received, mut summary, _) = self.drain_deliveries();
         if received || self.traffic_halted() {
             return Ok(summary);
         }
@@ -866,16 +832,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .any(|u| u.epoch == pending.epoch && u.body.list_ref.rev.seq >= seq)
     }
 
-    fn status_back_off(&mut self, retry_after_s: Option<u64>) {
-        let now = self.clock.mono_ms();
-        self.status_backoff_ms = self
-            .status_backoff_ms
-            .saturating_mul(2)
-            .clamp(BACKOFF_START_MS, BACKOFF_MAX_MS);
-        let wait = retry_after_s
-            .map_or(0, |s| s.saturating_mul(1000))
-            .max(self.status_backoff_ms);
-        self.status_backoff_until = self.status_backoff_until.max(now.saturating_add(wait));
+    pub(crate) fn status_back_off(&mut self, retry_after_s: Option<u64>) {
+        let wait = crate::schedule::defer_post(
+            self.clock.mono_ms(),
+            &mut self.status_backoff_ms,
+            &mut self.status_backoff_until,
+            retry_after_s,
+        );
+        let mut book = self.writer.state().status.clone();
+        book.restart_wait_ms = Some(wait);
+        if !self.commit_status(book) {
+            self.writer.mark_unwritable();
+        }
     }
 
     /// T2 → T2d → the answer.
@@ -933,6 +901,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             // byte, under the publication freeze.
             let url = format!("{}{ROUTE_STATUS}", self.writer.enrollment().issuer);
             let content_type = self.config.profile.status_request_content_type();
+            let delivery = self.inbox.bind(crate::client::Origin::Status, &pending.key);
             let freeze = purger.freeze_publications().ok();
             let first_byte_ok = freeze.is_some()
                 && !self.fail_stopped()
@@ -940,8 +909,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 && self
                     .inventory(purger)
                     .is_ok_and(|now| self.status_guard(&pending, &now))
-                && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS
-                && !self.inbox.has_refusal();
+                && !self.inbox.has_refusal()
+                && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS;
             if !first_byte_ok {
                 drop(freeze);
                 self.cancel_status_attempt(&sent.attempt, previous_dispatch, summary);
@@ -956,9 +925,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     .saturating_add(STATUS_NEW_KEY_SPACING_MS as u64);
             }
             summary.sent += 1;
-            let response =
-                self.transport
-                    .post(&url, &content_type, sent.compact.as_bytes(), LIST_TIMEOUTS);
+            let response = self.transport.post_lifecycle(
+                &url,
+                &content_type,
+                sent.compact.as_bytes(),
+                LIST_TIMEOUTS,
+                delivery,
+            );
             drop(freeze);
             let answer = self.classify_status(&pending.key, response);
             summary.record(answer);
@@ -1026,6 +999,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             exp_s: iat_s + crate::wire::REQUEST_LIFETIME_SECONDS,
         };
         let mut next = self.writer.state().status.clone();
+        next.restart_wait_ms = None;
         next.manifests.insert(
             digest,
             ManifestRef {
@@ -1099,7 +1073,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 let Ok(compact) = String::from_utf8(response.body) else {
                     return self.status_unverifiable();
                 };
-                match self.verify_status_with_refresh(&compact) {
+                match self.verify_with_refresh(&compact, Self::verify_status_ack) {
                     Ok(ack) if ack.idempotency_key == request_key => {
                         let pending = self
                             .writer
@@ -1111,7 +1085,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         self.on_status_ack(pending.as_ref(), ack)
                     }
                     Ok(_) => self.status_unverifiable(),
-                    Err(StatusVerificationFailure::PinWrite) => Answer::BackOff,
+                    Err(ReceiptFailure::PinWrite) => Answer::BackOff,
                     Err(_) => self.status_unverifiable(),
                 }
             }
@@ -1156,47 +1130,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }
     }
 
-    fn verify_status_with_refresh(
-        &mut self,
-        compact: &str,
-    ) -> Result<StatusAck, StatusVerificationFailure> {
-        use StatusVerificationFailure::{PinWrite, Unverifiable};
-        match self.verify_status_ack(compact) {
-            Err("kid") => {
-                let enrollment = self.writer.enrollment();
-                let profile = &self.config.profile;
-                let statement = crate::client::fetch_route_statement(
-                    &self.transport,
-                    &enrollment.issuer,
-                    profile,
-                )
-                .ok_or(Unverifiable)?;
-                let pins = crate::keys::verify_keyset(
-                    &statement,
-                    &enrollment.pinned,
-                    profile,
-                    &enrollment.issuer,
-                    self.clock.wall_ms(),
-                )
-                .map_err(|_| Unverifiable)?;
-                let seq = pins.keyset_seq;
-                self.commit_then(
-                    |writer| writer.pin_keys(pins),
-                    |holder| {
-                        if let Some(keyset_seq) = seq {
-                            holder
-                                .events
-                                .emit(HolderEvent::KeysetAccepted { keyset_seq });
-                        }
-                    },
-                )
-                .ok_or(PinWrite)?;
-                self.verify_status_ack(compact).map_err(|_| Unverifiable)
-            }
-            result => result.map_err(|_| Unverifiable),
-        }
-    }
-
     /// T7: deliver a delayed status POST receipt without sending a replacement.
     /// Only an outstanding uncertain key and its recorded attempt may resolve.
     pub fn receive_late_status_receipt(&mut self, compact: &str) -> bool {
@@ -1214,7 +1147,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         {
             return false;
         }
-        let Ok(ack) = self.verify_status_with_refresh(compact) else {
+        let Ok(ack) = self.verify_with_refresh(compact, Self::verify_status_ack) else {
             return false;
         };
         let Some(u) = self

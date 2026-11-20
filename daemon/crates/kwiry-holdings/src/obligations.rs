@@ -39,6 +39,9 @@ pub const SAME_STATE_WINDOW_MS: i64 = 300_000;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObligationBook {
+    /// Full remaining wait when last backed off. On restart no elapsed time is trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) restart_wait_ms: Option<u64>,
     /// Report channels by obligation id.
     pub channels: BTreeMap<String, Channel>,
     /// Superseded attempts whose acceptance is unknown, by idempotency key.

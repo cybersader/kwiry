@@ -77,6 +77,8 @@ pub enum HolderEvent {
     ReportBugHalt { status: u16 },
     /// A verified ack that matches no path; nothing was stored.
     AckUnverifiable,
+    /// The delayed response did not name its originating request.
+    UnknownResponseKey,
     /// A replay receipt for a key the authority definitively refused.
     AckContradiction,
     /// A convergence ack (`409 state_regression` or `already_complete`, or a
@@ -154,6 +156,7 @@ impl HolderEvent {
             Self::PurgeStepFailed { .. } => "lifecycle_purge_step_failed",
             Self::PurgeScanInvalidated => "lifecycle_purge_scan_invalidated",
             Self::ReportBugHalt { .. } => "lifecycle_report_bug_halt",
+            Self::UnknownResponseKey => "unknown_response_key",
             Self::AckUnverifiable => "ack_unverifiable",
             Self::AckContradiction => "ack_contradiction",
             Self::ReportConverged => "lifecycle_report_converged",

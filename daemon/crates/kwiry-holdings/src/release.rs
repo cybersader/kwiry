@@ -387,8 +387,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let mut failed = 0;
             for unit in &claims {
                 // H.45: nothing runs after a fail-stop, deletions included.
-                self.deletion_permitted()?;
-                match purger.delete(unit, &claimant) {
+                match self.with_deletion_permission(|| purger.delete(unit, &claimant))? {
                     Ok(DeleteOutcome::Deleted | DeleteOutcome::Absent) => {
                         deleted.insert(unit.clone());
                     }
@@ -407,16 +406,23 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 self.events
                     .emit(HolderEvent::PurgeDeleteFailed { count: failed });
             }
-            summary.deleted += deleted.len();
-            // After: what was deleted.
-            if !self.update_record(id, |r| {
-                r.deleted.extend(deleted);
-                r.claimed.clear();
-            }) {
+            let count = deleted.len();
+            let mut next = self.writer.state().status.clone();
+            let Some(record) = next.instructions.get_mut(id) else {
                 return Ok(());
-            }
-            if summary.deleted > 0 {
-                self.writer.replenish_reserve();
+            };
+            record.deleted.extend(deleted);
+            record.claimed.clear();
+            if self
+                .commit_books_then(None, Some(next), false, |holder| {
+                    summary.deleted += count;
+                    if count > 0 {
+                        holder.writer.replenish_reserve();
+                    }
+                })
+                .is_none()
+            {
+                return Ok(());
             }
         }
         // Verify: a barrier, then an independent census that observes none

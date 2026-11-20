@@ -63,7 +63,119 @@ impl Owed {
     }
 }
 
+pub(crate) enum ReceiptFailure {
+    Unverifiable,
+    PinWrite,
+}
+
 impl<S: ResourceStore, T: Transport> Holder<S, T> {
+    pub(crate) fn verify_with_refresh<A>(
+        &mut self,
+        compact: &str,
+        verify: fn(&Self, &str) -> Result<A, &'static str>,
+    ) -> Result<A, ReceiptFailure> {
+        use ReceiptFailure::{PinWrite, Unverifiable};
+        match verify(self, compact) {
+            Err("kid") => {
+                let enrollment = self.writer.enrollment();
+                let profile = &self.config.profile;
+                let statement = crate::client::fetch_route_statement(
+                    &self.transport,
+                    &enrollment.issuer,
+                    profile,
+                )
+                .ok_or(Unverifiable)?;
+                let pins = crate::keys::verify_keyset(
+                    &statement,
+                    &enrollment.pinned,
+                    profile,
+                    &enrollment.issuer,
+                    self.clock.wall_ms(),
+                )
+                .map_err(|_| Unverifiable)?;
+                let seq = pins.keyset_seq;
+                self.commit_then(
+                    |writer| writer.pin_keys(pins),
+                    |holder| {
+                        if let Some(keyset_seq) = seq {
+                            holder
+                                .events
+                                .emit(HolderEvent::KeysetAccepted { keyset_seq });
+                        }
+                    },
+                )
+                .ok_or(PinWrite)?;
+                verify(self, compact).map_err(|_| Unverifiable)
+            }
+            result => result.map_err(|_| Unverifiable),
+        }
+    }
+
+    pub(crate) fn drain_deliveries(
+        &mut self,
+    ) -> (
+        bool,
+        crate::status::StatusSummary,
+        crate::report::ReportSummary,
+    ) {
+        let batch = std::mem::take(&mut *self.inbox.lock());
+        self.intake(batch)
+    }
+
+    /// Refusals narrow immediately on their originating route. Signed answers
+    /// are deferred to their guarded channel pass: intake never fetches keys.
+    pub(crate) fn intake(
+        &mut self,
+        mut batch: Vec<crate::client::Delivery>,
+    ) -> (
+        bool,
+        crate::status::StatusSummary,
+        crate::report::ReportSummary,
+    ) {
+        use crate::client::{Origin, problem_code};
+        use crate::holder::{AuthHalt, RouteHealth};
+        batch.sort_by_cached_key(|(_, _, r)| match (r.status, problem_code(r).as_deref()) {
+            (403, _) => 0,
+            (503, Some("lifecycle_unavailable" | "authority_epoch_mismatch")) => 1,
+            (401, _) => 2,
+            _ => 3,
+        });
+        let mut refusal = false;
+        let mut status = crate::status::StatusSummary::default();
+        let mut report = crate::report::ReportSummary::default();
+        for (origin, key, response) in batch {
+            refusal |= response.status != 200;
+            if response.status == 401
+                && self.route == RouteHealth::AuthHalt(AuthHalt::NotAuthorized)
+            {
+                continue;
+            }
+            match origin {
+                Origin::Status if response.status == 200 => {
+                    self.late_acks.push_back((key, response))
+                }
+                Origin::Report(ob)
+                    if response.status == 200
+                        || (response.status == 409
+                            && problem_code(&response).as_deref() == Some("state_regression")) =>
+                {
+                    self.late_reports.push_back((ob, key, response))
+                }
+                Origin::Report(ob) => report.record(self.delayed_report(&ob, &key, response)),
+                Origin::Status => {
+                    let answer = self.classify_status(&key, Ok(response));
+                    status.record(answer);
+                    if answer == Answer::BackOff
+                        && self.clock.mono_ms() >= self.status_backoff_until
+                    {
+                        self.status_back_off(None);
+                    }
+                }
+            }
+        }
+        (refusal, status, report)
+    }
+
     pub(crate) fn commit_books_then<R>(
         &mut self,
         book: Option<ObligationBook>,

@@ -100,7 +100,7 @@ pub struct FakeState {
     exempt_next_start: bool,
     pub forced: VecDeque<Forced>,
     pub keyset_gets: usize,
-    pub late_status: Option<crate::client::ResponseInbox>,
+    pub deliveries: std::collections::BTreeMap<String, crate::client::ResponseDelivery>,
     pub hooks: Hooks,
     scheduled: Vec<(usize, Mutation)>,
     posts: usize,
@@ -179,7 +179,7 @@ impl FakeAuthority {
             last_list_start_mono: None,
             exempt_next_start: false,
             forced: VecDeque::new(),
-            late_status: None,
+            deliveries: Default::default(),
             keyset_gets: 0,
             hooks: Hooks::default(),
             scheduled: Vec::new(),
@@ -1508,8 +1508,18 @@ impl FakeState {
 }
 
 impl Transport for FakeAuthority {
-    fn bind_response_inbox(&self, inbox: crate::client::ResponseInbox) {
-        self.state().late_status = Some(inbox);
+    fn post_lifecycle(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        timeouts: Timeouts,
+        delivery: crate::client::ResponseDelivery,
+    ) -> Result<HttpResponse, TransportError> {
+        self.state()
+            .deliveries
+            .insert(delivery.request_key().to_owned(), delivery);
+        self.post(url, content_type, body, timeouts)
     }
     fn post(
         &self,

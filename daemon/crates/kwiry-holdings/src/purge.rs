@@ -290,6 +290,34 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// and uninterrupted authority evidence. Only a fresh apply restores it.
     pub(crate) fn deletion_permitted(&mut self) -> Result<(), ObligationsRefused> {
         self.drain_deliveries();
+        self.check_deletion()
+    }
+
+    /// Delivery and each adapter delete are ordered by the same mutex. Earlier
+    /// deliveries are drained before the check; later ones wait for the delete.
+    pub(crate) fn with_deletion_permission<R>(
+        &mut self,
+        delete: impl FnOnce() -> R,
+    ) -> Result<R, ObligationsRefused> {
+        let inbox = self.inbox.clone();
+        let guard = loop {
+            let mut guard = inbox.lock();
+            if guard.is_empty() {
+                break guard;
+            }
+            let batch = std::mem::take(&mut *guard);
+            drop(guard);
+            // Intake may call event/storage adapters. Reacquire and drain again
+            // so callbacks cannot deadlock or slip a delivery past the final check.
+            self.intake(batch);
+        };
+        self.check_deletion()?;
+        let result = delete();
+        drop(guard);
+        Ok(result)
+    }
+
+    fn check_deletion(&self) -> Result<(), ObligationsRefused> {
         self.obligations_allowed()?;
         if self.apply_failed_since_admit {
             return Err(ObligationsRefused::ApplyIncomplete);
@@ -509,8 +537,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut failed = 0;
         for unit in &claims {
             // H.45: nothing runs after a fail-stop, deletions included.
-            self.deletion_permitted()?;
-            match purger.delete(unit, &claimant) {
+            match self.with_deletion_permission(|| purger.delete(unit, &claimant))? {
                 Ok(DeleteOutcome::Deleted | DeleteOutcome::Absent) => {
                     deleted.insert(unit.clone());
                 }
@@ -530,7 +557,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             self.events
                 .emit(HolderEvent::PurgeDeleteFailed { count: failed });
         }
-        summary.deleted += deleted.len();
+        let count = deleted.len();
 
         // After: what was deleted.
         let mut book = self.book();
@@ -539,7 +566,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         record.claimed.clear();
         record.step = PurgeStep::Deleted;
         record.passes += 1;
-        Ok(self.commit_book(book))
+        Ok(self
+            .commit_books_then(Some(book), None, false, |_| summary.deleted += count)
+            .is_some())
     }
 
     fn final_scan(

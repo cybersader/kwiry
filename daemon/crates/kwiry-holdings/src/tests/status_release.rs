@@ -847,12 +847,7 @@ fn h50_a_possibly_sent_status_is_not_overtaken_on_the_same_list() {
     // A late receipt for K1 resolves it (T7).
     let k1_ack = rig.authority.state().status_receipts[&k1.key].1.clone();
     let delayed = rig.authority.state().status_ack_answer(&k1_ack);
-    rig.authority
-        .state()
-        .late_status
-        .as_ref()
-        .unwrap()
-        .deliver(k1.key.clone(), delayed);
+    rig.authority.state().deliveries[&k1.key].deliver(k1.key.clone(), delayed);
     let pass = rig.status().unwrap();
     assert_eq!((pass.sent, pass.receipts), (0, 1));
     assert!(rig.holder().state().status.uncertain.is_empty());
@@ -1482,12 +1477,7 @@ fn delayed_refusals_apply_route_guards_before_any_more_traffic_or_deletion() {
         later(rig);
         rig.status().unwrap();
         let response = rig.authority.state().problem_answer(status, code, None);
-        rig.authority
-            .state()
-            .late_status
-            .as_ref()
-            .unwrap()
-            .deliver(key.clone(), response);
+        rig.authority.state().deliveries[&key].deliver(key.clone(), response);
         let posts = rig.authority.state().posts();
         assert_eq!(rig.status().unwrap().sent, 0);
         assert_eq!(rig.authority.state().posts(), posts);
@@ -1653,11 +1643,7 @@ fn deliver_problem(rig: &Rig, key: &str, code: u16, problem: &str, retry: Option
     let mut state = rig.authority.state();
     let mut response = state.problem_answer(code, problem, None);
     response.retry_after_s = retry;
-    state
-        .late_status
-        .as_ref()
-        .unwrap()
-        .deliver(key.into(), response);
+    state.deliveries[key].deliver(key.into(), response);
 }
 
 #[test]
@@ -1669,7 +1655,8 @@ fn both_deletion_entries_consume_queued_custody_refusals_first() {
         rig.authority.state().issue_release(&digest, 2);
         applied(rig.relist());
         rig.purger.add(PLAIN, B, 1);
-        deliver_problem(rig, "older", 503, "lifecycle_unavailable", None);
+        let key = rig.holder().state().status.manifests[&digest].key.clone();
+        deliver_problem(rig, &key, 503, "lifecycle_unavailable", None);
         let before = rig.purger.view().deletions.clone();
         let posts = rig.authority.state().posts();
         if release {
@@ -1689,11 +1676,21 @@ fn a_queued_403_closes_serving_and_is_not_starved_or_downgraded_by_401() {
         let rig = &mut w.rig;
         let gate = rig.gate();
         assert!(gate.check(A).is_ok());
-        deliver_problem(rig, "older", 401, "invalid_holder_proof", None);
+        assert_eq!(rig.status().unwrap().receipts, 1);
+        let key = rig
+            .holder()
+            .state()
+            .status
+            .last_accepted
+            .as_ref()
+            .unwrap()
+            .key
+            .clone();
+        deliver_problem(rig, &key, 401, "invalid_holder_proof", None);
         if separate_passes {
             rig.status().unwrap();
         }
-        deliver_problem(rig, "later", 403, "holder_not_authorized", None);
+        deliver_problem(rig, &key, 403, "holder_not_authorized", None);
         assert_eq!(gate.check(A), Err(crate::gate::Refusal::AuthHalt));
         let posts = rig.authority.state().posts();
         assert_eq!(rig.report().unwrap().sent, 0);
@@ -1783,11 +1780,7 @@ fn already_committed_byte_identical_receipts_are_noops() {
     for _ in 0..4 {
         let state = rig.authority.state();
         let ack = state.status_ack_answer(&receipt);
-        state
-            .late_status
-            .as_ref()
-            .unwrap()
-            .deliver(key.clone(), ack);
+        state.deliveries[&key].deliver(key.clone(), ack);
         drop(state);
         assert_eq!(rig.status().unwrap(), Default::default());
     }
@@ -1807,7 +1800,8 @@ fn delayed_short_retry_after_cannot_shorten_a_long_one() {
     forced(rig, response);
     assert_eq!(rig.status().unwrap().sent, 1);
     rig.advance(1_000);
-    deliver_problem(rig, "older", 429, "rate_limited", Some(2));
+    let key = pending_status(rig).unwrap().key;
+    deliver_problem(rig, &key, 429, "rate_limited", Some(2));
     rig.status().unwrap();
     rig.advance(60_000);
     assert_eq!(rig.status().unwrap().sent, 0);
@@ -1835,4 +1829,89 @@ fn unreadable_second_manifest_does_not_block_reserved_first_release() {
     assert_eq!(rig.release().unwrap().executed, 1);
     assert_eq!(step(rig, &b), None);
     assert_eq!(release_deletions(rig, &a).len(), 2);
+}
+
+#[test]
+fn both_adapter_deletes_exclude_concurrent_inbox_delivery() {
+    use std::sync::mpsc::sync_channel;
+    for release in [false, true] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        assert_eq!(rig.status().unwrap().receipts, 1);
+        let key = rig
+            .holder()
+            .state()
+            .status
+            .last_accepted
+            .as_ref()
+            .unwrap()
+            .key
+            .clone();
+        if release {
+            let digest = purged_and_reported(&mut w);
+            w.rig.authority.state().issue_release(&digest, 2);
+            applied(w.rig.relist());
+        }
+        let rig = &mut w.rig;
+        let response = rig
+            .authority
+            .state()
+            .problem_answer(503, "lifecycle_unavailable", None);
+        let handle = rig.authority.state().deliveries[&key].clone();
+        let inbox = rig.holder().inbox.clone();
+        let (entered, start) = sync_channel(0);
+        let (probe, result) = sync_channel(0);
+        // A rendezvous and try_lock inside the adapter, not a scheduler timeout.
+        let sender = std::thread::spawn(move || {
+            start.recv().unwrap();
+            probe.send(inbox.delivery_blocked()).unwrap();
+            handle.deliver(key, response);
+        });
+        rig.purger.view().on_delete = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            assert!(
+                result.recv().unwrap(),
+                "the adapter delete lost its delivery guard"
+            );
+        }));
+        let before = rig.purger.deleted().len();
+        if release {
+            let _ = rig.release();
+        } else {
+            let _ = rig.purge();
+        }
+        sender.join().unwrap();
+        assert!(rig.purger.deleted().len() > before);
+        let after = rig.purger.deleted();
+        assert_eq!(rig.release(), Err(ObligationsRefused::LifecycleUnavailable));
+        assert_eq!(rig.purge(), Err(ObligationsRefused::LifecycleUnavailable));
+        assert_eq!(rig.purger.deleted(), after);
+    }
+}
+
+#[test]
+fn delete_counts_wait_for_the_post_delete_write_on_both_paths() {
+    for release in [false, true] {
+        let mut w = world();
+        if release {
+            let digest = purged_and_reported(&mut w);
+            w.rig.authority.state().issue_release(&digest, 2);
+            applied(w.rig.relist());
+        }
+        let rig = &mut w.rig;
+        let faults = rig.io_faults.clone();
+        rig.purger.view().on_delete = Some(Box::new(move || faults.fail_writes(1)));
+        let before = rig.purger.deleted().len();
+        let count = if release {
+            rig.release().unwrap().deleted
+        } else {
+            rig.purge().unwrap().deleted
+        };
+        assert!(
+            rig.purger.deleted().len() > before,
+            "the adapter did delete"
+        );
+        assert_eq!(count, 0, "the holder did not commit the deletion");
+        assert!(codes(rig).contains(&"disk_reserve_exhausted"));
+    }
 }

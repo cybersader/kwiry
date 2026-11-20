@@ -151,6 +151,8 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) status_spacing_until: u64,
     pub(crate) dispatched_key: Option<String>,
     pub(crate) inbox: crate::client::ResponseInbox,
+    pub(crate) late_reports:
+        std::collections::VecDeque<(String, String, crate::client::HttpResponse)>,
     pub(crate) late_acks: std::collections::VecDeque<(String, crate::client::HttpResponse)>,
 }
 
@@ -213,6 +215,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if engine.is_some() && state.reset_pending {
             events.emit(HolderEvent::Engine(EngineEvent::PinHistoryUnavailable));
         }
+        let now = clock.mono_ms();
+        let restart_deadline = |delay: Option<u64>| delay.map_or(0, |ms| now.saturating_add(ms));
+        let report_backoff_until = restart_deadline(state.obligations.restart_wait_ms);
+        let status_backoff_until = restart_deadline(state.status.restart_wait_ms);
         let mut writer = started.writer;
         {
             // v2 H.45: the instant durable state becomes untrustworthy, every
@@ -225,11 +231,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 events.emit(HolderEvent::HolderStateUnwritable);
             }));
         }
-        let inbox = crate::client::ResponseInbox::new(gate.clone());
-        transport.bind_response_inbox(inbox.clone());
+        let inbox = crate::client::ResponseInbox::new(gate.clone(), events.clone());
         let mut holder = Self {
             inbox,
             late_acks: Default::default(),
+            late_reports: Default::default(),
             config,
             writer,
             key: started.key,
@@ -253,9 +259,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             rollback_suspected: false,
             lifecycle_unavailable: false,
             report_backoff_ms: 0,
-            report_backoff_until: 0,
+            report_backoff_until,
             status_backoff_ms: 0,
-            status_backoff_until: 0,
+            status_backoff_until,
             status_unverifiable: 0,
             status_spacing_until,
             dispatched_key: None,
@@ -689,18 +695,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let plan = classify(&list, &held, &tombstoned);
 
         // Apply, durable part: one atomic commit.
-        if engine_on {
-            let engine_state = &self.writer.state().engine;
-            let size = engine_state.pin_history.len() + new_pairs.len();
-            let size = u64::try_from(size).unwrap_or(u64::MAX);
-            let ceiling = engine_state.pin_history_ceiling;
-            if let Some(raised) = engine::pin_history::raised_ceiling(size, ceiling) {
-                self.events
-                    .emit(HolderEvent::Engine(EngineEvent::PinHistoryCeilingRaised {
-                        from: ceiling,
-                        to: raised,
-                    }));
-            }
+        let ceiling_change = engine_on
+            .then(|| {
+                let state = &self.writer.state().engine;
+                let size =
+                    u64::try_from(state.pin_history.len() + new_pairs.len()).unwrap_or(u64::MAX);
+                engine::pin_history::raised_ceiling(size, state.pin_history_ceiling)
+                    .map(|to| (state.pin_history_ceiling, to))
+            })
+            .flatten();
+        if let Some((from, to)) = ceiling_change {
+            self.events.emit(HolderEvent::Engine(
+                EngineEvent::PinHistoryCeilingWillRise { from, to },
+            ));
         }
         // Floors, ended channels and resolved attempts ride in A1 (R12, R13,
         // R15): if they cannot be made durable, the apply fails whole.
@@ -713,6 +720,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         if let Err(error) = self.writer.apply_list(mutation) {
             return self.apply_failed("A1", Some(&error));
+        }
+        if let Some((from, to)) = ceiling_change {
+            self.events
+                .emit(HolderEvent::Engine(EngineEvent::PinHistoryCeilingRaised {
+                    from,
+                    to,
+                }));
         }
         // A1 superseded the list applied before: nothing may be purged or
         // reported on its strength any more. Until this apply reaches A4,

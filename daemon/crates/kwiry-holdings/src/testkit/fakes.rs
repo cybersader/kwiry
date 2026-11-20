@@ -300,6 +300,7 @@ pub struct PurgerView {
     /// Every deletion the purger refused, with its reason.
     pub refused: Vec<(String, &'static str)>,
     pub fail_delete: BTreeSet<String>,
+    pub on_delete: Option<Box<dyn FnOnce() + Send>>,
     pub fail_detach: bool,
     pub fail_barrier: bool,
     pub fail_census: bool,
@@ -439,6 +440,9 @@ impl ArtifactPurger for MemoryPurger {
     fn delete(&mut self, unit_id: &str, claimant: &Claimant) -> Result<DeleteOutcome, StoreError> {
         let mut view = self.view();
         view.calls.push("delete");
+        if let Some(hook) = view.on_delete.take() {
+            hook();
+        }
         let Some(unit) = view.units.get(unit_id).cloned() else {
             return Ok(DeleteOutcome::Absent);
         };
