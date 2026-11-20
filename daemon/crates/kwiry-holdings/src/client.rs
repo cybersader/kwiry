@@ -129,7 +129,7 @@ impl ResponseInbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn delivery_blocked(&self) -> bool {
         matches!(
             self.queue.try_lock(),
