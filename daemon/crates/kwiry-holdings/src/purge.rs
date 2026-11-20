@@ -186,6 +186,8 @@ pub struct PurgeSummary {
 pub enum ObligationsRefused {
     /// Authority reported custody unavailable; a successful list apply clears it.
     LifecycleUnavailable,
+    /// No current positive list evidence, including route halt or list failure.
+    NoCurrentAuthority,
     /// v2 H.45: the holder fail-stopped; no purge, report or write runs.
     HolderStateUnwritable,
     /// No list was applied in this process: nothing is known to be owed.
@@ -284,8 +286,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         Ok(())
     }
 
-    /// Deletion needs everything reporting needs, and no rollback suspicion.
-    pub(crate) fn purge_allowed(&self) -> Result<(), ObligationsRefused> {
+    /// Every adapter delete requires a successfully applied, still-current list
+    /// and uninterrupted authority evidence. Only a fresh apply restores it.
+    pub(crate) fn deletion_permitted(&self) -> Result<(), ObligationsRefused> {
         self.obligations_allowed()?;
         if self.apply_failed_since_admit {
             return Err(ObligationsRefused::ApplyIncomplete);
@@ -295,6 +298,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }
         if self.rollback_suspected {
             return Err(ObligationsRefused::AuthorityRollbackSuspected);
+        }
+        if self.route != crate::holder::RouteHealth::Normal
+            || self.list_failed
+            || self.list_request_invalid
+            || !self.applied.as_ref().is_some_and(|a| {
+                self.clock.wall_ms() < a.expires_wall_ms && self.clock.mono_ms() < a.expires_mono_ms
+            })
+        {
+            return Err(ObligationsRefused::NoCurrentAuthority);
         }
         Ok(())
     }
@@ -326,7 +338,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &mut dyn ArtifactPurger,
     ) -> Result<usize, ObligationsRefused> {
-        self.purge_allowed()?;
+        self.deletion_permitted()?;
         let Ok(inventory) = self.inventory(purger) else {
             self.events
                 .emit(HolderEvent::PurgeStepFailed { step: "census" });
@@ -334,7 +346,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         let mut detached = 0;
         for target in self.targets(&inventory) {
-            self.purge_allowed()?;
+            self.deletion_permitted()?;
             let step = self
                 .writer
                 .state()
@@ -376,7 +388,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &mut dyn ArtifactPurger,
     ) -> Result<PurgeSummary, ObligationsRefused> {
-        self.purge_allowed()?;
+        self.deletion_permitted()?;
         let mut summary = PurgeSummary::default();
         let Ok(inventory) = self.inventory(purger) else {
             self.events
@@ -496,7 +508,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut failed = 0;
         for unit in &claims {
             // H.45: nothing runs after a fail-stop, deletions included.
-            self.purge_allowed()?;
+            self.deletion_permitted()?;
             match purger.delete(unit, &claimant) {
                 Ok(DeleteOutcome::Deleted | DeleteOutcome::Absent) => {
                     deleted.insert(unit.clone());

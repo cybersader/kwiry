@@ -71,8 +71,9 @@ pub enum TransportError {
 /// timeouts they are given.
 pub trait Transport {
     /// Nonblocking delivery of an earlier status POST response that arrived
-    /// after the synchronous call returned. Never posts a replacement.
-    fn take_late_status_response(&self) -> Option<HttpResponse> {
+    /// after the synchronous call returned, paired with the original request
+    /// key from the transport (not a response claim). Never posts a replacement.
+    fn take_late_status_response(&self) -> Option<(String, HttpResponse)> {
         None
     }
 

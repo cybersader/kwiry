@@ -114,7 +114,10 @@ impl Claimant {
 ///
 /// Unit ids are random and holder-defined (an object id, a staging build id,
 /// a quarantine entry name). They MUST NOT encode a resource id: they appear
-/// in quarantine manifests and in final-scan records.
+/// in quarantine manifests and in final-scan records. An id names **one
+/// immutable generation**, across deletion, restart and deferred publication.
+/// Changed or replacement bytes MUST receive a fresh id even if their storage
+/// location and attribution are identical; never recycle an absent unit's id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedUnit {
     pub unit_id: String,

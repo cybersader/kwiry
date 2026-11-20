@@ -59,6 +59,9 @@ pub const QUEUE_CAP_MS: u64 = 30_000;
 pub const ABSENCE_BOUND_S: i64 = 120;
 /// Unverifiable acks in a row before the channel halts (R17).
 pub const UNVERIFIABLE_HALT: u8 = 3;
+// Positive permission to recover the live queue after an operator restart.
+// Removing an existing file does not need space for another lifecycle record.
+const QUEUE_SEAL: &str = "report-queue.seal";
 const BACKOFF_START_MS: u64 = 10_000;
 const BACKOFF_MAX_MS: u64 = 300_000;
 
@@ -354,6 +357,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// and reports may run again.
     pub(crate) fn after_apply(&mut self, prune: &[Attempt]) {
         self.relist_before_report = false;
+        self.list_failed = false;
         self.apply_failed_since_admit = false;
         self.lifecycle_unavailable = false;
         self.rollback_suspected = false;
@@ -374,9 +378,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &dyn ArtifactPurger,
     ) -> Result<ReportSummary, ObligationsRefused> {
-        self.obligations_allowed()?;
         let mut summary = ReportSummary::default();
-        if self.route != RouteHealth::Normal || self.apply_failed_since_admit {
+        if self.traffic_halted() {
+            return Ok(summary);
+        }
+        self.obligations_allowed()?;
+        if self.apply_failed_since_admit {
             return Ok(summary);
         }
         let Ok(inventory) = self.inventory(purger) else {
@@ -1079,6 +1086,58 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.route = RouteHealth::AuthHalt(AuthHalt::NotAuthorized);
         self.gate.set_auth_halt();
         self.events.emit(HolderEvent::HolderNotAuthorized);
+        // Revoke recovery permission before attempting the larger cancellation W.
+        // Even a crash after ENOSPC cannot turn an armed key live again.
+        if let Err(error) = self.writer.remove_side_file(QUEUE_SEAL) {
+            crate::holder::report_write_failure(
+                self.events.as_ref(),
+                &crate::state::WriteError::Io(error),
+            );
+            // Try the cancellation anyway; a failure of both operations leaves
+            // no trustworthy recovery record.
+            if !self.persist_cancellation() {
+                self.writer.mark_unwritable();
+            }
+        } else {
+            self.persist_cancellation();
+        }
+    }
+
+    pub(crate) fn recover_cancellation(&mut self) -> Result<(), crate::holder::ConfigError> {
+        use crate::holder::ConfigError::CancellationRecovery;
+        let seal = self
+            .writer
+            .dir()
+            .read(QUEUE_SEAL)
+            .map_err(|_| CancellationRecovery)?;
+        if seal.as_deref() != Some(self.writer.enrollment().holder_id.as_bytes()) {
+            if !self.persist_cancellation() {
+                return Err(CancellationRecovery);
+            }
+            let id = self.writer.enrollment().holder_id.clone();
+            self.writer
+                .write_side_file(QUEUE_SEAL, id.as_bytes())
+                .map_err(|failure| {
+                    crate::holder::report_write_failure(
+                        self.events.as_ref(),
+                        &crate::state::WriteError::Io(failure.error),
+                    );
+                    CancellationRecovery
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Traffic stops immediately on 403, but cancellation is only observable
+    /// as complete after the queue commit. Halted passes retry the write, not HTTP.
+    pub(crate) fn traffic_halted(&mut self) -> bool {
+        if self.route == RouteHealth::AuthHalt(AuthHalt::NotAuthorized) && !self.fail_stopped() {
+            self.persist_cancellation();
+        }
+        self.route != RouteHealth::Normal
+    }
+
+    fn persist_cancellation(&mut self) -> bool {
         let mut next = self.writer.state().obligations.clone();
         let mut cancelled = 0;
         let obligations: Vec<String> = next.channels.keys().cloned().collect();
@@ -1102,13 +1161,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if crate::status::cancel_status_on_403(&mut status) {
             cancelled += 1;
         }
-        // The route halt above already stops every send in memory; the
-        // durable record only matters across the operator restart.
         if cancelled > 0 {
-            self.commit_lifecycle(Some(next), Some(status), false);
+            if !self.commit_lifecycle(Some(next), Some(status), false) {
+                return false;
+            }
             self.events
                 .emit(HolderEvent::ReportsCancelled { count: cancelled });
         }
+        true
     }
 
     /// N5: an audited operator resume of a bug-halted report channel. Its

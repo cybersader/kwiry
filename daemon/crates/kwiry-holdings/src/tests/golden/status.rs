@@ -115,7 +115,8 @@ impl GoldenRig {
     }
 
     fn answer_status(&mut self, pending: &StatusPending, exchange: &Value) -> Answer {
-        self.holder.classify_status(pending, Ok(response(exchange)))
+        self.holder
+            .classify_status(&pending.key, Ok(response(exchange)))
     }
 
     fn instruction_step(&self, id: &str) -> Option<ReleaseStep> {

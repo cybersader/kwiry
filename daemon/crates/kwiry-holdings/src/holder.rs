@@ -57,6 +57,8 @@ pub enum ConfigError {
     EngineSettings,
     #[error("the enrolled holder kind is not the kind the engine profile binds")]
     HolderKind,
+    #[error("could not recover durable report cancellation")]
+    CancellationRecovery,
 }
 
 /// The cause of an auth halt (v2 §C.0).
@@ -115,7 +117,8 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) engine: Option<EngineGate>,
     pub(crate) route: RouteHealth,
     /// v2 H.40: raised on a list-route `400`/`413`, until a list applies.
-    list_request_invalid: bool,
+    pub(crate) list_request_invalid: bool,
+    pub(crate) list_failed: bool,
     /// Profile S (H.24): pins of the list last applied in this process, by
     /// holding id. Empty at process start.
     baseline: HashMap<String, Option<RootPin>>,
@@ -144,11 +147,10 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) status_backoff_ms: u64,
     pub(crate) status_backoff_until: u64,
     /// Unverifiable status acks in a row (T6c after three).
-    /// Exact first dispatch time; the durable arm uses a conservative bound until the next W.
-    pub(crate) status_dispatch_ms: Option<i64>,
     pub(crate) status_unverifiable: u8,
-    /// A definitive stale-list response whose rejection W still needs retry.
-    pub(crate) status_rejection_owed: Option<String>,
+    pub(crate) status_spacing_until: u64,
+    pub(crate) dispatched_key: Option<String>,
+    pub(crate) status_refusal: Option<crate::status::StatusRefusal>,
 }
 
 /// The parts of the list last applied in this process that obligations and
@@ -157,6 +159,8 @@ pub struct Holder<S: ResourceStore, T: Transport> {
 pub struct Applied {
     pub list_ref: crate::wire::ListRef,
     pub page0_iat_ms: i64,
+    pub(crate) expires_wall_ms: i64,
+    pub(crate) expires_mono_ms: u64,
     /// Every item that is not `active`.
     pub items: Vec<Item>,
     pub plan: PublishPlan,
@@ -196,6 +200,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .engine
             .map(|settings| EngineGate::new(gate.clone(), settings));
         let list_request_invalid = state.list_request_invalid;
+        // Monotonic clocks do not span boots. Without trusted elapsed time, wait
+        // a full interval for a different key, even if the wall clock jumped.
+        let status_spacing_until = if state.status.last_new_key_ms.is_some() {
+            clock
+                .mono_ms()
+                .saturating_add(crate::status::STATUS_NEW_KEY_SPACING_MS as u64)
+        } else {
+            0
+        };
         if engine.is_some() && state.reset_pending {
             events.emit(HolderEvent::Engine(EngineEvent::PinHistoryUnavailable));
         }
@@ -211,7 +224,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 events.emit(HolderEvent::HolderStateUnwritable);
             }));
         }
-        Ok(Self {
+        let mut holder = Self {
             config,
             writer,
             key: started.key,
@@ -223,6 +236,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             engine,
             route: RouteHealth::Normal,
             list_request_invalid,
+            list_failed: false,
             baseline: HashMap::new(),
             scheduler: RelistScheduler::new(300),
             applied: None,
@@ -238,9 +252,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             status_backoff_ms: 0,
             status_backoff_until: 0,
             status_unverifiable: 0,
-            status_dispatch_ms: None,
-            status_rejection_owed: None,
-        })
+            status_refusal: None,
+            status_spacing_until,
+            dispatched_key: None,
+        };
+        holder.recover_cancellation()?;
+        Ok(holder)
     }
 
     /// The core serving gate.
@@ -300,7 +317,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if self.fail_stopped() {
             return ListOutcome::Failed(FetchFailure::HolderStateUnwritable);
         }
-        if self.route != RouteHealth::Normal {
+        if self.traffic_halted() {
             return ListOutcome::AuthHalted;
         }
         // Startup honours a recorded release reservation before any list
@@ -340,7 +357,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     self.events.emit(HolderEvent::ListRequestInvalidCleared);
                 }
             }
-            ListOutcome::Failed(failure) => self.schedule_after_failure(failure, finished),
+            ListOutcome::Failed(failure) => {
+                self.list_failed = true;
+                self.schedule_after_failure(failure, finished);
+            }
             _ => self.scheduler.on_failure(finished, None),
         }
         outcome
@@ -429,6 +449,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     pub(crate) fn on_failure(&mut self, failure: &FetchFailure) {
+        self.list_failed = true;
         let event = match failure {
             FetchFailure::LifecycleUnavailable { .. } => {
                 self.lifecycle_unavailable = true;
@@ -687,7 +708,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.scheduler
             .set_relist_seconds(list.head.lease.relist_seconds);
         self.store.revoke(&plan);
+        let lease_ms = list.head.lease.serve_seconds.saturating_mul(1000);
         self.applied = Some(Applied {
+            expires_wall_ms: list
+                .page0_iat_ms
+                .saturating_add(i64::try_from(lease_ms).unwrap_or(i64::MAX)),
+            expires_mono_ms: list.page0_received_mono_ms.saturating_add(lease_ms),
             list_ref: list.list_ref(),
             page0_iat_ms: list.page0_iat_ms,
             items: list

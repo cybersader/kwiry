@@ -282,7 +282,7 @@ fn nothing_is_deleted_without_a_listed_obligation_and_its_exact_claimant() {
     rig.advance(1_000_000);
     failed(rig.holder().list_once());
     assert_eq!(plain(rig, A), Err(Refusal::LeaseLapsed));
-    rig.purge().unwrap();
+    assert_eq!(rig.purge(), Err(ObligationsRefused::NoCurrentAuthority));
 
     // B leaves the list: absence alone authorizes nothing, and its data
     // becomes unattributed quarantine.

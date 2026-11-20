@@ -628,7 +628,7 @@ fn status_acks_are_verified_against_the_exact_attempt_and_body() {
             .state()
             .sign_status_ack(&Value::Object(claims));
         let answer = rig.authority.state().status_ack_answer(&ack);
-        let class = rig.holder().classify_status(&pending, Ok(answer));
+        let class = rig.holder().classify_status(&pending.key, Ok(answer));
         assert!(
             matches!(
                 class,
@@ -847,7 +847,10 @@ fn h50_a_possibly_sent_status_is_not_overtaken_on_the_same_list() {
     // A late receipt for K1 resolves it (T7).
     let k1_ack = rig.authority.state().status_receipts[&k1.key].1.clone();
     let delayed = rig.authority.state().status_ack_answer(&k1_ack);
-    rig.authority.state().late_status.push_back(delayed);
+    rig.authority
+        .state()
+        .late_status
+        .push_back((k1.key.clone(), delayed));
     let pass = rig.status().unwrap();
     assert_eq!((pass.sent, pass.receipts), (0, 1));
     assert!(rig.holder().state().status.uncertain.is_empty());
@@ -1109,6 +1112,9 @@ fn a_lost_nonzero_ack_still_requires_a_corrective_zero_after_d() {
     rig.restart().unwrap();
     applied(rig.relist());
     assert!(rig.holder().state().status.uncertain.is_empty());
+    // Across a restart, elapsed wall time is not proof of 60 s spacing.
+    assert_eq!(rig.status().unwrap().sent, 0);
+    later(&rig);
     assert_eq!(rig.status().unwrap().receipts, 1);
     assert_eq!(
         accepted_statuses(&rig).last().unwrap()["quarantined_unattributed"],
@@ -1161,6 +1167,14 @@ fn failed_status_commits_do_not_report_a_receipt_or_halt() {
         assert_eq!(summary.sent, 1);
         assert_eq!((summary.receipts, summary.halted), (0, 0));
         assert!(!codes(rig).contains(&"lifecycle_status_bug_halt"));
+        if !receipt {
+            let posts = rig.authority.state().posts();
+            later(rig);
+            let pass = rig.status().unwrap();
+            assert_eq!((pass.halted, pass.sent), (1, 0));
+            assert_eq!(rig.authority.state().posts(), posts);
+            assert!(rig.holder().state().status.halted);
+        }
     }
 }
 
@@ -1395,4 +1409,223 @@ fn invalidated_unsent_status_manifest_is_eventually_pruned() {
     rig.advance(crate::status::MANIFEST_RETENTION_MS as u64 + 1);
     rig.status().unwrap();
     assert!(!path.exists());
+}
+
+#[test]
+fn an_approved_generation_id_cannot_be_republished_before_reservation() {
+    let mut w = world();
+    let digest = purged_and_reported(&mut w);
+    let rig = &mut w.rig;
+    let ins = rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    let old = &w.x_units[0];
+    let bytes = rig.purger.view().units.remove(old).unwrap();
+    rig.purger.publish(old, bytes);
+    assert!(!rig.purger.present(old));
+    let new = rig.purger.add(PLAIN, X, 1).pop().unwrap();
+    assert_eq!(rig.release().unwrap().mismatched, 1);
+    assert!(release_deletions(rig, &ins).is_empty());
+    assert!(rig.purger.present(&new));
+}
+
+#[test]
+fn list_failures_and_lease_expiry_withhold_all_deletion_until_apply() {
+    for failure in [
+        None,
+        Some(Forced::Unreachable),
+        Some(Forced::Timeout),
+        Some(Forced::Response(HttpResponse {
+            status: 413,
+            ..Default::default()
+        })),
+    ] {
+        let mut w = world();
+        let digest = purged_and_reported(&mut w);
+        let rig = &mut w.rig;
+        rig.authority.state().issue_release(&digest, 2);
+        applied(rig.relist());
+        if !matches!(failure, Some(Forced::Response(_))) {
+            rig.advance(901_000);
+        }
+        if let Some(f) = failure {
+            rig.authority.state().forced.push_back(f);
+            failed(rig.relist());
+        }
+        let calls = rig.purger.view().calls.len();
+        assert_eq!(rig.release(), Err(ObligationsRefused::NoCurrentAuthority));
+        assert_eq!(rig.purge(), Err(ObligationsRefused::NoCurrentAuthority));
+        assert_eq!(rig.purger.view().calls.len(), calls);
+        applied(rig.relist());
+        assert_eq!(rig.release().unwrap().executed, 1);
+    }
+}
+
+#[test]
+fn delayed_refusals_apply_route_guards_before_any_more_traffic_or_deletion() {
+    for (status, code) in [
+        (403, "holder_not_authorized"),
+        (503, "lifecycle_unavailable"),
+        (503, "authority_epoch_mismatch"),
+    ] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        rig.authority.state().drop_status_acks = 1;
+        assert_eq!(rig.status().unwrap().sent, 1);
+        let key = pending_status(rig).unwrap().key;
+        rig.purger.add_unattributable();
+        later(rig);
+        rig.status().unwrap();
+        let response = rig.authority.state().problem_answer(status, code, None);
+        rig.authority
+            .state()
+            .late_status
+            .push_back((key.clone(), response));
+        let posts = rig.authority.state().posts();
+        assert_eq!(rig.status().unwrap().sent, 0);
+        assert_eq!(rig.authority.state().posts(), posts);
+        assert!(rig.purge().is_err());
+        assert!(rig.purger.view().deletions.is_empty());
+        if status == 403 {
+            assert_eq!(rig.gate().check(A), Err(crate::gate::Refusal::AuthHalt));
+            let ack = rig.authority.state().status_receipts[&key].1.clone();
+            let claims = crate::jws::parse(&ack).unwrap().claims;
+            rig.authority.state().rotate_key([52; 32], false, true);
+            let rotated = rig
+                .authority
+                .state()
+                .sign_status_ack(&Value::Object(claims));
+            let gets = rig.authority.state().keyset_gets;
+            assert!(!rig.holder().receive_late_status_receipt(&rotated));
+            assert_eq!(rig.authority.state().keyset_gets, gets);
+        }
+    }
+}
+
+#[test]
+fn a_pre_resume_receipt_resolves_uncertainty_but_not_the_rearmed_gate() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    let current = epoch(rig);
+    assert!(rig.holder().arm_status_gate(&current));
+    rig.authority.state().drop_status_acks = 1;
+    rig.status().unwrap();
+    let key = pending_status(rig).unwrap().key;
+    let receipt = rig.authority.state().status_receipts[&key].1.clone();
+    later(rig);
+    problem(rig, 400, "invalid_request");
+    assert_eq!(rig.status().unwrap().halted, 1);
+    assert!(rig.holder().resume_status());
+    assert!(rig.holder().receive_late_status_receipt(&receipt));
+    assert!(!rig.holder().state().status.uncertain.contains_key(&key));
+    assert!(!rig.holder().state().obligations.status_gate.open());
+    assert_eq!(rig.report().unwrap().sent, 0);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    assert!(rig.holder().state().obligations.status_gate.open());
+}
+
+#[test]
+fn stepping_wall_forward_does_not_shorten_new_key_spacing() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    rig.clock.step_wall(65_000);
+    rig.purger.add_unattributable();
+    assert_eq!(rig.status().unwrap().sent, 0);
+    later(rig);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+}
+
+#[test]
+fn recovered_arm_starts_spacing_at_first_actual_dispatch() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    // Arm reached disk, first byte did not, and cancellation could not commit.
+    rig.purger.view().fail_freeze = true;
+    rig.io_faults.plan(vec![
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::BeforeRename,
+    ]);
+    assert_eq!(rig.status().unwrap().sent, 0);
+    assert_eq!(pending_status(rig).unwrap().status, PendingStatus::Armed);
+    rig.advance(150_000);
+    rig.restart().unwrap();
+    applied(rig.relist());
+    later(rig); // Both the original arm bound and the restart interval elapsed.
+    rig.purger.view().fail_freeze = false;
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    rig.purger.add_unattributable();
+    assert_eq!(rig.status().unwrap().sent, 0);
+    later(rig);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+}
+
+#[test]
+fn failed_403_cancellation_is_retried_without_post_even_across_restart() {
+    for restart in [false, true] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        rig.authority.state().drop_status_acks = 1;
+        rig.status().unwrap();
+        let key = pending_status(rig).unwrap().key;
+        rig.io_faults.fail_writes(1);
+        problem(rig, 403, "holder_not_authorized");
+        failed(rig.relist());
+        assert!(!codes(rig).contains(&"lifecycle_reports_cancelled"));
+        assert!(pending_status(rig).unwrap().live());
+        assert_eq!(rig.gate().check(A), Err(crate::gate::Refusal::AuthHalt));
+        let posts = rig.authority.state().posts();
+        if restart {
+            rig.restart().unwrap();
+        } else {
+            assert_eq!(rig.status().unwrap().sent, 0);
+        }
+        assert_eq!(rig.authority.state().posts(), posts);
+        assert!(codes(rig).contains(&"lifecycle_reports_cancelled"));
+        assert!(!pending_status(rig).unwrap().live());
+        assert!(rig.holder().state().status.uncertain.contains_key(&key));
+    }
+}
+
+#[test]
+fn status_pin_write_enospc_raises_storage_alert_not_a_bad_receipt() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.authority.state().rotate_key([81; 32], false, true);
+    rig.io_faults.plan(vec![
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::BeforeRename,
+    ]);
+    assert_eq!(rig.status().unwrap().receipts, 0);
+    assert!(codes(rig).contains(&"disk_reserve_exhausted"));
+    assert!(!codes(rig).contains(&"ack_unverifiable"));
+    later(rig);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+}
+
+#[test]
+fn status_receipt_must_advance_the_cited_list_sequence() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.authority.state().drop_status_acks = 1;
+    rig.status().unwrap();
+    let p = pending_status(rig).unwrap();
+    let ack = rig.authority.state().status_receipts[&p.key].1.clone();
+    let mut claims = crate::jws::parse(&ack).unwrap().claims;
+    claims["rev"]["seq"] = p.body.list_ref.rev.seq.into();
+    let ack = rig
+        .authority
+        .state()
+        .sign_status_ack(&Value::Object(claims));
+    let response = rig.authority.state().status_ack_answer(&ack);
+    assert_eq!(
+        rig.holder().classify_status(&p.key, Ok(response)),
+        crate::report::Answer::Unverifiable
+    );
+    assert!(rig.holder().state().status.last_accepted.is_none());
 }

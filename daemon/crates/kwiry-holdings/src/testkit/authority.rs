@@ -99,7 +99,8 @@ pub struct FakeState {
     last_list_start_mono: Option<u64>,
     exempt_next_start: bool,
     pub forced: VecDeque<Forced>,
-    pub late_status: VecDeque<HttpResponse>,
+    pub keyset_gets: usize,
+    pub late_status: VecDeque<(String, HttpResponse)>,
     pub hooks: Hooks,
     scheduled: Vec<(usize, Mutation)>,
     posts: usize,
@@ -179,6 +180,7 @@ impl FakeAuthority {
             exempt_next_start: false,
             forced: VecDeque::new(),
             late_status: VecDeque::new(),
+            keyset_gets: 0,
             hooks: Hooks::default(),
             scheduled: Vec::new(),
             posts: 0,
@@ -1506,7 +1508,7 @@ impl FakeState {
 }
 
 impl Transport for FakeAuthority {
-    fn take_late_status_response(&self) -> Option<HttpResponse> {
+    fn take_late_status_response(&self) -> Option<(String, HttpResponse)> {
         self.state().late_status.pop_front()
     }
     fn post(
@@ -1565,7 +1567,8 @@ impl Transport for FakeAuthority {
     }
 
     fn get(&self, url: &str, _timeouts: Timeouts) -> Result<HttpResponse, TransportError> {
-        let state = self.state();
+        let mut state = self.state();
+        state.keyset_gets += 1;
         match &state.keyset_statement {
             Some(statement) if url == format!("{}{ROUTE_KEYSET}", state.config.issuer) => {
                 Ok(HttpResponse {

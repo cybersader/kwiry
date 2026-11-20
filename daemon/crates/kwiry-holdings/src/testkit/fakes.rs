@@ -291,6 +291,8 @@ pub struct PurgerUnit {
 
 #[derive(Default)]
 pub struct PurgerView {
+    /// Generation identity outlives the physical inventory entry.
+    issued: BTreeSet<String>,
     pub units: BTreeMap<String, PurgerUnit>,
     pub detached: BTreeSet<ResourceKey>,
     /// Every unit deleted, with the obligation that claimed it.
@@ -350,7 +352,7 @@ impl MemoryPurger {
         let mut view = self.view();
         (0..count)
             .map(|_| {
-                let unit_id = format!("u{:04}", view.units.len());
+                let unit_id = view.fresh_id();
                 view.units.insert(
                     unit_id.clone(),
                     PurgerUnit {
@@ -371,7 +373,7 @@ impl MemoryPurger {
     /// Adds a unit the census cannot attribute to any resource.
     pub fn add_unattributable(&self) -> String {
         let mut view = self.view();
-        let unit_id = format!("u{:04}", view.units.len());
+        let unit_id = view.fresh_id();
         view.units.insert(
             unit_id.clone(),
             PurgerUnit {
@@ -589,9 +591,18 @@ impl ArtifactPurger for MemoryPurger {
 }
 
 impl PurgerView {
+    fn fresh_id(&mut self) -> String {
+        (self.issued.len()..)
+            .map(|n| format!("u{n:04}"))
+            .find(|id| self.issued.insert(id.clone()))
+            .unwrap()
+    }
+
     fn publish_unreserved(&mut self, id: String, unit: PurgerUnit) {
         if self.reservations.contains_key(&id) {
             self.refused.push((id, "reserved by a release"));
+        } else if !self.issued.insert(id.clone()) {
+            self.refused.push((id, "generation id already used"));
         } else {
             self.units.insert(id, unit);
         }

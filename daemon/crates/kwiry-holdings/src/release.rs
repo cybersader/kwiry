@@ -160,7 +160,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &mut dyn ArtifactPurger,
     ) -> Result<ReleaseSummary, ObligationsRefused> {
-        self.purge_allowed()?;
+        self.deletion_permitted()?;
         self.honor_reservations(purger)?;
         let mut summary = ReleaseSummary::default();
         let listed: Vec<Instruction> = self
@@ -169,7 +169,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .map(|a| a.instructions.clone())
             .unwrap_or_default();
         for instruction in listed {
-            self.purge_allowed()?;
+            self.deletion_permitted()?;
             if self
                 .writer
                 .state()
@@ -333,7 +333,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         id: &str,
         summary: &mut ReleaseSummary,
     ) -> Result<(), ObligationsRefused> {
-        self.purge_allowed()?;
+        self.deletion_permitted()?;
         let Some(record) = self.record(id) else {
             return Ok(());
         };
@@ -382,7 +382,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let mut failed = 0;
             for unit in &claims {
                 // H.45: nothing runs after a fail-stop, deletions included.
-                self.purge_allowed()?;
+                self.deletion_permitted()?;
                 match purger.delete(unit, &claimant) {
                     Ok(DeleteOutcome::Deleted | DeleteOutcome::Absent) => {
                         deleted.insert(unit.clone());
