@@ -37,7 +37,7 @@
 use crate::canonical::{is_sha256_tagged, labelled_digest, sha256_tagged};
 use crate::client::{HttpResponse, LIST_TIMEOUTS, Transport, TransportError, problem_code};
 use crate::events::HolderEvent;
-use crate::holder::{AuthHalt, Holder, RouteHealth};
+use crate::holder::{Holder, RouteHealth};
 use crate::obligations::{
     Attempt, Envelope, ObligationBook, PendingStatus, manifest_bytes, manifest_digest,
 };
@@ -603,23 +603,16 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             summary.record(self.apply_owed(owed));
             return Ok(summary);
         }
+        self.obligations_allowed()?;
+        if self.apply_failed_since_admit {
+            return Ok(summary);
+        }
         if let Some((key, response)) = self.late_acks.pop_front() {
-            // A route refusal narrows even if a newer list failed to apply. An
-            // affirmative answer must not refresh pins or broaden in that state.
-            if response.status == 200
-                && (self.obligations_allowed().is_err() || self.apply_failed_since_admit)
-            {
-                return Ok(summary);
-            }
             let answer = self.classify_status(&key, Ok(response));
             summary.record(answer);
             if answer == Answer::BackOff && self.clock.mono_ms() >= self.status_backoff_until {
                 self.status_back_off(None);
             }
-            return Ok(summary);
-        }
-        self.obligations_allowed()?;
-        if self.apply_failed_since_admit {
             return Ok(summary);
         }
         let Ok(inventory) = self.inventory(purger) else {
@@ -849,7 +842,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// T2 → T2d → the answer.
     fn status_transmit(&mut self, purger: &dyn ArtifactPurger, summary: &mut StatusSummary) {
         let mut replay_retried = false;
-        let mut expiry_retried = false;
         loop {
             if self.drain_deliveries().0
                 || self.fail_stopped()
@@ -902,6 +894,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let url = format!("{}{ROUTE_STATUS}", self.writer.enrollment().issuer);
             let content_type = self.config.profile.status_request_content_type();
             let delivery = self.inbox.bind(crate::client::Origin::Status, &pending.key);
+            let inbox = self.inbox.clone();
+            let ticket = inbox.ticket();
             let freeze = purger.freeze_publications().ok();
             let first_byte_ok = freeze.is_some()
                 && !self.fail_stopped()
@@ -909,29 +903,30 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 && self
                     .inventory(purger)
                     .is_ok_and(|now| self.status_guard(&pending, &now))
-                && !self.inbox.has_refusal()
                 && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS;
-            if !first_byte_ok {
+            #[cfg(all(test, unix))]
+            self.transport.before_dispatch();
+            let dispatched_at = self.clock.mono_ms();
+            let Some(start) = first_byte_ok.then(|| inbox.admit(ticket)).flatten() else {
                 drop(freeze);
                 self.cancel_status_attempt(&sent.attempt, previous_dispatch, summary);
                 self.drain_deliveries();
                 return;
-            }
-            if first_dispatch {
-                self.dispatched_key = Some(pending.key.clone());
-                self.status_spacing_until = self
-                    .clock
-                    .mono_ms()
-                    .saturating_add(STATUS_NEW_KEY_SPACING_MS as u64);
-            }
-            summary.sent += 1;
+            };
             let response = self.transport.post_lifecycle(
                 &url,
                 &content_type,
                 sent.compact.as_bytes(),
                 LIST_TIMEOUTS,
                 delivery,
+                start,
             );
+            if first_dispatch {
+                self.dispatched_key = Some(pending.key.clone());
+                self.status_spacing_until =
+                    dispatched_at.saturating_add(STATUS_NEW_KEY_SPACING_MS as u64);
+            }
+            summary.sent += 1;
             drop(freeze);
             let answer = self.classify_status(&pending.key, response);
             summary.record(answer);
@@ -947,12 +942,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 | Answer::Unverifiable
                 | Answer::AuthHalted => return,
                 Answer::RetryReplay if !replay_retried => replay_retried = true,
-                Answer::RetryExpired if !expiry_retried => expiry_retried = true,
-                Answer::RetryExpired => {
-                    self.events.emit(HolderEvent::ProofExpiredClockAlert);
-                    self.status_back_off(None);
-                    return;
-                }
+                Answer::RetryExpired => {}
                 Answer::RetryReplay | Answer::BackOff => {
                     // A `429` already backed off past its `Retry-After`.
                     if self.clock.mono_ms() >= self.status_backoff_until {
@@ -1057,11 +1047,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         request_key: &str,
         response: Result<HttpResponse, TransportError>,
     ) -> Answer {
-        let response = match response {
-            Ok(response) => response,
-            // T5: sent, outcome unknown; the attempt stays recorded.
-            Err(_) => return Answer::BackOff,
-        };
+        self.classify_post(
+            crate::client::Origin::Status,
+            request_key,
+            response,
+            |holder, response| holder.status_answer(request_key, response),
+        )
+    }
+
+    fn status_answer(&mut self, request_key: &str, response: HttpResponse) -> Answer {
         let code = problem_code(&response);
         match (response.status, code.as_deref()) {
             (200, _) => {
@@ -1085,6 +1079,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         self.on_status_ack(pending.as_ref(), ack)
                     }
                     Ok(_) => self.status_unverifiable(),
+                    Err(ReceiptFailure::Refused(answer)) => answer,
                     Err(ReceiptFailure::PinWrite) => Answer::BackOff,
                     Err(_) => self.status_unverifiable(),
                 }
@@ -1099,27 +1094,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 self.record_refusal(crate::transition::Owed::StatusHalt {
                     code: response.status,
                 })
-            }
-            (401, Some("replay")) => Answer::RetryReplay,
-            (401, Some("proof_expired")) => Answer::RetryExpired,
-            (401, _) => {
-                self.route = RouteHealth::AuthHalt(AuthHalt::InvalidProof);
-                self.events.emit(HolderEvent::HolderUnauthorized);
-                Answer::AuthHalted
-            }
-            (403, _) => {
-                self.on_not_authorized();
-                Answer::AuthHalted
-            }
-            (503, Some("lifecycle_unavailable")) => {
-                self.lifecycle_unavailable = true;
-                self.events.emit(HolderEvent::AuthorityUnreachable);
-                Answer::BackOff
-            }
-            (503, Some("authority_epoch_mismatch")) => {
-                self.rollback_suspected = true;
-                self.events.emit(HolderEvent::AuthorityRollbackSuspected);
-                Answer::BackOff
             }
             _ => {
                 if response.status == 429 {

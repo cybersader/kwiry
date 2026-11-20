@@ -302,10 +302,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let inbox = self.inbox.clone();
         let guard = loop {
             let mut guard = inbox.lock();
-            if guard.is_empty() {
+            if guard.deliveries.is_empty() {
                 break guard;
             }
-            let batch = std::mem::take(&mut *guard);
+            let batch = std::mem::take(&mut guard.deliveries);
             drop(guard);
             // Intake may call event/storage adapters. Reacquire and drain again
             // so callbacks cannot deadlock or slip a delivery past the final check.

@@ -66,9 +66,89 @@ impl Owed {
 pub(crate) enum ReceiptFailure {
     Unverifiable,
     PinWrite,
+    Refused(Answer),
 }
 
 impl<S: ResourceStore, T: Transport> Holder<S, T> {
+    fn apply_authority_refusal(&mut self, refusal: crate::client::AuthorityRefusal) -> Answer {
+        use crate::client::{AuthorityRefusal, FetchFailure};
+        match refusal {
+            AuthorityRefusal::Replay => Answer::RetryReplay,
+            AuthorityRefusal::Expired => Answer::RetryExpired,
+            AuthorityRefusal::Stop(failure) => {
+                self.apply_failure(&failure);
+                if matches!(
+                    failure,
+                    FetchFailure::NotAuthorized | FetchFailure::Unauthorized
+                ) {
+                    Answer::AuthHalted
+                } else {
+                    Answer::BackOff
+                }
+            }
+        }
+    }
+
+    /// Same intake for a synchronous POST and a delivery on either channel.
+    /// A timeout does not end a run of proof refusals: the next HTTP answer
+    /// may still arrive through the dispatch's retained delivery handle.
+    pub(crate) fn classify_post(
+        &mut self,
+        origin: crate::client::Origin,
+        key: &str,
+        response: Result<crate::client::HttpResponse, crate::client::TransportError>,
+        route_answer: impl FnOnce(&mut Self, crate::client::HttpResponse) -> Answer,
+    ) -> Answer {
+        let Ok(response) = response else {
+            return Answer::BackOff;
+        };
+        let answer = match crate::client::authority_refusal(&response) {
+            Some(refusal) => self.apply_authority_refusal(refusal),
+            None => route_answer(self, response),
+        };
+        // A late refusal from a superseded key has no proof to retry. It must
+        // not overwrite the current key's retry state on the same channel.
+        let current_key = match &origin {
+            crate::client::Origin::Status => self
+                .writer
+                .state()
+                .status
+                .pending
+                .as_ref()
+                .filter(|p| p.live())
+                .map(|p| &p.key),
+            crate::client::Origin::Report(ob) => self
+                .writer
+                .state()
+                .obligations
+                .channels
+                .get(ob)
+                .and_then(|c| c.pending.as_ref())
+                .filter(|p| p.live())
+                .map(|p| &p.key),
+        };
+        if current_key.is_some_and(|k| k != key) {
+            return answer;
+        }
+        let previous = self
+            .proof_retry
+            .get(&origin)
+            .filter(|(k, _)| k == key)
+            .map(|(_, a)| *a);
+        if matches!(answer, Answer::RetryExpired | Answer::RetryReplay) {
+            if previous == Some(answer) {
+                self.proof_retry.remove(&origin);
+                if answer == Answer::RetryExpired {
+                    self.events.emit(HolderEvent::ProofExpiredClockAlert);
+                }
+                return Answer::BackOff;
+            }
+            self.proof_retry.insert(origin, (key.to_owned(), answer));
+        } else if previous.is_some() {
+            self.proof_retry.remove(&origin);
+        }
+        answer
+    }
     pub(crate) fn verify_with_refresh<A>(
         &mut self,
         compact: &str,
@@ -79,12 +159,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             Err("kid") => {
                 let enrollment = self.writer.enrollment();
                 let profile = &self.config.profile;
-                let statement = crate::client::fetch_route_statement(
+                let statement = match crate::client::fetch_route_statement(
                     &self.transport,
                     &enrollment.issuer,
                     profile,
-                )
-                .ok_or(Unverifiable)?;
+                ) {
+                    Ok(s) => s.ok_or(Unverifiable)?,
+                    Err(r) => return Err(ReceiptFailure::Refused(self.apply_authority_refusal(r))),
+                };
                 let pins = crate::keys::verify_keyset(
                     &statement,
                     &enrollment.pinned,
@@ -118,7 +200,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         crate::status::StatusSummary,
         crate::report::ReportSummary,
     ) {
-        let batch = std::mem::take(&mut *self.inbox.lock());
+        let batch = std::mem::take(&mut self.inbox.lock().deliveries);
         self.intake(batch)
     }
 
@@ -132,13 +214,16 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         crate::status::StatusSummary,
         crate::report::ReportSummary,
     ) {
+        use crate::client::{AuthorityRefusal, FetchFailure, authority_refusal};
         use crate::client::{Origin, problem_code};
         use crate::holder::{AuthHalt, RouteHealth};
-        batch.sort_by_cached_key(|(_, _, r)| match (r.status, problem_code(r).as_deref()) {
-            (403, _) => 0,
-            (503, Some("lifecycle_unavailable" | "authority_epoch_mismatch")) => 1,
-            (401, _) => 2,
-            _ => 3,
+        batch.sort_by_cached_key(|(_, _, r)| match authority_refusal(r) {
+            Some(AuthorityRefusal::Stop(FetchFailure::NotAuthorized)) => 0,
+            Some(AuthorityRefusal::Stop(
+                FetchFailure::LifecycleUnavailable { .. } | FetchFailure::RollbackSuspected,
+            )) => 1,
+            Some(_) => 2,
+            None => 3,
         });
         let mut refusal = false;
         let mut status = crate::status::StatusSummary::default();

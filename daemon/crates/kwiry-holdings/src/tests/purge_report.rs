@@ -1620,3 +1620,30 @@ fn report_pin_write_failure_is_backoff_not_a_strike() {
     rig.advance(60_000);
     assert_eq!(rig.report().unwrap().receipts, 1);
 }
+
+#[test]
+fn obligation_receipts_must_advance_the_cited_list_even_when_uncertain() {
+    for uncertain in [false, true] {
+        let mut w = world(false);
+        let rig = &mut w.rig;
+        rig.authority.state().drop_acks = 1;
+        assert_eq!(rig.report().unwrap().sent, 1);
+        let p = pending(rig, &w.b_obligation).unwrap();
+        if uncertain {
+            let mut book = rig.holder().state().obligations.clone();
+            crate::report::invalidate(&mut book, &w.b_obligation);
+            rig.holder().writer.update_obligations(book).unwrap();
+        }
+        let ack = rig.authority.state().report_receipts[&p.key].1.clone();
+        let mut claims = crate::jws::parse(&ack).unwrap().claims;
+        claims["rev"]["seq"] = p.body.list_ref.rev.seq.into();
+        let ack = rig.authority.state().sign_ack(&Value::Object(claims));
+        let response = rig.authority.state().ack_answer(&ack, None);
+        assert_eq!(
+            rig.holder()
+                .delayed_report(&w.b_obligation, &p.key, response),
+            crate::report::Answer::Unverifiable
+        );
+        assert_eq!(floor(rig, &w.b_obligation), None);
+    }
+}

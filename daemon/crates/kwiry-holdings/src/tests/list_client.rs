@@ -279,6 +279,25 @@ fn replay_and_proof_expired_are_retried_once_and_never_halt() {
 }
 
 #[test]
+fn keyset_proof_expiry_shares_the_list_retry_budget() {
+    let (_dir, mut rig) = rig();
+    {
+        let mut authority = rig.authority.state();
+        authority.rotate_key([37; 32], false, true);
+        authority.keyset_response = Some(authority.problem_answer(401, "proof_expired", None));
+        authority.before_post(2, |a| a.forced.push_back(problem(401, "proof_expired")));
+    }
+    assert_eq!(
+        failed(rig.holder().list_once()),
+        FetchFailure::ProofExpiredTwice
+    );
+    assert_eq!(rig.authority.state().keyset_gets, 1);
+    assert_eq!(rig.authority.state().posts(), 2);
+    assert!(codes(&rig).contains(&"lifecycle_proof_expired"));
+    assert_eq!(rig.holder().route_health(), RouteHealth::Normal);
+}
+
+#[test]
 fn h8_counted_list_starts_are_five_seconds_apart() {
     let (_dir, mut rig) = rig();
     applied(rig.holder().list_once());

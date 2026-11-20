@@ -1915,3 +1915,130 @@ fn delete_counts_wait_for_the_post_delete_write_on_both_paths() {
         assert!(codes(rig).contains(&"disk_reserve_exhausted"));
     }
 }
+
+#[test]
+fn keyset_custody_refusal_while_verifying_a_receipt_blocks_release() {
+    let mut w = world();
+    let digest = purged_and_reported(&mut w);
+    let rig = &mut w.rig;
+    let ins = rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    let gets = {
+        let mut authority = rig.authority.state();
+        authority.rotate_key([37; 32], false, true);
+        authority.keyset_response =
+            Some(authority.problem_answer(503, "lifecycle_unavailable", None));
+        authority.keyset_gets
+    };
+    assert_eq!(rig.status().unwrap().receipts, 0);
+    assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+    assert_eq!(rig.release(), Err(ObligationsRefused::LifecycleUnavailable));
+    assert!(release_deletions(rig, &ins).is_empty());
+    assert!(!codes(rig).contains(&"ack_unverifiable"));
+}
+
+#[test]
+fn completed_refusal_between_arm_and_dispatch_prevents_both_posts() {
+    for status in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        // Take a genuine delivery handle from the opposite channel.
+        if status {
+            assert_eq!(rig.report().unwrap().sent, 1);
+        } else {
+            assert_eq!(rig.status().unwrap().sent, 1);
+        }
+        let posts = {
+            let mut authority = rig.authority.state();
+            let handle = authority.deliveries.values().next().unwrap().clone();
+            let refusal = authority.problem_answer(403, "holder_not_authorized", None);
+            authority.before_dispatch = Some(Box::new(move || {
+                handle.deliver(handle.request_key().into(), refusal)
+            }));
+            authority.posts()
+        };
+        let (sent, cancelled) = if status {
+            let s = rig.status().unwrap();
+            (s.sent, s.cancelled)
+        } else {
+            let s = rig.report().unwrap();
+            (s.sent, s.cancelled)
+        };
+        assert_eq!((sent, cancelled), (0, 1));
+        assert_eq!(rig.authority.state().posts(), posts);
+        assert!(rig.authority.state().before_dispatch.is_none());
+    }
+}
+
+#[test]
+fn delayed_expiry_then_retry_expiry_alerts_on_both_channels() {
+    for status in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        rig.authority.state().forced.push_back(Forced::Timeout);
+        let key = if status {
+            assert_eq!(rig.status().unwrap().sent, 1);
+            pending_status(rig).unwrap().key
+        } else {
+            assert_eq!(rig.report().unwrap().sent, 1);
+            rig.holder().state().obligations.channels[&w.b_obligation]
+                .pending
+                .as_ref()
+                .unwrap()
+                .key
+                .clone()
+        };
+        deliver_problem(rig, &key, 401, "proof_expired", None);
+        // Intake also runs on the other channel; it must retain the origin.
+        if status {
+            assert_eq!(rig.report().unwrap().sent, 0);
+        } else {
+            assert_eq!(rig.status().unwrap().sent, 0);
+        }
+        assert!(!codes(rig).contains(&"lifecycle_proof_expired"));
+        later(rig);
+        problem(rig, 401, "proof_expired");
+        let sent = if status {
+            rig.status().unwrap().sent
+        } else {
+            rig.report().unwrap().sent
+        };
+        assert_eq!(sent, 1);
+        assert!(codes(rig).contains(&"lifecycle_proof_expired"));
+        assert_eq!(
+            rig.holder().route_health(),
+            crate::holder::RouteHealth::Normal
+        );
+        let sent = if status {
+            rig.status().unwrap().sent
+        } else {
+            rig.report().unwrap().sent
+        };
+        assert_eq!(sent, 0);
+    }
+}
+
+#[test]
+fn late_status_receipt_survives_failed_apply_until_successful_apply() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.authority.state().drop_status_acks = 1;
+    assert_eq!(rig.status().unwrap().sent, 1);
+    let key = pending_status(rig).unwrap().key;
+    let ack = rig.authority.state().status_receipts[&key].1.clone();
+    later(rig);
+    problem(rig, 400, "invalid_request");
+    assert_eq!(rig.status().unwrap().halted, 1);
+    assert!(rig.holder().resume_status());
+    rig.store.view().fail_held = true;
+    assert!(matches!(rig.relist(), ListOutcome::ApplyFailed { .. }));
+    let response = rig.authority.state().status_ack_answer(&ack);
+    rig.authority.state().deliveries[&key].deliver(key.clone(), response);
+    assert_eq!(rig.status().unwrap().receipts, 0);
+    assert!(rig.holder().state().status.uncertain.contains_key(&key));
+    rig.store.view().fail_held = false;
+    applied(rig.relist());
+    let pass = rig.status().unwrap();
+    assert_eq!((pass.receipts, pass.sent), (1, 0));
+    assert!(!rig.holder().state().status.uncertain.contains_key(&key));
+}

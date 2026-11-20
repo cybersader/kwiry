@@ -149,6 +149,8 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     /// Unverifiable status acks in a row (T6c after three).
     pub(crate) status_unverifiable: u8,
     pub(crate) status_spacing_until: u64,
+    pub(crate) proof_retry:
+        std::collections::BTreeMap<crate::client::Origin, (String, crate::report::Answer)>,
     pub(crate) dispatched_key: Option<String>,
     pub(crate) inbox: crate::client::ResponseInbox,
     pub(crate) late_reports:
@@ -265,6 +267,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             status_unverifiable: 0,
             status_spacing_until,
             dispatched_key: None,
+            proof_retry: Default::default(),
         };
         holder.recover_cancellation()?;
         for owed in holder.writer.state().status.owed.clone() {
@@ -479,6 +482,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     pub(crate) fn on_failure(&mut self, failure: &FetchFailure) {
         self.list_failed = true;
+        self.apply_failure(failure);
+    }
+    pub(crate) fn apply_failure(&mut self, failure: &FetchFailure) {
         let event = match failure {
             FetchFailure::LifecycleUnavailable { .. } => {
                 self.lifecycle_unavailable = true;
@@ -972,6 +978,9 @@ struct Observer<'a> {
 }
 
 impl FetchHooks for Observer<'_> {
+    fn admit_post(&self) -> Option<crate::client::PostStart<'_>> {
+        self.inbox.admit(self.inbox.ticket())
+    }
     fn refusal_pending(&self) -> bool {
         self.inbox.has_refusal()
     }

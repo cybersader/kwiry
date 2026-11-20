@@ -788,7 +788,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     ) {
         let ob = target.obligation_id.clone();
         let mut replay_retried = false;
-        let mut expiry_retried = false;
         loop {
             if self.drain_deliveries().0
                 || !self.late_reports.is_empty()
@@ -866,6 +865,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let delivery = self
                 .inbox
                 .bind(crate::client::Origin::Report(ob.clone()), &pending.key);
+            let inbox = self.inbox.clone();
+            let ticket = inbox.ticket();
             let freeze = purger.freeze_publications().ok();
             let first_byte_ok = freeze.is_some()
                 && !self.fail_stopped()
@@ -876,23 +877,26 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                             .derive(target, &now)
                             .is_some_and(|c| c.counts == pending.body.counts)
                 })
-                && !self.inbox.has_refusal()
                 && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS;
-            if !first_byte_ok {
+            #[cfg(all(test, unix))]
+            self.transport.before_dispatch();
+            let dispatched_at = self.clock.mono_ms();
+            let Some(start) = first_byte_ok.then(|| inbox.admit(ticket)).flatten() else {
                 drop(freeze);
                 self.cancel_attempt(&ob, &sent.attempt, summary);
                 self.drain_deliveries();
                 return;
-            }
-            self.report_sends.push_back(self.clock.mono_ms());
-            summary.sent += 1;
+            };
             let response = self.transport.post_lifecycle(
                 &url,
                 &content_type,
                 sent.compact.as_bytes(),
                 LIST_TIMEOUTS,
                 delivery,
+                start,
             );
+            self.report_sends.push_back(dispatched_at);
+            summary.sent += 1;
             drop(freeze);
             let answer = self.classify(&ob, &pending, response);
             summary.record(answer);
@@ -904,12 +908,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Answer::Converged | Answer::Rejected | Answer::Halted => return,
                 Answer::Duplicate | Answer::Unverifiable | Answer::AuthHalted => return,
                 Answer::RetryReplay if !replay_retried => replay_retried = true,
-                Answer::RetryExpired if !expiry_retried => expiry_retried = true,
-                Answer::RetryExpired => {
-                    self.events.emit(HolderEvent::ProofExpiredClockAlert);
-                    self.back_off(None);
-                    return;
-                }
+                Answer::RetryExpired => {}
                 Answer::RetryReplay | Answer::BackOff => {
                     if self.clock.mono_ms() >= self.report_backoff_until {
                         self.back_off(None);
@@ -1029,11 +1028,21 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         pending: Option<&Pending>,
         response: Result<HttpResponse, TransportError>,
     ) -> Answer {
-        let response = match response {
-            Ok(response) => response,
-            // R10 / R2c: sent, outcome unknown; the attempt stays recorded.
-            Err(_) => return Answer::BackOff,
-        };
+        self.classify_post(
+            crate::client::Origin::Report(ob.into()),
+            key,
+            response,
+            |holder, response| holder.report_answer(ob, key, pending, response),
+        )
+    }
+
+    fn report_answer(
+        &mut self,
+        ob: &str,
+        key: &str,
+        pending: Option<&Pending>,
+        response: HttpResponse,
+    ) -> Answer {
         let code = problem_code(&response);
         match (response.status, code.as_deref()) {
             (200, _) => {
@@ -1056,6 +1065,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         ack,
                         outcome.as_deref() == Some("already_complete"),
                     ),
+                    Err(crate::transition::ReceiptFailure::Refused(answer)) => answer,
                     Err(crate::transition::ReceiptFailure::PinWrite) => Answer::BackOff,
                     Err(_) => self.unverifiable(ob),
                 }
@@ -1070,6 +1080,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     });
                 match current.map(|c| self.verify_with_refresh(&c, Self::verify_ack)) {
                     Some(Ok(ack)) => self.on_ack(ob, key, pending, ack, true),
+                    Some(Err(crate::transition::ReceiptFailure::Refused(answer))) => answer,
                     Some(Err(crate::transition::ReceiptFailure::PinWrite)) => Answer::BackOff,
                     _ => self.unverifiable(ob),
                 }
@@ -1090,28 +1101,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     ob: ob.into(),
                     code: response.status,
                 })
-            }
-            (401, Some("replay")) => Answer::RetryReplay,
-            (401, Some("proof_expired")) => Answer::RetryExpired,
-            (401, _) => {
-                self.route = RouteHealth::AuthHalt(AuthHalt::InvalidProof);
-                self.events.emit(HolderEvent::HolderUnauthorized);
-                Answer::AuthHalted
-            }
-            (403, _) => {
-                self.on_not_authorized();
-                Answer::AuthHalted
-            }
-            (503, Some("lifecycle_unavailable")) => {
-                self.lifecycle_unavailable = true;
-                self.events.emit(HolderEvent::AuthorityUnreachable);
-                Answer::BackOff
-            }
-            (503, Some("authority_epoch_mismatch")) => {
-                // H.12 step 2 or 4: no purge until a verified list applies.
-                self.rollback_suspected = true;
-                self.events.emit(HolderEvent::AuthorityRollbackSuspected);
-                Answer::BackOff
             }
             _ => {
                 if response.status == 429 {
@@ -1211,6 +1200,24 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .is_ok()
     }
 
+    // Uncertain records retain exact sent bytes rather than a second copy of
+    // the business claims. Read the cited revision from those same bytes.
+    fn uncertain_receipt_advances(&self, ack: &Ack) -> Option<bool> {
+        let bytes = self
+            .writer
+            .dir()
+            .read(&sent_file(&ack.report_digest))
+            .ok()??;
+        if sha256_tagged(&bytes) != ack.report_digest {
+            return None;
+        }
+        std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|s| crate::jws::parse(s).ok())
+            .and_then(|j| j.claims.get("list_ref")?.get("rev")?.get("seq")?.as_u64())
+            .map(|seq| ack.rev.seq > seq)
+    }
+
     fn on_ack(
         &mut self,
         ob: &str,
@@ -1228,7 +1235,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         // convergence (which itself requires the reported obligation).
         let own_obligation =
             ack.obligation_id == ob && pending.is_none_or(|p| p.body.obligation_id == ob);
-        if !convergence
+        let replay = !convergence && ack.idempotency_key == request_key;
+        if replay
             && own_obligation
             && let Some(pending) = pending.filter(|p| ack.idempotency_key == p.key)
         {
@@ -1239,7 +1247,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 .any(|a| a.digest == ack.report_digest && a.jti == ack.report_jti)
                 && ack.obligation_id == pending.body.obligation_id
                 && ack.holding_id == pending.body.holding_id
-                && ack.accepted_state == pending.body.state;
+                && ack.accepted_state == pending.body.state
+                && ack.rev.epoch == pending.body.list_ref.rev.epoch
+                && ack.rev.seq > pending.body.list_ref.rev.seq;
             if !matches {
                 // V2: the attempt the ack names is not on record.
                 return self.unverifiable(ob);
@@ -1263,7 +1273,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             prune_covered_uncertain(&mut next, ob, &epoch);
             return self.commit_ack(ob, &epoch, (next, None), &prune, None, Answer::Receipt);
         }
-        if !convergence
+        if replay
             && own_obligation
             && let Some(uncertain) = book
                 .uncertain
@@ -1275,12 +1285,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let matches = uncertain.obligation_id == ack.obligation_id
                 && uncertain.holding_id == ack.holding_id
                 && uncertain.state == ack.accepted_state
+                && ack.rev.epoch == uncertain.epoch
                 && uncertain
                     .attempts
                     .iter()
                     .any(|a| a.digest == ack.report_digest && a.jti == ack.report_jti);
             if !matches {
                 return self.unverifiable(ob);
+            }
+            match self.uncertain_receipt_advances(&ack) {
+                Some(true) => {}
+                Some(false) => return self.unverifiable(ob),
+                None => return Answer::BackOff, // local evidence unavailable, not an authority strike
             }
             if !self.store_receipt(&format!("receipt.{}.jws", ack.idempotency_key), &ack) {
                 return Answer::BackOff;
@@ -1311,8 +1327,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Answer::Receipt,
             );
         }
-        if !convergence && own_obligation && ack.idempotency_key == request_key && pending.is_none()
-        {
+        if replay && own_obligation && pending.is_none() {
             // A receipt side file alone is not proof of the holder W: an
             // outstanding pending/uncertain key was handled above. Verify under
             // live pins before comparing bytes, including on replay (H.37).

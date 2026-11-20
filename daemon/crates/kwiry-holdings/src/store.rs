@@ -218,7 +218,9 @@ pub trait ArtifactPurger {
     /// it does not attribute to an obligation claimant's resource, a unit a
     /// release reserved when the claimant is an obligation, and a unit not
     /// reserved by exactly that release when the claimant is a release. A
-    /// unit with an open handle is `Busy`, never deleted.
+    /// unit with an open handle is `Busy`, never deleted. Implementations must
+    /// not re-enter the holder or deliver responses synchronously: deletion
+    /// holds the ordering lock shared with response delivery.
     fn delete(&mut self, unit_id: &str, claimant: &Claimant) -> Result<DeleteOutcome, StoreError>;
     /// Under the same exclusion as publication and reclassification, validate
     /// the *whole* manifest against physical presence and the store's current

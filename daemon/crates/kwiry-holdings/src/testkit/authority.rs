@@ -102,6 +102,10 @@ pub struct FakeState {
     pub keyset_gets: usize,
     pub deliveries: std::collections::BTreeMap<String, crate::client::ResponseDelivery>,
     pub hooks: Hooks,
+    #[cfg(all(test, unix))]
+    pub before_dispatch: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(all(test, unix))]
+    pub keyset_response: Option<HttpResponse>,
     scheduled: Vec<(usize, Mutation)>,
     posts: usize,
     pub requests: Vec<RecordedRequest>,
@@ -182,6 +186,10 @@ impl FakeAuthority {
             deliveries: Default::default(),
             keyset_gets: 0,
             hooks: Hooks::default(),
+            #[cfg(all(test, unix))]
+            before_dispatch: None,
+            #[cfg(all(test, unix))]
+            keyset_response: None,
             scheduled: Vec::new(),
             posts: 0,
             requests: Vec::new(),
@@ -1508,6 +1516,13 @@ impl FakeState {
 }
 
 impl Transport for FakeAuthority {
+    #[cfg(all(test, unix))]
+    fn before_dispatch(&self) {
+        let hook = self.state().before_dispatch.take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     fn post_lifecycle(
         &self,
         url: &str,
@@ -1515,7 +1530,9 @@ impl Transport for FakeAuthority {
         body: &[u8],
         timeouts: Timeouts,
         delivery: crate::client::ResponseDelivery,
+        start: crate::client::PostStart<'_>,
     ) -> Result<HttpResponse, TransportError> {
+        start.entered();
         self.state()
             .deliveries
             .insert(delivery.request_key().to_owned(), delivery);
@@ -1579,6 +1596,10 @@ impl Transport for FakeAuthority {
     fn get(&self, url: &str, _timeouts: Timeouts) -> Result<HttpResponse, TransportError> {
         let mut state = self.state();
         state.keyset_gets += 1;
+        #[cfg(all(test, unix))]
+        if let Some(response) = state.keyset_response.take() {
+            return Ok(response);
+        }
         match &state.keyset_statement {
             Some(statement) if url == format!("{}{ROUTE_KEYSET}", state.config.issuer) => {
                 Ok(HttpResponse {
