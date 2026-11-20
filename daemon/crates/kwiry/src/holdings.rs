@@ -83,6 +83,32 @@ mod tests {
     }
 
     #[test]
+    fn authority_specific_vectors_belong_to_the_composition_crate() {
+        let provenance: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/holdings/lifecycle-vectors.v1.provenance.json"
+        ))
+        .unwrap();
+        let profile = openclast_profile();
+        assert_eq!(
+            provenance["wire_profile"]["typ_status_request"],
+            profile.typ_status_request
+        );
+        assert_eq!(
+            provenance["wire_profile"]["typ_status_ack"],
+            profile.typ_status_ack
+        );
+        // Neither the vector nor its provenance is duplicated under the holder.
+        let old = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kwiry-holdings/tests/fixtures");
+        for name in [
+            "openclast-lifecycle-vectors.v1.json",
+            "openclast-lifecycle-vectors.v1.provenance.json",
+        ] {
+            assert!(!old.join(name).exists());
+        }
+    }
+
+    #[test]
     fn the_profile_is_coherent() {
         assert_eq!(openclast_profile().validate(), Ok(()));
     }

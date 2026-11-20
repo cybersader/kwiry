@@ -325,11 +325,11 @@ impl ReportBody {
 }
 
 /// `qm1.` + base64url(SHA-256(label ‖ 0x00 ‖ JCS({holder_id, count, units}))).
-pub fn manifest_digest(holder_id: &str, units: &BTreeSet<String>) -> String {
+pub fn manifest_digest(holder_id: &str, units: &crate::store::ManifestUnits) -> String {
     let value = json!({
         "holder_id": holder_id,
         "count": units.len(),
-        "units": units.iter().collect::<Vec<_>>(),
+        "units": units,
     });
     format!(
         "qm1.{}",
@@ -339,11 +339,11 @@ pub fn manifest_digest(holder_id: &str, units: &BTreeSet<String>) -> String {
 
 /// The manifest file stored before the first transmission of a report that
 /// carries its digest (v2 §11.2), so a later release can bind to it.
-pub fn manifest_bytes(holder_id: &str, units: &BTreeSet<String>) -> Vec<u8> {
+pub fn manifest_bytes(holder_id: &str, units: &crate::store::ManifestUnits) -> Vec<u8> {
     canonical(&json!({
         "holder_id": holder_id,
         "count": units.len(),
-        "units": units.iter().collect::<Vec<_>>(),
+        "units": units,
     }))
     .into_bytes()
 }

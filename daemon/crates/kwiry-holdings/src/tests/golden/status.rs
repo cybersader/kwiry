@@ -73,7 +73,7 @@ fn record_status_sent(rig: &mut GoldenRig, requests: &[&str]) -> StatusPending {
 
 /// Records, as holder-local state, a manifest the vector says this holder
 /// retained for the report whose exact bytes hash to `digest`.
-fn retain_manifest(rig: &mut GoldenRig, digest: &str, units: &BTreeSet<String>) {
+fn retain_manifest(rig: &mut GoldenRig, digest: &str, units: &crate::store::ManifestUnits) {
     let holder_id = rig.holder.writer.enrollment().holder_id.clone();
     let key = "ik_goldenRetainedManifest00000000";
     rig.holder
@@ -226,6 +226,7 @@ fn v6_status_and_release() {
     assert!(
         rig.holder
             .retained_manifest(text(&instruction()["bound_report_digest"]))
+            .unwrap()
             .is_none()
     );
     assert_mismatch_reported(&mut rig, &units, case);
@@ -281,11 +282,12 @@ fn v7() {
         instruction()["approved_count"].as_u64(),
         retained["unit_count"].as_u64()
     );
-    let manifest: BTreeSet<String> = units.iter().cloned().collect();
+    let manifest = units.iter().cloned().map(|id| (id, None)).collect();
     retain_manifest(&mut rig, text(&retained["bound_report_digest"]), &manifest);
     assert_eq!(
         rig.holder
-            .retained_manifest(text(&retained["bound_report_digest"])),
+            .retained_manifest(text(&retained["bound_report_digest"]))
+            .unwrap(),
         Some(manifest)
     );
     assert_mismatch_reported(&mut rig, &units, case);
@@ -309,7 +311,7 @@ fn v8() {
         .add(text(&resource["kind"]), text(&resource["id"]), 1)
         .remove(0);
     units.push(reclassified);
-    let manifest: BTreeSet<String> = units.iter().cloned().collect();
+    let manifest = units.iter().cloned().map(|id| (id, None)).collect();
     retain_manifest(&mut rig, text(&retained["bound_report_digest"]), &manifest);
     assert_mismatch_reported(&mut rig, &units, case);
 }
@@ -332,7 +334,7 @@ fn v9() {
             bound_report_digest: format!("sha256:{}", "0".repeat(64)),
             approved_count: 2,
             step: ReleaseStep::Deleted,
-            units: BTreeSet::new(),
+            units: Default::default(),
             claimed: BTreeSet::new(),
             deleted: BTreeSet::new(),
             observed_manifest_digest: Some(text(&result["observed_manifest_digest"]).to_owned()),

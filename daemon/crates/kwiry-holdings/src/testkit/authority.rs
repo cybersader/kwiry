@@ -99,6 +99,7 @@ pub struct FakeState {
     last_list_start_mono: Option<u64>,
     exempt_next_start: bool,
     pub forced: VecDeque<Forced>,
+    pub late_status: VecDeque<HttpResponse>,
     pub hooks: Hooks,
     scheduled: Vec<(usize, Mutation)>,
     posts: usize,
@@ -177,6 +178,7 @@ impl FakeAuthority {
             last_list_start_mono: None,
             exempt_next_start: false,
             forced: VecDeque::new(),
+            late_status: VecDeque::new(),
             hooks: Hooks::default(),
             scheduled: Vec::new(),
             posts: 0,
@@ -1504,6 +1506,9 @@ impl FakeState {
 }
 
 impl Transport for FakeAuthority {
+    fn take_late_status_response(&self) -> Option<HttpResponse> {
+        self.state().late_status.pop_front()
+    }
     fn post(
         &self,
         url: &str,

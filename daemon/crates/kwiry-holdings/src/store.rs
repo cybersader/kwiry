@@ -7,7 +7,10 @@
 //! listed obligation (the `purge` module).
 
 pub use crate::wire::ResourceKey;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+
+/// Stable unit ids and their exact census attributions at report time.
+pub type ManifestUnits = BTreeMap<String, Option<ResourceKey>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldResource {
@@ -157,7 +160,7 @@ pub enum ReserveOutcome {
     /// Nothing was reserved. The unattributed set at the check supplies the
     /// observed manifest digest for the mismatch report.
     Mismatch {
-        unattributed: BTreeSet<String>,
+        unattributed: ManifestUnits,
     },
 }
 
@@ -221,6 +224,9 @@ pub trait ArtifactPurger {
     /// operation must work before the first list after restart. Repeating an
     /// already committed identical reservation is a success.
     ///
+    /// Compare the census attribution as well as the id, even when both old
+    /// and new resources are unlisted. Publication (including deferred
+    /// publication) must refuse reuse or replacement of a reserved id.
     /// A missing, attributed or otherwise reserved unit yields `Mismatch`,
     /// without modifying any unit. Storage/observation failures yield `Err`
     /// for retry; never substitute an empty classification on recovery.
@@ -229,7 +235,7 @@ pub trait ArtifactPurger {
     fn reserve(
         &mut self,
         instruction_id: &str,
-        units: &BTreeSet<String>,
+        units: &ManifestUnits,
     ) -> Result<ReserveOutcome, StoreError>;
     /// Syncs every storage location; an error means the barrier failed.
     fn barrier(&mut self) -> Result<(), StoreError>;

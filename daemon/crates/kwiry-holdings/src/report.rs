@@ -48,7 +48,6 @@ use crate::store::{ArtifactPurger, ResourceStore};
 use crate::verify::VerifiedList;
 use crate::wire::{ObligationState, Phase, ReportState, Rev};
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
 
 /// Report transmissions per holder per second (H.8).
 pub const REPORTS_PER_SECOND: usize = 10;
@@ -356,6 +355,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     pub(crate) fn after_apply(&mut self, prune: &[Attempt]) {
         self.relist_before_report = false;
         self.apply_failed_since_admit = false;
+        self.lifecycle_unavailable = false;
         self.rollback_suspected = false;
         self.prune_sent(prune);
         self.resolve_status_uncertain();
@@ -678,12 +678,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         {
             return false;
         }
-        let units: BTreeSet<String> = inventory.unattributed.clone();
         if self
             .writer
             .write_side_file(
                 &format!("manifest.{key}.json"),
-                &manifest_bytes(&holder_id, &units),
+                &manifest_bytes(&holder_id, &inventory.unattributed),
             )
             .is_err()
         {
@@ -1012,6 +1011,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             (403, _) => {
                 self.on_not_authorized();
                 Answer::AuthHalted
+            }
+            (503, Some("lifecycle_unavailable")) => {
+                self.lifecycle_unavailable = true;
+                self.events.emit(HolderEvent::AuthorityUnreachable);
+                Answer::BackOff
             }
             (503, Some("authority_epoch_mismatch")) => {
                 // H.12 step 2 or 4: no purge until a verified list applies.

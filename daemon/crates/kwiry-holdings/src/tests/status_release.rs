@@ -253,7 +253,14 @@ fn any_difference_from_the_bound_manifest_is_a_mismatch_and_deletes_nothing() {
             crate::store::ArtifactPurger::reserve(
                 &mut purger,
                 "ins_elsewhere000000000001",
-                &BTreeSet::from([unit]),
+                &[(
+                    unit,
+                    Some(crate::wire::ResourceKey {
+                        kind: PLAIN.into(),
+                        id: X.into(),
+                    }),
+                )]
+                .into(),
             )
             .unwrap();
             (digest.to_owned(), 2)
@@ -839,12 +846,10 @@ fn h50_a_possibly_sent_status_is_not_overtaken_on_the_same_list() {
     assert!(rig.holder().state().status.uncertain.contains_key(&k1.key));
     // A late receipt for K1 resolves it (T7).
     let k1_ack = rig.authority.state().status_receipts[&k1.key].1.clone();
-    let answer = rig.authority.state().status_ack_answer(&k1_ack);
-    let k2 = pending_status(rig).unwrap();
-    assert_eq!(
-        rig.holder().classify_status(&k2, Ok(answer)),
-        crate::report::Answer::Receipt
-    );
+    let delayed = rig.authority.state().status_ack_answer(&k1_ack);
+    rig.authority.state().late_status.push_back(delayed);
+    let pass = rig.status().unwrap();
+    assert_eq!((pass.sent, pass.receipts), (0, 1));
     assert!(rig.holder().state().status.uncertain.is_empty());
     assert!(rig.dir.join(format!("sreceipt.{}.jws", k1.key)).exists());
     assert_eq!(
@@ -1006,7 +1011,13 @@ fn g3_every_attempt_digest_names_its_manifest() {
     let digests = rig.authority.state().accepted_digests.clone();
     let x: BTreeSet<String> = w.x_units.iter().cloned().collect();
     for digest in &digests {
-        let units = rig.holder().retained_manifest(digest).expect("indexed");
+        let units = rig
+            .holder()
+            .retained_manifest(digest)
+            .unwrap()
+            .expect("indexed")
+            .into_keys()
+            .collect::<BTreeSet<_>>();
         assert_eq!(units, x, "{digest}");
     }
     let bodies: Vec<String> = rig
@@ -1118,7 +1129,7 @@ fn poisoned_reservation_confirmation_stops_before_the_next_adapter_call() {
     rig.release().unwrap();
     let mut book = rig.holder().state().status.clone();
     let mut second = book.instructions[&ins].clone();
-    second.units = [rig.purger.add_unattributable()].into();
+    second.units = [(rig.purger.add_unattributable(), None)].into();
     second.approved_count = 1;
     book.instructions
         .insert("ins_secondSynthetic000001".into(), second);
@@ -1162,4 +1173,226 @@ fn a_final_census_that_exhausts_the_queue_cap_cancels_dispatch() {
     assert_eq!((summary.sent, summary.cancelled), (0, 1));
     assert!(statuses(rig).is_empty());
     assert!(pending_status(rig).unwrap().attempts.is_empty());
+}
+
+#[test]
+fn unlisted_to_unlisted_reattribution_refuses_the_whole_release() {
+    for after_intent in [false, true] {
+        let mut w = world();
+        let digest = purged_and_reported(&mut w);
+        let rig = &mut w.rig;
+        let ins = rig.authority.state().issue_release(&digest, 2);
+        applied(rig.relist());
+        if after_intent {
+            rig.purger.view().fail_reserve = true;
+            rig.release().unwrap();
+            assert_eq!(step(rig, &ins), Some(ReleaseStep::Reserving));
+            rig.restart().unwrap();
+            rig.purger.view().fail_reserve = false;
+        }
+        rig.purger
+            .view()
+            .units
+            .get_mut(&w.x_units[1])
+            .unwrap()
+            .attribution
+            .as_mut()
+            .unwrap()
+            .id = "resYYYYYYYYYYYYYYYYYYYYY".into();
+        if after_intent {
+            assert_eq!(rig.honor().unwrap(), 0);
+        } else {
+            assert_eq!(rig.release().unwrap().mismatched, 1);
+        }
+        assert_eq!(step(rig, &ins), Some(ReleaseStep::Mismatch));
+        assert!(release_deletions(rig, &ins).is_empty());
+        assert!(rig.purger.view().reservations.is_empty());
+    }
+}
+
+#[test]
+fn publishers_cannot_clobber_a_reserved_id_even_at_thaw() {
+    use crate::store::ArtifactPurger;
+    let mut w = world();
+    let digest = purged_and_reported(&mut w);
+    let rig = &mut w.rig;
+    let id = &w.x_units[0];
+    let ins = rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    let replacement = rig.purger.view().units[id].clone();
+    rig.purger.view().units.get_mut(id).unwrap().open_handles = 1;
+    rig.release().unwrap();
+    for queued in [false, true] {
+        let freeze = queued.then(|| rig.purger.freeze_publications().unwrap());
+        rig.purger.publish(id, replacement.clone());
+        drop(freeze);
+        assert!(rig.purger.view().units[id].reserved);
+        assert_eq!(rig.purger.view().units[id].open_handles, 1);
+    }
+    rig.purger.view().units.get_mut(id).unwrap().open_handles = 0;
+    assert_eq!(rig.release().unwrap().executed, 1);
+    assert_eq!(release_deletions(rig, &ins).len(), 2);
+}
+
+#[test]
+fn failed_new_list_apply_blocks_deletion_on_the_previous_list() {
+    for fail_held in [false, true] {
+        let mut w = world();
+        let digest = purged_and_reported(&mut w);
+        let rig = &mut w.rig;
+        let ins = rig.authority.state().issue_release(&digest, 2);
+        applied(rig.relist());
+        rig.authority.state().add_active(PLAIN, X);
+        if fail_held {
+            rig.store.view().fail_held = true;
+        } else {
+            rig.io_faults.plan(vec![Fault::BeforeRename]);
+        }
+        assert!(matches!(rig.relist(), ListOutcome::ApplyFailed { .. }));
+        assert_eq!(rig.release(), Err(ObligationsRefused::ApplyIncomplete));
+        assert!(release_deletions(rig, &ins).is_empty());
+        rig.store.view().fail_held = false;
+        applied(rig.relist());
+        assert_eq!(rig.release().unwrap().mismatched, 1);
+    }
+}
+
+#[test]
+fn status_custody_outage_holds_release_until_successful_apply() {
+    let mut w = world();
+    let digest = purged_and_reported(&mut w);
+    let rig = &mut w.rig;
+    let ins = rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    rig.authority.state().custody_unreadable = true;
+    assert_eq!(rig.status().unwrap().receipts, 0);
+    assert_eq!(rig.release(), Err(ObligationsRefused::LifecycleUnavailable));
+    assert!(release_deletions(rig, &ins).is_empty());
+    rig.authority.state().custody_unreadable = false;
+    applied(rig.relist());
+    assert_eq!(rig.release().unwrap().executed, 1);
+}
+
+#[test]
+fn status_ack_rotation_refreshes_signed_pins_before_classification() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.authority.state().rotate_key([37; 32], false, true);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    assert!(!codes(rig).contains(&"ack_unverifiable"));
+    rig.restart().unwrap();
+    assert!(rig.holder().writer.enrollment().pinned.keyset_seq.is_some());
+}
+
+#[test]
+fn listed_release_pins_expired_manifest_before_first_evaluation() {
+    let mut w = world();
+    let digest = purged_and_reported(&mut w);
+    let rig = &mut w.rig;
+    rig.advance(crate::status::MANIFEST_RETENTION_MS as u64 + 1);
+    rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    rig.status().unwrap();
+    assert_eq!(rig.release().unwrap().executed, 1);
+}
+
+#[test]
+fn a_live_obligation_pins_its_manifest_across_the_retention_window() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.authority.state().drop_acks = 1;
+    assert_eq!(rig.report().unwrap().sent, 1);
+    let pending = rig.holder().state().obligations.channels[&w.b_obligation]
+        .pending
+        .clone()
+        .unwrap();
+    rig.advance(crate::status::MANIFEST_RETENTION_MS as u64 + 1);
+    rig.status().unwrap();
+    assert!(
+        rig.holder()
+            .retained_manifest(&pending.attempts[0].digest)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        rig.dir
+            .join(format!("manifest.{}.json", pending.key))
+            .is_file()
+    );
+}
+
+#[test]
+fn rejection_write_failure_retries_transition_not_the_rejected_key() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.authority.state().drop_status_acks = 1;
+    rig.status().unwrap();
+    later(rig);
+    problem(rig, 409, "stale_list_ref");
+    rig.io_faults
+        .plan(vec![Fault::Pass, Fault::Pass, Fault::BeforeRename]);
+    let pass = rig.status().unwrap();
+    assert_eq!((pass.sent, pass.rejected), (1, 0));
+    assert!(!codes(rig).contains(&"lifecycle_status_rejected"));
+    later(rig);
+    let key = pending_status(rig).unwrap().key;
+    let pass = rig.status().unwrap();
+    assert_eq!((pass.sent, pass.rejected), (0, 1));
+    applied(rig.relist());
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    assert_ne!(
+        accepted_statuses(rig).last().unwrap()["idempotency_key"],
+        key
+    );
+}
+
+#[test]
+fn temporary_manifest_read_error_does_not_finalize_mismatch() {
+    let mut w = world();
+    let digest = purged_and_reported(&mut w);
+    let rig = &mut w.rig;
+    let ins = rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    let key = rig.holder().state().status.manifests[&digest].key.clone();
+    let path = rig.dir.join(format!("manifest.{key}.json"));
+    let saved = path.with_extension("saved");
+    std::fs::rename(&path, &saved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(rig.release().unwrap().evaluated, 0);
+    assert_eq!(step(rig, &ins), None);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(saved, path).unwrap();
+    assert_eq!(rig.release().unwrap().executed, 1);
+}
+
+#[test]
+fn spacing_starts_at_dispatch_after_slow_final_census() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.purger.view().frozen_census_delay = Some((rig.clock.clone(), 29_000));
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    rig.purger.view().frozen_census_delay = None;
+    rig.purger.add_unattributable();
+    rig.advance(31_000);
+    assert_eq!(rig.status().unwrap().sent, 0);
+    rig.advance(29_000);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+}
+
+#[test]
+fn invalidated_unsent_status_manifest_is_eventually_pruned() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    rig.purger.add_unattributable();
+    assert_eq!(rig.status().unwrap().sent, 0);
+    let key = pending_status(rig).unwrap().key;
+    let path = rig.dir.join(format!("manifest.{key}.json"));
+    assert!(path.is_file());
+    rig.purger.add_unattributable();
+    later(rig);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    rig.advance(crate::status::MANIFEST_RETENTION_MS as u64 + 1);
+    rig.status().unwrap();
+    assert!(!path.exists());
 }

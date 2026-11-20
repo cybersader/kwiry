@@ -410,7 +410,7 @@ impl MemoryPurger {
         if held {
             view.waiting.push((unit_id.to_owned(), unit));
         } else {
-            view.units.insert(unit_id.to_owned(), unit);
+            view.publish_unreserved(unit_id.to_owned(), unit);
         }
     }
 
@@ -493,7 +493,7 @@ impl ArtifactPurger for MemoryPurger {
     fn reserve(
         &mut self,
         instruction_id: &str,
-        units: &BTreeSet<String>,
+        units: &crate::store::ManifestUnits,
     ) -> Result<ReserveOutcome, StoreError> {
         // Hold both the publication/classification state and the physical
         // inventory until the entire reservation is visible.
@@ -514,18 +514,25 @@ impl ArtifactPurger for MemoryPurger {
             .filter(|(_, id)| *id == instruction_id)
             .map(|(unit, _)| unit.clone())
             .collect();
-        if !owned.is_empty() && owned == *units {
+        if !owned.is_empty()
+            && owned.iter().eq(units.keys())
+            && units
+                .iter()
+                .all(|(id, attr)| unattributed.get(id) == Some(attr))
+        {
             return Ok(ReserveOutcome::Reserved);
         }
         if !owned.is_empty()
-            || !units.is_subset(&unattributed)
             || units
                 .iter()
+                .any(|(id, attr)| unattributed.get(id) != Some(attr))
+            || units
+                .keys()
                 .any(|unit| view.units[unit].reserved || view.reservations.contains_key(unit))
         {
             return Ok(ReserveOutcome::Mismatch { unattributed });
         }
-        for unit in units {
+        for unit in units.keys() {
             view.reservations
                 .insert(unit.clone(), instruction_id.to_owned());
             view.units
@@ -575,13 +582,20 @@ impl ArtifactPurger for MemoryPurger {
             .partition(|(n, _, _)| *n < calls);
         view.late = later;
         for (_, unit_id, unit) in due {
-            view.units.insert(unit_id, unit);
+            view.publish_unreserved(unit_id, unit);
         }
         Ok(view.snapshot())
     }
 }
 
 impl PurgerView {
+    fn publish_unreserved(&mut self, id: String, unit: PurgerUnit) {
+        if self.reservations.contains_key(&id) {
+            self.refused.push((id, "reserved by a release"));
+        } else {
+            self.units.insert(id, unit);
+        }
+    }
     fn snapshot(&self) -> Census {
         Census {
             locations: vec!["objects".into(), "staging".into(), "quarantine".into()],
@@ -610,7 +624,7 @@ impl Drop for Thaw {
         view.frozen = view.frozen.saturating_sub(1);
         if view.frozen == 0 {
             for (unit_id, unit) in std::mem::take(&mut view.waiting) {
-                view.units.insert(unit_id, unit);
+                view.publish_unreserved(unit_id, unit);
             }
         }
     }

@@ -1,5 +1,5 @@
 {
-  "fixture": "openclast-lifecycle-vectors.v1.json",
+  "fixture": "lifecycle-vectors.v1.json",
   "sha256": "6849181dbf41286ecdc18942a7b6194de3f843733c9d9431b0652600ccfe9da0",
   "source": {
     "repository": "https://github.com/cybersader/openclast",

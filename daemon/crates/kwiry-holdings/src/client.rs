@@ -70,6 +70,12 @@ pub enum TransportError {
 /// HTTP to the authority. Implementations enforce the connect and response
 /// timeouts they are given.
 pub trait Transport {
+    /// Nonblocking delivery of an earlier status POST response that arrived
+    /// after the synchronous call returned. Never posts a replacement.
+    fn take_late_status_response(&self) -> Option<HttpResponse> {
+        None
+    }
+
     fn post(
         &self,
         url: &str,
@@ -83,7 +89,11 @@ pub trait Transport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FetchFailure {
-    /// Network failure, `429`, `503 lifecycle_unavailable`, a second `replay`.
+    /// Known custody outage (unreachable backoff plus a deletion hold).
+    LifecycleUnavailable {
+        retry_after_s: Option<u64>,
+    },
+    /// Network failure, `429`, a second `replay`.
     Unreachable {
         retry_after_s: Option<u64>,
     },
@@ -293,11 +303,15 @@ fn apply_statement(
     Ok(())
 }
 
-fn fetch_route_statement(env: &FetchEnv) -> Option<String> {
-    let url = format!("{}{ROUTE_KEYSET}", env.ctx.issuer);
-    let response = env.transport.get(&url, LIST_TIMEOUTS).ok()?;
+pub(crate) fn fetch_route_statement(
+    transport: &dyn Transport,
+    issuer: &str,
+    profile: &crate::profile::WireProfile,
+) -> Option<String> {
+    let url = format!("{issuer}{ROUTE_KEYSET}");
+    let response = transport.get(&url, LIST_TIMEOUTS).ok()?;
     (response.status == 200
-        && response.content_type.as_deref() == Some(env.ctx.profile.keyset_content_type().as_str()))
+        && response.content_type.as_deref() == Some(profile.keyset_content_type().as_str()))
     .then(|| String::from_utf8(response.body).ok())
     .flatten()
 }
@@ -339,7 +353,8 @@ fn verify_with_keysets(
     match verify_signature(compact, &session.pins, now_recv, &env.ctx) {
         Err(PageError::UnknownKid) if attached.is_none() && !session.route_fetched => {
             session.route_fetched = true;
-            let statement = fetch_route_statement(env).ok_or(FetchFailure::UnknownKid)?;
+            let statement = fetch_route_statement(env.transport, env.ctx.issuer, env.ctx.profile)
+                .ok_or(FetchFailure::UnknownKid)?;
             apply_statement(env, session, &statement).map_err(|e| keyset_failure(&e, false))?;
             verify_signature(compact, &session.pins, now_recv, &env.ctx).map_err(page_error)
         }
@@ -533,6 +548,9 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                 (401, Some("proof_expired")) => return Err(FetchFailure::ProofExpiredTwice),
                 (401, _) => return Err(FetchFailure::Unauthorized),
                 (403, _) => return Err(FetchFailure::NotAuthorized),
+                (503, Some("lifecycle_unavailable")) => {
+                    return Err(FetchFailure::LifecycleUnavailable { retry_after_s });
+                }
                 (503, Some("authority_epoch_mismatch")) => {
                     return Err(FetchFailure::RollbackSuspected);
                 }
@@ -582,6 +600,9 @@ pub fn probe_clock(env: &mut FetchEnv, params: &FetchParams) -> Result<(), Fetch
             (401, Some("replay" | "proof_expired")) => FetchFailure::Unreachable { retry_after_s },
             (401, _) => FetchFailure::Unauthorized,
             (403, _) => FetchFailure::NotAuthorized,
+            (503, Some("lifecycle_unavailable")) => {
+                FetchFailure::LifecycleUnavailable { retry_after_s }
+            }
             (503, Some("authority_epoch_mismatch")) => FetchFailure::RollbackSuspected,
             (400 | 413, _) => FetchFailure::RequestInvalid { status },
             (409, _) => FetchFailure::Rejected { status },

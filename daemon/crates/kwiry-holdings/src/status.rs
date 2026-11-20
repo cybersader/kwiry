@@ -260,7 +260,7 @@ pub struct InstructionRecord {
     pub approved_count: u64,
     pub step: ReleaseStep,
     /// The exact units the manifest named (empty on a mismatch).
-    pub units: BTreeSet<String>,
+    pub units: crate::store::ManifestUnits,
     /// Units claimed for the deletion in progress (written before deleting).
     pub claimed: BTreeSet<String>,
     /// Units deleted under this release, across passes.
@@ -313,6 +313,9 @@ pub struct StatusBook {
     pub instructions: BTreeMap<String, InstructionRecord>,
     /// Attempt digest (`sha256:`) → the manifest its body named.
     pub manifests: BTreeMap<String, ManifestRef>,
+    /// Creation time of T1 files, including those with no transmitted attempt.
+    #[serde(default)]
+    pub manifest_files: BTreeMap<String, i64>,
 }
 
 impl StatusBook {
@@ -321,7 +324,7 @@ impl StatusBook {
         self.instructions
             .values()
             .filter(|r| r.holds_units())
-            .flat_map(|r| r.units.iter().cloned())
+            .flat_map(|r| r.units.keys().cloned())
             .collect()
     }
 
@@ -464,6 +467,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         status: Option<StatusBook>,
         clear_reset: bool,
     ) -> bool {
+        let mut status = status;
+        if let (Some(book), Some(ms)) = (&mut status, self.status_dispatch_ms) {
+            book.last_new_key_ms = Some(ms);
+        }
         match self.writer.update_lifecycle(book, status, clear_reset) {
             Ok(()) => true,
             Err(error) => {
@@ -571,11 +578,29 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if self.route != RouteHealth::Normal || self.apply_failed_since_admit {
             return Ok(summary);
         }
+        if !self.writer.state().status.uncertain.is_empty()
+            && let Some(response) = self.transport.take_late_status_response()
+            && response.status == 200
+            && response.content_type.as_deref()
+                == Some(self.config.profile.status_ack_content_type().as_str())
+            && let Ok(compact) = std::str::from_utf8(&response.body)
+            && self.receive_late_status_receipt(compact)
+        {
+            summary.receipts += 1;
+            return Ok(summary);
+        }
         let Ok(inventory) = self.inventory(purger) else {
             self.events
                 .emit(HolderEvent::PurgeStepFailed { step: "census" });
             return Ok(summary);
         };
+        if let Some(key) = self.status_rejection_owed.clone() {
+            if !self.reject_status(&key, 409) {
+                return Ok(summary);
+            }
+            self.status_rejection_owed = None;
+            summary.rejected += 1;
+        }
         self.status_invalidate_failing(&inventory, &mut summary);
         self.obligations_allowed()?;
         if self.status_derive_and_store(&inventory) {
@@ -753,6 +778,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 _ => {}
             }
         }
+        next.manifest_files
+            .insert(key.clone(), self.clock.wall_ms());
         next.derivations = derivation;
         next.pending = Some(StatusPending {
             key,
@@ -800,7 +827,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut replay_retried = false;
         let mut expiry_retried = false;
         loop {
-            if self.fail_stopped() || self.route != RouteHealth::Normal {
+            if self.fail_stopped() || self.route != RouteHealth::Normal || self.relist_before_report
+            {
                 return;
             }
             let status = self.writer.state().status.clone();
@@ -813,8 +841,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let first = pending.attempts.is_empty();
             if first {
                 // H.4.4: one new key per 60 s; retries are exempt.
-                let spaced = status
-                    .last_new_key_ms
+                let spaced = self
+                    .status_dispatch_ms
+                    .or(status.last_new_key_ms)
                     .is_none_or(|last| self.clock.wall_ms() - last >= STATUS_NEW_KEY_SPACING_MS);
                 if !spaced || self.status_overtakes_uncertain(&pending) {
                     summary.waiting += 1;
@@ -836,6 +865,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 }
                 return;
             }
+            let previous_dispatch = self.status_dispatch_ms.or(status.last_new_key_ms);
             let Some(sent) = self.arm_status_attempt(&pending, first) else {
                 return;
             };
@@ -856,15 +886,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS;
             if !first_byte_ok {
                 drop(freeze);
-                self.cancel_status_attempt(&sent.attempt);
+                self.cancel_status_attempt(&sent.attempt, previous_dispatch);
                 summary.cancelled += 1;
                 return;
             }
+            let dispatched_ms = self.clock.wall_ms();
             summary.sent += 1;
             let response =
                 self.transport
                     .post(&url, &content_type, sent.compact.as_bytes(), LIST_TIMEOUTS);
             drop(freeze);
+            if first {
+                self.status_dispatch_ms = Some(dispatched_ms);
+            }
             match self.classify_status(&pending, response) {
                 Answer::Receipt => {
                     summary.receipts += 1;
@@ -941,8 +975,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 recorded_ms: self.clock.wall_ms(),
             },
         );
+        let armed_mono = self.clock.mono_ms();
         if first {
-            next.last_new_key_ms = Some(self.clock.wall_ms());
+            self.status_dispatch_ms = None;
+            // If dispatch crashes, the queue cap bounds the latest possible send.
+            next.last_new_key_ms = Some(self.clock.wall_ms().saturating_add(QUEUE_CAP_MS as i64));
         }
         let record = next.pending.as_mut()?;
         record.attempts.push(attempt.clone());
@@ -953,13 +990,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         Some(StatusArmed {
             compact,
             attempt,
-            armed_mono: self.clock.mono_ms(),
+            armed_mono,
         })
     }
 
     /// T2q → T2x: the attempt never left; prune it and invalidate.
-    fn cancel_status_attempt(&mut self, attempt: &Attempt) {
+    fn cancel_status_attempt(&mut self, attempt: &Attempt, previous_dispatch: Option<i64>) {
         let mut next = self.writer.state().status.clone();
+        next.last_new_key_ms = previous_dispatch;
         next.manifests.remove(&attempt.digest);
         if let Some(pending) = next.pending.as_mut() {
             pending.attempts.retain(|a| a != attempt);
@@ -997,15 +1035,20 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 let Ok(compact) = String::from_utf8(response.body) else {
                     return self.status_unverifiable();
                 };
-                match self.verify_status_ack(&compact) {
-                    Ok(ack) => self.on_status_ack(pending, ack),
+                match self.verify_status_with_refresh(&compact) {
+                    Ok(ack) => self.on_status_ack(Some(pending), ack),
+                    Err("pin persistence") => Answer::BackOff,
                     Err(_) => self.status_unverifiable(),
                 }
             }
             (409, Some("stale_list_ref")) => {
                 self.relist_before_report = true;
-                self.reject_status(pending, response.status);
-                Answer::Rejected
+                if self.reject_status(&pending.key, response.status) {
+                    Answer::Rejected
+                } else {
+                    self.status_rejection_owed = Some(pending.key.clone());
+                    Answer::BackOff
+                }
             }
             (409, Some("idempotency_conflict")) | (400 | 413, _) => {
                 self.halt_status(response.status)
@@ -1021,6 +1064,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 self.on_not_authorized();
                 Answer::AuthHalted
             }
+            (503, Some("lifecycle_unavailable")) => {
+                self.lifecycle_unavailable = true;
+                self.events.emit(HolderEvent::AuthorityUnreachable);
+                Answer::BackOff
+            }
             (503, Some("authority_epoch_mismatch")) => {
                 self.rollback_suspected = true;
                 self.events.emit(HolderEvent::AuthorityRollbackSuspected);
@@ -1033,6 +1081,60 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Answer::BackOff
             }
         }
+    }
+
+    fn verify_status_with_refresh(&mut self, compact: &str) -> Result<StatusAck, &'static str> {
+        match self.verify_status_ack(compact) {
+            Err("kid") => {
+                let enrollment = self.writer.enrollment();
+                let profile = &self.config.profile;
+                let statement = crate::client::fetch_route_statement(
+                    &self.transport,
+                    &enrollment.issuer,
+                    profile,
+                )
+                .ok_or("kid")?;
+                let pins = crate::keys::verify_keyset(
+                    &statement,
+                    &enrollment.pinned,
+                    profile,
+                    &enrollment.issuer,
+                    self.clock.wall_ms(),
+                )
+                .map_err(|_| "kid")?;
+                let seq = pins.keyset_seq;
+                self.writer.pin_keys(pins).map_err(|_| "pin persistence")?;
+                if let Some(keyset_seq) = seq {
+                    self.events.emit(HolderEvent::KeysetAccepted { keyset_seq });
+                }
+                self.verify_status_ack(compact)
+            }
+            result => result,
+        }
+    }
+
+    /// T7: deliver a delayed status POST receipt without sending a replacement.
+    /// Only an outstanding uncertain key and its recorded attempt may resolve.
+    pub fn receive_late_status_receipt(&mut self, compact: &str) -> bool {
+        if self.obligations_allowed().is_err() || self.apply_failed_since_admit {
+            return false;
+        }
+        let Ok(ack) = self.verify_status_with_refresh(compact) else {
+            return false;
+        };
+        let Some(u) = self
+            .writer
+            .state()
+            .status
+            .uncertain
+            .get(&ack.idempotency_key)
+        else {
+            return false;
+        };
+        if !Self::receipt_matches(&ack, &ack.idempotency_key, &u.body, &u.attempts) {
+            return false;
+        }
+        self.on_status_ack(None, ack) == Answer::Receipt
     }
 
     fn status_unverifiable(&mut self) -> Answer {
@@ -1059,20 +1161,22 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     /// T6d: definitively not accepted; the key's bytes are pruned.
-    fn reject_status(&mut self, pending: &StatusPending, status: u16) {
+    fn reject_status(&mut self, key: &str, status: u16) -> bool {
         let mut next = self.writer.state().status.clone();
         let mut prune = Vec::new();
-        if let Some(record) = next.pending.as_mut().filter(|p| p.key == pending.key) {
+        if let Some(record) = next.pending.as_mut().filter(|p| p.key == key) {
             prune = std::mem::take(&mut record.attempts);
             record.status = PendingStatus::Rejected;
             for attempt in &prune {
                 next.manifests.remove(&attempt.digest);
             }
         }
-        if self.commit_status(next) {
-            self.prune_sent_attempts(&prune);
+        if !self.commit_status(next) {
+            return false;
         }
+        self.prune_sent_attempts(&prune);
         self.events.emit(HolderEvent::StatusRejected { status });
+        true
     }
 
     /// Checks a receipt's accepted claims against the body it names.
@@ -1095,30 +1199,31 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             && ack.rev.epoch == body.list_ref.rev.epoch
     }
 
-    fn on_status_ack(&mut self, pending: &StatusPending, ack: StatusAck) -> Answer {
+    fn on_status_ack(&mut self, pending: Option<&StatusPending>, ack: StatusAck) -> Answer {
         let Some(epoch) = self.high_water_epoch() else {
             return self.status_unverifiable();
         };
         let status = self.writer.state().status.clone();
         // T4: a receipt for this key's own claims.
-        let (key, body, attempts, from_pending) = if ack.idempotency_key == pending.key {
-            (
-                pending.key.clone(),
-                pending.body.clone(),
-                pending.attempts.clone(),
-                true,
-            )
-        } else if let Some(uncertain) = status.uncertain.get(&ack.idempotency_key) {
-            // T7: a late receipt for one of this holder's earlier keys.
-            (
-                ack.idempotency_key.clone(),
-                uncertain.body.clone(),
-                uncertain.attempts.clone(),
-                false,
-            )
-        } else {
-            return self.status_unverifiable();
-        };
+        let (key, body, attempts, from_pending) =
+            if let Some(pending) = pending.filter(|p| p.key == ack.idempotency_key) {
+                (
+                    pending.key.clone(),
+                    pending.body.clone(),
+                    pending.attempts.clone(),
+                    true,
+                )
+            } else if let Some(uncertain) = status.uncertain.get(&ack.idempotency_key) {
+                // T7: a late receipt for one of this holder's earlier keys.
+                (
+                    ack.idempotency_key.clone(),
+                    uncertain.body.clone(),
+                    uncertain.attempts.clone(),
+                    false,
+                )
+            } else {
+                return self.status_unverifiable();
+            };
         if !Self::receipt_matches(&ack, &key, &body, &attempts) {
             return self.status_unverifiable();
         }
@@ -1259,6 +1364,28 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .instructions
             .values()
             .map(|r| r.bound_report_digest.as_str())
+            .chain(
+                self.applied
+                    .iter()
+                    .flat_map(|a| &a.instructions)
+                    .map(|i| i.bound_report_digest.as_str()),
+            )
+            .collect();
+        let book = &self.writer.state().obligations;
+        let live_keys: BTreeSet<&str> = book
+            .channels
+            .values()
+            .filter_map(|c| c.pending.as_ref())
+            .filter(|p| p.live())
+            .map(|p| p.key.as_str())
+            .chain(book.uncertain.keys().map(String::as_str))
+            .chain(
+                status
+                    .pending
+                    .iter()
+                    .filter(|p| p.live())
+                    .map(|p| p.key.as_str()),
+            )
             .collect();
         let pinned: BTreeSet<&str> = status
             .pending
@@ -1272,14 +1399,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .iter()
             .filter(|(digest, r)| {
                 now - r.recorded_ms > MANIFEST_RETENTION_MS
+                    && !live_keys.contains(r.key.as_str())
                     && !bound.contains(digest.as_str())
                     && !pinned.contains(digest.as_str())
             })
             .map(|(digest, _)| digest.clone())
             .collect();
-        if expired.is_empty() {
-            return;
-        }
         let mut next = status.clone();
         for digest in &expired {
             next.manifests.remove(digest);
@@ -1287,8 +1412,23 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let keys: BTreeSet<String> = expired
             .iter()
             .filter_map(|d| status.manifests.get(d).map(|r| r.key.clone()))
+            .chain(
+                status
+                    .manifest_files
+                    .iter()
+                    .filter(|(k, ms)| {
+                        now - **ms > MANIFEST_RETENTION_MS && !live_keys.contains(k.as_str())
+                    })
+                    .map(|(k, _)| k.clone()),
+            )
             .filter(|key| next.manifests.values().all(|r| &r.key != key))
             .collect();
+        if expired.is_empty() && keys.is_empty() {
+            return;
+        }
+        for key in &keys {
+            next.manifest_files.remove(key);
+        }
         if self.commit_status(next) {
             for key in keys {
                 let _ = self
@@ -1342,7 +1482,7 @@ mod tests {
             bound_report_digest: "sha256:00".into(),
             approved_count: 1,
             step,
-            units: BTreeSet::new(),
+            units: Default::default(),
             claimed: BTreeSet::new(),
             deleted: BTreeSet::new(),
             observed_manifest_digest: None,

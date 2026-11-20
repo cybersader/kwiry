@@ -111,7 +111,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if self.fail_stopped() {
             return Err(ObligationsRefused::HolderStateUnwritable);
         }
-        let pending: Vec<(String, BTreeSet<String>)> = self
+        let pending: Vec<(String, crate::store::ManifestUnits)> = self
             .writer
             .state()
             .status
@@ -222,28 +222,28 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     /// The manifest this holder stored for the report whose exact bytes
     /// hash to `digest`, if it still has it and it is intact.
-    pub(crate) fn retained_manifest(&self, digest: &str) -> Option<BTreeSet<String>> {
-        let reference = self.writer.state().status.manifests.get(digest)?;
-        let bytes = self
+    pub(crate) fn retained_manifest(
+        &self,
+        digest: &str,
+    ) -> std::io::Result<Option<crate::store::ManifestUnits>> {
+        let Some(reference) = self.writer.state().status.manifests.get(digest) else {
+            return Ok(None);
+        };
+        let Some(bytes) = self
             .writer
             .dir()
-            .read(&format!("manifest.{}.json", reference.key))
-            .ok()??;
-        let value = crate::strict_json::parse(&bytes).ok()?;
-        let object = value.as_object()?;
+            .read(&format!("manifest.{}.json", reference.key))?
+        else {
+            return Ok(None);
+        };
         let holder_id = &self.writer.enrollment().holder_id;
-        if object.len() != 3 || object.get("holder_id")?.as_str()? != holder_id {
-            return None;
-        }
-        let units: BTreeSet<String> = object
-            .get("units")?
-            .as_array()?
-            .iter()
-            .map(|u| u.as_str().map(str::to_owned))
-            .collect::<Option<_>>()?;
-        let count = usize::try_from(object.get("count")?.as_u64()?).ok()?;
-        (count == units.len() && manifest_digest(holder_id, &units) == reference.manifest_digest)
-            .then_some(units)
+        // Closed and canonical: old id-only manifests are not deletion authority.
+        Ok(crate::strict_json::parse(&bytes).ok().and_then(|value| {
+            let units = serde_json::from_value(value.get("units")?.clone()).ok()?;
+            (crate::obligations::manifest_bytes(holder_id, &units) == bytes
+                && manifest_digest(holder_id, &units) == reference.manifest_digest)
+                .then_some(units)
+        }))
     }
 
     /// L1 or L2 for one unseen instruction. Returns the step recorded, or
@@ -257,11 +257,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .iter()
             .map(|u| (u.unit_id.as_str(), u.reserved))
             .collect();
-        let manifest = self.retained_manifest(&instruction.bound_report_digest);
+        let manifest = match self.retained_manifest(&instruction.bound_report_digest) {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                self.events.emit(HolderEvent::ReleaseStepFailed {
+                    step: "manifest_read",
+                });
+                return None;
+            }
+        };
         let exact = manifest.as_ref().filter(|units| {
             u64::try_from(units.len()).is_ok_and(|n| n == instruction.approved_count)
-                && units.iter().all(|unit| {
-                    inventory.unattributed.contains(unit)
+                && units.iter().all(|(unit, attribution)| {
+                    inventory.unattributed.get(unit) == Some(attribution)
                         && observed.get(unit.as_str()) == Some(&false)
                         && !held.contains(unit)
                 })
@@ -277,7 +285,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             Some(units) => (ReleaseStep::Reserving, units.clone(), None),
             None => (
                 ReleaseStep::Mismatch,
-                BTreeSet::new(),
+                Default::default(),
                 Some(manifest_digest(&holder_id, &inventory.unattributed)),
             ),
         };
@@ -337,7 +345,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let observed: BTreeMap<&str, u32> = census
             .units
             .iter()
-            .filter(|u| record.units.contains(&u.unit_id))
+            .filter(|u| record.units.contains_key(&u.unit_id))
             .map(|u| (u.unit_id.as_str(), u.open_handles))
             .collect();
         // A claim recorded before a crash: units no longer observed are gone.
@@ -421,18 +429,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if census
             .units
             .iter()
-            .any(|u| record.units.contains(&u.unit_id))
+            .any(|u| record.units.contains_key(&u.unit_id))
         {
             return Ok(());
         }
         let mut held = self.writer.state().status.release_held_units();
-        for unit in &record.units {
+        for unit in record.units.keys() {
             held.remove(unit);
         }
         let inventory = Inventory::with_held(&census, &self.plan(), &held);
         let holder_id = self.writer.enrollment().holder_id.clone();
         let observed_digest = manifest_digest(&holder_id, &inventory.unattributed);
-        let all = record.units.clone();
+        let all = record.units.into_keys();
         if self.update_record(id, |r| {
             r.step = ReleaseStep::Deleted;
             r.deleted.extend(all);

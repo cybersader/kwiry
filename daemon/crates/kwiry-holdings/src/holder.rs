@@ -134,6 +134,7 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     /// An admitted list failed to apply: its floors are not durable, so no
     /// report is derived or sent until a list applies (K2x).
     pub(crate) apply_failed_since_admit: bool,
+    pub(crate) lifecycle_unavailable: bool,
     /// `503 authority_epoch_mismatch` on any route (H.12 steps 2 and 4):
     /// treated as unreachable, and no purge runs until a verified list
     /// applies (§4.5).
@@ -143,7 +144,11 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) status_backoff_ms: u64,
     pub(crate) status_backoff_until: u64,
     /// Unverifiable status acks in a row (T6c after three).
+    /// Exact first dispatch time; the durable arm uses a conservative bound until the next W.
+    pub(crate) status_dispatch_ms: Option<i64>,
     pub(crate) status_unverifiable: u8,
+    /// A definitive stale-list response whose rejection W still needs retry.
+    pub(crate) status_rejection_owed: Option<String>,
 }
 
 /// The parts of the list last applied in this process that obligations and
@@ -227,11 +232,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             relist_before_report: false,
             apply_failed_since_admit: false,
             rollback_suspected: false,
+            lifecycle_unavailable: false,
             report_backoff_ms: 0,
             report_backoff_until: 0,
             status_backoff_ms: 0,
             status_backoff_until: 0,
             status_unverifiable: 0,
+            status_dispatch_ms: None,
+            status_rejection_owed: None,
         })
     }
 
@@ -342,7 +350,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     pub(crate) fn schedule_after_failure(&mut self, failure: &FetchFailure, finished: u64) {
         match failure {
             FetchFailure::RequestInvalid { .. } => self.scheduler.on_request_invalid(finished),
-            FetchFailure::Unreachable { retry_after_s } => {
+            FetchFailure::Unreachable { retry_after_s }
+            | FetchFailure::LifecycleUnavailable { retry_after_s } => {
                 let retry_ms = retry_after_s.map(|s| s.saturating_mul(1000));
                 self.scheduler.on_failure(finished, retry_ms);
             }
@@ -421,6 +430,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     pub(crate) fn on_failure(&mut self, failure: &FetchFailure) {
         let event = match failure {
+            FetchFailure::LifecycleUnavailable { .. } => {
+                self.lifecycle_unavailable = true;
+                HolderEvent::AuthorityUnreachable
+            }
             FetchFailure::Unreachable { .. } => HolderEvent::AuthorityUnreachable,
             FetchFailure::Deadline => HolderEvent::ListDeadline,
             FetchFailure::Invalid(error) => HolderEvent::ListInvalid {

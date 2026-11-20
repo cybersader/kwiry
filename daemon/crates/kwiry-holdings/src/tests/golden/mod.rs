@@ -47,11 +47,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 const FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/openclast-lifecycle-vectors.v1.json"
+    "/../kwiry/tests/fixtures/holdings/lifecycle-vectors.v1.json"
 ));
 const PROVENANCE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/openclast-lifecycle-vectors.v1.provenance.json"
+    "/../kwiry/tests/fixtures/holdings/lifecycle-vectors.v1.provenance.json"
 ));
 /// The sha256 the vendored fixture must have. A change to the fixture is a
 /// deliberate re-vendoring: update this, the provenance note and the
@@ -578,10 +578,7 @@ fn the_fixture_matches_its_recorded_sha256_and_provenance() {
         format!("sha256:{FIXTURE_SHA256}")
     );
     assert_eq!(text(&provenance()["sha256"]), FIXTURE_SHA256);
-    assert_eq!(
-        text(&provenance()["fixture"]),
-        "openclast-lifecycle-vectors.v1.json"
-    );
+    assert_eq!(text(&provenance()["fixture"]), "lifecycle-vectors.v1.json");
     let commit = text(&provenance()["source"]["commit"]);
     assert!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()));
     assert!(text(&fixture()["status"]).contains("TEST ONLY"));

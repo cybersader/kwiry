@@ -82,7 +82,7 @@ pub struct Inventory {
     pub attributed: BTreeMap<ResourceKey, Vec<ObservedUnit>>,
     /// Units no listed holding accounts for: unknown, tombstoned-unlisted,
     /// unattributable, or reserved by a release until deleted.
-    pub unattributed: BTreeSet<String>,
+    pub unattributed: crate::store::ManifestUnits,
 }
 
 impl Inventory {
@@ -111,7 +111,9 @@ impl Inventory {
                     .or_default()
                     .push(unit.clone()),
                 None => {
-                    inventory.unattributed.insert(unit.unit_id.clone());
+                    inventory
+                        .unattributed
+                        .insert(unit.unit_id.clone(), unit.attribution.clone());
                 }
             }
         }
@@ -182,6 +184,8 @@ pub struct PurgeSummary {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObligationsRefused {
+    /// Authority reported custody unavailable; a successful list apply clears it.
+    LifecycleUnavailable,
     /// v2 H.45: the holder fail-stopped; no purge, report or write runs.
     HolderStateUnwritable,
     /// No list was applied in this process: nothing is known to be owed.
@@ -283,6 +287,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// Deletion needs everything reporting needs, and no rollback suspicion.
     pub(crate) fn purge_allowed(&self) -> Result<(), ObligationsRefused> {
         self.obligations_allowed()?;
+        if self.apply_failed_since_admit {
+            return Err(ObligationsRefused::ApplyIncomplete);
+        }
+        if self.lifecycle_unavailable {
+            return Err(ObligationsRefused::LifecycleUnavailable);
+        }
         if self.rollback_suspected {
             return Err(ObligationsRefused::AuthorityRollbackSuspected);
         }

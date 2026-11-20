@@ -140,7 +140,7 @@ fn h12_every_list_route_answer_has_one_holder_action() {
     let cases: Vec<(Forced, FetchFailure, &str)> = vec![
         (
             problem(503, "lifecycle_unavailable"),
-            FetchFailure::Unreachable {
+            FetchFailure::LifecycleUnavailable {
                 retry_after_s: None,
             },
             "lifecycle_unreachable",
