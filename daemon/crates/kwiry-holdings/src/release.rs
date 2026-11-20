@@ -46,7 +46,9 @@ use crate::holder::Holder;
 use crate::obligations::manifest_digest;
 use crate::purge::{Inventory, ObligationsRefused};
 use crate::status::{InstructionRecord, ReleaseStep, StatusBook};
-use crate::store::{ArtifactPurger, Census, Claimant, DeleteOutcome, ResourceStore};
+use crate::store::{
+    ArtifactPurger, Census, Claimant, DeleteOutcome, ReserveOutcome, ResourceStore,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -120,17 +122,33 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .collect();
         let mut confirmed = 0;
         for (id, units) in pending {
-            if purger.reserve(&id, &units).is_err() {
-                self.events
-                    .emit(HolderEvent::ReleaseStepFailed { step: "reserve" });
-                continue;
+            if self.fail_stopped() {
+                return Err(ObligationsRefused::HolderStateUnwritable);
             }
-            let mut next = self.writer.state().status.clone();
-            if let Some(record) = next.instructions.get_mut(&id) {
-                record.step = ReleaseStep::Draining;
+            match purger.reserve(&id, &units) {
+                Ok(ReserveOutcome::Reserved) => {
+                    if self.update_record(&id, |r| r.step = ReleaseStep::Draining) {
+                        confirmed += 1;
+                        self.events.emit(HolderEvent::ReleaseReserved);
+                    }
+                }
+                Ok(ReserveOutcome::Mismatch { unattributed }) => {
+                    let digest =
+                        manifest_digest(&self.writer.enrollment().holder_id, &unattributed);
+                    if self.update_record(&id, |r| {
+                        r.step = ReleaseStep::Mismatch;
+                        r.units.clear();
+                        r.observed_manifest_digest = Some(digest);
+                    }) {
+                        self.events.emit(HolderEvent::ReleaseMismatch);
+                    }
+                }
+                Err(_) => self
+                    .events
+                    .emit(HolderEvent::ReleaseStepFailed { step: "reserve" }),
             }
-            if self.commit_status(next) {
-                confirmed += 1;
+            if self.fail_stopped() {
+                return Err(ObligationsRefused::HolderStateUnwritable);
             }
         }
         Ok(confirmed)
@@ -170,8 +188,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             match self.evaluate(&instruction, &census) {
                 Some(ReleaseStep::Reserving) => {
                     summary.evaluated += 1;
-                    summary.reserved += 1;
                     self.honor_reservations(purger)?;
+                    match self.writer.state().status.instructions[&instruction.instruction_id].step
+                    {
+                        ReleaseStep::Draining => summary.reserved += 1,
+                        ReleaseStep::Mismatch => summary.mismatched += 1,
+                        _ => {}
+                    }
                 }
                 Some(_) => {
                     summary.evaluated += 1;
@@ -276,11 +299,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if !self.commit_status(next) {
             return None;
         }
-        self.events.emit(if step == ReleaseStep::Reserving {
-            HolderEvent::ReleaseReserved
-        } else {
-            HolderEvent::ReleaseMismatch
-        });
+        if step == ReleaseStep::Mismatch {
+            self.events.emit(HolderEvent::ReleaseMismatch);
+        }
         Some(step)
     }
 

@@ -6,7 +6,7 @@ use crate::startup::{ContentState, DataRoot, DataRootEvidence, MarkerState};
 use crate::state::{DurableIo, FsIo, WriteFailure};
 use crate::store::{
     ArtifactPurger, Census, Claimant, DeleteOutcome, HeldResource, ObservedUnit, PublicationFreeze,
-    PublishPlan, ResourceKey, ResourceStore, StoreError,
+    PublishPlan, ReserveOutcome, ResourceKey, ResourceStore, StoreError,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -305,6 +305,8 @@ pub struct PurgerView {
     /// `(after_census_calls, unit_id, unit)`.
     pub late: Vec<(usize, String, PurgerUnit)>,
     pub census_calls: usize,
+    /// Simulate time spent scanning under the first-byte publication freeze.
+    pub frozen_census_delay: Option<(Arc<FakeClock>, u64)>,
     pub barriers: usize,
     /// Stops (as a crashing process would) once this many units were
     /// deleted: every later delete fails until cleared.
@@ -332,9 +334,13 @@ pub struct PurgerView {
 /// it belongs to, only after that resource was detached, never while a
 /// handle is open and never when a release reserved it.
 #[derive(Clone, Default)]
-pub struct MemoryPurger(pub Arc<Mutex<PurgerView>>);
+pub struct MemoryPurger(Arc<Mutex<PurgerView>>, MemoryStore);
 
 impl MemoryPurger {
+    pub fn for_store(store: &MemoryStore) -> Self {
+        Self(Default::default(), store.clone())
+    }
+
     pub fn view(&self) -> MutexGuard<'_, PurgerView> {
         lock(&self.0)
     }
@@ -488,27 +494,46 @@ impl ArtifactPurger for MemoryPurger {
         &mut self,
         instruction_id: &str,
         units: &BTreeSet<String>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<ReserveOutcome, StoreError> {
+        // Hold both the publication/classification state and the physical
+        // inventory until the entire reservation is visible.
+        let store = self.1.view();
         let mut view = self.view();
         view.calls.push("reserve");
-        if view.fail_reserve {
+        if view.fail_reserve || view.fail_census {
             return Err(StoreError("injected reserve failure".into()));
         }
-        if units.iter().any(|unit| {
-            view.reservations
-                .get(unit)
-                .is_some_and(|other| other != instruction_id)
-        }) {
-            return Err(StoreError("reserved by another release".into()));
+        let plan = store
+            .published
+            .last()
+            .ok_or_else(|| StoreError("classification unavailable".into()))?;
+        let unattributed = crate::purge::Inventory::new(&view.snapshot(), plan).unattributed;
+        let owned: BTreeSet<_> = view
+            .reservations
+            .iter()
+            .filter(|(_, id)| *id == instruction_id)
+            .map(|(unit, _)| unit.clone())
+            .collect();
+        if !owned.is_empty() && owned == *units {
+            return Ok(ReserveOutcome::Reserved);
+        }
+        if !owned.is_empty()
+            || !units.is_subset(&unattributed)
+            || units
+                .iter()
+                .any(|unit| view.units[unit].reserved || view.reservations.contains_key(unit))
+        {
+            return Ok(ReserveOutcome::Mismatch { unattributed });
         }
         for unit in units {
             view.reservations
                 .insert(unit.clone(), instruction_id.to_owned());
-            if let Some(stored) = view.units.get_mut(unit) {
-                stored.reserved = true;
-            }
+            view.units
+                .get_mut(unit)
+                .expect("validated under the lock")
+                .reserved = true;
         }
-        Ok(())
+        Ok(ReserveOutcome::Reserved)
     }
 
     fn barrier(&mut self) -> Result<(), StoreError> {
@@ -536,6 +561,11 @@ impl ArtifactPurger for MemoryPurger {
         let mut view = self.view();
         view.calls.push("census");
         view.census_calls += 1;
+        if view.frozen > 0
+            && let Some((clock, delay)) = &view.frozen_census_delay
+        {
+            clock.advance(*delay);
+        }
         if view.fail_census {
             return Err(StoreError("injected census failure".into()));
         }
@@ -547,9 +577,15 @@ impl ArtifactPurger for MemoryPurger {
         for (_, unit_id, unit) in due {
             view.units.insert(unit_id, unit);
         }
-        Ok(Census {
+        Ok(view.snapshot())
+    }
+}
+
+impl PurgerView {
+    fn snapshot(&self) -> Census {
+        Census {
             locations: vec!["objects".into(), "staging".into(), "quarantine".into()],
-            units: view
+            units: self
                 .units
                 .iter()
                 .filter(|(_, u)| u.present || u.open_handles > 0)
@@ -560,7 +596,7 @@ impl ArtifactPurger for MemoryPurger {
                     reserved: u.reserved,
                 })
                 .collect(),
-        })
+        }
     }
 }
 

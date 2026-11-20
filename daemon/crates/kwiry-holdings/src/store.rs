@@ -150,6 +150,17 @@ pub enum DeleteOutcome {
     Failed,
 }
 
+/// Result of atomically matching and reserving a complete release manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReserveOutcome {
+    Reserved,
+    /// Nothing was reserved. The unattributed set at the check supplies the
+    /// observed manifest digest for the mismatch report.
+    Mismatch {
+        unattributed: BTreeSet<String>,
+    },
+}
+
 /// Anything an adapter's publication lock guard is made of.
 pub trait FreezeHold {}
 impl<T> FreezeHold for T {}
@@ -203,19 +214,23 @@ pub trait ArtifactPurger {
     /// reserved by exactly that release when the claimant is a release. A
     /// unit with an open handle is `Busy`, never deleted.
     fn delete(&mut self, unit_id: &str, claimant: &Claimant) -> Result<DeleteOutcome, StoreError>;
-    /// Reserves `units` for the release `instruction_id` (v2 §11.2 D).
+    /// Under the same exclusion as publication and reclassification, validate
+    /// the *whole* manifest against physical presence and the store's current
+    /// durable classification, then durably reserve it, all or nothing (G.5).
+    /// The holder's `Reserving` intent is not evidence of eligibility. The
+    /// operation must work before the first list after restart. Repeating an
+    /// already committed identical reservation is a success.
     ///
-    /// **Adapter obligation.** Idempotent for the same instruction and
-    /// units. Once it returns `Ok`, and across restarts until each unit is
-    /// deleted: the census reports every one of them `reserved`; no
-    /// obligation claim may delete them; no publication, mapping, build or
-    /// list may re-map or reuse them; and only [`Claimant::Release`] with
-    /// the same `instruction_id` may delete them. It deletes nothing. It
-    /// returns `Err` if any unit is reserved by another instruction or the
-    /// reservation cannot be made durable; the holder then retries later
-    /// and deletes nothing meanwhile.
-    fn reserve(&mut self, instruction_id: &str, units: &BTreeSet<String>)
-    -> Result<(), StoreError>;
+    /// A missing, attributed or otherwise reserved unit yields `Mismatch`,
+    /// without modifying any unit. Storage/observation failures yield `Err`
+    /// for retry; never substitute an empty classification on recovery.
+    /// Reserved units stay counted unattributed, excluded from reuse and
+    /// mapping, and deletable only by this instruction across restarts.
+    fn reserve(
+        &mut self,
+        instruction_id: &str,
+        units: &BTreeSet<String>,
+    ) -> Result<ReserveOutcome, StoreError>;
     /// Syncs every storage location; an error means the barrier failed.
     fn barrier(&mut self) -> Result<(), StoreError>;
     fn census(&self) -> Result<Census, StoreError>;

@@ -1295,7 +1295,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     pub fn arm_status_gate(&mut self, epoch: &str) -> bool {
         let mut next = self.writer.state().obligations.clone();
         next.status_gate.armed_epoch = Some(epoch.to_owned());
-        next.status_gate.status_halted = false;
+        next.status_gate.status_halted = self.writer.state().status.halted;
         self.commit_book(next)
     }
 

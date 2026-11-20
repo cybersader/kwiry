@@ -302,6 +302,11 @@ pub struct StatusBook {
     /// Wall time of the first transmission of the newest key (H.4.4).
     pub last_new_key_ms: Option<i64>,
     pub last_accepted: Option<AcceptedStatus>,
+    /// A superseded attempt may already have updated the authority. D only
+    /// bounds *future* acceptance; acknowledge a replacement even when the
+    /// current census equals the last locally acknowledged one.
+    #[serde(default)]
+    pub correction_owed: bool,
     /// Superseded attempts whose acceptance is unknown, by key.
     pub uncertain: BTreeMap<String, StatusUncertain>,
     /// Release instructions seen, by instruction id.
@@ -645,6 +650,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if body.holder_state == HolderStateClaim::Reset
             || body.release_result.is_some()
             || epoch_owed
+            || state.status.correction_owed
         {
             return true;
         }
@@ -734,6 +740,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             match previous.status {
                 PendingStatus::Rejected => answered = previous.attempts,
                 _ if !previous.attempts.is_empty() => {
+                    next.correction_owed = true;
                     next.uncertain.insert(
                         previous.key.clone(),
                         StatusUncertain {
@@ -837,14 +844,16 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             };
             // T2d: the linearization point, immediately before the first
             // byte, under the publication freeze.
+            let url = format!("{}{ROUTE_STATUS}", self.writer.enrollment().issuer);
+            let content_type = self.config.profile.status_request_content_type();
             let freeze = purger.freeze_publications().ok();
             let first_byte_ok = freeze.is_some()
                 && !self.fail_stopped()
                 && self.route == RouteHealth::Normal
-                && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS
                 && self
                     .inventory(purger)
-                    .is_ok_and(|now| self.status_guard(&pending, &now));
+                    .is_ok_and(|now| self.status_guard(&pending, &now))
+                && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS;
             if !first_byte_ok {
                 drop(freeze);
                 self.cancel_status_attempt(&sent.attempt);
@@ -852,13 +861,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 return;
             }
             summary.sent += 1;
-            let url = format!("{}{ROUTE_STATUS}", self.writer.enrollment().issuer);
-            let response = self.transport.post(
-                &url,
-                &self.config.profile.status_request_content_type(),
-                sent.compact.as_bytes(),
-                LIST_TIMEOUTS,
-            );
+            let response =
+                self.transport
+                    .post(&url, &content_type, sent.compact.as_bytes(), LIST_TIMEOUTS);
             drop(freeze);
             match self.classify_status(&pending, response) {
                 Answer::Receipt => {
@@ -1003,8 +1008,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Answer::Rejected
             }
             (409, Some("idempotency_conflict")) | (400 | 413, _) => {
-                self.halt_status(response.status);
-                Answer::Halted
+                self.halt_status(response.status)
             }
             (401, Some("replay")) => Answer::RetryReplay,
             (401, Some("proof_expired")) => Answer::RetryExpired,
@@ -1035,21 +1039,23 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.events.emit(HolderEvent::AckUnverifiable);
         self.status_unverifiable = self.status_unverifiable.saturating_add(1);
         if self.status_unverifiable >= UNVERIFIABLE_HALT {
-            self.halt_status(0);
-            return Answer::Halted;
+            return self.halt_status(0);
         }
         Answer::Unverifiable
     }
 
     /// T6c (and repeated unverifiable acks): the status halts durably, and
     /// the status-first gate is released in the same commit (H.22.3).
-    fn halt_status(&mut self, status: u16) {
+    fn halt_status(&mut self, status: u16) -> Answer {
         let mut next = self.writer.state().status.clone();
         next.halted = true;
         let mut book = self.writer.state().obligations.clone();
         book.status_gate.status_halted = true;
-        self.commit_lifecycle(Some(book), Some(next), false);
+        if !self.commit_lifecycle(Some(book), Some(next), false) {
+            return Answer::BackOff;
+        }
         self.events.emit(HolderEvent::StatusBugHalt { status });
+        Answer::Halted
     }
 
     /// T6d: definitively not accepted; the key's bytes are pruned.
@@ -1138,6 +1144,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 .as_ref()
                 .is_none_or(|a| a.rev.epoch != epoch || a.rev.seq <= ack.rev.seq);
             if newer {
+                // A late ack for the superseded key is not the correction.
+                if from_pending {
+                    next.correction_owed = false;
+                }
                 next.last_accepted = Some(AcceptedStatus {
                     key: key.clone(),
                     report_digest: ack.report_digest.clone(),
@@ -1183,10 +1193,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             self.relist_before_report = true;
             self.events.emit(HolderEvent::AckOtherEpoch);
         }
-        self.status_unverifiable = 0;
-        if self.commit_lifecycle(book, Some(next), clear_reset) {
-            self.prune_sent_attempts(&attempts);
+        if !self.commit_lifecycle(book, Some(next), clear_reset) {
+            return Answer::BackOff;
         }
+        self.status_unverifiable = 0;
+        self.prune_sent_attempts(&attempts);
         Answer::Receipt
     }
 
@@ -1295,6 +1306,7 @@ pub(crate) fn invalidate_status(status: &mut StatusBook) {
         return;
     };
     if !pending.attempts.is_empty() {
+        status.correction_owed = true;
         status.uncertain.insert(
             pending.key.clone(),
             StatusUncertain {

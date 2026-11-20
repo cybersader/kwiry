@@ -977,8 +977,8 @@ impl GoldenRig {
             holder,
             clock,
             events,
+            purger: MemoryPurger::for_store(&store),
             store,
-            purger: MemoryPurger::default(),
             transport,
             dir,
         }

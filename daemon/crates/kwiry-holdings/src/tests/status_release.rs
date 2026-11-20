@@ -412,7 +412,7 @@ fn a_reservation_the_purger_has_not_confirmed_holds_every_list_back() {
     applied(rig.relist());
     rig.purger.view().fail_reserve = true;
     let pass = rig.release().unwrap();
-    assert_eq!((pass.reserved, pass.deleted), (1, 0));
+    assert_eq!((pass.reserved, pass.deleted), (0, 0));
     assert_eq!(step(rig, &ins), Some(ReleaseStep::Reserving));
     assert!(codes(rig).contains(&"lifecycle_release_step_failed"));
     assert_eq!(rig.relist(), ListOutcome::ReservationPending);
@@ -1021,4 +1021,145 @@ fn g3_every_attempt_digest_names_its_manifest() {
         [ReleaseOutcome::Executed, ReleaseOutcome::Mismatch].map(ReleaseOutcome::wire),
         ["executed", "mismatch"]
     );
+}
+
+#[test]
+fn recovery_rechecks_the_whole_manifest_before_reserving() {
+    for reattributed in [false, true] {
+        let mut w = world();
+        let digest = purged_and_reported(&mut w);
+        let rig = &mut w.rig;
+        let ins = rig.authority.state().issue_release(&digest, 2);
+        applied(rig.relist());
+        rig.purger.view().fail_reserve = true;
+        rig.release().unwrap();
+        assert_eq!(step(rig, &ins), Some(ReleaseStep::Reserving));
+        rig.restart().unwrap();
+        {
+            let mut view = rig.purger.view();
+            view.fail_reserve = false;
+            let changed = view.units.get_mut(&w.x_units[1]).unwrap();
+            if reattributed {
+                changed.attribution = Some(crate::store::ResourceKey {
+                    kind: PLAIN.into(),
+                    id: A.into(),
+                });
+            } else {
+                changed.present = false;
+            }
+        }
+        assert_eq!(rig.honor().unwrap(), 0);
+        assert_eq!(step(rig, &ins), Some(ReleaseStep::Mismatch));
+        assert!(rig.purger.view().reservations.is_empty());
+        applied(rig.relist());
+        assert_eq!(rig.release().unwrap().deleted, 0);
+        assert_eq!(rig.status().unwrap().receipts, 1);
+        let status = accepted_statuses(rig).pop().unwrap();
+        assert_eq!(status["release_result"]["result"], "mismatch");
+        assert_eq!(status["quarantined_unattributed"], 1);
+        assert_eq!(
+            status["release_result"]["observed_manifest_digest"],
+            status["quarantine_manifest_digest"]
+        );
+    }
+}
+
+#[test]
+fn a_durable_status_halt_outlives_gate_rearming() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    problem(rig, 400, "invalid_request");
+    assert_eq!(rig.status().unwrap().halted, 1);
+    assert!(rig.holder().arm_status_gate("ep_SOMEepoch0000000000001"));
+    rig.restart().unwrap();
+    applied(rig.relist());
+    assert!(rig.holder().state().status.halted);
+    assert_eq!(rig.report().unwrap().receipts, 1);
+}
+
+#[test]
+fn a_lost_nonzero_ack_still_requires_a_corrective_zero_after_d() {
+    let (_dir, mut rig) = rig();
+    applied(rig.relist());
+    let current = epoch(&mut rig);
+    assert!(rig.holder().arm_status_gate(&current));
+    assert_eq!(rig.status().unwrap().receipts, 1); // locally acknowledged zero
+    later(&rig);
+    let unit = rig.purger.add_unattributable();
+    rig.authority.state().drop_status_acks = 1;
+    assert_eq!(rig.status().unwrap().receipts, 0);
+    assert_eq!(
+        accepted_statuses(&rig).last().unwrap()["quarantined_unattributed"],
+        1
+    );
+    rig.purger.view().units.get_mut(&unit).unwrap().present = false;
+    assert_eq!(rig.status().unwrap().sent, 0); // same list: cannot overtake
+    rig.advance(421_000);
+    rig.restart().unwrap();
+    applied(rig.relist());
+    assert!(rig.holder().state().status.uncertain.is_empty());
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    assert_eq!(
+        accepted_statuses(&rig).last().unwrap()["quarantined_unattributed"],
+        0
+    );
+    later(&rig);
+    assert_eq!(rig.status().unwrap().derived, 0);
+}
+
+#[test]
+fn poisoned_reservation_confirmation_stops_before_the_next_adapter_call() {
+    let mut w = world();
+    let digest = purged_and_reported(&mut w);
+    let rig = &mut w.rig;
+    let ins = rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    rig.purger.view().fail_reserve = true;
+    rig.release().unwrap();
+    let mut book = rig.holder().state().status.clone();
+    let mut second = book.instructions[&ins].clone();
+    second.units = [rig.purger.add_unattributable()].into();
+    second.approved_count = 1;
+    book.instructions
+        .insert("ins_secondSynthetic000001".into(), second);
+    assert!(rig.holder().commit_status(book));
+    rig.purger.view().fail_reserve = false;
+    rig.purger.view().calls.clear();
+    rig.io_faults
+        .plan(vec![Fault::AfterRename, Fault::BeforeRename]);
+    assert_eq!(rig.honor(), Err(ObligationsRefused::HolderStateUnwritable));
+    assert_eq!(rig.purger.view().calls, ["reserve"]);
+}
+
+#[test]
+fn failed_status_commits_do_not_report_a_receipt_or_halt() {
+    for receipt in [false, true] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        rig.authority.state().drop_status_acks = 1;
+        assert_eq!(rig.status().unwrap().sent, 1);
+        later(rig);
+        if !receipt {
+            problem(rig, 400, "invalid_request");
+        }
+        // Retry: W(sent bytes), W(armed), optional W(receipt bytes), W(transition).
+        let mut writes = vec![Fault::Pass; if receipt { 3 } else { 2 }];
+        writes.push(Fault::BeforeRename);
+        rig.io_faults.plan(writes);
+        let summary = rig.status().unwrap();
+        assert_eq!(summary.sent, 1);
+        assert_eq!((summary.receipts, summary.halted), (0, 0));
+        assert!(!codes(rig).contains(&"lifecycle_status_bug_halt"));
+    }
+}
+
+#[test]
+fn a_final_census_that_exhausts_the_queue_cap_cancels_dispatch() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.purger.view().frozen_census_delay = Some((rig.clock.clone(), crate::report::QUEUE_CAP_MS));
+    let summary = rig.status().unwrap();
+    assert_eq!((summary.sent, summary.cancelled), (0, 1));
+    assert!(statuses(rig).is_empty());
+    assert!(pending_status(rig).unwrap().attempts.is_empty());
 }

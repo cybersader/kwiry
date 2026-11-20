@@ -208,16 +208,18 @@ impl Rig {
             page_size: crate::holder::DEFAULT_PAGE_SIZE,
             engine,
         };
+        let store = MemoryStore::default();
+        let purger = MemoryPurger::for_store(&store);
         let mut rig = Self {
             clock,
             authority,
             events: Arc::new(MemorySink::default()),
-            store: MemoryStore::default(),
+            store,
             data_root: FakeDataRoot::default(),
             io_faults,
             dir: dir.to_path_buf(),
             config,
-            purger: MemoryPurger::default(),
+            purger,
             holder: None,
         };
         rig.restart().expect("start");
