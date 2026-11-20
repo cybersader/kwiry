@@ -186,7 +186,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 return Ok(summary);
             };
             match self.evaluate(&instruction, &census) {
-                Some(ReleaseStep::Reserving) => {
+                Ok(Some(ReleaseStep::Reserving)) => {
                     summary.evaluated += 1;
                     self.honor_reservations(purger)?;
                     match self.writer.state().status.instructions[&instruction.instruction_id].step
@@ -196,12 +196,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         _ => {}
                     }
                 }
-                Some(_) => {
+                Ok(Some(_)) => {
                     summary.evaluated += 1;
                     summary.mismatched += 1;
                 }
                 // Not recorded: evaluated again on the next pass.
-                None => return Ok(summary),
+                Ok(None) => continue,
+                Err(()) => return Ok(summary),
             }
         }
         let draining: Vec<String> = self
@@ -247,8 +248,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     /// L1 or L2 for one unseen instruction. Returns the step recorded, or
-    /// `None` when nothing could be recorded.
-    fn evaluate(&mut self, instruction: &Instruction, census: &Census) -> Option<ReleaseStep> {
+    /// `Ok(None)` for a temporarily unreadable manifest; a write failure stops this pass.
+    fn evaluate(
+        &mut self,
+        instruction: &Instruction,
+        census: &Census,
+    ) -> Result<Option<ReleaseStep>, ()> {
         let status = self.writer.state().status.clone();
         let held = status.release_held_units();
         let inventory = Inventory::with_held(census, &self.plan(), &held);
@@ -263,7 +268,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 self.events.emit(HolderEvent::ReleaseStepFailed {
                     step: "manifest_read",
                 });
-                return None;
+                return Ok(None);
             }
         };
         let exact = manifest.as_ref().filter(|units| {
@@ -305,12 +310,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             },
         );
         if !self.commit_status(next) {
-            return None;
+            return Err(());
         }
         if step == ReleaseStep::Mismatch {
             self.events.emit(HolderEvent::ReleaseMismatch);
         }
-        Some(step)
+        Ok(Some(step))
     }
 
     fn record(&self, id: &str) -> Option<InstructionRecord> {

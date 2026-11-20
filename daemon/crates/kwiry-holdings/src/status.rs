@@ -297,6 +297,9 @@ pub struct ManifestRef {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusBook {
+    /// Write-ahead refusal records, consumed atomically with their effects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) owed: Vec<crate::transition::Owed>,
     pub pending: Option<StatusPending>,
     /// Bug halt (T6c). Cleared only by an operator resume (N5).
     pub halted: bool,
@@ -432,11 +435,6 @@ enum StatusVerificationFailure {
     PinWrite,
 }
 
-pub(crate) enum StatusRefusal {
-    Halt(u16),
-    Stale(String),
-}
-
 struct StatusArmed {
     compact: String,
     attempt: Attempt,
@@ -491,13 +489,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         status: Option<StatusBook>,
         clear_reset: bool,
     ) -> bool {
-        match self.writer.update_lifecycle(book, status, clear_reset) {
-            Ok(()) => true,
-            Err(error) => {
-                crate::holder::report_write_failure(self.events.as_ref(), &error);
-                false
-            }
-        }
+        self.commit_books_then(book, status, clear_reset, |_| ())
+            .is_some()
     }
 
     /// Verifies a status ack: closed header and members, exact `typ`, ES256
@@ -586,6 +579,38 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         })
     }
 
+    /// Intake is local only. No key refresh or affirmative action runs while
+    /// consuming refusals. A weaker refusal never replaces a stronger halt.
+    pub(crate) fn drain_deliveries(&mut self) -> (bool, StatusSummary) {
+        let mut batch = self.inbox.drain();
+        batch.sort_by_cached_key(|(_, r)| match (r.status, problem_code(r).as_deref()) {
+            (403, _) => 0,
+            (503, Some("lifecycle_unavailable" | "authority_epoch_mismatch")) => 1,
+            (401, _) => 2,
+            _ => 3,
+        });
+        let mut summary = StatusSummary::default();
+        let mut refusal = false;
+        for (key, response) in batch {
+            if response.status == 200 {
+                self.late_acks.push_back((key, response));
+                continue;
+            }
+            refusal = true;
+            if self.route == RouteHealth::AuthHalt(AuthHalt::NotAuthorized)
+                && response.status == 401
+            {
+                continue;
+            }
+            let answer = self.classify_status(&key, Ok(response));
+            summary.record(answer);
+            if answer == Answer::BackOff && self.clock.mono_ms() >= self.status_backoff_until {
+                self.status_back_off(None);
+            }
+        }
+        (refusal, summary)
+    }
+
     /// One pass of the status channel: invalidate a stale status, derive a
     /// new one if anything triggers it, transmit what is due and classify
     /// the answer.
@@ -593,18 +618,26 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &dyn ArtifactPurger,
     ) -> Result<StatusSummary, ObligationsRefused> {
-        let mut summary = StatusSummary::default();
-        if self.traffic_halted() {
+        let (received, mut summary) = self.drain_deliveries();
+        if received || self.traffic_halted() {
             return Ok(summary);
         }
         if self.fail_stopped() {
             return Err(ObligationsRefused::HolderStateUnwritable);
         }
-        if let Some(owed) = self.status_refusal.take() {
-            summary.record(self.finish_refusal(owed));
+        if let Some(owed) = self
+            .writer
+            .state()
+            .status
+            .owed
+            .iter()
+            .find(|o| o.for_status())
+            .cloned()
+        {
+            summary.record(self.apply_owed(owed));
             return Ok(summary);
         }
-        if let Some((key, response)) = self.transport.take_late_status_response() {
+        if let Some((key, response)) = self.late_acks.pop_front() {
             // A route refusal narrows even if a newer list failed to apply. An
             // affirmative answer must not refresh pins or broaden in that state.
             if response.status == 200
@@ -630,9 +663,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         self.status_invalidate_failing(&inventory, &mut summary);
         self.obligations_allowed()?;
-        if self.status_derive_and_store(&inventory) {
-            summary.derived += 1;
-        }
+        self.status_derive_and_store(&inventory, &mut summary);
         self.obligations_allowed()?;
         self.status_transmit(purger, &mut summary);
         self.prune_manifest_index();
@@ -743,28 +774,26 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return;
         }
         invalidate_status(&mut status);
-        if self.commit_status(status) {
-            summary.invalidated += 1;
-        }
+        self.commit_books_then(None, Some(status), false, |_| summary.invalidated += 1);
     }
 
-    /// T1 with its guards. Returns whether a new status was stored.
-    fn status_derive_and_store(&mut self, inventory: &Inventory) -> bool {
+    /// T1 with its guards.
+    fn status_derive_and_store(&mut self, inventory: &Inventory, summary: &mut StatusSummary) {
         if self.relist_before_report {
-            return false;
+            return;
         }
         let Some(epoch) = self.high_water_epoch() else {
-            return false;
+            return;
         };
         let status = self.writer.state().status.clone();
         if status.halted || status.pending.as_ref().is_some_and(StatusPending::live) {
-            return false;
+            return;
         }
         let Some(body) = self.derive_status(inventory) else {
-            return false;
+            return;
         };
         if !self.status_triggered(&body, &epoch) {
-            return false;
+            return;
         }
         let (holder_id, audience, htu) = self.status_envelope();
         let envelope = Envelope {
@@ -784,7 +813,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .is_err()
         {
             self.events.emit(HolderEvent::StorageExhausted);
-            return false;
+            return;
         }
         let mut next = status;
         let mut answered = Vec::new();
@@ -816,11 +845,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             attempts: Vec::new(),
             epoch,
         });
-        let stored = self.commit_status(next);
-        if stored {
-            self.prune_sent_attempts(&answered);
-        }
-        stored
+        self.commit_books_then(None, Some(next), false, |holder| {
+            holder.prune_sent_attempts(&answered);
+            summary.derived += 1;
+        });
     }
 
     /// H.50 for status: a possibly-sent earlier status that could still
@@ -847,7 +875,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let wait = retry_after_s
             .map_or(0, |s| s.saturating_mul(1000))
             .max(self.status_backoff_ms);
-        self.status_backoff_until = now.saturating_add(wait);
+        self.status_backoff_until = self.status_backoff_until.max(now.saturating_add(wait));
     }
 
     /// T2 → T2d → the answer.
@@ -855,12 +883,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut replay_retried = false;
         let mut expiry_retried = false;
         loop {
-            if self.fail_stopped() || self.route != RouteHealth::Normal || self.relist_before_report
+            if self.drain_deliveries().0
+                || self.fail_stopped()
+                || self.route != RouteHealth::Normal
+                || self.relist_before_report
             {
                 return;
             }
             let status = self.writer.state().status.clone();
-            if status.halted {
+            if status.halted || status.owed.iter().any(|o| o.for_status()) {
                 return;
             }
             let Some(pending) = status.pending.clone().filter(StatusPending::live) else {
@@ -885,9 +916,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             if !self.status_guard(&pending, &inventory) {
                 let mut next = status;
                 invalidate_status(&mut next);
-                if self.commit_status(next) {
-                    summary.invalidated += 1;
-                }
+                self.commit_books_then(None, Some(next), false, |_| summary.invalidated += 1);
                 return;
             }
             let previous_dispatch = status.last_new_key_ms;
@@ -911,12 +940,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 && self
                     .inventory(purger)
                     .is_ok_and(|now| self.status_guard(&pending, &now))
-                && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS;
+                && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS
+                && !self.inbox.has_refusal();
             if !first_byte_ok {
                 drop(freeze);
-                if self.cancel_status_attempt(&sent.attempt, previous_dispatch) {
-                    summary.cancelled += 1;
-                }
+                self.cancel_status_attempt(&sent.attempt, previous_dispatch, summary);
+                self.drain_deliveries();
                 return;
             }
             if first_dispatch {
@@ -938,7 +967,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     self.status_backoff_ms = 0;
                     return;
                 }
-                Answer::Rejected
+                Answer::Duplicate
+                | Answer::Rejected
                 | Answer::Halted
                 | Answer::Converged
                 | Answer::Unverifiable
@@ -1023,7 +1053,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     /// T2q → T2x: the attempt never left; prune it and invalidate.
-    fn cancel_status_attempt(&mut self, attempt: &Attempt, previous_dispatch: Option<i64>) -> bool {
+    fn cancel_status_attempt(
+        &mut self,
+        attempt: &Attempt,
+        previous_dispatch: Option<i64>,
+        summary: &mut StatusSummary,
+    ) {
         let mut next = self.writer.state().status.clone();
         next.last_new_key_ms = previous_dispatch;
         next.manifests.remove(&attempt.digest);
@@ -1031,12 +1066,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             pending.attempts.retain(|a| a != attempt);
         }
         invalidate_status(&mut next);
-        if self.commit_status(next) {
-            self.prune_sent_attempts(std::slice::from_ref(attempt));
-            true
-        } else {
-            false
-        }
+        self.commit_books_then(None, Some(next), false, |holder| {
+            holder.prune_sent_attempts(std::slice::from_ref(attempt));
+            summary.cancelled += 1;
+        });
     }
 
     pub(crate) fn prune_sent_attempts(&mut self, attempts: &[Attempt]) {
@@ -1084,10 +1117,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             }
             (409, Some("stale_list_ref")) => {
                 self.relist_before_report = true;
-                self.finish_refusal(StatusRefusal::Stale(request_key.into()))
+                self.record_refusal(crate::transition::Owed::StatusStale {
+                    key: request_key.into(),
+                })
             }
             (409, Some("idempotency_conflict")) | (400 | 413, _) => {
-                self.finish_refusal(StatusRefusal::Halt(response.status))
+                self.record_refusal(crate::transition::Owed::StatusHalt {
+                    code: response.status,
+                })
             }
             (401, Some("replay")) => Answer::RetryReplay,
             (401, Some("proof_expired")) => Answer::RetryExpired,
@@ -1143,13 +1180,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 )
                 .map_err(|_| Unverifiable)?;
                 let seq = pins.keyset_seq;
-                self.writer.pin_keys(pins).map_err(|error| {
-                    crate::holder::report_write_failure(self.events.as_ref(), &error);
-                    PinWrite
-                })?;
-                if let Some(keyset_seq) = seq {
-                    self.events.emit(HolderEvent::KeysetAccepted { keyset_seq });
-                }
+                self.commit_then(
+                    |writer| writer.pin_keys(pins),
+                    |holder| {
+                        if let Some(keyset_seq) = seq {
+                            holder
+                                .events
+                                .emit(HolderEvent::KeysetAccepted { keyset_seq });
+                        }
+                    },
+                )
+                .ok_or(PinWrite)?;
                 self.verify_status_ack(compact).map_err(|_| Unverifiable)
             }
             result => result.map_err(|_| Unverifiable),
@@ -1159,8 +1200,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// T7: deliver a delayed status POST receipt without sending a replacement.
     /// Only an outstanding uncertain key and its recorded attempt may resolve.
     pub fn receive_late_status_receipt(&mut self, compact: &str) -> bool {
+        self.drain_deliveries();
         if self.route != RouteHealth::Normal
-            || self.status_refusal.is_some()
+            || self
+                .writer
+                .state()
+                .status
+                .owed
+                .iter()
+                .any(|o| o.for_status())
             || self.obligations_allowed().is_err()
             || self.apply_failed_since_admit
         {
@@ -1188,59 +1236,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.events.emit(HolderEvent::AckUnverifiable);
         self.status_unverifiable = self.status_unverifiable.saturating_add(1);
         if self.status_unverifiable >= UNVERIFIABLE_HALT {
-            return self.finish_refusal(StatusRefusal::Halt(0));
+            return self.record_refusal(crate::transition::Owed::StatusHalt { code: 0 });
         }
         Answer::Unverifiable
-    }
-
-    /// A definitive refusal retries only its durable transition. Success events
-    /// and counts follow that commit; a failed write never re-enables the POST.
-    fn finish_refusal(&mut self, refusal: StatusRefusal) -> Answer {
-        let answer = match &refusal {
-            StatusRefusal::Halt(status) => self.halt_status(*status),
-            StatusRefusal::Stale(key) if self.reject_status(key, 409) => Answer::Rejected,
-            StatusRefusal::Stale(_) => Answer::BackOff,
-        };
-        if answer == Answer::BackOff {
-            self.status_refusal = Some(refusal);
-        }
-        answer
-    }
-
-    /// T6c (and repeated unverifiable acks): the status halts durably, and
-    /// the status-first gate is released in the same commit (H.22.3).
-    fn halt_status(&mut self, status: u16) -> Answer {
-        let mut next = self.writer.state().status.clone();
-        next.halted = true;
-        let mut book = self.writer.state().obligations.clone();
-        book.status_gate.status_halted = true;
-        if !self.commit_lifecycle(Some(book), Some(next), false) {
-            return Answer::BackOff;
-        }
-        self.events.emit(HolderEvent::StatusBugHalt { status });
-        Answer::Halted
-    }
-
-    /// T6d: definitively not accepted; the key's bytes are pruned.
-    fn reject_status(&mut self, key: &str, status: u16) -> bool {
-        let mut next = self.writer.state().status.clone();
-        let mut prune = Vec::new();
-        if let Some(record) = next.pending.as_mut().filter(|p| p.key == key) {
-            prune = std::mem::take(&mut record.attempts);
-            record.status = PendingStatus::Rejected;
-        }
-        if let Some(u) = next.uncertain.remove(key) {
-            prune.extend(u.attempts);
-        }
-        for attempt in &prune {
-            next.manifests.remove(&attempt.digest);
-        }
-        if !self.commit_status(next) {
-            return false;
-        }
-        self.prune_sent_attempts(&prune);
-        self.events.emit(HolderEvent::StatusRejected { status });
-        true
     }
 
     /// Checks a receipt's accepted claims against the body it names.
@@ -1286,6 +1284,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     uncertain.attempts.clone(),
                     false,
                 )
+            } else if self
+                .writer
+                .dir()
+                .read(&format!("sreceipt.{}.jws", ack.idempotency_key))
+                .is_ok_and(|bytes| bytes.as_deref() == Some(ack.compact.as_bytes()))
+            {
+                // H.37: even a byte-identical replay must verify under live pins.
+                // Only after ruling out an outstanding W may it be a no-op.
+                return Answer::Duplicate;
             } else {
                 return self.status_unverifiable();
             };
@@ -1367,18 +1374,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             // Minted in an epoch the holder has left: audit only (H.5).
             audit = Some(HolderEvent::AckOtherEpoch);
         }
-        if !self.commit_lifecycle(book, Some(next), clear_reset) {
-            return Answer::BackOff;
-        }
-        if ack.rev.epoch != epoch {
-            self.relist_before_report = true;
-        }
-        if let Some(event) = audit {
-            self.events.emit(event);
-        }
-        self.status_unverifiable = 0;
-        self.prune_sent_attempts(&attempts);
-        Answer::Receipt
+        self.commit_books_then(book, Some(next), clear_reset, |holder| {
+            if ack.rev.epoch != epoch {
+                holder.relist_before_report = true;
+            }
+            if let Some(event) = audit {
+                holder.events.emit(event);
+            }
+            holder.status_unverifiable = 0;
+            holder.prune_sent_attempts(&attempts);
+            Answer::Receipt
+        })
+        .unwrap_or(Answer::BackOff)
     }
 
     /// N5: an audited operator resume of a halted status. The status moves
@@ -1398,12 +1405,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut book = self.writer.state().obligations.clone();
         book.status_gate.status_halted = false;
         book.status_gate.acked_epoch = None;
-        if !self.commit_lifecycle(Some(book), Some(next), false) {
-            return false;
-        }
-        self.status_unverifiable = 0;
-        self.events.emit(HolderEvent::StatusResumed);
-        true
+        self.commit_books_then(Some(book), Some(next), false, |holder| {
+            holder.status_unverifiable = 0;
+            holder.events.emit(HolderEvent::StatusResumed);
+        })
+        .is_some()
     }
 
     /// After a successful apply: uncertain status attempts this list

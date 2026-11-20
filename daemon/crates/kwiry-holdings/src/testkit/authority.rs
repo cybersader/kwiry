@@ -100,7 +100,7 @@ pub struct FakeState {
     exempt_next_start: bool,
     pub forced: VecDeque<Forced>,
     pub keyset_gets: usize,
-    pub late_status: VecDeque<(String, HttpResponse)>,
+    pub late_status: Option<crate::client::ResponseInbox>,
     pub hooks: Hooks,
     scheduled: Vec<(usize, Mutation)>,
     posts: usize,
@@ -179,7 +179,7 @@ impl FakeAuthority {
             last_list_start_mono: None,
             exempt_next_start: false,
             forced: VecDeque::new(),
-            late_status: VecDeque::new(),
+            late_status: None,
             keyset_gets: 0,
             hooks: Hooks::default(),
             scheduled: Vec::new(),
@@ -1508,8 +1508,8 @@ impl FakeState {
 }
 
 impl Transport for FakeAuthority {
-    fn take_late_status_response(&self) -> Option<(String, HttpResponse)> {
-        self.state().late_status.pop_front()
+    fn bind_response_inbox(&self, inbox: crate::client::ResponseInbox) {
+        self.state().late_status = Some(inbox);
     }
     fn post(
         &self,

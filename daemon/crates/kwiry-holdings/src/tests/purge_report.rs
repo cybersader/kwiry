@@ -1331,3 +1331,109 @@ fn r3_a_crash_at_each_reserve_step_leaves_it_adoptable_or_refused_and_kept() {
     assert_eq!(refused.code(), "reserve_path_foreign");
     assert_eq!(std::fs::read(dir.join("other")).unwrap(), copied);
 }
+
+#[test]
+fn report_answers_do_not_claim_a_failed_transition() {
+    for kind in ["halt", "reject", "receipt", "converge"] {
+        let mut w = world(false);
+        let rig = &mut w.rig;
+        match kind {
+            "halt" => problem(rig, 400, "invalid_request", None),
+            "reject" => problem(rig, 409, "stale_list_ref", None),
+            "converge" => {
+                let epoch = rig
+                    .holder()
+                    .state()
+                    .high_water
+                    .as_ref()
+                    .unwrap()
+                    .epoch
+                    .clone();
+                let ack = forged_ack(
+                    rig,
+                    (&w.b_obligation, &w.b_holding),
+                    "complete",
+                    "complete",
+                    "retired",
+                    &epoch,
+                );
+                problem(rig, 409, "state_regression", Some(ack));
+            }
+            _ => {}
+        }
+        let n = rig.authority.state().posts() + 1;
+        let faults = rig.io_faults.clone();
+        rig.authority.state().before_post(n, move |_| {
+            let mut writes = vec![Fault::Pass; if kind == "converge" { 2 } else { 1 }];
+            writes.push(Fault::BeforeRename);
+            faults.plan(writes)
+        });
+        let pass = rig.report().unwrap();
+        assert_eq!(pass.sent, 1, "{kind}");
+        assert_eq!(
+            (pass.halted, pass.rejected, pass.receipts, pass.converged),
+            (0, 0, 0, 0),
+            "{kind}"
+        );
+        assert!(pending(rig, &w.b_obligation).unwrap().live());
+        assert!(floor(rig, &w.b_obligation).is_none());
+        for code in [
+            "lifecycle_report_bug_halt",
+            "lifecycle_report_rejected",
+            "lifecycle_report_converged",
+        ] {
+            assert!(!codes(rig).contains(&code));
+        }
+        if kind != "receipt" {
+            let posts = rig.authority.state().posts();
+            if kind == "halt" {
+                rig.restart().unwrap();
+                assert!(rig.holder().state().obligations.channels[&w.b_obligation].halted);
+            } else {
+                let recovered = rig.report().unwrap();
+                assert_eq!(
+                    (recovered.rejected + recovered.converged, recovered.sent),
+                    (1, 0)
+                );
+            }
+            assert_eq!(rig.authority.state().posts(), posts);
+        }
+    }
+}
+
+#[test]
+fn failed_first_byte_cancellation_does_not_count_or_prune_the_arm() {
+    let mut w = world(false);
+    let rig = &mut w.rig;
+    rig.purger.view().fail_freeze = true;
+    rig.io_faults.plan(vec![
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::BeforeRename,
+    ]);
+    let pass = rig.report().unwrap();
+    assert_eq!((pass.cancelled, pass.sent), (0, 0));
+    assert_eq!(
+        pending(rig, &w.b_obligation).unwrap().status,
+        PendingStatus::Armed
+    );
+    assert_eq!(holder_files(rig, "sent.").len(), 1);
+}
+
+#[test]
+fn failed_report_invalidation_is_not_counted() {
+    let mut w = world(false);
+    let rig = &mut w.rig;
+    rig.authority.state().drop_acks = 1;
+    assert_eq!(rig.report().unwrap().sent, 1);
+    rig.purger.add(PLAIN, B, 1);
+    rig.io_faults.fail_writes(2);
+    let pass = rig.report().unwrap();
+    assert_eq!(pass.invalidated, 0);
+    assert_eq!(
+        pending(rig, &w.b_obligation).unwrap().status,
+        PendingStatus::Armed
+    );
+}

@@ -67,15 +67,56 @@ pub enum TransportError {
     Timeout,
 }
 
+/// Delayed responses for this holder process. Delivery of a 403 narrows all
+/// serving-gate clones before the response becomes visible to lifecycle passes.
+#[derive(Clone)]
+pub struct ResponseInbox {
+    queue: std::sync::Arc<std::sync::Mutex<Vec<(String, HttpResponse)>>>,
+    gate: crate::gate::ServingGate,
+}
+
+impl ResponseInbox {
+    pub(crate) fn new(gate: crate::gate::ServingGate) -> Self {
+        Self {
+            queue: Default::default(),
+            gate,
+        }
+    }
+
+    pub fn deliver(&self, key: String, response: HttpResponse) {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if response.status == 403 {
+            self.gate.set_auth_halt();
+        }
+        queue.push((key, response));
+    }
+
+    pub(crate) fn has_refusal(&self) -> bool {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|(_, r)| r.status != 200)
+    }
+
+    pub(crate) fn drain(&self) -> Vec<(String, HttpResponse)> {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *queue)
+    }
+}
+
 /// HTTP to the authority. Implementations enforce the connect and response
 /// timeouts they are given.
 pub trait Transport {
-    /// Nonblocking delivery of an earlier status POST response that arrived
-    /// after the synchronous call returned, paired with the original request
-    /// key from the transport (not a response claim). Never posts a replacement.
-    fn take_late_status_response(&self) -> Option<(String, HttpResponse)> {
-        None
-    }
+    /// An asynchronous adapter delivers to the inbox bound at request time,
+    /// with the original request key (not a claim taken from the response).
+    fn bind_response_inbox(&self, _inbox: ResponseInbox) {}
 
     fn post(
         &self,
@@ -153,6 +194,10 @@ pub struct FetchEnv<'a> {
 /// What a fetch hands back while it runs. One object takes both, so a
 /// holder can apply each in observation order with its single writer.
 pub trait FetchHooks {
+    /// Stop before sending another page or accepting a list across a refusal.
+    fn refusal_pending(&self) -> bool {
+        false
+    }
     /// Persists an accepted key-set statement's pins durably; false refuses.
     fn accept_pins(&mut self, pins: &PinnedKeys) -> bool;
     /// Each signed page's evidence, at once, in observation order (raises).
@@ -390,6 +435,9 @@ fn exchange(
         &claims,
         env.key.signing_key(),
     );
+    if env.hooks.refusal_pending() {
+        return Err(FetchFailure::Local("delayed refusal pending"));
+    }
     let sent_mono = env.clock.mono_ms();
     let response = env.transport.post(
         &url,
@@ -409,6 +457,9 @@ fn exchange(
             code: problem_code(&response),
             retry_after_s: response.retry_after_s,
         });
+    }
+    if env.hooks.refusal_pending() {
+        return Err(FetchFailure::Local("delayed refusal pending"));
     }
     if response.content_type.as_deref() != Some(env.ctx.profile.list_page_content_type().as_str()) {
         return Err(FetchFailure::Invalid(PageError::Grammar("content-type")));

@@ -288,7 +288,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     /// Every adapter delete requires a successfully applied, still-current list
     /// and uninterrupted authority evidence. Only a fresh apply restores it.
-    pub(crate) fn deletion_permitted(&self) -> Result<(), ObligationsRefused> {
+    pub(crate) fn deletion_permitted(&mut self) -> Result<(), ObligationsRefused> {
+        self.drain_deliveries();
         self.obligations_allowed()?;
         if self.apply_failed_since_admit {
             return Err(ObligationsRefused::ApplyIncomplete);

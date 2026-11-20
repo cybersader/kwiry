@@ -116,6 +116,18 @@ pub struct ReportSummary {
     pub waiting: usize,
 }
 
+impl ReportSummary {
+    fn record(&mut self, answer: Answer) {
+        match answer {
+            Answer::Receipt => self.receipts += 1,
+            Answer::Converged => self.converged += 1,
+            Answer::Rejected => self.rejected += 1,
+            Answer::Halted => self.halted += 1,
+            _ => {}
+        }
+    }
+}
+
 enum Guard {
     Pass,
     /// The claim may still hold, but its proof is not available yet.
@@ -127,6 +139,7 @@ enum Guard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
     Receipt,
+    Duplicate,
     Converged,
     Rejected,
     Halted,
@@ -366,7 +379,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     /// Removes sent bytes nothing refers to any more (best effort).
-    fn prune_sent(&mut self, attempts: &[Attempt]) {
+    pub(crate) fn prune_sent(&mut self, attempts: &[Attempt]) {
         for attempt in attempts {
             let _ = self.writer.remove_side_file(&sent_file(&attempt.digest));
         }
@@ -378,8 +391,24 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &dyn ArtifactPurger,
     ) -> Result<ReportSummary, ObligationsRefused> {
+        let (received, _) = self.drain_deliveries();
         let mut summary = ReportSummary::default();
-        if self.traffic_halted() {
+        if received || self.traffic_halted() {
+            return Ok(summary);
+        }
+        let debts: Vec<_> = self
+            .writer
+            .state()
+            .status
+            .owed
+            .iter()
+            .filter(|o| o.for_report())
+            .cloned()
+            .collect();
+        if !debts.is_empty() {
+            for owed in debts {
+                summary.record(self.apply_owed(owed));
+            }
             return Ok(summary);
         }
         self.obligations_allowed()?;
@@ -396,9 +425,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.invalidate_failing(&targets, &inventory, &mut summary);
         for target in &targets {
             self.obligations_allowed()?;
-            if self.derive_and_store(target, &inventory) {
-                summary.derived += 1;
-            }
+            self.derive_and_store(target, &inventory, &mut summary);
         }
         for target in &targets {
             self.obligations_allowed()?;
@@ -572,7 +599,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     ) {
         let book = self.writer.state().obligations.clone();
         let mut next = book.clone();
-        let mut changed = false;
+        let mut changed = 0;
         for (ob, channel) in &book.channels {
             let Some(pending) = channel.pending.as_ref().filter(|p| p.live()) else {
                 continue;
@@ -583,12 +610,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             };
             if failing {
                 invalidate(&mut next, ob);
-                summary.invalidated += 1;
-                changed = true;
+                changed += 1;
             }
         }
-        if changed {
-            self.commit_book(next);
+        if changed != 0 {
+            self.commit_books_then(Some(next), None, false, |_| summary.invalidated += changed);
         }
     }
 
@@ -609,16 +635,21 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .max()
     }
 
-    /// R1 with its enqueue guard. Returns whether a new report was stored.
-    fn derive_and_store(&mut self, target: &Target, inventory: &Inventory) -> bool {
+    /// R1 with its enqueue guard.
+    fn derive_and_store(
+        &mut self,
+        target: &Target,
+        inventory: &Inventory,
+        summary: &mut ReportSummary,
+    ) {
         if self.relist_before_report {
-            return false;
+            return;
         }
         let Some(epoch) = self.high_water_epoch() else {
-            return false;
+            return;
         };
         let Some(body) = self.derive(target, inventory) else {
-            return false;
+            return;
         };
         let book = self.writer.state().obligations.clone();
         let channel = book
@@ -627,12 +658,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .cloned()
             .unwrap_or_else(|| Channel::new(&target.holding_id, target.resource.clone()));
         if channel.halted {
-            return false;
+            return;
         }
         let state = body.state;
         // §4.4: never below a state that may already have been sent.
         if Self::possibly_sent_max(&book, &target.obligation_id).is_some_and(|max| state < max) {
-            return false;
+            return;
         }
         let now = self.clock.wall_ms();
         let same_state = match channel.floor_in(&epoch) {
@@ -645,11 +676,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     .last_same_state_ms
                     .is_none_or(|last| now - last >= crate::obligations::SAME_STATE_WINDOW_MS);
                 if !update || !window_open {
-                    return false;
+                    return;
                 }
                 true
             }
-            Some(_) => return false,
+            Some(_) => return,
         };
         let mut uncertain_from_pending = None;
         let mut answered: Vec<Attempt> = Vec::new();
@@ -659,7 +690,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             }
             if pending.live() {
                 if state <= pending.body.state {
-                    return false;
+                    return;
                 }
                 uncertain_from_pending = Some(pending.clone());
             } else if !pending.attempts.is_empty() && pending.status == PendingStatus::Invalidated {
@@ -683,7 +714,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 .write_side_file(&format!("scan.{key}.json"), &scan.record)
                 .is_err()
         {
-            return false;
+            return;
         }
         if self
             .writer
@@ -694,7 +725,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .is_err()
         {
             self.events.emit(HolderEvent::StorageExhausted);
-            return false;
+            return;
         }
         let mut next = book;
         if let Some(previous) = uncertain_from_pending {
@@ -715,11 +746,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             attempts: Vec::new(),
             epoch,
         });
-        let stored = self.commit_book(next);
-        if stored {
-            self.prune_sent(&answered);
-        }
-        stored
+        self.commit_books_then(Some(next), None, false, |holder| {
+            holder.prune_sent(&answered);
+            summary.derived += 1;
+        });
     }
 
     fn rate_allows(&mut self) -> bool {
@@ -757,7 +787,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut replay_retried = false;
         let mut expiry_retried = false;
         loop {
-            if self.fail_stopped() || self.route != RouteHealth::Normal {
+            self.drain_deliveries();
+            if self.fail_stopped() || self.route != RouteHealth::Normal || self.relist_before_report
+            {
                 return;
             }
             let book = self.writer.state().obligations.clone();
@@ -767,7 +799,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let Some(pending) = channel.pending.clone().filter(Pending::live) else {
                 return;
             };
-            if channel.halted {
+            if channel.halted
+                || self
+                    .writer
+                    .state()
+                    .status
+                    .owed
+                    .iter()
+                    .any(|o| o.blocks_report(&ob))
+            {
                 return;
             }
             // H.22, H.27: a first send waits while the status-first gate is
@@ -792,8 +832,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Guard::Fail => {
                     let mut next = book;
                     invalidate(&mut next, &ob);
-                    self.commit_book(next);
-                    summary.invalidated += 1;
+                    self.commit_books_then(Some(next), None, false, |_| summary.invalidated += 1);
                     return;
                 }
             }
@@ -826,11 +865,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         && self
                             .derive(target, &now)
                             .is_some_and(|c| c.counts == pending.body.counts)
-                });
+                })
+                && !self.inbox.has_refusal();
             if !first_byte_ok {
                 drop(freeze);
-                self.cancel_attempt(&ob, &sent.attempt);
-                summary.cancelled += 1;
+                self.cancel_attempt(&ob, &sent.attempt, summary);
+                self.drain_deliveries();
                 return;
             }
             self.report_sends.push_back(self.clock.mono_ms());
@@ -844,25 +884,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             );
             drop(freeze);
             let answer = self.classify(&ob, &pending, response);
+            summary.record(answer);
             match answer {
                 Answer::Receipt => {
-                    summary.receipts += 1;
                     self.report_backoff_ms = 0;
                     return;
                 }
-                Answer::Converged => {
-                    summary.converged += 1;
-                    return;
-                }
-                Answer::Rejected => {
-                    summary.rejected += 1;
-                    return;
-                }
-                Answer::Halted => {
-                    summary.halted += 1;
-                    return;
-                }
-                Answer::Unverifiable | Answer::AuthHalted => return,
+                Answer::Converged | Answer::Rejected | Answer::Halted => return,
+                Answer::Duplicate | Answer::Unverifiable | Answer::AuthHalted => return,
                 Answer::RetryReplay if !replay_retried => replay_retried = true,
                 Answer::RetryExpired if !expiry_retried => expiry_retried = true,
                 Answer::RetryExpired => {
@@ -938,15 +967,16 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     /// R2q → R2x: the attempt never left; prune it and invalidate the report.
-    fn cancel_attempt(&mut self, ob: &str, attempt: &Attempt) {
+    fn cancel_attempt(&mut self, ob: &str, attempt: &Attempt, summary: &mut ReportSummary) {
         let mut next = self.writer.state().obligations.clone();
         if let Some(pending) = next.channels.get_mut(ob).and_then(|c| c.pending.as_mut()) {
             pending.attempts.retain(|a| a != attempt);
         }
         invalidate(&mut next, ob);
-        if self.commit_book(next) {
-            self.prune_sent(std::slice::from_ref(attempt));
-        }
+        self.commit_books_then(Some(next), None, false, |holder| {
+            holder.prune_sent(std::slice::from_ref(attempt));
+            summary.cancelled += 1;
+        });
     }
 
     pub(crate) fn classify(
@@ -1001,12 +1031,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 if matches!(code.as_deref(), Some("stale_list_ref")) || response.status == 404 {
                     self.relist_before_report = true;
                 }
-                self.reject(ob, pending, response.status);
-                Answer::Rejected
+                self.record_refusal(crate::transition::Owed::ReportRejected {
+                    ob: ob.into(),
+                    key: pending.key.clone(),
+                    code: response.status,
+                    relist: self.relist_before_report,
+                })
             }
             (409, Some("idempotency_conflict")) | (400 | 413, _) => {
-                self.halt(ob, response.status);
-                Answer::Halted
+                self.record_refusal(crate::transition::Owed::ReportHalt {
+                    ob: ob.into(),
+                    code: response.status,
+                })
             }
             (401, Some("replay")) => Answer::RetryReplay,
             (401, Some("proof_expired")) => Answer::RetryExpired,
@@ -1044,39 +1080,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let count = self.unverifiable.entry(ob.to_owned()).or_insert(0);
         *count += 1;
         if *count >= UNVERIFIABLE_HALT {
-            self.halt(ob, 0);
-            return Answer::Halted;
+            return self.record_refusal(crate::transition::Owed::ReportHalt {
+                ob: ob.into(),
+                code: 0,
+            });
         }
         Answer::Unverifiable
-    }
-
-    /// R9 (and R17 after repeated unverifiable acks): bug halt.
-    fn halt(&mut self, ob: &str, status: u16) {
-        let mut next = self.writer.state().obligations.clone();
-        if let Some(channel) = next.channels.get_mut(ob) {
-            channel.halted = true;
-        }
-        self.commit_book(next);
-        self.events.emit(HolderEvent::ReportBugHalt { status });
-    }
-
-    /// R7, R8: definitively not accepted; the key's bytes are pruned.
-    fn reject(&mut self, ob: &str, pending: &Pending, status: u16) {
-        let mut next = self.writer.state().obligations.clone();
-        let mut prune = Vec::new();
-        if let Some(record) = next
-            .channels
-            .get_mut(ob)
-            .and_then(|c| c.pending.as_mut())
-            .filter(|p| p.key == pending.key)
-        {
-            prune = std::mem::take(&mut record.attempts);
-            record.status = PendingStatus::Rejected;
-        }
-        if self.commit_book(next) {
-            self.prune_sent(&prune);
-        }
-        self.events.emit(HolderEvent::ReportRejected { status });
     }
 
     /// M10: `403` on any route. Nothing is servable, no traffic runs, and
@@ -1086,21 +1095,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.route = RouteHealth::AuthHalt(AuthHalt::NotAuthorized);
         self.gate.set_auth_halt();
         self.events.emit(HolderEvent::HolderNotAuthorized);
-        // Revoke recovery permission before attempting the larger cancellation W.
-        // Even a crash after ENOSPC cannot turn an armed key live again.
-        if let Err(error) = self.writer.remove_side_file(QUEUE_SEAL) {
-            crate::holder::report_write_failure(
-                self.events.as_ref(),
-                &crate::state::WriteError::Io(error),
-            );
-            // Try the cancellation anyway; a failure of both operations leaves
-            // no trustworthy recovery record.
-            if !self.persist_cancellation() {
-                self.writer.mark_unwritable();
-            }
-        } else {
-            self.persist_cancellation();
-        }
+        self.record_refusal(crate::transition::Owed::Cancel);
     }
 
     pub(crate) fn recover_cancellation(&mut self) -> Result<(), crate::holder::ConfigError> {
@@ -1111,7 +1106,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .read(QUEUE_SEAL)
             .map_err(|_| CancellationRecovery)?;
         if seal.as_deref() != Some(self.writer.enrollment().holder_id.as_bytes()) {
-            if !self.persist_cancellation() {
+            if self.record_refusal(crate::transition::Owed::Cancel) == Answer::BackOff {
                 return Err(CancellationRecovery);
             }
             let id = self.writer.enrollment().holder_id.clone();
@@ -1131,44 +1126,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// Traffic stops immediately on 403, but cancellation is only observable
     /// as complete after the queue commit. Halted passes retry the write, not HTTP.
     pub(crate) fn traffic_halted(&mut self) -> bool {
-        if self.route == RouteHealth::AuthHalt(AuthHalt::NotAuthorized) && !self.fail_stopped() {
-            self.persist_cancellation();
+        if self
+            .writer
+            .state()
+            .status
+            .owed
+            .contains(&crate::transition::Owed::Cancel)
+            && !self.fail_stopped()
+        {
+            self.apply_owed(crate::transition::Owed::Cancel);
         }
         self.route != RouteHealth::Normal
-    }
-
-    fn persist_cancellation(&mut self) -> bool {
-        let mut next = self.writer.state().obligations.clone();
-        let mut cancelled = 0;
-        let obligations: Vec<String> = next.channels.keys().cloned().collect();
-        for ob in obligations {
-            let Some(pending) = next.channels.get(&ob).and_then(|c| c.pending.clone()) else {
-                continue;
-            };
-            if !pending.live() {
-                continue;
-            }
-            cancelled += 1;
-            if pending.attempts.is_empty() {
-                if let Some(channel) = next.channels.get_mut(&ob) {
-                    channel.pending = None;
-                }
-            } else {
-                invalidate(&mut next, &ob);
-            }
-        }
-        let mut status = self.writer.state().status.clone();
-        if crate::status::cancel_status_on_403(&mut status) {
-            cancelled += 1;
-        }
-        if cancelled > 0 {
-            if !self.commit_lifecycle(Some(next), Some(status), false) {
-                return false;
-            }
-            self.events
-                .emit(HolderEvent::ReportsCancelled { count: cancelled });
-        }
-        true
     }
 
     /// N5: an audited operator resume of a bug-halted report channel. Its
@@ -1182,12 +1150,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         channel.halted = false;
         invalidate(&mut next, obligation_id);
-        if !self.commit_book(next) {
-            return false;
-        }
-        self.unverifiable.remove(obligation_id);
-        self.events.emit(HolderEvent::ReportResumed);
-        true
+        self.commit_books_then(Some(next), None, false, |holder| {
+            holder.unverifiable.remove(obligation_id);
+            holder.events.emit(HolderEvent::ReportResumed);
+        })
+        .is_some()
     }
 
     /// Stores an ack's bytes under `name` in the holder directory.
@@ -1198,25 +1165,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     fn on_ack(&mut self, ob: &str, pending: &Pending, ack: Ack, convergence: bool) -> Answer {
-        let answer = self.on_ack_inner(ob, pending, ack, convergence);
-        let epoch = self.high_water_epoch().unwrap_or_default();
-        let channel = self.writer.state().obligations.channels.get(ob);
-        let complete = channel.and_then(|c| c.floor_in(&epoch)) == Some(ReportState::Complete);
-        let owed = channel.is_some_and(|c| c.reconfirm_pending);
-        if complete {
-            self.verified.remove(ob);
-            if owed && channel.is_some_and(|c| c.pending.is_none()) {
-                let mut next = self.writer.state().obligations.clone();
-                if let Some(channel) = next.channels.get_mut(ob) {
-                    channel.reconfirm_pending = false;
-                }
-                self.commit_book(next);
-            }
-        }
-        answer
-    }
-
-    fn on_ack_inner(&mut self, ob: &str, pending: &Pending, ack: Ack, convergence: bool) -> Answer {
         let Some(epoch) = self.high_water_epoch() else {
             return self.unverifiable(ob);
         };
@@ -1255,11 +1203,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 }
             }
             prune_covered_uncertain(&mut next, ob, &epoch);
-            self.unverifiable.remove(ob);
-            if self.commit_book(next) {
-                self.prune_sent(&prune);
-            }
-            return Answer::Receipt;
+            return self.commit_ack(ob, &epoch, (next, None), &prune, None, Answer::Receipt);
         }
         if !convergence
             && own_obligation
@@ -1297,14 +1241,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 {
                     channel.pending = None;
                 }
-            } else {
-                self.events.emit(HolderEvent::AckOtherEpoch);
             }
-            self.unverifiable.remove(ob);
-            if self.commit_book(next) {
-                self.prune_sent(&uncertain.attempts);
-            }
-            return Answer::Receipt;
+            let audit = (ack.rev.epoch != epoch || uncertain.epoch != epoch)
+                .then_some(HolderEvent::AckOtherEpoch);
+            return self.commit_ack(
+                ob,
+                &epoch,
+                (next, None),
+                &uncertain.attempts,
+                audit,
+                Answer::Receipt,
+            );
         }
         // Convergence path (R6, R6e): never a receipt for the sent claims.
         let Some(channel) = book.channels.get(ob) else {
@@ -1317,41 +1264,104 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         {
             return self.unverifiable(ob);
         }
-        if !self.store_receipt(&format!("conv.{}.jws", ack.jti), &ack) {
+        self.record_refusal(crate::transition::Owed::Converge(
+            crate::transition::Convergence {
+                ob: ob.into(),
+                key: pending.key.clone(),
+                receipt_jti: ack.jti,
+                receipt: ack.compact,
+                epoch: ack.rev.epoch,
+                floor: ack.accepted_state,
+            },
+        ))
+    }
+
+    pub(crate) fn commit_convergence(
+        &mut self,
+        c: crate::transition::Convergence,
+        mut next: ObligationBook,
+        status: crate::status::StatusBook,
+    ) -> Answer {
+        let Some(epoch) = self.high_water_epoch() else {
+            return Answer::BackOff;
+        };
+        if self
+            .writer
+            .write_side_file(&format!("conv.{}.jws", c.receipt_jti), c.receipt.as_bytes())
+            .is_err()
+        {
+            self.events.emit(HolderEvent::StorageExhausted);
             return Answer::BackOff;
         }
-        let mut next = book;
+        let ob = c.ob.as_str();
         let mut prune = Vec::new();
-        if ack.rev.epoch == epoch {
+        if c.epoch == epoch {
             if let Some(channel) = next.channels.get_mut(ob) {
-                channel.raise_floor(ack.accepted_state, &epoch);
+                channel.raise_floor(c.floor, &epoch);
                 if let Some(record) = channel.pending.as_ref()
-                    && record.body.state <= ack.accepted_state
+                    && record.body.state <= c.floor
                 {
                     prune = record.attempts.clone();
                     channel.pending = None;
                 }
             }
             prune_covered_uncertain(&mut next, ob, &epoch);
-            self.events.emit(HolderEvent::ReportConverged);
         } else {
             // R6e: audit only; no floor change; relist before re-deriving.
             if let Some(record) = next
                 .channels
                 .get_mut(ob)
                 .and_then(|c| c.pending.as_mut())
-                .filter(|p| p.key == pending.key)
+                .filter(|p| p.key == c.key)
             {
                 record.status = PendingStatus::Rejected;
             }
             self.relist_before_report = true;
-            self.events.emit(HolderEvent::AckOtherEpoch);
         }
-        self.unverifiable.remove(ob);
-        if self.commit_book(next) {
-            self.prune_sent(&prune);
+        let audit = if c.epoch == epoch {
+            HolderEvent::ReportConverged
+        } else {
+            HolderEvent::AckOtherEpoch
+        };
+        self.commit_ack(
+            ob,
+            &epoch,
+            (next, Some(status)),
+            &prune,
+            Some(audit),
+            Answer::Converged,
+        )
+    }
+
+    /// Reconfirmation, the receipt floor and consuming the key are one W.
+    fn commit_ack(
+        &mut self,
+        ob: &str,
+        epoch: &str,
+        (mut next, status): (ObligationBook, Option<crate::status::StatusBook>),
+        prune: &[Attempt],
+        event: Option<HolderEvent>,
+        answer: Answer,
+    ) -> Answer {
+        let mut complete = false;
+        if let Some(channel) = next.channels.get_mut(ob) {
+            complete = channel.floor_in(epoch) == Some(ReportState::Complete);
+            if complete && channel.pending.is_none() {
+                channel.reconfirm_pending = false;
+            }
         }
-        Answer::Converged
+        self.commit_books_then(Some(next), status, false, |holder| {
+            if complete {
+                holder.verified.remove(ob);
+            }
+            if let Some(event) = event {
+                holder.events.emit(event);
+            }
+            holder.unverifiable.remove(ob);
+            holder.prune_sent(prune);
+            answer
+        })
+        .unwrap_or(Answer::BackOff)
     }
 
     /// v2 H.22, H.27 hook (S5 calls it): an epoch acceptance was consumed,
@@ -1415,7 +1425,7 @@ fn move_to_uncertain(book: &mut ObligationBook, ob: &str, pending: &Pending) {
 
 /// R3: the report becomes invalidated; any attempt that may have been sent
 /// moves to `uncertain`.
-fn invalidate(book: &mut ObligationBook, ob: &str) {
+pub(crate) fn invalidate(book: &mut ObligationBook, ob: &str) {
     let Some(pending) = book.channels.get(ob).and_then(|c| c.pending.clone()) else {
         return;
     };

@@ -57,7 +57,7 @@ pub enum ConfigError {
     EngineSettings,
     #[error("the enrolled holder kind is not the kind the engine profile binds")]
     HolderKind,
-    #[error("could not recover durable report cancellation")]
+    #[error("could not recover durable lifecycle transitions")]
     CancellationRecovery,
 }
 
@@ -150,7 +150,8 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) status_unverifiable: u8,
     pub(crate) status_spacing_until: u64,
     pub(crate) dispatched_key: Option<String>,
-    pub(crate) status_refusal: Option<crate::status::StatusRefusal>,
+    pub(crate) inbox: crate::client::ResponseInbox,
+    pub(crate) late_acks: std::collections::VecDeque<(String, crate::client::HttpResponse)>,
 }
 
 /// The parts of the list last applied in this process that obligations and
@@ -224,7 +225,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 events.emit(HolderEvent::HolderStateUnwritable);
             }));
         }
+        let inbox = crate::client::ResponseInbox::new(gate.clone());
+        transport.bind_response_inbox(inbox.clone());
         let mut holder = Self {
+            inbox,
+            late_acks: Default::default(),
             config,
             writer,
             key: started.key,
@@ -252,11 +257,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             status_backoff_ms: 0,
             status_backoff_until: 0,
             status_unverifiable: 0,
-            status_refusal: None,
             status_spacing_until,
             dispatched_key: None,
         };
         holder.recover_cancellation()?;
+        for owed in holder.writer.state().status.owed.clone() {
+            if holder.apply_owed(owed) == crate::report::Answer::BackOff {
+                return Err(ConfigError::CancellationRecovery);
+            }
+        }
         Ok(holder)
     }
 
@@ -314,11 +323,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     /// Fetches, verifies, admits and applies one list.
     pub fn list_once(&mut self) -> ListOutcome {
+        self.drain_deliveries();
         if self.fail_stopped() {
             return ListOutcome::Failed(FetchFailure::HolderStateUnwritable);
         }
         if self.traffic_halted() {
             return ListOutcome::AuthHalted;
+        }
+        // A list must not adopt, replace or retire a channel ahead of its
+        // durably received refusal.
+        for owed in self.writer.state().status.owed.clone() {
+            if self.apply_owed(owed) == crate::report::Answer::BackOff {
+                return ListOutcome::Failed(FetchFailure::Local("refusal transition pending"));
+            }
         }
         // Startup honours a recorded release reservation before any list
         // applies, so no list can re-map a unit a human approved deleting.
@@ -406,6 +423,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let high_water = writer.state().high_water.clone();
         let last_list_ref = writer.state().last_list_ref.clone();
         let mut observer = Observer {
+            inbox: &self.inbox,
             writer,
             gate,
             events: events.as_ref(),
@@ -429,10 +447,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             last_list_ref: last_list_ref.as_ref(),
             page_size: config.page_size,
         };
-        if probe {
+        let outcome = if probe {
             client::probe_clock(&mut env, &params).map(|()| None)
         } else {
             client::fetch_list(&mut env, &params).map(Some)
+        };
+        if self.drain_deliveries().0 && outcome.is_ok() {
+            Err(FetchFailure::Local("delayed refusal during list"))
+        } else {
+            outcome
         }
     }
 
@@ -470,6 +493,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             }
             FetchFailure::ProofExpiredTwice => HolderEvent::ProofExpiredClockAlert,
             FetchFailure::Unauthorized => {
+                if self.route == RouteHealth::AuthHalt(AuthHalt::NotAuthorized) {
+                    return;
+                }
                 self.route = RouteHealth::AuthHalt(AuthHalt::InvalidProof);
                 HolderEvent::HolderUnauthorized
             }
@@ -924,6 +950,7 @@ pub(crate) fn report_write_failure(events: &dyn EventSink, error: &WriteError) {
 /// Everything a running fetch hands back, applied at once and in order with
 /// the single holder-state writer.
 struct Observer<'a> {
+    inbox: &'a crate::client::ResponseInbox,
     writer: &'a mut StateWriter,
     gate: &'a ServingGate,
     events: &'a dyn EventSink,
@@ -931,6 +958,9 @@ struct Observer<'a> {
 }
 
 impl FetchHooks for Observer<'_> {
+    fn refusal_pending(&self) -> bool {
+        self.inbox.has_refusal()
+    }
     fn accept_pins(&mut self, pins: &PinnedKeys) -> bool {
         let accepted = self.writer.pin_keys(pins.clone()).is_ok();
         if accepted && let Some(keyset_seq) = pins.keyset_seq {

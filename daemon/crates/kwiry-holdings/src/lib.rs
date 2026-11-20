@@ -69,6 +69,7 @@ pub mod state;
 pub mod status;
 pub mod store;
 mod strict_json;
+mod transition;
 pub mod verify;
 pub mod wire;
 

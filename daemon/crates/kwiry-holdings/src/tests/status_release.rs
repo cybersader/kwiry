@@ -850,7 +850,9 @@ fn h50_a_possibly_sent_status_is_not_overtaken_on_the_same_list() {
     rig.authority
         .state()
         .late_status
-        .push_back((k1.key.clone(), delayed));
+        .as_ref()
+        .unwrap()
+        .deliver(k1.key.clone(), delayed);
     let pass = rig.status().unwrap();
     assert_eq!((pass.sent, pass.receipts), (0, 1));
     assert!(rig.holder().state().status.uncertain.is_empty());
@@ -1159,8 +1161,8 @@ fn failed_status_commits_do_not_report_a_receipt_or_halt() {
         if !receipt {
             problem(rig, 400, "invalid_request");
         }
-        // Retry: W(sent bytes), W(armed), optional W(receipt bytes), W(transition).
-        let mut writes = vec![Fault::Pass; if receipt { 3 } else { 2 }];
+        // Retry: sent bytes, arm, receipt bytes or refusal intake, then transition.
+        let mut writes = vec![Fault::Pass; 3];
         writes.push(Fault::BeforeRename);
         rig.io_faults.plan(writes);
         let summary = rig.status().unwrap();
@@ -1343,8 +1345,12 @@ fn rejection_write_failure_retries_transition_not_the_rejected_key() {
     rig.status().unwrap();
     later(rig);
     problem(rig, 409, "stale_list_ref");
-    rig.io_faults
-        .plan(vec![Fault::Pass, Fault::Pass, Fault::BeforeRename]);
+    rig.io_faults.plan(vec![
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::BeforeRename,
+    ]);
     let pass = rig.status().unwrap();
     assert_eq!((pass.sent, pass.rejected), (1, 0));
     assert!(!codes(rig).contains(&"lifecycle_status_rejected"));
@@ -1479,7 +1485,9 @@ fn delayed_refusals_apply_route_guards_before_any_more_traffic_or_deletion() {
         rig.authority
             .state()
             .late_status
-            .push_back((key.clone(), response));
+            .as_ref()
+            .unwrap()
+            .deliver(key.clone(), response);
         let posts = rig.authority.state().posts();
         assert_eq!(rig.status().unwrap().sent, 0);
         assert_eq!(rig.authority.state().posts(), posts);
@@ -1570,7 +1578,8 @@ fn failed_403_cancellation_is_retried_without_post_even_across_restart() {
         rig.authority.state().drop_status_acks = 1;
         rig.status().unwrap();
         let key = pending_status(rig).unwrap().key;
-        rig.io_faults.fail_writes(1);
+        rig.io_faults.fail_removes();
+        rig.io_faults.plan(vec![Fault::Pass, Fault::BeforeRename]);
         problem(rig, 403, "holder_not_authorized");
         failed(rig.relist());
         assert!(!codes(rig).contains(&"lifecycle_reports_cancelled"));
@@ -1586,6 +1595,16 @@ fn failed_403_cancellation_is_retried_without_post_even_across_restart() {
         assert!(codes(rig).contains(&"lifecycle_reports_cancelled"));
         assert!(!pending_status(rig).unwrap().live());
         assert!(rig.holder().state().status.uncertain.contains_key(&key));
+        if restart {
+            applied(rig.relist());
+            later(rig);
+            let n = rig.authority.state().bodies.len();
+            rig.status().unwrap();
+            for body in &rig.authority.state().bodies[n..] {
+                let sent = crate::jws::parse(std::str::from_utf8(body).unwrap()).unwrap();
+                assert_ne!(sent.claims["idempotency_key"], key);
+            }
+        }
     }
 }
 
@@ -1628,4 +1647,192 @@ fn status_receipt_must_advance_the_cited_list_sequence() {
         crate::report::Answer::Unverifiable
     );
     assert!(rig.holder().state().status.last_accepted.is_none());
+}
+
+fn deliver_problem(rig: &Rig, key: &str, code: u16, problem: &str, retry: Option<u64>) {
+    let mut state = rig.authority.state();
+    let mut response = state.problem_answer(code, problem, None);
+    response.retry_after_s = retry;
+    state
+        .late_status
+        .as_ref()
+        .unwrap()
+        .deliver(key.into(), response);
+}
+
+#[test]
+fn both_deletion_entries_consume_queued_custody_refusals_first() {
+    for release in [true, false] {
+        let mut w = world();
+        let digest = purged_and_reported(&mut w);
+        let rig = &mut w.rig;
+        rig.authority.state().issue_release(&digest, 2);
+        applied(rig.relist());
+        rig.purger.add(PLAIN, B, 1);
+        deliver_problem(rig, "older", 503, "lifecycle_unavailable", None);
+        let before = rig.purger.view().deletions.clone();
+        let posts = rig.authority.state().posts();
+        if release {
+            assert_eq!(rig.release(), Err(ObligationsRefused::LifecycleUnavailable));
+        } else {
+            assert_eq!(rig.purge(), Err(ObligationsRefused::LifecycleUnavailable));
+        }
+        assert_eq!(rig.purger.view().deletions, before);
+        assert_eq!(rig.authority.state().posts(), posts);
+    }
+}
+
+#[test]
+fn a_queued_403_closes_serving_and_is_not_starved_or_downgraded_by_401() {
+    for separate_passes in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        let gate = rig.gate();
+        assert!(gate.check(A).is_ok());
+        deliver_problem(rig, "older", 401, "invalid_holder_proof", None);
+        if separate_passes {
+            rig.status().unwrap();
+        }
+        deliver_problem(rig, "later", 403, "holder_not_authorized", None);
+        assert_eq!(gate.check(A), Err(crate::gate::Refusal::AuthHalt));
+        let posts = rig.authority.state().posts();
+        assert_eq!(rig.report().unwrap().sent, 0);
+        assert_eq!(
+            rig.holder().route_health(),
+            crate::holder::RouteHealth::AuthHalt(crate::holder::AuthHalt::NotAuthorized)
+        );
+        assert_eq!(rig.authority.state().posts(), posts);
+    }
+}
+
+#[test]
+fn restart_consumes_durable_rejection_before_relist_or_post() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    problem(rig, 409, "stale_list_ref");
+    let faults = rig.io_faults.clone();
+    let n = rig.authority.state().posts() + 1;
+    rig.authority.state().before_post(n, move |_| {
+        faults.plan(vec![Fault::Pass, Fault::BeforeRename])
+    });
+    let pass = rig.status().unwrap();
+    assert_eq!((pass.sent, pass.rejected), (1, 0));
+    let key = pending_status(rig).unwrap().key;
+    let posts = rig.authority.state().posts();
+    rig.restart().unwrap();
+    assert_eq!(rig.authority.state().posts(), posts);
+    assert_eq!(pending_status(rig).unwrap().status, PendingStatus::Rejected);
+    applied(rig.relist());
+    later(rig);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    assert_ne!(
+        accepted_statuses(rig).last().unwrap()["idempotency_key"],
+        key
+    );
+}
+
+#[test]
+fn unrecorded_refusal_is_possibly_sent_and_retries_only_identical_business_bytes() {
+    fn business(rig: &Rig) -> Vec<u8> {
+        let bytes = rig.authority.state().bodies.last().unwrap().clone();
+        let mut claims = crate::jws::parse(std::str::from_utf8(&bytes).unwrap())
+            .unwrap()
+            .claims;
+        for name in ["jti", "iat", "exp"] {
+            claims.remove(name);
+        }
+        serde_json::to_vec(&claims).unwrap()
+    }
+    let mut w = world();
+    let rig = &mut w.rig;
+    let faults = rig.io_faults.clone();
+    let n = rig.authority.state().posts() + 1;
+    rig.authority
+        .state()
+        .before_post(n, move |_| faults.fail_writes(1));
+    problem(rig, 400, "invalid_request");
+    let pass = rig.status().unwrap();
+    assert_eq!((pass.sent, pass.halted), (1, 0));
+    assert!(rig.holder().fail_stopped());
+    let original = business(rig);
+    rig.restart().unwrap();
+    applied(rig.relist());
+    later(rig);
+    problem(rig, 400, "invalid_request");
+    assert_eq!(rig.status().unwrap().halted, 1);
+    assert_eq!(business(rig), original);
+    later(rig);
+    assert_eq!(rig.status().unwrap().sent, 0);
+}
+
+#[test]
+fn already_committed_byte_identical_receipts_are_noops() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    assert_eq!(rig.status().unwrap().receipts, 1);
+    let key = rig
+        .holder()
+        .state()
+        .status
+        .last_accepted
+        .as_ref()
+        .unwrap()
+        .key
+        .clone();
+    let receipt = rig.authority.state().status_receipts[&key].1.clone();
+    for _ in 0..4 {
+        let state = rig.authority.state();
+        let ack = state.status_ack_answer(&receipt);
+        state
+            .late_status
+            .as_ref()
+            .unwrap()
+            .deliver(key.clone(), ack);
+        drop(state);
+        assert_eq!(rig.status().unwrap(), Default::default());
+    }
+    assert!(!rig.holder().state().status.halted);
+    assert!(!codes(rig).contains(&"ack_unverifiable"));
+}
+
+#[test]
+fn delayed_short_retry_after_cannot_shorten_a_long_one() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    let mut response = rig
+        .authority
+        .state()
+        .problem_answer(429, "rate_limited", None);
+    response.retry_after_s = Some(120);
+    forced(rig, response);
+    assert_eq!(rig.status().unwrap().sent, 1);
+    rig.advance(1_000);
+    deliver_problem(rig, "older", 429, "rate_limited", Some(2));
+    rig.status().unwrap();
+    rig.advance(60_000);
+    assert_eq!(rig.status().unwrap().sent, 0);
+    rig.advance(59_000);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+}
+
+#[test]
+fn unreadable_second_manifest_does_not_block_reserved_first_release() {
+    let mut w = world();
+    let digest = purged_and_reported(&mut w);
+    let rig = &mut w.rig;
+    let a = rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    rig.purger.view().fail_delete.extend(w.x_units.clone());
+    rig.release().unwrap();
+    assert_eq!(step(rig, &a), Some(ReleaseStep::Draining));
+    let b = rig.authority.state().issue_release(&digest, 2);
+    applied(rig.relist());
+    let key = rig.holder().state().status.manifests[&digest].key.clone();
+    let path = rig.dir.join(format!("manifest.{key}.json"));
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    rig.purger.view().fail_delete.clear();
+    assert_eq!(rig.release().unwrap().executed, 1);
+    assert_eq!(step(rig, &b), None);
+    assert_eq!(release_deletions(rig, &a).len(), 2);
 }
