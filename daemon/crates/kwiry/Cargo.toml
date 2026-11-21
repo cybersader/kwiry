@@ -26,6 +26,9 @@ toml.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+# Lifecycle holder transport (blocking HTTP, rustls with web PKI roots). Already
+# in the dependency graph through the semantic model downloader.
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }

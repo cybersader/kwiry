@@ -129,7 +129,10 @@ pub use formats::{
     PdfSection, PdfTextRun, PdfWritingMode, extract_pdf_candidate, pdf_limits, read_pdf_geometry,
 };
 #[cfg(feature = "native")]
-pub use generation::{DataRoot, DataRootLock, DiscardedGeneration, GenerationPaths};
+pub use generation::{
+    DataRoot, DataRootLock, DiscardedGeneration, GenerationPaths, PublicationFreeze,
+    freeze_generation_publications,
+};
 #[cfg(feature = "native")]
 pub use index::build_index;
 #[cfg(feature = "portable")]
@@ -141,9 +144,9 @@ pub use manifest::{
 };
 #[cfg(feature = "native")]
 pub use model::{
-    AuthConfig, Config, DEFAULT_BIND, HostProfile, IndexStats, IndexingConfig, IngestReport,
-    IngestWarning, LexicalSearchRequest, OpenClastAuthConfig, ResourceKey, SemanticConfig,
-    ServerConfig, VaultRegistration,
+    AuthConfig, Config, DEFAULT_BIND, HolderProfile, HolderSettings, HostProfile, IndexStats,
+    IndexingConfig, IngestReport, IngestWarning, LexicalSearchRequest, OpenClastAuthConfig,
+    ResourceKey, SemanticConfig, ServerConfig, VaultRegistration,
 };
 #[cfg(feature = "portable")]
 pub use model::{

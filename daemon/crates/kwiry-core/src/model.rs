@@ -44,6 +44,10 @@ pub struct Config {
     pub indexing: IndexingConfig,
     #[serde(default)]
     pub vaults: Vec<VaultRegistration>,
+    /// Optional resource-lifecycle holder. Absent means the daemon never
+    /// contacts a lifecycle authority (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<HolderSettings>,
     /// Runtime-only locations that must stay outside OpenClast room trees.
     #[doc(hidden)]
     #[serde(skip)]
@@ -60,6 +64,7 @@ impl Default for Config {
             semantic: SemanticConfig::default(),
             indexing: IndexingConfig::default(),
             vaults: Vec::new(),
+            holder: None,
             openclast_state_paths: Vec::new(),
         }
     }
@@ -82,6 +87,7 @@ impl Config {
             || self.server != next.server
             || self.auth != next.auth
             || self.semantic != next.semantic
+            || self.holder != next.holder
     }
 }
 
@@ -149,6 +155,47 @@ pub struct OpenClastAuthConfig {
     /// None preserves the legacy branch until the operator coordinates cutover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_identity_accept_until: Option<u64>,
+}
+
+/// The lifecycle authority's wire profile a holder speaks. Each value maps to
+/// one profile in the daemon's composition layer.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HolderProfile {
+    #[serde(rename = "openclast")]
+    OpenClast,
+}
+
+/// `[holder]`: this daemon as a holder of authority-listed resources.
+///
+/// Key material is never inline: the holder key, its enrollment record and the
+/// durable holder state live in `state_dir`, a private directory outside the
+/// data directory and every registered tree. Timing knobs the protocol leaves
+/// to the holder are optional and bounded.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HolderSettings {
+    pub profile: HolderProfile,
+    /// The authority's lifecycle base URL, exactly as enrolled.
+    pub issuer: String,
+    /// Absolute path of the private holder directory (key, enrollment, state).
+    pub state_dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_skew_allowance_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_stale_serve_seconds: Option<u32>,
+    /// Seconds between status-report passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_interval_seconds: Option<u64>,
+    /// Seconds between obligation-report passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_interval_seconds: Option<u64>,
+    /// Seconds between release and purge passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge_interval_seconds: Option<u64>,
 }
 
 #[cfg(feature = "native")]
