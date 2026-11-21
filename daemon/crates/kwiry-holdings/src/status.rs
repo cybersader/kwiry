@@ -431,8 +431,6 @@ fn token(bytes: usize) -> Option<String> {
     crate::b64::random_token(bytes).ok()
 }
 
-use crate::transition::ReceiptFailure;
-
 struct StatusArmed {
     compact: String,
     attempt: Attempt,
@@ -608,10 +606,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return Ok(summary);
         }
         if let Some((key, response)) = self.late_acks.pop_front() {
-            let answer = self.classify_status(&key, Ok(response));
+            let answer = self.classify_status(&key, Ok(response.clone()));
             summary.record(answer);
-            if answer == Answer::BackOff && self.clock.mono_ms() >= self.status_backoff_until {
-                self.status_back_off(None);
+            if answer == Answer::RetryReceipt {
+                // Keep the only reply in memory, not on the wire. A crash
+                // still follows the existing lost-response recovery rules.
+                self.late_acks.push_front((key, response));
+            } else {
+                if answer == Answer::BackOff && self.clock.mono_ms() >= self.status_backoff_until {
+                    self.status_back_off(None);
+                }
+                self.resolve_status_uncertain();
             }
             return Ok(summary);
         }
@@ -825,7 +830,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .any(|u| u.epoch == pending.epoch && u.body.list_ref.rev.seq >= seq)
     }
 
-    pub(crate) fn status_back_off(&mut self, retry_after_s: Option<u64>) {
+    pub(crate) fn status_back_off(&mut self, retry_after_s: Option<u64>) -> u64 {
         let wait = crate::schedule::defer_post(
             self.clock.mono_ms(),
             &mut self.status_backoff_ms,
@@ -837,6 +842,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if !self.commit_status(book) {
             self.writer.mark_unwritable();
         }
+        self.status_backoff_until
     }
 
     /// T2 → T2d → the answer.
@@ -844,6 +850,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut replay_retried = false;
         loop {
             if self.drain_deliveries().0
+                || !self.late_acks.is_empty()
                 || self.fail_stopped()
                 || self.route != RouteHealth::Normal
                 || self.relist_before_report
@@ -950,7 +957,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 | Answer::AuthHalted => return,
                 Answer::RetryReplay if !replay_retried => replay_retried = true,
                 Answer::RetryExpired => {}
-                Answer::RetryReplay | Answer::BackOff => {
+                Answer::RetryReplay | Answer::BackOff | Answer::RetryReceipt => {
                     // A `429` already backed off past its `Retry-After`.
                     if self.clock.mono_ms() >= self.status_backoff_until {
                         self.status_back_off(None);
@@ -1074,7 +1081,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 let Ok(compact) = String::from_utf8(response.body) else {
                     return self.status_unverifiable();
                 };
-                match self.verify_with_refresh(&compact, Self::verify_status_ack) {
+                match self.verify_with_refresh(
+                    &compact,
+                    Self::verify_status_ack,
+                    Self::status_back_off,
+                ) {
                     Ok(ack) if ack.idempotency_key == request_key => {
                         let pending = self
                             .writer
@@ -1086,9 +1097,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         self.on_status_ack(pending.as_ref(), ack)
                     }
                     Ok(_) => self.status_unverifiable(),
-                    Err(ReceiptFailure::Refused(answer)) => answer,
-                    Err(ReceiptFailure::PinWrite) => Answer::BackOff,
-                    Err(_) => self.status_unverifiable(),
+                    Err(failure) => self.receipt_failure(failure, Self::status_unverifiable),
                 }
             }
             (409, Some("stale_list_ref")) => {
@@ -1100,6 +1109,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             (409, Some("idempotency_conflict")) | (400 | 413, _) => {
                 self.record_refusal(crate::transition::Owed::StatusHalt {
                     code: response.status,
+                    key: Some(request_key.into()),
                 })
             }
             _ => {
@@ -1128,7 +1138,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         {
             return false;
         }
-        let Ok(ack) = self.verify_with_refresh(compact, Self::verify_status_ack) else {
+        let Ok(ack) =
+            self.verify_with_refresh(compact, Self::verify_status_ack, Self::status_back_off)
+        else {
             return false;
         };
         let Some(u) = self
@@ -1150,7 +1162,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.events.emit(HolderEvent::AckUnverifiable);
         self.status_unverifiable = self.status_unverifiable.saturating_add(1);
         if self.status_unverifiable >= UNVERIFIABLE_HALT {
-            return self.record_refusal(crate::transition::Owed::StatusHalt { code: 0 });
+            return self.record_refusal(crate::transition::Owed::StatusHalt { code: 0, key: None });
         }
         Answer::Unverifiable
     }
@@ -1219,7 +1231,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .is_err()
         {
             self.events.emit(HolderEvent::StorageExhausted);
-            return Answer::BackOff;
+            return Answer::RetryReceipt;
         }
         let before_resume =
             !from_pending && status.uncertain.get(&key).is_some_and(|u| u.before_resume);
@@ -1299,7 +1311,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             holder.prune_sent_attempts(&attempts);
             Answer::Receipt
         })
-        .unwrap_or(Answer::BackOff)
+        .unwrap_or(Answer::RetryReceipt)
     }
 
     /// N5: an audited operator resume of a halted status. The status moves
@@ -1340,15 +1352,37 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let page0_iat_s = applied.page0_iat_ms.div_euclid(1000);
         let mut next = self.writer.state().status.clone();
         let mut prune = Vec::new();
-        next.uncertain.retain(|_, u| {
-            let resolved = u.epoch != epoch || page0_iat_s > u.latest_exp_s() + ABSENCE_BOUND_S;
+        // Prefer an already-delivered receipt to deadline inference. Check
+        // both queues: a response can arrive during the list apply after
+        // the last intake. Do not hold the delivery lock across disk I/O.
+        let inbox = self.inbox.lock();
+        let queued: BTreeSet<_> = self
+            .late_acks
+            .iter()
+            .map(|(key, _)| key)
+            .chain(
+                inbox
+                    .deliveries
+                    .iter()
+                    .filter_map(|(origin, key, _, response)| {
+                        (*origin == crate::client::Origin::Status && response.status == 200)
+                            .then_some(key)
+                    }),
+            )
+            .collect();
+        next.uncertain.retain(|key, u| {
+            let resolved = !queued.contains(key)
+                && (u.epoch != epoch || page0_iat_s > u.latest_exp_s() + ABSENCE_BOUND_S);
             if resolved {
                 prune.extend(u.attempts.iter().cloned());
             }
             !resolved
         });
-        if !prune.is_empty() && self.commit_status(next) {
-            self.prune_sent_attempts(&prune);
+        drop(inbox);
+        if !prune.is_empty() {
+            self.commit_books_then(None, Some(next), false, |holder| {
+                holder.prune_sent_attempts(&prune)
+            });
         }
     }
 
