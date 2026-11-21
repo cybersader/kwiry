@@ -562,6 +562,7 @@ mod tests {
         // change masquerade as a re-registration and corrupt the meaning of a
         // field that gates re-ingest for an unrelated reason.
         let vault = VaultRegistration {
+            snapshot_id: None,
             id: "vault".to_owned(),
             path: std::path::PathBuf::from("/vault"),
             room: None,

@@ -13,7 +13,12 @@ use crate::manifest::{INDEX_FORMAT_VERSION, Manifest};
 use crate::partition::GenerationLayout;
 use crate::state::{read_json, sync_directory, sync_tree, write_json_atomic};
 
-const LAYOUT_VERSION: u32 = crate::partition::GENERATION_LAYOUT_VERSION;
+// The CURRENT pointer format is independent of the per-partition layout.
+pub(crate) const LAYOUT_VERSION: u32 = if crate::source::ROOM_INCLUSIVE_IDS {
+    3
+} else {
+    2
+};
 const RETAINED_GENERATIONS: usize = 3;
 static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 

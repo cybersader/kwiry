@@ -2747,7 +2747,13 @@ fn hit_from_document(
         }
         None => fallback_excerpt(content),
     };
+    let mut hashes = document.get_all(fields.content_hash);
+    let content_sha256 = match (hashes.next(), hashes.next()) {
+        (Some(value), None) => value.as_str().and_then(crate::ContentSha256::from_stored),
+        _ => None,
+    };
     Ok(SearchHit {
+        content_sha256,
         chunk_id: text(document, fields.chunk_id)?.to_owned(),
         vault_id: text(document, fields.vault_id)?.to_owned(),
         room_id: resource
@@ -2896,11 +2902,13 @@ mod tests {
         Config {
             vaults: vec![
                 VaultRegistration {
+                    snapshot_id: None,
                     id: "technical-a".into(),
                     path: fixture.join("vault-a"),
                     room: None,
                 },
                 VaultRegistration {
+                    snapshot_id: None,
                     id: "technical-b".into(),
                     path: fixture.join("vault-b"),
                     room: None,
@@ -2920,6 +2928,88 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn hit_hash_covers_raw_crlf_bom_and_frontmatter_bytes_and_agrees_across_chunks() {
+        use sha2::{Digest, Sha256};
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("notes");
+        let data = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        let notes: [(&str, &[u8]); 3] = [
+            (
+                "lines.md",
+                b"# First\r\ngreenplum\r\n# Second\r\ngreenplum\r\n",
+            ),
+            ("bom.md", b"\xef\xbb\xbfgreenplum\n"),
+            ("properties.md", b"---\ntitle: Spring\n---\ngreenplum\n"),
+        ];
+        for (path, bytes) in notes {
+            fs::write(root.join(path), bytes).unwrap();
+        }
+        build_index(
+            &Config {
+                vaults: vec![VaultRegistration {
+                    id: "garden".into(),
+                    room: None,
+                    path: root.clone(),
+                    snapshot_id: None,
+                }],
+                ..Config::default()
+            },
+            &data,
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap(); // Hydration cannot consult the current source.
+        let hits = search(&data, "greenplum", 20);
+        for (path, bytes) in notes {
+            let expected = format!("{:x}", Sha256::digest(bytes));
+            let matching: Vec<_> = hits.iter().filter(|hit| hit.path == path).collect();
+            assert_eq!(matching.len(), if path == "lines.md" { 2 } else { 1 });
+            for hit in matching {
+                assert_eq!(hit.require_content_sha256().unwrap().as_str(), expected);
+                assert!(
+                    serde_json::to_value(hit)
+                        .unwrap()
+                        .get("content_sha256")
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_stored_hash_is_corruption_only_if_required() {
+        let fields = Fields::from_schema(&crate::index::build_schema()).unwrap();
+        let mut doc = TantivyDocument::default();
+        for (field, value) in [
+            (fields.content, "greenplum"),
+            (fields.chunk_id, "chunk"),
+            (fields.vault_id, "garden"),
+            (fields.path, "note.md"),
+            (fields.heading_path, "[]"),
+            (fields.source_format, r#""markdown""#),
+            (fields.extraction_coverage, r#""indexed-complete""#),
+            (fields.source_locator, "null"),
+            (fields.frontmatter, "{}"),
+        ] {
+            doc.add_text(field, value);
+        }
+        for bad in [
+            None,
+            Some("a".repeat(63)),
+            Some("A".repeat(64)),
+            Some("g".repeat(64)),
+        ] {
+            let mut stored = doc.clone();
+            if let Some(value) = bad {
+                stored.add_text(fields.content_hash, value);
+            }
+            let hit = hit_from_document(&stored, &fields, 1.0, None, None).unwrap();
+            assert_eq!(hit.excerpt, "greenplum");
+            assert!(matches!(hit.require_content_sha256(), Err(Error::Index(_))));
+        }
     }
 
     fn search_with_quality(data: &Path, query: &str, limit: usize) -> LexicalSearchOutcome {
@@ -3038,6 +3128,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault,
                 room: None,
@@ -3096,6 +3187,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3134,6 +3226,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3190,6 +3283,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3227,6 +3321,7 @@ mod tests {
         fs::write(vault.join("note.md"), "alpha beta").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault,
                 room: None,
@@ -3277,11 +3372,13 @@ mod tests {
         let config = Config {
             vaults: vec![
                 VaultRegistration {
+                    snapshot_id: None,
                     id: "technical-a".into(),
                     path: fixture.join("vault-a"),
                     room: None,
                 },
                 VaultRegistration {
+                    snapshot_id: None,
                     id: "technical-b".into(),
                     path: fixture.join("vault-b"),
                     room: None,
@@ -3442,6 +3539,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3516,6 +3614,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3554,6 +3653,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3598,6 +3698,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3652,6 +3753,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3727,6 +3829,7 @@ mod tests {
         fs::write(vault.join("support.md"), "cedarleaf").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault.clone(),
                 room: None,
@@ -3825,6 +3928,7 @@ mod tests {
             fs::write(vault.join(partial_only_name), "cedarleaf").unwrap();
             let config = Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -3888,6 +3992,7 @@ mod tests {
             build_index(
                 &Config {
                     vaults: vec![VaultRegistration {
+                        snapshot_id: None,
                         id: "fixture".into(),
                         path: vault,
                         room: None,
@@ -3936,6 +4041,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4004,6 +4110,7 @@ mod tests {
 
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault,
                 room: None,
@@ -4064,6 +4171,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4143,6 +4251,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4188,6 +4297,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4260,6 +4370,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4336,6 +4447,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4393,6 +4505,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4452,6 +4565,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4530,6 +4644,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault.clone(),
                 room: None,
@@ -4655,6 +4770,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -4708,6 +4824,7 @@ mod tests {
         }
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "prefixes".into(),
                 path: vault,
                 room: None,
@@ -4778,6 +4895,7 @@ mod tests {
         write(10);
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "prefixes".into(),
                 path: vault.clone(),
                 room: None,
@@ -4860,6 +4978,7 @@ mod tests {
         }
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "ties".into(),
                 path: vault,
                 room: None,
@@ -4905,6 +5024,7 @@ mod tests {
         fs::write(vault.join("dragons.md"), "flying dragons").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "technical-a".into(),
                 path: vault,
                 room: None,
@@ -4999,6 +5119,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -5083,6 +5204,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -5157,6 +5279,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -5219,6 +5342,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -5358,6 +5482,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -5415,6 +5540,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "fixture".into(),
                     path: vault,
                     room: None,
@@ -5502,6 +5628,7 @@ mod tests {
         build_index(
             &Config {
                 vaults: vec![VaultRegistration {
+                    snapshot_id: None,
                     id: "balanced-fixture".into(),
                     path: vault,
                     room: None,
@@ -5640,6 +5767,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault,
                 room: None,
@@ -5853,6 +5981,7 @@ mod tests {
         }
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "allowed".into(),
                 path: allowed_vault,
                 room: None,

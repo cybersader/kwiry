@@ -327,19 +327,7 @@ fn build_openclast_candidate(
     layout_path: &Path,
     data_dir: &Path,
 ) -> Result<IndexStats> {
-    let resources: Vec<_> = config
-        .vaults
-        .iter()
-        .map(|vault| {
-            config.resource_key(vault).ok_or_else(|| {
-                Error::State(format!(
-                    "openclast vault {} is missing an exact resource classification",
-                    vault.id
-                ))
-            })
-        })
-        .collect::<Result<_>>()?;
-    let layout = GenerationLayout::openclast(resources)?;
+    let mut resources = BTreeMap::new();
     let mut manifest = Manifest::default();
     let mut stats = IndexStats::default();
 
@@ -354,7 +342,7 @@ fn build_openclast_candidate(
         let index_dir = partition_index_dir(partitions_dir, &resource);
         fs::create_dir_all(&index_dir)
             .map_err(|error| crate::error::io_error(&index_dir, error))?;
-        build_partition(
+        let complete = build_partition(
             vault,
             &resource,
             &index_dir,
@@ -362,8 +350,10 @@ fn build_openclast_candidate(
             &mut stats,
             &room_roots,
         )?;
+        resources.insert(resource, vault.snapshot_id.clone().filter(|_| complete));
     }
 
+    let layout = GenerationLayout::with_snapshots(resources)?;
     manifest.mark_synced()?;
     manifest.save(manifest_path)?;
     layout.save(layout_path)?;
@@ -412,7 +402,7 @@ fn build_partition(
     manifest: &mut Manifest,
     stats: &mut IndexStats,
     room_roots: &crate::room_walk::RoomRoots,
-) -> Result<()> {
+) -> Result<bool> {
     if vault.id != resource.vault_id || vault.room.as_deref() != Some(resource.room_id.as_str()) {
         return Err(Error::State(format!(
             "vault {} does not match its resource partition",
@@ -445,6 +435,11 @@ fn build_partition(
         enumeration = crate::room_walk::nesting_failure(vault);
         outcomes.clear();
     }
+    let complete = room.is_some()
+        && enumeration.completeness.may_infer_deletions()
+        && !outcomes
+            .iter()
+            .any(|o| o.coverage == crate::ExtractionCoverage::Unreadable);
     stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
@@ -473,7 +468,7 @@ fn build_partition(
     writer
         .wait_merging_threads()
         .map_err(|error| Error::Index(error.to_string()))?;
-    Ok(())
+    Ok(complete)
 }
 
 pub(crate) fn open_index(data_dir: &Path) -> Result<(Index, Fields)> {
@@ -1452,6 +1447,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1513,6 +1509,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1666,6 +1663,7 @@ mod tests {
         fs::write(vault_path.join("unreadable.canvas"), [0xff]).unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1795,6 +1793,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1835,6 +1834,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1874,6 +1874,7 @@ mod tests {
         fs::write(vault_path.join("note.md"), "stable phosphorescent").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -1894,6 +1895,7 @@ mod tests {
         fs::remove_dir_all(&vault_path).unwrap();
         let broken = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
