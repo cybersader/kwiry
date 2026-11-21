@@ -268,6 +268,12 @@ async fn main() -> Result<()> {
         Command::Vault {
             command: VaultCommand::Add { id, path, room },
         } => {
+            if private_cli(&paths)? {
+                register_vault(&paths, id, path, room)
+                    .map_err(|_| anyhow!("registration_failed"))?;
+                println!("room registered");
+                return Ok(());
+            }
             let registration = register_vault(&paths, id, path, room)?;
             println!(
                 "Registered vault '{}' at {}",
@@ -283,6 +289,12 @@ async fn main() -> Result<()> {
                     paths.config.display()
                 )
             })?;
+            if config.server.profile_required {
+                private_panic_hook();
+                build_index(&config, &paths.data_dir).map_err(|_| anyhow!("index_failed"))?;
+                println!("generation published; rooms={}", config.vaults.len());
+                return Ok(());
+            }
             let stats = build_index(&config, &paths.data_dir)?;
             for warning in &stats.warnings {
                 eprintln!("warning: {}: {}", warning.path.display(), warning.message);
@@ -307,6 +319,9 @@ async fn main() -> Result<()> {
             vault,
             json,
         } => {
+            if private_cli(&paths)? {
+                bail!("profile_required");
+            }
             let hits = search_index(
                 &paths.data_dir,
                 &LexicalSearchRequest {
@@ -347,7 +362,9 @@ fn run_config(paths: &Paths, command: ConfigCommand) -> Result<()> {
     match command {
         ConfigCommand::Show { json } => {
             let config = load_config_for_paths(paths)?;
-            if json {
+            if config.server.profile_required {
+                println!("profile required; rooms={}", config.vaults.len());
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&config)?);
             } else {
                 print!("{}", toml::to_string_pretty(&config)?);
@@ -368,6 +385,7 @@ fn run_config(paths: &Paths, command: ConfigCommand) -> Result<()> {
                     "nothing to change; pass --basis, --audit-sources, --audit-bytes, or --racy-window-ms"
                 );
             }
+            let private = private_cli(paths)?;
             let indexing = update_config(&paths.config, |config| {
                 if let Some(basis) = basis {
                     config.indexing.basis = basis.into();
@@ -382,7 +400,13 @@ fn run_config(paths: &Paths, command: ConfigCommand) -> Result<()> {
                     config.indexing.racy_window_millis = value;
                 }
                 Ok(config.indexing.clone())
-            })?;
+            });
+            if private {
+                indexing.map_err(|_| anyhow!("config_update_failed"))?;
+                println!("indexing configured");
+                return Ok(());
+            }
+            let indexing = indexing?;
             println!(
                 "Indexing configured: basis={}, audit {} sources / {} bytes per pass, racy window {} ms. A running daemon applies this on its next reconcile.",
                 match indexing.basis {
@@ -397,6 +421,20 @@ fn run_config(paths: &Paths, command: ConfigCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn private_cli(paths: &Paths) -> Result<bool> {
+    let private = load_config_for_paths(paths)?.server.profile_required;
+    if private {
+        private_panic_hook();
+    }
+    Ok(private)
+}
+
+fn private_panic_hook() {
+    std::panic::set_hook(Box::new(|_| {
+        eprintln!("kwiry: private service task failed")
+    }));
 }
 
 fn require_desktop_profile(paths: &Paths) -> Result<()> {

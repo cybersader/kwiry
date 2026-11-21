@@ -698,7 +698,7 @@ pub struct LexicalSearchRequest {
 pub struct ContentSha256(String);
 
 #[cfg(feature = "native")]
-fn valid_lower_sha256(s: &str) -> bool {
+pub fn valid_lower_sha256(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))

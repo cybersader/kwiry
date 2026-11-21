@@ -84,13 +84,13 @@
         "connection": "close",
         "content-length": "1208",
         "content-type": "application/json",
-        "date": "Sat, 21 Nov 2026 23:19:12 GMT",
+        "date": "Sat, 21 Nov 2026 23:39:19 GMT",
         "kwiry-id-scheme": "room-v1",
         "kwiry-multi-room": "closed",
         "kwiry-profile": "live-check-v1",
         "x-kwiry-field-emphasis": "none",
         "x-kwiry-field-scope": "none",
-        "x-kwiry-generation": "v1-22151f73080334145fd7c46dbc169063689e7bef3fafb99ddd626fc05537be5e",
+        "x-kwiry-generation": "v1-9bdee12409fe5b8c80fc19a41db435210cb86090de79c175a7217eb9219a9135",
         "x-kwiry-index-freshness": "stale; basis=strict_hash",
         "x-kwiry-lexical-match-quality": "standard_only",
         "x-kwiry-lexical-profile": "lexical-v2"
@@ -152,13 +152,13 @@
         "connection": "close",
         "content-length": "361",
         "content-type": "application/json",
-        "date": "Sat, 21 Nov 2026 23:19:13 GMT",
+        "date": "Sat, 21 Nov 2026 23:39:20 GMT",
         "kwiry-id-scheme": "room-v1",
         "kwiry-multi-room": "closed",
         "kwiry-profile": "live-check-v1",
         "x-kwiry-field-emphasis": "none",
         "x-kwiry-field-scope": "none",
-        "x-kwiry-generation": "v1-d9402e59eba024748e3e3fa6b52f598b34795f01a8c629fafea9113ba6d87e0f",
+        "x-kwiry-generation": "v1-363800e07c789b00f21700748d91389e695cc2373468825c81b179ee04feac3a",
         "x-kwiry-index-freshness": "stale; basis=strict_hash",
         "x-kwiry-lexical-match-quality": "none",
         "x-kwiry-lexical-profile": "lexical-v2"
@@ -220,7 +220,7 @@
         "connection": "close",
         "content-length": "361",
         "content-type": "application/json",
-        "date": "Sat, 21 Nov 2026 23:19:14 GMT",
+        "date": "Sat, 21 Nov 2026 23:39:21 GMT",
         "kwiry-id-scheme": "room-v1",
         "kwiry-multi-room": "closed",
         "kwiry-profile": "live-check-v1",
@@ -319,18 +319,74 @@
         "connection": "close",
         "content-length": "1208",
         "content-type": "application/json",
-        "date": "Sat, 21 Nov 2026 23:19:15 GMT",
+        "date": "Sat, 21 Nov 2026 23:39:23 GMT",
         "kwiry-id-scheme": "room-v1",
         "kwiry-multi-room": "closed",
         "kwiry-profile": "live-check-v1",
         "x-kwiry-field-emphasis": "none",
         "x-kwiry-field-scope": "none",
-        "x-kwiry-generation": "v1-b41f9b216ecf17af4e7fdaf17a1fbc36bc32136da7bde013eb449b20a5dc672d",
+        "x-kwiry-generation": "v1-c191b6fff6da1771adb10e4b0eac662c910f65de9865050b7f62e366d9bfacf8",
         "x-kwiry-index-freshness": "current; basis=strict_hash",
         "x-kwiry-lexical-match-quality": "standard_only",
         "x-kwiry-lexical-profile": "lexical-v2"
       },
       "status": 200
+    }
+  },
+  {
+    "case": "final-ineligible-binding",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "resource_unavailable",
+          "message": "an authorized resource is not available for search",
+          "resource_indexes": [
+            0
+          ]
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "127",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:39:23 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 503
     }
   },
   {
@@ -381,7 +437,7 @@
         "connection": "close",
         "content-length": "127",
         "content-type": "application/json",
-        "date": "Sat, 21 Nov 2026 23:19:15 GMT",
+        "date": "Sat, 21 Nov 2026 23:39:24 GMT",
         "kwiry-id-scheme": "room-v1",
         "kwiry-multi-room": "closed",
         "kwiry-profile": "live-check-v1"
@@ -434,7 +490,7 @@
         "connection": "close",
         "content-length": "104",
         "content-type": "application/json",
-        "date": "Sat, 21 Nov 2026 23:19:16 GMT",
+        "date": "Sat, 21 Nov 2026 23:39:25 GMT",
         "kwiry-id-scheme": "room-v1",
         "kwiry-multi-room": "closed",
         "kwiry-profile": "live-check-v1"

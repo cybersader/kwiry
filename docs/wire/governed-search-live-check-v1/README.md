@@ -1,6 +1,6 @@
 # Governed search: live-check-v1
 
-Version `live-check-v1`, 2026-11-21; daemon implementation `ed57609379c2dab1d2a0cb2976134f9be90e6293`, based on reader provenance at `c10c55d95596285b79445b150fef7c4d3d572399`. The schemas and fixtures here describe the profile-required instance on this revision of the wire. They do not describe the [unchanged baseline](../governed-search-v0/) or a public search API.
+Version `live-check-v1`, 2026-11-21; initial implementation `ed57609379c2dab1d2a0cb2976134f9be90e6293`, based on reader provenance at `c10c55d95596285b79445b150fef7c4d3d572399`. The schemas and fixtures here describe the profile-required instance on this revision of the wire. They do not describe the [unchanged baseline](../governed-search-v0/) or a public search API.
 
 **Invariant:** Kwiry is a separate process the platform calls over a narrow wire. Everything it returns is an untrusted suggestion. The platform renders only from its own authorized bytes and never forwards engine text. The reader label and whole-file hash are unsigned provenance, not attestations.
 
@@ -13,6 +13,12 @@ Version `live-check-v1`, 2026-11-21; daemon implementation `ed57609379c2dab1d2a0
 
 Register the authority's opaque label with `[[vaults]].snapshot_id`, never via HTTP. Partition layout stays v3 (pointer unchanged); the optional generation-bound `snapshot-labels.json` sidecar is version 1. A legacy layout without it has no binding. A successful clean walk can publish a new binding; a config edit or restart alone cannot. The actual reader's label may differ from the platform's expected one, including on an empty page. Neither label nor hash is a signature, cache key for caller responses, deletion receipt or proof of corpus parity. Keep both, note paths, query, hit counts and excerpts off logs, URLs, telemetry and caller output.
 
+Before emitting a prepared page, Kwiry checks global availability and the **currently installed** reader for the signed tuple. A missing or non-64-lowercase-hex binding refuses the whole request with `503 resource_unavailable` and `[0]`. A different *eligible* installed reader does not relabel the response: the page still names the reader that answered.
+
+The private service arms the config watch and rereads the config before opening admission. A config notification, backend error, dropped notification or requested backend rescan closes admission at delivery, not after debounce. The periodic safety pass also rereads the file. Admission resumes only after validation and application; an intervening notification invalidates an older pass. A closed gate returns the global `503 resource_unavailable` (no resource indexes) before body parsing.
+
+Config parse errors identify the file, structural key path when known, and error category, not the offending value. Private offline indexing reports publication and the configured room count or a fixed failure code, never source names, document/chunk/warning counts or warning text. Private config inspection and holder commands do not dump their records; local CLI search cannot print private hits. The authenticated search response is not an operator diagnostic.
+
 [Headers and ordering](headers.md) · [capability](capability.md) · [request](request.schema.json) · [success](success.schema.json) · [error](error.schema.json) · [health](health.schema.json) · [synthetic process fixtures](fixtures/)
 
 ## Evidence and replay
@@ -20,3 +26,10 @@ Register the authority's opaque label with `[[vaults]].snapshot_id`, never via H
 The Linux process harness validates the live body against draft 2020-12 and compares its HTTP status, fields and body with the captures. Each HTTP case includes a synthetic request descriptor: ordered header fields, redacted bearer shape (never a token), and the original body as UTF-8, base64url, or byte/count for oversized input. Dates, native generation digests and build extractor fingerprints are normalized after validation. The config-refusal fixture normalizes only the private config path. `key-rollover.json` exercises two distinct synthetic verification keys across restarts, not platform signing custody.
 
 `stalled-reader.json` uses GDB non-stop mode on the unmodified debug binary, after immutable handle acquisition. It disables that one breakpoint, observes a fresh B response while A remains suspended, then releases A. It also forces global and resource refusal before emission. Set `KWIRY_REQUIRE_LIVE_BARRIER=1` in acceptance runs to fail rather than skip when GDB is unavailable. No production synchronization hook or extra wire route exists. Component tests additionally cover an explicitly revoked holder, an ambiguous/wrong-tuple result, the independent planner limit, and Unicode 15.1 category drift. The core snapshot suite covers failed cold/incremental walks, retained rows, recovery, eviction and repair. These are engine receipts, not evidence for deployment isolation, OpenClast release or real-data use.
+
+### Not covered by fixtures
+
+- No live HTTP capture combines actual holder revocation with bad JSON or a stalled reply, or demonstrates baseline/pre-profile binaries ignoring the profile header. The revocation component test and the invalid-config HTTP examples are separate evidence.
+- Wrong/ambiguous bindings, a 129th planned probe from at most 128 words, reboot before publication, corrupt sidecar, failed/partial walks, repair and eviction have component evidence, not a complete cold/incremental HTTP fixture matrix.
+- The JSON request descriptors redact key aliases and token-reuse relationships; the process harness, not the JSON alone, reproduces key rotation and replay.
+- No joint receipt for failed peer identity, daemon-down gateway behavior, genuine enrollment and mint custody, release ordering, reference-model comparison or platform refusal of an old-label page.

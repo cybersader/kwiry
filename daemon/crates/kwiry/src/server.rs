@@ -28,7 +28,7 @@ use crate::auth::{AuthState, require_auth};
 use crate::capability::{CapabilityVerifier, ROOM_FORMAT};
 use crate::logging::Redacted;
 use crate::runtime::{ManagerHandle, spawn_manager};
-use crate::watcher::spawn_watcher;
+use crate::watcher::{ConfigGate, spawn_watcher};
 
 const INDEX_FRESHNESS_HEADER: &str = "x-kwiry-index-freshness";
 const GENERATION_HEADER: &str = "x-kwiry-generation";
@@ -40,7 +40,7 @@ const FIELD_EMPHASIS_HEADER: &str = "x-kwiry-field-emphasis";
 #[derive(Clone)]
 pub(crate) struct AppState {
     /// Present only on the dedicated listener. Reload failures close the gate.
-    live_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
+    live_gate: Option<Arc<ConfigGate>>,
     profile: HostProfile,
     runtime: SearchRuntime,
     status: Arc<RwLock<DaemonStatus>>,
@@ -63,9 +63,7 @@ pub(crate) async fn serve(
     let initial_config = load_config_for_paths(&paths)?;
     if initial_config.server.profile_required {
         // Even an unexpected dependency panic must not print private diagnostics.
-        std::panic::set_hook(Box::new(|_| {
-            eprintln!("kwiry: private service task failed")
-        }));
+        crate::private_panic_hook();
         return serve_configured(paths, bind_override, semantic, initial_config)
             .await
             .map_err(|_| anyhow!("the private search service could not start or continue"));
@@ -195,7 +193,7 @@ async fn serve_configured(
     let live_gate = config
         .server
         .profile_required
-        .then(|| Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        .then(|| Arc::new(ConfigGate::default()));
     let state = AppState {
         live_gate: live_gate.clone(),
         profile,
@@ -291,15 +289,24 @@ async fn serve_configured(
     }
 
     let (manager_handle, manager_task) = spawn_manager(manager, runtime.clone());
-    // The watcher is armed before the boot pass so nothing observed while
-    // it runs is lost; the manager actor serializes the passes.
-    let watcher = spawn_watcher(
-        paths.clone(),
-        config.clone(),
-        manager_handle.clone(),
-        status.clone(),
-        live_gate,
-    )?;
+    // Preserve the ordinary startup ordering. The private gate remains closed
+    // until boot finishes and its watched configuration is checked below.
+    let start_watcher = || {
+        spawn_watcher(
+            paths.clone(),
+            config.clone(),
+            manager_handle.clone(),
+            status.clone(),
+            live_gate.clone(),
+        )
+    };
+    // On the private listener, do not race a stale boot pass against a reload.
+    // Its watcher arms, then checks the boot configuration before first admission.
+    let watcher = if live_gate.is_none() {
+        Some(start_watcher()?)
+    } else {
+        None
+    };
     if semantic_enabled {
         // Owner ruling (KWIRY-Q-0022): the embedding model loads in the
         // background; semantic and hybrid answer an honest mode_unavailable
@@ -363,6 +370,10 @@ async fn serve_configured(
         }
     }
 
+    let watcher = match watcher {
+        Some(watcher) => watcher,
+        None => start_watcher()?,
+    };
     if let Some((listener, router)) = pending_server {
         serving = Some(spawn_server(listener, router));
     }
@@ -1129,7 +1140,8 @@ mod tests {
         build_index(&config, &data).unwrap();
         let mut state = test_state();
         state.profile = HostProfile::OpenClast;
-        state.live_gate = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        state.live_gate = Some(Arc::new(ConfigGate::default()));
+        state.live_gate.as_ref().unwrap().validated(0);
         let mut manager = IndexManager::open(config.clone(), &data, state.runtime.clone()).unwrap();
         manager.reconcile(config).unwrap();
         let mut rig = Rig::new(&directory.path().join("holder"));

@@ -127,18 +127,29 @@ fn governed_search_live_check_stored_fields() {
         .active()
         .unwrap()
         .unwrap();
-    let path = fs::read_dir(active.partitions_dir)
+    let partitions: Vec<_> = fs::read_dir(active.partitions_dir)
         .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("index");
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let [partition] = partitions.as_slice() else {
+        panic!("expected a single synthetic partition")
+    };
+    let path = partition.join("index");
     let index = Index::open_in_dir(path).unwrap();
     let schema = index.schema();
     let reader = index.reader().unwrap();
     let searcher = reader.searcher();
-    let source: TantivyDocument = searcher.doc(tantivy::DocAddress::new(0, 0)).unwrap();
+    // Select the Quartz chunk by logical identity, not segment/doc ordinal.
+    let id = "cbd5f33dc6136b66bff836fcb14ee1cec704762da0f7b1eace0500761d9d09f3";
+    let query = tantivy::query::TermQuery::new(
+        tantivy::Term::from_field_text(schema.get_field("chunk_id").unwrap(), id),
+        tantivy::schema::IndexRecordOption::Basic,
+    );
+    let docs = searcher
+        .search(&query, &tantivy::collector::DocSetCollector)
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+    let source: TantivyDocument = searcher.doc(*docs.iter().next().unwrap()).unwrap();
     let original: Value = serde_json::from_str(&source.to_json(&schema)).unwrap();
     assert_eq!(original["content_hash"][0], HASH);
     // Independent synthetic storage-fault fixture. Let the daemon open its lazy
@@ -161,6 +172,8 @@ fn governed_search_live_check_stored_fields() {
             Some(json!(["{\"kind\":\"pdf_page\",\"page\":1}"])),
         ),
         ("heather", "content_hash", Some(json!([LABEL_B]))),
+        ("aster", "chunk_id", Some(json!(["not-a-digest"]))),
+        ("fennel", "path", Some(json!(["/absolute.md"]))),
     ]
     .into_iter()
     .enumerate()
@@ -186,6 +199,8 @@ fn governed_search_live_check_stored_fields() {
         ("impossible-coverage", "clover"),
         ("impossible-format", "sorrel"),
         ("impossible-locator", "juniper"),
+        ("malformed-chunk-id", "aster"),
+        ("absolute-path", "fennel"),
         ("no-partial-page", "moonflower"),
     ] {
         c.check(case, lab.query(q), 500, "internal_error", true);
@@ -201,6 +216,54 @@ fn governed_search_live_check_stored_fields() {
     );
     c.save("stored-fields");
     lab.stop();
+}
+
+#[test]
+fn governed_search_live_check_private_cli_diagnostics() {
+    let mut lab = Lab::new();
+    lab.stop();
+    let run = |args: &[&str]| {
+        let output = Command::new(cargo_bin("kwiry"))
+            .arg("--config")
+            .arg(&lab.path)
+            .arg("--data-dir")
+            .arg(&lab.data)
+            .args(args)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for text in [&stdout, &stderr] {
+            assert!(!text.contains(MARKER));
+            assert!(!text.contains(LABEL_A));
+        }
+        (output.status.success(), stdout, stderr)
+    };
+    let root = &lab.config.vaults[0].path;
+    fs::write(root.join(format!("{MARKER}.md")), MARKER).unwrap();
+    std::os::unix::fs::symlink("absent", root.join(format!("{MARKER}-unreadable.md"))).unwrap();
+    let (ok, out, err) = run(&["index"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), "generation published; rooms=1");
+    assert!(err.is_empty());
+    let (ok, out, _) = run(&["config", "show"]);
+    assert!(ok);
+    assert_eq!(out.trim(), "profile required; rooms=1");
+    assert!(!run(&["search", MARKER]).0);
+    for (key, kind) in [
+        ("profile_required", "invalid type"),
+        ("profile", "unknown variant"),
+    ] {
+        fs::write(&lab.path, format!("[server]\n{key} = '{MARKER}'\n")).unwrap();
+        let (ok, out, err) = run(&["serve"]);
+        assert!(!ok);
+        assert!(out.is_empty());
+        assert!(
+            err.contains(lab.path.to_str().unwrap())
+                && err.contains(&format!("server.{key}: {kind}")),
+            "{err}"
+        );
+    }
 }
 
 fn config_fixture(name: &str, actual: Value) {

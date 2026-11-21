@@ -226,20 +226,96 @@ fn load_config_unlocked(path: &Path) -> Result<Config> {
     }
 
     let source = fs::read_to_string(path).map_err(|error| io_error(path, error))?;
-    let config: Config = toml::from_str(&source).map_err(|error| Error::InvalidConfig {
-        path: path.to_path_buf(),
-        // Display would echo the source line, including producer labels.
-        message: error.message().to_owned(),
+    let de = toml::Deserializer::parse(&source).map_err(|_| Error::InvalidConfig {
+        path: path.to_owned(),
+        message: "<document>: invalid TOML".into(),
     })?;
+    let config: Config =
+        serde_path_to_error::deserialize(de).map_err(|error| Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: config_parse_diagnostic(&error),
+        })?;
 
     if config.version != 1 {
         return Err(Error::InvalidConfig {
             path: path.to_path_buf(),
-            message: format!("unsupported config version {}", config.version),
+            message: "version: unsupported config version".into(),
         });
     }
 
     Ok(config)
+}
+
+// Error::message() itself may quote configured values. Only report a fixed
+// category and a structural path; enum variants and unknown keys are input.
+fn config_parse_diagnostic(error: &serde_path_to_error::Error<toml::de::Error>) -> String {
+    let detail = error.inner().message();
+    let kind = if detail == crate::SnapshotId::INVALID {
+        crate::SnapshotId::INVALID
+    } else if detail.starts_with("invalid type") {
+        "invalid type"
+    } else if detail.starts_with("unknown variant") {
+        "unknown variant"
+    } else if detail.starts_with("missing field") {
+        "missing required field"
+    } else if detail.starts_with("unknown field") {
+        "unknown field"
+    } else {
+        "invalid TOML or setting"
+    };
+    let mut key = String::new();
+    for segment in error.path() {
+        match segment {
+            serde_path_to_error::Segment::Map { key: field }
+                if matches!(
+                    field.as_str(),
+                    "version"
+                        | "server"
+                        | "auth"
+                        | "semantic"
+                        | "indexing"
+                        | "vaults"
+                        | "holder"
+                        | "profile_required"
+                        | "profile"
+                        | "bind"
+                        | "token_file"
+                        | "openclast"
+                        | "tenant_id"
+                        | "issuer"
+                        | "audience"
+                        | "jwks_file"
+                        | "max_token_ttl_seconds"
+                        | "workload_subject_allowlist"
+                        | "legacy_identity_accept_until"
+                        | "state_dir"
+                        | "page_size"
+                        | "clock_skew_allowance_seconds"
+                        | "max_stale_serve_seconds"
+                        | "enabled"
+                        | "basis"
+                        | "audit_sources_per_pass"
+                        | "audit_bytes_per_pass"
+                        | "racy_window_millis"
+                        | "snapshot_id"
+                        | "vault_id"
+                        | "path"
+                        | "room"
+                ) =>
+            {
+                if !key.is_empty() {
+                    key.push('.');
+                }
+                key.push_str(field);
+            }
+            serde_path_to_error::Segment::Seq { index } => key.push_str(&format!("[{index}]")),
+            _ => break,
+        }
+    }
+    if key.is_empty() {
+        key.push_str("<document>");
+    }
+    format!("{key}: {kind}")
 }
 
 fn save_config_unlocked(path: &Path, config: &Config) -> Result<()> {
@@ -308,7 +384,7 @@ fn validate_room_registrations(path: &Path, config: &Config) -> Result<()> {
     };
     for vault in &config.vaults {
         if !vaults.insert(&vault.id) && !allows_repeated_vault(config) {
-            return Err(Error::DuplicateVaultId(vault.id.clone()));
+            return Err(invalid("vaults.vault_id: duplicate vault ID"));
         }
         if config.server.profile == HostProfile::OpenClast {
             let room = vault
@@ -516,7 +592,7 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
         if config.server.profile == HostProfile::Desktop && !vault.path.is_absolute() {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
-                message: format!("vault path must be absolute: {}", vault.path.display()),
+                message: "vaults.path: vault path must be absolute".into(),
             });
         }
         if vault
@@ -526,16 +602,13 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
         {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
-                message: format!("vault room must not be empty: {}", vault.id),
+                message: "vaults.room: vault room must not be empty".into(),
             });
         }
         if config.server.profile == HostProfile::OpenClast && vault.room.is_none() {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
-                message: format!(
-                    "openclast profile requires a nonempty room for vault {}",
-                    vault.id
-                ),
+                message: "vaults.room: openclast profile requires a nonempty room".into(),
             });
         }
     }
@@ -563,10 +636,9 @@ fn validate_holder(path: &Path, config: &Config) -> Result<()> {
     }
     for vault in &config.vaults {
         if holder.state_dir.starts_with(&vault.path) || vault.path.starts_with(&holder.state_dir) {
-            return Err(invalid(format!(
-                "holder.state_dir must not overlap registered vault {}",
-                vault.id
-            )));
+            return Err(invalid(
+                "holder.state_dir must not overlap registered vault paths".into(),
+            ));
         }
     }
     if let Some(page_size) = holder.page_size
@@ -773,6 +845,38 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn config_parse_diagnostic_never_renders_values_or_unknown_keys() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let marker = "synthetic-whisper-106";
+        for (source, key, kind) in [
+            (
+                format!("[server]\nprofile_required = '{marker}'"),
+                "server.profile_required",
+                "invalid type",
+            ),
+            (
+                format!("[server]\nprofile = '{marker}'"),
+                "server.profile",
+                "unknown variant",
+            ),
+            (
+                format!("[holder]\n{marker} = true"),
+                "holder",
+                "unknown field",
+            ),
+            (format!("[{marker}"), "<document>", "invalid TOML"),
+        ] {
+            fs::write(&path, source).unwrap();
+            let err = load_config(&path).unwrap_err().to_string();
+            assert!(
+                err.contains(key) && err.contains(kind) && !err.contains(marker),
+                "{err}"
+            );
+        }
+    }
 
     #[test]
     fn invalid_snapshot_grammar_is_rejected_at_load_without_echoing_the_value() {

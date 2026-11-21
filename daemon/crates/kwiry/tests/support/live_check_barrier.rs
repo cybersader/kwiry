@@ -109,9 +109,13 @@ impl Drop for Debugger {
 
 #[test]
 fn governed_search_live_check_stalled_answering_reader() {
-    if Command::new("gdb").arg("--version").output().is_err() {
+    if !Command::new("gdb")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
         assert!(
-            std::env::var_os("KWIRY_REQUIRE_LIVE_BARRIER").is_none(),
+            std::env::var("KWIRY_REQUIRE_LIVE_BARRIER").as_deref() != Ok("1"),
             "gdb required for pinned-reader acceptance"
         );
         eprintln!("SKIP pinned-reader process fixture: gdb unavailable");
@@ -155,6 +159,24 @@ fn governed_search_live_check_stalled_answering_reader() {
         );
         cap.check(case, old, 200, "", true);
     }
+    let call = dbg.pause(&lab, "moonflower");
+    // Publish the same tuple with a generic (not live-check) label. A fresh
+    // indexed refusal distinguishes publication from the closed reload gate.
+    lab.config.vaults[0].snapshot_id = Some("generic-synthetic".parse().unwrap());
+    save_config(&lab.path, &lab.config).unwrap();
+    wait_for(|| lab.query("moonflower")["body"]["error"]["resource_indexes"] == json!([0]));
+    let reply = dbg.release(call);
+    assert_eq!(reply["body"]["error"]["resource_indexes"], json!([0]));
+    cap.check(
+        "final-ineligible-binding",
+        reply,
+        503,
+        "resource_unavailable",
+        true,
+    );
+    lab.config.vaults[0].snapshot_id = Some(LABEL_B.parse().unwrap());
+    save_config(&lab.path, &lab.config).unwrap();
+    wait_for(|| lab.query("moonflower")["body"]["resource_snapshots"][0]["snapshot_id"] == LABEL_B);
     let call = dbg.pause(&lab, "moonflower");
     let removed = lab.config.vaults.pop().unwrap();
     save_config(&lab.path, &lab.config).unwrap();

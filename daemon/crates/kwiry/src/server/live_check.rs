@@ -4,11 +4,11 @@ use super::*;
 use axum::extract::Request;
 use axum::http::{HeaderMap, header};
 use kwiry_core::{
-    ExtractionCoverage, GenerationSearchResult, ResourceKey, SearchFilters, SearchHit, SourceFormat,
+    ExtractionCoverage, GenerationSearchResult, ResourceKey, SearchHit, SourceFormat,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::sync::{LazyLock, atomic::Ordering};
+use std::sync::LazyLock;
 
 const PROFILE_HEADER: &str = "kwiry-profile";
 const PROFILE: &str = "live-check-v1";
@@ -92,10 +92,7 @@ fn search_error(error: kwiry_core::Error) -> HttpError {
 }
 fn global_gate(state: &AppState) -> Result<(), HttpError> {
     check_holder_gate(state)?;
-    if state
-        .live_gate
-        .as_ref()
-        .is_some_and(|gate| gate.load(Ordering::Acquire))
+    if state.live_gate.as_ref().is_some_and(|gate| gate.open())
         && state.runtime.active_room_identity_format()
         && state.runtime.freshness_basis() == IndexFreshnessBasis::StrictHash
     {
@@ -208,11 +205,9 @@ pub(super) fn finish(
     mut response: Response,
 ) -> Result<Response, HttpError> {
     global_gate(state)?;
-    let freshness = state.runtime.authorized_freshness(
-        &SearchFilters::default(),
-        std::slice::from_ref(resource),
-        generation,
-    );
+    let freshness = state
+        .runtime
+        .labeled_resource_freshness(resource, generation);
     // A holder may fail-stop during resource revalidation.
     global_gate(state)?;
     let freshness = freshness.map_err(search_error)?;
@@ -255,14 +250,27 @@ fn stage_response(
         .as_ref()
         .filter(|id| id.is_live_check_label())
         .ok_or_else(unbound)?;
-    if resource != signed || bindings.next().is_some() {
+    if resource != signed
+        || bindings.next().is_some()
+        || !kwiry_core::valid_tenant_identifier(&resource.tenant_id)
+        || !kwiry_core::valid_room_identifier(&resource.vault_id)
+        || !kwiry_core::valid_room_identifier(&resource.room_id)
+    {
         return Err(unbound());
     }
+    if result.hits.len() > 100 {
+        return Err(internal());
+    }
+    // Vec<String> headings, String excerpts, f32 (nonfinite serializes as null),
+    // and the closed Frontmatter projection (empty tags omitted) satisfy their schema by type.
     let hits = result
         .hits
         .iter()
         .map(|hit| {
-            if hit.vault_id != resource.vault_id
+            if !kwiry_core::valid_lower_sha256(&hit.chunk_id)
+                || hit.path.is_empty()
+                || hit.path.starts_with('/')
+                || hit.vault_id != resource.vault_id
                 || hit.room_id.as_ref() != Some(&resource.room_id)
                 || hit.format != SourceFormat::Markdown
                 || hit.coverage != ExtractionCoverage::IndexedComplete
@@ -310,6 +318,117 @@ fn stage_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn governed_search_live_check_success_schema_mutations() {
+        use serde_json::{Value, json};
+        // Obtain the opaque proof the same way production does (not via JSON).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("room");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("note.md"), "lavender").unwrap();
+        let data = dir.path().join("data");
+        let resource = ResourceKey::new(
+            "tenant_AAAAAAAAAAAAAAAAAAAA",
+            "A".repeat(22),
+            "B".repeat(22),
+        );
+        let mut cfg = Config::default();
+        cfg.vaults.push(kwiry_core::VaultRegistration {
+            id: resource.vault_id.clone(),
+            path: root,
+            room: None,
+            snapshot_id: None,
+        });
+        build_index(&cfg, &data).unwrap();
+        let mut hit = kwiry_core::search_index(
+            &data,
+            &kwiry_core::LexicalSearchRequest {
+                query: "lavender".into(),
+                limit: 1,
+                vault_id: None,
+            },
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        hit.room_id = Some(resource.room_id.clone());
+        let label = "a".repeat(64).parse().unwrap();
+        let mut result = GenerationSearchResult {
+            snapshot_ids: BTreeMap::from([(resource.clone(), Some(label))]),
+            hits: vec![hit.clone()],
+            generation: "synthetic".into(),
+            lexical_match_quality: Some(LexicalMatchQuality::StandardOnly),
+        };
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../../../docs/wire/governed-search-live-check-v1/success.schema.json"
+        ))
+        .unwrap();
+        let validator = jsonschema::draft202012::new(&schema).unwrap();
+        async fn body(response: Response) -> Value {
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+        let good = body(
+            stage_response(&resource, &result).unwrap_or_else(|e| panic!("{}", e.body.error.code)),
+        )
+        .await;
+        validator.validate(&good).unwrap();
+        // Mutate each hit field against the actual published schema. Some invalid
+        // wire shapes cannot exist in Rust, or normalize away (e.g. empty tags).
+        for (field, bad) in [
+            ("chunk_id", json!("not-a-digest")),
+            ("chunk_id", json!("A".repeat(64))),
+            ("vault_id", json!("!".repeat(22))),
+            ("room_id", Value::Null),
+            ("path", json!("")),
+            ("path", json!("/absolute")),
+            ("heading_path", json!([5])),
+            ("format", json!("text")),
+            ("coverage", json!("indexed-partial")),
+            ("locator", json!({"kind":"pdf_page","page":1})),
+            ("score", json!("high")),
+            ("excerpt", json!(false)),
+            ("frontmatter", json!({"title":1})),
+            ("frontmatter", json!({"description":1})),
+            ("frontmatter", json!({"status":1})),
+            ("frontmatter", json!({"date":1})),
+            ("frontmatter", json!({"tags":[]})),
+            ("frontmatter", json!({"tags":[1]})),
+            ("frontmatter", json!({"other":1})),
+            ("content_sha256", json!("bad")),
+            ("extra", json!(true)),
+        ] {
+            let mut invalid = good.clone();
+            invalid["hits"][0][field] = bad;
+            assert!(!validator.is_valid(&invalid), "{field}");
+            let Ok(mut candidate) = serde_json::from_value::<SearchHit>(invalid["hits"][0].clone())
+            else {
+                continue;
+            };
+            if field != "content_sha256" {
+                candidate.content_sha256.clone_from(&hit.content_sha256);
+            }
+            result.hits = vec![hit.clone(), candidate];
+            match stage_response(&resource, &result) {
+                Ok(response) => {
+                    assert!(matches!(field, "frontmatter" | "extra"));
+                    validator.validate(&body(response).await).unwrap();
+                }
+                Err(e) => assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
+        result.hits = vec![hit; 101];
+        assert_eq!(
+            stage_response(&resource, &result).unwrap_err().status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
     #[test]
     fn governed_search_live_check_unicode_tables_match_15_1() {
         // Drift detector over the Unicode 15.1 DerivedGeneralCategory.txt oracle:
