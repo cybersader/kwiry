@@ -224,6 +224,12 @@ impl DataRoot {
     }
 
     pub fn active(&self) -> Result<Option<GenerationPaths>> {
+        Ok(self.active_with_layout()?.map(|(paths, _)| paths))
+    }
+
+    pub(crate) fn active_with_layout(
+        &self,
+    ) -> Result<Option<(GenerationPaths, Option<GenerationLayout>)>> {
         let current_path = self.root.join("current.json");
         if !current_path.is_file() {
             return Ok(None);
@@ -234,8 +240,8 @@ impl DataRoot {
             current.generation.clone(),
             self.root.join("generations").join(&current.generation),
         );
-        paths.validate()?;
-        Ok(Some(paths))
+        let layout = paths.validated_layout()?;
+        Ok(Some((paths, layout)))
     }
 
     /// The index directory a **reader** may open, or a refusal.
@@ -551,6 +557,10 @@ impl GenerationPaths {
     }
 
     fn validate(&self) -> Result<()> {
+        self.validated_layout().map(drop)
+    }
+
+    fn validated_layout(&self) -> Result<Option<GenerationLayout>> {
         if !is_generation_id(&self.id) || !self.root.is_dir() {
             return Err(Error::State(format!(
                 "generation is missing or invalid: {}",
@@ -573,6 +583,7 @@ impl GenerationPaths {
                         self.root.display()
                     )));
                 }
+                Ok(None)
             }
             (false, true) => {
                 let layout = GenerationLayout::load(&self.layout_path)?;
@@ -607,15 +618,13 @@ impl GenerationPaths {
                     // source state whose content is deliberately withheld until the
                     // registration can be verified and reindexed.
                 }
+                Ok(Some(layout))
             }
-            _ => {
-                return Err(Error::State(format!(
-                    "generation is incomplete or has ambiguous profile state: {}",
-                    self.root.display()
-                )));
-            }
+            _ => Err(Error::State(format!(
+                "generation is incomplete or has ambiguous profile state: {}",
+                self.root.display()
+            ))),
         }
-        Ok(())
     }
 }
 

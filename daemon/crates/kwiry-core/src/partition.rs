@@ -21,9 +21,46 @@ struct SnapshotLabels {
     labels: Vec<LabelBinding>,
 }
 
+// The sidecar is disposable. Never allocate more than this bound for its bytes.
+pub(crate) const MAX_LABEL_BYTES: u64 = 1024 * 1024;
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_LABEL_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+impl SnapshotLabels {
+    fn read(path: &Path) -> Option<Self> {
+        use std::io::Read;
+        #[cfg(test)]
+        if FAIL_LABEL_READ.with(|cell| cell.replace(cell.get().saturating_sub(1))) == 1 {
+            return None;
+        }
+        let meta = path.symlink_metadata().ok()?;
+        if !meta.is_file() || meta.len() > MAX_LABEL_BYTES {
+            return None;
+        }
+        let file = std::fs::File::open(path).ok()?;
+        let mut bytes = Vec::new();
+        file.take(MAX_LABEL_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_LABEL_BYTES {
+            return None;
+        }
+        serde_json::from_slice(&bytes).ok()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ResourceKey", deny_unknown_fields)]
+struct StrictResource {
+    tenant_id: String,
+    vault_id: String,
+    room_id: String,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LabelBinding {
+    #[serde(with = "StrictResource")]
     resource: ResourceKey,
     partition_id: String,
     snapshot_id: SnapshotId,
@@ -41,7 +78,7 @@ pub(crate) enum PartitionEvidence<'a> {
 impl PartitionEvidence<'_> {
     /// Certify a newly built or changed partition iff the producing pass walked the
     /// entire room, read and indexed every eligible source cleanly, and its exact
-    /// per-source chunk counts match the live partition. Without this evidence the
+    /// per-source chunk counts and whole-file hashes match the live partition. Without this evidence the
     /// label is absent. Maintenance may carry the previous proof only when it
     /// preserves exactly the same live rows (e.g. compacting deleted documents).
     pub(crate) fn publication_label(&self) -> Option<SnapshotId> {
@@ -103,18 +140,18 @@ impl GenerationLayout {
     }
 
     pub(crate) fn load_generation(paths: &GenerationPaths) -> Result<Self> {
-        let mut layout = Self::load(&paths.layout_path)?;
+        Ok(Self::load(&paths.layout_path)?.with_generation_labels(paths))
+    }
+
+    pub(crate) fn with_generation_labels(mut self, paths: &GenerationPaths) -> Self {
         // An absent, unreadable or unrecognized sidecar never invalidates the
         // lexical generation. Validate ALL bindings before trusting any one.
         let path = paths.root.join(LABEL_SIDECAR);
-        if !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
-            return Ok(layout);
-        }
-        if let Ok(sidecar) = read_json::<SnapshotLabels>(&path)
+        if let Some(sidecar) = SnapshotLabels::read(&path)
             && sidecar.version == LABEL_VERSION
             && sidecar.generation == paths.id
         {
-            let partitions: BTreeMap<_, _> = layout
+            let partitions: BTreeMap<_, _> = self
                 .partitions
                 .iter()
                 .map(|p| (&p.resource, &p.partition_id))
@@ -126,14 +163,14 @@ impl GenerationLayout {
                         .insert(binding.resource, binding.snapshot_id)
                         .is_some()
                 {
-                    return Ok(layout);
+                    return self;
                 }
             }
-            for p in &mut layout.partitions {
+            for p in &mut self.partitions {
                 p.snapshot_id = labels.remove(&p.resource);
             }
         }
-        Ok(layout)
+        self
     }
 
     pub(crate) fn save_candidate(&self, candidate: &CandidateGeneration) -> Result<()> {

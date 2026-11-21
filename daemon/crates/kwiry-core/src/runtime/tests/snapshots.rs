@@ -435,10 +435,10 @@ fn matching_manifest_with_one_missing_chunk_is_reingested_before_label_publicati
     writer.commit().unwrap();
     writer.wait_merging_threads().unwrap();
     assert_eq!(
-        partition_source_counts(&index_dir)
+        partition_sources(&index_dir)
             .unwrap()
             .values()
-            .copied()
+            .map(|s| s.0)
             .collect::<Vec<_>>(),
         [1]
     );
@@ -448,7 +448,37 @@ fn matching_manifest_with_one_missing_chunk_is_reingested_before_label_publicati
 }
 
 #[test]
-fn physical_count_mismatch_with_clean_walk_is_unlabeled_and_repaired_on_retry() {
+fn a_missing_or_inconsistent_hash_on_one_live_chunk_forces_reingestion() {
+    for hash in [None, Some("f".repeat(64))] {
+        let mut f = Fixture::new(Some("# First\napricots\n# Second\napricots\n"));
+        let hit = &f.search("apricots").hits[0];
+        let dir = partition_index_dir(&f.published().partitions_dir, &f.resources[0]);
+        let (index, fields) = open_index_dir(&dir).unwrap();
+        let mut doc = tantivy::TantivyDocument::default();
+        let key = f.manager.manifest().files.keys().next().unwrap();
+        doc.add_text(fields.source_key.unwrap(), key);
+        if let Some(hash) = hash {
+            doc.add_text(fields.content_hash, hash);
+        }
+        let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
+        writer.delete_term(Term::from_field_text(fields.chunk_id, &hit.chunk_id));
+        writer.add_document(doc).unwrap();
+        writer.commit().unwrap();
+        writer.wait_merging_threads().unwrap();
+        f.config.vaults[0].snapshot_id = Some("snapshot:B".parse().unwrap());
+        assert_eq!(
+            f.manager
+                .reconcile(f.config.clone())
+                .unwrap()
+                .changed_sources,
+            1
+        );
+        f.check(&f.search("apricots"), Some("snapshot:B"), 2);
+    }
+}
+
+#[test]
+fn physical_count_mismatch_with_clean_walk_is_repaired_in_same_pass() {
     let mut f = Fixture::new(Some("apricots"));
     let index_dir = partition_index_dir(&f.published().partitions_dir, &f.resources[0]);
     let (index, fields) = open_index_dir(&index_dir).unwrap();
@@ -461,28 +491,23 @@ fn physical_count_mismatch_with_clean_walk_is_unlabeled_and_repaired_on_retry() 
     file.chunk_count = 2;
     let mut extra = tantivy::TantivyDocument::default();
     extra.add_text(fields.source_key.unwrap(), key.as_str());
+    extra.add_text(fields.content_hash, &file.content_hash);
     let mut writer: IndexWriter<tantivy::TantivyDocument> =
         index.writer(WRITER_MEMORY_BYTES).unwrap();
     writer.add_document(extra).unwrap();
     writer.commit().unwrap();
     writer.wait_merging_threads().unwrap();
     let report = f.manager.reconcile(f.config.clone()).unwrap();
-    assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.message.contains("incomplete partition"))
-    );
-    f.check(&f.search("apricots"), None, 1);
-    f.reconcile();
+    assert_eq!(report.changed_sources, 1);
     f.check(&f.search("apricots"), Some("snapshot:A"), 1);
     assert_eq!(
-        partition_source_counts(&partition_index_dir(
+        partition_sources(&partition_index_dir(
             &f.published().partitions_dir,
             &f.resources[0]
         ))
         .unwrap()
         .values()
+        .map(|s| s.0)
         .sum::<usize>(),
         1
     );
@@ -490,6 +515,7 @@ fn physical_count_mismatch_with_clean_walk_is_unlabeled_and_repaired_on_retry() 
 
 #[test]
 fn layout_bytes_remain_v3_with_and_without_labels_on_rollback() {
+    // This byte-level test stands in for an end-to-end rollback using an older binary.
     // Frozen v3 parser and field order. A rollback must not rely on an old
     // reader ignoring extension fields or accepting a new version number.
     #[derive(serde::Deserialize, serde::Serialize)]
@@ -548,13 +574,21 @@ fn missing_corrupt_wrong_version_or_mismatched_sidecar_serves_every_room_unlabel
         "partition",
         "generation",
         "duplicate",
+        "oversized",
+        "nested",
     ] {
         let mut bad = valid.clone();
         match defect {
             "missing" => fs::remove_file(&path).unwrap(),
+            "oversized" => {
+                let mut bytes = serde_json::to_vec(&valid).unwrap();
+                bytes.resize(crate::partition::MAX_LABEL_BYTES as usize + 1, b' ');
+                fs::write(&path, bytes).unwrap();
+            }
             "json" => fs::write(&path, b"{").unwrap(),
             _ => {
                 match defect {
+                    "nested" => bad["labels"][1]["resource"]["extra"] = true.into(),
                     "version" => bad["version"] = 400.into(),
                     "resource" => bad["labels"][1]["resource"]["room_id"] = "unknown".into(),
                     "partition" => bad["labels"][1]["partition_id"] = "wrong".into(),
@@ -574,6 +608,263 @@ fn missing_corrupt_wrong_version_or_mismatched_sidecar_serves_every_room_unlabel
         );
         assert!(result.require_snapshot_ids().is_err());
     }
+}
+
+fn metadata_no_audit(config: &mut Config) {
+    config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
+    config.indexing.racy_window_millis = 0;
+    config.indexing.audit_sources_per_pass = 0;
+}
+
+#[test]
+fn labeled_noop_and_zero_byte_note_keep_reader_without_scans_or_reads() {
+    for note in ["", "apricots"] {
+        let mut f = Fixture::new(Some(note));
+        metadata_no_audit(&mut f.config);
+        let current = f.published();
+        crate::index::PARTITION_SCANS.set(0);
+        let report = f.manager.reconcile(f.config.clone()).unwrap();
+        assert_eq!(report.source_files_read, 0);
+        assert_eq!(crate::index::PARTITION_SCANS.get(), 0);
+        assert_eq!(f.published().id, current.id);
+        f.check(
+            &f.search("apricots"),
+            Some("snapshot:A"),
+            usize::from(!note.is_empty()),
+        );
+    }
+}
+
+#[test]
+fn scoped_unlabeled_update_skips_scan_and_label_change_scans_once() {
+    let mut f = Fixture::with_label(Some("apricots"), None);
+    metadata_no_audit(&mut f.config);
+    fs::write(f.config.vaults[0].path.join("note.md"), "orchids").unwrap();
+    crate::index::PARTITION_SCANS.set(0);
+    f.manager
+        .reconcile_scoped(
+            f.config.clone(),
+            &ReconcileScope::RoomPaths([(f.resources[0].clone(), "note.md".into())].into()),
+        )
+        .unwrap();
+    assert_eq!(crate::index::PARTITION_SCANS.get(), 0);
+    f.check(&f.search("orchids"), None, 1);
+    f.config.vaults[0].snapshot_id = Some("snapshot:B".parse().unwrap());
+    let report = f.manager.reconcile(f.config.clone()).unwrap();
+    assert_eq!(report.source_files_read, 1);
+    assert_eq!(crate::index::PARTITION_SCANS.get(), 1);
+    f.check(&f.search("orchids"), Some("snapshot:B"), 1);
+}
+
+#[test]
+fn changed_row_completes_the_labeled_walk_without_reading_any_note_twice() {
+    let mut f = Fixture::new(Some("apricots"));
+    metadata_no_audit(&mut f.config);
+    fs::write(f.config.vaults[0].path.join("fresh.md"), "violets").unwrap();
+    crate::index::PARTITION_SCANS.set(0);
+    let report = f.manager.reconcile(f.config.clone()).unwrap();
+    assert_eq!(report.source_files_read, 2);
+    assert_eq!(report.changed_sources, 1);
+    assert_eq!(crate::index::PARTITION_SCANS.get(), 1);
+    f.check(&f.search("violets"), Some("snapshot:A"), 1);
+}
+
+#[test]
+fn boot_reads_labels_once_and_reconcile_uses_the_installed_view() {
+    for (fault, configured) in [(1, Some("snapshot:A")), (2, None), (0, Some("snapshot:A"))] {
+        let f = Fixture::new(Some("apricots"));
+        let original = f.published().id;
+        let data = f.dir.path().join("data");
+        f.manager.shutdown().unwrap();
+        let mut config = f.config;
+        config.vaults[0].snapshot_id = configured.map(|s| s.parse().unwrap());
+        crate::partition::FAIL_LABEL_READ.set(fault);
+        let runtime = SearchRuntime::new();
+        let mut manager = IndexManager::open(config.clone(), &data, runtime.clone()).unwrap();
+        assert_eq!(
+            crate::partition::FAIL_LABEL_READ.get(),
+            fault.saturating_sub(1)
+        );
+        let active = runtime.active.load_full().unwrap();
+        let ActiveSearchIndex::OpenClast(reader) = active.as_ref() else {
+            panic!()
+        };
+        assert_eq!(
+            reader.partitions[&f.resources[0]]
+                .snapshot_id
+                .as_ref()
+                .map(SnapshotId::as_str),
+            (fault != 1).then_some("snapshot:A")
+        );
+        manager.reconcile(config).unwrap();
+        let served = runtime
+            .search_authorized_with_generation(
+                "apricots",
+                10,
+                &SearchFilters::default(),
+                &f.resources,
+            )
+            .unwrap();
+        assert_eq!(
+            served.snapshot_ids[&f.resources[0]]
+                .as_ref()
+                .map(SnapshotId::as_str),
+            configured
+        );
+        assert_eq!(
+            DataRoot::new(data).active().unwrap().unwrap().id == original,
+            fault == 0
+        );
+    }
+}
+
+#[test]
+fn publication_sidecar_read_failure_retries_from_the_serving_reader() {
+    let mut f = Fixture::new(Some("apricots"));
+    f.config.vaults[0].snapshot_id = Some("snapshot:B".parse().unwrap());
+    crate::partition::FAIL_LABEL_READ.set(1);
+    f.reconcile();
+    f.check(&f.search("apricots"), None, 1);
+    f.reconcile();
+    f.check(&f.search("apricots"), Some("snapshot:B"), 1);
+}
+
+#[test]
+fn same_count_stale_partition_is_replaced_before_certifying_new_label() {
+    let mut f = Fixture::new(Some("apricots"));
+    let old_dir = partition_index_dir(&f.published().partitions_dir, &f.resources[0]);
+    fs::write(f.config.vaults[0].path.join("note.md"), "violets").unwrap();
+    f.reconcile();
+    let active = f.published();
+    let dir = partition_index_dir(&active.partitions_dir, &f.resources[0]);
+    f.manager.shutdown().unwrap();
+    fs::rename(&dir, f.dir.path().join("saved")).unwrap();
+    fs::rename(old_dir, dir).unwrap();
+    assert_eq!(
+        reopened_result(&active, &f.resources, "apricots")
+            .hits
+            .len(),
+        1
+    );
+    let mut config = f.config;
+    config.vaults[0].snapshot_id = Some("snapshot:B".parse().unwrap());
+    let runtime = SearchRuntime::new();
+    let mut manager =
+        IndexManager::open(config.clone(), &f.dir.path().join("data"), runtime.clone()).unwrap();
+    assert_eq!(manager.reconcile(config).unwrap().changed_sources, 1);
+    let query = |q| {
+        runtime
+            .search_authorized_with_generation(q, 10, &SearchFilters::default(), &f.resources)
+            .unwrap()
+    };
+    assert!(query("apricots").hits.is_empty());
+    let answer = query("violets");
+    assert_eq!(
+        answer.snapshot_ids[&f.resources[0]]
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "snapshot:B"
+    );
+    assert_eq!(answer.hits.len(), 1);
+    assert_eq!(
+        answer.hits[0].require_content_sha256().unwrap().as_str(),
+        format!("{:x}", Sha256::digest(b"violets"))
+    );
+}
+
+#[test]
+fn unaddressable_chunk_is_confined_to_its_room() {
+    let mut f = Fixture::new(Some("apricots"));
+    let mut other = f.config.vaults[0].clone();
+    other.id = "second".into();
+    other.room = Some("second".into());
+    other.path = f.dir.path().join("second");
+    fs::create_dir(&other.path).unwrap();
+    fs::write(other.path.join("healthy.md"), "violets").unwrap();
+    let healthy = f.config.resource_key(&other).unwrap();
+    f.config.vaults.push(other);
+    f.config.vaults[0].snapshot_id = Some("snapshot:B".parse().unwrap());
+    let dir = partition_index_dir(&f.published().partitions_dir, &f.resources[0]);
+    let (index, _) = open_index_dir(&dir).unwrap();
+    let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
+    writer
+        .add_document(tantivy::TantivyDocument::default())
+        .unwrap();
+    writer.commit().unwrap();
+    writer.wait_merging_threads().unwrap();
+    let report = f.manager.reconcile(f.config.clone()).unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("missing source_key"))
+    );
+    f.check(&f.search("apricots"), None, 1);
+    let answer = f
+        .runtime
+        .search_authorized_with_generation(
+            "violets",
+            10,
+            &SearchFilters::default(),
+            std::slice::from_ref(&healthy),
+        )
+        .unwrap();
+    assert_eq!(answer.hits.len(), 1);
+    assert_eq!(
+        answer.snapshot_ids[&healthy].as_ref().unwrap().as_str(),
+        "snapshot:A"
+    );
+    f.reconcile();
+    f.check(&f.search("apricots"), Some("snapshot:B"), 1);
+}
+
+#[test]
+fn labeled_reader_survives_boot_compaction() {
+    let f = Fixture::new(Some("apricots"));
+    let active = f.published();
+    let data = f.dir.path().join("data");
+    f.manager.shutdown().unwrap();
+    let dir = partition_index_dir(&active.partitions_dir, &f.resources[0]);
+    let (index, fields) = open_index_dir(&dir).unwrap();
+    let mut writer = index.writer(WRITER_MEMORY_BYTES).unwrap();
+    let mut dead = tantivy::TantivyDocument::default();
+    dead.add_text(fields.chunk_id, "departed");
+    writer.add_document(dead).unwrap();
+    writer.commit().unwrap();
+    writer
+        .merge(&index.searchable_segment_ids().unwrap())
+        .wait()
+        .unwrap();
+    writer.delete_term(Term::from_field_text(fields.chunk_id, "departed"));
+    writer.commit().unwrap();
+    writer.wait_merging_threads().unwrap();
+    assert_eq!(resident_deleted_docs(&dir), 1);
+    let runtime = SearchRuntime::new();
+    let mut manager = IndexManager::open(f.config.clone(), &data, runtime.clone()).unwrap();
+    let compacted = DataRoot::new(&data).active().unwrap().unwrap();
+    assert_ne!(active.id, compacted.id);
+    assert_eq!(
+        resident_deleted_docs(&partition_index_dir(
+            &compacted.partitions_dir,
+            &f.resources[0]
+        )),
+        0
+    );
+    let result = reopened_result(&compacted, &f.resources, "apricots");
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(
+        result.snapshot_ids[&f.resources[0]]
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "snapshot:A"
+    );
+    manager.reconcile(f.config).unwrap();
+    assert_eq!(
+        DataRoot::new(data).active().unwrap().unwrap().id,
+        compacted.id
+    );
 }
 
 #[test]

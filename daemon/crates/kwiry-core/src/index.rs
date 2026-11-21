@@ -438,16 +438,6 @@ fn build_partition(
     let complete = room.is_some()
         && enumeration.completeness.may_infer_deletions()
         && outcomes.iter().all(|o| o.clean_snapshot_input());
-    let expected: BTreeMap<_, _> = outcomes
-        .iter()
-        .filter(|o| !o.chunks.is_empty())
-        .map(|o| {
-            (
-                crate::source::room_source_key(&o.vault_id, o.room.as_deref(), &o.path),
-                o.chunks.len(),
-            )
-        })
-        .collect();
     stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
@@ -476,36 +466,108 @@ fn build_partition(
     writer
         .wait_merging_threads()
         .map_err(|error| Error::Index(error.to_string()))?;
-    Ok(complete && partition_source_counts(index_dir)? == expected)
+    if !complete || vault.snapshot_id.is_none() {
+        return Ok(false);
+    }
+    fresh_partition_matches(index_dir, manifest, resource)
 }
 
-pub(crate) fn partition_source_counts(index_dir: &Path) -> Result<BTreeMap<String, usize>> {
-    use tantivy::{collector::DocSetCollector, query::AllQuery, schema::Value};
-    let (index, fields) = open_index_dir(index_dir)?;
-    let source_key_field = fields
-        .source_key
-        .ok_or_else(|| Error::Index("resource partition is missing source_key".into()))?;
-    let reader = index
-        .reader()
-        .map_err(|error| Error::Index(error.to_string()))?;
-    let searcher = reader.searcher();
-    let addresses = searcher
-        .search(&AllQuery, &DocSetCollector)
-        .map_err(|error| Error::Index(error.to_string()))?;
-    let mut counts = BTreeMap::new();
-    for address in addresses {
-        let document = searcher
-            .doc::<TantivyDocument>(address)
-            .map_err(|error| Error::Index(error.to_string()))?;
-        let key = document
-            .get_first(source_key_field)
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                Error::Index("resource partition document is missing source_key".to_owned())
-            })?;
-        *counts.entry(key.to_owned()).or_default() += 1;
+pub(crate) fn fresh_partition_matches(
+    index_dir: &Path,
+    manifest: &Manifest,
+    resource: &ResourceKey,
+) -> Result<bool> {
+    let mut physical = partition_sources(index_dir)?;
+    Ok(manifest
+        .files
+        .iter()
+        .filter(|(_, f)| f.resource.as_ref() == Some(resource))
+        .all(|(key, file)| source_matches(physical.remove(key), file))
+        && physical.is_empty())
+}
+
+type SourceState = (usize, Option<std::sync::Arc<str>>);
+
+pub(crate) fn source_matches(
+    state: Option<SourceState>,
+    file: &crate::manifest::ManifestFile,
+) -> bool {
+    match state {
+        None => file.chunk_count == 0,
+        Some((count, hash)) => {
+            count == file.chunk_count && hash.as_deref() == Some(&file.content_hash)
+        }
     }
-    Ok(counts)
+}
+
+#[cfg(test)]
+thread_local! { pub(crate) static PARTITION_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// Once per room being certified: before planning repairs to inherited chunks, or
+/// after writing a fresh partition. Never
+/// on ordinary no-op passes. Join only the two exact STRING fields' postings by
+/// live segment-local doc ID; no stored bodies, all-address query, or cross-room map.
+pub(crate) fn partition_sources(index_dir: &Path) -> Result<BTreeMap<String, SourceState>> {
+    use std::sync::Arc;
+    use tantivy::{DocSet, TERMINATED};
+    #[cfg(test)]
+    PARTITION_SCANS.set(PARTITION_SCANS.get() + 1);
+    let (index, fields) = open_index_dir(index_dir)?;
+    let key = fields
+        .source_key
+        .ok_or_else(|| Error::Index("missing source_key field".into()))?;
+    let err = |e: tantivy::TantivyError| Error::Index(e.to_string());
+    let searcher = index.reader().map_err(err)?.searcher();
+    let mut sources = BTreeMap::<String, SourceState>::new();
+    for segment in searcher.segment_readers() {
+        let mut docs = vec![(None, false); segment.max_doc() as usize];
+        for field in [fields.content_hash, key] {
+            let inv = segment.inverted_index(field).map_err(err)?;
+            let mut terms = inv
+                .terms()
+                .stream()
+                .map_err(|e| Error::Index(e.to_string()))?;
+            while terms.advance() {
+                let value =
+                    std::str::from_utf8(terms.key()).map_err(|e| Error::Index(e.to_string()))?;
+                let hash = (field != key).then(|| Arc::<str>::from(value));
+                let mut postings = inv
+                    .read_postings_from_terminfo(terms.value(), IndexRecordOption::Basic)
+                    .map_err(|e| Error::Index(e.to_string()))?;
+                while postings.doc() != TERMINATED {
+                    let doc = postings.doc();
+                    postings.advance();
+                    if segment.is_deleted(doc) {
+                        continue;
+                    }
+                    let (stored, seen) = &mut docs[doc as usize];
+                    if field == key {
+                        if *seen {
+                            return Err(Error::Index("ambiguous source_key".into()));
+                        }
+                        *seen = true;
+                        let state = sources
+                            .entry(value.to_owned())
+                            .or_insert_with(|| (0, stored.clone()));
+                        state.0 += 1;
+                        if state.1 != *stored {
+                            state.1 = None;
+                        }
+                    } else if stored.is_some() {
+                        *stored = Some(Arc::from("")); // multiple hashes cannot match a digest
+                    } else {
+                        *stored = hash.clone();
+                    }
+                }
+            }
+        }
+        if docs.iter().filter(|(_, seen)| *seen).count() != segment.num_docs() as usize {
+            return Err(Error::Index(
+                "resource partition document is missing source_key".into(),
+            ));
+        }
+    }
+    Ok(sources)
 }
 
 pub(crate) fn open_index(data_dir: &Path) -> Result<(Index, Fields)> {

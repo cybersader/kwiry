@@ -19,12 +19,10 @@ use crate::api::SearchFilters;
 use crate::error::{Error, Result};
 use crate::generation::{DataRoot, DataRootLock};
 use crate::index::{
-    Fields, build_schema, chunk_document, open_index_dir, partition_source_counts,
-    register_lexical_analyzer,
+    Fields, build_schema, chunk_document, open_index_dir, partition_sources,
+    register_lexical_analyzer, source_matches,
 };
-use crate::manifest::{
-    EvictionReport, Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint,
-};
+use crate::manifest::{EvictionReport, Manifest, ManifestFile, registration_fingerprint};
 use crate::model::{
     Config, FileIngestOutcome, FileOutcomeKind, HostProfile, IndexFreshnessBasis, IngestWarning,
     LexicalSearchRequest, PreparedChunk, ResourceKey, RetrievalMetadata, SearchHit, SnapshotId,
@@ -769,7 +767,13 @@ fn search_opened_with_quality(
 
 impl PartitionedSearchIndex {
     fn open(active: &crate::generation::GenerationPaths) -> Result<Self> {
-        let layout = GenerationLayout::load_generation(active)?;
+        Self::from_layout(active, GenerationLayout::load_generation(active)?)
+    }
+
+    fn from_layout(
+        active: &crate::generation::GenerationPaths,
+        layout: GenerationLayout,
+    ) -> Result<Self> {
         let (manifest, _) = Manifest::load(&active.manifest_path)?.adopt();
         let mut partitions = BTreeMap::new();
         for partition in layout.partitions {
@@ -1072,7 +1076,6 @@ struct VaultObservationContext<'a> {
     registration_fingerprint: &'a str,
     scope: &'a PartitionScope,
     previous_resource: Option<&'a ResourceKey>,
-    physical: Option<&'a BTreeMap<String, usize>>,
     policy: ObservationPolicy,
     semantic: Option<&'a SemanticRuntime>,
     /// Watcher-evidence relative paths for this vault. Forces byte reads
@@ -1085,11 +1088,8 @@ impl VaultObservationContext<'_> {
     /// Manifest history can outlive a withheld partition. Only compare against
     /// history whose chunks actually exist in the partition carried forward.
     fn reusable<'a>(&self, previous: &'a Manifest, key: &str) -> Option<&'a ManifestFile> {
-        previous.files.get(key).filter(|f| {
-            self.physical.is_none_or(|counts| {
-                self.previous_resource.is_some()
-                    && counts.get(key).copied().unwrap_or(0) == f.chunk_count
-            })
+        previous.files.get(key).filter(|_| {
+            matches!(self.scope, PartitionScope::Whole) || self.previous_resource.is_some()
         })
     }
 }
@@ -1099,6 +1099,7 @@ fn observe_vault(
     previous: &Manifest,
     context: &VaultObservationContext<'_>,
     audit: &mut AuditBudget,
+    needs_full_read: impl FnOnce(usize, &[FileIngestOutcome]) -> bool,
 ) -> VaultObservations {
     let (mut enumeration, secure_read) = match context.room_roots {
         Some(roots) => roots.walk(vault),
@@ -1164,9 +1165,22 @@ fn observe_vault(
 
     let audited = audit.select(&audit_candidates);
     let mut outcomes = Vec::new();
-    let mut reused_keys = BTreeSet::new();
+    let mut deferred = Vec::new();
     let mut source_files_read = 0;
     let mut source_bytes_read = 0;
+    let nesting = || {
+        secure_read
+            .as_ref()
+            .is_some_and(crate::room_walk::RoomRead::nesting_detected)
+    };
+    let mut read = |file| {
+        let outcome = crate::chunk::ingest_file_with_room_handle(vault, file, secure_read.as_ref());
+        source_files_read += 1;
+        if outcome.content_hash.is_some() {
+            source_bytes_read += outcome.byte_length;
+        }
+        outcome
+    };
     for (file, key, decision) in decisions {
         let read_reason = match decision {
             ObservationDecision::ReadHash(reason) => Some(reason),
@@ -1174,27 +1188,29 @@ fn observe_vault(
             ObservationDecision::ReuseMetadata => None,
         };
         if read_reason.is_some() {
-            let outcome =
-                crate::chunk::ingest_file_with_room_handle(vault, file, secure_read.as_ref());
-            source_files_read += 1;
-            if outcome.content_hash.is_some() {
-                source_bytes_read += outcome.byte_length;
-            }
-            outcomes.push(outcome);
-            if secure_read
-                .as_ref()
-                .is_some_and(crate::room_walk::RoomRead::nesting_detected)
-            {
+            outcomes.push(read(file));
+            if nesting() {
                 break;
             }
+        } else {
+            deferred.push((file, key));
+        }
+    }
+    // Finish this same pinned walk if the normal observation found a row change.
+    // Already-read sources (including watcher hints and audits) are not read twice.
+    let full = needs_full_read(enumeration.files.len(), &outcomes);
+    let mut reused_keys = BTreeSet::new();
+    for (file, key) in deferred {
+        if full {
+            if nesting() {
+                break;
+            }
+            outcomes.push(read(file));
         } else {
             reused_keys.insert(key);
         }
     }
-
-    let nesting_detected = secure_read
-        .as_ref()
-        .is_some_and(crate::room_walk::RoomRead::nesting_detected);
+    let nesting_detected = nesting();
     if nesting_detected {
         enumeration = crate::room_walk::nesting_failure(vault);
         outcomes.clear();
@@ -1209,7 +1225,7 @@ fn observe_vault(
         source_files_read,
         source_bytes_read,
         audited_sources: audited.len(),
-        audit_pending: audit_candidates.len() > audited.len(),
+        audit_pending: !full && audit_candidates.len() > audited.len(),
     }
 }
 
@@ -1420,13 +1436,13 @@ impl DesktopIndexManager {
                     registration_fingerprint: &fingerprint,
                     scope: &PartitionScope::Whole,
                     previous_resource: None,
-                    physical: None,
                     policy: observation_policy,
                     semantic: semantic_runtime.as_deref(),
                     read_scope: vault_read_scope.as_ref(),
                     room_roots: None,
                 },
                 &mut audit,
+                |_, _| false,
             );
             let discovery_incomplete = !observed.enumeration.completeness.may_infer_deletions();
             warnings.extend(observed.enumeration.warnings);
@@ -1435,7 +1451,6 @@ impl DesktopIndexManager {
             audited_sources += observed.audited_sources;
             audit_pending |= observed.audit_pending;
             let mut seen_keys = observed.reused_keys;
-
             for outcome in observed.outcomes {
                 let key = crate::source::room_source_key(
                     &outcome.vault_id,
@@ -1614,7 +1629,6 @@ struct OpenClastIndexManager {
     _lock: DataRootLock,
     data_root: DataRoot,
     active: crate::generation::GenerationPaths,
-    layout: GenerationLayout,
     runtime: SearchRuntime,
     manifest: Manifest,
     config: Config,
@@ -1631,14 +1645,16 @@ impl OpenClastIndexManager {
         crate::room_boundary::validate_data_root(&config, data_dir)?;
         let data_root = DataRoot::new(data_dir);
         let lock = data_root.acquire_writer_lock()?;
-        let mut active = data_root.active()?.ok_or_else(|| {
+        let (mut active, layout) = data_root.active_with_layout()?.ok_or_else(|| {
             Error::State("IG-1 generation is missing; run `kwiry index` first".to_owned())
         })?;
         // Same mandatory open-time eviction as the desktop profile, addressed
         // per partition. `GenerationPaths::validate` has already refused any
         // OpenClast row without a resource, so every evicted key is addressable.
         let (mut manifest, evictions) = Manifest::load(&active.manifest_path)?.adopt();
-        let mut layout = GenerationLayout::load_generation(&active)?;
+        let mut layout = layout
+            .ok_or_else(|| Error::State("expected partitioned generation".into()))?
+            .with_generation_labels(&active);
         if !evictions.is_empty() {
             let mut evicted_by_resource = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
             for (key, evicted) in &evictions.evicted {
@@ -1684,6 +1700,7 @@ impl OpenClastIndexManager {
                 return Err(error);
             }
             active = data_root.publish(candidate)?;
+            layout = GenerationLayout::load_generation(&active)?;
         } else {
             // The same repair the desktop profile applies, per partition: this
             // profile addresses deletions per resource, so an inherited
@@ -1719,17 +1736,17 @@ impl OpenClastIndexManager {
                     return Err(error);
                 }
                 active = data_root.publish(candidate)?;
+                layout = GenerationLayout::load_generation(&active)?;
             }
         }
         let audit_cursor = manifest.state_revision as usize;
-        let search = Arc::new(PartitionedSearchIndex::open(&active)?);
+        let search = Arc::new(PartitionedSearchIndex::from_layout(&active, layout)?);
         runtime.set_freshness_basis(config.indexing.basis);
         runtime.install_reopened_openclast(search)?;
         Ok(Self {
             _lock: lock,
             data_root,
             active,
-            layout,
             runtime,
             manifest,
             config,
@@ -1771,12 +1788,20 @@ impl OpenClastIndexManager {
     ) -> Result<ReconcileReport> {
         let mut plan = ReconcilePlan::new(&self.manifest);
         let mut next_room_retries = BTreeSet::new();
-        let mut next_resources: BTreeMap<_, _> = self
-            .layout
+        let installed = self
+            .runtime
+            .active
+            .load_full()
+            .ok_or(Error::IndexBuilding)?;
+        let ActiveSearchIndex::OpenClast(reader) = installed.as_ref() else {
+            return Err(Error::IndexBuilding);
+        };
+        let serving: BTreeMap<_, _> = reader
             .partitions
             .iter()
-            .map(|p| (p.resource.clone(), p.snapshot_id.clone()))
+            .map(|(key, p)| (key.clone(), p.snapshot_id.clone()))
             .collect();
+        let mut next_resources = serving.clone();
         let mut warnings = Vec::new();
         let mut unavailable_vaults = Vec::new();
         let mut source_files_read = 0;
@@ -1832,8 +1857,7 @@ impl OpenClastIndexManager {
         }
         next_resources.retain(|resource, _| current_fingerprints.contains_key(resource));
 
-        let mut carried_counts = BTreeMap::new();
-        let mut clean_rooms = BTreeSet::new();
+        let mut fresh_indexes = BTreeSet::new();
         for vault in &config.vaults {
             let resource = config.resource_key(vault).ok_or_else(|| {
                 Error::State(format!(
@@ -1853,6 +1877,10 @@ impl OpenClastIndexManager {
                 .values()
                 .filter(|file| file.resource.as_ref() == Some(&resource))
                 .any(|file| file.registration_fingerprint != *fingerprint);
+            let vault_reclassified = vault_reclassified
+                || self.config.vaults.iter().any(|old| {
+                    old.id == vault.id && old.room == vault.room && old.path != vault.path
+                });
             if vault_reclassified {
                 next_resources.remove(&resource);
             }
@@ -1860,13 +1888,6 @@ impl OpenClastIndexManager {
                 crate::room_walk::RoomRoots::capture(&config, Some(self.data_root.path()));
             let index_dir = partition_index_dir(&self.active.partitions_dir, &resource);
             let has_partition = index_dir.join("meta.json").is_file();
-            let physical = carried_counts
-                .entry(resource.clone())
-                .or_insert(if has_partition {
-                    partition_source_counts(&index_dir)?
-                } else {
-                    BTreeMap::new()
-                });
             if !vault.path.is_dir() {
                 walks.insert(
                     resource.clone(),
@@ -1907,26 +1928,48 @@ impl OpenClastIndexManager {
                         .filter_map(|(key, path)| (key == &resource).then_some(path.clone())),
                 );
             }
+            // A layout may have survived without its manifest rows after a partial
+            // restore. Segment metadata suffices to detect an orphan-only index.
+            let fresh = !has_partition
+                || previous_resource.is_none()
+                || vault_reclassified
+                || (previous_keys.is_empty()
+                    && open_index_dir(&index_dir)?
+                        .0
+                        .searchable_segment_metas()
+                        .map_err(|e| Error::Index(e.to_string()))?
+                        .iter()
+                        .any(|m| m.num_docs() > 0));
             let scope = PartitionScope::Resource(resource.clone());
-            let context = VaultObservationContext {
+            let mut context = VaultObservationContext {
                 registration_fingerprint: fingerprint,
                 scope: &scope,
-                previous_resource: previous_resource.as_ref().filter(|_| has_partition),
-                physical: Some(physical),
-                // A label certifies bytes from this pass, never metadata reuse.
-                policy: if vault.snapshot_id.is_some() || label_changed {
-                    ObservationPolicy {
-                        basis: IndexFreshnessBasis::StrictHash,
-                        ..observation_policy
-                    }
-                } else {
-                    observation_policy
-                },
+                previous_resource: previous_resource.as_ref().filter(|_| !fresh),
+                policy: observation_policy,
                 semantic: None,
                 read_scope: vault_read_scope.as_ref(),
                 room_roots: Some(&room_roots),
             };
-            let observed = observe_vault(vault, &self.manifest, &context, &mut audit);
+            let mut certify = vault.snapshot_id.is_some() && (label_changed || fresh);
+            if certify {
+                context.policy.basis = IndexFreshnessBasis::StrictHash;
+            }
+            let observed = observe_vault(
+                vault,
+                &self.manifest,
+                &context,
+                &mut audit,
+                |files, outcomes| {
+                    if !certify && vault.snapshot_id.is_some() {
+                        certify = files != previous_keys.len()
+                            || outcomes.iter().any(|o| {
+                                ManifestFile::from_outcome(o, fingerprint, Some(&resource))
+                                    .is_none_or(|(k, f)| self.manifest.files.get(&k) != Some(&f))
+                            });
+                    }
+                    certify
+                },
+            );
             let opened_root = !observed.whole_walk_failed;
             let clean_inputs = observed.reused_keys.is_empty()
                 && observed
@@ -1949,6 +1992,27 @@ impl OpenClastIndexManager {
             audited_sources += observed.audited_sources;
             audit_pending |= observed.audit_pending;
             let mut seen_keys = observed.reused_keys;
+
+            let mut fresh = fresh;
+            let mut physical = None;
+            if certify && clean_inputs && !discovery_incomplete && opened_root && !fresh {
+                match partition_sources(&index_dir) {
+                    Ok(rows) => physical = Some(rows),
+                    Err(error) => {
+                        // An unaddressable chunk cannot be deleted by key. Replace only
+                        // this candidate partition from the complete walk; retry its proof.
+                        warnings.push(IngestWarning {
+                            path: index_dir.clone(),
+                            message: format!("incomplete partition: {error}"),
+                        });
+                        incomplete.insert(resource.clone());
+                        fresh = true;
+                    }
+                }
+            }
+            if fresh && opened_root {
+                fresh_indexes.insert(resource.clone());
+            }
 
             for outcome in observed.outcomes {
                 let key = crate::source::room_source_key(
@@ -1974,7 +2038,14 @@ impl OpenClastIndexManager {
                     continue;
                 };
                 seen_keys.insert(key.clone());
-                let previous_file = context.reusable(&self.manifest, &key);
+                // A successful delete-by-key plus insertion of these freshly prepared
+                // chunks establishes the post-commit state for every mismatching key.
+                let exact = physical
+                    .as_mut()
+                    .is_none_or(|rows| source_matches(rows.remove(&key), &next_file));
+                let previous_file = context
+                    .reusable(&self.manifest, &key)
+                    .filter(|_| exact && !fresh);
                 let previous_scope = previous_file.map(|file| {
                     PartitionScope::Resource(
                         file.resource
@@ -2026,6 +2097,11 @@ impl OpenClastIndexManager {
                     plan.remove_index_source(key, PartitionScope::Resource(resource.clone()));
                 }
             }
+            if let Some(extra) = physical {
+                for key in extra.into_keys() {
+                    plan.remove_index_source(key, scope.clone());
+                }
+            }
             let outcome = if incomplete.contains(&resource) {
                 RoomWalkOutcome::Incomplete {
                     retained_unverified,
@@ -2034,13 +2110,13 @@ impl OpenClastIndexManager {
                 RoomWalkOutcome::Complete
             };
             if opened_root {
-                let clean = clean_inputs && !incomplete.contains(&resource);
-                if clean {
-                    clean_rooms.insert(resource.clone());
-                }
-                let label = PartitionEvidence::Walk {
-                    configured: vault.snapshot_id.as_ref(),
-                    clean_and_exact: clean,
+                let label = if !certify && !label_changed && !incomplete.contains(&resource) {
+                    PartitionEvidence::UnchangedLiveRows(previous_label.as_ref())
+                } else {
+                    PartitionEvidence::Walk {
+                        configured: vault.snapshot_id.as_ref(),
+                        clean_and_exact: certify && clean_inputs && !incomplete.contains(&resource),
+                    }
                 }
                 .publication_label();
                 next_resources.insert(resource.clone(), label);
@@ -2048,34 +2124,8 @@ impl OpenClastIndexManager {
             walks.insert(resource, outcome);
         }
 
+        let layout_changed = next_resources != serving;
         let mut next_layout = GenerationLayout::with_snapshots(next_resources)?;
-        let layout_changed = next_layout != self.layout;
-        let mut expected_counts = BTreeMap::<ResourceKey, BTreeMap<String, usize>>::new();
-        for (key, file) in &plan.next_manifest.files {
-            let Some(resource) = file.resource.as_ref() else {
-                continue;
-            };
-            if file.outcome == ManifestFileOutcome::Indexed
-                && file.chunk_count > 0
-                && current_fingerprints.get(resource) == Some(&file.registration_fingerprint)
-            {
-                expected_counts
-                    .entry(resource.clone())
-                    .or_default()
-                    .insert(key.clone(), file.chunk_count);
-            }
-        }
-        for partition in &next_layout.partitions {
-            let expected = expected_counts.get(&partition.resource);
-            for key in carried_counts[&partition.resource].keys() {
-                if !expected.is_some_and(|expected| expected.contains_key(key)) {
-                    plan.remove_index_source(
-                        key.clone(),
-                        PartitionScope::Resource(partition.resource.clone()),
-                    );
-                }
-            }
-        }
         let added_chunks = plan.added_chunk_count();
         let mut resources_to_update: BTreeSet<_> = plan
             .update_scopes()
@@ -2085,17 +2135,15 @@ impl OpenClastIndexManager {
                 PartitionScope::Whole => None,
             })
             .collect();
-        for partition in &next_layout.partitions {
-            let index_dir = partition_index_dir(&self.active.partitions_dir, &partition.resource);
-            if !index_dir.join("meta.json").is_file() {
-                resources_to_update.insert(partition.resource.clone());
-            }
-        }
+        resources_to_update.extend(fresh_indexes.iter().cloned());
         plan.validate_retention()?;
         let manifest_changed = plan.next_manifest != self.manifest;
         let changed_sources = plan.changed_source_count();
-        let publish_generation =
-            manifest_changed || layout_changed || changed_sources > 0 || added_chunks > 0;
+        let publish_generation = manifest_changed
+            || layout_changed
+            || !resources_to_update.is_empty()
+            || changed_sources > 0
+            || added_chunks > 0;
         if publish_generation {
             crate::room_boundary::validate_data_root(&config, self.data_root.path())?;
             plan.next_manifest.mark_synced()?;
@@ -2139,6 +2187,10 @@ impl OpenClastIndexManager {
                         continue;
                     }
                     let index_dir = partition_index_dir(&candidate.partitions_dir, resource);
+                    if fresh_indexes.contains(resource) && index_dir.exists() {
+                        fs::remove_dir_all(&index_dir)
+                            .map_err(|e| crate::error::io_error(&index_dir, e))?;
+                    }
                     let (index, fields) = ensure_partition_index(&index_dir)?;
                     let scope = PartitionScope::Resource(resource.clone());
                     apply_index_updates(
@@ -2150,40 +2202,33 @@ impl OpenClastIndexManager {
                     )?;
                 }
 
+                // New/reclassified rooms did not scan the partition being discarded.
+                // Check the replacement once, after its writer has committed.
                 for p in &mut next_layout.partitions {
-                    // Untouched indexes are exact copies of the counts observed before
-                    // planning; changed ones must be verified AFTER the writer commits.
-                    let updated;
-                    let actual = if resources_to_update.contains(&p.resource) {
-                        updated = partition_source_counts(&partition_index_dir(
-                            &candidate.partitions_dir,
+                    if p.snapshot_id.is_some() && fresh_indexes.contains(&p.resource) {
+                        let dir = partition_index_dir(&candidate.partitions_dir, &p.resource);
+                        let exact = crate::index::fresh_partition_matches(
+                            &dir,
+                            &plan.next_manifest,
                             &p.resource,
-                        ))?;
-                        &updated
-                    } else {
-                        &carried_counts[&p.resource]
-                    };
-                    let exact = expected_counts
-                        .get(&p.resource)
-                        .map_or_else(|| actual.is_empty(), |expected| actual == expected);
-                    if !exact {
-                        warnings.push(IngestWarning {
-                            path: partition_index_dir(&self.active.partitions_dir, &p.resource),
-                            message: "incomplete partition: live source chunk counts differ from the pass; retry reconciliation".to_owned(),
-                        });
-                        incomplete.insert(p.resource.clone());
-                        walks.insert(
-                            p.resource.clone(),
-                            RoomWalkOutcome::Incomplete {
-                                retained_unverified: true,
-                            },
                         );
+                        if !matches!(exact, Ok(true)) {
+                            warnings.push(IngestWarning {
+                                path: dir,
+                                message: format!(
+                                    "incomplete partition: replacement verification: {exact:?}"
+                                ),
+                            });
+                            incomplete.insert(p.resource.clone());
+                            walks.insert(
+                                p.resource.clone(),
+                                RoomWalkOutcome::Incomplete {
+                                    retained_unverified: true,
+                                },
+                            );
+                            p.snapshot_id = PartitionEvidence::NoWalk.publication_label();
+                        }
                     }
-                    p.snapshot_id = PartitionEvidence::Walk {
-                        configured: p.snapshot_id.as_ref(),
-                        clean_and_exact: exact && clean_rooms.contains(&p.resource),
-                    }
-                    .publication_label();
                 }
                 next_layout.save_candidate(&candidate)?;
                 plan.next_manifest.save(&candidate.manifest_path())?;
@@ -2197,7 +2242,6 @@ impl OpenClastIndexManager {
             let search = Arc::new(PartitionedSearchIndex::open(&active)?);
             self.runtime.install_openclast(search);
             self.active = active;
-            self.layout = next_layout;
             self.manifest = plan.next_manifest;
         }
         if matches!(scope, ReconcileScope::Full) {
