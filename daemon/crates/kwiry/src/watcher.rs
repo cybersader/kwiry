@@ -34,6 +34,7 @@ impl WatcherHandle {
 }
 
 struct WatcherContext {
+    live_gate: Option<Arc<AtomicBool>>,
     paths: Paths,
     config: Config,
     manager: ManagerHandle,
@@ -240,6 +241,7 @@ pub(crate) fn spawn_watcher(
     initial_config: Config,
     manager: ManagerHandle,
     status: Arc<RwLock<DaemonStatus>>,
+    live_gate: Option<Arc<AtomicBool>>,
 ) -> Result<WatcherHandle> {
     let (events, receiver) = mpsc::channel(1_024);
     let overflow = Arc::new(AtomicBool::new(false));
@@ -257,6 +259,7 @@ pub(crate) fn spawn_watcher(
         overflow,
         shutdown_receiver,
         WatcherContext {
+            live_gate,
             paths,
             config: initial_config,
             manager,
@@ -274,6 +277,7 @@ async fn run_watcher(
     context: WatcherContext,
 ) {
     let WatcherContext {
+        live_gate,
         paths,
         mut config,
         manager,
@@ -285,10 +289,13 @@ async fn run_watcher(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    if watcher
+    let config_watch_ok = watcher
         .watch(&config_parent, RecursiveMode::NonRecursive)
-        .is_err()
-    {
+        .is_ok();
+    if !config_watch_ok {
+        if let Some(gate) = &live_gate {
+            gate.store(false, Ordering::Release);
+        }
         mark_degraded(&status).await;
     }
     let mut pending = PendingPaths::default();
@@ -374,6 +381,7 @@ async fn run_watcher(
                             Ok(next) => {
                                 config_invalid = false;
                                 if startup_config.requires_restart_for(&next) {
+                                    if let Some(gate) = &live_gate { gate.store(false, Ordering::Release); }
                                     restart_required = true;
                                     mark_degraded(&status).await;
                                 } else {
@@ -384,9 +392,11 @@ async fn run_watcher(
                                         config = next;
                                         roots = watch_roots(&config);
                                     }
+                                    if let Some(gate) = &live_gate { gate.store(config_watch_ok, Ordering::Release); }
                                 }
                             }
                             Err(_) => {
+                                if let Some(gate) = &live_gate { gate.store(false, Ordering::Release); }
                                 config_invalid = true;
                                 mark_degraded(&status).await;
                                 pending = PendingPaths::default();

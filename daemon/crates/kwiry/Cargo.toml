@@ -19,6 +19,7 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 kwiry-core = { path = "../kwiry-core" }
 kwiry-holdings = { path = "../kwiry-holdings" }
 notify.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 tempfile.workspace = true
@@ -38,6 +39,8 @@ libc.workspace = true
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
+# Synthetic physical-row corruption fixture; never part of the daemon adapter.
+tantivy.workspace = true
 assert_cmd.workspace = true
 http-body-util.workspace = true
 jsonschema = { version = "0.33", default-features = false }

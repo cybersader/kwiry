@@ -335,11 +335,13 @@ fn validate_room_registrations(path: &Path, config: &Config) -> Result<()> {
 fn validate_config(path: &Path, config: &Config) -> Result<()> {
     if config.vaults.iter().any(|v| {
         v.snapshot_id.is_some()
-            && (config.server.profile != HostProfile::OpenClast || v.room.is_none())
+            && (config.server.profile != HostProfile::OpenClast
+                || v.room.is_none()
+                || !config.server.profile_required)
     }) {
         return Err(Error::InvalidConfig {
             path: path.to_path_buf(),
-            message: "snapshot_id requires an OpenClast room registration".into(),
+            message: "snapshot_id requires a profile-required governed room registration".into(),
         });
     }
     if config
@@ -353,6 +355,22 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
             path: path.to_path_buf(),
             message: format!("at most {MAX_LABELED_ROOMS} OpenClast rooms may have a snapshot_id"),
         });
+    }
+    if config.server.profile_required
+        && !(config.server.profile == HostProfile::OpenClast
+            && crate::ROOM_INCLUSIVE_IDS
+            && config.indexing.basis == IndexFreshnessBasis::StrictHash
+            && config
+                .server
+                .bind
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|addr| addr.ip().is_loopback())
+            && config.auth.openclast.as_ref().is_some_and(|auth| {
+                auth.legacy_identity_accept_until == Some(0)
+                    && !auth.workload_subject_allowlist.is_empty()
+            }))
+    {
+        return Err(Error::InvalidConfig { path: path.to_path_buf(), message: "profile_required requires governed room identity, loopback, strict_hash and workload-only authentication".into() });
     }
     if config.server.bind.trim().is_empty() {
         return Err(Error::InvalidConfig {
@@ -784,11 +802,69 @@ mod tests {
     fn snapshot_id_rejected_in_desktop_profile_or_without_room() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        for (profile, room) in [("desktop", "room = 'room'"), ("openclast", "")] {
+        for (profile, room) in [
+            ("desktop", "room = 'room'"),
+            ("openclast", ""),
+            ("openclast", "room = 'room'"),
+        ] {
             fs::write(&path,format!("[server]\nprofile = '{profile}'\n[[vaults]]\nvault_id = 'garden'\npath = '/synthetic'\nsnapshot_id = 'sample.label'\n{room}")).unwrap();
             let error = load_config(&path).unwrap_err().to_string();
             assert!(error.contains("snapshot_id requires"));
             assert!(!error.contains("sample.label"));
+        }
+    }
+
+    #[test]
+    fn config_profile_required_precludes_unsafe_serving_settings() {
+        let path = Path::new("config.toml");
+        let mut base = Config::default();
+        base.server.profile = HostProfile::OpenClast;
+        base.server.profile_required = true;
+        base.auth.openclast = Some(crate::OpenClastAuthConfig {
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
+            issuer: "issuer".into(),
+            audience: "search".into(),
+            jwks_file: std::env::temp_dir().join("synthetic-public-jwks"),
+            workload_subject_allowlist: vec!["synthetic-workload".into()],
+            max_token_ttl_seconds: 60,
+            legacy_identity_accept_until: Some(0),
+        });
+        assert_eq!(
+            validate_config(path, &base).is_ok(),
+            crate::ROOM_INCLUSIVE_IDS
+        );
+        for kind in ["profile", "external", "basis", "legacy", "subject", "ttl"] {
+            let mut candidate = base.clone();
+            match kind {
+                "profile" => candidate.server.profile = HostProfile::Desktop,
+                "external" => candidate.server.bind = "0.0.0.0:0".into(),
+                "basis" => candidate.indexing.basis = IndexFreshnessBasis::MetadataAudit,
+                "legacy" => {
+                    candidate
+                        .auth
+                        .openclast
+                        .as_mut()
+                        .unwrap()
+                        .legacy_identity_accept_until = None
+                }
+                "subject" => candidate
+                    .auth
+                    .openclast
+                    .as_mut()
+                    .unwrap()
+                    .workload_subject_allowlist
+                    .clear(),
+                "ttl" => {
+                    candidate
+                        .auth
+                        .openclast
+                        .as_mut()
+                        .unwrap()
+                        .max_token_ttl_seconds = 61
+                }
+                _ => unreachable!(),
+            }
+            assert!(validate_config(path, &candidate).is_err(), "{kind}");
         }
     }
 
@@ -798,7 +874,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let mut config = String::from("[server]\nprofile = 'openclast'\n");
+        let mut config = String::from("[server]\nprofile = 'openclast'\nprofile_required = true\n");
         for i in 0..=MAX_LABELED_ROOMS {
             writeln!(
                 config,

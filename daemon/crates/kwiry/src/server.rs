@@ -1,3 +1,5 @@
+mod live_check;
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,6 +39,8 @@ const FIELD_EMPHASIS_HEADER: &str = "x-kwiry-field-emphasis";
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    /// Present only on the dedicated listener. Reload failures close the gate.
+    live_gate: Option<Arc<std::sync::atomic::AtomicBool>>,
     profile: HostProfile,
     runtime: SearchRuntime,
     status: Arc<RwLock<DaemonStatus>>,
@@ -57,11 +61,29 @@ pub(crate) async fn serve(
     semantic: bool,
 ) -> Result<()> {
     let initial_config = load_config_for_paths(&paths)?;
+    if initial_config.server.profile_required {
+        // Even an unexpected dependency panic must not print private diagnostics.
+        std::panic::set_hook(Box::new(|_| {
+            eprintln!("kwiry: private service task failed")
+        }));
+        return serve_configured(paths, bind_override, semantic, initial_config)
+            .await
+            .map_err(|_| anyhow!("the private search service could not start or continue"));
+    }
+    serve_configured(paths, bind_override, semantic, initial_config).await
+}
+
+async fn serve_configured(
+    paths: Paths,
+    bind_override: Option<String>,
+    semantic: bool,
+    initial_config: Config,
+) -> Result<()> {
     let profile = initial_config.server.profile;
     if profile == HostProfile::OpenClast {
         probe_openclast_ingestion(&paths.data_dir, &initial_config.vaults)?;
     }
-    let _logging = crate::logging::init(&paths.logs_dir())?;
+    let _logging = crate::logging::init(&paths.logs_dir(), initial_config.server.profile_required)?;
     tracing::info!(
         config = %paths.config.display(),
         data_dir = %paths.data_dir.display(),
@@ -110,6 +132,14 @@ pub(crate) async fn serve(
             "kwiry desktop profile accepts loopback bind addresses only: {address}"
         ));
     }
+    if config.server.profile_required
+        && (!address.ip().is_loopback()
+            || !matches!(ROOM_FORMAT, kwiry_core::OpenClastRoomFormat::Closed))
+    {
+        return Err(anyhow!(
+            "profile-required service needs a closed room-v1 build and isolated loopback"
+        ));
+    }
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind {address}"))?;
@@ -133,7 +163,7 @@ pub(crate) async fn serve(
     // below — so it must not be the quieter of the two. The gate's message is
     // produced and then classified away inside `prepare`; this is where it is
     // handed back to the operator.
-    if let Some(discarded) = discarded {
+    if let Some(discarded) = discarded.filter(|_| !config.server.profile_required) {
         let generation = discarded.generation.as_deref().unwrap_or("<unreadable>");
         tracing::warn!(
             generation,
@@ -162,7 +192,12 @@ pub(crate) async fn serve(
     let status = Arc::new(RwLock::new(DaemonStatus::starting(env!(
         "CARGO_PKG_VERSION"
     ))));
+    let live_gate = config
+        .server
+        .profile_required
+        .then(|| Arc::new(std::sync::atomic::AtomicBool::new(true)));
     let state = AppState {
+        live_gate: live_gate.clone(),
         profile,
         runtime: runtime.clone(),
         status: status.clone(),
@@ -223,7 +258,7 @@ pub(crate) async fn serve(
     // reindex that follows is explicable rather than mysterious.
     {
         let evictions = manager.open_evictions();
-        if !evictions.is_empty() {
+        if !evictions.is_empty() && !config.server.profile_required {
             let formats = evictions
                 .by_format
                 .iter()
@@ -263,6 +298,7 @@ pub(crate) async fn serve(
         config.clone(),
         manager_handle.clone(),
         status.clone(),
+        live_gate,
     )?;
     if semantic_enabled {
         // Owner ruling (KWIRY-Q-0022): the embedding model loads in the
@@ -516,25 +552,37 @@ fn install_semantic(_paths: &Paths, _runtime: &SearchRuntime) -> Result<()> {
 }
 
 pub(crate) fn build_router(state: AppState, auth: AuthState, profile: HostProfile) -> Router {
-    let mut protected = Router::new().route("/v0/search", post(search));
+    let required = state.live_gate.is_some();
+    let handler = if required {
+        post(live_check::search)
+    } else {
+        post(search)
+    };
+    let mut protected = Router::new().route("/v0/search", handler);
     if profile == HostProfile::Desktop {
         protected = protected.route("/v0/status", get(status));
     }
     protected = protected
         .method_not_allowed_fallback(method_not_allowed)
         .route_layer(middleware::from_fn_with_state(
-            auth.with_runtime(state.runtime.clone()),
+            auth.with_runtime(state.runtime.clone())
+                .with_required_profile(required),
             require_auth,
         ));
     if profile == HostProfile::OpenClast {
         protected = protected.route_layer(middleware::from_fn(room_format_headers));
     }
-    Router::new()
+    let router = Router::new()
         .route("/v0/health", get(health))
         .merge(protected)
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
-        .with_state(state)
+        .with_state(state);
+    if required {
+        router.layer(middleware::from_fn(live_check::no_store))
+    } else {
+        router
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Response {
@@ -1051,11 +1099,60 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState {
+            live_gate: None,
             profile: HostProfile::Desktop,
             runtime: SearchRuntime::new(),
             status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
             holder_gate: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn governed_search_live_check_holder_revocation_discards_staged_success() {
+        use kwiry_holdings::testkit::Rig;
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("room");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("note.md"), "marigold").unwrap();
+        let data = directory.path().join("data");
+        let mut config = Config::default();
+        config.server.profile = HostProfile::OpenClast;
+        config.auth.openclast = Some(openclast_auth_config(directory.path()));
+        config.vaults.push(VaultRegistration {
+            id: "garden".into(),
+            room: Some("orchard".into()),
+            snapshot_id: Some("a".repeat(64).parse().unwrap()),
+            path: root,
+        });
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        build_index(&config, &data).unwrap();
+        let mut state = test_state();
+        state.profile = HostProfile::OpenClast;
+        state.live_gate = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        let mut manager = IndexManager::open(config.clone(), &data, state.runtime.clone()).unwrap();
+        manager.reconcile(config).unwrap();
+        let mut rig = Rig::new(&directory.path().join("holder"));
+        state.holder_gate = Some(rig.gate());
+        let result = state
+            .runtime
+            .search_labeled_resource("marigold", 10, &resource)
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        let emit = || {
+            live_check::finish(
+                &state,
+                &resource,
+                &result.generation,
+                Json(&result.hits).into_response(),
+            )
+        };
+        assert!(emit().is_ok());
+        drop(rig.take_holder());
+        let refusal = emit().unwrap_err();
+        assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refusal.body.error.resource_indexes, None);
+        manager.shutdown().unwrap();
     }
 
     #[tokio::test]
@@ -1377,6 +1474,7 @@ mod tests {
         status.dirty = false;
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::Desktop,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
@@ -1495,6 +1593,7 @@ mod tests {
         status.dirty = false;
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::Desktop,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
@@ -1638,6 +1737,7 @@ mod tests {
         let token = search_capability(&resource, 20);
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::OpenClast,
                 runtime: SearchRuntime::new(),
                 status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
@@ -1755,6 +1855,7 @@ mod tests {
         status.dirty = false;
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::OpenClast,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
@@ -1913,6 +2014,7 @@ mod tests {
             .unwrap();
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::OpenClast,
                 runtime: runtime.clone(),
                 status: status.clone(),

@@ -15,7 +15,7 @@ pub(crate) struct LoggingGuard {
     _file_guard: WorkerGuard,
 }
 
-pub(crate) fn init(logs_dir: &Path) -> Result<LoggingGuard> {
+pub(crate) fn init(logs_dir: &Path, private_search: bool) -> Result<LoggingGuard> {
     create_private_logs_dir(logs_dir)?;
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::HOURLY)
@@ -25,7 +25,13 @@ pub(crate) fn init(logs_dir: &Path) -> Result<LoggingGuard> {
         .build(logs_dir)
         .with_context(|| format!("failed to initialize logs in {}", logs_dir.display()))?;
     let (file_writer, file_guard) = tracing_appender::non_blocking(appender);
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Dependency log records (including debug HTTP diagnostics) are not a trusted
+    // output surface. Never attach a content-bearing subscriber in the pilot.
+    let filter = if private_search {
+        EnvFilter::new("off")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
     let console = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_writer(std::io::stderr);
