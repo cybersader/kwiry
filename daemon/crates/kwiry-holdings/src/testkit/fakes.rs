@@ -304,6 +304,7 @@ pub struct PurgerView {
     pub fail_detach: bool,
     pub fail_barrier: bool,
     pub fail_census: bool,
+    pub on_census: Option<Box<dyn FnOnce() + Send>>,
     /// Builder outputs published once the census has run this many times:
     /// `(after_census_calls, unit_id, unit)`.
     pub late: Vec<(usize, String, PurgerUnit)>,
@@ -590,7 +591,13 @@ impl ArtifactPurger for MemoryPurger {
         for (_, unit_id, unit) in due {
             view.publish_unreserved(unit_id, unit);
         }
-        Ok(view.snapshot())
+        let snapshot = view.snapshot();
+        let hook = view.on_census.take();
+        drop(view);
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(snapshot)
     }
 }
 

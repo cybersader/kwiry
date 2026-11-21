@@ -284,7 +284,7 @@ fn keyset_proof_expiry_shares_the_list_retry_budget() {
     {
         let mut authority = rig.authority.state();
         authority.rotate_key([37; 32], false, true);
-        authority.keyset_response = Some(authority.problem_answer(401, "proof_expired", None));
+        authority.keyset_response = Some(Ok(authority.problem_answer(401, "proof_expired", None)));
         authority.before_post(2, |a| a.forced.push_back(problem(401, "proof_expired")));
     }
     assert_eq!(

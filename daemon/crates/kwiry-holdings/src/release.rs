@@ -170,6 +170,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .unwrap_or_default();
         for instruction in listed {
             self.deletion_permitted()?;
+            if self.release_list_rejected {
+                break;
+            }
             if self
                 .writer
                 .state()
@@ -185,24 +188,38 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     .emit(HolderEvent::ReleaseStepFailed { step: "census" });
                 return Ok(summary);
             };
-            match self.evaluate(&instruction, &census) {
-                Ok(Some(ReleaseStep::Reserving)) => {
-                    summary.evaluated += 1;
-                    self.honor_reservations(purger)?;
-                    match self.writer.state().status.instructions[&instruction.instruction_id].step
-                    {
-                        ReleaseStep::Draining => summary.reserved += 1,
-                        ReleaseStep::Mismatch => summary.mismatched += 1,
-                        _ => {}
-                    }
+            let Some(record) = self.evaluate(&instruction, &census) else {
+                continue;
+            };
+            let step = record.step;
+            // A response delivered during census/manifest reads must win over
+            // the first durable reservation. A later refusal may stop new
+            // evaluations but cannot undo a reservation already committed.
+            let write = self.with_deletion_permission(|holder| {
+                if holder.release_list_rejected {
+                    return None;
                 }
-                Ok(Some(_)) => {
-                    summary.evaluated += 1;
-                    summary.mismatched += 1;
+                let mut next = holder.writer.state().status.clone();
+                next.instructions
+                    .insert(instruction.instruction_id.clone(), record);
+                Some(holder.writer.update_lifecycle(None, Some(next), false))
+            })?;
+            let Some(write) = write else { break };
+            if let Err(error) = write {
+                crate::holder::report_write_failure(self.events.as_ref(), &error);
+                return Ok(summary);
+            }
+            summary.evaluated += 1;
+            if step == ReleaseStep::Reserving {
+                self.honor_reservations(purger)?;
+                match self.writer.state().status.instructions[&instruction.instruction_id].step {
+                    ReleaseStep::Draining => summary.reserved += 1,
+                    ReleaseStep::Mismatch => summary.mismatched += 1,
+                    _ => {}
                 }
-                // Not recorded: evaluated again on the next pass.
-                Ok(None) => continue,
-                Err(()) => return Ok(summary),
+            } else {
+                self.events.emit(HolderEvent::ReleaseMismatch);
+                summary.mismatched += 1;
             }
         }
         let draining: Vec<String> = self
@@ -247,14 +264,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }))
     }
 
-    /// L1 or L2 for one unseen instruction. Returns the step recorded, or
-    /// `Ok(None)` for a temporarily unreadable manifest; a write failure stops this pass.
-    fn evaluate(
-        &mut self,
-        instruction: &Instruction,
-        census: &Census,
-    ) -> Result<Option<ReleaseStep>, ()> {
-        let status = self.writer.state().status.clone();
+    /// Prepare L1 or L2 for one unseen instruction without authorizing it.
+    /// A temporarily unreadable manifest is retried on the next pass.
+    fn evaluate(&self, instruction: &Instruction, census: &Census) -> Option<InstructionRecord> {
+        let status = &self.writer.state().status;
         let held = status.release_held_units();
         let inventory = Inventory::with_held(census, &self.plan(), &held);
         let observed: BTreeMap<&str, bool> = census
@@ -268,7 +281,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 self.events.emit(HolderEvent::ReleaseStepFailed {
                     step: "manifest_read",
                 });
-                return Ok(None);
+                return None;
             }
         };
         let exact = manifest.as_ref().filter(|units| {
@@ -294,28 +307,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Some(manifest_digest(&holder_id, &inventory.unattributed)),
             ),
         };
-        let mut next = status;
-        next.instructions.insert(
-            instruction.instruction_id.clone(),
-            InstructionRecord {
-                bound_report_digest: instruction.bound_report_digest.clone(),
-                approved_count: instruction.approved_count,
-                step,
-                units,
-                claimed: BTreeSet::new(),
-                deleted: BTreeSet::new(),
-                observed_manifest_digest: observed_digest,
-                carried_epoch: None,
-                order,
-            },
-        );
-        if !self.commit_status(next) {
-            return Err(());
-        }
-        if step == ReleaseStep::Mismatch {
-            self.events.emit(HolderEvent::ReleaseMismatch);
-        }
-        Ok(Some(step))
+        Some(InstructionRecord {
+            bound_report_digest: instruction.bound_report_digest.clone(),
+            approved_count: instruction.approved_count,
+            step,
+            units,
+            claimed: BTreeSet::new(),
+            deleted: BTreeSet::new(),
+            observed_manifest_digest: observed_digest,
+            carried_epoch: None,
+            order,
+        })
     }
 
     fn record(&self, id: &str) -> Option<InstructionRecord> {
@@ -387,7 +389,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let mut failed = 0;
             for unit in &claims {
                 // H.45: nothing runs after a fail-stop, deletions included.
-                match self.with_deletion_permission(|| purger.delete(unit, &claimant))? {
+                match self.with_deletion_permission(|_| purger.delete(unit, &claimant))? {
                     Ok(DeleteOutcome::Deleted | DeleteOutcome::Absent) => {
                         deleted.insert(unit.clone());
                     }

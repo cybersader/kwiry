@@ -1,5 +1,5 @@
 //! The durable intake boundary shared by the two outbound channels.
-use crate::client::Transport;
+use crate::client::{FetchFailure, HttpResponse, Transport, TransportError, problem_code};
 use crate::events::HolderEvent;
 use crate::holder::Holder;
 use crate::obligations::{ObligationBook, PendingStatus};
@@ -89,6 +89,22 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         }
     }
 
+    /// Narrow new release authority before any refusal write. The request's
+    /// own list reference (also retained by its delivery handle) still binds
+    /// the refusal even if the business key has already left durable state.
+    pub(crate) fn observe_list_refusal(
+        &mut self,
+        cited: &crate::wire::ListRef,
+        response: &HttpResponse,
+    ) {
+        if response.status == 409
+            && self.applied.as_ref().is_some_and(|a| &a.list_ref == cited)
+            && problem_code(response).as_deref() == Some("stale_list_ref")
+        {
+            self.release_list_rejected = true;
+        }
+    }
+
     /// Same intake for a synchronous POST and a delivery on either channel.
     /// A timeout does not end a run of proof refusals: the next HTTP answer
     /// may still arrive through the dispatch's retained delivery handle.
@@ -96,11 +112,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         origin: crate::client::Origin,
         key: &str,
-        response: Result<crate::client::HttpResponse, crate::client::TransportError>,
-        route_answer: impl FnOnce(&mut Self, crate::client::HttpResponse) -> Answer,
+        response: Result<HttpResponse, TransportError>,
+        route_answer: impl FnOnce(&mut Self, HttpResponse) -> Answer,
     ) -> Answer {
-        let Ok(response) = response else {
-            return Answer::BackOff;
+        let response = match response {
+            Ok(response) => response,
+            Err(TransportError::Unreachable) => {
+                self.apply_failure(&FetchFailure::Unreachable {
+                    retry_after_s: None,
+                });
+                return Answer::BackOff;
+            }
+            Err(TransportError::Timeout) => return Answer::BackOff,
         };
         let answer = match crate::client::authority_refusal(&response) {
             Some(refusal) => self.apply_authority_refusal(refusal),
@@ -214,13 +237,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         crate::status::StatusSummary,
         crate::report::ReportSummary,
     ) {
-        use crate::client::{AuthorityRefusal, FetchFailure, authority_refusal};
-        use crate::client::{Origin, problem_code};
+        use crate::client::{AuthorityRefusal, Origin, authority_refusal};
         use crate::holder::{AuthHalt, RouteHealth};
-        batch.sort_by_cached_key(|(_, _, r)| match authority_refusal(r) {
+        batch.sort_by_cached_key(|(_, _, _, r)| match authority_refusal(r) {
             Some(AuthorityRefusal::Stop(FetchFailure::NotAuthorized)) => 0,
             Some(AuthorityRefusal::Stop(
-                FetchFailure::LifecycleUnavailable { .. } | FetchFailure::RollbackSuspected,
+                FetchFailure::LifecycleUnavailable { .. }
+                | FetchFailure::RollbackSuspected
+                | FetchFailure::Unreachable { .. },
             )) => 1,
             Some(_) => 2,
             None => 3,
@@ -228,8 +252,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut refusal = false;
         let mut status = crate::status::StatusSummary::default();
         let mut report = crate::report::ReportSummary::default();
-        for (origin, key, response) in batch {
+        for (origin, key, cited, response) in batch {
             refusal |= response.status != 200;
+            self.observe_list_refusal(&cited, &response);
             if response.status == 401
                 && self.route == RouteHealth::AuthHalt(AuthHalt::NotAuthorized)
             {

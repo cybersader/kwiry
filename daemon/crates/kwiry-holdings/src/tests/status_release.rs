@@ -1916,6 +1916,241 @@ fn delete_counts_wait_for_the_post_delete_write_on_both_paths() {
     }
 }
 
+/// An exact, unevaluated release alongside an independently purgeable obligation.
+fn with_fresh_release() -> (World, String, String) {
+    let mut w = world();
+    assert_eq!(w.rig.status().unwrap().receipts, 1);
+    let digest = w
+        .rig
+        .authority
+        .state()
+        .accepted_digests
+        .last()
+        .unwrap()
+        .clone();
+    let ins = w.rig.authority.state().issue_release(&digest, 2);
+    applied(w.rig.relist());
+    // Change the status business claim without invalidating the approved set.
+    w.rig.purger.add(PLAIN, "resYYYYYYYYYYYYYYYYYYYYY", 1);
+    later(&w.rig);
+    (w, digest, ins)
+}
+
+fn assert_no_delete_or_reserve(rig: &Rig) {
+    let purger = rig.purger.view();
+    assert!(purger.deletions.is_empty());
+    assert!(
+        !purger
+            .calls
+            .iter()
+            .any(|call| matches!(*call, "delete" | "reserve"))
+    );
+}
+
+fn send_on(rig: &mut Rig, status: bool) -> (usize, usize) {
+    if status {
+        let s = rig.status().unwrap();
+        (s.sent, s.receipts)
+    } else {
+        let r = rig.report().unwrap();
+        (r.sent, r.receipts)
+    }
+}
+
+#[test]
+fn unreachable_post_or_plain_503_holds_both_delete_paths_until_apply() {
+    for status in [true, false] {
+        for unreachable in [true, false] {
+            let (mut w, _, ins) = with_fresh_release();
+            let rig = &mut w.rig;
+            if unreachable {
+                rig.authority.state().forced.push_back(Forced::Unreachable);
+            } else {
+                forced(
+                    rig,
+                    HttpResponse {
+                        status: 503,
+                        ..HttpResponse::default()
+                    },
+                );
+            }
+            assert_eq!(send_on(rig, status), (1, 0));
+            assert_eq!(rig.purge(), Err(ObligationsRefused::NoCurrentAuthority));
+            assert_eq!(rig.release(), Err(ObligationsRefused::NoCurrentAuthority));
+            assert_no_delete_or_reserve(rig);
+            assert_eq!(step(rig, &ins), None);
+
+            later(rig);
+            assert_eq!(send_on(rig, status), (1, 1));
+            // The probe verifies a page but does not apply or renew a list.
+            assert!(matches!(rig.holder().fetch(true), Ok(None)));
+            assert_eq!(rig.purge(), Err(ObligationsRefused::NoCurrentAuthority));
+            assert_eq!(rig.release(), Err(ObligationsRefused::NoCurrentAuthority));
+            assert_no_delete_or_reserve(rig);
+
+            rig.advance(5_000);
+            rig.store.view().fail_held = true;
+            assert!(matches!(rig.relist(), ListOutcome::ApplyFailed { .. }));
+            assert!(rig.purge().is_err());
+            assert!(rig.release().is_err());
+            assert_no_delete_or_reserve(rig);
+            rig.store.view().fail_held = false;
+            applied(rig.relist());
+            assert_eq!(rig.purge().unwrap().deleted, 3);
+            assert_eq!(rig.release().unwrap().deleted, 2);
+        }
+    }
+}
+
+#[test]
+fn unreachable_ack_keyset_holds_both_delete_paths_until_apply() {
+    for status in [true, false] {
+        for unreachable in [true, false] {
+            let (mut w, _, ins) = with_fresh_release();
+            let rig = &mut w.rig;
+            let gets = {
+                let mut authority = rig.authority.state();
+                authority.rotate_key([37; 32], false, true);
+                authority.keyset_response = Some(if unreachable {
+                    Err(crate::client::TransportError::Unreachable)
+                } else {
+                    Ok(authority.problem_answer(503, "unknown_problem", None))
+                });
+                authority.keyset_gets
+            };
+            assert_eq!(send_on(rig, status), (1, 0));
+            assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+            assert!(!codes(rig).contains(&"ack_unverifiable"));
+            assert_eq!(rig.release(), Err(ObligationsRefused::NoCurrentAuthority));
+            assert_eq!(rig.purge(), Err(ObligationsRefused::NoCurrentAuthority));
+            assert_eq!(step(rig, &ins), None);
+            assert_no_delete_or_reserve(rig);
+
+            // Both the key refresh and receipt now succeed. Neither applies a list.
+            later(rig);
+            assert_eq!(send_on(rig, status), (1, 1));
+            assert_eq!(rig.authority.state().keyset_gets, gets + 2);
+            assert_eq!(rig.release(), Err(ObligationsRefused::NoCurrentAuthority));
+            assert_eq!(rig.purge(), Err(ObligationsRefused::NoCurrentAuthority));
+            assert_no_delete_or_reserve(rig);
+
+            applied(rig.relist());
+            assert_eq!(rig.release().unwrap().deleted, 2);
+            assert_eq!(rig.purge().unwrap().deleted, 3);
+        }
+    }
+}
+
+#[test]
+fn stale_current_post_blocks_new_release_even_if_refusal_write_fails() {
+    for status in [true, false] {
+        for fail_write in [false, true] {
+            let (mut w, _, ins) = with_fresh_release();
+            let rig = &mut w.rig;
+            if fail_write {
+                let faults = rig.io_faults.clone();
+                let mut authority = rig.authority.state();
+                let post = authority.posts() + 1;
+                authority.before_post(post, move |_| faults.fail_writes(1));
+            }
+            problem(rig, 409, "stale_list_ref");
+            assert_eq!(send_on(rig, status), (1, 0));
+            if fail_write {
+                assert_eq!(
+                    rig.release(),
+                    Err(ObligationsRefused::HolderStateUnwritable)
+                );
+            } else {
+                assert_eq!(rig.release().unwrap().evaluated, 0);
+            }
+            assert_eq!(step(rig, &ins), None);
+            assert_no_delete_or_reserve(rig);
+
+            // Model the lost approval: the next list no longer includes it.
+            rig.authority.state().instructions.clear();
+            if fail_write {
+                rig.restart().unwrap();
+                assert!(rig.release().is_err());
+            }
+            applied(rig.relist());
+            assert_eq!(rig.release().unwrap().evaluated, 0);
+            assert_eq!(step(rig, &ins), None);
+            assert!(rig.purger.deleted().is_empty());
+        }
+    }
+}
+
+#[test]
+fn delayed_stale_post_only_revokes_the_list_it_cited() {
+    for status in [true, false] {
+        for superseded in [false, true] {
+            let (mut w, _, ins) = with_fresh_release();
+            let rig = &mut w.rig;
+            rig.authority.state().forced.push_back(Forced::Timeout);
+            assert_eq!(send_on(rig, status), (1, 0));
+            let key = if status {
+                pending_status(rig).unwrap().key
+            } else {
+                rig.holder().state().obligations.channels[&w.b_obligation]
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .key
+                    .clone()
+            };
+            let cited = rig.holder().applied.as_ref().unwrap().list_ref.clone();
+            if superseded {
+                applied(rig.relist());
+                let current = &rig.holder().applied.as_ref().unwrap().list_ref;
+                assert_eq!(current.rev, cited.rev);
+                assert_ne!(current, &cited);
+            }
+            {
+                let mut authority = rig.authority.state();
+                let handle = authority.deliveries[&key].clone();
+                let response = authority.problem_answer(409, "stale_list_ref", None);
+                // Land after the pass's initial check, but before its durable reservation.
+                rig.purger.view().on_census = Some(Box::new(move || handle.deliver(key, response)));
+            }
+            let result = rig.release().unwrap();
+            if superseded {
+                assert_eq!((result.evaluated, result.executed), (1, 1));
+                assert_eq!(release_deletions(rig, &ins).len(), 2);
+            } else {
+                assert_eq!(result.evaluated, 0);
+                assert_eq!(step(rig, &ins), None);
+                assert_no_delete_or_reserve(rig);
+            }
+        }
+    }
+}
+
+#[test]
+fn stale_current_list_does_not_undo_a_durable_release_reservation() {
+    for confirmed in [false, true] {
+        let (mut w, _, ins) = with_fresh_release();
+        let rig = &mut w.rig;
+        rig.purger.view().fail_reserve = !confirmed;
+        rig.purger.view().fail_delete.extend(w.x_units.clone());
+        assert_eq!(rig.release().unwrap().deleted, 0);
+        assert_eq!(
+            step(rig, &ins),
+            Some(if confirmed {
+                ReleaseStep::Draining
+            } else {
+                ReleaseStep::Reserving
+            })
+        );
+        problem(rig, 409, "stale_list_ref");
+        assert_eq!(send_on(rig, false), (1, 0));
+        rig.purger.view().fail_reserve = false;
+        rig.purger.view().fail_delete.clear();
+        let result = rig.release().unwrap();
+        assert_eq!((result.evaluated, result.executed), (0, 1));
+        assert_eq!(release_deletions(rig, &ins).len(), 2);
+    }
+}
+
 #[test]
 fn keyset_custody_refusal_while_verifying_a_receipt_blocks_release() {
     let mut w = world();
@@ -1926,8 +2161,11 @@ fn keyset_custody_refusal_while_verifying_a_receipt_blocks_release() {
     let gets = {
         let mut authority = rig.authority.state();
         authority.rotate_key([37; 32], false, true);
-        authority.keyset_response =
-            Some(authority.problem_answer(503, "lifecycle_unavailable", None));
+        authority.keyset_response = Some(Ok(authority.problem_answer(
+            503,
+            "lifecycle_unavailable",
+            None,
+        )));
         authority.keyset_gets
     };
     assert_eq!(rig.status().unwrap().receipts, 0);

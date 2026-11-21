@@ -293,11 +293,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.check_deletion()
     }
 
-    /// Delivery and each adapter delete are ordered by the same mutex. Earlier
-    /// deliveries are drained before the check; later ones wait for the delete.
+    /// Order each adapter delete and the first durable release evaluation
+    /// against deliveries. Drain earlier replies; later ones wait for the step.
     pub(crate) fn with_deletion_permission<R>(
         &mut self,
-        delete: impl FnOnce() -> R,
+        step: impl FnOnce(&mut Self) -> R,
     ) -> Result<R, ObligationsRefused> {
         let inbox = self.inbox.clone();
         let guard = loop {
@@ -312,7 +312,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             self.intake(batch);
         };
         self.check_deletion()?;
-        let result = delete();
+        let result = step(self);
         drop(guard);
         Ok(result)
     }
@@ -329,7 +329,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return Err(ObligationsRefused::AuthorityRollbackSuspected);
         }
         if self.route != crate::holder::RouteHealth::Normal
-            || self.list_failed
+            || self.authority_evidence_lost
             || self.list_request_invalid
             || !self.applied.as_ref().is_some_and(|a| {
                 self.clock.wall_ms() < a.expires_wall_ms && self.clock.mono_ms() < a.expires_mono_ms
@@ -537,7 +537,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut failed = 0;
         for unit in &claims {
             // H.45: nothing runs after a fail-stop, deletions included.
-            match self.with_deletion_permission(|| purger.delete(unit, &claimant))? {
+            match self.with_deletion_permission(|_| purger.delete(unit, &claimant))? {
                 Ok(DeleteOutcome::Deleted | DeleteOutcome::Absent) => {
                     deleted.insert(unit.clone());
                 }

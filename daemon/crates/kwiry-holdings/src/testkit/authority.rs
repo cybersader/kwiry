@@ -105,7 +105,7 @@ pub struct FakeState {
     #[cfg(all(test, unix))]
     pub before_dispatch: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(all(test, unix))]
-    pub keyset_response: Option<HttpResponse>,
+    pub keyset_response: Option<Result<HttpResponse, TransportError>>,
     scheduled: Vec<(usize, Mutation)>,
     posts: usize,
     pub requests: Vec<RecordedRequest>,
@@ -1598,7 +1598,7 @@ impl Transport for FakeAuthority {
         state.keyset_gets += 1;
         #[cfg(all(test, unix))]
         if let Some(response) = state.keyset_response.take() {
-            return Ok(response);
+            return response;
         }
         match &state.keyset_statement {
             Some(statement) if url == format!("{}{ROUTE_KEYSET}", state.config.issuer) => {

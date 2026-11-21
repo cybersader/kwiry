@@ -893,7 +893,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             // byte, under the publication freeze.
             let url = format!("{}{ROUTE_STATUS}", self.writer.enrollment().issuer);
             let content_type = self.config.profile.status_request_content_type();
-            let delivery = self.inbox.bind(crate::client::Origin::Status, &pending.key);
+            let delivery = self.inbox.bind(
+                crate::client::Origin::Status,
+                &pending.key,
+                &pending.body.list_ref,
+            );
             let inbox = self.inbox.clone();
             let ticket = inbox.ticket();
             let freeze = purger.freeze_publications().ok();
@@ -928,6 +932,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             }
             summary.sent += 1;
             drop(freeze);
+            if let Ok(response) = &response {
+                self.observe_list_refusal(&pending.body.list_ref, response);
+            }
             let answer = self.classify_status(&pending.key, response);
             summary.record(answer);
             match answer {

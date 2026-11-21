@@ -73,7 +73,7 @@ pub(crate) enum Origin {
     Status,
     Report(String),
 }
-pub(crate) type Delivery = (Origin, String, HttpResponse);
+pub(crate) type Delivery = (Origin, String, ListRef, HttpResponse);
 #[derive(Clone)]
 pub(crate) struct ResponseInbox {
     queue: std::sync::Arc<std::sync::Mutex<InboxState>>,
@@ -102,6 +102,7 @@ pub struct ResponseDelivery {
     inbox: ResponseInbox,
     origin: Origin,
     key: String,
+    list_ref: ListRef,
 }
 impl ResponseDelivery {
     pub fn request_key(&self) -> &str {
@@ -123,7 +124,9 @@ impl ResponseDelivery {
         ) {
             self.inbox.gate.set_auth_halt();
         }
-        queue.deliveries.push((self.origin.clone(), key, response));
+        queue
+            .deliveries
+            .push((self.origin.clone(), key, self.list_ref.clone(), response));
     }
 }
 impl ResponseInbox {
@@ -137,11 +140,12 @@ impl ResponseInbox {
             events,
         }
     }
-    pub(crate) fn bind(&self, origin: Origin, key: &str) -> ResponseDelivery {
+    pub(crate) fn bind(&self, origin: Origin, key: &str, list_ref: &ListRef) -> ResponseDelivery {
         ResponseDelivery {
             inbox: self.clone(),
             origin,
             key: key.into(),
+            list_ref: list_ref.clone(),
         }
     }
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, InboxState> {
@@ -161,14 +165,14 @@ impl ResponseInbox {
     }
     pub(crate) fn admit(&self, ticket: u64) -> Option<PostStart<'_>> {
         let state = self.lock();
-        (ticket == state.generation && !state.deliveries.iter().any(|(_, _, r)| r.status != 200))
+        (ticket == state.generation && !state.deliveries.iter().any(|(_, _, _, r)| r.status != 200))
             .then_some(PostStart(Some(state)))
     }
     pub(crate) fn has_refusal(&self) -> bool {
         self.lock()
             .deliveries
             .iter()
-            .any(|(_, _, r)| r.status != 200)
+            .any(|(_, _, _, r)| r.status != 200)
     }
 }
 
@@ -407,6 +411,9 @@ pub(crate) fn authority_refusal(response: &HttpResponse) -> Option<AuthorityRefu
             retry_after_s: response.retry_after_s,
         }),
         (503, Some("authority_epoch_mismatch")) => Stop(FetchFailure::RollbackSuspected),
+        (503, _) => Stop(FetchFailure::Unreachable {
+            retry_after_s: response.retry_after_s,
+        }),
         _ => return None,
     })
 }
@@ -480,8 +487,14 @@ pub(crate) fn fetch_route_statement(
     profile: &crate::profile::WireProfile,
 ) -> Result<Option<String>, AuthorityRefusal> {
     let url = format!("{issuer}{ROUTE_KEYSET}");
-    let Ok(response) = transport.get(&url, LIST_TIMEOUTS) else {
-        return Ok(None);
+    let response = match transport.get(&url, LIST_TIMEOUTS) {
+        Ok(response) => response,
+        Err(TransportError::Unreachable) => {
+            return Err(AuthorityRefusal::Stop(FetchFailure::Unreachable {
+                retry_after_s: None,
+            }));
+        }
+        Err(TransportError::Timeout) => return Ok(None),
     };
     if let Some(refusal) = authority_refusal(&response) {
         return Err(refusal);

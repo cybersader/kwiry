@@ -368,7 +368,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// and reports may run again.
     pub(crate) fn after_apply(&mut self, prune: &[Attempt]) {
         self.relist_before_report = false;
-        self.list_failed = false;
+        self.release_list_rejected = false;
+        self.authority_evidence_lost = false;
         self.apply_failed_since_admit = false;
         self.lifecycle_unavailable = false;
         self.rollback_suspected = false;
@@ -862,9 +863,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             // freeze the adapter cannot give cancels it as never transmitted.
             let url = format!("{}{ROUTE_REPORT}", self.writer.enrollment().issuer);
             let content_type = self.config.profile.report_request_content_type();
-            let delivery = self
-                .inbox
-                .bind(crate::client::Origin::Report(ob.clone()), &pending.key);
+            let delivery = self.inbox.bind(
+                crate::client::Origin::Report(ob.clone()),
+                &pending.key,
+                &pending.body.list_ref,
+            );
             let inbox = self.inbox.clone();
             let ticket = inbox.ticket();
             let freeze = purger.freeze_publications().ok();
@@ -1001,6 +1004,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         pending: &Pending,
         response: Result<HttpResponse, TransportError>,
     ) -> Answer {
+        if let Ok(response) = &response {
+            self.observe_list_refusal(&pending.body.list_ref, response);
+        }
         self.classify_report(ob, &pending.key, Some(pending), response)
     }
 

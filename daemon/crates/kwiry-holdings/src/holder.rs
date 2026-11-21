@@ -118,7 +118,9 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) route: RouteHealth,
     /// v2 H.40: raised on a list-route `400`/`413`, until a list applies.
     pub(crate) list_request_invalid: bool,
-    pub(crate) list_failed: bool,
+    /// A failed list or unreachable authority on any route blocks deletion
+    /// until a complete list applies. This does not change serving leases.
+    pub(crate) authority_evidence_lost: bool,
     /// Profile S (H.24): pins of the list last applied in this process, by
     /// holding id. Empty at process start.
     baseline: HashMap<String, Option<RootPin>>,
@@ -134,6 +136,10 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     /// A report answer said the list is stale (`stale_list_ref`, `404`, an
     /// other-epoch ack): nothing is re-derived until a list applies.
     pub(crate) relist_before_report: bool,
+    /// A POST citing this exact applied list was rejected as stale. It can
+    /// no longer authorize new release evaluations; durable reservations
+    /// are separate and may drain if normal deletion checks allow it.
+    pub(crate) release_list_rejected: bool,
     /// An admitted list failed to apply: its floors are not durable, so no
     /// report is derived or sent until a list applies (K2x).
     pub(crate) apply_failed_since_admit: bool,
@@ -249,7 +255,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             engine,
             route: RouteHealth::Normal,
             list_request_invalid,
-            list_failed: false,
+            authority_evidence_lost: false,
             baseline: HashMap::new(),
             scheduler: RelistScheduler::new(300),
             applied: None,
@@ -257,6 +263,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             report_sends: std::collections::VecDeque::new(),
             unverifiable: HashMap::new(),
             relist_before_report: false,
+            release_list_rejected: false,
             apply_failed_since_admit: false,
             rollback_suspected: false,
             lifecycle_unavailable: false,
@@ -384,7 +391,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 }
             }
             ListOutcome::Failed(failure) => {
-                self.list_failed = true;
+                self.authority_evidence_lost = true;
                 self.schedule_after_failure(failure, finished);
             }
             _ => self.scheduler.on_failure(finished, None),
@@ -481,7 +488,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     pub(crate) fn on_failure(&mut self, failure: &FetchFailure) {
-        self.list_failed = true;
+        self.authority_evidence_lost = true;
         self.apply_failure(failure);
     }
     pub(crate) fn apply_failure(&mut self, failure: &FetchFailure) {
@@ -490,7 +497,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 self.lifecycle_unavailable = true;
                 HolderEvent::AuthorityUnreachable
             }
-            FetchFailure::Unreachable { .. } => HolderEvent::AuthorityUnreachable,
+            FetchFailure::Unreachable { .. } => {
+                self.authority_evidence_lost = true;
+                HolderEvent::AuthorityUnreachable
+            }
             FetchFailure::Deadline => HolderEvent::ListDeadline,
             FetchFailure::Invalid(error) => HolderEvent::ListInvalid {
                 reason: error.to_string(),
