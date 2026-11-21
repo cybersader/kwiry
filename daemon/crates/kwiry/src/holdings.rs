@@ -9,16 +9,131 @@
 //! The protocol logic is authority-neutral; this module supplies the
 //! authority's wire constants (v2 §2.3, §2.4, §3.3, §C.1 and S.0). Slice 1
 //! only defines them and proves the holder against the fake authority under
-//! them; slice S4 wires the holder into configuration, the CLI and the server.
+//! them; slice S4 wires the holder into configuration (`[holder]`), the CLI
+//! (`kwiry holder …`) and the server (one driver thread per daemon).
+//!
+//! **This build is list-only.** It verifies and applies lists but does not
+//! send status or obligation reports or evaluate purge or release instructions.
+//! There is no deletion or reservation adapter.
 
-use kwiry_holdings::engine::EngineProfile;
+pub(crate) mod adapters;
+pub(crate) mod cli;
+pub(crate) mod driver;
+pub(crate) mod transport;
+
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{Result, anyhow};
+use kwiry_core::{Config, DataRoot, DataRootLock, HolderProfile, HolderSettings};
+use kwiry_holdings::clock::{Clock, SystemClock};
+use kwiry_holdings::engine::{EngineProfile, EngineSettings};
+use kwiry_holdings::holder::{ConfigError, DEFAULT_PAGE_SIZE, Holder, HolderConfig};
 use kwiry_holdings::profile::WireProfile;
+use kwiry_holdings::state::{DirError, FsIo, HolderDir};
+
+use adapters::{ConfiguredRooms, IndexDataRoot, LogSink};
+use transport::HttpTransport;
+
+/// The holder as the daemon composes it.
+pub(crate) type DaemonHolder = Holder<ConfiguredRooms, HttpTransport>;
+
+/// Default `clock_skew_allowance` (H.21.3 caps it at 30 s).
+const DEFAULT_CLOCK_SKEW_ALLOWANCE_S: u32 = 30;
+
+/// The wire profile a configured profile value selects.
+pub(crate) fn wire_profile(profile: HolderProfile) -> WireProfile {
+    match profile {
+        HolderProfile::OpenClast => openclast_profile(),
+    }
+}
+
+/// Opens the holder directory under its exclusive lock. A held lock means
+/// another process (normally the running daemon) owns the holder.
+pub(crate) fn open_holder_dir(
+    settings: &HolderSettings,
+    config: &Config,
+    data_dir: &Path,
+) -> Result<HolderDir> {
+    let mut forbidden: Vec<&Path> = vec![data_dir];
+    forbidden.extend(config.vaults.iter().map(|vault| vault.path.as_path()));
+    HolderDir::open(&settings.state_dir, &forbidden).map_err(|error| match error {
+        DirError::LockHeld => anyhow!(
+            "the holder state directory is locked by another process (is the daemon running?); stop it before running this command"
+        ),
+        other => anyhow!("holder state directory: {other}"),
+    })
+}
+
+/// Starts the holder from durable state: enrollment, the loss/reset rules
+/// against the index data root, and replay of every owed transition. Returns
+/// the data-root lock so the daemon can prepare the index after admission.
+pub(crate) fn start_holder(
+    settings: &HolderSettings,
+    config: &Config,
+    data_dir: &Path,
+    clock: Arc<dyn Clock>,
+    events: Arc<LogSink>,
+) -> Result<(DaemonHolder, DataRootLock)> {
+    let dir = open_holder_dir(settings, config, data_dir)?;
+    let data_lock = DataRoot::new(data_dir).lock_writer()?;
+    let started = kwiry_holdings::startup::start(
+        dir,
+        Box::new(FsIo),
+        clock.clone(),
+        &IndexDataRoot::new(data_dir),
+        events.as_ref(),
+    )
+    .map_err(|error| match error {
+        kwiry_holdings::startup::StartupError::RootHolderMismatch => anyhow!(
+            "holder startup refused ({}): {error}. If the data directory is unmarked, stop the daemon, remove only `{}`, then restart; the index rebuilds from the vault. Keep everything else in the data directory, including replay state (`replay-epoch` and `replay-iat-watermark`). If the marker is unreadable or belongs to another holder, select the correct data directory instead.",
+            error.code(),
+            DataRoot::INDEX_ENTRIES.join("`, `"),
+        ),
+        other => anyhow!("holder startup refused ({}): {other}", other.code()),
+    })?;
+    if started.writer.enrollment().issuer != settings.issuer {
+        return Err(anyhow!(
+            "holder startup refused: holder.issuer does not match the enrolled issuer"
+        ));
+    }
+    let engine = EngineSettings::new(
+        settings
+            .clock_skew_allowance_seconds
+            .unwrap_or(DEFAULT_CLOCK_SKEW_ALLOWANCE_S),
+        settings
+            .max_stale_serve_seconds
+            .unwrap_or(kwiry_holdings::engine::stale_serve::DEFAULT_STALE_SERVE_S),
+    )
+    .map_err(|reason| anyhow!("holder configuration: {reason}"))?;
+    let holder_config = HolderConfig {
+        profile: wire_profile(settings.profile),
+        page_size: settings.page_size.unwrap_or(DEFAULT_PAGE_SIZE),
+        engine: Some(engine),
+    };
+    let holder = Holder::new(
+        started,
+        holder_config,
+        ConfiguredRooms::from_config(config),
+        HttpTransport::new(),
+        clock,
+        events,
+    )
+    .map_err(|error| match error {
+        ConfigError::CancellationRecovery => anyhow!(
+            "holder startup refused: replaying owed lifecycle transitions failed; holder state is unchanged, fix storage and restart"
+        ),
+        other => anyhow!("holder startup refused: {other}"),
+    })?;
+    Ok((holder, data_lock))
+}
+
+/// A system clock for one holder process.
+pub(crate) fn system_clock() -> Arc<dyn Clock> {
+    Arc::new(SystemClock::new())
+}
 
 /// OpenClast's Holdings wire profile for an engine holder that holds rooms.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(dead_code, reason = "wired into the daemon in slice S4")
-)]
 pub(crate) fn openclast_profile() -> WireProfile {
     let strings = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect();
     WireProfile {

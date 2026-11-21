@@ -137,8 +137,19 @@ pub enum PendingStatus {
 pub struct Attempt {
     pub jti: String,
     /// `sha256:` over the exact compact JWS sent.
+    #[serde(deserialize_with = "deserialize_attempt_digest")]
     pub digest: String,
     pub exp_s: i64,
+}
+
+fn deserialize_attempt_digest<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let digest = String::deserialize(deserializer)?;
+    if !crate::canonical::is_sha256_tagged(&digest) {
+        return Err(serde::de::Error::custom("invalid attempt digest"));
+    }
+    Ok(digest)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

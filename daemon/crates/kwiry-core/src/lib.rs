@@ -141,9 +141,9 @@ pub use manifest::{
 };
 #[cfg(feature = "native")]
 pub use model::{
-    AuthConfig, Config, DEFAULT_BIND, HostProfile, IndexStats, IndexingConfig, IngestReport,
-    IngestWarning, LexicalSearchRequest, OpenClastAuthConfig, ResourceKey, SemanticConfig,
-    ServerConfig, VaultRegistration,
+    AuthConfig, Config, DEFAULT_BIND, HolderProfile, HolderSettings, HostProfile, IndexStats,
+    IndexingConfig, IngestReport, IngestWarning, LexicalSearchRequest, OpenClastAuthConfig,
+    ResourceKey, SemanticConfig, ServerConfig, VaultRegistration,
 };
 #[cfg(feature = "portable")]
 pub use model::{

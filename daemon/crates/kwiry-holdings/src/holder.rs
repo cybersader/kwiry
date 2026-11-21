@@ -182,6 +182,13 @@ pub struct Applied {
     pub instructions: Vec<crate::release::Instruction>,
 }
 
+impl Applied {
+    /// Wall-clock end of this list's lease (page 0 `iat` + `serve_seconds`).
+    pub fn lease_expires_wall_ms(&self) -> i64 {
+        self.expires_wall_ms
+    }
+}
+
 impl<S: ResourceStore, T: Transport> Holder<S, T> {
     pub fn new(
         started: Started,
@@ -334,6 +341,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     pub fn route_health(&self) -> RouteHealth {
         self.route
+    }
+
+    /// The list last applied in this process, if any.
+    pub fn applied(&self) -> Option<&Applied> {
+        self.applied.as_ref()
     }
 
     pub fn scheduler(&mut self) -> &mut RelistScheduler {

@@ -1790,6 +1790,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
+ "fs2",
  "http-body-util",
  "jsonwebtoken",
  "kwiry-core",
@@ -1806,6 +1807,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "ureq",
  "windows-sys 0.59.0",
 ]
 

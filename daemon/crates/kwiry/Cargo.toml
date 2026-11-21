@@ -14,6 +14,7 @@ anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
 clap.workspace = true
+fs2.workspace = true
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 kwiry-core = { path = "../kwiry-core" }
 kwiry-holdings = { path = "../kwiry-holdings" }
@@ -26,6 +27,12 @@ toml.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+# Lifecycle holder transport (blocking HTTP, rustls with web PKI roots). Already
+# in the dependency graph through the semantic model downloader.
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
@@ -33,9 +40,7 @@ windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 [dev-dependencies]
 assert_cmd.workspace = true
 http-body-util.workspace = true
+kwiry-core = { path = "../kwiry-core", features = ["internal-storage-probe-test"] }
 kwiry-holdings = { path = "../kwiry-holdings", features = ["testkit"] }
 predicates.workspace = true
 tower.workspace = true
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-libc.workspace = true

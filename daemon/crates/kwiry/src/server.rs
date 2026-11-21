@@ -40,6 +40,10 @@ pub(crate) struct AppState {
     profile: HostProfile,
     runtime: SearchRuntime,
     status: Arc<RwLock<DaemonStatus>>,
+    /// The lifecycle holder's gate, when a holder is configured. Searches
+    /// stop the moment the holder fail-stops (H.45). The full per-resource
+    /// gate is not consulted yet (`HOLDINGS_SERVING_IMPLEMENTED` is false).
+    holder_gate: Option<kwiry_holdings::gate::ServingGate>,
 }
 
 enum StartupIdentity {
@@ -110,13 +114,26 @@ pub(crate) async fn serve(
         .await
         .with_context(|| format!("failed to bind {address}"))?;
 
-    let data_root = DataRoot::new(&paths.data_dir);
+    // A configured holder must admit the as-found data root before index
+    // preparation can remove staging or otherwise change that evidence.
+    let (holder, discarded) = match config.holder.clone() {
+        Some(settings) => {
+            let (holder, discarded) = crate::holdings::driver::HolderService::spawn(
+                settings,
+                config.clone(),
+                paths.data_dir.clone(),
+            )
+            .await?;
+            (Some(holder), discarded)
+        }
+        None => (None, DataRoot::new(&paths.data_dir).prepare()?),
+    };
     // A core-identity mismatch discards the whole generation here, and the
     // rebuild that follows is far larger than the per-format eviction reported
     // below — so it must not be the quieter of the two. The gate's message is
     // produced and then classified away inside `prepare`; this is where it is
     // handed back to the operator.
-    if let Some(discarded) = data_root.prepare()? {
+    if let Some(discarded) = discarded {
         let generation = discarded.generation.as_deref().unwrap_or("<unreadable>");
         tracing::warn!(
             generation,
@@ -128,6 +145,8 @@ pub(crate) async fn serve(
             discarded.reason
         );
     }
+
+    let fail_stop = holder.as_ref().map(|holder| holder.fail_stop());
 
     let runtime = SearchRuntime::new();
     if profile == HostProfile::OpenClast {
@@ -147,6 +166,9 @@ pub(crate) async fn serve(
         profile,
         runtime: runtime.clone(),
         status: status.clone(),
+        holder_gate: holder
+            .as_ref()
+            .map(crate::holdings::driver::HolderService::gate),
     };
     let router = build_router(state, auth, profile);
     let local_address = listener.local_addr()?;
@@ -169,6 +191,9 @@ pub(crate) async fn serve(
         Err(error) => {
             let Some(server) = serving else {
                 // OpenClast is not serving yet; fail fast exactly as before.
+                if let Some(holder) = holder {
+                    holder.shutdown().await;
+                }
                 return Err(error);
             };
             // Desktop keeps the surface alive: health answers, search
@@ -331,15 +356,48 @@ pub(crate) async fn serve(
         }
     }
 
-    let server_result = serving
-        .expect("the HTTP server is started in every non-degraded path")
-        .await;
+    let server = serving.expect("the HTTP server is started in every non-degraded path");
+    let served = serve_until_fail_stop(server, fail_stop).await;
     watcher.shutdown().await;
     let shutdown_result = shutdown_manager(manager_handle, manager_task).await;
-    server_result.context("HTTP server task failed")??;
+    if let Some(holder) = holder {
+        holder.shutdown().await;
+    }
+    match served {
+        Served::Stopped(server_result) => server_result.context("HTTP server task failed")??,
+        Served::FailStopped => {
+            return Err(anyhow!(crate::holdings::driver::FAIL_STOP_MESSAGE));
+        }
+    }
     shutdown_result?;
     tracing::info!("kwiry daemon stopped");
     Ok(())
+}
+
+type ServerTask = tokio::task::JoinHandle<std::result::Result<(), std::io::Error>>;
+
+enum Served {
+    Stopped(std::result::Result<std::result::Result<(), std::io::Error>, tokio::task::JoinError>),
+    FailStopped,
+}
+
+/// Runs the server until it stops or the holder fail-stops. On a fail-stop
+/// the server is aborted at once: no request is answered after it.
+async fn serve_until_fail_stop(
+    mut server: ServerTask,
+    fail_stop: Option<Arc<crate::holdings::driver::FailStop>>,
+) -> Served {
+    let Some(fail_stop) = fail_stop else {
+        return Served::Stopped(server.await);
+    };
+    tokio::select! {
+        result = &mut server => Served::Stopped(result),
+        () = fail_stop.wait() => {
+            server.abort();
+            let _ = server.await;
+            Served::FailStopped
+        }
+    }
 }
 
 fn spawn_server(
@@ -517,11 +575,23 @@ async fn status(State(state): State<AppState>) -> Json<DaemonStatus> {
     Json(state.status.read().await.clone())
 }
 
+fn check_holder_gate(state: &AppState) -> std::result::Result<(), HttpError> {
+    if state
+        .holder_gate
+        .as_ref()
+        .is_some_and(crate::holdings::driver::gate_revoked)
+    {
+        return Err(map_core_error(kwiry_core::Error::ResourceUnavailable));
+    }
+    Ok(())
+}
+
 async fn search(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     payload: std::result::Result<Json<ApiSearchRequest>, JsonRejection>,
 ) -> std::result::Result<Response, HttpError> {
+    check_holder_gate(&state)?;
     if principal.profile != state.profile || !principal.has_scope(Scope::Search) {
         return Err(HttpError::new(
             StatusCode::FORBIDDEN,
@@ -613,6 +683,8 @@ async fn search(
             .authorized_freshness(&request.filters, &principal.resources, &result.generation)
             .map_err(map_core_error)?,
     };
+    // A search that was admitted before a fail-stop cannot release its hits.
+    check_holder_gate(&state)?;
     let mut response = Json(ApiSearchResponse {
         hits: result.hits,
         next_cursor: None,
@@ -957,7 +1029,135 @@ mod tests {
             profile: HostProfile::Desktop,
             runtime: SearchRuntime::new(),
             status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
+            holder_gate: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_holder_fail_stop_aborts_the_server_and_reports_it() {
+        let fail_stop = Arc::new(crate::holdings::driver::FailStop::default());
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        let server: ServerTask = tokio::spawn(async move {
+            let _guard = dropped_tx;
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let tripper = fail_stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tripper.trip();
+        });
+        let served = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            serve_until_fail_stop(server, Some(fail_stop)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(served, Served::FailStopped));
+        // The server task was aborted, not left running.
+        assert!(dropped_rx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn without_a_holder_the_server_result_passes_through() {
+        let server: ServerTask = tokio::spawn(async { Ok(()) });
+        assert!(matches!(
+            serve_until_fail_stop(server, None).await,
+            Served::Stopped(Ok(Ok(())))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_revoked_holder_gate_refuses_every_search() {
+        use kwiry_holdings::testkit::Rig;
+        let directory = tempfile::tempdir().unwrap();
+        let mut rig = Rig::with_profile(
+            &directory.path().join("holder"),
+            crate::holdings::openclast_profile(),
+            "openclast-lifecycle/v1",
+        );
+        let gate = rig.gate();
+        drop(rig.take_holder());
+        assert!(crate::holdings::driver::gate_revoked(&gate));
+        let mut state = test_state();
+        state.holder_gate = Some(gate);
+        let app = build_router(
+            state,
+            AuthState::desktop("secret".to_owned()),
+            HostProfile::Desktop,
+        );
+        let response = app
+            .oneshot(
+                axum::http::Request::post("/v0/search")
+                    .header("authorization", "Bearer secret")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"q":"x","mode":"lexical","limit":5}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_search_admitted_before_holder_revocation_releases_no_results() {
+        use kwiry_holdings::testkit::Rig;
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let directory = tempdir().unwrap();
+        let vault = directory.path().join("vault");
+        let data = directory.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("note.md"), "# Search\nrevocationprobe").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data).unwrap();
+        let mut state = test_state();
+        let manager = IndexManager::open(config, &data, state.runtime.clone()).unwrap();
+        let mut rig = Rig::new(&directory.path().join("holder"));
+        state.holder_gate = Some(rig.gate());
+        let status = state.status.clone();
+        let request =
+            serde_json::from_str(r#"{"q":"revocationprobe","mode":"lexical","limit":5}"#).unwrap();
+
+        // Hold the freshness read so one poll takes the request through
+        // admission but cannot let it finish, regardless of search timing.
+        let hold = status.write().await;
+        let mut pending = std::pin::pin!(search(
+            State(state),
+            Extension(Principal::desktop()),
+            Ok(Json(request)),
+        ));
+        assert!(
+            pending
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(rig.take_holder());
+        drop(hold);
+
+        let response = pending
+            .await
+            .expect_err("revoked search returned hits")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            r#"{"error":{"code":"resource_unavailable","message":"an authorized resource is not available for search"}}"#
+        );
+        manager.shutdown().unwrap();
     }
 
     #[test]
@@ -1147,6 +1347,7 @@ mod tests {
                 profile: HostProfile::Desktop,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
+                holder_gate: None,
             },
             AuthState::desktop("secret".to_owned()),
             HostProfile::Desktop,
@@ -1263,6 +1464,7 @@ mod tests {
                 profile: HostProfile::Desktop,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
+                holder_gate: None,
             },
             AuthState::desktop("secret".to_owned()),
             HostProfile::Desktop,
@@ -1405,6 +1607,7 @@ mod tests {
                 profile: HostProfile::OpenClast,
                 runtime: SearchRuntime::new(),
                 status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
+                holder_gate: None,
             },
             AuthState::openclast(verifier),
             HostProfile::OpenClast,
@@ -1520,6 +1723,7 @@ mod tests {
                 profile: HostProfile::OpenClast,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
+                holder_gate: None,
             },
             AuthState::openclast(CapabilityVerifier::load(&auth_config, temporary.path()).unwrap()),
             HostProfile::OpenClast,
@@ -1676,6 +1880,7 @@ mod tests {
                 profile: HostProfile::OpenClast,
                 runtime: runtime.clone(),
                 status: status.clone(),
+                holder_gate: None,
             },
             AuthState::openclast(verifier),
             HostProfile::OpenClast,

@@ -331,3 +331,76 @@ impl Rig {
         self.holder().list_once()
     }
 }
+
+/// TEST-ONLY. A bare response inbox for exercising a [`crate::client::Transport`]
+/// adapter's `post_lifecycle` outside a holder: it hands the adapter a real
+/// delivery handle and dispatch admission, and records what is delivered.
+pub struct LateDeliveryProbe {
+    inbox: crate::client::ResponseInbox,
+    gate: ServingGate,
+}
+
+impl Default for LateDeliveryProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LateDeliveryProbe {
+    pub fn new() -> Self {
+        let clock: Arc<dyn crate::clock::Clock> = Arc::new(FakeClock::new(TEST_START_WALL_MS, 0));
+        let gate = ServingGate::new(clock, false);
+        let inbox =
+            crate::client::ResponseInbox::new(gate.clone(), Arc::new(MemorySink::default()));
+        Self { inbox, gate }
+    }
+
+    /// Runs one dispatch with a freshly bound handle and admission.
+    pub fn dispatch<R>(
+        &self,
+        post: impl FnOnce(crate::client::ResponseDelivery, crate::client::PostStart<'_>) -> R,
+    ) -> R {
+        let list_ref = crate::wire::ListRef {
+            list_id: "ls_TESTlist00000000000001".into(),
+            rev: crate::wire::Rev {
+                epoch: "ep_TESTepoch0000000000001".into(),
+                seq: 1,
+            },
+            nonce: "TESTnonce0000000000000001".into(),
+            state_digest: "TESTdigest".into(),
+            list_tag: "TESTtag".into(),
+        };
+        let key = "TESTkey00000000000000001";
+        let delivery = self
+            .inbox
+            .bind(crate::client::Origin::Status, key, &list_ref);
+        let start = self
+            .inbox
+            .admit(self.inbox.ticket())
+            .expect("no refusal pending");
+        post(delivery, start)
+    }
+
+    /// The statuses delivered so far, in order.
+    pub fn delivered(&self) -> Vec<u16> {
+        self.inbox
+            .lock()
+            .deliveries
+            .iter()
+            .map(|(_, _, _, response)| response.status)
+            .collect()
+    }
+
+    /// Whether a delivered `403` raised the auth halt on the gate.
+    pub fn auth_halted(&self) -> bool {
+        self.gate.auth_halted()
+    }
+}
+
+impl Rig {
+    /// Takes the running holder out of the rig, for a host-side driver test.
+    /// The rig's other parts (authority, clock, store, faults) stay shared.
+    pub fn take_holder(&mut self) -> TestHolder {
+        self.holder.take().expect("holder running")
+    }
+}

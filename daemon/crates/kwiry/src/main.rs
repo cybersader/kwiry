@@ -73,6 +73,11 @@ enum Command {
         #[arg(long)]
         semantic: bool,
     },
+    /// Operate the resource-lifecycle holder configured in `[holder]`.
+    Holder {
+        #[command(subcommand)]
+        command: holdings::cli::HolderCommand,
+    },
     /// Search the lexical index.
     Search {
         query: String,
@@ -291,6 +296,11 @@ async fn main() -> Result<()> {
             );
         }
         Command::Serve { bind, semantic } => server::serve(paths, bind, semantic).await?,
+        Command::Holder { command } => {
+            tokio::task::spawn_blocking(move || holdings::cli::run(&paths, command))
+                .await
+                .context("holder command failed")??;
+        }
         Command::Search {
             query,
             limit,

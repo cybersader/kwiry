@@ -173,6 +173,9 @@ fn prepare_config(path: &Path, config: &mut Config, paths: Option<&Paths>) -> Re
             protected.push(token);
             protected.push(config_path.with_extension("lock"));
         }
+        if let Some(holder) = &config.holder {
+            protected.push(holder.state_dir.clone());
+        }
         config.openclast_state_paths = protected;
         crate::room_boundary::validate(config, None)?;
     }
@@ -481,7 +484,99 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
             });
         }
     }
+    validate_holder(path, config)?;
     validate_room_registrations(path, config)
+}
+
+fn validate_holder(path: &Path, config: &Config) -> Result<()> {
+    let Some(holder) = &config.holder else {
+        return Ok(());
+    };
+    let invalid = |message: String| Error::InvalidConfig {
+        path: path.to_path_buf(),
+        message,
+    };
+    if config.server.profile != HostProfile::OpenClast {
+        return Err(invalid(
+            "the [holder] section requires server.profile = \"openclast\"".to_owned(),
+        ));
+    }
+    validate_holder_issuer(&holder.issuer)
+        .map_err(|reason| invalid(format!("holder.issuer {reason}")))?;
+    if !holder.state_dir.is_absolute() {
+        return Err(invalid("holder.state_dir must be absolute".to_owned()));
+    }
+    for vault in &config.vaults {
+        if holder.state_dir.starts_with(&vault.path) || vault.path.starts_with(&holder.state_dir) {
+            return Err(invalid(format!(
+                "holder.state_dir must not overlap registered vault {}",
+                vault.id
+            )));
+        }
+    }
+    if let Some(page_size) = holder.page_size
+        && !(1..=1000).contains(&page_size)
+    {
+        return Err(invalid(
+            "holder.page_size must be between 1 and 1000".to_owned(),
+        ));
+    }
+    if let Some(skew) = holder.clock_skew_allowance_seconds
+        && skew > 30
+    {
+        return Err(invalid(
+            "holder.clock_skew_allowance_seconds must be between 0 and 30".to_owned(),
+        ));
+    }
+    if let Some(stale) = holder.max_stale_serve_seconds
+        && stale > 86_400
+    {
+        return Err(invalid(
+            "holder.max_stale_serve_seconds must be between 0 and 86400".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// `https://host[:port]/path` with no user info, query, fragment or trailing
+/// slash. Plain `http` is accepted only for a loopback IP literal, for local
+/// authorities and tests.
+fn validate_holder_issuer(issuer: &str) -> std::result::Result<(), &'static str> {
+    if issuer.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("must not contain whitespace");
+    }
+    let (https, rest) = if let Some(rest) = issuer.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = issuer.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        return Err("must be an https URL");
+    };
+    if issuer.contains(['?', '#']) {
+        return Err("must not carry a query or fragment");
+    }
+    if issuer.ends_with('/') {
+        return Err("must not end with a slash");
+    }
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if authority.is_empty() || authority.contains('@') {
+        return Err("must name a host without user info");
+    }
+    if path.is_empty() {
+        return Err("must include the lifecycle base path");
+    }
+    if !https {
+        // SocketAddr accepts only IP literals, requires brackets for IPv6,
+        // and validates any explicit port. Try a default port when omitted.
+        let loopback = authority
+            .parse::<std::net::SocketAddr>()
+            .or_else(|_| format!("{authority}:80").parse())
+            .is_ok_and(|address| address.ip().is_loopback());
+        if !loopback || authority.contains('%') {
+            return Err("must use https unless the host is a loopback IP literal");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -943,5 +1038,147 @@ mod tests {
             "N29 ensure"
         );
         assert_eq!(config.vaults, [a]);
+    }
+
+    fn holder_config(extra: &str) -> std::result::Result<Config, String> {
+        let source = format!("[server]\nprofile = \"openclast\"\n\n[holder]\n{extra}");
+        toml::from_str::<Config>(&source).map_err(|error| error.to_string())
+    }
+
+    fn complete_holder(root: &Path) -> String {
+        let state_dir = toml::Value::try_from(root.join("holder")).unwrap();
+        format!(
+            "profile = \"openclast\"\nissuer = \"https://login.example.test/api/lifecycle/v1\"\nstate_dir = {state_dir}\n"
+        )
+    }
+
+    #[test]
+    fn holder_section_is_optional_and_absent_by_default() {
+        let config = toml::from_str::<Config>("version = 1\n").unwrap();
+        assert_eq!(config.holder, None);
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        assert!(!encoded.contains("holder"));
+    }
+
+    #[test]
+    fn partial_or_unknown_holder_configuration_is_refused_at_parse() {
+        let temporary = tempfile::tempdir().unwrap();
+        let complete = complete_holder(temporary.path());
+        for missing in ["profile", "issuer", "state_dir"] {
+            let partial: String = complete
+                .lines()
+                .filter(|line| !line.starts_with(missing))
+                .map(|line| format!("{line}\n"))
+                .collect();
+            let error = holder_config(&partial).unwrap_err();
+            assert!(
+                error.contains(&format!("missing field `{missing}`")),
+                "{error}"
+            );
+        }
+        for removed_or_unknown in [
+            "key",
+            "status_interval_seconds",
+            "report_interval_seconds",
+            "purge_interval_seconds",
+        ] {
+            let error =
+                holder_config(&format!("{complete}{removed_or_unknown} = 1\n")).unwrap_err();
+            assert!(
+                error.contains(&format!("unknown field `{removed_or_unknown}`")),
+                "{error}"
+            );
+        }
+        let unknown_profile = complete.replace("profile = \"openclast\"", "profile = \"other\"");
+        let error = holder_config(&unknown_profile).unwrap_err();
+        assert!(error.contains("unknown variant"), "{error}");
+        assert!(holder_config(&complete).is_ok());
+    }
+
+    #[test]
+    fn holder_section_validation_names_the_offending_field() {
+        let temporary = tempfile::tempdir().unwrap();
+        let complete = complete_holder(temporary.path());
+        let config_path = temporary.path().join("config.toml");
+        let path = config_path.as_path();
+        let check = |extra: &str, profile: HostProfile| {
+            let mut config = holder_config(&format!("{complete}{extra}")).unwrap();
+            config.server.profile = profile;
+            validate_holder(path, &config).map_err(|error| error.to_string())
+        };
+        assert_eq!(check("", HostProfile::OpenClast), Ok(()));
+        assert!(
+            check("", HostProfile::Desktop)
+                .unwrap_err()
+                .contains("requires server.profile")
+        );
+        for (extra, field) in [
+            ("page_size = 0\n", "holder.page_size"),
+            ("page_size = 1001\n", "holder.page_size"),
+            (
+                "clock_skew_allowance_seconds = 31\n",
+                "holder.clock_skew_allowance_seconds",
+            ),
+            (
+                "max_stale_serve_seconds = 86401\n",
+                "holder.max_stale_serve_seconds",
+            ),
+        ] {
+            let error = check(extra, HostProfile::OpenClast).unwrap_err();
+            assert!(error.contains(field), "{extra}: {error}");
+        }
+        let mut config = holder_config(&complete).unwrap();
+        config.holder.as_mut().unwrap().state_dir = PathBuf::from("relative/holder");
+        assert!(
+            validate_holder(path, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("must be absolute")
+        );
+        let vault = temporary.path().join("vault");
+        config.holder.as_mut().unwrap().state_dir = vault.join("holder");
+        config.vaults.push(VaultRegistration {
+            id: "notes".into(),
+            path: vault,
+            room: Some("room".into()),
+        });
+        assert!(
+            validate_holder(path, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("must not overlap")
+        );
+    }
+
+    #[test]
+    fn holder_issuer_requires_https_except_for_loopback_ip_literals() {
+        for good in [
+            "https://login.example.test/api/lifecycle/v1",
+            "https://login.example.test:8443/api/lifecycle/v1",
+            "http://127.0.0.1:4000/api/lifecycle/v1",
+            "http://127.255.0.42/api/lifecycle/v1",
+            "http://[::1]/api/lifecycle/v1",
+            "http://[::1]:4000/api/lifecycle/v1",
+        ] {
+            assert_eq!(validate_holder_issuer(good), Ok(()), "{good}");
+        }
+        for bad in [
+            "http://localhost/api/lifecycle/v1",
+            "http://login.example.test/api/lifecycle/v1",
+            "http://10.0.0.1/api/lifecycle/v1",
+            "http://[::2]/api/lifecycle/v1",
+            "http://::1/api/lifecycle/v1",
+            "http://[::1]unexpected/api/lifecycle/v1",
+            "http://127.0.0.1:65536/api/lifecycle/v1",
+            "ftp://login.example.test/x",
+            "https://login.example.test",
+            "https://login.example.test/api/lifecycle/v1/",
+            "https://user@login.example.test/api",
+            "https://login.example.test/api?x=1",
+            "https://login.example.test/api#frag",
+            "https://login.example.test/api lifecycle",
+        ] {
+            assert!(validate_holder_issuer(bad).is_err(), "{bad}");
+        }
     }
 }
