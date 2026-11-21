@@ -15,6 +15,7 @@ import {
   type BackendIdentity,
   type BackendStatus,
   type SearchBackend,
+  DAEMON_HOST_UNAVAILABLE,
   KwiryBackendError,
 } from "./backend";
 import { DaemonBackend } from "./backends/daemon-backend";
@@ -23,7 +24,7 @@ import {
   type InPluginBackendStartupObservation,
 } from "./backends/in-plugin-lexical-backend";
 import { createInPluginCacheOptions } from "./cache/build-cache-options";
-import { readDaemonToken } from "./credentials";
+import { hasDaemonTokenFileSupport, readDaemonToken } from "./credentials";
 import { createProductionDesktopDiagnosticsExportHost } from "./diagnostics/desktop-export-host";
 import type { DiagnosticsExportResult } from "./diagnostics/export-contract";
 import { createProductionFullReportClipboardHost } from "./diagnostics/full-report-clipboard-host";
@@ -74,6 +75,10 @@ const VAULT_ACTIVITY_INTERVAL_MS = 5_000;
 
 export default class KwiryPlugin extends Plugin {
   settings: KwiryPluginSettings = DEFAULT_SETTINGS;
+  // The daemon uses desktop loopback transport and a local token file, not the vault adapter.
+  readonly daemonBackendAvailable = Platform.isDesktopApp
+    && typeof requestUrl === "function"
+    && hasDaemonTokenFileSupport();
   hoverPreviewSource: string | null = null;
   private readonly backendInvalidationCallbacks = new Set<() => void>();
   private statusBar: HTMLElement | null = null;
@@ -106,7 +111,7 @@ export default class KwiryPlugin extends Plugin {
     await this.diagnostics.capture("info", "plugin.load", { pluginEpoch }, async (event) => {
       try {
         const storedData = await this.loadData();
-        this.settings = loadSettings(storedData);
+        this.settings = loadSettings(storedData, this.daemonBackendAvailable);
         // The core identity no longer depends on which formats are enabled, so
         // this value survives a Settings toggle: the cache is restored and
         // projected down to the new set rather than discarded.
@@ -127,6 +132,7 @@ export default class KwiryPlugin extends Plugin {
             currentVaultId: optionalString(this.settings.daemonCurrentVaultId),
             tokenProvider: () => readDaemonToken(this.settings.tokenFilePath),
             transport: obsidianTransport,
+            hostAvailable: this.daemonBackendAvailable,
           }),
           in_plugin: (instanceId) => {
             const cache = createInPluginCacheOptions(
@@ -876,6 +882,7 @@ function diagnosticErrorCode(code: unknown): DiagnosticTextValue {
       return "vault_read_failed";
     case "disposed":
     case "daemon_unreachable":
+    case DAEMON_HOST_UNAVAILABLE.code:
     case "daemon_upgrade_required":
     case "mode_unavailable":
     case "explicit_query_unsupported":

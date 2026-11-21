@@ -65,6 +65,19 @@ export function normalizeDaemonToken(raw: string): string {
   return token;
 }
 
+/** Check the host APIs used by the reader without touching any token file. */
+export function hasDaemonTokenFileSupport(): boolean {
+  return typeof fs.lstatSync === "function"
+    && typeof fs.openSync === "function"
+    && typeof fs.fstatSync === "function"
+    && typeof fs.readSync === "function"
+    && typeof fs.closeSync === "function"
+    && typeof fs.constants?.O_RDONLY === "number"
+    && typeof path.isAbsolute === "function"
+    && typeof Buffer !== "undefined"
+    && typeof Buffer.alloc === "function";
+}
+
 export function readDaemonToken(tokenFilePath: string): string {
   const configuredPath = tokenFilePath.trim();
   if (!configuredPath || !path.isAbsolute(configuredPath)) {
