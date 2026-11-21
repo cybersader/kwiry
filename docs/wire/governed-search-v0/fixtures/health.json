@@ -1,0 +1,22 @@
+{
+  "request": {
+    "authorization": "none",
+    "body": null,
+    "method": "GET",
+    "path": "/v0/health"
+  },
+  "response": {
+    "body": {
+      "id_scheme": "room-v1",
+      "multi_room": "closed",
+      "status": "ok"
+    },
+    "headers": {
+      "connection": "close",
+      "content-length": "59",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT"
+    },
+    "status": 200
+  }
+}

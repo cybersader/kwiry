@@ -1,0 +1,24 @@
+{
+  "request": {
+    "authorization": "none",
+    "body": null,
+    "method": "POST",
+    "path": "/v0/health"
+  },
+  "response": {
+    "body": {
+      "error": {
+        "code": "method_not_allowed",
+        "message": "method not allowed"
+      }
+    },
+    "headers": {
+      "allow": "GET,HEAD",
+      "connection": "close",
+      "content-length": "70",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT"
+    },
+    "status": 405
+  }
+}

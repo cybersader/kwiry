@@ -1,0 +1,26 @@
+{
+  "request": {
+    "authorization": "valid workload",
+    "body": null,
+    "method": "GET",
+    "path": "/v0/search"
+  },
+  "response": {
+    "body": {
+      "error": {
+        "code": "method_not_allowed",
+        "message": "method not allowed"
+      }
+    },
+    "headers": {
+      "allow": "POST",
+      "connection": "close",
+      "content-length": "70",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT",
+      "kwiry-id-scheme": "room-v1",
+      "kwiry-multi-room": "closed"
+    },
+    "status": 405
+  }
+}

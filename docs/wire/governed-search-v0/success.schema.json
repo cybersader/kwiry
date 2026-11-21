@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Governed lexical search success (governed-search-v0)",
+  "description": "HTTP 200 response body. Freshness (current, stale, reconciling) and the scoped index digest are carried by X-Kwiry-Index-Freshness and X-Kwiry-Generation, not by JSON members. See headers.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hits", "next_cursor", "extraction_policy_fingerprint"],
+  "properties": {
+    "hits": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {"$ref": "#/$defs/hit"}
+    },
+    "next_cursor": {"type": "null"},
+    "extraction_policy_fingerprint": {
+      "$ref": "#/$defs/hex_digest",
+      "description": "Report-only SHA-256 identity of the build's extractor set, not the scoped index digest."
+    }
+  },
+  "$defs": {
+    "hex_digest": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+    "room_v1_id": {"type": "string", "minLength": 22, "maxLength": 22, "pattern": "^[A-Za-z0-9_-]{22}$"},
+    "hit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chunk_id", "vault_id", "room_id", "path", "heading_path", "format", "coverage", "locator", "score", "excerpt", "frontmatter"],
+      "properties": {
+        "chunk_id": {"$ref": "#/$defs/hex_digest"},
+        "vault_id": {"$ref": "#/$defs/room_v1_id"},
+        "room_id": {"$ref": "#/$defs/room_v1_id"},
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "not": {"pattern": "^/"},
+          "description": "Room-relative source path, using forward slash separators."
+        },
+        "heading_path": {"type": "array", "items": {"type": "string"}},
+        "format": {"enum": ["markdown", "text", "base", "canvas", "docx", "pdf", "excalidraw", "excel", "html"]},
+        "coverage": {"enum": ["indexed-complete", "indexed-partial"]},
+        "locator": {"$ref": "#/$defs/locator"},
+        "score": {
+          "type": ["number", "null"],
+          "description": "Engine score (f32); JSON null if native explicit syntax yields a nonfinite score."
+        },
+        "excerpt": {"type": "string", "description": "Snippet HTML or the fallback excerpt."},
+        "frontmatter": {"$ref": "#/$defs/frontmatter"}
+      }
+    },
+    "frontmatter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "tags": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "status": {"type": "string"},
+        "date": {"type": "string"}
+      }
+    },
+    "locator": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "view"],
+          "properties": {"kind": {"const": "base_view"}, "view": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "page"],
+          "properties": {"kind": {"const": "pdf_page"}, "page": {"type": "integer", "minimum": 1, "maximum": 4294967295}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "sheet", "cell"],
+          "properties": {"kind": {"const": "excel_cell"}, "sheet": {"type": "string"}, "cell": {"type": "string"}}
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "request": {
+    "authorization": "none",
+    "body": null,
+    "method": "GET",
+    "path": "/v0/search"
+  },
+  "response": {
+    "body": {
+      "error": {
+        "code": "unauthorized",
+        "message": "a valid bearer token is required"
+      }
+    },
+    "headers": {
+      "allow": "POST",
+      "connection": "close",
+      "content-length": "78",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT",
+      "kwiry-id-scheme": "room-v1",
+      "kwiry-multi-room": "closed",
+      "www-authenticate": "Bearer"
+    },
+    "status": 401
+  }
+}

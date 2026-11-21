@@ -1,0 +1,71 @@
+{
+  "request": {
+    "authorization": "valid workload",
+    "body": {
+      "cursor": null,
+      "filters": {
+        "frontmatter_equals": {
+          "status": "sample"
+        },
+        "path_prefix": "grove/",
+        "room": "RoomAaaa_0123456789abc",
+        "tags": [
+          "botany"
+        ],
+        "vault_id": "VaultAaa_0123456789abc"
+      },
+      "limit": 1,
+      "mode": "lexical",
+      "q": "in:body >body moonpetal"
+    },
+    "method": "POST",
+    "path": "/v0/search"
+  },
+  "response": {
+    "body": {
+      "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+      "hits": [
+        {
+          "chunk_id": "ff515225edb5b84c7b345cc96508c538ff7b17962c7f9cf161bf5e87fb06993f",
+          "coverage": "indexed-complete",
+          "excerpt": "## Trials\n<b>Moonpetal</b> survives in clay pots",
+          "format": "markdown",
+          "frontmatter": {
+            "date": "2026-01-02",
+            "description": "Synthetic botany notes",
+            "status": "sample",
+            "tags": [
+              "botany"
+            ],
+            "title": "Seedling ledger"
+          },
+          "heading_path": [
+            "Greenhouse",
+            "Trials"
+          ],
+          "locator": null,
+          "path": "grove/seedling.md",
+          "room_id": "RoomAaaa_0123456789abc",
+          "score": 0.9066488,
+          "vault_id": "VaultAaa_0123456789abc"
+        }
+      ],
+      "next_cursor": null
+    },
+    "headers": {
+      "connection": "close",
+      "content-length": "627",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT",
+      "kwiry-id-scheme": "room-v1",
+      "kwiry-multi-room": "closed",
+      "x-kwiry-field-emphasis": "body",
+      "x-kwiry-field-scope": "body",
+      "x-kwiry-generation": "v1-fdfed093511b0a13ef6bcc50055f95572f80c02bfc4c0ef93e2c5eba8b689256",
+      "x-kwiry-index-freshness": "current; basis=strict_hash",
+      "x-kwiry-lexical-match-quality": "standard_only",
+      "x-kwiry-lexical-profile": "lexical-v2"
+    },
+    "status": 200
+  }
+}
