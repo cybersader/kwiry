@@ -2280,3 +2280,263 @@ fn late_status_receipt_survives_failed_apply_until_successful_apply() {
     assert_eq!((pass.receipts, pass.sent), (1, 0));
     assert!(!rig.holder().state().status.uncertain.contains_key(&key));
 }
+
+#[test]
+fn completed_403_prevents_keyset_get_for_an_unknown_ack_signer() {
+    for status in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        assert_eq!(send_on(rig, !status).0, 1);
+        let gets = {
+            let mut authority = rig.authority.state();
+            let handle = authority.deliveries.values().next().unwrap().clone();
+            let refusal = authority.problem_answer(403, "holder_not_authorized", None);
+            let next = authority.posts() + 1;
+            // The POST has entered the transport, but its rotated ack has
+            // not returned to the holder yet. Complete the older delivery.
+            authority.before_post(next, move |authority| {
+                handle.deliver(handle.request_key().into(), refusal);
+                authority.rotate_key([46; 32], false, true);
+            });
+            authority.keyset_gets
+        };
+        let pass = send_on(rig, status);
+        assert_eq!(rig.authority.state().keyset_gets, gets);
+        assert_eq!(pass, (1, 0));
+        assert_eq!(rig.gate().check(A), Err(crate::gate::Refusal::AuthHalt));
+        assert_eq!(send_on(rig, status), (0, 0));
+        assert_eq!(rig.authority.state().keyset_gets, gets);
+    }
+}
+
+/// Send a status, lose the synchronous answer, then change the census so
+/// the original key is uncertain and its signed receipt can arrive later.
+fn queue_uncertain_status_receipt(rig: &mut Rig) -> (StatusPending, HttpResponse) {
+    rig.authority.state().drop_status_acks = 1;
+    assert_eq!(rig.status().unwrap().sent, 1);
+    let pending = pending_status(rig).unwrap();
+    rig.purger.add_unattributable();
+    later(rig);
+    assert_eq!(rig.status().unwrap().sent, 0);
+    assert!(
+        rig.holder()
+            .state()
+            .status
+            .uncertain
+            .contains_key(&pending.key)
+    );
+    let response = {
+        let authority = rig.authority.state();
+        let ack = &authority.status_receipts[&pending.key].1;
+        let response = authority.status_ack_answer(ack);
+        authority.deliveries[&pending.key].deliver(pending.key.clone(), response.clone());
+        response
+    };
+    (pending, response)
+}
+
+#[test]
+fn relist_past_d_preserves_a_queued_status_receipt_until_it_resolves_once() {
+    let mut w = world();
+    let rig = &mut w.rig;
+    let (pending, response) = queue_uncertain_status_receipt(rig);
+    let d = pending.attempts[0].exp_s + crate::report::ABSENCE_BOUND_S;
+    rig.advance(u64::try_from(d - now_s(rig) + 1).unwrap() * 1000);
+    applied(rig.relist());
+    assert!(now_s(rig) > d);
+    let posts = rig.authority.state().posts();
+    let pass = rig.status().unwrap();
+    assert_eq!((pass.receipts, pass.sent), (1, 0));
+    assert!(
+        !rig.holder()
+            .state()
+            .status
+            .uncertain
+            .contains_key(&pending.key)
+    );
+    assert_eq!(
+        rig.holder()
+            .state()
+            .status
+            .last_accepted
+            .as_ref()
+            .unwrap()
+            .key,
+        pending.key
+    );
+    rig.authority.state().deliveries[&pending.key].deliver(pending.key.clone(), response);
+    let pass = rig.status().unwrap();
+    assert_eq!((pass.receipts, pass.sent), (0, 0));
+    assert_eq!(rig.authority.state().posts(), posts);
+    assert!(!codes(rig).contains(&"ack_unverifiable"));
+}
+
+#[test]
+fn queued_status_receipt_retries_receipt_and_state_write_failures_without_post() {
+    for writes in [
+        vec![Fault::BeforeRename],
+        vec![Fault::Pass, Fault::BeforeRename],
+    ] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        let (pending, _) = queue_uncertain_status_receipt(rig);
+        rig.io_faults.fail_removes();
+        rig.io_faults.plan(writes);
+        let posts = rig.authority.state().posts();
+        let failed = rig.status().unwrap();
+        assert_eq!((failed.receipts, failed.sent), (0, 0));
+        assert!(rig.holder().state().status.last_accepted.is_none());
+        assert!(
+            rig.holder()
+                .state()
+                .status
+                .uncertain
+                .contains_key(&pending.key)
+        );
+        assert!(codes(rig).contains(&"disk_reserve_exhausted"));
+        rig.io_faults.clear();
+        let retried = rig.status().unwrap();
+        assert_eq!((retried.receipts, retried.sent), (1, 0));
+        assert_eq!(rig.authority.state().posts(), posts);
+        assert!(
+            !rig.holder()
+                .state()
+                .status
+                .uncertain
+                .contains_key(&pending.key)
+        );
+    }
+}
+
+#[test]
+fn transient_keyset_get_errors_back_off_without_bad_ack_strikes() {
+    use crate::client::TransportError;
+
+    for status in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        rig.authority.state().rotate_key([61; 32], false, true);
+        for (index, rate_limited) in [false, true, false].into_iter().enumerate() {
+            let gets = {
+                let mut authority = rig.authority.state();
+                let mut response = authority.problem_answer(429, "rate_limited", None);
+                response.retry_after_s = Some(90);
+                authority.keyset_response = Some(if rate_limited {
+                    Ok(response)
+                } else {
+                    Err(TransportError::Timeout)
+                });
+                authority.keyset_gets
+            };
+            assert_eq!(send_on(rig, status), (1, 0), "interruption {index}");
+            assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+            assert!(!codes(rig).contains(&"ack_unverifiable"));
+            if rate_limited {
+                later(rig); // 61 s is below Retry-After.
+            }
+            assert_eq!(send_on(rig, status), (0, 0));
+            assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+            rig.advance(91_000);
+        }
+        assert_eq!(send_on(rig, status), (1, 1));
+        assert!(!codes(rig).contains(&"ack_unverifiable"));
+    }
+
+    // A GET delayed by Retry-After retries the queued ack itself, with no
+    // new POST.
+    let mut w = world();
+    let rig = &mut w.rig;
+    rig.authority.state().rotate_key([62; 32], false, true);
+    let (pending, _) = queue_uncertain_status_receipt(rig);
+    let (gets, posts) = {
+        let mut authority = rig.authority.state();
+        let mut response = authority.problem_answer(429, "rate_limited", None);
+        response.retry_after_s = Some(90);
+        authority.keyset_response = Some(Ok(response));
+        (authority.keyset_gets, authority.posts())
+    };
+    assert_eq!(send_on(rig, true), (0, 0));
+    assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+    later(rig);
+    assert_eq!(send_on(rig, true), (0, 0));
+    assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+    rig.advance(30_000);
+    assert_eq!(send_on(rig, true), (0, 1));
+    assert_eq!(rig.authority.state().keyset_gets, gets + 2);
+    assert_eq!(rig.authority.state().posts(), posts);
+    assert!(
+        !rig.holder()
+            .state()
+            .status
+            .uncertain
+            .contains_key(&pending.key)
+    );
+    assert!(!codes(rig).contains(&"ack_unverifiable"));
+}
+
+#[test]
+fn delayed_pre_resume_400_resolves_only_the_old_key_on_both_channels() {
+    for status in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        let ob = &w.b_obligation;
+        if status {
+            let current = epoch(rig);
+            assert!(rig.holder().arm_status_gate(&current));
+        }
+        let pending_key = |rig: &mut Rig| {
+            if status {
+                pending_status(rig).unwrap().key
+            } else {
+                rig.holder().state().obligations.channels[ob]
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .key
+                    .clone()
+            }
+        };
+        let uncertain = |rig: &mut Rig, key: &str| {
+            let state = rig.holder().state();
+            if status {
+                state.status.uncertain.contains_key(key)
+            } else {
+                state.obligations.uncertain.contains_key(key)
+            }
+        };
+        problem(rig, 400, "invalid_request");
+        assert_eq!(send_on(rig, status), (1, 0));
+        let old = pending_key(rig);
+        if status {
+            assert!(rig.holder().resume_status());
+            rig.authority.state().commit();
+            applied(rig.relist());
+        } else {
+            assert!(rig.holder().resume_report(ob));
+        }
+        assert!(uncertain(rig, &old));
+        later(rig);
+        rig.authority.state().forced.push_back(Forced::Timeout);
+        assert_eq!(send_on(rig, status), (1, 0));
+        let new = pending_key(rig);
+        assert_ne!(old, new);
+        deliver_problem(rig, &old, 400, "invalid_request", None);
+        let posts = rig.authority.state().posts();
+        assert_eq!(send_on(rig, status), (0, 0));
+        assert_eq!(rig.authority.state().posts(), posts);
+        let state = rig.holder().state();
+        if status {
+            assert!(!state.status.halted);
+            assert!(!state.obligations.status_gate.open());
+        } else {
+            assert!(!state.obligations.channels[ob].halted);
+        }
+        assert!(!uncertain(rig, &old));
+        assert_eq!(pending_key(rig), new);
+        later(rig);
+        assert_eq!(send_on(rig, status), (1, 1));
+        if status {
+            assert!(rig.holder().state().obligations.status_gate.open());
+        }
+    }
+}

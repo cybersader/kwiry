@@ -152,6 +152,8 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) report_backoff_until: u64,
     pub(crate) status_backoff_ms: u64,
     pub(crate) status_backoff_until: u64,
+    /// Timeout or Retry-After from an ack's key-set GET, not its POST.
+    pub(crate) ack_keyset_backoff_until: u64,
     /// Unverifiable status acks in a row (T6c after three).
     pub(crate) status_unverifiable: u8,
     pub(crate) status_spacing_until: u64,
@@ -271,6 +273,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             report_backoff_until,
             status_backoff_ms: 0,
             status_backoff_until,
+            ack_keyset_backoff_until: 0,
             status_unverifiable: 0,
             status_spacing_until,
             dispatched_key: None,
