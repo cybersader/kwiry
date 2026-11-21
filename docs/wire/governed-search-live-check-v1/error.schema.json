@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Governed HTTP error (live-check-v1)",
+  "description": "JSON errors on the two mounted paths, including method errors but not the fallback for unmounted paths or transport errors. For each code, x-http-status gives the required HTTP status outside the JSON body.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "oneOf": [
+            {
+              "x-http-status": 400,
+              "const": "invalid_request",
+              "description": "JSON extraction fails (including content type, syntax, type/unknown fields or body size), or the parsed limit is outside 1–100."
+            },
+            {
+              "x-http-status": 400,
+              "const": "invalid_query",
+              "description": "The query is empty, violates the planner limits or is rejected by the lexical parser."
+            },
+            {
+              "x-http-status": 401,
+              "const": "unauthorized",
+              "description": "No valid bearer capability was supplied, including a rejected identity, signature, audience, time bound or replay."
+            },
+            {
+              "x-http-status": 403,
+              "const": "forbidden",
+              "description": "The authenticated capability fails the tenant, action, resource or signed-limit admissibility checks."
+            },
+            {
+              "x-http-status": 403,
+              "const": "limit_exceeded",
+              "description": "The valid request limit exceeds the signed max_limit."
+            },
+            {
+              "x-http-status": 405,
+              "const": "method_not_allowed",
+              "description": "The method is not mounted on this path; on /v0/search the capability is verified first."
+            },
+            {
+              "x-http-status": 500,
+              "const": "internal_error",
+              "description": "An unexpected search task, index, or response-construction failure prevents returning results."
+            },
+            {
+              "x-http-status": 503,
+              "const": "resource_unavailable",
+              "description": "An effective signed resource is unsearchable, or availability fails globally without signed indexes."
+            },
+            {
+              "x-http-status": 503,
+              "const": "replay_state_unavailable",
+              "description": "The verifier task failed or could not use or durably update replay protection."
+            },
+            {
+              "x-http-status": 406,
+              "const": "profile_unsupported"
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable diagnostic that does not quote caller-supplied search input. Branch on status and code, not message wording."
+        },
+        "resource_indexes": {
+          "const": [
+            0
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "code": {
+            "const": "resource_unavailable"
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "resource_indexes"
+          ]
+        }
+      }
+    }
+  }
+}

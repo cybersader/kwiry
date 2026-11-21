@@ -106,6 +106,8 @@ The binding rules are in [`CONTRACT.md`](CONTRACT.md).
 
 ### IG-1 — governed lexical OpenClast gateway — Foundation owner-accepted (2026-11-17); production enablement not yet authorized
 
+2026-11-21: The owner authorized a synthetic-notes pilot of governed search with platform-side verification of every result; real workspaces remain on the platform’s built-in search.
+
 - The committed Kwiry checkpoint verifies short-lived lexical-only capabilities, opens only request-authorized resource partitions, and computes BM25 statistics only from those partitions.
 - The companion OpenClast gateway must resolve live grants on every request, mint capabilities with a separate search key, and keep the internal capability and Kwiry address server-side.
 - The synthetic two-user/two-room connected witness passed against OpenClast's engine-neutral search seam: live per-call scope, authorized-only partition access proved by an internal observer (absent from shipped builds), authorized-only BM25 equal to physical baselines, named provider errors with no fallback, credential privacy, and identical behavior between shipped and observer builds.

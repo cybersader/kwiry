@@ -1,0 +1,169 @@
+[
+  {
+    "case": "hits",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [
+          {
+            "chunk_id": "5bfc8520cee2ef687bfe02a351b88b815e32bc8f1fd42e03eeb356653c18d430",
+            "content_sha256": "88c947992efa50845a81c41612c14b0df9dad3107b5bafadcf2c34d0715c278a",
+            "coverage": "indexed-complete",
+            "excerpt": "﻿# Topaz\r\nCafé <b>moonflower</b>",
+            "format": "markdown",
+            "frontmatter": {},
+            "heading_path": [],
+            "locator": null,
+            "path": "blossom.md",
+            "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+            "score": 0.1823216,
+            "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+          },
+          {
+            "chunk_id": "cbd5f33dc6136b66bff836fcb14ee1cec704762da0f7b1eace0500761d9d09f3",
+            "content_sha256": "88c947992efa50845a81c41612c14b0df9dad3107b5bafadcf2c34d0715c278a",
+            "coverage": "indexed-complete",
+            "excerpt": "# Quartz\r\nA <b>moonflower</b>",
+            "format": "markdown",
+            "frontmatter": {},
+            "heading_path": [
+              "Quartz"
+            ],
+            "locator": null,
+            "path": "blossom.md",
+            "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+            "score": 0.1823216,
+            "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+          }
+        ],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "1208",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "standard_only",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "no-hits",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"zzzzzzzz\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  }
+]

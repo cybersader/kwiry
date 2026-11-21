@@ -1,0 +1,4 @@
+{
+  "exit_code": 1,
+  "stderr": "Error: invalid configuration at <config>: snapshot_id requires a profile-required governed room registration"
+}

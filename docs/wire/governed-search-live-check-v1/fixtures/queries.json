@@ -1,0 +1,1409 @@
+[
+  {
+    "case": "accent",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"Café  audit\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [
+          {
+            "chunk_id": "5bfc8520cee2ef687bfe02a351b88b815e32bc8f1fd42e03eeb356653c18d430",
+            "content_sha256": "88c947992efa50845a81c41612c14b0df9dad3107b5bafadcf2c34d0715c278a",
+            "coverage": "indexed-complete",
+            "excerpt": "﻿# Topaz\r\n<b>Café</b> moonflower",
+            "format": "markdown",
+            "frontmatter": {},
+            "heading_path": [],
+            "locator": null,
+            "path": "blossom.md",
+            "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+            "score": 0.6931472,
+            "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+          }
+        ],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "783",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "partial_only",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "combining",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"é ٢\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "ext-i",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"𮯰\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "literal-operator-prefix",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"ANDromeda\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "digits",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"42\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "empty",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "leading",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\" x\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "trailing",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"x \"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "leading-mark",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"́a\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "nbsp",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"x y\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "tab",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"x\\ty\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "line-feed",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"x\\ny\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "and",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"aNd\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "or",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"x OR y\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "quotes",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"\\\"x\\\"\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "punctuation",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"x-y\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "field",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"in:body\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "post-15.1",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"Ᲊ\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "bytes-4096",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "bytes-4097",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "repeated-128",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "distinct-128",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"word000 word001 word002 word003 word004 word005 word006 word007 word008 word009 word010 word011 word012 word013 word014 word015 word016 word017 word018 word019 word020 word021 word022 word023 word024 word025 word026 word027 word028 word029 word030 word031 word032 word033 word034 word035 word036 word037 word038 word039 word040 word041 word042 word043 word044 word045 word046 word047 word048 word049 word050 word051 word052 word053 word054 word055 word056 word057 word058 word059 word060 word061 word062 word063 word064 word065 word066 word067 word068 word069 word070 word071 word072 word073 word074 word075 word076 word077 word078 word079 word080 word081 word082 word083 word084 word085 word086 word087 word088 word089 word090 word091 word092 word093 word094 word095 word096 word097 word098 word099 word100 word101 word102 word103 word104 word105 word106 word107 word108 word109 word110 word111 word112 word113 word114 word115 word116 word117 word118 word119 word120 word121 word122 word123 word124 word125 word126 word127\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "repeated-129",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha alpha\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "distinct-129",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"word000 word001 word002 word003 word004 word005 word006 word007 word008 word009 word010 word011 word012 word013 word014 word015 word016 word017 word018 word019 word020 word021 word022 word023 word024 word025 word026 word027 word028 word029 word030 word031 word032 word033 word034 word035 word036 word037 word038 word039 word040 word041 word042 word043 word044 word045 word046 word047 word048 word049 word050 word051 word052 word053 word054 word055 word056 word057 word058 word059 word060 word061 word062 word063 word064 word065 word066 word067 word068 word069 word070 word071 word072 word073 word074 word075 word076 word077 word078 word079 word080 word081 word082 word083 word084 word085 word086 word087 word088 word089 word090 word091 word092 word093 word094 word095 word096 word097 word098 word099 word100 word101 word102 word103 word104 word105 word106 word107 word108 word109 word110 word111 word112 word113 word114 word115 word116 word117 word118 word119 word120 word121 word122 word123 word124 word125 word126 word127 word128\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  }
+]

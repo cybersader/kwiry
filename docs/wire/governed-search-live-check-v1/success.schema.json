@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Governed lexical search success (live-check-v1)",
+  "description": "HTTP 200 response body. Freshness (current, stale, reconciling) and the scoped index digest are carried by X-Kwiry-Index-Freshness and X-Kwiry-Generation, not by JSON members. See headers.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "hits",
+    "next_cursor",
+    "extraction_policy_fingerprint",
+    "resource_snapshots"
+  ],
+  "properties": {
+    "hits": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/hit"
+      }
+    },
+    "next_cursor": {
+      "type": "null"
+    },
+    "extraction_policy_fingerprint": {
+      "$ref": "#/$defs/hex_digest",
+      "description": "Report-only SHA-256 identity of the build's extractor set, not the scoped index digest."
+    },
+    "resource_snapshots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "tenant_id": {
+                "type": "string",
+                "pattern": "^tenant_[A-Za-z0-9_-]{20}$",
+                "minLength": 27,
+                "maxLength": 27
+              },
+              "vault_id": {
+                "$ref": "#/$defs/room_v1_id"
+              },
+              "room_id": {
+                "$ref": "#/$defs/room_v1_id"
+              }
+            },
+            "required": [
+              "tenant_id",
+              "vault_id",
+              "room_id"
+            ]
+          },
+          "snapshot_id": {
+            "$ref": "#/$defs/hex_digest"
+          }
+        },
+        "required": [
+          "resource",
+          "snapshot_id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "hex_digest": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "room_v1_id": {
+      "type": "string",
+      "minLength": 22,
+      "maxLength": 22,
+      "pattern": "^[A-Za-z0-9_-]{22}$"
+    },
+    "hit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chunk_id",
+        "vault_id",
+        "room_id",
+        "path",
+        "heading_path",
+        "format",
+        "coverage",
+        "locator",
+        "score",
+        "excerpt",
+        "frontmatter",
+        "content_sha256"
+      ],
+      "properties": {
+        "chunk_id": {
+          "$ref": "#/$defs/hex_digest"
+        },
+        "vault_id": {
+          "$ref": "#/$defs/room_v1_id"
+        },
+        "room_id": {
+          "$ref": "#/$defs/room_v1_id"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "pattern": "^/"
+          },
+          "description": "Room-relative source path, using forward slash separators."
+        },
+        "heading_path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "format": {
+          "const": "markdown"
+        },
+        "coverage": {
+          "const": "indexed-complete"
+        },
+        "locator": {
+          "type": "null"
+        },
+        "score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Engine score (f32); JSON null if native explicit syntax yields a nonfinite score."
+        },
+        "excerpt": {
+          "type": "string",
+          "description": "Snippet HTML or the fallback excerpt."
+        },
+        "frontmatter": {
+          "$ref": "#/$defs/frontmatter"
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/hex_digest"
+        }
+      }
+    },
+    "frontmatter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

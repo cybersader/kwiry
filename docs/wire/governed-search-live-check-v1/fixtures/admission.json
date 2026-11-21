@@ -1,0 +1,2424 @@
+[
+  {
+    "case": "health",
+    "request": {
+      "body": {
+        "utf8": ""
+      },
+      "headers": [
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "GET",
+      "path": "/v0/health"
+    },
+    "response": {
+      "body": {
+        "id_scheme": "room-v1",
+        "multi_room": "closed",
+        "status": "ok"
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "59",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "health-head",
+    "request": {
+      "body": {
+        "utf8": ""
+      },
+      "headers": [
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "HEAD",
+      "path": "/v0/health"
+    },
+    "response": {
+      "body": null,
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "59",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "health-method",
+    "request": {
+      "body": {
+        "utf8": ""
+      },
+      "headers": [
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/health"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "method_not_allowed",
+          "message": "method not allowed"
+        }
+      },
+      "headers": {
+        "allow": "GET,HEAD",
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "70",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT"
+      },
+      "status": 405
+    }
+  },
+  {
+    "case": "off-route",
+    "request": {
+      "body": {
+        "utf8": ""
+      },
+      "headers": [
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "GET",
+      "path": "/v0/status"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "not_found",
+          "message": "endpoint not found"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "61",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT"
+      },
+      "status": 404
+    }
+  },
+  {
+    "case": "auth-before-method",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "kwiry-profile",
+          "not-for-output-927"
+        ]
+      ],
+      "method": "GET",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "unauthorized",
+          "message": "a valid bearer token is required"
+        }
+      },
+      "headers": {
+        "allow": "POST",
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "www-authenticate": "Bearer"
+      },
+      "status": 401
+    }
+  },
+  {
+    "case": "auth-before-negotiation",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          "<malformed synthetic bearer>"
+        ],
+        [
+          "kwiry-profile",
+          "unknown"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "unauthorized",
+          "message": "a valid bearer token is required"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "www-authenticate": "Bearer"
+      },
+      "status": 401
+    }
+  },
+  {
+    "case": "duplicate-auth",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "unauthorized",
+          "message": "a valid bearer token is required"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "www-authenticate": "Bearer"
+      },
+      "status": 401
+    }
+  },
+  {
+    "case": "mixed-auth",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "authorization",
+          "<malformed synthetic bearer>"
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "unauthorized",
+          "message": "a valid bearer token is required"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "www-authenticate": "Bearer"
+      },
+      "status": 401
+    }
+  },
+  {
+    "case": "comma-auth",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          "<malformed synthetic bearer>"
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "unauthorized",
+          "message": "a valid bearer token is required"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "www-authenticate": "Bearer"
+      },
+      "status": 401
+    }
+  },
+  {
+    "case": "method-before-negotiation",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "unknown"
+        ]
+      ],
+      "method": "GET",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "method_not_allowed",
+          "message": "method not allowed"
+        }
+      },
+      "headers": {
+        "allow": "POST",
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "70",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed"
+      },
+      "status": 405
+    }
+  },
+  {
+    "case": "replay-after-method",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "unauthorized",
+          "message": "a valid bearer token is required"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "www-authenticate": "Bearer"
+      },
+      "status": 401
+    }
+  },
+  {
+    "case": "multi-before-selection",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              },
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "unknown"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "profile_unsupported",
+          "message": "the required search profile was not selected"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "97",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed"
+      },
+      "status": 406
+    }
+  },
+  {
+    "case": "multi-selected",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              },
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "forbidden",
+          "message": "one authorized resource is required"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 403
+    }
+  },
+  {
+    "case": "signed-101",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 101,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "forbidden",
+          "message": "the capability does not authorize this request"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "89",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed"
+      },
+      "status": 403
+    }
+  },
+  {
+    "case": "signed-noninteger",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20.0,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "unauthorized",
+          "message": "a valid bearer token is required"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "www-authenticate": "Bearer"
+      },
+      "status": 401
+    }
+  },
+  {
+    "case": "startup-second",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "unauthorized",
+          "message": "a valid bearer token is required"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "78",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "www-authenticate": "Bearer"
+      },
+      "status": 401
+    }
+  },
+  {
+    "case": "absent-v0",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "profile_unsupported",
+          "message": "the required search profile was not selected"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "97",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed"
+      },
+      "status": 406
+    }
+  },
+  {
+    "case": "unknown",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "LIVE-CHECK-V1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "profile_unsupported",
+          "message": "the required search profile was not selected"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "97",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed"
+      },
+      "status": 406
+    }
+  },
+  {
+    "case": "duplicate",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "profile_unsupported",
+          "message": "the required search profile was not selected"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "97",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed"
+      },
+      "status": 406
+    }
+  },
+  {
+    "case": "mixed",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "kwiry-profile",
+          "unknown"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "profile_unsupported",
+          "message": "the required search profile was not selected"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "97",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed"
+      },
+      "status": 406
+    }
+  },
+  {
+    "case": "comma",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1, live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "profile_unsupported",
+          "message": "the required search profile was not selected"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "97",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed"
+      },
+      "status": 406
+    }
+  },
+  {
+    "case": "absent-media",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "suffix-media",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/test+json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "parameter-media",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json; charset=utf-8"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "comma-media",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json, application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "duplicate-media",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "mixed-media",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "content-type",
+          "text/plain"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "case-insensitive-media",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"zzzzzzzz\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "Application/JSON"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+        "hits": [],
+        "next_cursor": null,
+        "resource_snapshots": [
+          {
+            "resource": {
+              "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+              "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+              "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+            },
+            "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "361",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1",
+        "x-kwiry-field-emphasis": "none",
+        "x-kwiry-field-scope": "none",
+        "x-kwiry-generation": "v1-4e51a7f387cf6780d4cd0ff502fe12d888d9b87d43d96862a4c3908cb6f9cb92",
+        "x-kwiry-index-freshness": "current; basis=strict_hash",
+        "x-kwiry-lexical-match-quality": "none",
+        "x-kwiry-lexical-profile": "lexical-v2"
+      },
+      "status": 200
+    }
+  },
+  {
+    "case": "malformed-json",
+    "request": {
+      "body": {
+        "utf8": "{"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "invalid-utf8",
+    "request": {
+      "body": {
+        "base64url": "e_99"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "invalid-unicode",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"\\ud800\",\"mode\":\"lexical\",\"limit\":20}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "duplicate-key",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"q\":\"y\",\"mode\":\"lexical\",\"limit\":20}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "positional",
+    "request": {
+      "body": {
+        "utf8": "[\"x\",\"lexical\",20]"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "no-mode",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"limit\":20}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "wrong-mode",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"mode\":\"semantic\",\"limit\":20}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "no-limit",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"mode\":\"lexical\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "decimal-limit",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"mode\":\"lexical\",\"limit\":20.0}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "exponent-limit",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"mode\":\"lexical\",\"limit\":2e1}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "filter",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"mode\":\"lexical\",\"limit\":20,\"filters\":{}}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "cursor",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"mode\":\"lexical\",\"limit\":20,\"cursor\":null}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "unknown-control",
+    "request": {
+      "body": {
+        "utf8": "{\"q\":\"x\",\"mode\":\"lexical\",\"limit\":20,\"not-for-output-927\":false}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "oversize",
+    "request": {
+      "body": {
+        "length": 2097153,
+        "repeat_byte": 32
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "AAAAAAAAAAAAAAAAAAAAAg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "AAAAAAAAAAAAAAAAAAAAAQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "zero-limit",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":0,\"mode\":\"lexical\",\"q\":\"in:body\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "outside-range",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":101,\"mode\":\"lexical\",\"q\":\"in:body\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "below-ceiling",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":19,\"mode\":\"lexical\",\"q\":\"in:body\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_request",
+          "message": "the request is not a valid live-check search"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "93",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "above-ceiling",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":21,\"mode\":\"lexical\",\"q\":\"in:body\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "limit_exceeded",
+          "message": "the requested limit exceeds the capability constraint"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "101",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 403
+    }
+  },
+  {
+    "case": "query-before-resource",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"not-for-output-927\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "invalid_query",
+          "message": "the query is not supported"
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "73",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 400
+    }
+  },
+  {
+    "case": "missing-partition",
+    "request": {
+      "body": {
+        "utf8": "{\"limit\":20,\"mode\":\"lexical\",\"q\":\"moonflower\"}"
+      },
+      "headers": [
+        [
+          "authorization",
+          {
+            "ceiling": 20,
+            "resources": [
+              {
+                "room_id": "BBBBBBBBBBBBBBBBBBBBBg",
+                "tenant_id": "tenant_AAAAAAAAAAAAAAAAAAAA",
+                "vault_id": "BBBBBBBBBBBBBBBBBBBBBQ"
+              }
+            ],
+            "synthetic_workload": true
+          }
+        ],
+        [
+          "kwiry-profile",
+          "live-check-v1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "method": "POST",
+      "path": "/v0/search"
+    },
+    "response": {
+      "body": {
+        "error": {
+          "code": "resource_unavailable",
+          "message": "an authorized resource is not available for search",
+          "resource_indexes": [
+            0
+          ]
+        }
+      },
+      "headers": {
+        "cache-control": "no-store",
+        "connection": "close",
+        "content-length": "127",
+        "content-type": "application/json",
+        "date": "Sat, 21 Nov 2026 23:19:10 GMT",
+        "kwiry-id-scheme": "room-v1",
+        "kwiry-multi-room": "closed",
+        "kwiry-profile": "live-check-v1"
+      },
+      "status": 503
+    }
+  }
+]

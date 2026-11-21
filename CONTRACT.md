@@ -214,3 +214,11 @@ Name: **kwiry** ("Knowledge Workspace Information Retrieval Yoke", pronounced "q
 ## 11. Reserved later gates
 
 The following remain outside IG-1 and require their own owner-reviewed verticals: governed semantic/hybrid retrieval; scoped chunk/status surfaces; MCP parity; monotonic policy/subject epochs and revocation; connector ACL normalization; remote agent delegation; and structural graph traversal. None may weaken the invariants above or silently broaden a profile.
+
+## Amendment — private synthetic governed-search pilot (owner-approved 2026-11-21)
+
+**Baseline erratum (§4):** deployed v0 successes contain `hits`, `extraction_policy_fingerprint` and an always-null `next_cursor`; the hit field is `room_id`. No v0 wire behavior changes.
+
+Only a dedicated, isolated, profile-required instance may accept trusted room `snapshot_id` registration. On its existing search route, require `Kwiry-Profile: live-check-v1` and refuse downgrade. The [closed wire profile](docs/wire/governed-search-live-check-v1/) defines negotiation, single-tuple workload authority, literal lexical requests and ordered refusals. A success includes each hit’s stored whole-file `content_sha256` and exactly one snapshot label bound to the answering reader, even on zero hits. Only a complete clean walk may bind a new label; identical or empty editions may have different labels. Missing or invalid provenance fails the whole request.
+
+These unsigned suggestions stay on the authenticated private hop. OpenClast verifies every candidate against its register and renders only its own authorized bytes. This approval covers synthetic notes only, not real data, corpus parity or storage removal.
