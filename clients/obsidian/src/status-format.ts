@@ -1,10 +1,17 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import type { BackendStatus } from "./backend";
+import {
+  DAEMON_HOST_UNAVAILABLE,
+  DAEMON_HOST_UNAVAILABLE_GUIDANCE,
+  type BackendStatus,
+} from "./backend";
 import { formatIndexProgressSummary } from "./index-progress-format";
 
 export function formatStatus(status: BackendStatus): string {
+  if (status.issue?.code === DAEMON_HOST_UNAVAILABLE.code) {
+    return `Kwiry: ${DAEMON_HOST_UNAVAILABLE_GUIDANCE}`;
+  }
   if (status.progress) return `Kwiry: ${formatIndexProgressSummary(status.progress)}`;
 
   const partial = status.sourceFormatCounts === undefined

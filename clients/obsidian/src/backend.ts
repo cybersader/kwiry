@@ -61,6 +61,15 @@ export interface BackendIssue {
   recoverable: boolean;
 }
 
+export const DAEMON_HOST_UNAVAILABLE = {
+  code: "daemon_host_unavailable",
+  safeMessage: "The daemon backend is not available in this host.",
+  recoverable: false,
+} as const satisfies BackendIssue;
+
+export const DAEMON_HOST_UNAVAILABLE_GUIDANCE =
+  `${DAEMON_HOST_UNAVAILABLE.safeMessage} Choose In-plugin · Lexical to search without a daemon.`;
+
 export interface BackendStatus {
   identity: BackendIdentity;
   phase: BackendPhase;

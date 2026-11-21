@@ -56,14 +56,17 @@ export const DEFAULT_SETTINGS: KwiryPluginSettings = {
 };
 
 /** Merges stored data over defaults, discarding unknown keys. */
-export function loadSettings(stored: unknown): KwiryPluginSettings {
+export function loadSettings(stored: unknown, daemonBackendAvailable = true): KwiryPluginSettings {
   const settings: KwiryPluginSettings = {
     ...DEFAULT_SETTINGS,
     enabledSourceFormats: { ...DEFAULT_ENABLED_SOURCE_FORMATS },
   };
-  if (typeof stored !== "object" || stored === null) {
+  if (stored === null || stored === undefined) {
+    if (!daemonBackendAvailable) settings.backendProfile = "in_plugin";
     return settings;
   }
+  if (typeof stored !== "object") return settings;
+  // Legacy settings without a profile keep the original implicit daemon choice.
   const source = stored as Record<string, unknown>;
   if (source.backendProfile === "daemon" || source.backendProfile === "in_plugin") {
     settings.backendProfile = source.backendProfile;

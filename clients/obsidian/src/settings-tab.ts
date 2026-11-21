@@ -5,6 +5,7 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 
 import type KwiryPlugin from "./main";
 import type { SearchMode } from "./api";
+import { DAEMON_HOST_UNAVAILABLE_GUIDANCE } from "./backend";
 import {
   SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
   SOURCE_ROW_LIMIT_SETTING_NAME,
@@ -31,20 +32,30 @@ export class KwirySettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    const daemonAvailable = this.plugin.daemonBackendAvailable;
     new Setting(containerEl)
       .setName("Search backend")
-      .setDesc("Backend selection is explicit. A daemon failure never activates in-plugin search.")
-      .addDropdown((dropdown) =>
+      .setDesc(daemonAvailable
+        ? "Backend selection is explicit. A daemon failure never activates in-plugin search."
+        : DAEMON_HOST_UNAVAILABLE_GUIDANCE)
+      .addDropdown((dropdown) => {
         dropdown
-          .addOptions({ daemon: "Daemon", in_plugin: "In-plugin · Lexical" })
+          .addOptions({
+            daemon: daemonAvailable ? "Daemon" : "Daemon (unavailable)",
+            in_plugin: "In-plugin · Lexical",
+          })
           .setValue(this.plugin.settings.backendProfile)
           .onChange(async (value) => {
             this.plugin.settings.backendProfile = value === "in_plugin" ? "in_plugin" : "daemon";
             await this.plugin.saveSettings();
             await this.plugin.activateBackendProfile();
             this.display();
-          }),
-      );
+          });
+        if (!daemonAvailable) {
+          const daemonOption = dropdown.selectEl.querySelector<HTMLOptionElement>('option[value="daemon"]');
+          if (daemonOption) daemonOption.disabled = true;
+        }
+      });
 
     if (this.plugin.settings.backendProfile === "daemon") {
       this.renderDaemonSettings(containerEl);
