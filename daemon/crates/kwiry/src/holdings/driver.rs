@@ -1,14 +1,7 @@
-//! The daemon's one holder driver: a dedicated thread that owns the holder
-//! and runs its passes on the holder's own schedule.
-//!
-//! - **List** whenever the relist scheduler says one is due (startup, the
-//!   periodic interval, backoff), and a clock probe while the hold is raised.
-//! - **Status** and **obligation reports** on their configured intervals.
-//! - **Purge** passes on their interval, against the census-only purger:
-//!   detach and deletion are refused, so they change nothing.
-//! - **Release** instructions are never evaluated in this build (a matched
-//!   release would durably record a reservation the census-only purger can
-//!   never honour, which holds every later list back).
+//! The daemon's list-only holder driver. A dedicated thread owns the holder
+//! and lists whenever its relist scheduler says one is due (startup, the
+//! periodic interval, backoff). It also probes the authority's clock while a
+//! clock hold is raised. It does not run status, report, purge or release passes.
 //!
 //! Request handlers never call the holder; they share only its gate. The
 //! thread holds no async lock and the holder's HTTP calls block only it.
@@ -17,6 +10,8 @@
 //! holder revokes every gate clone, the event sink trips [`FailStop`], and
 //! the serving task stops the process with a non-zero exit.
 
+use std::fs;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -27,13 +22,11 @@ use kwiry_core::{Config, HolderSettings};
 use kwiry_holdings::clock::Clock;
 use kwiry_holdings::gate::{Refusal, ServingGate};
 use kwiry_holdings::holder::{ListOutcome, RouteHealth};
-use kwiry_holdings::purge::ObligationsRefused;
 use kwiry_holdings::state::HolderState;
-use kwiry_holdings::store::ArtifactPurger;
 use kwiry_holdings::store::ResourceStore;
 use serde::{Deserialize, Serialize};
 
-use super::adapters::{CensusOnlyPurger, LogSink};
+use super::adapters::LogSink;
 use super::{start_holder, system_clock};
 
 /// The operator message a fail-stopped daemon exits with.
@@ -43,10 +36,9 @@ pub(crate) const FAIL_STOP_MESSAGE: &str = "holder_state_unwritable: the lifecyc
 /// by `kwiry holder status`. Never holds keys, ids of resources, nonces or
 /// digests.
 pub(crate) const SNAPSHOT_FILE: &str = "holder-status.json";
+/// Temporary snapshots left by a crash are not index content.
+pub(super) const SNAPSHOT_TEMP_PREFIX: &str = ".holder-status.json.";
 
-const DEFAULT_STATUS_INTERVAL_S: u64 = 60;
-const DEFAULT_REPORT_INTERVAL_S: u64 = 30;
-const DEFAULT_PURGE_INTERVAL_S: u64 = 60;
 const TICK: Duration = Duration::from_millis(500);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const SNAPSHOT_REFRESH_MS: i64 = 30_000;
@@ -82,64 +74,30 @@ pub(crate) fn gate_revoked(gate: &ServingGate) -> bool {
     matches!(gate.check(""), Err(Refusal::Revoked))
 }
 
-#[derive(Clone, Copy)]
-struct Intervals {
-    status_ms: u64,
-    report_ms: u64,
-    purge_ms: u64,
-}
-
-impl Intervals {
-    fn from(settings: &HolderSettings) -> Self {
-        let ms = |value: Option<u64>, default: u64| value.unwrap_or(default).saturating_mul(1000);
-        Self {
-            status_ms: ms(settings.status_interval_seconds, DEFAULT_STATUS_INTERVAL_S),
-            report_ms: ms(settings.report_interval_seconds, DEFAULT_REPORT_INTERVAL_S),
-            purge_ms: ms(settings.purge_interval_seconds, DEFAULT_PURGE_INTERVAL_S),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Tick {
     Continue,
     FailStopped,
 }
 
-/// One holder and the passes it is owed.
-pub(crate) struct Driver<S: ResourceStore, T: kwiry_holdings::client::Transport, P> {
+/// One holder and its list scheduler.
+struct Driver<S: ResourceStore, T: kwiry_holdings::client::Transport> {
     holder: kwiry_holdings::holder::Holder<S, T>,
-    purger: P,
     clock: Arc<dyn Clock>,
-    intervals: Intervals,
-    next_status: u64,
-    next_report: u64,
-    next_purge: u64,
     /// The last list outcome logged, so a standing refusal (an auth halt, a
     /// pending reservation) is logged once rather than every tick.
     last_list_note: Option<String>,
 }
 
-impl<S, T, P> Driver<S, T, P>
+impl<S, T> Driver<S, T>
 where
     S: ResourceStore,
     T: kwiry_holdings::client::Transport,
-    P: ArtifactPurger,
 {
-    fn new(
-        holder: kwiry_holdings::holder::Holder<S, T>,
-        purger: P,
-        clock: Arc<dyn Clock>,
-        intervals: Intervals,
-    ) -> Self {
+    fn new(holder: kwiry_holdings::holder::Holder<S, T>, clock: Arc<dyn Clock>) -> Self {
         Self {
             holder,
-            purger,
             clock,
-            intervals,
-            next_status: 0,
-            next_report: 0,
-            next_purge: 0,
             last_list_note: None,
         }
     }
@@ -148,9 +106,8 @@ where
         &self.holder
     }
 
-    /// One scheduling round. Each pass refuses on its own when it may not
-    /// run (no list in this process, an auth halt, a backoff).
-    pub(crate) fn tick(&mut self) -> Tick {
+    /// Runs the list scheduler and clock probe, respecting the holder's refusals.
+    fn tick(&mut self) -> Tick {
         if self.holder.fail_stopped() {
             return Tick::FailStopped;
         }
@@ -167,54 +124,10 @@ where
             tracing::warn!(failure = ?failure, "holder clock probe failed");
         }
         if self.holder.fail_stopped() {
-            return Tick::FailStopped;
+            Tick::FailStopped
+        } else {
+            Tick::Continue
         }
-        let now = self.clock.mono_ms();
-        if now >= self.next_status {
-            self.next_status = now.saturating_add(self.intervals.status_ms);
-            match self.holder.status_once(&self.purger) {
-                Ok(summary) => tracing::debug!(?summary, "holder status pass"),
-                Err(refused) => log_refused("status", refused),
-            }
-        }
-        if now >= self.next_report {
-            self.next_report = now.saturating_add(self.intervals.report_ms);
-            match self.holder.report_once(&self.purger) {
-                Ok(summary) => tracing::debug!(?summary, "holder report pass"),
-                Err(refused) => log_refused("report", refused),
-            }
-        }
-        if now >= self.next_purge {
-            self.next_purge = now.saturating_add(self.intervals.purge_ms);
-            self.purge_pass();
-        }
-        if self.holder.fail_stopped() {
-            return Tick::FailStopped;
-        }
-        Tick::Continue
-    }
-
-    /// Detach, then delete-and-verify. With the census-only purger both
-    /// refuse every step: nothing is detached, reserved or deleted.
-    fn purge_pass(&mut self) {
-        match self.holder.purge_detach(&mut self.purger) {
-            Ok(0) => {}
-            Ok(detached) => tracing::info!(detached, "holder purge detached"),
-            Err(refused) => return log_refused("purge", refused),
-        }
-        match self.holder.purge_delete_and_verify(&mut self.purger) {
-            Ok(summary) => tracing::debug!(?summary, "holder purge pass"),
-            Err(refused) => log_refused("purge", refused),
-        }
-    }
-}
-
-fn log_refused(pass: &'static str, refused: ObligationsRefused) {
-    match refused {
-        ObligationsRefused::HolderStateUnwritable => {
-            tracing::error!(pass, "holder pass refused: holder state unwritable");
-        }
-        other => tracing::debug!(pass, refused = ?other, "holder pass not run"),
     }
 }
 
@@ -357,14 +270,36 @@ fn write_snapshot(data_dir: &Path, report: &HolderReport, last: &mut Option<(Hol
     {
         return;
     }
-    *last = Some((unstamped, now));
-    let Ok(bytes) = serde_json::to_vec_pretty(report) else {
-        return;
-    };
-    let path = data_dir.join(SNAPSHOT_FILE);
-    let temporary = data_dir.join(format!(".{SNAPSHOT_FILE}.tmp"));
-    if std::fs::write(&temporary, bytes).is_ok() {
-        let _ = std::fs::rename(&temporary, &path);
+    if replace_snapshot(data_dir, report).is_ok() {
+        *last = Some((unstamped, now));
+    }
+}
+
+fn replace_snapshot(data_dir: &Path, report: &HolderReport) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(report)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(SNAPSHOT_TEMP_PREFIX)
+        .tempfile_in(data_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.write_all(&bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(data_dir.join(SNAPSHOT_FILE))?;
+    #[cfg(unix)]
+    fs::File::open(data_dir)?.sync_all()?;
+    Ok(())
+}
+
+fn remove_snapshot(data_dir: &Path) {
+    if let Err(error) = fs::remove_file(data_dir.join(SNAPSHOT_FILE))
+        && error.kind() != ErrorKind::NotFound
+    {
+        tracing::warn!(kind = ?error.kind(), "could not remove the holder status snapshot");
     }
 }
 
@@ -406,15 +341,13 @@ impl HolderService {
                     }
                 };
                 let gate = holder.gate();
-                let mut driver = Driver::new(
-                    holder,
-                    CensusOnlyPurger::new(&data_dir),
-                    clock.clone(),
-                    Intervals::from(&settings),
-                );
+                let mut driver = Driver::new(holder, clock);
+                // Do not expose a previous daemon's snapshot as ours.
+                remove_snapshot(&data_dir);
                 if started_tx.send(Ok(gate)).is_err() {
                     return;
                 }
+                tracing::info!("this build lists holdings only; it does not report status, report obligations, or delete index data");
                 run(&trip_poll, &mut driver, &data_dir, &stop_rx);
             })
             .map_err(|error| anyhow!("could not start the holder thread: {error}"))?;
@@ -456,11 +389,7 @@ impl HolderService {
 
 fn run(
     fail_stop: &FailStop,
-    driver: &mut Driver<
-        super::adapters::ConfiguredRooms,
-        super::transport::HttpTransport,
-        CensusOnlyPurger,
-    >,
+    driver: &mut Driver<super::adapters::ConfiguredRooms, super::transport::HttpTransport>,
     data_dir: &Path,
     stop: &mpsc::Receiver<()>,
 ) {
@@ -478,7 +407,10 @@ fn run(
         }
         match stop.recv_timeout(TICK) {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            _ => return,
+            _ => {
+                remove_snapshot(data_dir);
+                return;
+            }
         }
     }
 }
@@ -487,7 +419,8 @@ fn run(
 mod tests {
     use super::*;
     use crate::holdings::openclast_profile;
-    use kwiry_holdings::testkit::{Fault, MemoryPurger, Rig};
+    use kwiry_holdings::state::STATE_FILE;
+    use kwiry_holdings::testkit::{FakeAuthority, Fault, MemoryStore, Rig};
 
     const DIGEST_SALT: &str = "openclast-lifecycle/v1";
 
@@ -497,22 +430,8 @@ mod tests {
         (dir, rig)
     }
 
-    fn intervals() -> Intervals {
-        Intervals {
-            status_ms: 0,
-            report_ms: 0,
-            purge_ms: 0,
-        }
-    }
-
-    /// Takes the rig's holder into a driver with the given purger.
-    fn driver<P: ArtifactPurger>(
-        rig: &mut Rig,
-        purger: P,
-    ) -> Driver<kwiry_holdings::testkit::MemoryStore, kwiry_holdings::testkit::FakeAuthority, P>
-    {
-        let holder = rig.take_holder();
-        Driver::new(holder, purger, rig.clock.clone(), intervals())
+    fn driver(rig: &mut Rig) -> Driver<MemoryStore, FakeAuthority> {
+        Driver::new(rig.take_holder(), rig.clock.clone())
     }
 
     #[test]
@@ -522,64 +441,40 @@ mod tests {
         rig.store.hold("room", room, true, 1);
         let holding = rig.authority.state().add_active("room", room);
         rig.authority.state().attest(&holding, "synthetic-root-1");
-        // A real data root with one generation, the census-only purger's view.
-        let data = dir.path().join("data");
-        std::fs::create_dir_all(data.join("generations/g-1")).unwrap();
-        let mut driver = driver(&mut rig, CensusOnlyPurger::new(&data));
-        assert_eq!(driver.tick(), Tick::Continue);
-        assert!(driver.holder().gate().list_applied_in_process());
+        rig.purger.add("room", room, 1);
+        let unattributed = rig.purger.add_unattributable();
+        let generation = dir.path().join("data/generations/g-1");
+        fs::create_dir_all(&generation).unwrap();
 
-        // Retire the room (a tombstoned obligation) and list a release
-        // instruction bound to an accepted status.
-        rig.authority.state().retire(&holding);
-        let digest = rig
-            .authority
-            .state()
-            .accepted_digests
-            .last()
-            .cloned()
-            .expect("the first tick sent a status the authority accepted");
-        rig.authority.state().issue_release(&digest, 1);
+        // Seed a matching accepted report in the testkit, not the driver.
+        // The daemon must not act even on a release it could match.
+        assert!(matches!(rig.holder().list_once(), ListOutcome::Applied(_)));
+        assert_eq!(rig.status().unwrap().receipts, 1);
+        let digest = rig.authority.state().accepted_digests[0].clone();
+        let obligation = rig.authority.state().retire(&holding);
+        let release = rig.authority.state().issue_release(&digest, 1);
+        let mut driver = driver(&mut rig);
         for _ in 0..5 {
             rig.advance(60_000);
             assert_eq!(driver.tick(), Tick::Continue);
         }
-        let state = driver.holder().state();
+        let applied = driver.holder().applied().unwrap();
+        assert_eq!(applied.instructions.len(), 1);
+        assert!(rig.authority.state().outstanding(&release));
+        assert!(applied.items.iter().any(|item| {
+            item.obligation
+                .as_ref()
+                .is_some_and(|listed| listed.obligation_id == obligation)
+        }));
+        let state = HolderState::parse(&fs::read(rig.dir.join(STATE_FILE)).unwrap()).unwrap();
         assert!(state.is_tombstoned(room));
-        // No release was evaluated, so no reservation exists.
         assert!(state.status.instructions.is_empty());
         assert!(!state.status.reservation_pending());
-        // Nothing was detached: every purge stayed before its first step.
-        assert!(
-            state
-                .obligations
-                .channels
-                .values()
-                .all(|c| c.purge.deleted.is_empty())
-        );
-        // The data root is untouched.
-        assert!(data.join("generations/g-1").is_dir());
-    }
-
-    #[test]
-    fn the_census_only_purger_is_what_stops_deletion() {
-        // Control: the same scenario with the testkit's deleting purger does
-        // delete, so the zero above is the adapter's doing.
-        let (_dir, mut rig) = rig();
-        let room = "room-test-1";
-        rig.store.hold("room", room, true, 1);
-        let holding = rig.authority.state().add_active("room", room);
-        rig.authority.state().attest(&holding, "synthetic-root-1");
-        let purger = MemoryPurger::for_store(&rig.store);
-        purger.add("room", room, 2);
-        let mut driver = driver(&mut rig, purger.clone());
-        assert_eq!(driver.tick(), Tick::Continue);
-        rig.authority.state().retire(&holding);
-        for _ in 0..5 {
-            rig.advance(60_000);
-            driver.tick();
-        }
-        assert_eq!(purger.deleted().len(), 2);
+        assert!(!state.obligations.channels.contains_key(&obligation));
+        assert!(rig.purger.deleted().is_empty());
+        assert!(rig.purger.present(&unattributed));
+        assert_eq!(rig.purger.present_of("room", room), 1);
+        assert!(generation.is_dir());
     }
 
     #[test]
@@ -588,8 +483,7 @@ mod tests {
         rig.store.hold("room", "room-test-1", true, 1);
         let holding = rig.authority.state().add_active("room", "room-test-1");
         rig.authority.state().attest(&holding, "synthetic-root-1");
-        let purger = MemoryPurger::for_store(&rig.store);
-        let mut driver = driver(&mut rig, purger);
+        let mut driver = driver(&mut rig);
         assert_eq!(driver.tick(), Tick::Continue);
         let gate = driver.holder().gate();
         assert!(!gate_revoked(&gate));
@@ -642,8 +536,7 @@ mod tests {
         rig.store.hold("room", "room-test-1", true, 1);
         let holding = rig.authority.state().add_active("room", "room-test-1");
         rig.authority.state().attest(&holding, "synthetic-root-1");
-        let purger = MemoryPurger::for_store(&rig.store);
-        let mut driver = driver(&mut rig, purger);
+        let mut driver = driver(&mut rig);
         driver.tick();
         let report = HolderReport::from_holder(driver.holder(), 0);
         let text = serde_json::to_string(&report).unwrap();

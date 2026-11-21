@@ -5,7 +5,7 @@
   "room": "fixture-room",
   "path": "Format Matrix/juniperfield-kestrelway.pdf",
   "format": "pdf",
-  "extraction_profile": "enhanced",
+  "extraction_profile": "portable",
   "coverage": "indexed-complete",
   "content_hash": "f071e8e9ed1949736f3dc33e7435e76386802df6ee300a9e5da07d26d1f77f15",
   "byte_length": 641,

@@ -17,41 +17,6 @@ const LAYOUT_VERSION: u32 = crate::partition::GENERATION_LAYOUT_VERSION;
 const RETAINED_GENERATIONS: usize = 3;
 static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// The publication lock. Every step that makes a generation or a staging
-/// directory observable takes the shared side; a lifecycle census that must
-/// see a stable artifact set takes the exclusive side through
-/// [`freeze_generation_publications`]. One process at a time owns a data root
-/// (the writer lock), so an in-process lock covers every publisher.
-static PUBLICATION_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
-
-fn publication_shared() -> std::sync::RwLockReadGuard<'static, ()> {
-    PUBLICATION_LOCK
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Holds every new generation publication back until dropped.
-#[must_use = "publications resume as soon as the freeze is dropped"]
-pub struct PublicationFreeze {
-    _guard: std::sync::RwLockWriteGuard<'static, ()>,
-}
-
-impl std::fmt::Debug for PublicationFreeze {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("PublicationFreeze")
-    }
-}
-
-/// Waits for in-flight publications to finish, then holds new ones back while
-/// the returned guard lives.
-pub fn freeze_generation_publications() -> PublicationFreeze {
-    PublicationFreeze {
-        _guard: PUBLICATION_LOCK
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    }
-}
-
 #[cfg(test)]
 thread_local! {
     static STORAGE_PROBE_TEST_FAULT: std::cell::Cell<bool> = const {
@@ -173,7 +138,6 @@ impl DataRoot {
     pub fn create_candidate(&self) -> Result<CandidateGeneration> {
         let id = generation_id()?;
         let generations = self.root.join("generations");
-        let _publishing = publication_shared();
         fs::create_dir_all(&generations).map_err(|error| io_error(&generations, error))?;
         let staging_dir = generations.join(format!(".staging-{id}"));
         let index_dir = staging_dir.join("index");
@@ -266,7 +230,6 @@ impl DataRoot {
             GenerationPaths::new(candidate.id.clone(), candidate.staging_dir.clone());
         candidate_paths.validate()?;
         sync_tree(&candidate.staging_dir)?;
-        let _publishing = publication_shared();
         inject_publish_fault(fault, PublishFault::CandidateSynced)?;
 
         let generations = self.root.join("generations");

@@ -129,10 +129,7 @@ pub use formats::{
     PdfSection, PdfTextRun, PdfWritingMode, extract_pdf_candidate, pdf_limits, read_pdf_geometry,
 };
 #[cfg(feature = "native")]
-pub use generation::{
-    DataRoot, DataRootLock, DiscardedGeneration, GenerationPaths, PublicationFreeze,
-    freeze_generation_publications,
-};
+pub use generation::{DataRoot, DataRootLock, DiscardedGeneration, GenerationPaths};
 #[cfg(feature = "native")]
 pub use index::build_index;
 #[cfg(feature = "portable")]

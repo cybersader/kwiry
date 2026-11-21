@@ -187,15 +187,6 @@ pub struct HolderSettings {
     pub clock_skew_allowance_seconds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_stale_serve_seconds: Option<u32>,
-    /// Seconds between status-report passes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_interval_seconds: Option<u64>,
-    /// Seconds between obligation-report passes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report_interval_seconds: Option<u64>,
-    /// Seconds between release and purge passes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub purge_interval_seconds: Option<u64>,
 }
 
 #[cfg(feature = "native")]

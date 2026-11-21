@@ -1,32 +1,22 @@
-//! The daemon's holder adapters: what Kwiry holds, a census of its retained
-//! index data, its data-root marker and a log-only event sink.
-//!
-//! **No adapter here deletes or reserves anything.** [`CensusOnlyPurger`]
-//! observes the data root and refuses `detach`, `reserve` and `delete` with a
-//! retryable error. Production deletion is a separate, separately reviewed
-//! adapter.
+//! The daemon's list-only holder adapters: configured rooms, the index
+//! data-root marker and a log-only event sink.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kwiry_core::{Config, freeze_generation_publications};
+use kwiry_core::Config;
 use kwiry_holdings::events::{EventSink, HolderEvent};
 use kwiry_holdings::startup::{ContentState, DataRoot, DataRootEvidence, MarkerState};
-use kwiry_holdings::store::{
-    ArtifactPurger, Census, Claimant, DeleteOutcome, HeldResource, ManifestUnits, ObservedUnit,
-    PublicationFreeze, PublishPlan, ReserveOutcome, ResourceKey, ResourceStore, StoreError,
-};
+use kwiry_holdings::store::{HeldResource, PublishPlan, ResourceKey, ResourceStore, StoreError};
+
+use super::driver::{SNAPSHOT_FILE, SNAPSHOT_TEMP_PREFIX};
 
 /// The resource kind Kwiry holds: one room per registered vault.
 pub(crate) const ROOM_KIND: &str = "room";
 
 /// The holder marker in the data root (the startup loss/reset rules).
 pub(crate) const MARKER_FILE: &str = "holder-marker.json";
-
-/// The refusal every deleting operation returns in this build.
-pub(crate) const DELETION_DISABLED: &str = "deletion is not enabled in this build";
 
 /// The rooms the configuration names. The classification an applied list
 /// produces is held by the holder's gate; in this build the serving path does
@@ -72,99 +62,6 @@ impl ResourceStore for ConfiguredRooms {
     fn revoke(&mut self, _plan: &PublishPlan) {}
 }
 
-/// Observes the data root; never detaches, reserves or deletes.
-///
-/// Every published generation and every staging build is one unit. Unit ids
-/// are the generation directory names (random, never a room id), and each
-/// names one immutable generation. The census cannot tell which room's bytes
-/// a generation holds, so every unit is unattributed: no obligation can ever
-/// claim one, and a report can never say `complete` while one remains.
-pub(crate) struct CensusOnlyPurger {
-    data_dir: PathBuf,
-}
-
-impl CensusOnlyPurger {
-    pub(crate) fn new(data_dir: &Path) -> Self {
-        Self {
-            data_dir: data_dir.to_path_buf(),
-        }
-    }
-
-    fn refuse(step: &'static str) -> StoreError {
-        tracing::warn!(step, "holder {step} refused: {DELETION_DISABLED}");
-        StoreError(DELETION_DISABLED.to_owned())
-    }
-}
-
-impl ArtifactPurger for CensusOnlyPurger {
-    fn detach(&mut self, _resource: &ResourceKey) -> Result<(), StoreError> {
-        Err(Self::refuse("detach"))
-    }
-
-    fn delete(
-        &mut self,
-        _unit_id: &str,
-        _claimant: &Claimant,
-    ) -> Result<DeleteOutcome, StoreError> {
-        Err(Self::refuse("delete"))
-    }
-
-    fn reserve(
-        &mut self,
-        _instruction_id: &str,
-        _units: &ManifestUnits,
-    ) -> Result<ReserveOutcome, StoreError> {
-        Err(Self::refuse("reserve"))
-    }
-
-    fn barrier(&mut self) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    fn census(&self) -> Result<Census, StoreError> {
-        let generations = self.data_dir.join("generations");
-        let entries = match fs::read_dir(&generations) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Census {
-                    locations: vec!["generations".to_owned()],
-                    units: Vec::new(),
-                });
-            }
-            Err(_) => return Err(StoreError("census: data root unreadable".to_owned())),
-        };
-        let mut units = BTreeMap::new();
-        for entry in entries {
-            let entry = entry.map_err(|_| StoreError("census: entry unreadable".to_owned()))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let kind = match name.strip_prefix(".staging-") {
-                Some(_) => "staging",
-                None if name.starts_with("g-") => "generation",
-                // Anything else in the generations directory is still
-                // retained data the census must count.
-                None => "other",
-            };
-            units.insert(
-                format!("{kind}:{name}"),
-                ObservedUnit {
-                    unit_id: format!("{kind}:{name}"),
-                    attribution: None,
-                    open_handles: 0,
-                    reserved: false,
-                },
-            );
-        }
-        Ok(Census {
-            locations: vec!["generations".to_owned()],
-            units: units.into_values().collect(),
-        })
-    }
-
-    fn freeze_publications(&self) -> Result<PublicationFreeze<'_>, StoreError> {
-        Ok(PublicationFreeze::new(freeze_generation_publications()))
-    }
-}
-
 /// The index data root as the holder's startup rules see it.
 pub(crate) struct IndexDataRoot {
     data_dir: PathBuf,
@@ -183,7 +80,7 @@ impl IndexDataRoot {
 /// share a custom data directory.
 const NON_CONTENT: &[&str] = &[
     MARKER_FILE,
-    super::driver::SNAPSHOT_FILE,
+    SNAPSHOT_FILE,
     "daemon.lock",
     "replay.lock",
     "replay-epoch",
@@ -213,7 +110,7 @@ impl DataRoot for IndexDataRoot {
             };
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if NON_CONTENT.contains(&name.as_ref()) {
+            if NON_CONTENT.contains(&name.as_ref()) || name.starts_with(SNAPSHOT_TEMP_PREFIX) {
                 continue;
             }
             // An empty generations directory holds nothing.
@@ -302,41 +199,6 @@ impl EventSink for LogSink {
 mod tests {
     use super::*;
 
-    fn key() -> ResourceKey {
-        ResourceKey {
-            kind: ROOM_KIND.into(),
-            id: "room-test-1".into(),
-        }
-    }
-
-    #[test]
-    fn the_census_only_purger_refuses_every_deleting_step() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut purger = CensusOnlyPurger::new(dir.path());
-        assert!(purger.detach(&key()).is_err());
-        assert!(purger.reserve("in_x", &ManifestUnits::new()).is_err());
-        let claimant = kwiry_holdings::store::Claimant::Obligation {
-            obligation_id: "ob_x".into(),
-            resource: key(),
-        };
-        assert!(purger.delete("generation:g-1", &claimant).is_err());
-        assert!(purger.barrier().is_ok());
-    }
-
-    #[test]
-    fn the_census_counts_every_generation_unattributed() {
-        let dir = tempfile::tempdir().unwrap();
-        let purger = CensusOnlyPurger::new(dir.path());
-        assert!(purger.census().unwrap().units.is_empty());
-        fs::create_dir_all(dir.path().join("generations/g-1")).unwrap();
-        fs::create_dir_all(dir.path().join("generations/.staging-g-2")).unwrap();
-        let census = purger.census().unwrap();
-        let ids: Vec<_> = census.units.iter().map(|u| u.unit_id.as_str()).collect();
-        assert_eq!(ids, ["generation:g-1", "staging:.staging-g-2"]);
-        assert!(census.units.iter().all(|u| u.attribution.is_none()));
-        drop(purger.freeze_publications().unwrap());
-    }
-
     #[test]
     fn the_data_root_is_lost_only_when_it_holds_no_index_content() {
         let dir = tempfile::tempdir().unwrap();
@@ -348,6 +210,11 @@ mod tests {
         assert_eq!(root.inspect("hd_a").unwrap(), lost);
         fs::create_dir_all(dir.path().join("data/generations")).unwrap();
         fs::write(dir.path().join("data/daemon.lock"), b"").unwrap();
+        fs::write(
+            root.data_dir.join(format!("{SNAPSHOT_TEMP_PREFIX}test")),
+            b"",
+        )
+        .unwrap();
         assert_eq!(root.inspect("hd_a").unwrap(), lost);
         root.bind("hd_a").unwrap();
         assert_eq!(root.inspect("hd_a").unwrap().marker, MarkerState::Matches);

@@ -488,11 +488,6 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
     validate_room_registrations(path, config)
 }
 
-/// Bounds for the holder timing knobs the lifecycle protocol leaves to the
-/// holder. The protocol's own limits (page size ≤ 1000) are enforced again by
-/// the holder crate at start.
-pub const HOLDER_INTERVAL_RANGE_SECONDS: std::ops::RangeInclusive<u64> = 1..=3600;
-
 fn validate_holder(path: &Path, config: &Config) -> Result<()> {
     let Some(holder) = &config.holder else {
         return Ok(());
@@ -540,20 +535,11 @@ fn validate_holder(path: &Path, config: &Config) -> Result<()> {
             "holder.max_stale_serve_seconds must be between 0 and 86400".to_owned(),
         ));
     }
-    for (name, value) in [
-        ("status_interval_seconds", holder.status_interval_seconds),
-        ("report_interval_seconds", holder.report_interval_seconds),
-        ("purge_interval_seconds", holder.purge_interval_seconds),
-    ] {
-        if value.is_some_and(|v| !HOLDER_INTERVAL_RANGE_SECONDS.contains(&v)) {
-            return Err(invalid(format!("holder.{name} must be between 1 and 3600")));
-        }
-    }
     Ok(())
 }
 
 /// `https://host[:port]/path` with no user info, query, fragment or trailing
-/// slash. Plain `http` is accepted only for a loopback host, for local
+/// slash. Plain `http` is accepted only for a loopback IP literal, for local
 /// authorities and tests.
 fn validate_holder_issuer(issuer: &str) -> std::result::Result<(), &'static str> {
     if issuer.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -580,17 +566,14 @@ fn validate_holder_issuer(issuer: &str) -> std::result::Result<(), &'static str>
         return Err("must include the lifecycle base path");
     }
     if !https {
-        let host = if let Some(bracketed) = authority.strip_prefix('[') {
-            bracketed.split_once(']').map_or("", |(host, _)| host)
-        } else {
-            authority.split(':').next().unwrap_or("")
-        };
-        let loopback = host == "localhost"
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback());
-        if !loopback {
-            return Err("must use https unless the host is loopback");
+        // SocketAddr accepts only IP literals, requires brackets for IPv6,
+        // and validates any explicit port. Try a default port when omitted.
+        let loopback = authority
+            .parse::<std::net::SocketAddr>()
+            .or_else(|_| format!("{authority}:80").parse())
+            .is_ok_and(|address| address.ip().is_loopback());
+        if !loopback || authority.contains('%') {
+            return Err("must use https unless the host is a loopback IP literal");
         }
     }
     Ok(())
@@ -1062,7 +1045,12 @@ mod tests {
         toml::from_str::<Config>(&source).map_err(|error| error.to_string())
     }
 
-    const COMPLETE_HOLDER: &str = "profile = \"openclast\"\nissuer = \"https://login.example.test/api/lifecycle/v1\"\nstate_dir = \"/srv/kwiry-holder\"\n";
+    fn complete_holder(root: &Path) -> String {
+        let state_dir = toml::Value::try_from(root.join("holder")).unwrap();
+        format!(
+            "profile = \"openclast\"\nissuer = \"https://login.example.test/api/lifecycle/v1\"\nstate_dir = {state_dir}\n"
+        )
+    }
 
     #[test]
     fn holder_section_is_optional_and_absent_by_default() {
@@ -1074,8 +1062,10 @@ mod tests {
 
     #[test]
     fn partial_or_unknown_holder_configuration_is_refused_at_parse() {
+        let temporary = tempfile::tempdir().unwrap();
+        let complete = complete_holder(temporary.path());
         for missing in ["profile", "issuer", "state_dir"] {
-            let partial: String = COMPLETE_HOLDER
+            let partial: String = complete
                 .lines()
                 .filter(|line| !line.starts_with(missing))
                 .map(|line| format!("{line}\n"))
@@ -1086,21 +1076,33 @@ mod tests {
                 "{error}"
             );
         }
-        let error = holder_config(&format!("{COMPLETE_HOLDER}key = \"inline\"\n")).unwrap_err();
-        assert!(error.contains("unknown field `key`"), "{error}");
-        let error = holder_config(
-            "profile = \"other\"\nissuer = \"https://a.test/x\"\nstate_dir = \"/s\"\n",
-        )
-        .unwrap_err();
+        for removed_or_unknown in [
+            "key",
+            "status_interval_seconds",
+            "report_interval_seconds",
+            "purge_interval_seconds",
+        ] {
+            let error =
+                holder_config(&format!("{complete}{removed_or_unknown} = 1\n")).unwrap_err();
+            assert!(
+                error.contains(&format!("unknown field `{removed_or_unknown}`")),
+                "{error}"
+            );
+        }
+        let unknown_profile = complete.replace("profile = \"openclast\"", "profile = \"other\"");
+        let error = holder_config(&unknown_profile).unwrap_err();
         assert!(error.contains("unknown variant"), "{error}");
-        assert!(holder_config(COMPLETE_HOLDER).is_ok());
+        assert!(holder_config(&complete).is_ok());
     }
 
     #[test]
     fn holder_section_validation_names_the_offending_field() {
-        let path = Path::new("/synthetic/config.toml");
+        let temporary = tempfile::tempdir().unwrap();
+        let complete = complete_holder(temporary.path());
+        let config_path = temporary.path().join("config.toml");
+        let path = config_path.as_path();
         let check = |extra: &str, profile: HostProfile| {
-            let mut config = holder_config(&format!("{COMPLETE_HOLDER}{extra}")).unwrap();
+            let mut config = holder_config(&format!("{complete}{extra}")).unwrap();
             config.server.profile = profile;
             validate_holder(path, &config).map_err(|error| error.to_string())
         };
@@ -1121,23 +1123,11 @@ mod tests {
                 "max_stale_serve_seconds = 86401\n",
                 "holder.max_stale_serve_seconds",
             ),
-            (
-                "status_interval_seconds = 0\n",
-                "holder.status_interval_seconds",
-            ),
-            (
-                "report_interval_seconds = 3601\n",
-                "holder.report_interval_seconds",
-            ),
-            (
-                "purge_interval_seconds = 0\n",
-                "holder.purge_interval_seconds",
-            ),
         ] {
             let error = check(extra, HostProfile::OpenClast).unwrap_err();
             assert!(error.contains(field), "{extra}: {error}");
         }
-        let mut config = holder_config(COMPLETE_HOLDER).unwrap();
+        let mut config = holder_config(&complete).unwrap();
         config.holder.as_mut().unwrap().state_dir = PathBuf::from("relative/holder");
         assert!(
             validate_holder(path, &config)
@@ -1145,10 +1135,11 @@ mod tests {
                 .to_string()
                 .contains("must be absolute")
         );
-        config.holder.as_mut().unwrap().state_dir = PathBuf::from("/srv/vault/holder");
+        let vault = temporary.path().join("vault");
+        config.holder.as_mut().unwrap().state_dir = vault.join("holder");
         config.vaults.push(VaultRegistration {
             id: "notes".into(),
-            path: PathBuf::from("/srv/vault"),
+            path: vault,
             room: Some("room".into()),
         });
         assert!(
@@ -1160,19 +1151,25 @@ mod tests {
     }
 
     #[test]
-    fn holder_issuer_requires_https_except_on_loopback() {
+    fn holder_issuer_requires_https_except_for_loopback_ip_literals() {
         for good in [
             "https://login.example.test/api/lifecycle/v1",
             "https://login.example.test:8443/api/lifecycle/v1",
             "http://127.0.0.1:4000/api/lifecycle/v1",
-            "http://localhost/api/lifecycle/v1",
+            "http://127.255.0.42/api/lifecycle/v1",
+            "http://[::1]/api/lifecycle/v1",
             "http://[::1]:4000/api/lifecycle/v1",
         ] {
             assert_eq!(validate_holder_issuer(good), Ok(()), "{good}");
         }
         for bad in [
+            "http://localhost/api/lifecycle/v1",
             "http://login.example.test/api/lifecycle/v1",
             "http://10.0.0.1/api/lifecycle/v1",
+            "http://[::2]/api/lifecycle/v1",
+            "http://::1/api/lifecycle/v1",
+            "http://[::1]unexpected/api/lifecycle/v1",
+            "http://127.0.0.1:65536/api/lifecycle/v1",
             "ftp://login.example.test/x",
             "https://login.example.test",
             "https://login.example.test/api/lifecycle/v1/",

@@ -1,12 +1,12 @@
 //! `kwiry holder …`: operator commands for a configured holder.
 //!
-//! Commands that change holder state (`key`, `enroll`, `relist`,
-//! `resume-status`, `resume-report`) take the holder directory's exclusive
-//! lock and **refuse while a running daemon holds it**. `status` only reads:
-//! the durable holder state (written by atomic rename) and the running
-//! daemon's snapshot, so it is safe at any time. Nothing printed carries key
-//! material, resource ids, nonces or digests.
+//! `key`, `enroll` and `relist` take the holder directory's exclusive lock
+//! and refuse while a running daemon holds it. `status` changes no files:
+//! it reads durable state and shows the daemon's snapshot only while the
+//! holder lock is held. Nothing printed carries key material, resource ids,
+//! nonces or digests.
 
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use kwiry_core::{Config, HolderSettings, Paths, load_config_for_paths};
 use kwiry_holdings::engine::clock_hold::SEAL_FILE;
-use kwiry_holdings::state::{FsIo, HolderState, STATE_FILE};
+use kwiry_holdings::state::{FsIo, HolderState, LOCK_FILE, STATE_FILE};
 
 use super::adapters::LogSink;
 use super::driver::{HolderReport, LiveReport, SNAPSHOT_FILE, describe_list};
@@ -43,13 +43,6 @@ pub(crate) enum HolderCommand {
     Status {
         #[arg(long)]
         json: bool,
-    },
-    /// Operator resume (N5) of a bug-halted status channel.
-    ResumeStatus,
-    /// Operator resume (N5) of a bug-halted obligation report channel.
-    ResumeReport {
-        #[arg(value_name = "OBLIGATION_ID")]
-        obligation_id: String,
     },
 }
 
@@ -131,22 +124,6 @@ pub(crate) fn run(paths: &Paths, command: HolderCommand) -> Result<()> {
                 print_report(&report);
             }
         }
-        HolderCommand::ResumeStatus => {
-            let (mut holder, _) = start(&settings, &config, &paths.data_dir)?;
-            if holder.resume_status() {
-                println!("status channel resumed: it will be re-derived under a new key");
-            } else {
-                bail!("the status channel is not halted; nothing was changed");
-            }
-        }
-        HolderCommand::ResumeReport { obligation_id } => {
-            let (mut holder, _) = start(&settings, &config, &paths.data_dir)?;
-            if holder.resume_report(&obligation_id) {
-                println!("report channel resumed: it will be re-derived under a new key");
-            } else {
-                bail!("no halted report channel has that obligation id; nothing was changed");
-            }
-        }
     }
     Ok(())
 }
@@ -173,7 +150,7 @@ fn now_ms() -> i64 {
         })
 }
 
-/// Durable state plus the running daemon's snapshot, read without the lock.
+/// Durable state plus the daemon's snapshot if the state directory is locked.
 fn read_status(settings: &HolderSettings, data_dir: &Path) -> Result<HolderReport> {
     let state_path = settings.state_dir.join(STATE_FILE);
     let bytes = match std::fs::read(&state_path) {
@@ -200,8 +177,22 @@ fn read_status(settings: &HolderSettings, data_dir: &Path) -> Result<HolderRepor
         .ok()
         .and_then(|bytes| serde_json::from_slice::<HolderReport>(&bytes).ok())
         .filter(|snapshot| snapshot.holder_id == state.holder_id)
-        .and_then(|snapshot| snapshot.live);
+        .and_then(|snapshot| snapshot.live)
+        .filter(|_| holder_lock_is_held(&settings.state_dir));
     Ok(report)
+}
+
+fn holder_lock_is_held(state_dir: &Path) -> bool {
+    // Open only an existing lock file, without truncating it. The same lock
+    // primitive as HolderDir distinguishes contention from an I/O failure.
+    let Ok(lock) = OpenOptions::new()
+        .write(true)
+        .open(state_dir.join(LOCK_FILE))
+    else {
+        return false;
+    };
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .is_err_and(|error| error.raw_os_error() == fs2::lock_contended_error().raw_os_error())
 }
 
 fn utc(ms: i64) -> String {

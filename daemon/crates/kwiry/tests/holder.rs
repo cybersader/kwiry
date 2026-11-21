@@ -6,10 +6,11 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,13 +21,14 @@ use kwiry_core::{
 };
 use kwiry_holdings::client::{Timeouts, Transport};
 use kwiry_holdings::keys::HolderKey;
-use kwiry_holdings::profile::WireProfile;
+use kwiry_holdings::profile::{ROUTE_LIST, ROUTE_REPORT, ROUTE_STATUS, WireProfile};
 use kwiry_holdings::state::{FsIo, HolderDir};
 use kwiry_holdings::testkit::{AuthorityConfig, FakeAuthority, FakeClock, TEST_HOLDER_KEY_SEED};
 use tempfile::tempdir;
 
 const ROOM: &str = "RoomAaaa_0123456789abc";
 const DIGEST_SALT: &str = "openclast-lifecycle/v1";
+const BASE_PATH: &str = "/api/lifecycle/v1";
 
 /// The OpenClast wire profile, as the daemon's `profile = "openclast"`
 /// selects it. Mirrored here because the composition module is private to
@@ -70,13 +72,14 @@ struct AuthorityServer {
     authority: FakeAuthority,
     issuer: String,
     hits: Arc<AtomicUsize>,
+    post_paths: Arc<Mutex<Vec<String>>>,
 }
 
 impl AuthorityServer {
     fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let issuer = format!("{origin}/api/lifecycle/v1");
+        let issuer = format!("{origin}{BASE_PATH}");
         let clock = Arc::new(FakeClock::new(wall_ms(), 1_000_000));
         let authority = FakeAuthority::new(
             AuthorityConfig {
@@ -85,13 +88,15 @@ impl AuthorityServer {
                 digest_salt: DIGEST_SALT.into(),
                 holder_kind: "engine".into(),
                 serve_seconds: 900,
-                relist_seconds: 300,
+                relist_seconds: 5,
             },
             clock.clone(),
         );
         let hits = Arc::new(AtomicUsize::new(0));
+        let post_paths = Arc::new(Mutex::new(Vec::new()));
         let served = authority.clone();
         let counter = hits.clone();
+        let recorded_posts = post_paths.clone();
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
@@ -100,18 +105,34 @@ impl AuthorityServer {
                 if lag > 0 {
                     clock.advance(u64::try_from(lag).unwrap());
                 }
-                serve_one(stream, &served, &origin);
+                serve_one(stream, &served, &origin, &recorded_posts);
             }
         });
         Self {
             authority,
             issuer,
             hits,
+            post_paths,
         }
+    }
+
+    fn posts_to(&self, route: &str) -> usize {
+        let path = format!("{BASE_PATH}{route}");
+        self.post_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&seen| seen == &path)
+            .count()
     }
 }
 
-fn serve_one(mut stream: TcpStream, authority: &FakeAuthority, origin: &str) {
+fn serve_one(
+    mut stream: TcpStream,
+    authority: &FakeAuthority,
+    origin: &str,
+    post_paths: &Mutex<Vec<String>>,
+) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -121,8 +142,11 @@ fn serve_one(mut stream: TcpStream, authority: &FakeAuthority, origin: &str) {
         return;
     }
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_owned();
-    let path = parts.next().unwrap_or_default().to_owned();
+    let method = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+    if method == "POST" {
+        post_paths.lock().unwrap().push(path.to_owned());
+    }
     let mut content_type = String::new();
     let mut length = 0;
     loop {
@@ -223,9 +247,6 @@ fn fixture(issuer: Option<&str>) -> Fixture {
         page_size: None,
         clock_skew_allowance_seconds: None,
         max_stale_serve_seconds: None,
-        status_interval_seconds: Some(1),
-        report_interval_seconds: Some(1),
-        purge_interval_seconds: Some(1),
     });
     save_config(&config_path, &config).unwrap();
     Fixture {
@@ -327,61 +348,48 @@ fn wait_for(seconds: u64, mut condition: impl FnMut() -> bool) -> bool {
     false
 }
 
-#[test]
-fn a_configured_daemon_applies_a_list_and_gets_a_status_receipt_over_http() {
-    let server = AuthorityServer::start();
-    let fixture = fixture(Some(&server.issuer));
-    enroll(&fixture, &server);
-    {
-        let mut authority = server.authority.state();
-        let holding = authority.add_active("room", ROOM);
-        authority.attest(&holding, "synthetic-root-1");
-    }
-    let daemon = Daemon::start(&fixture);
-    let receipted = wait_for(20, || {
-        server
-            .authority
-            .state()
-            .statuses
-            .iter()
-            .any(|(_, status)| *status == 200)
-    });
-    assert!(receipted, "no status receipt");
-    // The receipted status cites a list the authority issued in this epoch;
-    // the holder's high-water (below) is that applied list.
-    let (cited, epoch) = {
-        let authority = server.authority.state();
-        let claims = authority
-            .statuses
-            .iter()
-            .find(|(_, status)| *status == 200)
-            .map(|(claims, _)| claims.clone())
-            .unwrap();
-        let cited = claims["list_ref"]["rev"]["seq"].as_u64().unwrap();
-        assert!(cited <= authority.seq);
-        assert_eq!(claims["list_ref"]["rev"]["epoch"], authority.epoch.as_str());
-        (cited, authority.epoch.clone())
-    };
-
-    // The running daemon's snapshot is visible to a read-only status.
-    let output = kwiry(&fixture, &["holder", "status", "--json"])
+fn holder_status(fixture: &Fixture) -> serde_json::Value {
+    let output = kwiry(fixture, &["holder", "status", "--json"])
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["high_water_seq"], cited);
-    assert_eq!(report["high_water_epoch"], epoch.as_str());
-    assert_eq!(report["status_halted"], false);
-    assert!(wait_for(5, || {
-        let output = kwiry(&fixture, &["holder", "status", "--json"])
-            .output()
-            .unwrap();
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        report["live"]["list_applied_in_process"] == true && report["live"]["route"] == "normal"
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn a_configured_daemon_applies_a_list_and_never_posts_status_or_obligation_reports() {
+    let server = AuthorityServer::start();
+    let fixture = fixture(Some(&server.issuer));
+    enroll(&fixture, &server);
+    let (seq, epoch) = {
+        let mut authority = server.authority.state();
+        let holding = authority.add_active("room", ROOM);
+        authority.attest(&holding, "synthetic-root-1");
+        authority.retire(&holding); // A live obligation, not just an empty report queue.
+        (authority.seq, authority.epoch.clone())
+    };
+    let daemon = Daemon::start(&fixture);
+
+    // The running daemon applied the signed list and exposed a local snapshot.
+    assert!(wait_for(20, || {
+        let report = holder_status(&fixture);
+        report["live"]["list_applied_in_process"] == true && report["high_water_seq"] == seq
     }));
-    let text = String::from_utf8(output.stdout).unwrap();
+    let report = holder_status(&fixture);
+    assert_eq!(report["high_water_epoch"], epoch.as_str());
+    assert_eq!(report["live"]["route"], "normal");
+    assert_eq!(report["tombstones"], 1);
+    let text = report.to_string();
     assert!(!text.contains(ROOM), "status never names a resource");
     assert!(!text.contains("\"d\""), "status never carries key material");
+
+    // A second scheduled list start proves the observation spans more than
+    // two 500 ms driver ticks (list starts are spaced at least 5 s apart).
+    assert!(wait_for(15, || server.posts_to(ROUTE_LIST) >= 2));
+    let snapshot_path = fixture.data.join("holder-status.json");
+    let mode = fs::metadata(&snapshot_path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let snapshot = fs::read(&snapshot_path).unwrap();
 
     // State-changing commands refuse while the daemon holds the lock.
     let output = kwiry(&fixture, &["holder", "relist"]).output().unwrap();
@@ -391,6 +399,15 @@ fn a_configured_daemon_applies_a_list_and_gets_a_status_receipt_over_http() {
         "{output:?}"
     );
     daemon.stop();
+    assert_eq!(server.posts_to(ROUTE_STATUS), 0);
+    assert_eq!(server.posts_to(ROUTE_REPORT), 0);
+    assert!(!snapshot_path.exists(), "clean shutdown left a snapshot");
+
+    // Simulate an old snapshot left by an unclean exit. With the lock free,
+    // a read-only status ignores it rather than printing it as live.
+    fs::write(&snapshot_path, &snapshot).unwrap();
+    assert!(holder_status(&fixture).get("live").is_none());
+    assert_eq!(fs::read(&snapshot_path).unwrap(), snapshot);
 
     // With the daemon stopped, relist runs one pass and prints its outcome
     // (after the authority's 5 s list-start spacing).
@@ -399,18 +416,8 @@ fn a_configured_daemon_applies_a_list_and_gets_a_status_receipt_over_http() {
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.starts_with("list applied: epoch "), "{text}");
-    // Nothing to resume: both commands refuse and change nothing.
-    let output = kwiry(&fixture, &["holder", "resume-status"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let output = kwiry(
-        &fixture,
-        &["holder", "resume-report", "ob_TESTnone0000000000000001"],
-    )
-    .output()
-    .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(server.posts_to(ROUTE_STATUS), 0);
+    assert_eq!(server.posts_to(ROUTE_REPORT), 0);
 }
 
 #[test]
@@ -450,6 +457,49 @@ fn a_holder_that_cannot_start_stops_the_daemon_before_it_serves() {
     assert!(!stdout.contains("listening"), "{stdout}");
     assert!(stderr.contains("holder_state_corrupt"), "{stderr}");
     assert_eq!(server.hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_root_holder_mismatch_refuses_to_serve_and_explains_recovery() {
+    let server = AuthorityServer::start();
+    let fixture = fixture(Some(&server.issuer));
+    enroll(&fixture, &server);
+    let generation = fixture.data.join("generations/g-test");
+    fs::create_dir_all(&generation).unwrap();
+    let output = kwiry(&fixture, &["serve", "--bind", "127.0.0.1:0"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stdout.contains("listening"), "{stdout}");
+    assert!(stderr.contains("root_holder_mismatch"), "{stderr}");
+    assert!(
+        stderr.contains("move or empty the configured data directory"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("the index rebuilds from the vault"),
+        "{stderr}"
+    );
+    assert_eq!(server.hits.load(Ordering::SeqCst), 0);
+    assert!(generation.is_dir());
+}
+
+#[test]
+fn holder_help_lists_only_the_supported_commands() {
+    let fixture = fixture(None);
+    let output = kwiry(&fixture, &["holder", "--help"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let commands: Vec<_> = text
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(commands, ["key", "enroll", "relist", "status", "help"]);
 }
 
 #[test]

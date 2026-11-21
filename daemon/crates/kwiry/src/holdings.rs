@@ -12,10 +12,9 @@
 //! them; slice S4 wires the holder into configuration (`[holder]`), the CLI
 //! (`kwiry holder …`) and the server (one driver thread per daemon).
 //!
-//! **Deletion is not enabled in this build.** The daemon's purger is
-//! [`adapters::CensusOnlyPurger`]: it observes the data root and refuses
-//! every detach, reservation and deletion. Release instructions are never
-//! evaluated, so no reservation is ever recorded.
+//! **This build is list-only.** It verifies and applies lists but does not
+//! send status or obligation reports or evaluate purge or release instructions.
+//! There is no deletion or reservation adapter.
 
 pub(crate) mod adapters;
 pub(crate) mod cli;
@@ -84,7 +83,13 @@ pub(crate) fn start_holder(
         &IndexDataRoot::new(data_dir),
         events.as_ref(),
     )
-    .map_err(|error| anyhow!("holder startup refused ({}): {error}", error.code()))?;
+    .map_err(|error| match error {
+        kwiry_holdings::startup::StartupError::RootHolderMismatch => anyhow!(
+            "holder startup refused ({}): {error}. Stop the daemon, move or empty the configured data directory, then restart; the index rebuilds from the vault",
+            error.code()
+        ),
+        other => anyhow!("holder startup refused ({}): {other}", other.code()),
+    })?;
     if started.writer.enrollment().issuer != settings.issuer {
         return Err(anyhow!(
             "holder startup refused: holder.issuer does not match the enrolled issuer"
