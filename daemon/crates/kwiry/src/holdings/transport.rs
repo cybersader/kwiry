@@ -506,10 +506,17 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/api/lifecycle/v1", listener.local_addr().unwrap());
         drop(listener);
-        assert_eq!(
-            HttpTransport::new().post(&url, "application/x", b"r", FAST),
-            Err(TransportError::Unreachable)
-        );
+        let result = HttpTransport::new().post(&url, "application/x", b"r", FAST);
+        // Unix refuses a closed port at once; Windows retries the SYN until
+        // the connect deadline. Either way nothing answered.
+        if cfg!(unix) {
+            assert_eq!(result, Err(TransportError::Unreachable));
+        } else {
+            assert!(matches!(
+                result,
+                Err(TransportError::Unreachable | TransportError::Timeout)
+            ));
+        }
     }
 
     #[test]
