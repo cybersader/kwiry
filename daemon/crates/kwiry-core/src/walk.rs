@@ -215,6 +215,7 @@ mod tests {
         fs::create_dir(temporary.path().join(".hidden")).unwrap();
         fs::write(temporary.path().join(".hidden/secret.md"), "secret").unwrap();
         let vault = VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: temporary.path().to_path_buf(),
             room: None,
@@ -255,6 +256,7 @@ mod tests {
             .set_len(MAX_FILE_BYTES + 1)
             .unwrap();
         let vault = VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: temporary.path().to_path_buf(),
             room: None,

@@ -38,6 +38,7 @@ fn pre_spec_binary_refuses_room_identity_generation_rb1_rb2() {
             fs::create_dir(&path).unwrap();
             fs::write(path.join("index.md"), "synthetic rollback fixture").unwrap();
             config.vaults.push(VaultRegistration {
+                snapshot_id: None,
                 id: VAULT.into(),
                 path,
                 room: Some(format!("Room_{index:017}")),

@@ -1141,6 +1141,7 @@ mod tests {
         fs::write(vault.join("note.md"), "# Search\nrevocationprobe").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault,
                 room: None,
@@ -1359,6 +1360,7 @@ mod tests {
         fs::write(vault.join("note.md"), "# Search\nshapeprobe").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault,
                 room: None,
@@ -1476,6 +1478,7 @@ mod tests {
         fs::write(vault.join("support.md"), "cedarleaf").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault,
                 room: None,
@@ -1728,6 +1731,7 @@ mod tests {
         config.server.profile = HostProfile::OpenClast;
         config.auth.openclast = Some(auth_config.clone());
         config.vaults = vec![VaultRegistration {
+            snapshot_id: None,
             id: resource.vault_id.clone(),
             path: vault,
             room: Some(resource.room_id.clone()),
@@ -1885,6 +1889,7 @@ mod tests {
                 _ => ("VaultTwo_0123456789abc".into(), format!("Room_{index:017}")),
             };
             config.vaults.push(VaultRegistration {
+                snapshot_id: None,
                 id: vault,
                 path,
                 room: Some(room),

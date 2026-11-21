@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use kwiry_core::VaultRegistration;
 use serde::Serialize;
 
@@ -50,6 +50,7 @@ fn peak_rss_mib() -> u64 {
 
 fn load_chunks(vault_path: &PathBuf) -> Result<(usize, Vec<String>)> {
     let registration = VaultRegistration {
+        snapshot_id: None,
         id: "bench".to_string(),
         path: vault_path.clone(),
         room: None,
@@ -78,7 +79,12 @@ fn load_chunks(vault_path: &PathBuf) -> Result<(usize, Vec<String>)> {
 }
 
 #[cfg(feature = "bench-fastembed")]
-fn run_bench(documents: usize, texts: Vec<String>, unique: usize, batch: usize) -> Result<BenchReport> {
+fn run_bench(
+    documents: usize,
+    texts: Vec<String>,
+    unique: usize,
+    batch: usize,
+) -> Result<BenchReport> {
     use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
     let model_id = EmbeddingModel::BGESmallENV15;
@@ -112,13 +118,20 @@ fn run_bench(documents: usize, texts: Vec<String>, unique: usize, batch: usize) 
         embed_ms,
         chunks_per_sec: embeddings.len() as f64 / secs,
         peak_rss_mib: peak_rss_mib(),
-        threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        threads: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
         batch_size: batch,
     })
 }
 
 #[cfg(not(feature = "bench-fastembed"))]
-fn run_bench(_documents: usize, _texts: Vec<String>, _unique: usize, _batch: usize) -> Result<BenchReport> {
+fn run_bench(
+    _documents: usize,
+    _texts: Vec<String>,
+    _unique: usize,
+    _batch: usize,
+) -> Result<BenchReport> {
     bail!("build with exactly one bench feature, e.g. --features bench-fastembed");
 }
 

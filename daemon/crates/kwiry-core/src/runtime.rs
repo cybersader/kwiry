@@ -28,7 +28,7 @@ use crate::manifest::{
 };
 use crate::model::{
     Config, FileIngestOutcome, FileOutcomeKind, HostProfile, IndexFreshnessBasis, IngestWarning,
-    LexicalSearchRequest, PreparedChunk, ResourceKey, RetrievalMetadata, SearchHit,
+    LexicalSearchRequest, PreparedChunk, ResourceKey, RetrievalMetadata, SearchHit, SnapshotId,
 };
 use crate::partition::{GenerationLayout, partition_index_dir};
 use crate::ranking::LexicalMatchQuality;
@@ -63,9 +63,23 @@ const WRITER_MEMORY_BYTES: usize = 50_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerationSearchResult {
+    /// Only resources actually opened for this request, even if none matched.
+    pub snapshot_ids: BTreeMap<ResourceKey, Option<SnapshotId>>,
     pub generation: String,
     pub hits: Vec<SearchHit>,
     pub lexical_match_quality: Option<LexicalMatchQuality>,
+}
+
+impl GenerationSearchResult {
+    /// Check the complete participating set, not just resources appearing in hits.
+    pub fn require_snapshot_ids(&self) -> Result<()> {
+        if self.snapshot_ids.values().any(Option::is_none) {
+            return Err(Error::State(
+                "participating resource has no reader snapshot label".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -155,6 +169,7 @@ impl SearchRuntime {
             ActiveSearchIndex::Desktop(index) => {
                 let outcome = index.search_with_quality(query, limit, filters)?;
                 Ok(GenerationSearchResult {
+                    snapshot_ids: BTreeMap::new(),
                     generation: index.generation.clone(),
                     hits: outcome.hits,
                     lexical_match_quality: Some(outcome.match_quality),
@@ -220,12 +235,7 @@ impl SearchRuntime {
         resources: &[ResourceKey],
     ) -> Result<GenerationSearchResult> {
         let (index, opened) = self.open_authorized_snapshot(filters, resources)?;
-        let outcome = search_opened_with_quality(&opened, query, limit, filters)?;
-        Ok(GenerationSearchResult {
-            generation: index.scoped_generation(filters, resources)?,
-            hits: outcome.hits,
-            lexical_match_quality: Some(outcome.match_quality),
-        })
+        index.search_opened(&opened, query, limit, filters, resources)
     }
 
     /// Semantic-only search: nearest chunks by embedding distance, then
@@ -259,6 +269,7 @@ impl SearchRuntime {
         let mut hits = active.hydrate(&ordered, filters, Some(query))?;
         hits.truncate(limit);
         Ok(GenerationSearchResult {
+            snapshot_ids: BTreeMap::new(),
             generation: active.generation.clone(),
             hits,
             lexical_match_quality: None,
@@ -308,6 +319,7 @@ impl SearchRuntime {
         let mut hits = active.hydrate(&ordered, filters, Some(semantic_query))?;
         hits.truncate(limit);
         Ok(GenerationSearchResult {
+            snapshot_ids: BTreeMap::new(),
             generation: active.generation.clone(),
             hits,
             lexical_match_quality: None,
@@ -714,11 +726,16 @@ enum ActiveSearchIndex {
     OpenClast(Arc<PartitionedSearchIndex>),
 }
 
+struct ReaderPartition {
+    index_dir: PathBuf,
+    revision: [u8; 32],
+    snapshot_id: Option<SnapshotId>,
+}
+
 struct PartitionedSearchIndex {
     format: u32,
     generation: String,
-    partition_dirs: BTreeMap<ResourceKey, PathBuf>,
-    revisions: BTreeMap<ResourceKey, [u8; 32]>,
+    partitions: BTreeMap<ResourceKey, ReaderPartition>,
     /// Lazy per-resource readers. A partition is opened only after a
     /// request's authorized resource intersection selects it, then cached
     /// for the lifetime of this immutable generation; a generation swap
@@ -755,13 +772,9 @@ impl PartitionedSearchIndex {
     fn open(active: &crate::generation::GenerationPaths) -> Result<Self> {
         let layout = GenerationLayout::load(&active.layout_path)?;
         let (manifest, _) = Manifest::load(&active.manifest_path)?.adopt();
-        let mut revisions = BTreeMap::new();
-        let mut partition_dirs = BTreeMap::new();
+        let mut partitions = BTreeMap::new();
         for partition in layout.partitions {
-            revisions.insert(
-                partition.resource.clone(),
-                resource_revision(&manifest, &partition.resource)?,
-            );
+            let revision = resource_revision(&manifest, &partition.resource)?;
             let index_dir = partition_index_dir(&active.partitions_dir, &partition.resource);
             if !index_dir.join("meta.json").is_file() {
                 return Err(Error::State(format!(
@@ -769,8 +782,15 @@ impl PartitionedSearchIndex {
                     partition.partition_id
                 )));
             }
-            if partition_dirs
-                .insert(partition.resource.clone(), index_dir)
+            if partitions
+                .insert(
+                    partition.resource.clone(),
+                    ReaderPartition {
+                        index_dir,
+                        revision,
+                        snapshot_id: partition.snapshot_id,
+                    },
+                )
                 .is_some()
             {
                 return Err(Error::State(format!(
@@ -784,8 +804,7 @@ impl PartitionedSearchIndex {
         Ok(Self {
             generation: active.id.clone(),
             format: manifest.index_format_version,
-            partition_dirs,
-            revisions,
+            partitions,
             readers: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
@@ -806,10 +825,10 @@ impl PartitionedSearchIndex {
                 continue;
             }
             let reader = self
-                .partition_dirs
+                .partitions
                 .get(resource)
                 .filter(|_| is_available(resource))
-                .and_then(|path| self.authorized_reader(resource, path).ok());
+                .and_then(|p| self.authorized_reader(resource, &p.index_dir).ok());
             if let Some(reader) = reader {
                 opened.insert(resource, reader);
             } else {
@@ -825,6 +844,26 @@ impl PartitionedSearchIndex {
         }
     }
 
+    fn search_opened(
+        &self,
+        opened: &OpenedResources<'_>,
+        query: &str,
+        limit: usize,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+    ) -> Result<GenerationSearchResult> {
+        let outcome = search_opened_with_quality(opened, query, limit, filters)?;
+        Ok(GenerationSearchResult {
+            snapshot_ids: opened
+                .keys()
+                .map(|&key| (key.clone(), self.partitions[key].snapshot_id.clone()))
+                .collect(),
+            generation: self.scoped_generation(filters, resources)?,
+            hits: outcome.hits,
+            lexical_match_quality: Some(outcome.match_quality),
+        })
+    }
+
     fn scoped_generation(
         &self,
         filters: &SearchFilters,
@@ -835,14 +874,14 @@ impl PartitionedSearchIndex {
         digest.update(b"L");
         digest.update((effective.len() as u64).to_le_bytes());
         for resource in effective {
-            let revision = self
-                .revisions
+            let partition = self
+                .partitions
                 .get(resource)
                 .ok_or(Error::ResourceUnavailable)?;
             for field in [&resource.tenant_id, &resource.vault_id, &resource.room_id] {
                 digest_bytes(&mut digest, field.as_bytes());
             }
-            digest_bytes(&mut digest, revision);
+            digest_bytes(&mut digest, &partition.revision);
         }
         Ok(format!("v1-{:x}", digest.finalize()))
     }
@@ -1702,11 +1741,11 @@ impl OpenClastIndexManager {
     ) -> Result<ReconcileReport> {
         let mut plan = ReconcilePlan::new(&self.manifest);
         let mut next_room_retries = BTreeSet::new();
-        let mut next_resources: BTreeSet<_> = self
+        let mut next_resources: BTreeMap<_, _> = self
             .layout
             .partitions
             .iter()
-            .map(|partition| partition.resource.clone())
+            .map(|p| (p.resource.clone(), p.snapshot_id.clone()))
             .collect();
         let mut warnings = Vec::new();
         let mut unavailable_vaults = Vec::new();
@@ -1761,7 +1800,7 @@ impl OpenClastIndexManager {
         for key in removed_keys {
             plan.remove_manifest_source(&key);
         }
-        next_resources.retain(|resource| current_fingerprints.contains_key(resource));
+        next_resources.retain(|resource, _| current_fingerprints.contains_key(resource));
 
         for vault in &config.vaults {
             let resource = config.resource_key(vault).ok_or_else(|| {
@@ -1770,7 +1809,11 @@ impl OpenClastIndexManager {
                     vault.id
                 ))
             })?;
-            let previous_resource = next_resources.get(&resource).cloned();
+            let previous_resource = next_resources
+                .get_key_value(&resource)
+                .map(|(key, _)| key.clone());
+            let previous_label = next_resources.get(&resource).cloned().flatten();
+            let label_changed = previous_label != vault.snapshot_id;
             let fingerprint = &current_fingerprints[&resource];
             let vault_reclassified = self
                 .manifest
@@ -1830,16 +1873,26 @@ impl OpenClastIndexManager {
                     registration_fingerprint: fingerprint,
                     scope: &PartitionScope::Resource(resource.clone()),
                     previous_resource: previous_resource.as_ref(),
-                    policy: observation_policy,
+                    // Identical metadata across producer snapshots is not byte proof.
+                    policy: if label_changed {
+                        ObservationPolicy {
+                            basis: IndexFreshnessBasis::StrictHash,
+                            ..observation_policy
+                        }
+                    } else {
+                        observation_policy
+                    },
                     semantic: None,
                     read_scope: vault_read_scope.as_ref(),
                     room_roots: Some(&room_roots),
                 },
                 &mut audit,
             );
-            if !observed.whole_walk_failed {
-                next_resources.insert(resource.clone());
-            }
+            let opened_root = !observed.whole_walk_failed;
+            let failed_input = observed
+                .outcomes
+                .iter()
+                .any(|o| o.coverage == crate::ExtractionCoverage::Unreadable);
             let discovery_incomplete = !observed.enumeration.completeness.may_infer_deletions();
             if discovery_incomplete {
                 incomplete.insert(resource.clone());
@@ -1940,10 +1993,19 @@ impl OpenClastIndexManager {
             } else {
                 RoomWalkOutcome::Complete
             };
+            if opened_root {
+                // A partial transition can mix new rows with unverified retained rows.
+                let label = if label_changed && (failed_input || incomplete.contains(&resource)) {
+                    None
+                } else {
+                    vault.snapshot_id.clone()
+                };
+                next_resources.insert(resource.clone(), label);
+            }
             walks.insert(resource, outcome);
         }
 
-        let next_layout = GenerationLayout::openclast(next_resources)?;
+        let next_layout = GenerationLayout::with_snapshots(next_resources)?;
         let layout_changed = next_layout != self.layout;
         let mut expected_source_keys = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
         for (key, file) in &plan.next_manifest.files {
@@ -2430,6 +2492,9 @@ mod tests {
     use crate::index::build_index;
     use crate::model::VaultRegistration;
 
+    #[cfg(target_os = "linux")]
+    mod snapshots;
+
     fn request(query: &str) -> LexicalSearchRequest {
         LexicalSearchRequest {
             query: query.into(),
@@ -2473,6 +2538,7 @@ mod tests {
         fs::write(&note, "# One\noldterm").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -2521,6 +2587,7 @@ mod tests {
         set_file_mtime(&note, fixed_mtime).unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -2551,6 +2618,7 @@ mod tests {
         set_file_mtime(&note, FileTime::from_unix_time(1_700_000_100, 0)).unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -2580,6 +2648,7 @@ mod tests {
         fs::write(&retained, "retainedterm").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -2619,6 +2688,7 @@ mod tests {
         fs::write(&note, "transientterm").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -2658,6 +2728,7 @@ mod tests {
         }
         let mut config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -2699,6 +2770,7 @@ mod tests {
         set_file_mtime(&note, settled).unwrap();
         let mut config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -2739,6 +2811,7 @@ mod tests {
         set_file_mtime(&untouched, settled).unwrap();
         let mut config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -2780,6 +2853,7 @@ mod tests {
         set_file_mtime(&untouched, settled).unwrap();
         let mut config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -2824,6 +2898,7 @@ mod tests {
         set_file_mtime(&doomed, settled).unwrap();
         let mut config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -2863,6 +2938,7 @@ mod tests {
         }
         let mut config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -2943,6 +3019,7 @@ mod tests {
         fs::create_dir(&vault_path).unwrap();
         fs::write(vault_path.join("note.md"), "vanishterm").unwrap();
         let config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "vault-a".into(),
             path: vault_path,
             room: Some("room-a".into()),
@@ -2981,6 +3058,7 @@ mod tests {
         fs::write(&note, "partitionterm").unwrap();
         set_file_mtime(&note, settled).unwrap();
         let mut config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "vault-a".into(),
             path: vault_path,
             room: Some("room-a".into()),
@@ -3025,6 +3103,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -3067,6 +3146,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: Some("room-a".into()),
@@ -3124,6 +3204,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -3194,6 +3275,7 @@ mod tests {
         fs::write(vault_path.join("note.md"), "phosphorescent").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -3244,6 +3326,7 @@ mod tests {
         fs::write(room.join("removed.md"), "synthetic expired").unwrap();
         fs::write(room.join("kept.md"), "synthetic remaining").unwrap();
         let mut config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: room.clone(),
             room: Some("room".into()),
@@ -3335,6 +3418,7 @@ mod tests {
         fs::write(sub.join("note.md"), "synthetic fixture").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "b".into(),
                 path: b.clone(),
                 room: Some("b".into()),
@@ -3391,6 +3475,7 @@ mod tests {
             assert_eq!(attempted, config);
             assert_eq!(fs::read(&settings).unwrap(), saved);
             attempted.vaults.push(VaultRegistration {
+                snapshot_id: None,
                 id: "a".into(),
                 path: bad,
                 room: Some("a".into()),
@@ -3460,6 +3545,7 @@ mod tests {
             fs::write(unread.join("removed.md"), "synthetic uncertain").unwrap();
             fs::write(unread.join("kept.md"), "synthetic remaining").unwrap();
             let registration = |name: &str, path| VaultRegistration {
+                snapshot_id: None,
                 id: name.into(),
                 path,
                 room: Some(name.into()),
@@ -3550,6 +3636,7 @@ mod tests {
                     fs::create_dir(&path).unwrap();
                     fs::write(path.join("note.md"), "synthetic needle").unwrap();
                     VaultRegistration {
+                        snapshot_id: None,
                         id: id.into(),
                         path,
                         room: Some(id.into()),
@@ -3597,6 +3684,7 @@ mod tests {
         let path = fixture.path().join("room");
         fs::create_dir(&path).unwrap();
         let config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "vault".into(),
             path: path.clone(),
             room: Some("room".into()),
@@ -3653,6 +3741,7 @@ mod tests {
             fs::create_dir(root).unwrap();
             fs::write(root.join("index.md"), "synthetic pinecone").unwrap();
             VaultRegistration {
+                snapshot_id: None,
                 id: name.into(),
                 path: root.into(),
                 room: Some(name.into()),
@@ -3713,6 +3802,7 @@ mod tests {
         }
 
         let x_registration = VaultRegistration {
+            snapshot_id: None,
             id: "x".into(),
             path: x.clone(),
             room: Some("room-x".into()),
@@ -3720,6 +3810,7 @@ mod tests {
         let config = openclast_config(vec![
             x_registration.clone(),
             VaultRegistration {
+                snapshot_id: None,
                 id: "y".into(),
                 path: y,
                 room: Some("room-y".into()),
@@ -3815,6 +3906,7 @@ mod tests {
         }
 
         let allowed_registration = VaultRegistration {
+            snapshot_id: None,
             id: "allowed".into(),
             path: allowed.clone(),
             room: Some("room-allowed".into()),
@@ -3822,6 +3914,7 @@ mod tests {
         let config = openclast_config(vec![
             allowed_registration.clone(),
             VaultRegistration {
+                snapshot_id: None,
                 id: "forbidden".into(),
                 path: forbidden,
                 room: Some("room-forbidden".into()),
@@ -3940,6 +4033,7 @@ mod tests {
         }
 
         let allowed_registration = VaultRegistration {
+            snapshot_id: None,
             id: "allowed".into(),
             path: allowed.clone(),
             room: Some("room-allowed".into()),
@@ -3947,6 +4041,7 @@ mod tests {
         let config = openclast_config(vec![
             allowed_registration.clone(),
             VaultRegistration {
+                snapshot_id: None,
                 id: "forbidden".into(),
                 path: forbidden,
                 room: Some("room-forbidden".into()),
@@ -4080,11 +4175,13 @@ mod tests {
 
         let config = openclast_config(vec![
             VaultRegistration {
+                snapshot_id: None,
                 id: "x".into(),
                 path: x,
                 room: Some("room-x".into()),
             },
             VaultRegistration {
+                snapshot_id: None,
                 id: "y".into(),
                 path: y,
                 room: Some("room-y".into()),
@@ -4159,6 +4256,7 @@ mod tests {
         fs::create_dir(&x).unwrap();
         fs::write(x.join("allowed.md"), "authorized needle").unwrap();
         let config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "x".into(),
             path: x,
             room: Some("room-x".into()),
@@ -4231,6 +4329,7 @@ mod tests {
         fs::create_dir(&vault_path).unwrap();
         fs::write(vault_path.join("note.md"), "cachedneedle").unwrap();
         let config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "vault-a".into(),
             path: vault_path,
             room: Some("room-a".into()),
@@ -4280,6 +4379,7 @@ mod tests {
         let note = vault_path.join("note.md");
         fs::write(&note, "# One\noldterm").unwrap();
         let config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path.clone(),
             room: Some("room-a".into()),
@@ -4358,6 +4458,7 @@ mod tests {
         fs::create_dir(&vault_path).unwrap();
         fs::write(vault_path.join("note.md"), "reclassifiedterm").unwrap();
         let old_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path.clone(),
             room: Some("room-a".into()),
@@ -4366,6 +4467,7 @@ mod tests {
         let old_resource = old_config.resource_key(&old_config.vaults[0]).unwrap();
 
         let new_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path,
             room: Some("room-b".into()),
@@ -4409,6 +4511,7 @@ mod tests {
         fs::create_dir(&vault_path).unwrap();
         fs::write(vault_path.join("note.md"), "tenantterm").unwrap();
         let old_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path,
             room: Some("room-a".into()),
@@ -4454,6 +4557,7 @@ mod tests {
         fs::write(vault_path.join("duplicate.md"), "duplicateterm").unwrap();
         fs::write(vault_path.join("deleted.md"), "deletedterm").unwrap();
         let old_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path,
             room: Some("room-a".into()),
@@ -4587,6 +4691,7 @@ mod tests {
         fs::write(existing_path.join("existing.md"), "existingterm").unwrap();
         fs::write(vault_path.join("deleted.md"), "unpublishedterm").unwrap();
         let existing = VaultRegistration {
+            snapshot_id: None,
             id: "existing".into(),
             path: existing_path,
             room: Some("room-existing".into()),
@@ -4600,6 +4705,7 @@ mod tests {
         let new_config = openclast_config(vec![
             existing,
             VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: Some("room-a".into()),
@@ -4687,6 +4793,7 @@ mod tests {
         fs::create_dir(&vault_path).unwrap();
         fs::write(vault_path.join("note.md"), "withheldterm").unwrap();
         let old_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path.clone(),
             room: Some("room-a".into()),
@@ -4695,6 +4802,7 @@ mod tests {
         let old_resource = old_config.resource_key(&old_config.vaults[0]).unwrap();
 
         let new_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path.clone(),
             room: Some("room-b".into()),
@@ -4773,6 +4881,7 @@ mod tests {
         fs::create_dir(&old_path).unwrap();
         fs::write(old_path.join("note.md"), "oldpathterm").unwrap();
         let old_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: old_path,
             room: Some("room-a".into()),
@@ -4781,6 +4890,7 @@ mod tests {
         let resource = old_config.resource_key(&old_config.vaults[0]).unwrap();
 
         let new_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: new_path.clone(),
             room: Some("room-a".into()),
@@ -4839,6 +4949,7 @@ mod tests {
         fs::create_dir(&vault_path).unwrap();
         fs::write(vault_path.join("note.md"), "removedwithheldterm").unwrap();
         let old_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path.clone(),
             room: Some("room-a".into()),
@@ -4848,6 +4959,7 @@ mod tests {
         fs::rename(&vault_path, &offline_path).unwrap();
 
         let reclassified_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path,
             room: Some("room-b".into()),
@@ -4905,11 +5017,13 @@ mod tests {
         fs::write(y.join("removed.md"), "removedterm").unwrap();
         let old_config = openclast_config(vec![
             VaultRegistration {
+                snapshot_id: None,
                 id: "x".into(),
                 path: x.clone(),
                 room: Some("room-x".into()),
             },
             VaultRegistration {
+                snapshot_id: None,
                 id: "y".into(),
                 path: y,
                 room: Some("room-y".into()),
@@ -4919,6 +5033,7 @@ mod tests {
         let removed_resource = old_config.resource_key(&old_config.vaults[1]).unwrap();
 
         let new_config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "x".into(),
             path: x,
             room: Some("room-x".into()),
@@ -4951,6 +5066,7 @@ mod tests {
         fs::create_dir(&empty).unwrap();
         fs::write(populated.join("note.md"), "existingterm").unwrap();
         let initial = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "populated".into(),
             path: populated.clone(),
             room: Some("room-a".into()),
@@ -4962,6 +5078,7 @@ mod tests {
         let next = openclast_config(vec![
             initial.vaults[0].clone(),
             VaultRegistration {
+                snapshot_id: None,
                 id: "empty".into(),
                 path: empty,
                 room: Some("room-empty".into()),
@@ -4988,6 +5105,7 @@ mod tests {
         fs::write(vault_path.join("note.md"), "startupterm").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -5014,6 +5132,7 @@ mod tests {
         fs::write(vault_path.join("note.md"), "retainedterm").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -5108,6 +5227,7 @@ mod tests {
         fs::write(vault_path.join("log.txt"), "plainterm").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -5354,6 +5474,7 @@ mod tests {
         fs::write(vault_path.join("note.md"), "# Note\nmarkdownterm").unwrap();
         fs::write(vault_path.join("log.txt"), "plainterm").unwrap();
         let config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path,
             room: Some("room-a".into()),
@@ -5751,6 +5872,7 @@ mod tests {
         write_drift_corpus(&vault_path);
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -5802,6 +5924,7 @@ mod tests {
         fs::write(vault_path.join("log.txt"), "alpha beta gamma\n").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -5856,6 +5979,7 @@ mod tests {
         fs::write(vault_path.join("kept.md"), "projzeta\n").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -5909,6 +6033,7 @@ mod tests {
         }
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -5963,6 +6088,7 @@ mod tests {
         }
         fs::write(vault_path.join("log.txt"), "plainterm\n").unwrap();
         let config = openclast_config(vec![VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: vault_path,
             room: Some("room-a".into()),
@@ -6129,6 +6255,7 @@ mod tests {
         write_long_document_corpus(&vault_path, 0, &[]);
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -6232,6 +6359,7 @@ mod tests {
         }
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -6315,6 +6443,7 @@ mod tests {
             fs::create_dir(&path).unwrap();
             fs::write(path.join("note.md"), "# Note\nneedle evidence").unwrap();
             vaults.push(VaultRegistration {
+                snapshot_id: None,
                 id: id.into(),
                 path,
                 room: Some(format!("room-{id}")),
@@ -6740,6 +6869,7 @@ mod tests {
             fs::create_dir(&path).unwrap();
             fs::write(path.join("index.md"), text).unwrap();
             VaultRegistration {
+                snapshot_id: None,
                 id: "VaultOne_0123456789abc".into(),
                 path,
                 room: Some(room.into()),
@@ -6905,11 +7035,13 @@ mod tests {
         symlink(b.join("index.md"), a.join("link.md")).unwrap();
         let config = openclast_config(vec![
             VaultRegistration {
+                snapshot_id: None,
                 id: "vault".into(),
                 path: a.clone(),
                 room: Some("room-a".into()),
             },
             VaultRegistration {
+                snapshot_id: None,
                 id: "vault".into(),
                 path: b.clone(),
                 room: Some("room-b".into()),

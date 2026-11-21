@@ -1,18 +1,16 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::model::{HostProfile, ResourceKey};
+use crate::model::{HostProfile, ResourceKey, SnapshotId};
 use crate::state::{read_json, write_json_atomic};
 
-pub(crate) const GENERATION_LAYOUT_VERSION: u32 = if crate::source::ROOM_INCLUSIVE_IDS {
-    3
-} else {
-    2
-};
+// Before snapshot labels, partitions and CURRENT used the same version number.
+const PRE_LABEL_LAYOUT_VERSION: u32 = crate::generation::LAYOUT_VERSION;
+const GENERATION_LAYOUT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct GenerationLayout {
@@ -25,19 +23,26 @@ pub(crate) struct GenerationLayout {
 pub(crate) struct PartitionLayout {
     pub partition_id: String,
     pub resource: ResourceKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 impl GenerationLayout {
+    #[cfg(test)]
     pub(crate) fn openclast(resources: impl IntoIterator<Item = ResourceKey>) -> Result<Self> {
-        let mut resources: Vec<_> = resources.into_iter().collect();
-        resources.sort();
-        resources.dedup();
+        Self::with_snapshots(resources.into_iter().map(|r| (r, None)).collect())
+    }
+
+    pub(crate) fn with_snapshots(
+        resources: BTreeMap<ResourceKey, Option<SnapshotId>>,
+    ) -> Result<Self> {
         let layout = Self {
             layout_version: GENERATION_LAYOUT_VERSION,
             profile: HostProfile::OpenClast,
             partitions: resources
                 .into_iter()
-                .map(|resource| PartitionLayout {
+                .map(|(resource, snapshot_id)| PartitionLayout {
+                    snapshot_id,
                     partition_id: partition_id(&resource),
                     resource,
                 })
@@ -48,7 +53,14 @@ impl GenerationLayout {
     }
 
     pub(crate) fn load(path: &Path) -> Result<Self> {
-        let layout: Self = read_json(path)?;
+        let mut layout: Self = read_json(path)?;
+        if layout.layout_version == PRE_LABEL_LAYOUT_VERSION {
+            // Upgrade in memory. No rebuild, inferred labels or forced publication.
+            layout.layout_version = GENERATION_LAYOUT_VERSION;
+            for partition in &mut layout.partitions {
+                partition.snapshot_id = None;
+            }
+        }
         layout.validate()?;
         Ok(layout)
     }

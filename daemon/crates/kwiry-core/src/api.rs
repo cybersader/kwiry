@@ -349,6 +349,7 @@ mod tests {
     fn search_response_shape_excludes_internal_retrieval_metadata() {
         let response = ApiSearchResponse {
             hits: vec![SearchHit {
+                content_sha256: None,
                 chunk_id: "chunk-1".into(),
                 vault_id: "notes".into(),
                 room_id: None,

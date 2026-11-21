@@ -523,6 +523,7 @@ mod platform {
         let room = dir.path().join("room");
         std::fs::create_dir(&room).unwrap();
         let vaults = [VaultRegistration {
+            snapshot_id: None,
             id: "vault".into(),
             path: room,
             room: Some("room".into()),
@@ -662,6 +663,7 @@ mod tests {
             fs::create_dir(path).unwrap();
             fs::write(path.join("index.md"), "synthetic evidence").unwrap();
             VaultRegistration {
+                snapshot_id: None,
                 id: id.into(),
                 path: path.into(),
                 room: Some(id.into()),
@@ -718,6 +720,7 @@ mod tests {
         fs::write(ra.join("index.md"), "synthetic alpha").unwrap();
         fs::write(rd.join("index.md"), "synthetic delta").unwrap();
         let vault = |path, id: &str| VaultRegistration {
+            snapshot_id: None,
             id: id.into(),
             path,
             room: Some(id.into()),
@@ -776,6 +779,7 @@ mod tests {
                 .is_socket()
         );
         let vault = VaultRegistration {
+            snapshot_id: None,
             id: "vault".into(),
             path: directory.path().into(),
             room: Some("room".into()),
@@ -803,6 +807,7 @@ mod tests {
             std::fs::write(path, "synthetic").unwrap();
         }
         let room = |path, room| VaultRegistration {
+            snapshot_id: None,
             id: "vault".into(),
             path,
             room: Some(room),
@@ -861,11 +866,13 @@ mod tests {
         );
         let rooms = [
             VaultRegistration {
+                snapshot_id: None,
                 id: "vault".into(),
                 path: a.clone(),
                 room: Some("a".into()),
             },
             VaultRegistration {
+                snapshot_id: None,
                 id: "vault".into(),
                 path: b.clone(),
                 room: Some("b".into()),
@@ -892,6 +899,7 @@ mod tests {
             vaults: rooms
                 .into_iter()
                 .chain([VaultRegistration {
+                    snapshot_id: None,
                     id: "healthy".into(),
                     path: c,
                     room: Some("c".into()),

@@ -49,6 +49,7 @@ mod tests {
     fn input(path: impl Into<PathBuf>, semantic_enabled: bool) -> ResolvedSetupInput {
         ResolvedSetupInput {
             vault: VaultRegistration {
+                snapshot_id: None,
                 id: "project-notes".into(),
                 path: path.into(),
                 room: None,
@@ -123,6 +124,7 @@ mod tests {
         let vault = fs::canonicalize(vault).unwrap();
         let snapshot = ready_snapshot(
             VaultRegistration {
+                snapshot_id: None,
                 id: "persisted-id".into(),
                 path: vault.clone(),
                 room: Some("work".into()),
@@ -225,6 +227,7 @@ mod tests {
     #[test]
     fn planner_rejects_id_and_path_conflicts() {
         let configured = VaultRegistration {
+            snapshot_id: None,
             id: "project-notes".into(),
             path: PathBuf::from("/vaults/old"),
             room: None,
@@ -237,6 +240,7 @@ mod tests {
 
         let different_id = ResolvedSetupInput {
             vault: VaultRegistration {
+                snapshot_id: None,
                 id: "other".into(),
                 path: PathBuf::from("/vaults/old"),
                 room: None,

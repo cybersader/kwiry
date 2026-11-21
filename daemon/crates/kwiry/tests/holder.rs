@@ -236,6 +236,7 @@ fn fixture(issuer: Option<&str>) -> Fixture {
         legacy_identity_accept_until: None,
     });
     config.vaults = vec![VaultRegistration {
+        snapshot_id: None,
         id: "VaultOne_0123456789abc".into(),
         path: fs::canonicalize(&vault).unwrap(),
         room: Some(ROOM.into()),
