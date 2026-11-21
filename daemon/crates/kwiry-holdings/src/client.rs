@@ -88,7 +88,7 @@ pub(crate) struct InboxState {
 
 /// Admission is transferred into the transport entry point, not checked and
 /// dropped by the caller. Consume it on entry, BEFORE any blocking I/O or
-/// response callback. A delivery can then finish while this POST is in flight.
+/// response callback. A delivery can then finish while the request is in flight.
 pub struct PostStart<'a>(Option<std::sync::MutexGuard<'a, InboxState>>);
 impl PostStart<'_> {
     pub fn entered(self) {
@@ -177,9 +177,9 @@ impl ResponseInbox {
 }
 
 /// HTTP to the authority. Implementations enforce the supplied timeouts.
-/// Overrides of `post_list` and `post_lifecycle` must consume `start.entered()`
-/// on entry, before blocking or invoking callbacks. The holder orders delivery
-/// against entry to the POST, not completion of its response.
+/// Overrides of `post_list`, `post_lifecycle` and `get_keyset` must consume
+/// `start.entered()` on entry, before blocking or invoking callbacks. The
+/// holder orders delivery against entry to the request, not its response.
 pub trait Transport {
     #[cfg(all(test, unix))]
     fn before_dispatch(&self) {}
@@ -214,6 +214,16 @@ pub trait Transport {
         body: &[u8],
         timeouts: Timeouts,
     ) -> Result<HttpResponse, TransportError>;
+
+    fn get_keyset(
+        &self,
+        url: &str,
+        timeouts: Timeouts,
+        start: PostStart<'_>,
+    ) -> Result<HttpResponse, TransportError> {
+        start.entered();
+        self.get(url, timeouts)
+    }
 
     fn get(&self, url: &str, timeouts: Timeouts) -> Result<HttpResponse, TransportError>;
 }
@@ -288,6 +298,7 @@ pub trait FetchHooks {
         false
     }
     /// Acquire final dispatch admission; a holder orders it with delivery.
+    /// Used for list POSTs and any key-set GET while verifying a list page.
     fn admit_post(&self) -> Option<PostStart<'_>> {
         (!self.refusal_pending()).then_some(PostStart(None))
     }
@@ -481,28 +492,44 @@ fn apply_statement(
     Ok(())
 }
 
-pub(crate) fn fetch_route_statement(
+pub(crate) enum KeysetFetchError {
+    DispatchBlocked,
+    Timeout,
+    RetryableHttp { retry_after_s: Option<u64> },
+    Refusal(AuthorityRefusal),
+    Invalid,
+}
+
+pub(crate) fn fetch_route_statement<'a>(
     transport: &dyn Transport,
     issuer: &str,
     profile: &crate::profile::WireProfile,
-) -> Result<Option<String>, AuthorityRefusal> {
+    admit: impl FnOnce() -> Option<PostStart<'a>>,
+) -> Result<String, KeysetFetchError> {
+    use KeysetFetchError::*;
     let url = format!("{issuer}{ROUTE_KEYSET}");
-    let response = match transport.get(&url, LIST_TIMEOUTS) {
+    let start = admit().ok_or(DispatchBlocked)?;
+    let response = match transport.get_keyset(&url, LIST_TIMEOUTS, start) {
         Ok(response) => response,
         Err(TransportError::Unreachable) => {
-            return Err(AuthorityRefusal::Stop(FetchFailure::Unreachable {
+            return Err(Refusal(AuthorityRefusal::Stop(FetchFailure::Unreachable {
                 retry_after_s: None,
-            }));
+            })));
         }
-        Err(TransportError::Timeout) => return Ok(None),
+        Err(TransportError::Timeout) => return Err(Timeout),
     };
     if let Some(refusal) = authority_refusal(&response) {
-        return Err(refusal);
+        return Err(Refusal(refusal));
     }
-    Ok((response.status == 200
-        && response.content_type.as_deref() == Some(profile.keyset_content_type().as_str()))
-    .then(|| String::from_utf8(response.body).ok())
-    .flatten())
+    match response.status {
+        200 if response.content_type.as_deref() == Some(profile.keyset_content_type().as_str()) => {
+            String::from_utf8(response.body).map_err(|_| Invalid)
+        }
+        429 | 500..=599 => Err(RetryableHttp {
+            retry_after_s: response.retry_after_s,
+        }),
+        _ => Err(Invalid),
+    }
 }
 
 fn keyset_failure(error: &KeyError, page_kid_pinned: bool) -> FetchFailure {
@@ -552,9 +579,21 @@ fn verify_with_keysets(
     let verified = match verify_signature(compact, &session.pins, now_recv, &env.ctx) {
         Err(PageError::UnknownKid) if attached.is_none() && !session.route_fetched => {
             session.route_fetched = true;
-            let statement = fetch_route_statement(env.transport, env.ctx.issuer, env.ctx.profile)
-                .map_err(SignatureFailure::KeysetRefusal)?
-                .ok_or(FetchFailure::UnknownKid)?;
+            let statement =
+                fetch_route_statement(env.transport, env.ctx.issuer, env.ctx.profile, || {
+                    env.hooks.admit_post()
+                })
+                .map_err(|error| match error {
+                    KeysetFetchError::DispatchBlocked => {
+                        FetchFailure::Local("delayed refusal pending").into()
+                    }
+                    KeysetFetchError::Timeout => FetchFailure::Deadline.into(),
+                    KeysetFetchError::RetryableHttp { retry_after_s } => {
+                        FetchFailure::Unreachable { retry_after_s }.into()
+                    }
+                    KeysetFetchError::Refusal(refusal) => SignatureFailure::KeysetRefusal(refusal),
+                    KeysetFetchError::Invalid => FetchFailure::UnknownKid.into(),
+                })?;
             apply_statement(env, session, &statement).map_err(|e| keyset_failure(&e, false))?;
             verify_signature(compact, &session.pins, now_recv, &env.ctx)
         }

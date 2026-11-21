@@ -161,6 +161,9 @@ impl Pending {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Uncertain {
+    /// A delayed 400 resolves this attempt without halting the resumed channel.
+    #[serde(default)]
+    pub before_resume: bool,
     pub obligation_id: String,
     pub holding_id: String,
     pub state: ReportState,

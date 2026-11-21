@@ -145,6 +145,8 @@ pub(crate) enum Answer {
     RetryReplay,
     RetryExpired,
     BackOff,
+    /// The queued response still needs verification or a local write.
+    RetryReceipt,
     AuthHalted,
 }
 
@@ -414,7 +416,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return Ok(summary);
         }
         if let Some((ob, key, response)) = self.late_reports.pop_front() {
-            summary.record(self.delayed_report(&ob, &key, response));
+            let answer = self.delayed_report(&ob, &key, response.clone());
+            if answer == Answer::RetryReceipt {
+                self.late_reports.push_front((ob, key, response));
+            }
+            summary.record(answer);
             return Ok(summary);
         }
         let Ok(inventory) = self.inventory(purger) else {
@@ -766,7 +772,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.report_sends.len() < REPORTS_PER_SECOND
     }
 
-    fn back_off(&mut self, retry_after_s: Option<u64>) {
+    fn back_off(&mut self, retry_after_s: Option<u64>) -> u64 {
         let wait = crate::schedule::defer_post(
             self.clock.mono_ms(),
             &mut self.report_backoff_ms,
@@ -778,6 +784,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         if !self.commit_book(book) {
             self.writer.mark_unwritable();
         }
+        self.report_backoff_until
     }
 
     /// R2 → R2d → the answer, for one obligation's live report.
@@ -912,7 +919,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Answer::Duplicate | Answer::Unverifiable | Answer::AuthHalted => return,
                 Answer::RetryReplay if !replay_retried => replay_retried = true,
                 Answer::RetryExpired => {}
-                Answer::RetryReplay | Answer::BackOff => {
+                Answer::RetryReplay | Answer::BackOff | Answer::RetryReceipt => {
                     if self.clock.mono_ms() >= self.report_backoff_until {
                         self.back_off(None);
                     }
@@ -1063,7 +1070,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 let Ok(compact) = String::from_utf8(response.body) else {
                     return self.unverifiable(ob);
                 };
-                match self.verify_with_refresh(&compact, Self::verify_ack) {
+                match self.verify_with_refresh(&compact, Self::verify_ack, Self::back_off) {
                     Ok(ack) => self.on_ack(
                         ob,
                         key,
@@ -1071,9 +1078,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         ack,
                         outcome.as_deref() == Some("already_complete"),
                     ),
-                    Err(crate::transition::ReceiptFailure::Refused(answer)) => answer,
-                    Err(crate::transition::ReceiptFailure::PinWrite) => Answer::BackOff,
-                    Err(_) => self.unverifiable(ob),
+                    Err(failure) => self.receipt_failure(failure, |h| h.unverifiable(ob)),
                 }
             }
             (409, Some("state_regression")) => {
@@ -1084,11 +1089,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                             .and_then(Value::as_str)
                             .map(str::to_owned)
                     });
-                match current.map(|c| self.verify_with_refresh(&c, Self::verify_ack)) {
+                match current
+                    .map(|c| self.verify_with_refresh(&c, Self::verify_ack, Self::back_off))
+                {
                     Some(Ok(ack)) => self.on_ack(ob, key, pending, ack, true),
-                    Some(Err(crate::transition::ReceiptFailure::Refused(answer))) => answer,
-                    Some(Err(crate::transition::ReceiptFailure::PinWrite)) => Answer::BackOff,
-                    _ => self.unverifiable(ob),
+                    Some(Err(failure)) => self.receipt_failure(failure, |h| h.unverifiable(ob)),
+                    None => self.unverifiable(ob),
                 }
             }
             (409, Some("complete_refused_unattributed" | "stale_list_ref")) | (404, _) => {
@@ -1106,6 +1112,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 self.record_refusal(crate::transition::Owed::ReportHalt {
                     ob: ob.into(),
                     code: response.status,
+                    key: Some(key.into()),
                 })
             }
             _ => {
@@ -1125,6 +1132,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             return self.record_refusal(crate::transition::Owed::ReportHalt {
                 ob: ob.into(),
                 code: 0,
+                key: None,
             });
         }
         Answer::Unverifiable
@@ -1192,6 +1200,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         channel.halted = false;
         invalidate(&mut next, obligation_id);
+        for attempt in next.uncertain.values_mut() {
+            if attempt.obligation_id == obligation_id {
+                attempt.before_resume = true;
+            }
+        }
         self.commit_books_then(Some(next), None, false, |holder| {
             holder.unverifiable.remove(obligation_id);
             holder.events.emit(HolderEvent::ReportResumed);
@@ -1508,6 +1521,7 @@ fn move_to_uncertain(book: &mut ObligationBook, ob: &str, pending: &Pending) {
     book.uncertain.insert(
         pending.key.clone(),
         Uncertain {
+            before_resume: false,
             obligation_id: ob.to_owned(),
             holding_id,
             state: pending.body.state,

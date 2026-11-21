@@ -1126,6 +1126,7 @@ fn f7_a_response_naming_another_obligations_key_is_not_a_receipt() {
     book.uncertain.insert(
         b_pending.key.clone(),
         Uncertain {
+            before_resume: false,
             obligation_id: w.b_obligation.clone(),
             holding_id: w.b_holding.clone(),
             state: b_pending.body.state,

@@ -25,6 +25,9 @@ pub(crate) struct Convergence {
 pub(crate) enum Owed {
     StatusHalt {
         code: u16,
+        // Keyless debts on older disks (and ack-strike halts) remain readable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
     StatusStale {
         key: String,
@@ -32,6 +35,8 @@ pub(crate) enum Owed {
     ReportHalt {
         ob: String,
         code: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
     },
     ReportRejected {
         ob: String,
@@ -66,6 +71,7 @@ impl Owed {
 pub(crate) enum ReceiptFailure {
     Unverifiable,
     PinWrite,
+    RefreshDeferred,
     Refused(Answer),
 }
 
@@ -176,19 +182,43 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         compact: &str,
         verify: fn(&Self, &str) -> Result<A, &'static str>,
+        back_off: fn(&mut Self, Option<u64>) -> u64,
     ) -> Result<A, ReceiptFailure> {
-        use ReceiptFailure::{PinWrite, Unverifiable};
+        use crate::client::KeysetFetchError;
+        use crate::holder::RouteHealth;
+        use ReceiptFailure::*;
+
         match verify(self, compact) {
             Err("kid") => {
+                if self.clock.mono_ms() < self.ack_keyset_backoff_until {
+                    return Err(RefreshDeferred);
+                }
                 let enrollment = self.writer.enrollment();
                 let profile = &self.config.profile;
                 let statement = match crate::client::fetch_route_statement(
                     &self.transport,
                     &enrollment.issuer,
                     profile,
+                    || {
+                        (self.route == RouteHealth::Normal && !self.fail_stopped())
+                            .then(|| self.inbox.admit(self.inbox.ticket()))
+                            .flatten()
+                    },
                 ) {
-                    Ok(s) => s.ok_or(Unverifiable)?,
-                    Err(r) => return Err(ReceiptFailure::Refused(self.apply_authority_refusal(r))),
+                    Ok(statement) => statement,
+                    Err(KeysetFetchError::DispatchBlocked) => return Err(RefreshDeferred),
+                    Err(KeysetFetchError::Timeout) => {
+                        self.ack_keyset_backoff_until = back_off(self, None);
+                        return Err(RefreshDeferred);
+                    }
+                    Err(KeysetFetchError::RetryableHttp { retry_after_s }) => {
+                        self.ack_keyset_backoff_until = back_off(self, retry_after_s);
+                        return Err(RefreshDeferred);
+                    }
+                    Err(KeysetFetchError::Refusal(r)) => {
+                        return Err(Refused(self.apply_authority_refusal(r)));
+                    }
+                    Err(KeysetFetchError::Invalid) => return Err(Unverifiable),
                 };
                 let pins = crate::keys::verify_keyset(
                     &statement,
@@ -210,9 +240,22 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     },
                 )
                 .ok_or(PinWrite)?;
+                // H.6: fetch once; a kid still unknown after refresh is a strike.
                 verify(self, compact).map_err(|_| Unverifiable)
             }
             result => result.map_err(|_| Unverifiable),
+        }
+    }
+
+    pub(crate) fn receipt_failure(
+        &mut self,
+        failure: ReceiptFailure,
+        strike: impl FnOnce(&mut Self) -> Answer,
+    ) -> Answer {
+        match failure {
+            ReceiptFailure::Unverifiable => strike(self),
+            ReceiptFailure::PinWrite | ReceiptFailure::RefreshDeferred => Answer::RetryReceipt,
+            ReceiptFailure::Refused(answer) => answer,
         }
     }
 
@@ -346,13 +389,27 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         status.owed.remove(index);
         let (answer, event) = match owed {
-            Owed::StatusHalt { code } => {
-                status.halted = true;
-                book.status_gate.status_halted = true;
-                (
-                    Answer::Halted,
-                    Some(HolderEvent::StatusBugHalt { status: code }),
-                )
+            Owed::StatusHalt { code, key } => {
+                if code == 400
+                    && let Some(key) = key
+                    && let std::collections::btree_map::Entry::Occupied(entry) =
+                        status.uncertain.entry(key)
+                    && entry.get().before_resume
+                {
+                    // A delayed 400 for a pre-resume key answers only the old request.
+                    prune.extend(entry.remove().attempts);
+                    (
+                        Answer::Rejected,
+                        Some(HolderEvent::StatusRejected { status: code }),
+                    )
+                } else {
+                    status.halted = true;
+                    book.status_gate.status_halted = true;
+                    (
+                        Answer::Halted,
+                        Some(HolderEvent::StatusBugHalt { status: code }),
+                    )
+                }
             }
             Owed::StatusStale { key } => {
                 relist = true;
@@ -368,14 +425,28 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     Some(HolderEvent::StatusRejected { status: 409 }),
                 )
             }
-            Owed::ReportHalt { ob, code } => {
-                if let Some(channel) = book.channels.get_mut(&ob) {
-                    channel.halted = true;
+            Owed::ReportHalt { ob, code, key } => {
+                if code == 400
+                    && let Some(key) = key
+                    && let std::collections::btree_map::Entry::Occupied(entry) =
+                        book.uncertain.entry(key)
+                    && entry.get().obligation_id == ob
+                    && entry.get().before_resume
+                {
+                    prune.extend(entry.remove().attempts);
+                    (
+                        Answer::Rejected,
+                        Some(HolderEvent::ReportRejected { status: code }),
+                    )
+                } else {
+                    if let Some(channel) = book.channels.get_mut(&ob) {
+                        channel.halted = true;
+                    }
+                    (
+                        Answer::Halted,
+                        Some(HolderEvent::ReportBugHalt { status: code }),
+                    )
                 }
-                (
-                    Answer::Halted,
-                    Some(HolderEvent::ReportBugHalt { status: code }),
-                )
             }
             Owed::ReportRejected {
                 ob,
