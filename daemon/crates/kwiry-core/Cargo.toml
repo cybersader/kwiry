@@ -50,6 +50,8 @@ required-features = ["internal-d5c-preview", "native"]
 
 [features]
 default = ["native"]
+# Lets daemon tests share the storage-probe fault injection.
+internal-storage-probe-test = ["native"]
 portable = [
   "dep:encoding_rs",
   "dep:flate2",

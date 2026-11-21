@@ -17,14 +17,14 @@ const LAYOUT_VERSION: u32 = crate::partition::GENERATION_LAYOUT_VERSION;
 const RETAINED_GENERATIONS: usize = 3;
 static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-storage-probe-test"))]
 thread_local! {
     static STORAGE_PROBE_TEST_FAULT: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "internal-storage-probe-test"))]
 fn inject_storage_probe_test_fault() -> Result<()> {
     STORAGE_PROBE_TEST_FAULT.with(|fault| {
         if fault.replace(false) {
@@ -61,8 +61,14 @@ impl DataRoot {
         &self.root
     }
 
-    /// Takes the writer lock without probing storage or cleaning generations.
-    /// A caller inspecting the as-found root can do so before calling
+    #[cfg(feature = "internal-storage-probe-test")]
+    #[doc(hidden)]
+    pub fn fail_next_storage_probe_for_test() {
+        STORAGE_PROBE_TEST_FAULT.with(|fault| fault.set(true));
+    }
+
+    /// Takes the writer lock and probes storage before returning it, without
+    /// cleaning generations. Inspect the as-found index before calling
     /// [`DataRootLock::prepare`].
     pub fn lock_writer(&self) -> Result<DataRootLock> {
         fs::create_dir_all(&self.root).map_err(|error| io_error(&self.root, error))?;
@@ -78,6 +84,7 @@ impl DataRoot {
             .map_err(|error| io_error(&lock_path, error))?;
         file.try_lock_exclusive()
             .map_err(|_| Error::LockHeld(lock_path.clone()))?;
+        probe_storage_semantics(&self.root)?;
 
         Ok(DataRootLock {
             file,
@@ -92,7 +99,7 @@ impl DataRoot {
     }
 
     /// Top-level entries that can hold a current, staged, or legacy index.
-    pub const INDEX_ENTRIES: [&str; 3] = ["current.json", "generations", "meta.json"];
+    pub const INDEX_ENTRIES: [&str; 4] = ["current.json", "generations", "meta.json", "semantic"];
 
     /// An empty generations directory, locks and other daemon state are not
     /// evidence of an index. Any entry inside generations (even staging) is.
@@ -488,7 +495,6 @@ impl DataRootLock {
 
     fn prepare_storage(&self) -> Result<()> {
         self.root.remove_abandoned_probes()?;
-        probe_storage_semantics(&self.root.root)?;
         self.root.prepare_locked()
     }
 }
@@ -738,7 +744,7 @@ fn probe_storage_semantics(root: &Path) -> Result<()> {
     let probe_dir = root.join(format!(".storage-probe-{probe_id}"));
     let result = (|| -> Result<()> {
         fs::create_dir(&probe_dir).map_err(|error| io_error(&probe_dir, error))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "internal-storage-probe-test"))]
         inject_storage_probe_test_fault()?;
 
         let lock_path = probe_dir.join("lock");

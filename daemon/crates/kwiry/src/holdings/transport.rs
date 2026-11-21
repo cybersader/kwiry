@@ -270,9 +270,22 @@ pub(crate) fn parse_retry_after(value: &str, now_s: i64) -> Option<u64> {
 
 /// `Sun, 06 Nov 1994 08:49:37 GMT` → Unix seconds.
 fn parse_imf_fixdate(value: &str) -> Option<i64> {
-    let (_weekday, rest) = value.split_once(", ")?;
+    fn decimal(value: &str, width: usize) -> Option<i64> {
+        if value.len() != width || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        value.parse().ok()
+    }
+
+    let (weekday, rest) = value.split_once(", ")?;
+    if !matches!(
+        weekday,
+        "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat" | "Sun"
+    ) {
+        return None;
+    }
     let mut parts = rest.split(' ');
-    let day: i64 = parts.next()?.parse().ok()?;
+    let day = decimal(parts.next()?, 2)?;
     let month = match parts.next()? {
         "Jan" => 1,
         "Feb" => 2,
@@ -288,25 +301,36 @@ fn parse_imf_fixdate(value: &str) -> Option<i64> {
         "Dec" => 12,
         _ => return None,
     };
-    let year: i64 = parts.next()?.parse().ok()?;
+    let year = decimal(parts.next()?, 4)?;
     let mut clock = parts.next()?.split(':');
-    let hour: i64 = clock.next()?.parse().ok()?;
-    let minute: i64 = clock.next()?.parse().ok()?;
-    let second: i64 = clock.next()?.parse().ok()?;
+    let hour = decimal(clock.next()?, 2)?;
+    let minute = decimal(clock.next()?, 2)?;
+    let second = decimal(clock.next()?, 2)?;
     if parts.next()? != "GMT" || parts.next().is_some() || clock.next().is_some() {
         return None;
     }
-    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+    let days_in_month = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=days_in_month).contains(&day) || hour > 23 || minute > 59 || second > 60 {
         return None;
     }
-    // Days from civil (Howard Hinnant), proleptic Gregorian.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
+    // Days from civil (Howard Hinnant), proleptic Gregorian. Validated fields
+    // bound the within-era and within-day offsets.
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
     let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+    let days = era
+        .checked_mul(146_097)?
+        .checked_add(doe)?
+        .checked_sub(719_468)?;
+    days.checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)
 }
 
 #[cfg(test)]
@@ -635,7 +659,24 @@ mod tests {
             parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", 784_111_777 + 30),
             Some(0)
         );
-        for bad in ["", "-1", "1.5", "soon", "Sun, 06 Nov 1994 08:49:37 UTC"] {
+        for bad in [
+            "",
+            "-1",
+            "1.5",
+            "soon",
+            "Sun, 06 Nov 1994 08:49:37 UTC",
+            "Sun, 06 Nov 11994 08:49:37 GMT",
+            "Sun, 06 Nov -994 08:49:37 GMT",
+            "Sun, 06 Nov 9223372036854775807 08:49:37 GMT",
+            "Sun, 00 Nov 1994 08:49:37 GMT",
+            "Sun, 32 Nov 1994 08:49:37 GMT",
+            "Sun, 29 Feb 1994 08:49:37 GMT",
+            "Sun, 06 Nov 1994 24:49:37 GMT",
+            "Sun, 06 Nov 1994 08:60:37 GMT",
+            "Sun, 06 Nov 1994 08:49:61 GMT",
+            "Tue, 06 Xxx 1994 08:49:37 GMT",
+            "Fry, 06 Nov 1994 08:49:37 GMT",
+        ] {
             assert_eq!(parse_retry_after(bad, 0), None, "{bad}");
         }
     }

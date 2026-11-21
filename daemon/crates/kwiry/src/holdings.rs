@@ -55,8 +55,6 @@ pub(crate) fn open_holder_dir(
     config: &Config,
     data_dir: &Path,
 ) -> Result<HolderDir> {
-    #[cfg(unix)]
-    check_holder_dir_permissions(&settings.state_dir)?;
     let mut forbidden: Vec<&Path> = vec![data_dir];
     forbidden.extend(config.vaults.iter().map(|vault| vault.path.as_path()));
     HolderDir::open(&settings.state_dir, &forbidden).map_err(|error| match error {
@@ -65,31 +63,6 @@ pub(crate) fn open_holder_dir(
         ),
         other => anyhow!("holder state directory: {other}"),
     })
-}
-
-#[cfg(unix)]
-fn check_holder_dir_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    // Newly created holder directories are private (0700).
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(anyhow!("cannot inspect holder.state_dir: {error}")),
-    };
-    // SAFETY: geteuid takes no arguments and has no preconditions.
-    let uid = unsafe { libc::geteuid() };
-    if !holder_dir_is_private(metadata.uid(), metadata.mode(), uid) {
-        return Err(anyhow!(
-            "unsafe holder.state_dir permissions: the directory must be owned by the current user and not group- or other-writable"
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn holder_dir_is_private(owner: u32, mode: u32, effective_uid: u32) -> bool {
-    owner == effective_uid && mode & 0o022 == 0
 }
 
 /// Starts the holder from durable state: enrollment, the loss/reset rules
@@ -248,14 +221,6 @@ mod tests {
         ] {
             assert!(!old.join(name).exists());
         }
-    }
-
-    #[test]
-    fn private_holder_directory_requires_current_owner_and_safe_mode() {
-        assert!(super::holder_dir_is_private(1000, 0o755, 1000));
-        assert!(!super::holder_dir_is_private(1001, 0o700, 1000));
-        assert!(!super::holder_dir_is_private(1000, 0o720, 1000));
-        assert!(!super::holder_dir_is_private(1000, 0o702, 1000));
     }
 
     #[test]

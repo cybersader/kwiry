@@ -22,7 +22,7 @@ use kwiry_core::{
 use kwiry_holdings::client::{Timeouts, Transport};
 use kwiry_holdings::keys::HolderKey;
 use kwiry_holdings::profile::{ROUTE_LIST, ROUTE_REPORT, ROUTE_STATUS, WireProfile};
-use kwiry_holdings::state::{FsIo, HolderDir};
+use kwiry_holdings::state::{FsIo, HolderDir, STATE_FILE};
 use kwiry_holdings::testkit::{AuthorityConfig, FakeAuthority, FakeClock, TEST_HOLDER_KEY_SEED};
 use tempfile::tempdir;
 
@@ -461,13 +461,25 @@ fn a_holder_that_cannot_start_stops_the_daemon_before_it_serves() {
 
 #[test]
 fn an_unmarked_staging_generation_is_refused_and_preserved() {
+    assert_unmarked_index_is_refused_and_preserved("generations/.staging-test/segment", false);
+}
+
+#[test]
+fn an_unmarked_semantic_only_root_is_refused_and_preserved() {
+    assert_unmarked_index_is_refused_and_preserved("semantic/semantic.db", true);
+}
+
+fn assert_unmarked_index_is_refused_and_preserved(index_file: &str, lose_holder_state: bool) {
     let server = AuthorityServer::start();
     let fixture = fixture(Some(&server.issuer));
     enroll(&fixture, &server);
-    let staging = fixture.data.join("generations").join(".staging-test");
-    fs::create_dir_all(&staging).unwrap();
-    let staged_data = staging.join("segment");
-    fs::write(&staged_data, b"synthetic index data").unwrap();
+    let state = fixture.state_dir.join(STATE_FILE);
+    if lose_holder_state {
+        fs::remove_file(&state).unwrap();
+    }
+    let index_file = fixture.data.join(index_file);
+    fs::create_dir_all(index_file.parent().unwrap()).unwrap();
+    fs::write(&index_file, b"synthetic index data").unwrap();
 
     for args in [
         &["serve", "--bind", "127.0.0.1:0"][..],
@@ -480,15 +492,16 @@ fn an_unmarked_staging_generation_is_refused_and_preserved() {
         assert!(!stdout.contains("listening"), "{stdout}");
         for expected in [
             "root_holder_mismatch",
-            "remove only `current.json`, `generations`, `meta.json`",
+            "remove only `current.json`, `generations`, `meta.json`, `semantic`",
             "the index rebuilds from the vault",
             "Keep everything else in the data directory",
             "`replay-epoch` and `replay-iat-watermark`",
         ] {
             assert!(stderr.contains(expected), "{stderr}");
         }
-        assert_eq!(fs::read(&staged_data).unwrap(), b"synthetic index data");
+        assert_eq!(fs::read(&index_file).unwrap(), b"synthetic index data");
         assert!(!fixture.data.join("holder-marker.json").exists());
+        assert_eq!(state.exists(), !lose_holder_state);
     }
     assert_eq!(server.hits.load(Ordering::SeqCst), 0);
 }
@@ -509,6 +522,19 @@ fn relist_binds_an_unmarked_root_with_only_replay_state() {
     for (file, bytes) in replay_entries {
         assert_eq!(fs::read(fixture.data.join(file)).unwrap(), bytes);
     }
+}
+
+#[test]
+fn holder_key_creates_a_private_state_directory_on_first_run() {
+    let fixture = fixture(Some("https://authority.example.test/api/lifecycle/v1"));
+    assert!(!fixture.state_dir.exists());
+    let output = kwiry(&fixture, &["holder", "key"]).output().unwrap();
+    assert!(output.status.success());
+    let mode = fs::metadata(&fixture.state_dir)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
 }
 
 #[test]
@@ -537,7 +563,7 @@ fn daemon_and_holder_commands_refuse_writable_state_directories() {
             assert!(!output.status.success(), "{args:?}");
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
-                stderr.contains("unsafe holder.state_dir permissions"),
+                stderr.contains("unsafe holder directory permissions"),
                 "{stderr}"
             );
         }

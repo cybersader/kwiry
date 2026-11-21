@@ -175,7 +175,7 @@ impl HolderDir {
         if !path.exists() {
             create_private_dir(path)?;
         }
-        let root = fs::canonicalize(path)?;
+        let root = Self::checked_root(path)?;
         for other in forbidden {
             let other = match fs::canonicalize(other) {
                 Ok(canonical) => canonical,
@@ -195,6 +195,31 @@ impl HolderDir {
         Ok(Self { root, _lock: lock })
     }
 
+    /// Resolves and checks an existing holder directory without creating or
+    /// locking it. Use the returned path for subsequent holder I/O.
+    pub fn checked_root(path: &Path) -> io::Result<PathBuf> {
+        let root = fs::canonicalize(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let metadata = fs::symlink_metadata(&root)?;
+            if !metadata.is_dir()
+                || !holder_dir_is_private(
+                    metadata.uid(),
+                    metadata.mode(),
+                    rustix::process::geteuid().as_raw(),
+                )
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unsafe holder directory permissions: the directory must be owned by the current user and not group- or other-writable",
+                ));
+            }
+        }
+        Ok(root)
+    }
+
     pub fn path(&self) -> &Path {
         &self.root
     }
@@ -212,6 +237,11 @@ impl HolderDir {
             Err(error) => Err(error),
         }
     }
+}
+
+#[cfg(unix)]
+fn holder_dir_is_private(owner: u32, mode: u32, effective_uid: u32) -> bool {
+    owner == effective_uid && mode & 0o022 == 0
 }
 
 // Protocol-owned names are portable ASCII filename components. Validate at
@@ -749,6 +779,14 @@ mod tests {
     use crate::obligations::{Attempt, Uncertain};
     use crate::testkit::Rig;
     use crate::wire::ReportState;
+
+    #[test]
+    fn private_holder_directory_requires_current_owner_and_safe_mode() {
+        assert!(holder_dir_is_private(1000, 0o755, 1000));
+        assert!(!holder_dir_is_private(1001, 0o700, 1000));
+        assert!(!holder_dir_is_private(1000, 0o720, 1000));
+        assert!(!holder_dir_is_private(1000, 0o702, 1000));
+    }
 
     #[test]
     fn invalid_persisted_attempt_digests_are_corrupt_state() {

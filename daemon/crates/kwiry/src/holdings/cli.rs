@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use kwiry_core::{Config, HolderSettings, Paths, load_config_for_paths};
 use kwiry_holdings::engine::clock_hold::SEAL_FILE;
-use kwiry_holdings::state::{FsIo, HolderState, LOCK_FILE, STATE_FILE};
+use kwiry_holdings::state::{FsIo, HolderDir, HolderState, LOCK_FILE, STATE_FILE};
 
 use super::adapters::LogSink;
 use super::driver::{HolderReport, LiveReport, SNAPSHOT_FILE, describe_list};
@@ -155,10 +155,9 @@ fn now_ms() -> i64 {
 
 /// Durable state plus the daemon's snapshot if the state directory is locked.
 fn read_status(settings: &HolderSettings, data_dir: &Path) -> Result<HolderReport> {
-    #[cfg(unix)]
-    super::check_holder_dir_permissions(&settings.state_dir)?;
-    let state_path = settings.state_dir.join(STATE_FILE);
-    let bytes = match std::fs::read(&state_path) {
+    let bytes_and_dir = HolderDir::checked_root(&settings.state_dir)
+        .and_then(|dir| std::fs::read(dir.join(STATE_FILE)).map(|bytes| (bytes, dir)));
+    let (bytes, dir) = match bytes_and_dir {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             bail!("the holder is not enrolled (no holder state in holder.state_dir)")
@@ -166,7 +165,7 @@ fn read_status(settings: &HolderSettings, data_dir: &Path) -> Result<HolderRepor
         Err(error) => return Err(anyhow!("holder state unreadable: {error}")),
     };
     let state = HolderState::parse(&bytes).map_err(|_| anyhow!("holder state unreadable"))?;
-    let seal = match std::fs::read(settings.state_dir.join(SEAL_FILE)) {
+    let seal = match std::fs::read(dir.join(SEAL_FILE)) {
         Ok(bytes) => Some(String::from_utf8(bytes).ok()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         // An unreadable seal reads as a raised hold.
@@ -183,7 +182,7 @@ fn read_status(settings: &HolderSettings, data_dir: &Path) -> Result<HolderRepor
         .and_then(|bytes| serde_json::from_slice::<HolderReport>(&bytes).ok())
         .filter(|snapshot| snapshot.holder_id == state.holder_id)
         .and_then(|snapshot| snapshot.live)
-        .filter(|_| holder_lock_is_held(&settings.state_dir));
+        .filter(|_| holder_lock_is_held(&dir));
     Ok(report)
 }
 
@@ -252,5 +251,51 @@ fn print_live(live: &LiveReport) {
     }
     if !live.alerts.is_empty() {
         println!("  raised: {}", live.alerts.join(", "));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use kwiry_core::{DataRoot, HolderProfile};
+    use kwiry_holdings::testkit::{Rig, TEST_ISSUER};
+
+    #[test]
+    fn startup_and_relist_do_not_bind_or_reset_when_the_storage_probe_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = HolderSettings {
+            profile: HolderProfile::OpenClast,
+            issuer: TEST_ISSUER.into(),
+            state_dir: temp.path().join("holder"),
+            page_size: None,
+            clock_skew_allowance_seconds: None,
+            max_stale_serve_seconds: None,
+        };
+        drop(Rig::with_profile(
+            &settings.state_dir,
+            wire_profile(settings.profile),
+            "example-lifecycle/v1",
+        ));
+        let state = settings.state_dir.join(STATE_FILE);
+        std::fs::remove_file(&state).unwrap();
+        let config = Config::default();
+        let data = temp.path().join("data");
+
+        for relist in [false, true] {
+            DataRoot::fail_next_storage_probe_for_test();
+            let result = if relist {
+                start(&settings, &config, &data).map(|_| ())
+            } else {
+                let sink = Arc::new(LogSink::new(Arc::new(|| {})));
+                start_holder(&settings, &config, &data, system_clock(), sink).map(|_| ())
+            };
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("injected storage-probe checkpoint failure"),
+                "{error}"
+            );
+            assert!(!state.exists());
+            assert!(!data.join(super::super::adapters::MARKER_FILE).exists());
+        }
     }
 }
