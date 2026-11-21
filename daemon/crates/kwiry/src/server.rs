@@ -581,7 +581,10 @@ fn check_holder_gate(state: &AppState) -> std::result::Result<(), HttpError> {
         .as_ref()
         .is_some_and(crate::holdings::driver::gate_revoked)
     {
-        return Err(map_core_error(kwiry_core::Error::ResourceUnavailable));
+        return Err(map_core_error(
+            kwiry_core::Error::ResourceUnavailable,
+            state.profile,
+        ));
     }
     Ok(())
 }
@@ -599,34 +602,24 @@ async fn search(
             "the authenticated principal cannot search this profile",
         ));
     }
-    // Do not render or log the extractor's diagnostic: it can quote input.
-    let Json(request) = payload.map_err(|_| {
-        HttpError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "the request body could not be read as a search request",
-        )
+    let Json(request) = payload.map_err(|error| {
+        let message = match state.profile {
+            HostProfile::Desktop => error.body_text(),
+            // The extractor's diagnostic can quote caller input.
+            HostProfile::OpenClast => {
+                "the request body could not be read as a search request".to_owned()
+            }
+        };
+        HttpError::new(StatusCode::BAD_REQUEST, "invalid_request", message)
     })?;
     let prepared_query = request
         .prepare_query()
-        .map_err(|error| HttpError::new(StatusCode::BAD_REQUEST, error.code, error.message))?;
+        .map_err(|error| map_request_error(error, state.profile))?;
     let semantic_available =
         state.profile == HostProfile::Desktop && state.runtime.semantic_ready();
-    request.validate(semantic_available).map_err(|error| {
-        let status = match error.code {
-            "mode_unavailable" | "cursor_unavailable" => StatusCode::NOT_IMPLEMENTED,
-            _ => StatusCode::BAD_REQUEST,
-        };
-        let message = if state.profile == HostProfile::OpenClast && error.code == "mode_unavailable"
-        {
-            // The shared hybrid default still applies; an explicit lexical mode
-            // is required to pass validation in the governed profile.
-            "mode is required and must be \"lexical\" in the openclast profile".to_owned()
-        } else {
-            error.message
-        };
-        HttpError::new(status, error.code, message)
-    })?;
+    request
+        .validate(semantic_available)
+        .map_err(|error| map_request_error(error, state.profile))?;
     if request.limit > principal.max_limit {
         return Err(HttpError::new(
             StatusCode::FORBIDDEN,
@@ -672,7 +665,7 @@ async fn search(
             "the search task failed",
         )
     })?
-    .map_err(map_core_error)?;
+    .map_err(|error| map_core_error(error, state.profile))?;
     if state.profile == HostProfile::OpenClast {
         tracing::info!(
             jti = principal.jti.as_deref().unwrap_or("missing"),
@@ -690,7 +683,7 @@ async fn search(
         HostProfile::OpenClast => state
             .runtime
             .authorized_freshness(&request.filters, &principal.resources, &result.generation)
-            .map_err(map_core_error)?,
+            .map_err(|error| map_core_error(error, state.profile))?,
     };
     // A search that was admitted before a fail-stop cannot release its hits.
     check_holder_gate(&state)?;
@@ -784,14 +777,34 @@ fn response_freshness(
     IndexFreshness::new(state, basis)
 }
 
-fn map_core_error(error: kwiry_core::Error) -> HttpError {
+fn map_request_error(error: kwiry_core::ApiRequestError, profile: HostProfile) -> HttpError {
+    let status = match error.code {
+        "mode_unavailable" | "cursor_unavailable" => StatusCode::NOT_IMPLEMENTED,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    let message = match (profile, error.code) {
+        // The shared hybrid default still applies; the governed profile requires explicit lexical mode.
+        (HostProfile::OpenClast, "mode_unavailable") => {
+            "mode is required and must be \"lexical\" in the openclast profile".to_owned()
+        }
+        (HostProfile::OpenClast, "invalid_filter") if error.contains_caller_text() => {
+            "the frontmatter filter key is not supported".to_owned()
+        }
+        _ => error.message,
+    };
+    HttpError::new(status, error.code, message)
+}
+
+fn map_core_error(error: kwiry_core::Error, profile: HostProfile) -> HttpError {
     match error {
         // Core diagnostics may contain query text, field names, or filter values.
-        kwiry_core::Error::Query(_) => HttpError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_query",
-            "the query could not be parsed or applied",
-        ),
+        kwiry_core::Error::Query(message) => {
+            let message = match profile {
+                HostProfile::Desktop => message,
+                HostProfile::OpenClast => "the query could not be parsed or applied".to_owned(),
+            };
+            HttpError::new(StatusCode::BAD_REQUEST, "invalid_query", message)
+        }
         kwiry_core::Error::IndexBuilding => HttpError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "index_building",
@@ -801,7 +814,7 @@ fn map_core_error(error: kwiry_core::Error) -> HttpError {
             HttpError::new(StatusCode::NOT_IMPLEMENTED, "mode_unavailable", message)
         }
         kwiry_core::Error::UnavailableResourceIndexes(indexes) => {
-            let mut error = map_core_error(kwiry_core::Error::ResourceUnavailable);
+            let mut error = map_core_error(kwiry_core::Error::ResourceUnavailable, profile);
             error.body.error.resource_indexes = Some(indexes);
             error
         }
@@ -1174,7 +1187,10 @@ mod tests {
 
     #[test]
     fn unavailable_authorized_resource_is_an_explicit_nonrevealing_503() {
-        let error = map_core_error(kwiry_core::Error::ResourceUnavailable);
+        let error = map_core_error(
+            kwiry_core::Error::ResourceUnavailable,
+            HostProfile::OpenClast,
+        );
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.body.error.code, "resource_unavailable");
         assert!(!error.body.error.message.contains("room"));
@@ -1182,8 +1198,11 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_resource_indexes_are_exact_and_nonrevealing() {
-        let response = map_core_error(kwiry_core::Error::UnavailableResourceIndexes(vec![0, 2]))
-            .into_response();
+        let response = map_core_error(
+            kwiry_core::Error::UnavailableResourceIndexes(vec![0, 2]),
+            HostProfile::OpenClast,
+        )
+        .into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.into_body().collect().await.unwrap().to_bytes(),

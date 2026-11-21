@@ -109,10 +109,11 @@ impl ApiSearchRequest {
         }
         for key in self.filters.frontmatter_equals.keys() {
             if !FRONTMATTER_FILTERS.contains(&key.as_str()) {
-                return Err(ApiRequestError::new(
-                    "invalid_filter",
-                    "the frontmatter filter key is not supported",
-                ));
+                return Err(ApiRequestError {
+                    code: "invalid_filter",
+                    message: format!("unsupported frontmatter filter: {key}"),
+                    caller_text: true,
+                });
             }
         }
         Ok(())
@@ -231,6 +232,7 @@ pub struct ApiErrorBody {
 pub struct ApiRequestError {
     pub code: &'static str,
     pub message: String,
+    caller_text: bool,
 }
 
 impl ApiRequestError {
@@ -238,7 +240,13 @@ impl ApiRequestError {
         Self {
             code,
             message: message.into(),
+            caller_text: false,
         }
+    }
+
+    /// Whether the diagnostic quotes caller-supplied text.
+    pub fn contains_caller_text(&self) -> bool {
+        self.caller_text
     }
 }
 
