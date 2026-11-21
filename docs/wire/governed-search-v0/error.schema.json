@@ -28,7 +28,7 @@
             {"x-http-status": 503, "const": "replay_state_unavailable", "description": "The verifier task failed or could not use or durably update replay protection."}
           ]
         },
-        "message": {"type": "string"},
+        "message": {"type": "string", "description": "Human-readable diagnostic that does not quote caller-supplied search input. Branch on status and code, not message wording."},
         "resource_indexes": {
           "type": "array",
           "minItems": 1,

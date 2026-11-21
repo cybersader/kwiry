@@ -194,6 +194,46 @@ fn daemon_watches_files_reloads_config_and_reconciles_offline_changes() {
 }
 
 #[test]
+fn desktop_search_errors_keep_detailed_diagnostics() {
+    let temporary = tempdir().unwrap();
+    let config = temporary.path().join("config.toml");
+    let data = temporary.path().join("data");
+    let vault = temporary.path().join("vault");
+    fs::create_dir(&vault).unwrap();
+    fs::write(vault.join("note.md"), "# Orchard\nSample notes.").unwrap();
+    vault_add(&config, &data, "orchard", &vault);
+    let daemon = Daemon::start(&config, &data);
+    let token = fs::read_to_string(config.with_extension("token")).unwrap();
+    let token = token.trim();
+    wait_for(|| status(&daemon.address, token).state == DaemonState::Ready);
+
+    for (body, code, diagnostic) in [
+        (
+            r#"{"q":"\"orchard","mode":"lexical"}"#,
+            "invalid_query",
+            "Syntax Error",
+        ),
+        (
+            r#"{"q":"orchard","mode":"lexical","synthetic_option":true}"#,
+            "invalid_request",
+            "unknown field `synthetic_option`",
+        ),
+        (
+            r#"{"q":"orchard","mode":"lexical","filters":{"frontmatter_equals":{"synthetic_key":"sample"}}}"#,
+            "invalid_filter",
+            "unsupported frontmatter filter: synthetic_key",
+        ),
+    ] {
+        let (status, response) = request(&daemon.address, token, "POST", "/v0/search", Some(body));
+        assert_eq!(status, 400, "{response}");
+        let error: kwiry_core::ApiErrorEnvelope = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, code);
+        assert!(error.error.message.contains(diagnostic), "{response}");
+    }
+    daemon.stop();
+}
+
+#[test]
 fn daemon_watches_populated_subtree_lifecycle() {
     let temporary = tempdir().unwrap();
     let config = temporary.path().join("config.toml");
