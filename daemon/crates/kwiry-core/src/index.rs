@@ -356,7 +356,7 @@ fn build_openclast_candidate(
     let layout = GenerationLayout::with_snapshots(resources)?;
     manifest.mark_synced()?;
     manifest.save(&candidate.manifest_path())?;
-    layout.save_candidate(candidate)?;
+    layout.save_candidate(candidate, &mut stats.warnings)?;
 
     let indexed_chunks = layout
         .partitions

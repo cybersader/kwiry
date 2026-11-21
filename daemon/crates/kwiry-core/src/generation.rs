@@ -679,6 +679,8 @@ fn inject_publish_fault(fault: Option<PublishFault>, step: PublishFault) -> Resu
     Ok(())
 }
 
+pub(crate) const GENERATED_ID_BYTES: usize = 94;
+
 fn generation_id() -> Result<String> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -688,11 +690,13 @@ fn generation_id() -> Result<String> {
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random)
         .map_err(|error| Error::State(format!("could not generate generation ID: {error}")))?;
-    Ok(format!(
+    let id = format!(
         "g-{nanos:039}-{:010}-{sequence:020}-{:020}",
         std::process::id(),
         u64::from_le_bytes(random)
-    ))
+    );
+    debug_assert_eq!(id.len(), GENERATED_ID_BYTES);
+    Ok(id)
 }
 
 fn is_generation_id(id: &str) -> bool {

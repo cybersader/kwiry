@@ -9,6 +9,7 @@ use tempfile::NamedTempFile;
 
 use crate::error::{Error, Result, io_error};
 use crate::model::{Config, HostProfile, IndexFreshnessBasis, MAX_FILE_BYTES, VaultRegistration};
+use crate::partition::{MAX_LABELED_ROOMS, label_resource_fits};
 
 const ROOM_FORMAT: crate::OpenClastRoomFormat = crate::openclast_room_format!();
 
@@ -341,6 +342,18 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
             message: "snapshot_id requires an OpenClast room registration".into(),
         });
     }
+    if config
+        .vaults
+        .iter()
+        .filter(|v| v.snapshot_id.is_some())
+        .count()
+        > MAX_LABELED_ROOMS
+    {
+        return Err(Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: format!("at most {MAX_LABELED_ROOMS} OpenClast rooms may have a snapshot_id"),
+        });
+    }
     if config.server.bind.trim().is_empty() {
         return Err(Error::InvalidConfig {
             path: path.to_path_buf(),
@@ -425,6 +438,20 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
                         message: format!("auth.openclast.{name} must not be empty"),
                     });
                 }
+            }
+            if config.vaults.iter().any(|vault| {
+                vault.snapshot_id.is_some()
+                    && vault
+                        .room
+                        .as_deref()
+                        .is_some_and(|room| !label_resource_fits(&auth.tenant_id, &vault.id, room))
+            }) {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message:
+                        "OpenClast resource identifiers are too long for snapshot label storage"
+                            .into(),
+                });
             }
             if crate::source::ROOM_INCLUSIVE_IDS && !valid_tenant_identifier(&auth.tenant_id) {
                 return Err(Error::InvalidConfig {
@@ -763,6 +790,26 @@ mod tests {
             assert!(error.contains("snapshot_id requires"));
             assert!(!error.contains("sample.label"));
         }
+    }
+
+    #[test]
+    fn config_rejects_more_than_the_snapshot_labeled_room_bound() {
+        use std::fmt::Write as _;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = String::from("[server]\nprofile = 'openclast'\n");
+        for i in 0..=MAX_LABELED_ROOMS {
+            writeln!(
+                config,
+                "[[vaults]]\nvault_id = 'vault-{i}'\nroom = 'room-{i}'\npath = '/synthetic/{i}'\nsnapshot_id = 'sample.label'"
+            )
+            .unwrap();
+        }
+        fs::write(&path, config).unwrap();
+        let error = load_config(&path).unwrap_err().to_string();
+        assert!(error.contains(&format!("at most {MAX_LABELED_ROOMS} OpenClast rooms")));
+        assert!(!error.contains("sample.label"));
     }
 
     #[test]

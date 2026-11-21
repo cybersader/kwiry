@@ -610,6 +610,96 @@ fn missing_corrupt_wrong_version_or_mismatched_sidecar_serves_every_room_unlabel
     }
 }
 
+fn check_failed_walk_label(configured: Option<&str>, expected: Option<&str>) {
+    let mut f = Fixture::new(Some("apricots"));
+    let other = VaultRegistration {
+        id: "second".into(),
+        room: Some("second".into()),
+        path: f.dir.path().join("second"),
+        snapshot_id: Some("snapshot:C".parse().unwrap()),
+    };
+    fs::create_dir(&other.path).unwrap();
+    let note = other.path.join("note.md");
+    fs::write(&note, "seedlings").unwrap();
+    let healthy = f.config.resource_key(&other).unwrap();
+    f.config.vaults.push(other);
+    f.reconcile();
+    let previous = f.published();
+
+    fs::rename(&f.config.vaults[0].path, f.dir.path().join("offline")).unwrap();
+    f.config.vaults[0].snapshot_id = configured.map(|s| s.parse().unwrap());
+    f.reconcile();
+    assert_eq!(f.published().id, previous.id);
+    f.check(&f.search("apricots"), Some("snapshot:A"), 1);
+
+    fs::write(note, "violets").unwrap();
+    f.reconcile();
+    let active = f.published();
+    assert_ne!(active.id, previous.id);
+    let both = [f.resources[0].clone(), healthy.clone()];
+    let answer = reopened_result(&active, &both, "violets");
+    assert_eq!(answer.snapshot_ids.len(), 2);
+    assert_eq!(
+        answer.snapshot_ids[&f.resources[0]]
+            .as_ref()
+            .map(SnapshotId::as_str),
+        expected
+    );
+    assert_eq!(
+        answer.snapshot_ids[&healthy].as_ref().unwrap().as_str(),
+        "snapshot:C"
+    );
+    assert_eq!(answer.hits.len(), 1);
+}
+
+#[test]
+fn failed_walk_retains_matching_snapshot_label_when_another_room_publishes() {
+    check_failed_walk_label(Some("snapshot:A"), Some("snapshot:A"));
+}
+
+#[test]
+fn failed_walk_drops_removed_snapshot_label_when_another_room_publishes() {
+    check_failed_walk_label(None, None);
+}
+
+#[test]
+fn failed_walk_drops_changed_snapshot_label_when_another_room_publishes() {
+    check_failed_walk_label(Some("snapshot:B"), None);
+}
+
+#[test]
+fn over_cap_snapshot_label_write_leaves_generation_unlabeled_without_republishing() {
+    let mut f = Fixture::new(Some("apricots"));
+    let previous = f.published();
+    // Bypass config loading to exercise the writer's defense in depth. Keep the
+    // oversized registration empty so only the sidecar/layout use this long ID.
+    let other = VaultRegistration {
+        id: "\u{1}".repeat(175_000),
+        room: Some("second".into()),
+        path: f.dir.path().join("second"),
+        snapshot_id: Some("snapshot:C".parse().unwrap()),
+    };
+    fs::create_dir(&other.path).unwrap();
+    let healthy = f.config.resource_key(&other).unwrap();
+    f.config.vaults.push(other);
+    let report = f.manager.reconcile(f.config.clone()).unwrap();
+    let active = f.published();
+    assert_ne!(active.id, previous.id);
+    assert!(report.warnings.iter().any(|warning| {
+        warning.path.ends_with(crate::partition::LABEL_SIDECAR)
+            && warning.message.contains("exceeds the storage limit")
+    }));
+    assert!(!active.root.join(crate::partition::LABEL_SIDECAR).exists());
+    let answer = reopened_result(&active, &[f.resources[0].clone(), healthy], "apricots");
+    assert_eq!(answer.hits.len(), 1);
+    assert_eq!(answer.snapshot_ids.len(), 2);
+    assert!(answer.snapshot_ids.values().all(Option::is_none));
+
+    f.reconcile();
+    assert_eq!(f.published().id, active.id);
+    f.check(&f.search("apricots"), None, 1);
+}
+
 fn metadata_no_audit(config: &mut Config) {
     config.indexing.basis = IndexFreshnessBasis::MetadataAudit;
     config.indexing.racy_window_millis = 0;

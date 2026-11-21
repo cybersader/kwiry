@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::model::{HostProfile, ResourceKey, SnapshotId};
+use crate::model::{HostProfile, IngestWarning, ResourceKey, SnapshotId};
 use crate::state::{read_json, write_json_atomic};
 
-use crate::generation::{CandidateGeneration, GenerationPaths, LAYOUT_VERSION};
+use crate::generation::{CandidateGeneration, GENERATED_ID_BYTES, GenerationPaths, LAYOUT_VERSION};
 
 pub(crate) const LABEL_SIDECAR: &str = "snapshot-labels.json";
 const LABEL_VERSION: u32 = 1;
@@ -23,10 +23,33 @@ struct SnapshotLabels {
 
 // The sidecar is disposable. Never allocate more than this bound for its bytes.
 pub(crate) const MAX_LABEL_BYTES: u64 = 1024 * 1024;
+const MAX_LABEL_RESOURCE_JSON_BYTES: usize = 260;
+// The encoded resource tuple uses 10 bytes for quotes, commas and brackets,
+// leaving at most 250 escaped value bytes. In the pretty sidecar each binding
+// needs at most 250 + 64 (partition hash) + 128 (label) + 163 (JSON and separator)
+// bytes. Reserve 151 bytes for the envelope (94-byte generation ID and newline
+// included); subtract one more byte to stay strictly below the reader cap.
+pub(crate) const MAX_LABELED_ROOMS: usize = (MAX_LABEL_BYTES as usize - 151 - 1) / 605;
+
+pub(crate) fn label_resource_fits(tenant_id: &str, vault_id: &str, room_id: &str) -> bool {
+    serde_json::to_vec(&[tenant_id, vault_id, room_id])
+        .is_ok_and(|bytes| bytes.len() <= MAX_LABEL_RESOURCE_JSON_BYTES)
+}
+
 #[cfg(test)]
 thread_local! { pub(crate) static FAIL_LABEL_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 impl SnapshotLabels {
+    fn fit(&self) -> Result<bool> {
+        if self.labels.is_empty() {
+            return Ok(true);
+        }
+        let encoded = serde_json::to_vec_pretty(self)
+            .map_err(|error| Error::State(format!("could not encode snapshot labels: {error}")))?;
+        // write_json_atomic appends one newline.
+        Ok((encoded.len() as u64) < MAX_LABEL_BYTES)
+    }
+
     fn read(path: &Path) -> Option<Self> {
         use std::io::Read;
         #[cfg(test)]
@@ -173,29 +196,49 @@ impl GenerationLayout {
         self
     }
 
-    pub(crate) fn save_candidate(&self, candidate: &CandidateGeneration) -> Result<()> {
-        self.save(&candidate.layout_path())?;
-        let labels: Vec<_> = self
-            .partitions
-            .iter()
-            .filter_map(|p| {
-                Some(LabelBinding {
-                    partition_id: p.partition_id.clone(),
-                    resource: p.resource.clone(),
-                    snapshot_id: p.snapshot_id.clone()?,
+    fn snapshot_labels(&self, generation: String) -> SnapshotLabels {
+        SnapshotLabels {
+            version: LABEL_VERSION,
+            generation,
+            labels: self
+                .partitions
+                .iter()
+                .filter_map(|p| {
+                    Some(LabelBinding {
+                        partition_id: p.partition_id.clone(),
+                        resource: p.resource.clone(),
+                        snapshot_id: p.snapshot_id.clone()?,
+                    })
                 })
-            })
-            .collect();
+                .collect(),
+        }
+    }
+
+    pub(crate) fn labels_fit(&self) -> Result<bool> {
+        // Newly generated IDs have a fixed width and require no JSON escaping.
+        self.snapshot_labels("0".repeat(GENERATED_ID_BYTES)).fit()
+    }
+
+    pub(crate) fn save_candidate(
+        &self,
+        candidate: &CandidateGeneration,
+        warnings: &mut Vec<IngestWarning>,
+    ) -> Result<()> {
+        self.save(&candidate.layout_path())?;
+        let sidecar = self.snapshot_labels(candidate.id.clone());
         // Fresh staging never inherits the predecessor's sidecar.
-        if !labels.is_empty() {
-            write_json_atomic(
-                &candidate.staging_dir.join(LABEL_SIDECAR),
-                &SnapshotLabels {
-                    version: LABEL_VERSION,
-                    generation: candidate.id.clone(),
-                    labels,
-                },
-            )?;
+        if !sidecar.labels.is_empty() {
+            let path = candidate.staging_dir.join(LABEL_SIDECAR);
+            if sidecar.fit()? {
+                write_json_atomic(&path, &sidecar)?;
+            } else {
+                warnings.push(IngestWarning {
+                    path,
+                    message:
+                        "snapshot label sidecar exceeds the storage limit; generation is unlabeled"
+                            .into(),
+                });
+            }
         }
         Ok(())
     }
@@ -294,6 +337,44 @@ mod tests {
             partition_id(&first),
             partition_id(&ResourceKey::new("other", "vault", "room"))
         );
+    }
+
+    #[test]
+    fn maximum_size_snapshot_label_bindings_round_trip_at_room_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = crate::DataRoot::new(dir.path()).create_candidate().unwrap();
+        let tenant = format!("tenant_{}", "t".repeat(20));
+        let snapshot = "s".repeat(128).parse::<SnapshotId>().unwrap();
+        let resources = (0..MAX_LABELED_ROOMS)
+            .map(|i| {
+                // Each control byte uses six escaped bytes; 174 + 27 + 27 + 22 = 250.
+                let vault = format!("{}{:027}", "\u{1}".repeat(29), i);
+                let room = format!("{i:022}");
+                assert!(label_resource_fits(&tenant, &vault, &room));
+                assert!(!label_resource_fits(&tenant, &vault, &format!("{room}x")));
+                (
+                    ResourceKey::new(&tenant, vault, room),
+                    Some(snapshot.clone()),
+                )
+            })
+            .collect();
+        let layout = GenerationLayout::with_snapshots(resources).unwrap();
+        let mut warnings = Vec::new();
+        layout.save_candidate(&candidate, &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        let path = candidate.staging_dir.join(LABEL_SIDECAR);
+        let bytes = path.metadata().unwrap().len();
+        assert!(bytes < MAX_LABEL_BYTES);
+        assert_eq!(bytes as usize, 151 + MAX_LABELED_ROOMS * 605);
+        let paths = GenerationPaths {
+            manifest_path: candidate.manifest_path(),
+            layout_path: candidate.layout_path(),
+            id: candidate.id,
+            root: candidate.staging_dir,
+            index_dir: candidate.index_dir,
+            partitions_dir: candidate.partitions_dir,
+        };
+        assert_eq!(GenerationLayout::load_generation(&paths).unwrap(), layout);
     }
 
     #[test]

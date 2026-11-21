@@ -1635,6 +1635,7 @@ struct OpenClastIndexManager {
     audit_cursor: usize,
     evictions: EvictionReport,
     room_retries: BTreeSet<(ResourceKey, String)>,
+    pending_storage_warnings: Vec<IngestWarning>,
 }
 
 impl OpenClastIndexManager {
@@ -1655,6 +1656,7 @@ impl OpenClastIndexManager {
         let mut layout = layout
             .ok_or_else(|| Error::State("expected partitioned generation".into()))?
             .with_generation_labels(&active);
+        let mut pending_storage_warnings = Vec::new();
         if !evictions.is_empty() {
             let mut evicted_by_resource = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
             for (key, evicted) in &evictions.evicted {
@@ -1691,7 +1693,7 @@ impl OpenClastIndexManager {
                     }
                     .publication_label();
                 }
-                layout.save_candidate(&candidate)?;
+                layout.save_candidate(&candidate, &mut pending_storage_warnings)?;
                 manifest.save(&candidate.manifest_path())?;
                 Ok(())
             })();
@@ -1727,7 +1729,7 @@ impl OpenClastIndexManager {
                             PartitionEvidence::UnchangedLiveRows(p.snapshot_id.as_ref())
                                 .publication_label();
                     }
-                    layout.save_candidate(&candidate)?;
+                    layout.save_candidate(&candidate, &mut pending_storage_warnings)?;
                     manifest.save(&candidate.manifest_path())?;
                     Ok(())
                 })();
@@ -1753,6 +1755,7 @@ impl OpenClastIndexManager {
             audit_cursor,
             evictions,
             room_retries: BTreeSet::new(),
+            pending_storage_warnings,
         })
     }
 
@@ -1858,6 +1861,7 @@ impl OpenClastIndexManager {
         next_resources.retain(|resource, _| current_fingerprints.contains_key(resource));
 
         let mut fresh_indexes = BTreeSet::new();
+        let mut failed_walks = BTreeMap::new();
         for vault in &config.vaults {
             let resource = config.resource_key(vault).ok_or_else(|| {
                 Error::State(format!(
@@ -1889,6 +1893,7 @@ impl OpenClastIndexManager {
             let index_dir = partition_index_dir(&self.active.partitions_dir, &resource);
             let has_partition = index_dir.join("meta.json").is_file();
             if !vault.path.is_dir() {
+                failed_walks.insert(resource.clone(), label_changed);
                 walks.insert(
                     resource.clone(),
                     RoomWalkOutcome::Incomplete {
@@ -2120,12 +2125,14 @@ impl OpenClastIndexManager {
                 }
                 .publication_label();
                 next_resources.insert(resource.clone(), label);
+            } else {
+                failed_walks.insert(resource.clone(), label_changed);
             }
             walks.insert(resource, outcome);
         }
 
-        let layout_changed = next_resources != serving;
-        let mut next_layout = GenerationLayout::with_snapshots(next_resources)?;
+        let layout_changed = !next_resources.keys().eq(serving.keys());
+        let labels_changed = next_resources != serving;
         let added_chunks = plan.added_chunk_count();
         let mut resources_to_update: BTreeSet<_> = plan
             .update_scopes()
@@ -2136,6 +2143,17 @@ impl OpenClastIndexManager {
             })
             .collect();
         resources_to_update.extend(fresh_indexes.iter().cloned());
+        // Changing a failed room's label alone must not replace the serving
+        // reader. If we do publish, only carry proof for untouched live rows
+        // whose serving label still matches the registration.
+        for (resource, label_changed) in failed_walks {
+            if (label_changed || resources_to_update.contains(&resource))
+                && let Some(label) = next_resources.get_mut(&resource)
+            {
+                *label = PartitionEvidence::NoWalk.publication_label();
+            }
+        }
+        let mut next_layout = GenerationLayout::with_snapshots(next_resources)?;
         plan.validate_retention()?;
         let manifest_changed = plan.next_manifest != self.manifest;
         let changed_sources = plan.changed_source_count();
@@ -2143,7 +2161,8 @@ impl OpenClastIndexManager {
             || layout_changed
             || !resources_to_update.is_empty()
             || changed_sources > 0
-            || added_chunks > 0;
+            || added_chunks > 0
+            || (labels_changed && next_layout.labels_fit()?);
         if publish_generation {
             crate::room_boundary::validate_data_root(&config, self.data_root.path())?;
             plan.next_manifest.mark_synced()?;
@@ -2230,7 +2249,7 @@ impl OpenClastIndexManager {
                         }
                     }
                 }
-                next_layout.save_candidate(&candidate)?;
+                next_layout.save_candidate(&candidate, &mut warnings)?;
                 plan.next_manifest.save(&candidate.manifest_path())?;
                 Ok(())
             })();
@@ -2250,6 +2269,7 @@ impl OpenClastIndexManager {
         let freshness_basis = config.indexing.basis;
         self.config = config;
         self.room_retries = next_room_retries;
+        warnings.append(&mut self.pending_storage_warnings);
 
         Ok(ReconcileReport {
             changed_sources,
