@@ -302,7 +302,7 @@ jobs:
         run: npm run package:release -- .tmp/gate5-field-package gate5.evidence.json
       - name: Upload sanitized Gate 5 evidence and field package
         if: matrix.node == '22.23.1'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kwiry-gate5-field-package
           path: clients/obsidian/.tmp/gate5-field-package/
@@ -373,7 +373,7 @@ jobs:
           sha256sum .tmp/sideload/* > .tmp/sideload/SHA256SUMS
       - name: Upload sanitized evidence and sideload package
         if: matrix.node == '22.23.1'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kwiry-fts5-gate2-field-test
           path: |
