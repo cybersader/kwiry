@@ -2475,6 +2475,155 @@ fn transient_keyset_get_errors_back_off_without_bad_ack_strikes() {
 }
 
 #[test]
+fn a_good_keyset_missing_the_ack_kid_strikes_and_halts_on_the_third_ack() {
+    for status in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        let (pinned, unknown) = {
+            let mut authority = rig.authority.state();
+            let pinned = authority.active_kid.clone();
+            let unknown = authority
+                .issue_keyset(&[[63; 32]], &[], None, false)
+                .remove(0);
+            (pinned, unknown)
+        };
+        for strike in 1..=3 {
+            let gets = {
+                let mut authority = rig.authority.state();
+                authority.use_key(&pinned);
+                // Each GET yields a fresh, valid statement that adds a different key.
+                authority.issue_keyset(&[[64 + strike; 32]], &[], None, false);
+                authority.use_key(&unknown);
+                authority.keyset_gets
+            };
+            assert_eq!(send_on(rig, status), (1, 0), "strike {strike}");
+            assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+            let events = codes(rig);
+            assert_eq!(
+                events.iter().filter(|&&c| c == "ack_unverifiable").count(),
+                usize::from(strike)
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|&&c| c == "lifecycle_keyset_accepted")
+                    .count(),
+                usize::from(strike)
+            );
+            let state = rig.holder().state();
+            let halted = if status {
+                state.status.halted
+            } else {
+                state.obligations.channels[&w.b_obligation].halted
+            };
+            assert_eq!(halted, strike == 3);
+            later(rig);
+        }
+        assert!(codes(rig).contains(&if status {
+            "lifecycle_status_bug_halt"
+        } else {
+            "lifecycle_report_bug_halt"
+        }));
+        assert_eq!(send_on(rig, status), (0, 0));
+    }
+}
+
+#[test]
+fn keyset_5xx_backs_off_without_striking_or_resending_in_the_same_pass() {
+    for status in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        rig.authority.state().rotate_key([68; 32], false, true);
+        for code in [500, 502, 500] {
+            let (gets, posts) = {
+                let mut authority = rig.authority.state();
+                authority.keyset_response = Some(Ok(HttpResponse {
+                    status: code,
+                    retry_after_s: Some(90),
+                    ..HttpResponse::default()
+                }));
+                (authority.keyset_gets, authority.posts())
+            };
+            assert_eq!(send_on(rig, status), (1, 0));
+            assert_eq!(rig.authority.state().posts(), posts + 1);
+            assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+            assert!(!codes(rig).contains(&"ack_unverifiable"));
+            later(rig); // Below Retry-After.
+            assert_eq!(send_on(rig, status), (0, 0));
+            assert_eq!(rig.authority.state().posts(), posts + 1);
+            assert_eq!(rig.authority.state().keyset_gets, gets + 1);
+            rig.advance(30_000);
+        }
+        assert_eq!(send_on(rig, status), (1, 1));
+    }
+}
+
+#[test]
+fn delayed_400_for_an_inventory_superseded_key_halts_both_channels() {
+    for status in [true, false] {
+        let mut w = world();
+        let rig = &mut w.rig;
+        let ob = &w.b_obligation;
+        if status {
+            let current = epoch(rig);
+            assert!(rig.holder().arm_status_gate(&current));
+        }
+        rig.authority.state().forced.push_back(Forced::Timeout);
+        assert_eq!(send_on(rig, status), (1, 0));
+        let old = if status {
+            pending_status(rig).unwrap().key
+        } else {
+            rig.holder().state().obligations.channels[ob]
+                .pending
+                .as_ref()
+                .unwrap()
+                .key
+                .clone()
+        };
+        rig.purger.add_unattributable();
+        later(rig);
+        if status {
+            let pass = rig.status().unwrap();
+            assert_eq!((pass.invalidated, pass.derived, pass.sent), (1, 1, 0));
+            let state = rig.holder().state();
+            assert_ne!(state.status.pending.as_ref().unwrap().key, old);
+            assert!(!state.status.uncertain[&old].before_resume);
+        } else {
+            rig.authority.state().forced.push_back(Forced::Timeout);
+            let pass = rig.report().unwrap();
+            assert_eq!((pass.invalidated, pass.derived, pass.sent), (1, 1, 1));
+            let book = &rig.holder().state().obligations;
+            assert_ne!(book.channels[ob].pending.as_ref().unwrap().key, old);
+            let attempt = &book.uncertain[&old];
+            assert!(!attempt.before_resume);
+            let mut legacy = serde_json::to_value(attempt).unwrap();
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("before_resume")
+                .unwrap();
+            assert_eq!(
+                serde_json::from_value::<crate::obligations::Uncertain>(legacy).unwrap(),
+                *attempt
+            );
+        }
+        deliver_problem(rig, &old, 400, "invalid_request", None);
+        assert_eq!(send_on(rig, status), (0, 0));
+        let state = rig.holder().state();
+        if status {
+            assert!(state.status.halted);
+            assert!(state.obligations.status_gate.open());
+            assert!(codes(rig).contains(&"lifecycle_status_bug_halt"));
+        } else {
+            assert!(state.obligations.channels[ob].halted);
+            assert!(codes(rig).contains(&"lifecycle_report_bug_halt"));
+        }
+        later(rig);
+        assert_eq!(send_on(rig, status), (0, 0));
+    }
+}
+
+#[test]
 fn delayed_pre_resume_400_resolves_only_the_old_key_on_both_channels() {
     for status in [true, false] {
         let mut w = world();

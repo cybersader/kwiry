@@ -1200,6 +1200,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         channel.halted = false;
         invalidate(&mut next, obligation_id);
+        for attempt in next.uncertain.values_mut() {
+            if attempt.obligation_id == obligation_id {
+                attempt.before_resume = true;
+            }
+        }
         self.commit_books_then(Some(next), None, false, |holder| {
             holder.unverifiable.remove(obligation_id);
             holder.events.emit(HolderEvent::ReportResumed);
@@ -1516,6 +1521,7 @@ fn move_to_uncertain(book: &mut ObligationBook, ob: &str, pending: &Pending) {
     book.uncertain.insert(
         pending.key.clone(),
         Uncertain {
+            before_resume: false,
             obligation_id: ob.to_owned(),
             holding_id,
             state: pending.body.state,

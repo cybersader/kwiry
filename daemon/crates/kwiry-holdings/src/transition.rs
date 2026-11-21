@@ -70,7 +70,6 @@ impl Owed {
 
 pub(crate) enum ReceiptFailure {
     Unverifiable,
-    NoLiveKey,
     PinWrite,
     RefreshDeferred,
     Refused(Answer),
@@ -212,14 +211,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                         self.ack_keyset_backoff_until = back_off(self, None);
                         return Err(RefreshDeferred);
                     }
-                    Err(KeysetFetchError::RateLimited { retry_after_s }) => {
+                    Err(KeysetFetchError::RetryableHttp { retry_after_s }) => {
                         self.ack_keyset_backoff_until = back_off(self, retry_after_s);
                         return Err(RefreshDeferred);
                     }
                     Err(KeysetFetchError::Refusal(r)) => {
                         return Err(Refused(self.apply_authority_refusal(r)));
                     }
-                    Err(KeysetFetchError::Invalid) => return Err(NoLiveKey),
+                    Err(KeysetFetchError::Invalid) => return Err(Unverifiable),
                 };
                 let pins = crate::keys::verify_keyset(
                     &statement,
@@ -228,7 +227,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     &enrollment.issuer,
                     self.clock.wall_ms(),
                 )
-                .map_err(|_| NoLiveKey)?;
+                .map_err(|_| Unverifiable)?;
                 let seq = pins.keyset_seq;
                 self.commit_then(
                     |writer| writer.pin_keys(pins),
@@ -241,10 +240,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     },
                 )
                 .ok_or(PinWrite)?;
-                verify(self, compact).map_err(|error| match error {
-                    "kid" => NoLiveKey,
-                    _ => Unverifiable,
-                })
+                // H.6: fetch once; a kid still unknown after refresh is a strike.
+                verify(self, compact).map_err(|_| Unverifiable)
             }
             result => result.map_err(|_| Unverifiable),
         }
@@ -257,11 +254,6 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     ) -> Answer {
         match failure {
             ReceiptFailure::Unverifiable => strike(self),
-            ReceiptFailure::NoLiveKey => {
-                // The ack is unusable, but no live pin proved it was bad.
-                self.events.emit(HolderEvent::AckUnverifiable);
-                Answer::Unverifiable
-            }
             ReceiptFailure::PinWrite | ReceiptFailure::RefreshDeferred => Answer::RetryReceipt,
             ReceiptFailure::Refused(answer) => answer,
         }
@@ -398,16 +390,14 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         status.owed.remove(index);
         let (answer, event) = match owed {
             Owed::StatusHalt { code, key } => {
-                if let Some(key) = key.filter(|key| {
-                    !status
-                        .pending
-                        .as_ref()
-                        .is_some_and(|p| p.live() && &p.key == key)
-                }) {
-                    // A refusal after resume answers only the old request.
-                    if let Some(u) = status.uncertain.remove(&key) {
-                        prune.extend(u.attempts);
-                    }
+                if code == 400
+                    && let Some(key) = key
+                    && let std::collections::btree_map::Entry::Occupied(entry) =
+                        status.uncertain.entry(key)
+                    && entry.get().before_resume
+                {
+                    // A delayed 400 for a pre-resume key answers only the old request.
+                    prune.extend(entry.remove().attempts);
                     (
                         Answer::Rejected,
                         Some(HolderEvent::StatusRejected { status: code }),
@@ -436,25 +426,20 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 )
             }
             Owed::ReportHalt { ob, code, key } => {
-                let channel = book.channels.get_mut(&ob);
-                if let Some(key) = key.filter(|key| {
-                    !channel
-                        .as_ref()
-                        .and_then(|c| c.pending.as_ref())
-                        .is_some_and(|p| p.live() && &p.key == key)
-                }) {
-                    if let std::collections::btree_map::Entry::Occupied(entry) =
+                if code == 400
+                    && let Some(key) = key
+                    && let std::collections::btree_map::Entry::Occupied(entry) =
                         book.uncertain.entry(key)
-                        && entry.get().obligation_id == ob
-                    {
-                        prune.extend(entry.remove().attempts);
-                    }
+                    && entry.get().obligation_id == ob
+                    && entry.get().before_resume
+                {
+                    prune.extend(entry.remove().attempts);
                     (
                         Answer::Rejected,
                         Some(HolderEvent::ReportRejected { status: code }),
                     )
                 } else {
-                    if let Some(channel) = channel {
+                    if let Some(channel) = book.channels.get_mut(&ob) {
                         channel.halted = true;
                     }
                     (

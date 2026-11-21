@@ -33,6 +33,7 @@ fn assert_digest_names(ack: &Map<String, Value>, compact: &str) {
 fn record_uncertain(rig: &mut GoldenRig, requests: &[&str]) -> Uncertain {
     let pending = pending_from(requests, false);
     let uncertain = Uncertain {
+        before_resume: false,
         obligation_id: pending.body.obligation_id.clone(),
         holding_id: pending.body.holding_id.clone(),
         state: pending.body.state,

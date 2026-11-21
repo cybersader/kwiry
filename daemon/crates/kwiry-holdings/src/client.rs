@@ -495,7 +495,7 @@ fn apply_statement(
 pub(crate) enum KeysetFetchError {
     DispatchBlocked,
     Timeout,
-    RateLimited { retry_after_s: Option<u64> },
+    RetryableHttp { retry_after_s: Option<u64> },
     Refusal(AuthorityRefusal),
     Invalid,
 }
@@ -525,7 +525,7 @@ pub(crate) fn fetch_route_statement<'a>(
         200 if response.content_type.as_deref() == Some(profile.keyset_content_type().as_str()) => {
             String::from_utf8(response.body).map_err(|_| Invalid)
         }
-        429 => Err(RateLimited {
+        429 | 500..=599 => Err(RetryableHttp {
             retry_after_s: response.retry_after_s,
         }),
         _ => Err(Invalid),
@@ -588,7 +588,7 @@ fn verify_with_keysets(
                         FetchFailure::Local("delayed refusal pending").into()
                     }
                     KeysetFetchError::Timeout => FetchFailure::Deadline.into(),
-                    KeysetFetchError::RateLimited { retry_after_s } => {
+                    KeysetFetchError::RetryableHttp { retry_after_s } => {
                         FetchFailure::Unreachable { retry_after_s }.into()
                     }
                     KeysetFetchError::Refusal(refusal) => SignatureFailure::KeysetRefusal(refusal),
