@@ -25,7 +25,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use kwiry_core::{Config, HolderProfile, HolderSettings};
+use kwiry_core::{Config, DataRoot, DataRootLock, HolderProfile, HolderSettings};
 use kwiry_holdings::clock::{Clock, SystemClock};
 use kwiry_holdings::engine::{EngineProfile, EngineSettings};
 use kwiry_holdings::holder::{ConfigError, DEFAULT_PAGE_SIZE, Holder, HolderConfig};
@@ -55,6 +55,8 @@ pub(crate) fn open_holder_dir(
     config: &Config,
     data_dir: &Path,
 ) -> Result<HolderDir> {
+    #[cfg(unix)]
+    check_holder_dir_permissions(&settings.state_dir)?;
     let mut forbidden: Vec<&Path> = vec![data_dir];
     forbidden.extend(config.vaults.iter().map(|vault| vault.path.as_path()));
     HolderDir::open(&settings.state_dir, &forbidden).map_err(|error| match error {
@@ -65,17 +67,43 @@ pub(crate) fn open_holder_dir(
     })
 }
 
+#[cfg(unix)]
+fn check_holder_dir_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    // Newly created holder directories are private (0700).
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(anyhow!("cannot inspect holder.state_dir: {error}")),
+    };
+    // SAFETY: geteuid takes no arguments and has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    if !holder_dir_is_private(metadata.uid(), metadata.mode(), uid) {
+        return Err(anyhow!(
+            "unsafe holder.state_dir permissions: the directory must be owned by the current user and not group- or other-writable"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn holder_dir_is_private(owner: u32, mode: u32, effective_uid: u32) -> bool {
+    owner == effective_uid && mode & 0o022 == 0
+}
+
 /// Starts the holder from durable state: enrollment, the loss/reset rules
-/// against the index data root, and replay of every owed transition. A
-/// failed replay refuses to start.
+/// against the index data root, and replay of every owed transition. Returns
+/// the data-root lock so the daemon can prepare the index after admission.
 pub(crate) fn start_holder(
     settings: &HolderSettings,
     config: &Config,
     data_dir: &Path,
     clock: Arc<dyn Clock>,
     events: Arc<LogSink>,
-) -> Result<DaemonHolder> {
+) -> Result<(DaemonHolder, DataRootLock)> {
     let dir = open_holder_dir(settings, config, data_dir)?;
+    let data_lock = DataRoot::new(data_dir).lock_writer()?;
     let started = kwiry_holdings::startup::start(
         dir,
         Box::new(FsIo),
@@ -85,8 +113,9 @@ pub(crate) fn start_holder(
     )
     .map_err(|error| match error {
         kwiry_holdings::startup::StartupError::RootHolderMismatch => anyhow!(
-            "holder startup refused ({}): {error}. Stop the daemon, move or empty the configured data directory, then restart; the index rebuilds from the vault",
-            error.code()
+            "holder startup refused ({}): {error}. If the data directory is unmarked, stop the daemon, remove only `{}`, then restart; the index rebuilds from the vault. Keep everything else in the data directory, including replay state (`replay-epoch` and `replay-iat-watermark`). If the marker is unreadable or belongs to another holder, select the correct data directory instead.",
+            error.code(),
+            DataRoot::INDEX_ENTRIES.join("`, `"),
         ),
         other => anyhow!("holder startup refused ({}): {other}", other.code()),
     })?;
@@ -109,7 +138,7 @@ pub(crate) fn start_holder(
         page_size: settings.page_size.unwrap_or(DEFAULT_PAGE_SIZE),
         engine: Some(engine),
     };
-    Holder::new(
+    let holder = Holder::new(
         started,
         holder_config,
         ConfiguredRooms::from_config(config),
@@ -122,7 +151,8 @@ pub(crate) fn start_holder(
             "holder startup refused: replaying owed lifecycle transitions failed; holder state is unchanged, fix storage and restart"
         ),
         other => anyhow!("holder startup refused: {other}"),
-    })
+    })?;
+    Ok((holder, data_lock))
 }
 
 /// A system clock for one holder process.
@@ -218,6 +248,14 @@ mod tests {
         ] {
             assert!(!old.join(name).exists());
         }
+    }
+
+    #[test]
+    fn private_holder_directory_requires_current_owner_and_safe_mode() {
+        assert!(super::holder_dir_is_private(1000, 0o755, 1000));
+        assert!(!super::holder_dir_is_private(1001, 0o700, 1000));
+        assert!(!super::holder_dir_is_private(1000, 0o720, 1000));
+        assert!(!super::holder_dir_is_private(1000, 0o702, 1000));
     }
 
     #[test]

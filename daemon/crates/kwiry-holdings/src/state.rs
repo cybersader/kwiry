@@ -205,12 +205,30 @@ impl HolderDir {
 
     /// Reads a holder file; `Ok(None)` when it does not exist.
     pub fn read(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        check_side_file_name(name)?;
         match fs::read(self.file(name)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
     }
+}
+
+// Protocol-owned names are portable ASCII filename components. Validate at
+// the I/O boundary as well as where persisted digests are deserialized.
+fn check_side_file_name(name: &str) -> io::Result<()> {
+    if name.is_empty()
+        || name.ends_with('.')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid holder side-file name",
+        ));
+    }
+    Ok(())
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -476,6 +494,7 @@ impl StateWriter {
     /// Replaces a profile-owned side file in the holder directory, through
     /// the same durable replacement as the state file.
     pub(crate) fn write_side_file(&mut self, name: &str, bytes: &[u8]) -> Result<(), WriteFailure> {
+        check_side_file_name(name).map_err(WriteFailure::before_rename)?;
         if self.unwritable {
             return Err(WriteFailure::before_rename(io::Error::other(
                 "holder_state_unwritable",
@@ -492,6 +511,7 @@ impl StateWriter {
     }
 
     pub(crate) fn remove_side_file(&self, name: &str) -> io::Result<()> {
+        check_side_file_name(name)?;
         // v2 H.45: no lifecycle write after a fail-stop.
         if self.unwritable {
             return Err(io::Error::other("holder_state_unwritable"));
@@ -719,5 +739,84 @@ impl StateWriter {
         }
         self.enrollment = next;
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::canonical::sha256_tagged;
+    use crate::obligations::{Attempt, Uncertain};
+    use crate::testkit::Rig;
+    use crate::wire::ReportState;
+
+    #[test]
+    fn invalid_persisted_attempt_digests_are_corrupt_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path().join("holder");
+        let mut rig = Rig::new(&dir);
+        let mut state = rig.holder().writer.state().clone();
+        let attempt = Attempt {
+            jti: "synthetic".into(),
+            digest: sha256_tagged(b"synthetic attempt"),
+            exp_s: 0,
+        };
+        state.obligations.uncertain.insert(
+            "synthetic".into(),
+            Uncertain {
+                before_resume: false,
+                obligation_id: "synthetic".into(),
+                holding_id: "synthetic".into(),
+                state: ReportState::Complete,
+                epoch: "synthetic".into(),
+                attempts: vec![attempt],
+            },
+        );
+        let bytes = serde_json::to_vec(&state).unwrap();
+        assert_eq!(HolderState::parse(&bytes).unwrap(), state);
+        state
+            .obligations
+            .uncertain
+            .get_mut("synthetic")
+            .unwrap()
+            .attempts[0]
+            .digest = "sha256:not/a/digest".into();
+        drop(rig.take_holder());
+        fs::write(dir.join(STATE_FILE), serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(rig.restart().unwrap_err().code(), "holder_state_corrupt");
+    }
+
+    #[test]
+    fn side_file_io_refuses_nonplain_names() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut rig = Rig::new(&temporary.path().join("holder"));
+        let writer = &mut rig.holder().writer;
+        for name in [
+            "", ".", "..", "a/entry", r"a\entry", "entry:", "entry.", "entry ",
+        ] {
+            assert_eq!(
+                writer.dir().read(name).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                writer
+                    .write_side_file(name, b"fixture")
+                    .unwrap_err()
+                    .error
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                writer.remove_side_file(name).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        writer.write_side_file("fixture.json", b"fixture").unwrap();
+        assert_eq!(
+            writer.dir().read("fixture.json").unwrap().unwrap(),
+            b"fixture"
+        );
+        writer.remove_side_file("fixture.json").unwrap();
+        assert!(writer.dir().read("fixture.json").unwrap().is_none());
     }
 }

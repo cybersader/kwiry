@@ -10,8 +10,6 @@ use kwiry_holdings::events::{EventSink, HolderEvent};
 use kwiry_holdings::startup::{ContentState, DataRoot, DataRootEvidence, MarkerState};
 use kwiry_holdings::store::{HeldResource, PublishPlan, ResourceKey, ResourceStore, StoreError};
 
-use super::driver::{SNAPSHOT_FILE, SNAPSHOT_TEMP_PREFIX};
-
 /// The resource kind Kwiry holds: one room per registered vault.
 pub(crate) const ROOM_KIND: &str = "room";
 
@@ -75,52 +73,16 @@ impl IndexDataRoot {
     }
 }
 
-/// Entries that are never index content: the marker, the holder snapshot,
-/// locks, capability replay state, logs and the connection descriptor that
-/// share a custom data directory.
-const NON_CONTENT: &[&str] = &[
-    MARKER_FILE,
-    SNAPSHOT_FILE,
-    "daemon.lock",
-    "replay.lock",
-    "replay-epoch",
-    "replay-iat-watermark",
-    "logs",
-    "connection.json",
-    "setup.lock",
-];
-
 impl DataRoot for IndexDataRoot {
     fn inspect(&self, holder_id: &str) -> Result<DataRootEvidence, String> {
-        let entries = match fs::read_dir(&self.data_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(DataRootEvidence {
-                    content: ContentState::Lost,
-                    marker: MarkerState::Absent,
-                });
-            }
-            Err(_) => return Err("data root unreadable".to_owned()),
+        let content = if kwiry_core::DataRoot::new(&self.data_dir)
+            .has_index_entries()
+            .map_err(|_| "data root unreadable".to_owned())?
+        {
+            ContentState::Intact
+        } else {
+            ContentState::Lost
         };
-        let mut content = ContentState::Lost;
-        for entry in entries {
-            let Ok(entry) = entry else {
-                content = ContentState::Intact;
-                continue;
-            };
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if NON_CONTENT.contains(&name.as_ref()) || name.starts_with(SNAPSHOT_TEMP_PREFIX) {
-                continue;
-            }
-            // An empty generations directory holds nothing.
-            if name == "generations"
-                && fs::read_dir(entry.path()).is_ok_and(|mut inner| inner.next().is_none())
-            {
-                continue;
-            }
-            content = ContentState::Intact;
-        }
         let marker = match fs::read(self.data_dir.join(MARKER_FILE)) {
             Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                 Ok(value) if value["holder_id"].as_str() == Some(holder_id) => MarkerState::Matches,
@@ -208,13 +170,15 @@ mod tests {
             marker: MarkerState::Absent,
         };
         assert_eq!(root.inspect("hd_a").unwrap(), lost);
-        fs::create_dir_all(dir.path().join("data/generations")).unwrap();
-        fs::write(dir.path().join("data/daemon.lock"), b"").unwrap();
-        fs::write(
-            root.data_dir.join(format!("{SNAPSHOT_TEMP_PREFIX}test")),
-            b"",
-        )
-        .unwrap();
+        fs::create_dir_all(root.data_dir.join("generations")).unwrap();
+        for name in [
+            "daemon.lock",
+            "replay-epoch",
+            "replay-iat-watermark",
+            "other",
+        ] {
+            fs::write(root.data_dir.join(name), b"").unwrap();
+        }
         assert_eq!(root.inspect("hd_a").unwrap(), lost);
         root.bind("hd_a").unwrap();
         assert_eq!(root.inspect("hd_a").unwrap().marker, MarkerState::Matches);

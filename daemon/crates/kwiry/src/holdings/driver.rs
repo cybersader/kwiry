@@ -18,7 +18,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use kwiry_core::{Config, HolderSettings};
+use kwiry_core::{Config, DiscardedGeneration, HolderSettings};
 use kwiry_holdings::clock::Clock;
 use kwiry_holdings::gate::{Refusal, ServingGate};
 use kwiry_holdings::holder::{ListOutcome, RouteHealth};
@@ -319,7 +319,7 @@ impl HolderService {
         settings: HolderSettings,
         config: Config,
         data_dir: PathBuf,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Option<DiscardedGeneration>)> {
         let fail_stop = Arc::new(FailStop::default());
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (stop, stop_rx) = mpsc::channel::<()>();
@@ -332,9 +332,12 @@ impl HolderService {
             .spawn(move || {
                 let clock = system_clock();
                 let sink = Arc::new(LogSink::new(Arc::new(move || trip.trip())));
-                let holder = match start_holder(&settings, &config, &data_dir, clock.clone(), sink)
-                {
-                    Ok(holder) => holder,
+                let startup =
+                    start_holder(&settings, &config, &data_dir, clock.clone(), sink).and_then(
+                        |(holder, data_lock)| Ok((holder, data_lock.prepare()?)),
+                    );
+                let (holder, discarded) = match startup {
+                    Ok(started) => started,
                     Err(error) => {
                         let _ = started_tx.send(Err(error));
                         return;
@@ -344,22 +347,25 @@ impl HolderService {
                 let mut driver = Driver::new(holder, clock);
                 // Do not expose a previous daemon's snapshot as ours.
                 remove_snapshot(&data_dir);
-                if started_tx.send(Ok(gate)).is_err() {
+                if started_tx.send(Ok((gate, discarded))).is_err() {
                     return;
                 }
                 tracing::info!("this build lists holdings only; it does not report status, report obligations, or delete index data");
                 run(&trip_poll, &mut driver, &data_dir, &stop_rx);
             })
             .map_err(|error| anyhow!("could not start the holder thread: {error}"))?;
-        let gate = started_rx
+        let (gate, discarded) = started_rx
             .await
             .map_err(|_| anyhow!("the holder thread stopped during startup"))??;
-        Ok(Self {
-            gate,
-            fail_stop,
-            stop,
-            thread: Some(thread),
-        })
+        Ok((
+            Self {
+                gate,
+                fail_stop,
+                stop,
+                thread: Some(thread),
+            },
+            discarded,
+        ))
     }
 
     pub(crate) fn gate(&self) -> ServingGate {

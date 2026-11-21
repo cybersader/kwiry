@@ -61,7 +61,10 @@ impl DataRoot {
         &self.root
     }
 
-    pub fn acquire_writer_lock(&self) -> Result<DataRootLock> {
+    /// Takes the writer lock without probing storage or cleaning generations.
+    /// A caller inspecting the as-found root can do so before calling
+    /// [`DataRootLock::prepare`].
+    pub fn lock_writer(&self) -> Result<DataRootLock> {
         fs::create_dir_all(&self.root).map_err(|error| io_error(&self.root, error))?;
         reject_known_network_filesystem(&self.root)?;
 
@@ -76,10 +79,40 @@ impl DataRoot {
         file.try_lock_exclusive()
             .map_err(|_| Error::LockHeld(lock_path.clone()))?;
 
-        self.remove_abandoned_probes()?;
-        probe_storage_semantics(&self.root)?;
-        self.prepare_locked()?;
-        Ok(DataRootLock { file })
+        Ok(DataRootLock {
+            file,
+            root: self.clone(),
+        })
+    }
+
+    pub fn acquire_writer_lock(&self) -> Result<DataRootLock> {
+        let lock = self.lock_writer()?;
+        lock.prepare_storage()?;
+        Ok(lock)
+    }
+
+    /// Top-level entries that can hold a current, staged, or legacy index.
+    pub const INDEX_ENTRIES: [&str; 3] = ["current.json", "generations", "meta.json"];
+
+    /// An empty generations directory, locks and other daemon state are not
+    /// evidence of an index. Any entry inside generations (even staging) is.
+    pub fn has_index_entries(&self) -> Result<bool> {
+        for name in Self::INDEX_ENTRIES {
+            let path = self.root.join(name);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if name == "generations" && metadata.is_dir() => {
+                    let mut entries =
+                        fs::read_dir(&path).map_err(|error| io_error(&path, error))?;
+                    if entries.next().is_some() {
+                        return Ok(true);
+                    }
+                }
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(&path, error)),
+            }
+        }
+        Ok(false)
     }
 
     /// Prepares the root and reports what it had to throw away.
@@ -92,9 +125,7 @@ impl DataRoot {
     /// per-format eviction announces itself by name. Returning the reason makes
     /// the blunt instrument at least as explicable as the precise one.
     pub fn prepare(&self) -> Result<Option<DiscardedGeneration>> {
-        let discarded = self.discarded_generation();
-        drop(self.acquire_writer_lock()?);
-        Ok(discarded)
+        self.lock_writer()?.prepare()
     }
 
     /// Why the active pointer is about to be discarded, when there is one and
@@ -444,6 +475,22 @@ impl DataRoot {
 #[derive(Debug)]
 pub struct DataRootLock {
     file: File,
+    root: DataRoot,
+}
+
+impl DataRootLock {
+    /// Prepares the locked root and reports a discarded active generation.
+    pub fn prepare(&self) -> Result<Option<DiscardedGeneration>> {
+        let discarded = self.root.discarded_generation();
+        self.prepare_storage()?;
+        Ok(discarded)
+    }
+
+    fn prepare_storage(&self) -> Result<()> {
+        self.root.remove_abandoned_probes()?;
+        probe_storage_semantics(&self.root.root)?;
+        self.root.prepare_locked()
+    }
 }
 
 impl Drop for DataRootLock {

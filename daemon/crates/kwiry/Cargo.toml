@@ -31,6 +31,9 @@ tracing-subscriber.workspace = true
 # in the dependency graph through the semantic model downloader.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 
@@ -40,6 +43,3 @@ http-body-util.workspace = true
 kwiry-holdings = { path = "../kwiry-holdings", features = ["testkit"] }
 predicates.workspace = true
 tower.workspace = true
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-libc.workspace = true

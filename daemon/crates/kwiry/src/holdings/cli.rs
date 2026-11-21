@@ -138,7 +138,10 @@ fn start(
     let sink = Arc::new(LogSink::new(Arc::new(move || {
         flag.store(true, Ordering::SeqCst);
     })));
-    let holder = start_holder(settings, config, data_dir, system_clock(), sink)?;
+    let (holder, data_lock) = start_holder(settings, config, data_dir, system_clock(), sink)?;
+    // Relist inspects and binds under the writer lock, but never repairs or
+    // prepares the index and need not hold the lock during authority I/O.
+    drop(data_lock);
     Ok((holder, tripped))
 }
 
@@ -152,6 +155,8 @@ fn now_ms() -> i64 {
 
 /// Durable state plus the daemon's snapshot if the state directory is locked.
 fn read_status(settings: &HolderSettings, data_dir: &Path) -> Result<HolderReport> {
+    #[cfg(unix)]
+    super::check_holder_dir_permissions(&settings.state_dir)?;
     let state_path = settings.state_dir.join(STATE_FILE);
     let bytes = match std::fs::read(&state_path) {
         Ok(bytes) => bytes,

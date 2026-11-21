@@ -10,6 +10,7 @@
 //!   [`ResponseDelivery`] it was dispatched with.
 //! - Response bodies are bounded ([`MAX_RESPONSE_BYTES`], the largest list
 //!   page the wire allows); an oversize answer is treated as unreachable.
+//!   A 403 is authoritative on headers alone, so its body is not read.
 //! - Redirects are never followed and no proxy is consulted: environment
 //!   proxy variables are ignored.
 //! - `Retry-After` is read as delta-seconds or an HTTP date.
@@ -31,9 +32,6 @@ pub(crate) const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 /// How long a timed-out lifecycle POST may still deliver its answer late.
 pub(crate) const LATE_DELIVERY_CAP: Duration = Duration::from_secs(120);
-
-/// `Retry-After` values above a day are clamped.
-const MAX_RETRY_AFTER_S: u64 = 86_400;
 
 /// Response headers kept for the holder (it reads a few by name).
 const MAX_KEPT_HEADERS: usize = 64;
@@ -127,21 +125,24 @@ fn read_response(
     };
     let content_type = header("content-type").map(str::to_owned);
     let retry_after_s = header("retry-after").and_then(|value| parse_retry_after(value, now_s()));
-    // The reader's limit refuses a body that reaches it, so allow one byte
-    // more and check the exact bound here.
-    let body = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES + 1)
-        .read_to_vec()
-        .map_err(|error| match error {
-            ureq::Error::Timeout(_) => TransportError::Timeout,
-            // An oversize or truncated body is never handed to verification.
-            _ => TransportError::Unreachable,
-        })?;
-    if u64::try_from(body.len()).map_or(true, |len| len > MAX_RESPONSE_BYTES) {
-        return Err(TransportError::Unreachable);
-    }
+    let body = if status == 403 {
+        // Nothing in the body can change the auth halt. Don't let a body
+        // read (or its deadline) conceal a refusal already received.
+        Vec::new()
+    } else {
+        // The reader's limit refuses a body that reaches it, so allow one
+        // byte more and check the exact bound here.
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_RESPONSE_BYTES + 1)
+            .read_to_vec()
+            .map_err(|error| map_error(&error))?;
+        if u64::try_from(body.len()).map_or(true, |len| len > MAX_RESPONSE_BYTES) {
+            return Err(TransportError::Unreachable);
+        }
+        body
+    };
     Ok(HttpResponse {
         status,
         content_type,
@@ -261,14 +262,10 @@ fn now_s() -> i64 {
 pub(crate) fn parse_retry_after(value: &str, now_s: i64) -> Option<u64> {
     let value = value.trim();
     if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(
-            value
-                .parse::<u64>()
-                .map_or(MAX_RETRY_AFTER_S, |s| s.min(MAX_RETRY_AFTER_S)),
-        );
+        return Some(value.parse::<u64>().unwrap_or(u64::MAX));
     }
     let at = parse_imf_fixdate(value)?;
-    Some(u64::try_from(at.saturating_sub(now_s)).map_or(0, |s| s.min(MAX_RETRY_AFTER_S)))
+    Some(if at > now_s { at.abs_diff(now_s) } else { 0 })
 }
 
 /// `Sun, 06 Nov 1994 08:49:37 GMT` → Unix seconds.
@@ -484,6 +481,94 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn oversized_and_truncated_403_bodies_cannot_hide_an_auth_halt() {
+        use crate::holdings::{
+            adapters::LogSink, open_holder_dir, openclast_profile, start_holder, system_clock,
+        };
+        use kwiry_core::{Config, HolderProfile, HolderSettings};
+        use kwiry_holdings::client::FetchFailure;
+        use kwiry_holdings::holder::{AuthHalt, ListOutcome, RouteHealth};
+        use kwiry_holdings::startup::{EnrollParams, create_key, enroll};
+        use kwiry_holdings::state::FsIo;
+        use kwiry_holdings::testkit::Rig;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = openclast_profile();
+        let rig = Rig::with_profile(
+            &temporary.path().join("test-kit"),
+            profile.clone(),
+            "openclast-lifecycle/v1",
+        );
+        let oversized = vec![b'a'; usize::try_from(MAX_RESPONSE_BYTES).unwrap() + 1];
+        let headers = [("content-type", "application/problem+json")];
+        let truncated = b"HTTP/1.1 403 Forbidden\r\ncontent-type: application/problem+json\r\ncontent-length: 99\r\nconnection: close\r\n\r\nshort";
+        for (id, response) in [
+            http("403 Forbidden", &headers, &oversized),
+            truncated.to_vec(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let server = TestServer::start(Duration::ZERO, response);
+            let response = HttpTransport::new()
+                .post(&server.url, "application/x", b"r", FAST)
+                .unwrap();
+            assert_eq!(response.status, 403);
+            assert_eq!(
+                response.header("content-type"),
+                Some("application/problem+json")
+            );
+            assert!(response.body.is_empty());
+
+            let settings = HolderSettings {
+                profile: HolderProfile::OpenClast,
+                issuer: server.url,
+                state_dir: temporary.path().join(format!("holder-{id}")),
+                page_size: None,
+                clock_skew_allowance_seconds: None,
+                max_stale_serve_seconds: None,
+            };
+            let config = Config::default();
+            let data = temporary.path().join(format!("data-{id}"));
+            let clock = system_clock();
+            let dir = open_holder_dir(&settings, &config, &data).unwrap();
+            let key = create_key(&dir, &FsIo).unwrap();
+            let (holder_id, jwks) = rig.authority.enroll(&key);
+            enroll(
+                dir,
+                Box::new(FsIo),
+                clock.clone(),
+                &EnrollParams {
+                    holder_id: &holder_id,
+                    holder_kind: "engine",
+                    issuer: &settings.issuer,
+                    jwks: &jwks,
+                    authority_key_id_prefix: &profile.authority_key_id_prefix,
+                },
+            )
+            .unwrap();
+            let (mut holder, _lock) = start_holder(
+                &settings,
+                &config,
+                &data,
+                clock,
+                Arc::new(LogSink::new(Arc::new(|| {}))),
+            )
+            .unwrap();
+            assert_eq!(
+                holder.list_once(),
+                ListOutcome::Failed(FetchFailure::NotAuthorized)
+            );
+            assert_eq!(
+                holder.route_health(),
+                RouteHealth::AuthHalt(AuthHalt::NotAuthorized)
+            );
+            assert_eq!(holder.list_once(), ListOutcome::AuthHalted);
+        }
+    }
+
     #[test]
     fn the_response_deadline_is_enforced() {
         let server = TestServer::start(Duration::from_millis(1_500), http("200 OK", &[], b"late"));
@@ -529,18 +614,22 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_reads_seconds_and_http_dates() {
+    fn retry_after_reads_seconds_and_http_dates_without_shortening() {
         assert_eq!(parse_retry_after("120", 0), Some(120));
         assert_eq!(parse_retry_after(" 5 ", 0), Some(5));
-        assert_eq!(parse_retry_after("999999999", 0), Some(MAX_RETRY_AFTER_S));
+        assert_eq!(parse_retry_after("172800", 0), Some(172_800));
         assert_eq!(
             parse_retry_after("99999999999999999999999", 0),
-            Some(MAX_RETRY_AFTER_S)
+            Some(u64::MAX)
         );
         // 1994-11-06T08:49:37Z = 784111777.
         assert_eq!(
             parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", 784_111_777 - 30),
             Some(30)
+        );
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", 784_111_777 - 172_800),
+            Some(172_800)
         );
         assert_eq!(
             parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", 784_111_777 + 30),

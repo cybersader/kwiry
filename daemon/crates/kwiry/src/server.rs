@@ -114,13 +114,26 @@ pub(crate) async fn serve(
         .await
         .with_context(|| format!("failed to bind {address}"))?;
 
-    let data_root = DataRoot::new(&paths.data_dir);
+    // A configured holder must admit the as-found data root before index
+    // preparation can remove staging or otherwise change that evidence.
+    let (holder, discarded) = match config.holder.clone() {
+        Some(settings) => {
+            let (holder, discarded) = crate::holdings::driver::HolderService::spawn(
+                settings,
+                config.clone(),
+                paths.data_dir.clone(),
+            )
+            .await?;
+            (Some(holder), discarded)
+        }
+        None => (None, DataRoot::new(&paths.data_dir).prepare()?),
+    };
     // A core-identity mismatch discards the whole generation here, and the
     // rebuild that follows is far larger than the per-format eviction reported
     // below — so it must not be the quieter of the two. The gate's message is
     // produced and then classified away inside `prepare`; this is where it is
     // handed back to the operator.
-    if let Some(discarded) = data_root.prepare()? {
+    if let Some(discarded) = discarded {
         let generation = discarded.generation.as_deref().unwrap_or("<unreadable>");
         tracing::warn!(
             generation,
@@ -133,20 +146,6 @@ pub(crate) async fn serve(
         );
     }
 
-    // The lifecycle holder starts before the index boots: its startup rules
-    // inspect the data root before anything populates it, and a refused
-    // start (including a failed replay of owed transitions) stops here.
-    let holder = match config.holder.clone() {
-        Some(settings) => Some(
-            crate::holdings::driver::HolderService::spawn(
-                settings,
-                config.clone(),
-                paths.data_dir.clone(),
-            )
-            .await?,
-        ),
-        None => None,
-    };
     let fail_stop = holder.as_ref().map(|holder| holder.fail_stop());
 
     let runtime = SearchRuntime::new();
@@ -576,22 +575,23 @@ async fn status(State(state): State<AppState>) -> Json<DaemonStatus> {
     Json(state.status.read().await.clone())
 }
 
-async fn search(
-    State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    payload: std::result::Result<Json<ApiSearchRequest>, JsonRejection>,
-) -> std::result::Result<Response, HttpError> {
+fn check_holder_gate(state: &AppState) -> std::result::Result<(), HttpError> {
     if state
         .holder_gate
         .as_ref()
         .is_some_and(crate::holdings::driver::gate_revoked)
     {
-        return Err(HttpError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "resource_unavailable",
-            "an authorized resource is not available for search",
-        ));
+        return Err(map_core_error(kwiry_core::Error::ResourceUnavailable));
     }
+    Ok(())
+}
+
+async fn search(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    payload: std::result::Result<Json<ApiSearchRequest>, JsonRejection>,
+) -> std::result::Result<Response, HttpError> {
+    check_holder_gate(&state)?;
     if principal.profile != state.profile || !principal.has_scope(Scope::Search) {
         return Err(HttpError::new(
             StatusCode::FORBIDDEN,
@@ -683,6 +683,8 @@ async fn search(
             .authorized_freshness(&request.filters, &principal.resources, &result.generation)
             .map_err(map_core_error)?,
     };
+    // A search that was admitted before a fail-stop cannot release its hits.
+    check_holder_gate(&state)?;
     let mut response = Json(ApiSearchResponse {
         hits: result.hits,
         next_cursor: None,
@@ -1098,6 +1100,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_search_admitted_before_holder_revocation_releases_no_results() {
+        use kwiry_holdings::testkit::Rig;
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let directory = tempdir().unwrap();
+        let vault = directory.path().join("vault");
+        let data = directory.path().join("data");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("note.md"), "# Search\nrevocationprobe").unwrap();
+        let config = Config {
+            vaults: vec![VaultRegistration {
+                id: "fixture".into(),
+                path: vault,
+                room: None,
+            }],
+            ..Config::default()
+        };
+        build_index(&config, &data).unwrap();
+        let mut state = test_state();
+        let manager = IndexManager::open(config, &data, state.runtime.clone()).unwrap();
+        let mut rig = Rig::new(&directory.path().join("holder"));
+        state.holder_gate = Some(rig.gate());
+        let status = state.status.clone();
+        let request =
+            serde_json::from_str(r#"{"q":"revocationprobe","mode":"lexical","limit":5}"#).unwrap();
+
+        // Hold the freshness read so one poll takes the request through
+        // admission but cannot let it finish, regardless of search timing.
+        let hold = status.write().await;
+        let mut pending = std::pin::pin!(search(
+            State(state),
+            Extension(Principal::desktop()),
+            Ok(Json(request)),
+        ));
+        assert!(
+            pending
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(rig.take_holder());
+        drop(hold);
+
+        let response = pending
+            .await
+            .expect_err("revoked search returned hits")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            r#"{"error":{"code":"resource_unavailable","message":"an authorized resource is not available for search"}}"#
+        );
+        manager.shutdown().unwrap();
     }
 
     #[test]

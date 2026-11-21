@@ -460,30 +460,89 @@ fn a_holder_that_cannot_start_stops_the_daemon_before_it_serves() {
 }
 
 #[test]
-fn a_root_holder_mismatch_refuses_to_serve_and_explains_recovery() {
+fn an_unmarked_staging_generation_is_refused_and_preserved() {
     let server = AuthorityServer::start();
     let fixture = fixture(Some(&server.issuer));
     enroll(&fixture, &server);
-    let generation = fixture.data.join("generations/g-test");
-    fs::create_dir_all(&generation).unwrap();
-    let output = kwiry(&fixture, &["serve", "--bind", "127.0.0.1:0"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stdout.contains("listening"), "{stdout}");
-    assert!(stderr.contains("root_holder_mismatch"), "{stderr}");
-    assert!(
-        stderr.contains("move or empty the configured data directory"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("the index rebuilds from the vault"),
-        "{stderr}"
-    );
+    let staging = fixture.data.join("generations").join(".staging-test");
+    fs::create_dir_all(&staging).unwrap();
+    let staged_data = staging.join("segment");
+    fs::write(&staged_data, b"synthetic index data").unwrap();
+
+    for args in [
+        &["serve", "--bind", "127.0.0.1:0"][..],
+        &["holder", "relist"],
+    ] {
+        let output = kwiry(&fixture, args).output().unwrap();
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stdout.contains("listening"), "{stdout}");
+        for expected in [
+            "root_holder_mismatch",
+            "remove only `current.json`, `generations`, `meta.json`",
+            "the index rebuilds from the vault",
+            "Keep everything else in the data directory",
+            "`replay-epoch` and `replay-iat-watermark`",
+        ] {
+            assert!(stderr.contains(expected), "{stderr}");
+        }
+        assert_eq!(fs::read(&staged_data).unwrap(), b"synthetic index data");
+        assert!(!fixture.data.join("holder-marker.json").exists());
+    }
     assert_eq!(server.hits.load(Ordering::SeqCst), 0);
-    assert!(generation.is_dir());
+}
+
+#[test]
+fn relist_binds_an_unmarked_root_with_only_replay_state() {
+    let server = AuthorityServer::start();
+    let fixture = fixture(Some(&server.issuer));
+    enroll(&fixture, &server);
+    fs::create_dir(&fixture.data).unwrap();
+    let replay_entries = [("replay-epoch", b"7"), ("replay-iat-watermark", b"9")];
+    for (file, bytes) in replay_entries {
+        fs::write(fixture.data.join(file), bytes).unwrap();
+    }
+    let output = kwiry(&fixture, &["holder", "relist"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(fixture.data.join("holder-marker.json").is_file());
+    for (file, bytes) in replay_entries {
+        assert_eq!(fs::read(fixture.data.join(file)).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn daemon_and_holder_commands_refuse_writable_state_directories() {
+    let server = AuthorityServer::start();
+    let fixture = fixture(Some(&server.issuer));
+    enroll(&fixture, &server);
+    let jwks = fixture.state_dir.with_extension("jwks.json");
+    for mode in [0o720, 0o702] {
+        fs::set_permissions(&fixture.state_dir, fs::Permissions::from_mode(mode)).unwrap();
+        for args in [
+            &["serve", "--bind", "127.0.0.1:0"][..],
+            &["holder", "key"],
+            &[
+                "holder",
+                "enroll",
+                "--holder-id",
+                "synthetic",
+                "--jwks",
+                jwks.to_str().unwrap(),
+            ],
+            &["holder", "relist"],
+            &["holder", "status"],
+        ] {
+            let output = kwiry(&fixture, args).output().unwrap();
+            assert!(!output.status.success(), "{args:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("unsafe holder.state_dir permissions"),
+                "{stderr}"
+            );
+        }
+    }
+    assert_eq!(server.hits.load(Ordering::SeqCst), 0);
 }
 
 #[test]
