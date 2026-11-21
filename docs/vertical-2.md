@@ -170,6 +170,8 @@ The desktop daemon serves first: it binds and answers HTTP immediately, replying
 
 The OpenClast format release checks room and state boundaries for each walk, including bind-mount aliases, and does not read or write a room pin store. Linux must expose a mount ID through `statx` on each opened room-root descriptor; a missing or mismatched ID blocks that room. Register room roots by their exact absolute canonical paths, without symlinks, dot segments or redundant separators. Keep the data root, config directory and token path separate from the room trees. Mount room trees read-only for Kwiry and run it under a dedicated UID other than 0, 1000 or 911. The format release does not detect replacement of a room root between walks; restrict writes to the host-side parent directories. After an incomplete room walk, Kwiry removes sources known absent from completed directory listings; any uncertain rows stay stale. `indexing.max_stale_serve_seconds` (default 3600, valid range 0–86400) caps how long its last artifacts can serve. A reopened OpenClast index is not served until reconciliation establishes room coverage. An incomplete first walk does not give unverified rows a new grace period.
 
+Linux mounts with non-absolute roots (such as `nsfs`) do not invalidate unrelated paths, but the boundary check refuses room and protected state paths covered by them.
+
 The future admission release starts every OpenClast room `pin_pending`. It imports no prior pin, path binding or root identity. Leaving pending is decided by the OpenClast authority (authority-side root attestation, still being specified), not by a Kwiry-local pin command. The format release implements none of it.
 
 

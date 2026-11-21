@@ -80,6 +80,8 @@ pub(crate) fn validate(config: &Config, data_root: Option<&Path>) -> Result<()> 
         .iter()
         .map(|vault| require_canonical_room_root(&vault.path))
         .collect::<Result<Vec<_>>>()?;
+    // Linux still checks the configured state mounts with no registered rooms.
+    #[cfg(not(target_os = "linux"))]
     if roots.is_empty() {
         return Ok(());
     }
@@ -127,6 +129,7 @@ pub(crate) fn validate(config: &Config, data_root: Option<&Path>) -> Result<()> 
 /// Check the writable root separately, so a broken or overlapping room does
 /// not stop a build from walking unrelated rooms in a safe data directory.
 pub(crate) fn validate_data_root(config: &Config, data_root: &Path) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
     if config.vaults.is_empty() {
         return Ok(());
     }
@@ -218,6 +221,9 @@ fn boundary_error(message: &str) -> Error {
     Error::State(format!("openclast_room_boundary: {message}"))
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use linux::with_mount_snapshot;
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::ffi::OsString;
@@ -225,11 +231,14 @@ mod linux {
 
     use super::*;
 
-    struct Mount<'a> {
-        id: &'a [u8],
-        parent: &'a [u8],
-        device: &'a [u8],
-        root: PathBuf,
+    const UNSUPPORTED_MOUNT_ROOT: &str = "path is on a mount with a non-absolute root";
+
+    struct Mount {
+        id: u64,
+        parent: u64,
+        device: (u64, u64),
+        // Pseudo-filesystems such as nsfs have no filesystem-relative path here.
+        root: Option<PathBuf>,
         point: PathBuf,
     }
 
@@ -248,35 +257,85 @@ mod linux {
                 });
                 remaining = &rest[3..];
             } else {
+                if matches!(byte, b'\t' | b'\0') {
+                    return None;
+                }
                 bytes.push(byte);
                 remaining = rest;
             }
         }
-        let path = PathBuf::from(OsString::from_vec(bytes));
-        path.is_absolute().then_some(path)
+        Some(PathBuf::from(OsString::from_vec(bytes)))
     }
 
-    fn parse_mounts(input: &[u8]) -> Result<Vec<Mount<'_>>> {
+    fn parse_decimal(field: &[u8]) -> Option<u64> {
+        if field.is_empty() {
+            return None;
+        }
+        field.iter().try_fold(0_u64, |n, &byte| {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            n.checked_mul(10)?.checked_add(u64::from(byte - b'0'))
+        })
+    }
+
+    fn parse_mount_id(field: &[u8]) -> Option<u64> {
+        // Kernel mount IDs have one spelling; reject padded IDs and parents.
+        if field.len() > 1 && field[0] == b'0' {
+            return None;
+        }
+        parse_decimal(field)
+    }
+
+    fn parse_mount(line: &[u8]) -> Option<Mount> {
+        let mut fields = line.split(|byte| *byte == b' ');
+        let mut field = || fields.next().filter(|field| !field.is_empty());
+        let id = parse_mount_id(field()?)?;
+        let parent = parse_mount_id(field()?)?;
+        let device = field()?;
+        let colon = device.iter().position(|&byte| byte == b':')?;
+        let device = (
+            parse_decimal(&device[..colon])?,
+            parse_decimal(&device[colon + 1..])?,
+        );
+        let root = decode_path(field()?)?;
+        let point = decode_path(field()?)?;
+        if !point.is_absolute() {
+            return None;
+        }
+        // Check the complete record shape, even though these fields do not
+        // contribute to the location key.
+        field()?; // mount options
+        while field()? != b"-" {} // optional fields, then the separator
+        field()?; // filesystem type
+        field()?; // mount source
+        field()?; // superblock options
+        if fields.next().is_some() {
+            return None;
+        }
+        Some(Mount {
+            id,
+            parent,
+            device,
+            root: root.is_absolute().then_some(root),
+            point,
+        })
+    }
+
+    fn parse_mounts(input: &[u8]) -> Result<Vec<Mount>> {
+        let invalid = || boundary_error("invalid mountinfo record");
+        // Kernel records are newline-terminated, even when the last field
+        // would also look valid after truncation.
         input
+            .strip_suffix(b"\n")
+            .ok_or_else(invalid)?
             .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                let mut fields = line.split(|byte| *byte == b' ');
-                (|| {
-                    Some(Mount {
-                        id: fields.next()?,
-                        parent: fields.next()?,
-                        device: fields.next()?,
-                        root: decode_path(fields.next()?)?,
-                        point: decode_path(fields.next()?)?,
-                    })
-                })()
-                .ok_or_else(|| boundary_error("invalid mountinfo record"))
-            })
+            .map(|line| parse_mount(line).ok_or_else(invalid))
             .collect()
     }
 
-    fn location<'a>(mounts: &[Mount<'a>], path: &Path) -> Result<Location<'a>> {
+    /// `None` means resolution crossed a mount with no usable root path.
+    fn location(mounts: &[Mount], path: &Path) -> Result<Option<Location>> {
         let mut roots = mounts.iter().filter(|mount| {
             mount.point == Path::new("/")
                 && !mounts
@@ -291,7 +350,10 @@ mod linux {
         }
         // Follow the mount tree: a visible overmount can hide a mount with a
         // longer textual prefix on the underlying filesystem.
-        loop {
+        let root = loop {
+            let Some(root) = &mount.root else {
+                return Ok(None);
+            };
             let mut children: Vec<_> = mounts
                 .iter()
                 .filter(|child| {
@@ -301,7 +363,9 @@ mod linux {
                 })
                 .collect();
             children.sort_unstable_by_key(|child| child.point.components().count());
-            let Some(next) = children.first() else { break };
+            let Some(next) = children.first() else {
+                break root;
+            };
             if children
                 .get(1)
                 .is_some_and(|other| other.point == next.point)
@@ -309,29 +373,43 @@ mod linux {
                 return Err(boundary_error("ambiguous covering mounts"));
             }
             mount = next;
-        }
+        };
         let below_mount = path.strip_prefix(&mount.point).expect("covering mount");
-        let mount_id = std::str::from_utf8(mount.id)
-            .ok()
-            .and_then(|id| id.parse().ok())
-            .ok_or_else(|| boundary_error("invalid mount ID"))?;
-        Ok(Location {
-            mount_id,
+        Ok(Some(Location {
+            mount_id: mount.id,
             device: mount.device,
-            path: mount.root.join(below_mount),
-        })
+            path: root.join(below_mount),
+        }))
     }
 
-    struct Location<'a> {
+    struct Location {
         mount_id: u64,
-        device: &'a [u8],
+        device: (u64, u64),
         path: PathBuf,
     }
 
-    impl Location<'_> {
+    impl Location {
         fn overlaps(&self, other: &Self) -> bool {
             self.device == other.device && overlap(&self.path, &other.path)
         }
+    }
+
+    #[cfg(test)]
+    std::thread_local! {
+        static TEST_MOUNT_SNAPSHOT: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_mount_snapshot(snapshot: Vec<u8>, test: impl FnOnce()) {
+        // Isolate the fixture from concurrent tests and restore it even on panic.
+        struct Restore(Option<Vec<u8>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                TEST_MOUNT_SNAPSHOT.replace(self.0.take());
+            }
+        }
+        let _restore = Restore(TEST_MOUNT_SNAPSHOT.replace(Some(snapshot)));
+        test();
     }
 
     pub(super) fn validate_mounts(
@@ -341,6 +419,21 @@ mod linux {
         compare_rooms: bool,
         descriptor_mount_ids: Option<&[Option<u64>]>,
     ) -> Result<()> {
+        #[cfg(test)]
+        if let Some(result) = TEST_MOUNT_SNAPSHOT.with(|snapshot| {
+            snapshot.borrow().as_deref().map(|bytes| {
+                validate_mount_snapshot(
+                    bytes,
+                    rooms,
+                    state,
+                    failures,
+                    compare_rooms,
+                    descriptor_mount_ids,
+                )
+            })
+        }) {
+            return result;
+        }
         let bytes = fs::read("/proc/self/mountinfo")
             .map_err(|_| boundary_error("mountinfo is unavailable"))?;
         validate_mount_snapshot(
@@ -365,15 +458,24 @@ mod linux {
         let room_keys: Vec<_> = rooms.iter().map(|path| location(&mounts, path)).collect();
         let state = state
             .iter()
-            .map(|path| location(&mounts, path))
+            .map(|path| {
+                location(&mounts, path)?.ok_or_else(|| boundary_error(UNSUPPORTED_MOUNT_ROOT))
+            })
             .collect::<Result<Vec<_>>>()?;
         for (i, key) in room_keys.iter().enumerate() {
-            let Ok(room) = key else {
-                failures[i] = Some("room mount could not be checked");
-                continue;
+            let room = match key {
+                Ok(Some(room)) => room,
+                Ok(None) => {
+                    failures[i] = Some(UNSUPPORTED_MOUNT_ROOT);
+                    continue;
+                }
+                Err(_) => {
+                    failures[i] = Some("room mount could not be checked");
+                    continue;
+                }
             };
             for (j, other) in room_keys[..i].iter().enumerate() {
-                if compare_rooms && other.as_ref().is_ok_and(|other| room.overlaps(other)) {
+                if compare_rooms && matches!(other, Ok(Some(other)) if room.overlaps(other)) {
                     failures[i] = Some("room roots overlap through a mount");
                     failures[j] = failures[i];
                 }
@@ -386,7 +488,7 @@ mod linux {
         // Compare with the mount ID of that very descriptor from statx.
         if let Some(ids) = descriptor_mount_ids {
             for (i, key) in room_keys.iter().enumerate() {
-                if let Ok(room) = key
+                if let Ok(Some(room)) = key
                     && ids.get(i).copied().flatten() != Some(room.mount_id)
                 {
                     failures[i] = Some("opened room mount does not match mountinfo");
@@ -394,6 +496,158 @@ mod linux {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    const PSEUDO_MOUNT_SNAPSHOT: &[u8] = b"1 0 8:1 / / rw - ext4 fixture rw\n2 1 0:42 net:[4026531840] /namespaces/isolated rw shared:2 - nsfs fixture rw\n";
+
+    #[cfg(test)]
+    #[test]
+    fn mountinfo_accepts_unrelated_pseudo_mounts() {
+        let rooms = ["/rooms/A".into(), "/namespaces/isolated-other".into()];
+        let state = ["/state".into()];
+        let mut failures = [None; 2];
+        validate_mount_snapshot(
+            PSEUDO_MOUNT_SNAPSHOT,
+            &rooms,
+            &state,
+            &mut failures,
+            true,
+            Some(&[Some(1), Some(1)]),
+        )
+        .unwrap();
+        assert_eq!(failures, [None, None]);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn mountinfo_refuses_rooms_and_state_on_pseudo_mounts() {
+        for path in ["/namespaces/isolated", "/namespaces/isolated/child"] {
+            let rooms = [path.into(), "/rooms/B".into()];
+            let mut failures = [None; 2];
+            validate_mount_snapshot(
+                PSEUDO_MOUNT_SNAPSHOT,
+                &rooms,
+                &[],
+                &mut failures,
+                true,
+                Some(&[Some(2), Some(1)]),
+            )
+            .unwrap();
+            assert_eq!(failures, [Some(UNSUPPORTED_MOUNT_ROOT), None]);
+
+            let error = validate_mount_snapshot(
+                PSEUDO_MOUNT_SNAPSHOT,
+                &[],
+                &[path.into()],
+                &mut [],
+                false,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                boundary_error(UNSUPPORTED_MOUNT_ROOT).to_string()
+            );
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn mountinfo_rejects_malformed_records() {
+        for line in [
+            &b"2 1 0:42 net:[4026531840] namespaces/isolated rw - nsfs fixture rw\n"[..],
+            b"2 1 0:42 net:[4026531840] /namespaces/isolated\\777 rw - nsfs fixture rw\n",
+            b"2 1 0:42 net:[4026531840] /namespaces/isolated\\04 rw - nsfs fixture rw\n",
+            b"2 1 0:42 net:[4026531840] /namespaces/isolated\t rw - nsfs fixture rw\n",
+            b"2 1 0:42 net:[4026531840]\\777 /namespaces/isolated rw - nsfs fixture rw\n",
+            b"2 1 0:42  /namespaces/isolated rw - nsfs fixture rw\n",
+            b"2 1 0:42 net:[4026531840]\n",
+            b"2 1 0:42 net:[4026531840] /namespaces/isolated\n",
+            b"2 1 0:42 net:[4026531840] /namespaces/isolated rw - nsfs fixture\n",
+            b"2 1 0:42 net:[4026531840] /namespaces/isolated rw - nsfs fixture r",
+        ] {
+            let mut snapshot = PSEUDO_MOUNT_SNAPSHOT.to_vec();
+            snapshot.extend(line);
+            let error =
+                validate_mount_snapshot(&snapshot, &[], &[], &mut [], true, None).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                boundary_error("invalid mountinfo record").to_string()
+            );
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn mountinfo_rejects_invalid_numeric_fields() {
+        for fields in [
+            "2 invalid 0:42",
+            "invalid 1 0:42",
+            "2  0:42",
+            " 1 0:42",
+            "2 1 42",
+            "2 1 x:42",
+            "2 1 0:x",
+            "2 1 :42",
+            "2 1 0:",
+            "2 1 0:4:2",
+            "18446744073709551616 1 0:42",
+            "2 18446744073709551616 0:42",
+            "2 1 0:18446744073709551616",
+            "2 +1 0:42",
+            "02 1 0:42",
+            "2 01 0:42",
+        ] {
+            let snapshot = format!(
+                "1 0 8:1 / / rw - ext4 fixture rw\n{fields} / /child rw - ext4 fixture rw\n"
+            );
+            let error = validate_mount_snapshot(snapshot.as_bytes(), &[], &[], &mut [], true, None)
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                boundary_error("invalid mountinfo record").to_string(),
+                "{fields}"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn mountinfo_accepts_root_with_parent_outside_snapshot() {
+        let snapshot = b"1 42 8:1 /visible / rw - ext4 fixture rw\n";
+        let mut failures = [None];
+        validate_mount_snapshot(
+            snapshot,
+            &["/rooms/A".into()],
+            &["/state".into()],
+            &mut failures,
+            true,
+            Some(&[Some(1)]),
+        )
+        .unwrap();
+        assert_eq!(failures, [None]);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn mountinfo_compares_device_numbers_numerically() {
+        let snapshot =
+            b"1 0 8:1 / / rw - ext4 fixture rw\n2 1 08:01 /rooms/A /alias rw - ext4 fixture rw\n";
+        let mut failures = [None];
+        validate_mount_snapshot(
+            snapshot,
+            &["/rooms/A".into()],
+            &["/alias".into()],
+            &mut failures,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            failures,
+            [Some("room root overlaps Kwiry state through a mount")]
+        );
     }
 
     #[cfg(test)]

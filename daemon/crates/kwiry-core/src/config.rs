@@ -810,6 +810,82 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    fn assert_pseudo_mount_refused(place_state: impl FnOnce(&mut Config, &mut Paths, &Path)) {
+        use crate::room_boundary::with_mount_snapshot;
+
+        let temporary = tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let pseudo = root.join("pseudo");
+        fs::create_dir(&pseudo).unwrap();
+        let mut paths = Paths::resolve(
+            Some(root.join("control/config.toml")),
+            Some(root.join("local-state")),
+        )
+        .unwrap();
+        let mut config = holder_config(&complete_holder(&root)).unwrap();
+        config.auth.openclast = Some(crate::model::OpenClastAuthConfig {
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
+            issuer: "issuer".into(),
+            audience: "audience".into(),
+            jwks_file: root.join("jwks.json"),
+            max_token_ttl_seconds: 60,
+            workload_subject_allowlist: vec![],
+            legacy_identity_accept_until: None,
+        });
+        place_state(&mut config, &mut paths, &pseudo);
+        save_config_unlocked(&paths.config, &config).unwrap();
+
+        let mut snapshot = b"1 0 8:1 / / rw - ext4 fixture rw\n".to_vec();
+        with_mount_snapshot(snapshot.clone(), || {
+            load_config_for_paths(&paths).unwrap();
+        });
+        snapshot.extend_from_slice(b"2 1 0:42 net:[42] ");
+        for &byte in pseudo.as_os_str().as_encoded_bytes() {
+            match byte {
+                b' ' => snapshot.extend_from_slice(b"\\040"),
+                b'\t' => snapshot.extend_from_slice(b"\\011"),
+                b'\n' => snapshot.extend_from_slice(b"\\012"),
+                b'\\' => snapshot.extend_from_slice(b"\\134"),
+                _ => snapshot.push(byte),
+            }
+        }
+        snapshot.extend_from_slice(b" rw - nsfs fixture rw\n");
+        with_mount_snapshot(snapshot, || {
+            let error = load_config_for_paths(&paths).unwrap_err();
+            assert!(matches!(
+                error,
+                Error::State(message)
+                    if message == "openclast_room_boundary: path is on a mount with a non-absolute root"
+            ));
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn openclast_config_refuses_data_directory_on_pseudo_mount() {
+        assert_pseudo_mount_refused(|_, paths, pseudo| {
+            // Leave the local state directory and its paths on the ordinary mount.
+            paths.data_dir = pseudo.join("index");
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn openclast_config_refuses_holder_state_directory_on_pseudo_mount() {
+        assert_pseudo_mount_refused(|config, _, pseudo| {
+            config.holder.as_mut().unwrap().state_dir = pseudo.join("holder");
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn openclast_config_refuses_jwks_file_on_pseudo_mount() {
+        assert_pseudo_mount_refused(|config, _, pseudo| {
+            config.auth.openclast.as_mut().unwrap().jwks_file = pseudo.join("keys.json");
+        });
+    }
+
     #[test]
     fn relative_overrides_are_absolutized_without_existing() {
         let current = std::env::current_dir().unwrap();
