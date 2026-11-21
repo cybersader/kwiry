@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Transport } from "../src/api";
 import { DaemonBackend } from "../src/backends/daemon-backend";
+import { presentBackgroundIndex } from "../src/search-status-presenter";
 
 const TOKEN = "A".repeat(43);
 const SOURCE_FORMAT_COUNTS = {
@@ -125,6 +126,39 @@ function backend(transport: Transport, tokenProvider = () => TOKEN): DaemonBacke
 }
 
 describe("DaemonBackend", () => {
+  it("explains an unsupported host without reading a token or attempting transport", async () => {
+    const tokenProvider = vi.fn(() => TOKEN);
+    const transport = vi.fn(jsonTransport(() => ({ status: 200, body: STATUS })));
+    const daemon = new DaemonBackend({
+      instanceId: "daemon-7",
+      baseUrl: "http://127.0.0.1:32189",
+      currentVaultId: "notes",
+      tokenProvider,
+      transport,
+      hostAvailable: false,
+    });
+    const safeMessage = "The daemon backend is not available in this host.";
+    const status = await daemon.status();
+    expect(status).toMatchObject({
+      identity: { profile: "daemon" },
+      phase: "unavailable",
+      searchable: false,
+      issue: { code: "daemon_host_unavailable", recoverable: false, safeMessage },
+    });
+    expect(presentBackgroundIndex(status)).toEqual({
+      state: "attention",
+      text: `${safeMessage} Choose In-plugin · Lexical to search without a daemon.`,
+    });
+    await expect(daemon.search({ q: "match", mode: "lexical" })).rejects.toMatchObject({
+      code: "daemon_host_unavailable",
+      stage: "configuration",
+      retryable: false,
+      safeMessage,
+    });
+    expect(tokenProvider).not.toHaveBeenCalled();
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("maps daemon status and attaches immutable result origin", async () => {
     const transport = jsonTransport((url) => {
       if (url.endsWith("/v0/status")) {

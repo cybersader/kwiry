@@ -55,6 +55,24 @@ describe("loadSettings", () => {
     expect(loadSettings({ backendProfile: "unknown" }).backendProfile).toBe("daemon");
   });
 
+  it("keeps the exact fresh-install defaults when the host supports the daemon", () => {
+    expect(loadSettings(null, true)).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it("defaults a fresh install to in-plugin lexical when the host cannot run the daemon", () => {
+    for (const stored of [null, undefined]) {
+      expect(loadSettings(stored, false)).toEqual({ ...DEFAULT_SETTINGS, backendProfile: "in_plugin" });
+    }
+  });
+
+  it.each([true, false])("keeps saved backend choices when daemon host support is %s", (supported) => {
+    for (const backendProfile of ["daemon", "in_plugin"] as const) {
+      const stored = { backendProfile, daemonUrl: "http://127.0.0.1:9999", resultLimit: 42 };
+      expect(loadSettings(stored, supported)).toEqual({ ...DEFAULT_SETTINGS, ...stored });
+    }
+    expect(loadSettings({ resultLimit: 42 }, supported)).toEqual({ ...DEFAULT_SETTINGS, resultLimit: 42 });
+  });
+
   it("migrates existing daemon settings and drops unknown keys", () => {
     const loaded = loadSettings({
       daemonUrl: "http://127.0.0.1:9999",

@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import type {
-  BackendStatus,
-  CandidateWindowFacts,
-  LexicalMatchQualityFacts,
+import {
+  DAEMON_HOST_UNAVAILABLE,
+  DAEMON_HOST_UNAVAILABLE_GUIDANCE,
+  type BackendStatus,
+  type CandidateWindowFacts,
+  type LexicalMatchQualityFacts,
 } from "./backend";
 import {
   emptyStateMessage,
@@ -113,6 +115,9 @@ export function presentQueryStatus(facts: QueryStatusFacts): QueryStatusPresenta
  * progress to assistive technology.
  */
 export function presentBackgroundIndex(status: BackendStatus): BackgroundIndexPresentation {
+  if (status.issue?.code === DAEMON_HOST_UNAVAILABLE.code) {
+    return { state: "attention", text: DAEMON_HOST_UNAVAILABLE_GUIDANCE };
+  }
   const text = progressLine(status);
   if (text === null) return { state: "quiet", text: "" };
   return {

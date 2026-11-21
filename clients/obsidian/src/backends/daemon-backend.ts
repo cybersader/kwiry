@@ -16,6 +16,7 @@ import {
   type LexicalMatchQualityFacts,
   type SearchBackend,
   type SearchExecution,
+  DAEMON_HOST_UNAVAILABLE,
   KwiryBackendError,
 } from "../backend";
 import { DaemonCredentialError } from "../credentials";
@@ -27,6 +28,7 @@ export interface DaemonBackendOptions {
   currentVaultId: string | null;
   tokenProvider: () => string;
   transport: Transport;
+  hostAvailable?: boolean;
 }
 
 const LEXICAL_ONLY: BackendCapabilities = {
@@ -40,6 +42,7 @@ export class DaemonBackend implements SearchBackend {
   private readonly baseUrl: string;
   private readonly tokenProvider: () => string;
   private readonly transport: Transport;
+  private readonly hostAvailable: boolean;
   private disposed = false;
   private lastStatus: BackendStatus | null = null;
 
@@ -53,6 +56,7 @@ export class DaemonBackend implements SearchBackend {
     this.baseUrl = options.baseUrl;
     this.tokenProvider = options.tokenProvider;
     this.transport = options.transport;
+    this.hostAvailable = options.hostAvailable ?? true;
   }
 
   async initialize(): Promise<void> {
@@ -62,6 +66,7 @@ export class DaemonBackend implements SearchBackend {
   async status(): Promise<BackendStatus> {
     if (this.disposed) return this.disposedStatus();
     try {
+      this.requireHost();
       const daemon = await this.makeClient().status();
       if (this.disposed) return this.disposedStatus();
       const capabilities: BackendCapabilities = daemon.model
@@ -114,6 +119,7 @@ export class DaemonBackend implements SearchBackend {
 
   async search(request: SearchRequest): Promise<SearchExecution> {
     this.requireActive();
+    this.requireHost();
     const status = this.lastStatus ?? await this.status();
     if (!status.searchable) {
       const issue = status.issue;
@@ -200,6 +206,18 @@ export class DaemonBackend implements SearchBackend {
       tokenProvider: this.tokenProvider,
       transport: this.transport,
     });
+  }
+
+  private requireHost(): void {
+    if (!this.hostAvailable) {
+      throw new KwiryBackendError(
+        DAEMON_HOST_UNAVAILABLE.code,
+        "daemon",
+        "configuration",
+        DAEMON_HOST_UNAVAILABLE.recoverable,
+        DAEMON_HOST_UNAVAILABLE.safeMessage,
+      );
+    }
   }
 
   private requireActive(): void {

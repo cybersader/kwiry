@@ -9,6 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { KwirySearchApiV1 } from "../src/public-api";
 
+interface SettingRow {
+  name?: string;
+  description?: string;
+  options?: Record<string, { label: string; disabled: boolean }>;
+  value?: string;
+  onChange?: (value: string) => Promise<void>;
+}
+
 interface LifecycleHarness {
   hoverSources: Array<{ id: string; display: string; defaultMod: boolean }>;
   layoutReady: (() => void) | null;
@@ -32,7 +40,12 @@ interface LifecycleHarness {
   fullClipboardResult: "saved" | "cancelled" | "inside_vault" | "unsafe_destination" | "unavailable" | "write_failed";
   notices: string[];
   savedData: unknown[];
-  storedData: Record<string, unknown>;
+  storedData: Record<string, unknown> | null;
+  desktopApp: boolean;
+  nodeFilesystemAvailable: boolean;
+  desktopTransportAvailable: boolean;
+  displaySettings: (() => void) | null;
+  settingRows: SettingRow[];
   rebuildResult: "scheduled" | "already_building";
   statusBarEvents: string[];
   statusBarText: string;
@@ -63,6 +76,11 @@ const harness: LifecycleHarness = {
   notices: [],
   savedData: [],
   storedData: {},
+  desktopApp: true,
+  nodeFilesystemAvailable: true,
+  desktopTransportAvailable: true,
+  displaySettings: null,
+  settingRows: [],
   rebuildResult: "scheduled",
   statusBarEvents: [],
   statusBarText: "",
@@ -74,6 +92,7 @@ const require = createRequire(import.meta.url);
 
 async function loadProductionPlugin(): Promise<new () => {
   settings: {
+    backendProfile: "daemon" | "in_plugin";
     enabledSourceFormats: Record<string, boolean>;
     diagnosticsReportLevel: "debug" | "info" | "warn" | "error";
     diagnosticsReportScope: "all" | "indexing" | "search" | "startup" | "failures";
@@ -108,7 +127,8 @@ async function loadProductionPlugin(): Promise<new () => {
 
   const module = { exports: {} as Record<string, unknown> };
   const evaluate = new Function("module", "exports", "require", output.text);
-  evaluate(module, module.exports, require);
+  evaluate(module, module.exports, (id: string): unknown =>
+    id === "fs" && !harness.nodeFilesystemAvailable ? {} : require(id));
   const plugin = module.exports.default;
   if (typeof plugin !== "function") throw new Error("main.ts test bundle has no default plugin");
   return plugin as Awaited<ReturnType<typeof loadProductionPlugin>>;
@@ -119,15 +139,12 @@ function lifecycleHarnessPlugin(): EsbuildPlugin {
     ["obsidian", "obsidian"],
     ["virtual:kwiry-worker-source", "worker-source"],
     ["./active-vault-source", "active-vault-source"],
-    ["./backends/daemon-backend", "daemon-backend"],
     ["./backends/in-plugin-lexical-backend", "in-plugin-backend"],
     ["./cache/build-cache-options", "cache-options"],
-    ["./credentials", "credentials"],
     ["./diagnostics/desktop-export-host", "desktop-export-host"],
     ["./diagnostics/full-report-clipboard-host", "full-report-clipboard-host"],
     ["./internal/private-tools", "private-tools"],
     ["./search-modal", "search-modal"],
-    ["./settings-tab", "settings-tab"],
   ]);
 
   return {
@@ -152,6 +169,37 @@ function stubSource(path: string): string {
     case "obsidian":
       return `
         const harness = globalThis.__kwiryStartupLifecycleHarness;
+        export class PluginSettingTab {
+          containerEl = { empty() { harness.settingRows.length = 0; } };
+        }
+        export class Setting {
+          row = {};
+          constructor() { harness.settingRows.push(this.row); }
+          setName(name) { this.row.name = name; return this; }
+          setDesc(description) { this.row.description = description; return this; }
+          setHeading() { return this; }
+          addText() { return this; }
+          addToggle() { return this; }
+          addButton() { return this; }
+          addDropdown(configure) {
+            const row = this.row;
+            configure({
+              selectEl: {
+                querySelector(selector) {
+                  return selector === 'option[value="daemon"]' ? row.options.daemon ?? null : null;
+                },
+              },
+              addOptions(options) {
+                row.options = Object.fromEntries(Object.entries(options).map(([value, label]) =>
+                  [value, { label, disabled: false }]));
+                return this;
+              },
+              setValue(value) { row.value = value; return this; },
+              onChange(callback) { row.onChange = callback; return this; },
+            });
+            return this;
+          }
+        }
         export class Plugin {
           app = {
             vault: {
@@ -169,6 +217,7 @@ function stubSource(path: string): string {
           manifest = { version: "0.5.2", name: "Kwiry Search" };
           registerHoverLinkSource(id, info) { harness.hoverSources.push({ id, ...info }); }
           async loadData() {
+            if (harness.storedData === null) return null;
             return {
               backendProfile: "in_plugin",
               diagnosticsLogLevel: "info",
@@ -177,7 +226,7 @@ function stubSource(path: string): string {
             };
           }
           async saveData(value) { harness.savedData.push(value); }
-          addSettingTab() {}
+          addSettingTab(tab) { harness.displaySettings = () => tab.display(); }
           addCommand() {}
           addRibbonIcon() {}
           addStatusBarItem() {
@@ -203,9 +252,13 @@ function stubSource(path: string): string {
         export class Notice {
           constructor(message) { harness.notices.push(message); }
         }
-        export const Platform = { isAndroidApp: false, isIosApp: false };
+        export const Platform = {
+          isDesktopApp: harness.desktopApp, isAndroidApp: false, isIosApp: false,
+        };
         export const apiVersion = "1.8.10";
-        export async function requestUrl() { throw new Error("unexpected request"); }
+        export const requestUrl = harness.desktopTransportAvailable
+          ? async () => { throw new Error("unexpected request"); }
+          : undefined;
       `;
     case "worker-source":
       return `export default "worker source";`;
@@ -219,8 +272,6 @@ function stubSource(path: string): string {
           }
         }
       `;
-    case "daemon-backend":
-      return `export class DaemonBackend {}`;
     case "in-plugin-backend":
       return `
         const harness = globalThis.__kwiryStartupLifecycleHarness;
@@ -309,8 +360,6 @@ function stubSource(path: string): string {
           return undefined;
         }
       `;
-    case "credentials":
-      return `export async function readDaemonToken() { throw new Error("unexpected token read"); }`;
     case "desktop-export-host":
       return `
         const harness = globalThis.__kwiryStartupLifecycleHarness;
@@ -369,8 +418,6 @@ function stubSource(path: string): string {
       `;
     case "search-modal":
       return `export class KwirySearchModal {}`;
-    case "settings-tab":
-      return `export class KwirySettingTab {}`;
     default:
       throw new Error(`missing lifecycle test stub: ${path}`);
   }
@@ -401,6 +448,11 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.notices.length = 0;
     harness.savedData.length = 0;
     harness.storedData = {};
+    harness.desktopApp = true;
+    harness.nodeFilesystemAvailable = true;
+    harness.desktopTransportAvailable = true;
+    harness.displaySettings = null;
+    harness.settingRows.length = 0;
     harness.rebuildResult = "scheduled";
     harness.statusBarEvents.length = 0;
     harness.statusBarText = "";
@@ -418,6 +470,83 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("keeps the fresh desktop daemon default, settings controls, and status", async () => {
+    harness.storedData = null;
+    harness.adapterBasePath = null;
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+    expect(plugin.settings.backendProfile).toBe("daemon");
+    harness.displaySettings?.();
+    expect(harness.settingRows.find(({ name }) => name === "Search backend")).toMatchObject({
+      value: "daemon",
+      description: "Backend selection is explicit. A daemon failure never activates in-plugin search.",
+      options: {
+        daemon: { label: "Daemon", disabled: false },
+        in_plugin: { label: "In-plugin · Lexical", disabled: false },
+      },
+    });
+    expect(harness.settingRows).toContainEqual(expect.objectContaining({ name: "Daemon URL" }));
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Index unavailable"));
+    expect(harness.savedData).toEqual([]);
+    plugin.onunload();
+  });
+
+  it.each(["desktopApp", "nodeFilesystemAvailable", "desktopTransportAvailable"] as const)(
+    "starts in-plugin indexing on a fresh install without %s",
+    async (missingCapability) => {
+      harness[missingCapability] = false;
+      harness.storedData = null;
+      const KwiryPlugin = await loadProductionPlugin();
+      const plugin = new KwiryPlugin();
+      await plugin.onload();
+      expect(plugin.settings.backendProfile).toBe("in_plugin");
+      harness.layoutReady?.();
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"));
+      expect(harness.backendInitializations).toBe(1);
+      expect(harness.savedData).toEqual([]);
+      plugin.onunload();
+    },
+  );
+
+  it("keeps an unavailable saved daemon selection until the user switches in settings", async () => {
+    harness.desktopApp = false;
+    harness.nodeFilesystemAvailable = false;
+    harness.storedData = { backendProfile: "daemon", daemonUrl: "invalid-url" };
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+    harness.layoutReady?.();
+    const guidance = "The daemon backend is not available in this host. "
+      + "Choose In-plugin · Lexical to search without a daemon.";
+    await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${guidance}`));
+    expect(plugin.settings.backendProfile).toBe("daemon");
+    expect(harness.backendInitializations).toBe(0);
+    expect(harness.savedData).toEqual([]);
+
+    harness.displaySettings?.();
+    const backendRow = harness.settingRows.find(({ name }) => name === "Search backend");
+    expect(backendRow).toMatchObject({
+      value: "daemon",
+      description: guidance,
+      options: {
+        daemon: { label: "Daemon (unavailable)", disabled: true },
+        in_plugin: { label: "In-plugin · Lexical", disabled: false },
+      },
+    });
+    await backendRow?.onChange?.("in_plugin");
+    expect(plugin.settings.backendProfile).toBe("in_plugin");
+    expect(harness.savedData).toEqual([expect.objectContaining({ backendProfile: "in_plugin" })]);
+    expect(harness.backendInitializations).toBe(1);
+    expect(harness.statusBarText).toBe("Kwiry: Ready");
+    expect(harness.settingRows.find(({ name }) => name === "Search backend")).toMatchObject({
+      value: "in_plugin",
+      options: { daemon: { disabled: true } },
+    });
+    plugin.onunload();
   });
 
   it("publishes the API on the plugin and revokes cached references synchronously on unload", async () => {
