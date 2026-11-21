@@ -10,6 +10,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(note: Option<&str>) -> Self {
+        Self::with_label(note, Some("snapshot:A"))
+    }
+
+    fn with_label(note: Option<&str>, label: Option<&str>) -> Self {
         let dir = tempdir().unwrap();
         let room = dir.path().join("first");
         fs::create_dir(&room).unwrap();
@@ -17,7 +21,7 @@ impl Fixture {
             fs::write(room.join("note.md"), text).unwrap();
         }
         let mut config = openclast_config(vec![VaultRegistration {
-            snapshot_id: Some("snapshot:A".parse().unwrap()),
+            snapshot_id: label.map(|s| s.parse().unwrap()),
             id: "orchard".into(),
             path: room,
             room: Some("garden".into()),
@@ -168,15 +172,23 @@ fn same_path_label_only_change_and_label_removal_each_publish() {
     }
 }
 
-fn write_legacy_layout(active: &crate::GenerationPaths) {
-    let mut layout: serde_json::Value =
-        serde_json::from_slice(&fs::read(&active.layout_path).unwrap()).unwrap();
-    layout["layout_version"] = 3.into();
-    layout["partitions"][0]
-        .as_object_mut()
+fn remove_label_sidecar(active: &crate::GenerationPaths) {
+    fs::remove_file(active.root.join(crate::partition::LABEL_SIDECAR)).unwrap();
+}
+
+fn reopened_result(
+    active: &crate::GenerationPaths,
+    resources: &[ResourceKey],
+    query: &str,
+) -> GenerationSearchResult {
+    let reader = PartitionedSearchIndex::open(active).unwrap();
+    let filters = SearchFilters::default();
+    let opened = reader
+        .open_resources(&filters, resources, |_| true)
+        .unwrap();
+    reader
+        .search_opened(&opened, query, 10, &filters, resources)
         .unwrap()
-        .remove("snapshot_id");
-    fs::write(&active.layout_path, serde_json::to_vec(&layout).unwrap()).unwrap();
 }
 
 #[test]
@@ -184,7 +196,7 @@ fn legacy_unlabeled_deployment_serves_after_boot_without_rebuilding_or_republish
     let f = Fixture::new(Some("apricots"));
     let active = f.published();
     f.manager.shutdown().unwrap();
-    write_legacy_layout(&active);
+    remove_label_sidecar(&active);
     let mut config = f.config;
     config.vaults[0].snapshot_id = None;
     let rt = SearchRuntime::new();
@@ -205,7 +217,7 @@ fn restart_with_different_config(legacy: bool) {
     let active = f.published();
     f.manager.shutdown().unwrap();
     if legacy {
-        write_legacy_layout(&active);
+        remove_label_sidecar(&active);
     }
     let mut config = f.config;
     config.vaults[0].snapshot_id = Some("snapshot:B".parse().unwrap());
@@ -314,8 +326,8 @@ fn partial_initial_build_cannot_claim_the_registered_label() {
     })
     .unwrap();
     let active = DataRoot::new(data).active().unwrap().unwrap();
-    let reader = PartitionedSearchIndex::open(&active).unwrap();
-    assert!(reader.partitions[&f.resources[0]].snapshot_id.is_none());
+    let result = reopened_result(&active, &f.resources, "apricots");
+    f.check(&result, None, 1);
 }
 
 #[test]
@@ -325,4 +337,248 @@ fn failed_root_cannot_relabel_the_serving_reader() {
     f.config.vaults[0].snapshot_id = Some("snapshot:B".parse().unwrap());
     f.reconcile();
     f.check(&f.search("apricots"), Some("snapshot:A"), 1);
+}
+
+#[test]
+fn unreadable_note_under_unchanged_label_publishes_unlabeled() {
+    let mut f = Fixture::new(Some("apricots"));
+    let old = f.published();
+    crate::room_walk::with_unreadable_source("note.md", || f.reconcile());
+    assert_ne!(old.id, f.published().id);
+    f.check(&f.search("apricots"), None, 0);
+    f.reconcile();
+    f.check(&f.search("apricots"), Some("snapshot:A"), 1);
+}
+
+#[test]
+fn indexed_partial_source_disqualifies_initial_build_and_replacement() {
+    let mut f = Fixture::new(Some("apricots"));
+    fs::write(
+        f.config.vaults[0].path.join("board.canvas"),
+        include_bytes!("../../../tests/fixtures/canvas/partial.canvas"),
+    )
+    .unwrap();
+    f.reconcile();
+    f.check(&f.search("apricots"), None, 1);
+    let data = f.dir.path().join("fresh");
+    build_index(&f.config, &data).unwrap();
+    let active = DataRoot::new(data).active().unwrap().unwrap();
+    f.check(&reopened_result(&active, &f.resources, "apricots"), None, 1);
+}
+
+#[test]
+fn boot_time_eviction_clears_label_until_a_clean_pass() {
+    let f = Fixture::new(Some("apricots"));
+    let data = f.dir.path().join("data");
+    f.manager.shutdown().unwrap();
+    assert_eq!(forge_foreign_identity(&data, SourceFormat::Markdown), 1);
+    let runtime = SearchRuntime::new();
+    let mut manager = IndexManager::open(f.config.clone(), &data, runtime.clone()).unwrap();
+    assert_eq!(manager.open_evictions().total(), 1);
+    let before = reopened_result(
+        &DataRoot::new(&data).active().unwrap().unwrap(),
+        &f.resources,
+        "apricots",
+    );
+    assert!(before.hits.is_empty());
+    assert!(before.require_snapshot_ids().is_err());
+    manager.reconcile(f.config).unwrap();
+    let after = runtime
+        .search_authorized_with_generation("apricots", 10, &SearchFilters::default(), &f.resources)
+        .unwrap();
+    assert_eq!(after.hits.len(), 1);
+    assert_eq!(
+        after.snapshot_ids[&f.resources[0]]
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "snapshot:A"
+    );
+}
+
+fn restore_withheld_root(previous: Option<&str>, next: Option<&str>) {
+    let mut f = Fixture::with_label(Some("apricots"), previous);
+    let original = f.config.vaults[0].path.clone();
+    f.config.vaults[0].path = f.dir.path().join("offline");
+    f.reconcile();
+    assert!(!partition_index_dir(&f.published().partitions_dir, &f.resources[0]).exists());
+    assert_eq!(f.manager.manifest().files.len(), 1);
+    f.config.vaults[0].path = original;
+    f.config.vaults[0].snapshot_id = next.map(|s| s.parse().unwrap());
+    f.reconcile();
+    f.check(&f.search("apricots"), next, 1);
+}
+
+#[test]
+fn returning_to_withheld_root_with_new_label_returns_note_and_label() {
+    restore_withheld_root(Some("snapshot:A"), Some("snapshot:C"));
+}
+
+#[test]
+fn returning_to_withheld_root_without_label_returns_note() {
+    restore_withheld_root(None, None);
+}
+
+#[test]
+fn matching_manifest_with_one_missing_chunk_is_reingested_before_label_publication() {
+    let mut f = Fixture::new(Some("# First\napricots\n# Second\napricots\n"));
+    let both = f.search("apricots");
+    f.check(&both, Some("snapshot:A"), 2);
+    let index_dir = partition_index_dir(&f.published().partitions_dir, &f.resources[0]);
+    let (index, fields) = open_index_dir(&index_dir).unwrap();
+    let mut writer: IndexWriter<tantivy::TantivyDocument> =
+        index.writer(WRITER_MEMORY_BYTES).unwrap();
+    writer.delete_term(Term::from_field_text(
+        fields.chunk_id,
+        &both.hits[0].chunk_id,
+    ));
+    writer.commit().unwrap();
+    writer.wait_merging_threads().unwrap();
+    assert_eq!(
+        partition_source_counts(&index_dir)
+            .unwrap()
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    f.config.vaults[0].snapshot_id = Some("snapshot:C".parse().unwrap());
+    f.reconcile();
+    f.check(&f.search("apricots"), Some("snapshot:C"), 2);
+}
+
+#[test]
+fn physical_count_mismatch_with_clean_walk_is_unlabeled_and_repaired_on_retry() {
+    let mut f = Fixture::new(Some("apricots"));
+    let index_dir = partition_index_dir(&f.published().partitions_dir, &f.resources[0]);
+    let (index, fields) = open_index_dir(&index_dir).unwrap();
+    // Inherited metadata and physical state agree on two chunks; the clean
+    // walk produces one. Checking only for the source key would certify it.
+    let IndexManagerInner::OpenClast(manager) = &mut f.manager.inner else {
+        unreachable!()
+    };
+    let (key, file) = manager.manifest.files.iter_mut().next().unwrap();
+    file.chunk_count = 2;
+    let mut extra = tantivy::TantivyDocument::default();
+    extra.add_text(fields.source_key.unwrap(), key.as_str());
+    let mut writer: IndexWriter<tantivy::TantivyDocument> =
+        index.writer(WRITER_MEMORY_BYTES).unwrap();
+    writer.add_document(extra).unwrap();
+    writer.commit().unwrap();
+    writer.wait_merging_threads().unwrap();
+    let report = f.manager.reconcile(f.config.clone()).unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("incomplete partition"))
+    );
+    f.check(&f.search("apricots"), None, 1);
+    f.reconcile();
+    f.check(&f.search("apricots"), Some("snapshot:A"), 1);
+    assert_eq!(
+        partition_source_counts(&partition_index_dir(
+            &f.published().partitions_dir,
+            &f.resources[0]
+        ))
+        .unwrap()
+        .values()
+        .sum::<usize>(),
+        1
+    );
+}
+
+#[test]
+fn layout_bytes_remain_v3_with_and_without_labels_on_rollback() {
+    // Frozen v3 parser and field order. A rollback must not rely on an old
+    // reader ignoring extension fields or accepting a new version number.
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct V3Layout {
+        layout_version: u32,
+        profile: HostProfile,
+        partitions: Vec<V3Partition>,
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct V3Partition {
+        partition_id: String,
+        resource: ResourceKey,
+    }
+    for label in [Some("snapshot:A"), None] {
+        let f = Fixture::with_label(Some("apricots"), label);
+        let bytes = fs::read(f.published().layout_path).unwrap();
+        let old: V3Layout = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(old.layout_version, 3);
+        assert_eq!(old.profile, HostProfile::OpenClast);
+        assert_eq!(old.partitions.len(), 1);
+        assert_eq!(old.partitions[0].resource, f.resources[0]);
+        assert_eq!(
+            old.partitions[0].partition_id,
+            crate::partition::partition_id(&f.resources[0])
+        );
+        let mut v3_bytes = serde_json::to_vec_pretty(&old).unwrap();
+        v3_bytes.push(b'\n');
+        assert_eq!(bytes, v3_bytes);
+    }
+}
+
+#[test]
+fn missing_corrupt_wrong_version_or_mismatched_sidecar_serves_every_room_unlabeled() {
+    let mut f = Fixture::new(Some("apricots"));
+    let mut other = f.config.vaults[0].clone();
+    other.id = "second".into();
+    other.room = Some("second".into());
+    other.path = f.dir.path().join("second");
+    fs::create_dir(&other.path).unwrap();
+    let both = [
+        f.resources[0].clone(),
+        f.config.resource_key(&other).unwrap(),
+    ];
+    f.config.vaults.push(other);
+    f.reconcile();
+    let active = f.published();
+    let path = active.root.join(crate::partition::LABEL_SIDECAR);
+    let valid: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for defect in [
+        "missing",
+        "json",
+        "version",
+        "resource",
+        "partition",
+        "generation",
+        "duplicate",
+    ] {
+        let mut bad = valid.clone();
+        match defect {
+            "missing" => fs::remove_file(&path).unwrap(),
+            "json" => fs::write(&path, b"{").unwrap(),
+            _ => {
+                match defect {
+                    "version" => bad["version"] = 400.into(),
+                    "resource" => bad["labels"][1]["resource"]["room_id"] = "unknown".into(),
+                    "partition" => bad["labels"][1]["partition_id"] = "wrong".into(),
+                    "generation" => bad["generation"] = "predecessor".into(),
+                    "duplicate" => bad["labels"][1] = bad["labels"][0].clone(),
+                    _ => unreachable!(),
+                }
+                fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+            }
+        }
+        let result = reopened_result(&active, &both, "apricots");
+        assert_eq!(result.hits.len(), 1, "{defect}");
+        assert_eq!(result.snapshot_ids.len(), 2);
+        assert!(
+            result.snapshot_ids.values().all(Option::is_none),
+            "{defect}"
+        );
+        assert!(result.require_snapshot_ids().is_err());
+    }
+}
+
+#[test]
+fn empty_participating_set_does_not_satisfy_required_labels() {
+    let mut result = Fixture::new(None).search("apricots");
+    result.snapshot_ids.clear();
+    assert!(result.require_snapshot_ids().is_err());
 }

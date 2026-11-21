@@ -388,6 +388,7 @@ mod platform {
     #[cfg(test)]
     thread_local! {
         static INTERRUPT_LISTING: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+        static UNREADABLE_SOURCE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
         static MOUNT_ID_OVERRIDE: Cell<Option<(Inode, Option<u64>)>> = const { Cell::new(None) };
     }
 
@@ -401,6 +402,14 @@ mod platform {
         let previous = MOUNT_ID_OVERRIDE.replace(Some((id, forced)));
         let result = run();
         MOUNT_ID_OVERRIDE.set(previous);
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_unreadable_source<T>(path: &str, run: impl FnOnce() -> T) -> T {
+        let previous = UNREADABLE_SOURCE.replace(Some(path.to_owned()));
+        let result = run();
+        UNREADABLE_SOURCE.replace(previous);
         result
     }
 
@@ -470,6 +479,10 @@ mod platform {
         }
 
         pub(crate) fn open(&self, relative: &str) -> io::Result<File> {
+            #[cfg(test)]
+            if UNREADABLE_SOURCE.with(|p| p.borrow().as_deref() == Some(relative)) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
             let (directory, name) = relative
                 .rsplit_once('/')
                 .map_or((None, relative), |(directory, name)| {
@@ -595,11 +608,11 @@ mod platform {
 }
 
 pub use platform::probe_openclast_ingestion;
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use platform::with_interrupted_listing;
 pub(crate) use platform::{RoomRead, RoomRoots, single_link};
 #[cfg(target_os = "linux")]
 pub(crate) use platform::{descriptor_mount_id, open_root_for_boundary};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use platform::{with_interrupted_listing, with_unreadable_source};
 
 fn failed_walk(vault: &VaultRegistration, message: &str) -> EnumerationResult {
     let mut enumeration = empty_enumeration();

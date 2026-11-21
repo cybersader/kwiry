@@ -11,17 +11,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use tantivy::IndexWriter;
-use tantivy::collector::DocSetCollector;
 use tantivy::index::SegmentId;
-use tantivy::query::AllQuery;
-use tantivy::schema::{Field, Value};
-use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
+use tantivy::schema::Field;
+use tantivy::{Index, IndexReader, ReloadPolicy, Term};
 
 use crate::api::SearchFilters;
 use crate::error::{Error, Result};
 use crate::generation::{DataRoot, DataRootLock};
 use crate::index::{
-    Fields, build_schema, chunk_document, open_index_dir, register_lexical_analyzer,
+    Fields, build_schema, chunk_document, open_index_dir, partition_source_counts,
+    register_lexical_analyzer,
 };
 use crate::manifest::{
     EvictionReport, Manifest, ManifestFile, ManifestFileOutcome, registration_fingerprint,
@@ -30,7 +29,7 @@ use crate::model::{
     Config, FileIngestOutcome, FileOutcomeKind, HostProfile, IndexFreshnessBasis, IngestWarning,
     LexicalSearchRequest, PreparedChunk, ResourceKey, RetrievalMetadata, SearchHit, SnapshotId,
 };
-use crate::partition::{GenerationLayout, partition_index_dir};
+use crate::partition::{GenerationLayout, PartitionEvidence, partition_index_dir};
 use crate::ranking::LexicalMatchQuality;
 #[cfg(feature = "internal-d5c-preview")]
 use crate::ranking::RelevanceProfile;
@@ -73,7 +72,7 @@ pub struct GenerationSearchResult {
 impl GenerationSearchResult {
     /// Check the complete participating set, not just resources appearing in hits.
     pub fn require_snapshot_ids(&self) -> Result<()> {
-        if self.snapshot_ids.values().any(Option::is_none) {
+        if self.snapshot_ids.is_empty() || self.snapshot_ids.values().any(Option::is_none) {
             return Err(Error::State(
                 "participating resource has no reader snapshot label".into(),
             ));
@@ -770,7 +769,7 @@ fn search_opened_with_quality(
 
 impl PartitionedSearchIndex {
     fn open(active: &crate::generation::GenerationPaths) -> Result<Self> {
-        let layout = GenerationLayout::load(&active.layout_path)?;
+        let layout = GenerationLayout::load_generation(active)?;
         let (manifest, _) = Manifest::load(&active.manifest_path)?.adopt();
         let mut partitions = BTreeMap::new();
         for partition in layout.partitions {
@@ -1073,12 +1072,26 @@ struct VaultObservationContext<'a> {
     registration_fingerprint: &'a str,
     scope: &'a PartitionScope,
     previous_resource: Option<&'a ResourceKey>,
+    physical: Option<&'a BTreeMap<String, usize>>,
     policy: ObservationPolicy,
     semantic: Option<&'a SemanticRuntime>,
     /// Watcher-evidence relative paths for this vault. Forces byte reads
     /// for matching sources; never restricts enumeration or deletion.
     read_scope: Option<&'a BTreeSet<String>>,
     room_roots: Option<&'a crate::room_walk::RoomRoots>,
+}
+
+impl VaultObservationContext<'_> {
+    /// Manifest history can outlive a withheld partition. Only compare against
+    /// history whose chunks actually exist in the partition carried forward.
+    fn reusable<'a>(&self, previous: &'a Manifest, key: &str) -> Option<&'a ManifestFile> {
+        previous.files.get(key).filter(|f| {
+            self.physical.is_none_or(|counts| {
+                self.previous_resource.is_some()
+                    && counts.get(key).copied().unwrap_or(0) == f.chunk_count
+            })
+        })
+    }
 }
 
 fn observe_vault(
@@ -1097,7 +1110,7 @@ fn observe_vault(
     for file in &enumeration.files {
         let key =
             crate::source::room_source_key(&vault.id, vault.room.as_deref(), &file.relative_path);
-        let previous_file = previous.files.get(&key);
+        let previous_file = context.reusable(previous, &key);
         let previous_scope = previous_file.map(|file| match context.scope {
             PartitionScope::Whole => PartitionScope::Whole,
             PartitionScope::Resource(current) => PartitionScope::Resource(
@@ -1407,6 +1420,7 @@ impl DesktopIndexManager {
                     registration_fingerprint: &fingerprint,
                     scope: &PartitionScope::Whole,
                     previous_resource: None,
+                    physical: None,
                     policy: observation_policy,
                     semantic: semantic_runtime.as_deref(),
                     read_scope: vault_read_scope.as_ref(),
@@ -1624,6 +1638,7 @@ impl OpenClastIndexManager {
         // per partition. `GenerationPaths::validate` has already refused any
         // OpenClast row without a resource, so every evicted key is addressable.
         let (mut manifest, evictions) = Manifest::load(&active.manifest_path)?.adopt();
+        let mut layout = GenerationLayout::load_generation(&active)?;
         if !evictions.is_empty() {
             let mut evicted_by_resource = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
             for (key, evicted) in &evictions.evicted {
@@ -1652,6 +1667,15 @@ impl OpenClastIndexManager {
                     let (index, fields) = open_index_dir(&index_dir)?;
                     apply_index_updates(&index, &fields, Some(keys), None, Some(resource))?;
                 }
+                for p in &mut layout.partitions {
+                    p.snapshot_id = if evicted_by_resource.contains_key(&p.resource) {
+                        PartitionEvidence::NoWalk
+                    } else {
+                        PartitionEvidence::UnchangedLiveRows(p.snapshot_id.as_ref())
+                    }
+                    .publication_label();
+                }
+                layout.save_candidate(&candidate)?;
                 manifest.save(&candidate.manifest_path())?;
                 Ok(())
             })();
@@ -1665,10 +1689,10 @@ impl OpenClastIndexManager {
             // profile addresses deletions per resource, so an inherited
             // generation can hold them in any subset of its partitions.
             let mut inherited: Vec<ResourceKey> = Vec::new();
-            for partition in GenerationLayout::load(&active.layout_path)?.partitions {
+            for partition in &layout.partitions {
                 let index_dir = partition_index_dir(&active.partitions_dir, &partition.resource);
                 if index_dir.join("meta.json").is_file() && holds_resident_deletions(&index_dir)? {
-                    inherited.push(partition.resource);
+                    inherited.push(partition.resource.clone());
                 }
             }
             if !inherited.is_empty() {
@@ -1680,6 +1704,13 @@ impl OpenClastIndexManager {
                         let index_dir = partition_index_dir(&candidate.partitions_dir, resource);
                         repair_inherited_generation(&index_dir)?;
                     }
+                    // Expunging deleted documents neither adds nor removes live chunks.
+                    for p in &mut layout.partitions {
+                        p.snapshot_id =
+                            PartitionEvidence::UnchangedLiveRows(p.snapshot_id.as_ref())
+                                .publication_label();
+                    }
+                    layout.save_candidate(&candidate)?;
                     manifest.save(&candidate.manifest_path())?;
                     Ok(())
                 })();
@@ -1691,7 +1722,6 @@ impl OpenClastIndexManager {
             }
         }
         let audit_cursor = manifest.state_revision as usize;
-        let layout = GenerationLayout::load(&active.layout_path)?;
         let search = Arc::new(PartitionedSearchIndex::open(&active)?);
         runtime.set_freshness_basis(config.indexing.basis);
         runtime.install_reopened_openclast(search)?;
@@ -1802,6 +1832,8 @@ impl OpenClastIndexManager {
         }
         next_resources.retain(|resource, _| current_fingerprints.contains_key(resource));
 
+        let mut carried_counts = BTreeMap::new();
+        let mut clean_rooms = BTreeSet::new();
         for vault in &config.vaults {
             let resource = config.resource_key(vault).ok_or_else(|| {
                 Error::State(format!(
@@ -1826,6 +1858,15 @@ impl OpenClastIndexManager {
             }
             let room_roots =
                 crate::room_walk::RoomRoots::capture(&config, Some(self.data_root.path()));
+            let index_dir = partition_index_dir(&self.active.partitions_dir, &resource);
+            let has_partition = index_dir.join("meta.json").is_file();
+            let physical = carried_counts
+                .entry(resource.clone())
+                .or_insert(if has_partition {
+                    partition_source_counts(&index_dir)?
+                } else {
+                    BTreeMap::new()
+                });
             if !vault.path.is_dir() {
                 walks.insert(
                     resource.clone(),
@@ -1866,33 +1907,32 @@ impl OpenClastIndexManager {
                         .filter_map(|(key, path)| (key == &resource).then_some(path.clone())),
                 );
             }
-            let observed = observe_vault(
-                vault,
-                &self.manifest,
-                &VaultObservationContext {
-                    registration_fingerprint: fingerprint,
-                    scope: &PartitionScope::Resource(resource.clone()),
-                    previous_resource: previous_resource.as_ref(),
-                    // Identical metadata across producer snapshots is not byte proof.
-                    policy: if label_changed {
-                        ObservationPolicy {
-                            basis: IndexFreshnessBasis::StrictHash,
-                            ..observation_policy
-                        }
-                    } else {
-                        observation_policy
-                    },
-                    semantic: None,
-                    read_scope: vault_read_scope.as_ref(),
-                    room_roots: Some(&room_roots),
+            let scope = PartitionScope::Resource(resource.clone());
+            let context = VaultObservationContext {
+                registration_fingerprint: fingerprint,
+                scope: &scope,
+                previous_resource: previous_resource.as_ref().filter(|_| has_partition),
+                physical: Some(physical),
+                // A label certifies bytes from this pass, never metadata reuse.
+                policy: if vault.snapshot_id.is_some() || label_changed {
+                    ObservationPolicy {
+                        basis: IndexFreshnessBasis::StrictHash,
+                        ..observation_policy
+                    }
+                } else {
+                    observation_policy
                 },
-                &mut audit,
-            );
+                semantic: None,
+                read_scope: vault_read_scope.as_ref(),
+                room_roots: Some(&room_roots),
+            };
+            let observed = observe_vault(vault, &self.manifest, &context, &mut audit);
             let opened_root = !observed.whole_walk_failed;
-            let failed_input = observed
-                .outcomes
-                .iter()
-                .any(|o| o.coverage == crate::ExtractionCoverage::Unreadable);
+            let clean_inputs = observed.reused_keys.is_empty()
+                && observed
+                    .outcomes
+                    .iter()
+                    .all(FileIngestOutcome::clean_snapshot_input);
             let discovery_incomplete = !observed.enumeration.completeness.may_infer_deletions();
             if discovery_incomplete {
                 incomplete.insert(resource.clone());
@@ -1934,7 +1974,7 @@ impl OpenClastIndexManager {
                     continue;
                 };
                 seen_keys.insert(key.clone());
-                let previous_file = self.manifest.files.get(&key);
+                let previous_file = context.reusable(&self.manifest, &key);
                 let previous_scope = previous_file.map(|file| {
                     PartitionScope::Resource(
                         file.resource
@@ -1994,50 +2034,43 @@ impl OpenClastIndexManager {
                 RoomWalkOutcome::Complete
             };
             if opened_root {
-                // A partial transition can mix new rows with unverified retained rows.
-                let label = if label_changed && (failed_input || incomplete.contains(&resource)) {
-                    None
-                } else {
-                    vault.snapshot_id.clone()
-                };
+                let clean = clean_inputs && !incomplete.contains(&resource);
+                if clean {
+                    clean_rooms.insert(resource.clone());
+                }
+                let label = PartitionEvidence::Walk {
+                    configured: vault.snapshot_id.as_ref(),
+                    clean_and_exact: clean,
+                }
+                .publication_label();
                 next_resources.insert(resource.clone(), label);
             }
             walks.insert(resource, outcome);
         }
 
-        let next_layout = GenerationLayout::with_snapshots(next_resources)?;
+        let mut next_layout = GenerationLayout::with_snapshots(next_resources)?;
         let layout_changed = next_layout != self.layout;
-        let mut expected_source_keys = BTreeMap::<ResourceKey, BTreeSet<String>>::new();
+        let mut expected_counts = BTreeMap::<ResourceKey, BTreeMap<String, usize>>::new();
         for (key, file) in &plan.next_manifest.files {
             let Some(resource) = file.resource.as_ref() else {
                 continue;
             };
             if file.outcome == ManifestFileOutcome::Indexed
+                && file.chunk_count > 0
                 && current_fingerprints.get(resource) == Some(&file.registration_fingerprint)
             {
-                expected_source_keys
+                expected_counts
                     .entry(resource.clone())
                     .or_default()
-                    .insert(key.clone());
+                    .insert(key.clone(), file.chunk_count);
             }
         }
         for partition in &next_layout.partitions {
-            let index_dir = partition_index_dir(&self.active.partitions_dir, &partition.resource);
-            if !index_dir.join("meta.json").is_file() {
-                continue;
-            }
-            let (index, fields) = open_index_dir(&index_dir)?;
-            let source_key_field = fields.source_key.ok_or_else(|| {
-                Error::Index("resource partition is missing the source_key field".to_owned())
-            })?;
-            let expected = expected_source_keys
-                .get(&partition.resource)
-                .cloned()
-                .unwrap_or_default();
-            for key in partition_source_keys(&index, source_key_field)? {
-                if !expected.contains(&key) {
+            let expected = expected_counts.get(&partition.resource);
+            for key in carried_counts[&partition.resource].keys() {
+                if !expected.is_some_and(|expected| expected.contains_key(key)) {
                     plan.remove_index_source(
-                        key,
+                        key.clone(),
                         PartitionScope::Resource(partition.resource.clone()),
                     );
                 }
@@ -2076,7 +2109,7 @@ impl OpenClastIndexManager {
             let next_partition_ids: BTreeSet<_> = next_layout
                 .partitions
                 .iter()
-                .map(|partition| partition.partition_id.as_str())
+                .map(|partition| partition.partition_id.clone())
                 .collect();
             let update_result = (|| -> Result<()> {
                 for entry in fs::read_dir(&candidate.partitions_dir)
@@ -2117,7 +2150,42 @@ impl OpenClastIndexManager {
                     )?;
                 }
 
-                next_layout.save(&candidate.layout_path())?;
+                for p in &mut next_layout.partitions {
+                    // Untouched indexes are exact copies of the counts observed before
+                    // planning; changed ones must be verified AFTER the writer commits.
+                    let updated;
+                    let actual = if resources_to_update.contains(&p.resource) {
+                        updated = partition_source_counts(&partition_index_dir(
+                            &candidate.partitions_dir,
+                            &p.resource,
+                        ))?;
+                        &updated
+                    } else {
+                        &carried_counts[&p.resource]
+                    };
+                    let exact = expected_counts
+                        .get(&p.resource)
+                        .map_or_else(|| actual.is_empty(), |expected| actual == expected);
+                    if !exact {
+                        warnings.push(IngestWarning {
+                            path: partition_index_dir(&self.active.partitions_dir, &p.resource),
+                            message: "incomplete partition: live source chunk counts differ from the pass; retry reconciliation".to_owned(),
+                        });
+                        incomplete.insert(p.resource.clone());
+                        walks.insert(
+                            p.resource.clone(),
+                            RoomWalkOutcome::Incomplete {
+                                retained_unverified: true,
+                            },
+                        );
+                    }
+                    p.snapshot_id = PartitionEvidence::Walk {
+                        configured: p.snapshot_id.as_ref(),
+                        clean_and_exact: exact && clean_rooms.contains(&p.resource),
+                    }
+                    .publication_label();
+                }
+                next_layout.save_candidate(&candidate)?;
                 plan.next_manifest.save(&candidate.manifest_path())?;
                 Ok(())
             })();
@@ -2345,30 +2413,6 @@ fn holds_resident_deletions(index_dir: &Path) -> Result<bool> {
 fn repair_inherited_generation(index_dir: &Path) -> Result<()> {
     let (index, _) = open_index_dir(index_dir)?;
     expunge_resident_deletions(&index)
-}
-
-fn partition_source_keys(index: &Index, source_key_field: Field) -> Result<BTreeSet<String>> {
-    let reader = index
-        .reader()
-        .map_err(|error| Error::Index(error.to_string()))?;
-    let searcher = reader.searcher();
-    let addresses = searcher
-        .search(&AllQuery, &DocSetCollector)
-        .map_err(|error| Error::Index(error.to_string()))?;
-    let mut source_keys = BTreeSet::new();
-    for address in addresses {
-        let document = searcher
-            .doc::<TantivyDocument>(address)
-            .map_err(|error| Error::Index(error.to_string()))?;
-        let key = document
-            .get_first(source_key_field)
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                Error::Index("resource partition document is missing source_key".to_owned())
-            })?;
-        source_keys.insert(key.to_owned());
-    }
-    Ok(source_keys)
 }
 
 fn ensure_partition_index(index_dir: &Path) -> Result<(Index, Fields)> {

@@ -19,14 +19,14 @@ use unicode_normalization::char::is_combining_mark;
 use crate::chunk::ingest_vault_files;
 use crate::error::{Error, Result};
 use crate::format::SourceFormat;
-use crate::generation::DataRoot;
+use crate::generation::{CandidateGeneration, DataRoot};
 use crate::lexical::{fold_lexical, normalize_raw};
 use crate::manifest::{Manifest, registration_fingerprint};
 use crate::model::{
     Config, HostProfile, IndexStats, PreparedChunk, PropertyBag, PropertyValue, ResourceKey,
     RetrievalMetadata, VaultRegistration,
 };
-use crate::partition::{GenerationLayout, partition_index_dir};
+use crate::partition::{GenerationLayout, PartitionEvidence, partition_index_dir};
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 const MAX_RAW_PROPERTY_TOKEN_BYTES: usize = 39;
@@ -224,13 +224,7 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
         HostProfile::Desktop => {
             build_desktop_candidate(config, &candidate.index_dir, &candidate.manifest_path())
         }
-        HostProfile::OpenClast => build_openclast_candidate(
-            config,
-            &candidate.partitions_dir,
-            &candidate.manifest_path(),
-            &candidate.layout_path(),
-            data_dir,
-        ),
+        HostProfile::OpenClast => build_openclast_candidate(config, &candidate, data_dir),
     };
     let stats = match result {
         Ok(stats) => stats,
@@ -322,11 +316,10 @@ fn build_desktop_candidate(
 
 fn build_openclast_candidate(
     config: &Config,
-    partitions_dir: &Path,
-    manifest_path: &Path,
-    layout_path: &Path,
+    candidate: &CandidateGeneration,
     data_dir: &Path,
 ) -> Result<IndexStats> {
+    let partitions_dir = &candidate.partitions_dir;
     let mut resources = BTreeMap::new();
     let mut manifest = Manifest::default();
     let mut stats = IndexStats::default();
@@ -350,13 +343,20 @@ fn build_openclast_candidate(
             &mut stats,
             &room_roots,
         )?;
-        resources.insert(resource, vault.snapshot_id.clone().filter(|_| complete));
+        resources.insert(
+            resource,
+            PartitionEvidence::Walk {
+                configured: vault.snapshot_id.as_ref(),
+                clean_and_exact: complete,
+            }
+            .publication_label(),
+        );
     }
 
     let layout = GenerationLayout::with_snapshots(resources)?;
     manifest.mark_synced()?;
-    manifest.save(manifest_path)?;
-    layout.save(layout_path)?;
+    manifest.save(&candidate.manifest_path())?;
+    layout.save_candidate(candidate)?;
 
     let indexed_chunks = layout
         .partitions
@@ -437,9 +437,17 @@ fn build_partition(
     }
     let complete = room.is_some()
         && enumeration.completeness.may_infer_deletions()
-        && !outcomes
-            .iter()
-            .any(|o| o.coverage == crate::ExtractionCoverage::Unreadable);
+        && outcomes.iter().all(|o| o.clean_snapshot_input());
+    let expected: BTreeMap<_, _> = outcomes
+        .iter()
+        .filter(|o| !o.chunks.is_empty())
+        .map(|o| {
+            (
+                crate::source::room_source_key(&o.vault_id, o.room.as_deref(), &o.path),
+                o.chunks.len(),
+            )
+        })
+        .collect();
     stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
@@ -468,7 +476,36 @@ fn build_partition(
     writer
         .wait_merging_threads()
         .map_err(|error| Error::Index(error.to_string()))?;
-    Ok(complete)
+    Ok(complete && partition_source_counts(index_dir)? == expected)
+}
+
+pub(crate) fn partition_source_counts(index_dir: &Path) -> Result<BTreeMap<String, usize>> {
+    use tantivy::{collector::DocSetCollector, query::AllQuery, schema::Value};
+    let (index, fields) = open_index_dir(index_dir)?;
+    let source_key_field = fields
+        .source_key
+        .ok_or_else(|| Error::Index("resource partition is missing source_key".into()))?;
+    let reader = index
+        .reader()
+        .map_err(|error| Error::Index(error.to_string()))?;
+    let searcher = reader.searcher();
+    let addresses = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .map_err(|error| Error::Index(error.to_string()))?;
+    let mut counts = BTreeMap::new();
+    for address in addresses {
+        let document = searcher
+            .doc::<TantivyDocument>(address)
+            .map_err(|error| Error::Index(error.to_string()))?;
+        let key = document
+            .get_first(source_key_field)
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                Error::Index("resource partition document is missing source_key".to_owned())
+            })?;
+        *counts.entry(key.to_owned()).or_default() += 1;
+    }
+    Ok(counts)
 }
 
 pub(crate) fn open_index(data_dir: &Path) -> Result<(Index, Fields)> {

@@ -2979,8 +2979,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn missing_or_malformed_stored_hash_is_corruption_only_if_required() {
+    fn hash_test_document() -> (Fields, TantivyDocument) {
         let fields = Fields::from_schema(&crate::index::build_schema()).unwrap();
         let mut doc = TantivyDocument::default();
         for (field, value) in [
@@ -2996,6 +2995,22 @@ mod tests {
         ] {
             doc.add_text(field, value);
         }
+        (fields, doc)
+    }
+
+    #[test]
+    fn two_distinct_valid_stored_hashes_on_one_chunk_are_corruption() {
+        let (fields, mut doc) = hash_test_document();
+        for value in ["a".repeat(64), "b".repeat(64)] {
+            doc.add_text(fields.content_hash, value);
+        }
+        let hit = hit_from_document(&doc, &fields, 1.0, None, None).unwrap();
+        assert!(matches!(hit.require_content_sha256(), Err(Error::Index(_))));
+    }
+
+    #[test]
+    fn missing_or_malformed_stored_hash_is_corruption_only_if_required() {
+        let (fields, doc) = hash_test_document();
         for bad in [
             None,
             Some("a".repeat(63)),

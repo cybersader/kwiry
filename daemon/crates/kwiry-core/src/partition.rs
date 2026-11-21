@@ -8,9 +8,53 @@ use crate::error::{Error, Result};
 use crate::model::{HostProfile, ResourceKey, SnapshotId};
 use crate::state::{read_json, write_json_atomic};
 
-// Before snapshot labels, partitions and CURRENT used the same version number.
-const PRE_LABEL_LAYOUT_VERSION: u32 = crate::generation::LAYOUT_VERSION;
-const GENERATION_LAYOUT_VERSION: u32 = 4;
+use crate::generation::{CandidateGeneration, GenerationPaths, LAYOUT_VERSION};
+
+pub(crate) const LABEL_SIDECAR: &str = "snapshot-labels.json";
+const LABEL_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotLabels {
+    version: u32,
+    generation: String,
+    labels: Vec<LabelBinding>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LabelBinding {
+    resource: ResourceKey,
+    partition_id: String,
+    snapshot_id: SnapshotId,
+}
+
+pub(crate) enum PartitionEvidence<'a> {
+    Walk {
+        configured: Option<&'a SnapshotId>,
+        clean_and_exact: bool,
+    },
+    UnchangedLiveRows(Option<&'a SnapshotId>),
+    NoWalk,
+}
+
+impl PartitionEvidence<'_> {
+    /// Certify a newly built or changed partition iff the producing pass walked the
+    /// entire room, read and indexed every eligible source cleanly, and its exact
+    /// per-source chunk counts match the live partition. Without this evidence the
+    /// label is absent. Maintenance may carry the previous proof only when it
+    /// preserves exactly the same live rows (e.g. compacting deleted documents).
+    pub(crate) fn publication_label(&self) -> Option<SnapshotId> {
+        match self {
+            Self::Walk {
+                configured,
+                clean_and_exact: true,
+            }
+            | Self::UnchangedLiveRows(configured) => configured.cloned(),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct GenerationLayout {
@@ -23,7 +67,7 @@ pub(crate) struct GenerationLayout {
 pub(crate) struct PartitionLayout {
     pub partition_id: String,
     pub resource: ResourceKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub snapshot_id: Option<SnapshotId>,
 }
 
@@ -37,7 +81,7 @@ impl GenerationLayout {
         resources: BTreeMap<ResourceKey, Option<SnapshotId>>,
     ) -> Result<Self> {
         let layout = Self {
-            layout_version: GENERATION_LAYOUT_VERSION,
+            layout_version: LAYOUT_VERSION,
             profile: HostProfile::OpenClast,
             partitions: resources
                 .into_iter()
@@ -53,16 +97,70 @@ impl GenerationLayout {
     }
 
     pub(crate) fn load(path: &Path) -> Result<Self> {
-        let mut layout: Self = read_json(path)?;
-        if layout.layout_version == PRE_LABEL_LAYOUT_VERSION {
-            // Upgrade in memory. No rebuild, inferred labels or forced publication.
-            layout.layout_version = GENERATION_LAYOUT_VERSION;
-            for partition in &mut layout.partitions {
-                partition.snapshot_id = None;
-            }
-        }
+        let layout: Self = read_json(path)?;
         layout.validate()?;
         Ok(layout)
+    }
+
+    pub(crate) fn load_generation(paths: &GenerationPaths) -> Result<Self> {
+        let mut layout = Self::load(&paths.layout_path)?;
+        // An absent, unreadable or unrecognized sidecar never invalidates the
+        // lexical generation. Validate ALL bindings before trusting any one.
+        let path = paths.root.join(LABEL_SIDECAR);
+        if !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
+            return Ok(layout);
+        }
+        if let Ok(sidecar) = read_json::<SnapshotLabels>(&path)
+            && sidecar.version == LABEL_VERSION
+            && sidecar.generation == paths.id
+        {
+            let partitions: BTreeMap<_, _> = layout
+                .partitions
+                .iter()
+                .map(|p| (&p.resource, &p.partition_id))
+                .collect();
+            let mut labels = BTreeMap::new();
+            for binding in sidecar.labels {
+                if partitions.get(&binding.resource).copied() != Some(&binding.partition_id)
+                    || labels
+                        .insert(binding.resource, binding.snapshot_id)
+                        .is_some()
+                {
+                    return Ok(layout);
+                }
+            }
+            for p in &mut layout.partitions {
+                p.snapshot_id = labels.remove(&p.resource);
+            }
+        }
+        Ok(layout)
+    }
+
+    pub(crate) fn save_candidate(&self, candidate: &CandidateGeneration) -> Result<()> {
+        self.save(&candidate.layout_path())?;
+        let labels: Vec<_> = self
+            .partitions
+            .iter()
+            .filter_map(|p| {
+                Some(LabelBinding {
+                    partition_id: p.partition_id.clone(),
+                    resource: p.resource.clone(),
+                    snapshot_id: p.snapshot_id.clone()?,
+                })
+            })
+            .collect();
+        // Fresh staging never inherits the predecessor's sidecar.
+        if !labels.is_empty() {
+            write_json_atomic(
+                &candidate.staging_dir.join(LABEL_SIDECAR),
+                &SnapshotLabels {
+                    version: LABEL_VERSION,
+                    generation: candidate.id.clone(),
+                    labels,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
@@ -71,9 +169,9 @@ impl GenerationLayout {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.layout_version != GENERATION_LAYOUT_VERSION {
+        if self.layout_version != LAYOUT_VERSION {
             return Err(Error::State(format!(
-                "unsupported generation layout version {}; expected {GENERATION_LAYOUT_VERSION}",
+                "unsupported generation layout version {}; expected {LAYOUT_VERSION}",
                 self.layout_version
             )));
         }

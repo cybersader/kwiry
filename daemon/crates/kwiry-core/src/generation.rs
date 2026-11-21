@@ -198,7 +198,7 @@ impl DataRoot {
     pub fn create_candidate_from(&self, source: &GenerationPaths) -> Result<CandidateGeneration> {
         source.validate()?;
         let candidate = self.create_candidate()?;
-        if let Err(error) = copy_tree_contents(&source.root, &candidate.staging_dir) {
+        if let Err(error) = copy_tree_contents(&source.root, &candidate.staging_dir, true) {
             let _ = fs::remove_dir_all(&candidate.staging_dir);
             return Err(error);
         }
@@ -713,7 +713,7 @@ fn validate_index_dir(index_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_tree_contents(source: &Path, destination: &Path) -> Result<()> {
+fn copy_tree_contents(source: &Path, destination: &Path, generation_root: bool) -> Result<()> {
     let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
     if metadata.file_type().is_symlink() {
         return Err(Error::State(format!(
@@ -739,7 +739,10 @@ fn copy_tree_contents(source: &Path, destination: &Path) -> Result<()> {
         .map_err(|error| io_error(source, error))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        copy_tree_contents(&entry.path(), &destination.join(entry.file_name()))?;
+        if generation_root && entry.file_name() == crate::partition::LABEL_SIDECAR {
+            continue;
+        }
+        copy_tree_contents(&entry.path(), &destination.join(entry.file_name()), false)?;
     }
     Ok(())
 }

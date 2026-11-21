@@ -884,6 +884,15 @@ pub(crate) struct FileIngestOutcome {
     pub warning: Option<IngestWarning>,
 }
 
+#[cfg(feature = "native")]
+impl FileIngestOutcome {
+    pub(crate) fn clean_snapshot_input(&self) -> bool {
+        self.kind == FileOutcomeKind::Indexed
+            && self.coverage == ExtractionCoverage::IndexedComplete
+            && self.content_hash.is_some()
+    }
+}
+
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
