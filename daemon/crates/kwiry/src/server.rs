@@ -599,11 +599,12 @@ async fn search(
             "the authenticated principal cannot search this profile",
         ));
     }
-    let Json(request) = payload.map_err(|error| {
+    // Do not render or log the extractor's diagnostic: it can quote input.
+    let Json(request) = payload.map_err(|_| {
         HttpError::new(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            error.body_text(),
+            "the request body could not be read as a search request",
         )
     })?;
     let prepared_query = request
@@ -616,7 +617,15 @@ async fn search(
             "mode_unavailable" | "cursor_unavailable" => StatusCode::NOT_IMPLEMENTED,
             _ => StatusCode::BAD_REQUEST,
         };
-        HttpError::new(status, error.code, error.message)
+        let message = if state.profile == HostProfile::OpenClast && error.code == "mode_unavailable"
+        {
+            // The shared hybrid default still applies; an explicit lexical mode
+            // is required to pass validation in the governed profile.
+            "mode is required and must be \"lexical\" in the openclast profile".to_owned()
+        } else {
+            error.message
+        };
+        HttpError::new(status, error.code, message)
     })?;
     if request.limit > principal.max_limit {
         return Err(HttpError::new(
@@ -777,9 +786,12 @@ fn response_freshness(
 
 fn map_core_error(error: kwiry_core::Error) -> HttpError {
     match error {
-        kwiry_core::Error::Query(message) => {
-            HttpError::new(StatusCode::BAD_REQUEST, "invalid_query", message)
-        }
+        // Core diagnostics may contain query text, field names, or filter values.
+        kwiry_core::Error::Query(_) => HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_query",
+            "the query could not be parsed or applied",
+        ),
         kwiry_core::Error::IndexBuilding => HttpError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "index_building",

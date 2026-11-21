@@ -77,6 +77,96 @@ fn normalize(fixture: &mut Value) {
 }
 
 #[test]
+fn governed_search_wire_errors_do_not_echo_request_text() {
+    let fixture_root = tempdir().unwrap();
+    let root = fixture_root.path();
+    let config_path = isolated_config(root);
+    let data = root.join("index-data");
+    let room = root.join("room-notes");
+    fs::create_dir(&room).unwrap();
+    fs::write(room.join("note.md"), "# Orchard\nSample notes.").unwrap();
+    let mut config = format_daemon_config(config_path.parent().unwrap());
+    config.vaults.push(VaultRegistration {
+        id: REGISTERED.0.into(),
+        path: room,
+        room: Some(REGISTERED.1.into()),
+    });
+    save_config(&config_path, &config).unwrap();
+    let daemon = Daemon::start_openclast(&config_path, &data);
+    let at = format_release_token_time(&data);
+
+    const MARKER: &str = "synthetic_echo_probe_641e";
+    for (jti, (case, request, status, code)) in [
+        (
+            "unterminated quote",
+            json!({"q": format!("\"{MARKER}"), "mode": "lexical"}),
+            400,
+            "invalid_query",
+        ),
+        (
+            "unknown Tantivy field",
+            json!({"q": format!("{MARKER}:sample"), "mode": "lexical"}),
+            400,
+            "invalid_query",
+        ),
+        (
+            "unknown field control",
+            json!({"q": format!("in:{MARKER} sample"), "mode": "lexical"}),
+            400,
+            "invalid_field_control",
+        ),
+        (
+            "unknown frontmatter key",
+            json!({"q": "sample", "mode": "lexical", "filters": {"frontmatter_equals": {MARKER: MARKER}}}),
+            400,
+            "invalid_filter",
+        ),
+        (
+            "invalid path prefix",
+            json!({"q": "sample", "mode": "lexical", "filters": {"path_prefix": format!("/{MARKER}")}}),
+            400,
+            "invalid_filter",
+        ),
+        (
+            "string cursor",
+            json!({"q": "sample", "mode": "lexical", "cursor": MARKER}),
+            501,
+            "cursor_unavailable",
+        ),
+        (
+            "unknown JSON key",
+            json!({"q": "sample", "mode": "lexical", MARKER: true}),
+            400,
+            "invalid_request",
+        ),
+        (
+            "invalid mode value",
+            json!({"q": "sample", "mode": MARKER}),
+            400,
+            "invalid_request",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let signed = sign_format_token(&[REGISTERED], false, Some("kwiry-cap+jwt"), jti + 1, at);
+        let (actual_status, body, headers) = request_with_headers(
+            &daemon.address,
+            &signed,
+            "POST",
+            "/v0/search",
+            Some(&request.to_string()),
+        );
+        assert_eq!(actual_status, status, "{case}: {body}");
+        assert!(!headers.contains(MARKER), "{case}: {headers}");
+        assert!(!body.contains(MARKER), "{case}: {body}");
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["error"]["code"], code, "{case}");
+    }
+    daemon.stop();
+}
+
+#[test]
 fn governed_search_wire_matches_deployed_fixtures() {
     let (_, request_schema) = validator("request");
     let (_, success_schema) = validator("success");

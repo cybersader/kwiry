@@ -9,12 +9,12 @@
     "body": {
       "error": {
         "code": "invalid_request",
-        "message": "Failed to parse the request body as JSON: EOF while parsing an object at line 1 column 1"
+        "message": "the request body could not be read as a search request"
       }
     },
     "headers": {
       "connection": "close",
-      "content-length": "137",
+      "content-length": "103",
       "content-type": "application/json",
       "date": "Sat, 21 Nov 2026 18:00:15 GMT",
       "kwiry-id-scheme": "room-v1",

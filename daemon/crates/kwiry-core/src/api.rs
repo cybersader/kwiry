@@ -111,7 +111,7 @@ impl ApiSearchRequest {
             if !FRONTMATTER_FILTERS.contains(&key.as_str()) {
                 return Err(ApiRequestError::new(
                     "invalid_filter",
-                    format!("unsupported frontmatter filter: {key}"),
+                    "the frontmatter filter key is not supported",
                 ));
             }
         }

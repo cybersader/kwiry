@@ -11,12 +11,12 @@
     "body": {
       "error": {
         "code": "mode_unavailable",
-        "message": "semantic and hybrid modes require the daemon to run with an embedding model; use mode \"lexical\""
+        "message": "mode is required and must be \"lexical\" in the openclast profile"
       }
     },
     "headers": {
       "connection": "close",
-      "content-length": "147",
+      "content-length": "115",
       "content-type": "application/json",
       "date": "Sat, 21 Nov 2026 18:00:15 GMT",
       "kwiry-id-scheme": "room-v1",
