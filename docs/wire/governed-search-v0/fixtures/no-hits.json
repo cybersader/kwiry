@@ -1,0 +1,33 @@
+{
+  "request": {
+    "authorization": "valid workload",
+    "body": {
+      "mode": "lexical",
+      "q": "rainshard"
+    },
+    "method": "POST",
+    "path": "/v0/search"
+  },
+  "response": {
+    "body": {
+      "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+      "hits": [],
+      "next_cursor": null
+    },
+    "headers": {
+      "connection": "close",
+      "content-length": "129",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT",
+      "kwiry-id-scheme": "room-v1",
+      "kwiry-multi-room": "closed",
+      "x-kwiry-field-emphasis": "none",
+      "x-kwiry-field-scope": "none",
+      "x-kwiry-generation": "v1-fdfed093511b0a13ef6bcc50055f95572f80c02bfc4c0ef93e2c5eba8b689256",
+      "x-kwiry-index-freshness": "current; basis=strict_hash",
+      "x-kwiry-lexical-match-quality": "none",
+      "x-kwiry-lexical-profile": "lexical-v2"
+    },
+    "status": 200
+  }
+}

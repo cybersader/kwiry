@@ -1,0 +1,31 @@
+{
+  "request": {
+    "authorization": "one of two signed resources has no partition",
+    "body": {
+      "mode": "lexical",
+      "q": "moonpetal"
+    },
+    "method": "POST",
+    "path": "/v0/search"
+  },
+  "response": {
+    "body": {
+      "error": {
+        "code": "resource_unavailable",
+        "message": "an authorized resource is not available for search",
+        "resource_indexes": [
+          1
+        ]
+      }
+    },
+    "headers": {
+      "connection": "close",
+      "content-length": "127",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT",
+      "kwiry-id-scheme": "room-v1",
+      "kwiry-multi-room": "closed"
+    },
+    "status": 503
+  }
+}

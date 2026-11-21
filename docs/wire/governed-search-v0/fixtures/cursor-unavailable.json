@@ -1,0 +1,29 @@
+{
+  "request": {
+    "authorization": "valid workload",
+    "body": {
+      "cursor": "example",
+      "mode": "lexical",
+      "q": "moonpetal"
+    },
+    "method": "POST",
+    "path": "/v0/search"
+  },
+  "response": {
+    "body": {
+      "error": {
+        "code": "cursor_unavailable",
+        "message": "cursor pagination is not available until a later vertical"
+      }
+    },
+    "headers": {
+      "connection": "close",
+      "content-length": "109",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT",
+      "kwiry-id-scheme": "room-v1",
+      "kwiry-multi-room": "closed"
+    },
+    "status": 501
+  }
+}

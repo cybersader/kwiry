@@ -15,6 +15,10 @@ use kwiry_core::{
 };
 use tempfile::tempdir;
 
+#[cfg(target_os = "linux")]
+#[path = "support/governed_search_wire.rs"]
+mod governed_search_wire;
+
 struct Daemon {
     child: Child,
     address: String,
@@ -1281,9 +1285,14 @@ fn request_with_headers(
     let mut stream = TcpStream::connect_timeout(&address.parse().unwrap(), timeout).unwrap();
     stream.set_read_timeout(Some(timeout)).unwrap();
     stream.set_write_timeout(Some(timeout)).unwrap();
+    let authorization = if token.is_empty() {
+        String::new()
+    } else {
+        format!("Authorization: Bearer {token}\r\n")
+    };
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();

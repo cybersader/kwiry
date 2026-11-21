@@ -1,0 +1,52 @@
+{
+  "request": {
+    "authorization": "valid workload",
+    "body": {
+      "mode": "lexical",
+      "q": "sunfern"
+    },
+    "method": "POST",
+    "path": "/v0/search"
+  },
+  "response": {
+    "body": {
+      "extraction_policy_fingerprint": "a8c00357bd4da3a9b7f2b76a46605e2e3eef275f1220cd500916687709989061",
+      "hits": [
+        {
+          "chunk_id": "1b7ce86804015cf65508f5d615473f3f50f80231cb4bfcdc9c1ed60e73611f7d",
+          "coverage": "indexed-complete",
+          "excerpt": "name: Sunfern\norder[0]: file.name\ntype: table",
+          "format": "base",
+          "frontmatter": {},
+          "heading_path": [
+            "Sunfern"
+          ],
+          "locator": {
+            "kind": "base_view",
+            "view": "Sunfern"
+          },
+          "path": "herbarium.base",
+          "room_id": "RoomAaaa_0123456789abc",
+          "score": 2.9424875,
+          "vault_id": "VaultAaa_0123456789abc"
+        }
+      ],
+      "next_cursor": null
+    },
+    "headers": {
+      "connection": "close",
+      "content-length": "519",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT",
+      "kwiry-id-scheme": "room-v1",
+      "kwiry-multi-room": "closed",
+      "x-kwiry-field-emphasis": "none",
+      "x-kwiry-field-scope": "none",
+      "x-kwiry-generation": "v1-fdfed093511b0a13ef6bcc50055f95572f80c02bfc4c0ef93e2c5eba8b689256",
+      "x-kwiry-index-freshness": "current; basis=strict_hash",
+      "x-kwiry-lexical-match-quality": "standard_only",
+      "x-kwiry-lexical-profile": "lexical-v2"
+    },
+    "status": 200
+  }
+}

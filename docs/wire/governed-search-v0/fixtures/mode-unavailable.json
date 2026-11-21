@@ -1,0 +1,28 @@
+{
+  "request": {
+    "authorization": "valid workload",
+    "body": {
+      "mode": "semantic",
+      "q": "moonpetal"
+    },
+    "method": "POST",
+    "path": "/v0/search"
+  },
+  "response": {
+    "body": {
+      "error": {
+        "code": "mode_unavailable",
+        "message": "semantic and hybrid modes require the daemon to run with an embedding model; use mode \"lexical\""
+      }
+    },
+    "headers": {
+      "connection": "close",
+      "content-length": "147",
+      "content-type": "application/json",
+      "date": "Sat, 21 Nov 2026 18:00:15 GMT",
+      "kwiry-id-scheme": "room-v1",
+      "kwiry-multi-room": "closed"
+    },
+    "status": 501
+  }
+}

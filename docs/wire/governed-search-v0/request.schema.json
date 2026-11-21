@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Governed lexical search request (governed-search-v0)",
+  "description": "Body for a successful POST /v0/search. Clients should send the named object form, not rely on positional deserialization. JSON body limit: 2 MiB. The daemon also checks query grammar, UTF-8 byte and term limits, and the signed capability; schema validity is not authorization.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["q", "mode"],
+      "properties": {
+        "q": {"$ref": "#/$defs/query"},
+        "mode": {"$ref": "#/$defs/mode"},
+        "filters": {"$ref": "#/$defs/filters"},
+        "limit": {"$ref": "#/$defs/limit"},
+        "cursor": {"$ref": "#/$defs/cursor"}
+      }
+    },
+    {
+      "description": "The Rust struct deserializer also accepts a positional array, in the order q, mode, filters, limit, cursor. Omitted trailing fields take the same defaults as the object form.",
+      "type": "array",
+      "minItems": 2,
+      "prefixItems": [
+        {"$ref": "#/$defs/query"},
+        {"$ref": "#/$defs/mode"},
+        {"$ref": "#/$defs/filters"},
+        {"$ref": "#/$defs/limit"},
+        {"$ref": "#/$defs/cursor"}
+      ],
+      "items": false
+    }
+  ],
+  "$defs": {
+    "query": {
+      "$ref": "#/$defs/non_blank",
+      "maxLength": 4096,
+      "description": "At most 4096 UTF-8 bytes, 128 whitespace-delimited terms and 128 evidence terms. maxLength is only a code point ceiling; clients must check the UTF-8 byte count separately. Lexical syntax and optional leading in:<field> and ><field> controls are checked by the daemon."
+    },
+    "mode": {
+      "const": "lexical",
+      "description": "Send explicitly. Omission defaults to hybrid internally, which, like semantic, is unsupported in the governed profile."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 20,
+      "description": "Must also be at most the signed max_limit, even when this field is omitted. Encode as an integer literal, not a fraction or exponent."
+    },
+    "cursor": {
+      "type": "null",
+      "description": "Omit or send null. String cursors parse but are rejected as unavailable."
+    },
+    "filters": {
+      "default": {},
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "vault_id": {"$ref": "#/$defs/vault_filter"},
+            "room": {"$ref": "#/$defs/room_filter"},
+            "path_prefix": {"$ref": "#/$defs/path_prefix"},
+            "tags": {"$ref": "#/$defs/tags"},
+            "frontmatter_equals": {"$ref": "#/$defs/frontmatter_equals"}
+          }
+        },
+        {
+          "description": "Positional serde form, in order vault_id, room, path_prefix, tags, frontmatter_equals.",
+          "type": "array",
+          "prefixItems": [
+            {"$ref": "#/$defs/vault_filter"},
+            {"$ref": "#/$defs/room_filter"},
+            {"$ref": "#/$defs/path_prefix"},
+            {"$ref": "#/$defs/tags"},
+            {"$ref": "#/$defs/frontmatter_equals"}
+          ],
+          "items": false
+        }
+      ]
+    },
+    "non_blank": {
+      "type": "string",
+      "pattern": "[^\\u0009-\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+    },
+    "vault_filter": {
+      "anyOf": [{"$ref": "#/$defs/non_blank"}, {"type": "null"}],
+      "description": "Exact narrowing match against signed vault IDs; not subject to the signed ID-format check."
+    },
+    "room_filter": {
+      "anyOf": [{"$ref": "#/$defs/non_blank"}, {"type": "null"}],
+      "description": "Exact narrowing match against signed room_id values; not subject to the signed ID-format check."
+    },
+    "path_prefix": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {"not": {"pattern": "^/"}},
+            {"not": {"pattern": "[\\\\\\u0000]"}},
+            {"not": {"pattern": "(^|/)\\.\\.(/|$)"}}
+          ]
+        },
+        {"type": "null"}
+      ],
+      "description": "Nonempty room-relative prefix, no initial slash, backslash, NUL or '..' component. A trailing slash is accepted."
+    },
+    "tags": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/non_blank"},
+      "default": []
+    },
+    "frontmatter_equals": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "status": {"type": "string"},
+        "date": {"type": "string"}
+      }
+    }
+  }
+}
