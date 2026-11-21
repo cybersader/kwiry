@@ -140,7 +140,7 @@ fn h12_every_list_route_answer_has_one_holder_action() {
     let cases: Vec<(Forced, FetchFailure, &str)> = vec![
         (
             problem(503, "lifecycle_unavailable"),
-            FetchFailure::Unreachable {
+            FetchFailure::LifecycleUnavailable {
                 retry_after_s: None,
             },
             "lifecycle_unreachable",
@@ -274,6 +274,25 @@ fn replay_and_proof_expired_are_retried_once_and_never_halt() {
     assert_eq!(rig.authority.state().posts(), 2, "one re-signed retry");
     let claims = rig.authority.state().requests.clone();
     assert!(claims.iter().all(|r| r.status == 401));
+    assert!(codes(&rig).contains(&"lifecycle_proof_expired"));
+    assert_eq!(rig.holder().route_health(), RouteHealth::Normal);
+}
+
+#[test]
+fn keyset_proof_expiry_shares_the_list_retry_budget() {
+    let (_dir, mut rig) = rig();
+    {
+        let mut authority = rig.authority.state();
+        authority.rotate_key([37; 32], false, true);
+        authority.keyset_response = Some(Ok(authority.problem_answer(401, "proof_expired", None)));
+        authority.before_post(2, |a| a.forced.push_back(problem(401, "proof_expired")));
+    }
+    assert_eq!(
+        failed(rig.holder().list_once()),
+        FetchFailure::ProofExpiredTwice
+    );
+    assert_eq!(rig.authority.state().keyset_gets, 1);
+    assert_eq!(rig.authority.state().posts(), 2);
     assert!(codes(&rig).contains(&"lifecycle_proof_expired"));
     assert_eq!(rig.holder().route_health(), RouteHealth::Normal);
 }

@@ -18,6 +18,25 @@ pub const LIST_START_SPACING_MS: u64 = 5_000;
 pub const PROBE_SPACING_MS: u64 = 60_000;
 pub const BACKOFF_START_MS: u64 = 10_000;
 
+/// Advance a POST route's exponential backoff without ever shortening an
+/// already advertised deadline. Return the conservative delay to save for restart.
+pub(crate) fn defer_post(
+    now: u64,
+    exponential: &mut u64,
+    until: &mut u64,
+    retry_after_s: Option<u64>,
+) -> u64 {
+    *exponential = exponential
+        .saturating_mul(2)
+        .clamp(BACKOFF_START_MS, 300_000);
+    let wait = retry_after_s
+        .unwrap_or(0)
+        .saturating_mul(1000)
+        .max(*exponential);
+    *until = (*until).max(now.saturating_add(wait));
+    until.saturating_sub(now)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EarlyRelist {
     /// A relist is now pending; it may start at this instant.

@@ -39,6 +39,9 @@ pub const SAME_STATE_WINDOW_MS: i64 = 300_000;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObligationBook {
+    /// Full remaining wait when last backed off. On restart no elapsed time is trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) restart_wait_ms: Option<u64>,
     /// Report channels by obligation id.
     pub channels: BTreeMap<String, Channel>,
     /// Superseded attempts whose acceptance is unknown, by idempotency key.
@@ -325,11 +328,11 @@ impl ReportBody {
 }
 
 /// `qm1.` + base64url(SHA-256(label ‖ 0x00 ‖ JCS({holder_id, count, units}))).
-pub fn manifest_digest(holder_id: &str, units: &BTreeSet<String>) -> String {
+pub fn manifest_digest(holder_id: &str, units: &crate::store::ManifestUnits) -> String {
     let value = json!({
         "holder_id": holder_id,
         "count": units.len(),
-        "units": units.iter().collect::<Vec<_>>(),
+        "units": units,
     });
     format!(
         "qm1.{}",
@@ -339,11 +342,11 @@ pub fn manifest_digest(holder_id: &str, units: &BTreeSet<String>) -> String {
 
 /// The manifest file stored before the first transmission of a report that
 /// carries its digest (v2 §11.2), so a later release can bind to it.
-pub fn manifest_bytes(holder_id: &str, units: &BTreeSet<String>) -> Vec<u8> {
+pub fn manifest_bytes(holder_id: &str, units: &crate::store::ManifestUnits) -> Vec<u8> {
     canonical(&json!({
         "holder_id": holder_id,
         "count": units.len(),
-        "units": units.iter().collect::<Vec<_>>(),
+        "units": units,
     }))
     .into_bytes()
 }

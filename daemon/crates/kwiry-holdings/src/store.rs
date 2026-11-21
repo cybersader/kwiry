@@ -9,6 +9,9 @@
 pub use crate::wire::ResourceKey;
 use std::collections::BTreeMap;
 
+/// Stable unit ids and their exact census attributions at report time.
+pub type ManifestUnits = BTreeMap<String, Option<ResourceKey>>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldResource {
     pub key: ResourceKey,
@@ -80,9 +83,9 @@ pub trait ResourceStore {
     fn revoke(&mut self, plan: &PublishPlan);
 }
 
-/// The one authority a deletion may cite (v2 §3.4 rule 5). A purger checks
-/// the claimant against its own attribution of the unit and refuses any
-/// mismatch: no other reason can stand in for it.
+/// The only authorities a deletion may cite (v2 §3.4 rule 5, §11.2 D). A
+/// purger checks the claimant against its own records of the unit and
+/// refuses any mismatch: no other reason can stand in for either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Claimant {
     /// A listed obligation for exactly this resource.
@@ -90,12 +93,19 @@ pub enum Claimant {
         obligation_id: String,
         resource: ResourceKey,
     },
+    /// An operator release whose strict manifest match the holder proved
+    /// (v2 §11.2 D, §11.4 G.5): exactly the units this instruction reserved
+    /// through [`ArtifactPurger::reserve`], and nothing else.
+    Release { instruction_id: String },
 }
 
 impl Claimant {
-    pub fn resource(&self) -> &ResourceKey {
+    /// The resource an obligation claim names; `None` for a release, which
+    /// names units, never a resource.
+    pub fn resource(&self) -> Option<&ResourceKey> {
         match self {
-            Self::Obligation { resource, .. } => resource,
+            Self::Obligation { resource, .. } => Some(resource),
+            Self::Release { .. } => None,
         }
     }
 }
@@ -104,7 +114,10 @@ impl Claimant {
 ///
 /// Unit ids are random and holder-defined (an object id, a staging build id,
 /// a quarantine entry name). They MUST NOT encode a resource id: they appear
-/// in quarantine manifests and in final-scan records.
+/// in quarantine manifests and in final-scan records. An id names **one
+/// immutable generation**, across deletion, restart and deferred publication.
+/// Changed or replacement bytes MUST receive a fresh id even if their storage
+/// location and attribution are identical; never recycle an absent unit's id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedUnit {
     pub unit_id: String,
@@ -115,8 +128,9 @@ pub struct ObservedUnit {
     /// Open handles, including handles to an unlinked file. A unit with an
     /// open handle is never deleted, and it still counts as remaining.
     pub open_handles: u32,
-    /// Reserved by an operator release (a later slice): never claimed by an
-    /// obligation, and counted unattributed until deleted.
+    /// Reserved by an operator release ([`ArtifactPurger::reserve`]): never
+    /// claimed by an obligation, never re-mapped, and counted unattributed
+    /// until deleted.
     pub reserved: bool,
 }
 
@@ -142,6 +156,17 @@ pub enum DeleteOutcome {
     Failed,
 }
 
+/// Result of atomically matching and reserving a complete release manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReserveOutcome {
+    Reserved,
+    /// Nothing was reserved. The unattributed set at the check supplies the
+    /// observed manifest digest for the mismatch report.
+    Mismatch {
+        unattributed: ManifestUnits,
+    },
+}
+
 /// Anything an adapter's publication lock guard is made of.
 pub trait FreezeHold {}
 impl<T> FreezeHold for T {}
@@ -164,10 +189,11 @@ impl<'a> PublicationFreeze<'a> {
     }
 }
 
-/// Deletes retained data under a listed obligation (v2 §3.4 rules 3 to 5).
+/// Deletes retained data under a listed obligation (v2 §3.4 rules 3 to 5)
+/// or an executed operator release (v2 §11.2 D, G.5).
 ///
-/// The holder drives it in a fixed, crash-safe order, with a durable
-/// holder-state write before and after every step:
+/// For an obligation, the holder drives it in a fixed, crash-safe order,
+/// with a durable holder-state write before and after every step:
 ///
 /// 1. [`detach`](Self::detach): the resource can no longer be opened, leased
 ///    or built from. Idempotent; deletes nothing.
@@ -177,11 +203,45 @@ impl<'a> PublicationFreeze<'a> {
 /// 3. [`barrier`](Self::barrier) then [`census`](Self::census): sync every
 ///    location, then observe everything that remains.
 ///
+/// For a release (the `release` module) the order is: a durable record of
+/// the exact units, then [`reserve`](Self::reserve), a durable `draining`
+/// mark, the exact claimed units recorded, one deletion per unit under
+/// [`Claimant::Release`], the deleted units recorded, and a barrier and
+/// census proving every reserved unit gone.
+///
 /// Nothing else ever calls `delete`. Lease expiry, unknown data, authority
-/// errors, regression, disk pressure and absence from a list never reach it.
+/// errors, regression, disk pressure, a declined release (`blocked`) and
+/// absence from a list never reach it.
 pub trait ArtifactPurger {
     fn detach(&mut self, resource: &ResourceKey) -> Result<(), StoreError>;
+    /// Deletes one unit under `claimant`. The purger refuses (`Err`) a unit
+    /// it does not attribute to an obligation claimant's resource, a unit a
+    /// release reserved when the claimant is an obligation, and a unit not
+    /// reserved by exactly that release when the claimant is a release. A
+    /// unit with an open handle is `Busy`, never deleted. Implementations must
+    /// not re-enter the holder or deliver responses synchronously: deletion
+    /// holds the ordering lock shared with response delivery.
     fn delete(&mut self, unit_id: &str, claimant: &Claimant) -> Result<DeleteOutcome, StoreError>;
+    /// Under the same exclusion as publication and reclassification, validate
+    /// the *whole* manifest against physical presence and the store's current
+    /// durable classification, then durably reserve it, all or nothing (G.5).
+    /// The holder's `Reserving` intent is not evidence of eligibility. The
+    /// operation must work before the first list after restart. Repeating an
+    /// already committed identical reservation is a success.
+    ///
+    /// Compare the census attribution as well as the id, even when both old
+    /// and new resources are unlisted. Publication (including deferred
+    /// publication) must refuse reuse or replacement of a reserved id.
+    /// A missing, attributed or otherwise reserved unit yields `Mismatch`,
+    /// without modifying any unit. Storage/observation failures yield `Err`
+    /// for retry; never substitute an empty classification on recovery.
+    /// Reserved units stay counted unattributed, excluded from reuse and
+    /// mapping, and deletable only by this instruction across restarts.
+    fn reserve(
+        &mut self,
+        instruction_id: &str,
+        units: &ManifestUnits,
+    ) -> Result<ReserveOutcome, StoreError>;
     /// Syncs every storage location; an error means the barrier failed.
     fn barrier(&mut self) -> Result<(), StoreError>;
     fn census(&self) -> Result<Census, StoreError>;

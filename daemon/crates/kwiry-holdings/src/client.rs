@@ -67,9 +67,146 @@ pub enum TransportError {
     Timeout,
 }
 
-/// HTTP to the authority. Implementations enforce the connect and response
-/// timeouts they are given.
+/// Bound by the holder at dispatch, never inferred from the response.
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
+pub(crate) enum Origin {
+    Status,
+    Report(String),
+}
+pub(crate) type Delivery = (Origin, String, ListRef, HttpResponse);
+#[derive(Clone)]
+pub(crate) struct ResponseInbox {
+    queue: std::sync::Arc<std::sync::Mutex<InboxState>>,
+    gate: crate::gate::ServingGate,
+    events: std::sync::Arc<dyn crate::events::EventSink>,
+}
+#[derive(Default)]
+pub(crate) struct InboxState {
+    pub(crate) deliveries: Vec<Delivery>,
+    generation: u64,
+}
+
+/// Admission is transferred into the transport entry point, not checked and
+/// dropped by the caller. Consume it on entry, BEFORE any blocking I/O or
+/// response callback. A delivery can then finish while this POST is in flight.
+pub struct PostStart<'a>(Option<std::sync::MutexGuard<'a, InboxState>>);
+impl PostStart<'_> {
+    pub fn entered(self) {
+        drop(self.0);
+    }
+}
+/// An asynchronous transport retains this handle while its POST can still
+/// deliver. The holder need not retain an unbounded history of dispatched keys.
+#[derive(Clone)]
+pub struct ResponseDelivery {
+    inbox: ResponseInbox,
+    origin: Origin,
+    key: String,
+    list_ref: ListRef,
+}
+impl ResponseDelivery {
+    pub fn request_key(&self) -> &str {
+        &self.key
+    }
+    pub fn deliver(&self, key: String, response: HttpResponse) {
+        if key != self.key {
+            self.inbox
+                .events
+                .emit(crate::events::HolderEvent::UnknownResponseKey);
+            return;
+        }
+        let refusal = authority_refusal(&response);
+        let mut queue = self.inbox.lock();
+        queue.generation = queue.generation.wrapping_add(1);
+        if matches!(
+            refusal,
+            Some(AuthorityRefusal::Stop(FetchFailure::NotAuthorized))
+        ) {
+            self.inbox.gate.set_auth_halt();
+        }
+        queue
+            .deliveries
+            .push((self.origin.clone(), key, self.list_ref.clone(), response));
+    }
+}
+impl ResponseInbox {
+    pub(crate) fn new(
+        gate: crate::gate::ServingGate,
+        events: std::sync::Arc<dyn crate::events::EventSink>,
+    ) -> Self {
+        Self {
+            queue: Default::default(),
+            gate,
+            events,
+        }
+    }
+    pub(crate) fn bind(&self, origin: Origin, key: &str, list_ref: &ListRef) -> ResponseDelivery {
+        ResponseDelivery {
+            inbox: self.clone(),
+            origin,
+            key: key.into(),
+            list_ref: list_ref.clone(),
+        }
+    }
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, InboxState> {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn delivery_blocked(&self) -> bool {
+        matches!(
+            self.queue.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+    pub(crate) fn ticket(&self) -> u64 {
+        self.lock().generation
+    }
+    pub(crate) fn admit(&self, ticket: u64) -> Option<PostStart<'_>> {
+        let state = self.lock();
+        (ticket == state.generation && !state.deliveries.iter().any(|(_, _, _, r)| r.status != 200))
+            .then_some(PostStart(Some(state)))
+    }
+    pub(crate) fn has_refusal(&self) -> bool {
+        self.lock()
+            .deliveries
+            .iter()
+            .any(|(_, _, _, r)| r.status != 200)
+    }
+}
+
+/// HTTP to the authority. Implementations enforce the supplied timeouts.
+/// Overrides of `post_list` and `post_lifecycle` must consume `start.entered()`
+/// on entry, before blocking or invoking callbacks. The holder orders delivery
+/// against entry to the POST, not completion of its response.
 pub trait Transport {
+    #[cfg(all(test, unix))]
+    fn before_dispatch(&self) {}
+    fn post_list(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        timeouts: Timeouts,
+        start: PostStart<'_>,
+    ) -> Result<HttpResponse, TransportError> {
+        start.entered();
+        self.post(url, content_type, body, timeouts)
+    }
+    /// Asynchronous adapters retain the handle belonging to this POST.
+    fn post_lifecycle(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        timeouts: Timeouts,
+        _delivery: ResponseDelivery,
+        start: PostStart<'_>,
+    ) -> Result<HttpResponse, TransportError> {
+        start.entered();
+        self.post(url, content_type, body, timeouts)
+    }
     fn post(
         &self,
         url: &str,
@@ -83,7 +220,11 @@ pub trait Transport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FetchFailure {
-    /// Network failure, `429`, `503 lifecycle_unavailable`, a second `replay`.
+    /// Known custody outage (unreachable backoff plus a deletion hold).
+    LifecycleUnavailable {
+        retry_after_s: Option<u64>,
+    },
+    /// Network failure, `429`, a second `replay`.
     Unreachable {
         retry_after_s: Option<u64>,
     },
@@ -142,6 +283,14 @@ pub struct FetchEnv<'a> {
 /// What a fetch hands back while it runs. One object takes both, so a
 /// holder can apply each in observation order with its single writer.
 pub trait FetchHooks {
+    /// Stop before sending another page or accepting a list across a refusal.
+    fn refusal_pending(&self) -> bool {
+        false
+    }
+    /// Acquire final dispatch admission; a holder orders it with delivery.
+    fn admit_post(&self) -> Option<PostStart<'_>> {
+        (!self.refusal_pending()).then_some(PostStart(None))
+    }
     /// Persists an accepted key-set statement's pins durably; false refuses.
     fn accept_pins(&mut self, pins: &PinnedKeys) -> bool;
     /// Each signed page's evidence, at once, in observation order (raises).
@@ -179,9 +328,9 @@ enum Answer {
         compact: String,
         answered: ClockEvidence,
     },
+    Common(AuthorityRefusal),
     Problem {
         status: u16,
-        code: Option<String>,
         retry_after_s: Option<u64>,
     },
     Transport(TransportError),
@@ -240,6 +389,45 @@ pub(crate) fn problem_code(response: &HttpResponse) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The route-independent part of §4.5. Route handlers only interpret the
+/// remaining responses (e.g. 409), never raw authentication or custody codes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AuthorityRefusal {
+    Replay,
+    Expired,
+    Stop(FetchFailure),
+}
+pub(crate) fn authority_refusal(response: &HttpResponse) -> Option<AuthorityRefusal> {
+    use AuthorityRefusal::*;
+    if !matches!(response.status, 401 | 403 | 503) {
+        return None;
+    }
+    Some(match (response.status, problem_code(response).as_deref()) {
+        (403, _) => Stop(FetchFailure::NotAuthorized),
+        (401, Some("replay")) => Replay,
+        (401, Some("proof_expired")) => Expired,
+        (401, _) => Stop(FetchFailure::Unauthorized),
+        (503, Some("lifecycle_unavailable")) => Stop(FetchFailure::LifecycleUnavailable {
+            retry_after_s: response.retry_after_s,
+        }),
+        (503, Some("authority_epoch_mismatch")) => Stop(FetchFailure::RollbackSuspected),
+        (503, _) => Stop(FetchFailure::Unreachable {
+            retry_after_s: response.retry_after_s,
+        }),
+        _ => return None,
+    })
+}
+impl AuthorityRefusal {
+    fn fetch_failure(self) -> FetchFailure {
+        match self {
+            Self::Stop(failure) => failure,
+            _ => FetchFailure::Unreachable {
+                retry_after_s: None,
+            },
+        }
+    }
+}
+
 fn whole_list_budget_ms(items_total: u64) -> u64 {
     let pages = items_total.div_ceil(500).max(1);
     pages
@@ -293,13 +481,28 @@ fn apply_statement(
     Ok(())
 }
 
-fn fetch_route_statement(env: &FetchEnv) -> Option<String> {
-    let url = format!("{}{ROUTE_KEYSET}", env.ctx.issuer);
-    let response = env.transport.get(&url, LIST_TIMEOUTS).ok()?;
-    (response.status == 200
-        && response.content_type.as_deref() == Some(env.ctx.profile.keyset_content_type().as_str()))
+pub(crate) fn fetch_route_statement(
+    transport: &dyn Transport,
+    issuer: &str,
+    profile: &crate::profile::WireProfile,
+) -> Result<Option<String>, AuthorityRefusal> {
+    let url = format!("{issuer}{ROUTE_KEYSET}");
+    let response = match transport.get(&url, LIST_TIMEOUTS) {
+        Ok(response) => response,
+        Err(TransportError::Unreachable) => {
+            return Err(AuthorityRefusal::Stop(FetchFailure::Unreachable {
+                retry_after_s: None,
+            }));
+        }
+        Err(TransportError::Timeout) => return Ok(None),
+    };
+    if let Some(refusal) = authority_refusal(&response) {
+        return Err(refusal);
+    }
+    Ok((response.status == 200
+        && response.content_type.as_deref() == Some(profile.keyset_content_type().as_str()))
     .then(|| String::from_utf8(response.body).ok())
-    .flatten()
+    .flatten())
 }
 
 fn keyset_failure(error: &KeyError, page_kid_pinned: bool) -> FetchFailure {
@@ -311,6 +514,16 @@ fn keyset_failure(error: &KeyError, page_kid_pinned: bool) -> FetchFailure {
     }
 }
 
+enum SignatureFailure {
+    Verify(FetchFailure),
+    KeysetRefusal(AuthorityRefusal),
+}
+impl From<FetchFailure> for SignatureFailure {
+    fn from(failure: FetchFailure) -> Self {
+        Self::Verify(failure)
+    }
+}
+
 /// Verifies the signature stage, first applying any attached key-set
 /// statement (always processed, even when the page's own key is pinned), and
 /// on an unknown `kid` without one, the key-set route once per list.
@@ -319,7 +532,7 @@ fn verify_with_keysets(
     session: &mut Session,
     compact: &str,
     now_recv: i64,
-) -> Result<SignedPage, FetchFailure> {
+) -> Result<SignedPage, SignatureFailure> {
     let unverified = crate::jws::parse(compact).ok();
     let page_kid = unverified
         .as_ref()
@@ -336,15 +549,18 @@ fn verify_with_keysets(
         let pinned = session.pins.live(&page_kid, prefix, now_recv).is_some();
         apply_statement(env, session, statement).map_err(|e| keyset_failure(&e, pinned))?;
     }
-    match verify_signature(compact, &session.pins, now_recv, &env.ctx) {
+    let verified = match verify_signature(compact, &session.pins, now_recv, &env.ctx) {
         Err(PageError::UnknownKid) if attached.is_none() && !session.route_fetched => {
             session.route_fetched = true;
-            let statement = fetch_route_statement(env).ok_or(FetchFailure::UnknownKid)?;
+            let statement = fetch_route_statement(env.transport, env.ctx.issuer, env.ctx.profile)
+                .map_err(SignatureFailure::KeysetRefusal)?
+                .ok_or(FetchFailure::UnknownKid)?;
             apply_statement(env, session, &statement).map_err(|e| keyset_failure(&e, false))?;
-            verify_signature(compact, &session.pins, now_recv, &env.ctx).map_err(page_error)
+            verify_signature(compact, &session.pins, now_recv, &env.ctx)
         }
-        other => other.map_err(page_error),
-    }
+        other => other,
+    };
+    Ok(verified.map_err(page_error)?)
 }
 
 fn exchange(
@@ -374,12 +590,20 @@ fn exchange(
         &claims,
         env.key.signing_key(),
     );
+    if env.hooks.refusal_pending() {
+        return Err(FetchFailure::Local("delayed refusal pending"));
+    }
     let sent_mono = env.clock.mono_ms();
-    let response = env.transport.post(
+    let start = env
+        .hooks
+        .admit_post()
+        .ok_or(FetchFailure::Local("delayed refusal pending"))?;
+    let response = env.transport.post_list(
         &url,
         &env.ctx.profile.list_request_content_type(),
         body.as_bytes(),
         LIST_TIMEOUTS,
+        start,
     );
     let received_mono = env.clock.mono_ms();
     let now_recv = env.clock.wall_ms();
@@ -387,19 +611,28 @@ fn exchange(
         Ok(response) => response,
         Err(error) => return Ok(Answer::Transport(error)),
     };
+    if let Some(refusal) = authority_refusal(&response) {
+        return Ok(Answer::Common(refusal));
+    }
     if response.status != 200 {
         return Ok(Answer::Problem {
             status: response.status,
-            code: problem_code(&response),
             retry_after_s: response.retry_after_s,
         });
+    }
+    if env.hooks.refusal_pending() {
+        return Err(FetchFailure::Local("delayed refusal pending"));
     }
     if response.content_type.as_deref() != Some(env.ctx.profile.list_page_content_type().as_str()) {
         return Err(FetchFailure::Invalid(PageError::Grammar("content-type")));
     }
     let compact = String::from_utf8(response.body)
         .map_err(|_| FetchFailure::Invalid(PageError::Jws(crate::jws::JwsError::Malformed)))?;
-    let signed = verify_with_keysets(env, session, &compact, now_recv)?;
+    let signed = match verify_with_keysets(env, session, &compact, now_recv) {
+        Ok(page) => page,
+        Err(SignatureFailure::Verify(error)) => return Err(error),
+        Err(SignatureFailure::KeysetRefusal(refusal)) => return Ok(Answer::Common(refusal)),
+    };
     let lag_ms = signed.iat_ms - now_recv;
     env.hooks.on_clock(ClockEvidence::Signed { lag_ms });
     session.evidence.push(ClockEvidence::Signed { lag_ms });
@@ -507,12 +740,17 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                     Some(cursor) => session.cursor = Some(cursor),
                 }
             }
+            Answer::Common(AuthorityRefusal::Replay) if !replay_retried => replay_retried = true,
+            Answer::Common(AuthorityRefusal::Expired) if !expiry_retried => expiry_retried = true,
+            Answer::Common(AuthorityRefusal::Expired) => {
+                return Err(FetchFailure::ProofExpiredTwice);
+            }
+            Answer::Common(other) => return Err(other.fetch_failure()),
             Answer::Problem {
                 status,
-                code,
                 retry_after_s,
-            } => match (status, code.as_deref()) {
-                (410, _) => {
+            } => match status {
+                410 => {
                     expired_410s += 1;
                     if expired_410s >= LIVELOCK_410S {
                         return Err(FetchFailure::Livelock);
@@ -523,21 +761,8 @@ pub fn fetch_list(env: &mut FetchEnv, params: &FetchParams) -> Result<VerifiedLi
                     session.cursor = None;
                     session.nonce = list_nonce()?;
                 }
-                (401, Some("replay")) if !replay_retried => replay_retried = true,
-                (401, Some("replay")) => {
-                    return Err(FetchFailure::Unreachable {
-                        retry_after_s: None,
-                    });
-                }
-                (401, Some("proof_expired")) if !expiry_retried => expiry_retried = true,
-                (401, Some("proof_expired")) => return Err(FetchFailure::ProofExpiredTwice),
-                (401, _) => return Err(FetchFailure::Unauthorized),
-                (403, _) => return Err(FetchFailure::NotAuthorized),
-                (503, Some("authority_epoch_mismatch")) => {
-                    return Err(FetchFailure::RollbackSuspected);
-                }
-                (400 | 413, _) => return Err(FetchFailure::RequestInvalid { status }),
-                (409, _) => return Err(FetchFailure::Rejected { status }),
+                400 | 413 => return Err(FetchFailure::RequestInvalid { status }),
+                409 => return Err(FetchFailure::Rejected { status }),
                 _ => return Err(FetchFailure::Unreachable { retry_after_s }),
             },
         }
@@ -574,17 +799,13 @@ pub fn probe_clock(env: &mut FetchEnv, params: &FetchParams) -> Result<(), Fetch
         Answer::Transport(TransportError::Unreachable) => Err(FetchFailure::Unreachable {
             retry_after_s: None,
         }),
+        Answer::Common(other) => Err(other.fetch_failure()),
         Answer::Problem {
             status,
-            code,
             retry_after_s,
-        } => Err(match (status, code.as_deref()) {
-            (401, Some("replay" | "proof_expired")) => FetchFailure::Unreachable { retry_after_s },
-            (401, _) => FetchFailure::Unauthorized,
-            (403, _) => FetchFailure::NotAuthorized,
-            (503, Some("authority_epoch_mismatch")) => FetchFailure::RollbackSuspected,
-            (400 | 413, _) => FetchFailure::RequestInvalid { status },
-            (409, _) => FetchFailure::Rejected { status },
+        } => Err(match status {
+            400 | 413 => FetchFailure::RequestInvalid { status },
+            409 => FetchFailure::Rejected { status },
             _ => FetchFailure::Unreachable { retry_after_s },
         }),
     }

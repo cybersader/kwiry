@@ -226,7 +226,11 @@ fn v3() {
     let later = rig.record_sent(&[request("cases.V5.complete")], false);
     assert_ne!(later.key, k);
     let ob = later.body.obligation_id.clone();
-    assert_eq!(rig.answer(&later, case), Answer::Receipt);
+    // V3 is a late response to K, not an HTTP response to the later key.
+    assert_eq!(
+        rig.holder.delayed_report(&ob, &k, response(case)),
+        Answer::Receipt
+    );
     assert_eq!(text(&case["expect"]["holder"]), "replay_receipt");
     // The ack is in the current epoch: the floor rises, K is pruned, the
     // later report stays pending.
@@ -342,7 +346,8 @@ fn v5_an_ack_under_another_key_is_convergence_without_the_header() {
 
 /// V6's list and report half: the incomplete report's receipt, the
 /// instruction parsed and bound to that report's digest, nothing deleted.
-/// The status report and release execution are S3.
+/// The status report and release execution run in
+/// `status::v6_status_and_release`.
 #[test]
 fn v6_lists_and_report() {
     let case = at("cases.V6");
@@ -690,4 +695,19 @@ fn h53_accepted_current_report() {
     );
     assert_eq!(rig.answer(&pending, accepted), Answer::Receipt);
     assert_eq!(rig.floor(&ob), Some(ReportState::Incomplete));
+}
+
+#[test]
+fn different_request_key_with_an_uncertain_ack_is_convergence() {
+    let case = at("cases.V3");
+    let earlier = request("cases.V1.attempts.0");
+    let mut rig = GoldenRig::applied(at("cases.V1.initial_list"));
+    record_uncertain(&mut rig, &[earlier]);
+    let later = rig.record_sent(&[request("cases.V5.complete")], false);
+    let earlier_key = pending_from(&[earlier], false).key;
+    assert_ne!(earlier_key, later.key);
+    assert!(response(case).headers.is_empty());
+    assert_eq!(rig.answer(&later, case), Answer::Converged);
+    assert!(rig.files("receipt.").is_empty());
+    assert_eq!(rig.files("conv.").len(), 1);
 }

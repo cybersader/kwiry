@@ -282,7 +282,7 @@ fn nothing_is_deleted_without_a_listed_obligation_and_its_exact_claimant() {
     rig.advance(1_000_000);
     failed(rig.holder().list_once());
     assert_eq!(plain(rig, A), Err(Refusal::LeaseLapsed));
-    rig.purge().unwrap();
+    assert_eq!(rig.purge(), Err(ObligationsRefused::NoCurrentAuthority));
 
     // B leaves the list: absence alone authorizes nothing, and its data
     // becomes unattributed quarantine.
@@ -1330,4 +1330,320 @@ fn r3_a_crash_at_each_reserve_step_leaves_it_adoptable_or_refused_and_kept() {
         .unwrap_err();
     assert_eq!(refused.code(), "reserve_path_foreign");
     assert_eq!(std::fs::read(dir.join("other")).unwrap(), copied);
+}
+
+#[test]
+fn report_answers_do_not_claim_a_failed_transition() {
+    for kind in ["halt", "reject", "receipt", "converge"] {
+        let mut w = world(false);
+        let rig = &mut w.rig;
+        match kind {
+            "halt" => problem(rig, 400, "invalid_request", None),
+            "reject" => problem(rig, 409, "stale_list_ref", None),
+            "converge" => {
+                let epoch = rig
+                    .holder()
+                    .state()
+                    .high_water
+                    .as_ref()
+                    .unwrap()
+                    .epoch
+                    .clone();
+                let ack = forged_ack(
+                    rig,
+                    (&w.b_obligation, &w.b_holding),
+                    "complete",
+                    "complete",
+                    "retired",
+                    &epoch,
+                );
+                problem(rig, 409, "state_regression", Some(ack));
+            }
+            _ => {}
+        }
+        let n = rig.authority.state().posts() + 1;
+        let faults = rig.io_faults.clone();
+        rig.authority.state().before_post(n, move |_| {
+            let mut writes = vec![Fault::Pass; if kind == "converge" { 2 } else { 1 }];
+            writes.push(Fault::BeforeRename);
+            faults.plan(writes)
+        });
+        let pass = rig.report().unwrap();
+        assert_eq!(pass.sent, 1, "{kind}");
+        assert_eq!(
+            (pass.halted, pass.rejected, pass.receipts, pass.converged),
+            (0, 0, 0, 0),
+            "{kind}"
+        );
+        assert!(pending(rig, &w.b_obligation).unwrap().live());
+        assert!(floor(rig, &w.b_obligation).is_none());
+        for code in [
+            "lifecycle_report_bug_halt",
+            "lifecycle_report_rejected",
+            "lifecycle_report_converged",
+        ] {
+            assert!(!codes(rig).contains(&code));
+        }
+        if kind != "receipt" {
+            let posts = rig.authority.state().posts();
+            if kind == "halt" {
+                rig.restart().unwrap();
+                assert!(rig.holder().state().obligations.channels[&w.b_obligation].halted);
+            } else {
+                let recovered = rig.report().unwrap();
+                assert_eq!(
+                    (recovered.rejected + recovered.converged, recovered.sent),
+                    (1, 0)
+                );
+            }
+            assert_eq!(rig.authority.state().posts(), posts);
+        }
+    }
+}
+
+#[test]
+fn failed_first_byte_cancellation_does_not_count_or_prune_the_arm() {
+    let mut w = world(false);
+    let rig = &mut w.rig;
+    rig.purger.view().fail_freeze = true;
+    rig.io_faults.plan(vec![
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::Pass,
+        Fault::BeforeRename,
+    ]);
+    let pass = rig.report().unwrap();
+    assert_eq!((pass.cancelled, pass.sent), (0, 0));
+    assert_eq!(
+        pending(rig, &w.b_obligation).unwrap().status,
+        PendingStatus::Armed
+    );
+    assert_eq!(holder_files(rig, "sent.").len(), 1);
+}
+
+#[test]
+fn failed_report_invalidation_is_not_counted() {
+    let mut w = world(false);
+    let rig = &mut w.rig;
+    rig.authority.state().drop_acks = 1;
+    assert_eq!(rig.report().unwrap().sent, 1);
+    rig.purger.add(PLAIN, B, 1);
+    rig.io_faults.fail_writes(2);
+    let pass = rig.report().unwrap();
+    assert_eq!(pass.invalidated, 0);
+    assert_eq!(
+        pending(rig, &w.b_obligation).unwrap().status,
+        PendingStatus::Armed
+    );
+}
+
+#[test]
+fn delayed_refusal_halts_only_its_origin_and_unknown_keys_do_nothing() {
+    let mut w = world(true);
+    let rig = &mut w.rig;
+    rig.authority.state().drop_acks = 1;
+    assert_eq!(rig.report().unwrap().sent, 1);
+    let key = pending(rig, &w.b_obligation).unwrap().key;
+    let delivery = rig.authority.state().deliveries[&key].clone();
+    let unknown = rig
+        .authority
+        .state()
+        .problem_answer(403, "holder_not_authorized", None);
+    delivery.deliver("unknown".into(), unknown);
+    assert!(codes(rig).contains(&"unknown_response_key"));
+    assert!(rig.gate().check(A).is_ok());
+    let refusal = rig
+        .authority
+        .state()
+        .problem_answer(400, "invalid_request", None);
+    delivery.deliver(key, refusal);
+    assert_eq!(rig.status().unwrap().halted, 0);
+    assert!(!rig.holder().state().status.halted);
+    assert!(rig.holder().state().obligations.channels[&w.b_obligation].halted);
+    rig.advance(60_000);
+    assert_eq!(rig.report().unwrap().sent, 0);
+    assert_eq!(rig.status().unwrap().receipts, 1);
+}
+
+#[test]
+fn retry_after_survives_shorter_answers_and_restart_on_both_routes() {
+    for status in [true, false] {
+        let mut w = world(true);
+        let rig = &mut w.rig;
+        let mut long = rig
+            .authority
+            .state()
+            .problem_answer(429, "rate_limited", None);
+        long.retry_after_s = Some(180);
+        forced(rig, long);
+        let send = |rig: &mut Rig| {
+            if status {
+                rig.status().unwrap().sent
+            } else {
+                rig.report().unwrap().sent
+            }
+        };
+        assert_eq!(send(rig), 1);
+        let key = rig
+            .authority
+            .state()
+            .deliveries
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        rig.advance(5_000);
+        let mut short = rig
+            .authority
+            .state()
+            .problem_answer(429, "rate_limited", None);
+        short.retry_after_s = Some(1);
+        rig.authority.state().deliveries[&key].deliver(key.clone(), short);
+        assert_eq!(send(rig), 0);
+        rig.advance(65_000);
+        assert_eq!(send(rig), 0, "shorter wait replaced the long one");
+        rig.restart().unwrap();
+        applied(rig.relist());
+        rig.advance(61_000);
+        assert_eq!(
+            send(rig),
+            0,
+            "restart lost Retry-After for an attempted key"
+        );
+        rig.advance(120_000);
+        assert_eq!(send(rig), 1);
+    }
+}
+
+#[test]
+fn report_queue_age_includes_the_frozen_census() {
+    let mut w = world(false);
+    let rig = &mut w.rig;
+    rig.purger.view().frozen_census_delay = Some((rig.clock.clone(), 30_000));
+    let posts = rig.authority.state().posts();
+    let pass = rig.report().unwrap();
+    assert_eq!((pass.sent, pass.cancelled), (0, 1));
+    assert_eq!(rig.authority.state().posts(), posts);
+    assert!(rig.holder().state().status.manifests.is_empty());
+}
+
+#[test]
+fn report_receipt_and_current_ack_refresh_once_before_a_strike() {
+    for convergence in [false, true] {
+        for valid in [false, true] {
+            let mut w = world(true);
+            let rig = &mut w.rig;
+            rig.authority.state().rotate_key([73; 32], false, true);
+            if !valid {
+                rig.authority.state().keyset_statement = None;
+            }
+            if convergence {
+                let epoch = rig.holder().state().high_water.clone().unwrap().epoch;
+                let ack = forged_ack(
+                    rig,
+                    (&w.b_obligation, &w.b_holding),
+                    "complete",
+                    "complete",
+                    "retired",
+                    &epoch,
+                );
+                problem(rig, 409, "state_regression", Some(ack));
+            }
+            let before = rig.authority.state().keyset_gets;
+            let pass = rig.report().unwrap();
+            assert_eq!(rig.authority.state().keyset_gets, before + 1);
+            assert_eq!(codes(rig).contains(&"ack_unverifiable"), !valid);
+            assert_eq!(
+                (pass.receipts, pass.converged),
+                (
+                    usize::from(valid && !convergence),
+                    usize::from(valid && convergence)
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn delayed_report_receipt_finishes_pending_write_then_replays_as_noop() {
+    let mut w = world(false);
+    let rig = &mut w.rig;
+    // Receipt bytes persisted, but the write that consumes the pending key failed.
+    let faults = rig.io_faults.clone();
+    let n = rig.authority.state().posts() + 1;
+    rig.authority.state().before_post(n, move |_| {
+        faults.plan(vec![Fault::Pass, Fault::BeforeRename])
+    });
+    assert_eq!(rig.report().unwrap().receipts, 0);
+    let key = pending(rig, &w.b_obligation).unwrap().key;
+    let ack = rig.authority.state().report_receipts[&key].1.clone();
+    let response = rig.authority.state().ack_answer(&ack, None);
+    let handle = rig.authority.state().deliveries[&key].clone();
+    let posts = rig.authority.state().posts();
+    for expected in [1, 0, 0, 0, 0] {
+        handle.deliver(key.clone(), response.clone());
+        let pass = rig.report().unwrap();
+        assert_eq!(
+            (pass.receipts, pass.converged, pass.halted, pass.sent),
+            (expected, 0, 0, 0)
+        );
+        assert!(pending(rig, &w.b_obligation).is_none());
+        assert_eq!(rig.authority.state().posts(), posts);
+    }
+    assert!(!codes(rig).contains(&"ack_unverifiable"));
+    rig.authority.state().rotate_key([71; 32], true, true);
+    applied(rig.relist());
+    handle.deliver(key, response);
+    assert_eq!(rig.report().unwrap().receipts, 0);
+    assert!(
+        codes(rig).contains(&"ack_unverifiable"),
+        "a duplicate still needs a live key"
+    );
+}
+
+#[test]
+fn report_pin_write_failure_is_backoff_not_a_strike() {
+    let mut w = world(true);
+    let rig = &mut w.rig;
+    rig.authority.state().rotate_key([72; 32], false, true);
+    let faults = rig.io_faults.clone();
+    let n = rig.authority.state().posts() + 1;
+    rig.authority
+        .state()
+        .before_post(n, move |_| faults.fail_writes(1));
+    let before = rig.authority.state().keyset_gets;
+    assert_eq!(rig.report().unwrap().receipts, 0);
+    assert_eq!(rig.authority.state().keyset_gets, before + 1);
+    assert!(codes(rig).contains(&"disk_reserve_exhausted"));
+    assert!(!codes(rig).contains(&"ack_unverifiable"));
+    rig.advance(60_000);
+    assert_eq!(rig.report().unwrap().receipts, 1);
+}
+
+#[test]
+fn obligation_receipts_must_advance_the_cited_list_even_when_uncertain() {
+    for uncertain in [false, true] {
+        let mut w = world(false);
+        let rig = &mut w.rig;
+        rig.authority.state().drop_acks = 1;
+        assert_eq!(rig.report().unwrap().sent, 1);
+        let p = pending(rig, &w.b_obligation).unwrap();
+        if uncertain {
+            let mut book = rig.holder().state().obligations.clone();
+            crate::report::invalidate(&mut book, &w.b_obligation);
+            rig.holder().writer.update_obligations(book).unwrap();
+        }
+        let ack = rig.authority.state().report_receipts[&p.key].1.clone();
+        let mut claims = crate::jws::parse(&ack).unwrap().claims;
+        claims["rev"]["seq"] = p.body.list_ref.rev.seq.into();
+        let ack = rig.authority.state().sign_ack(&Value::Object(claims));
+        let response = rig.authority.state().ack_answer(&ack, None);
+        assert_eq!(
+            rig.holder()
+                .delayed_report(&w.b_obligation, &p.key, response),
+            crate::report::Answer::Unverifiable
+        );
+        assert_eq!(floor(rig, &w.b_obligation), None);
+    }
 }

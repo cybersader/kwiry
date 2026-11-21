@@ -448,7 +448,12 @@ fn ap27_the_pin_history_ceiling_is_raised_before_persisting_and_never_evicts() {
         let holding = rig.authority.state().add_active(PINNED, id);
         rig.authority.state().attest(&holding, dir);
     }
-    applied(rig.holder().list_once());
+    rig.io_faults.fail_writes(1);
+    assert_eq!(rig.relist(), ListOutcome::ApplyFailed { step: "A1" });
+    assert!(codes(&rig).contains(&"pin_history_ceiling_will_rise"));
+    assert!(!codes(&rig).contains(&"pin_history_ceiling_raised"));
+    assert_eq!(rig.holder().state().engine.pin_history_ceiling, 2);
+    applied(rig.relist());
     assert!(
         rig.events
             .events()

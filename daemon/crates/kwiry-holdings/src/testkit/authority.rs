@@ -12,7 +12,9 @@ use super::{TEST_AUTHORITY_KEY_SEED, TEST_CURSOR_KEY, TEST_DIGEST_ROOT, jcs, pin
 use crate::client::{HttpResponse, Timeouts, Transport, TransportError};
 use crate::clock::{Clock, format_utc_seconds};
 use crate::keys::{HolderKey, authority_public_jwk, ed25519_public_from_jwk};
-use crate::profile::{PROBLEM_CONTENT_TYPE, ROUTE_KEYSET, ROUTE_LIST, ROUTE_REPORT, WireProfile};
+use crate::profile::{
+    PROBLEM_CONTENT_TYPE, ROUTE_KEYSET, ROUTE_LIST, ROUTE_REPORT, ROUTE_STATUS, WireProfile,
+};
 use crate::{b64, grammar, jws};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -97,7 +99,13 @@ pub struct FakeState {
     last_list_start_mono: Option<u64>,
     exempt_next_start: bool,
     pub forced: VecDeque<Forced>,
+    pub keyset_gets: usize,
+    pub deliveries: std::collections::BTreeMap<String, crate::client::ResponseDelivery>,
     pub hooks: Hooks,
+    #[cfg(all(test, unix))]
+    pub before_dispatch: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(all(test, unix))]
+    pub keyset_response: Option<Result<HttpResponse, TransportError>>,
     scheduled: Vec<(usize, Mutation)>,
     posts: usize,
     pub requests: Vec<RecordedRequest>,
@@ -118,6 +126,20 @@ pub struct FakeState {
     pub commit_delay_ms: u64,
     /// The next N committed reports have their answer dropped (H10).
     pub drop_acks: usize,
+    /// Status route: idempotency receipts by key.
+    pub status_receipts: BTreeMap<String, (Map<String, Value>, String)>,
+    /// H.4.2: `(epoch, seq)` of the last accepted status's `list_ref`.
+    pub status_floor: Option<(String, u64)>,
+    /// H.4.4: authority time of the last accepted new status key.
+    pub last_status_key_ms: Option<i64>,
+    /// Every status whose signature verified, with its HTTP answer.
+    pub statuses: Vec<(Map<String, Value>, u16)>,
+    /// Digest of every accepted status and report (what a release may bind).
+    pub accepted_digests: Vec<String>,
+    /// Instructions finalized by a status, with the outcome.
+    pub finalized: BTreeMap<String, &'static str>,
+    /// The next N committed statuses have their answer dropped.
+    pub drop_status_acks: usize,
 }
 
 #[derive(Clone)]
@@ -161,7 +183,13 @@ impl FakeAuthority {
             last_list_start_mono: None,
             exempt_next_start: false,
             forced: VecDeque::new(),
+            deliveries: Default::default(),
+            keyset_gets: 0,
             hooks: Hooks::default(),
+            #[cfg(all(test, unix))]
+            before_dispatch: None,
+            #[cfg(all(test, unix))]
+            keyset_response: None,
             scheduled: Vec::new(),
             posts: 0,
             requests: Vec::new(),
@@ -174,6 +202,13 @@ impl FakeAuthority {
             reports: Vec::new(),
             commit_delay_ms: 0,
             drop_acks: 0,
+            status_receipts: BTreeMap::new(),
+            status_floor: None,
+            last_status_key_ms: None,
+            statuses: Vec::new(),
+            accepted_digests: Vec::new(),
+            finalized: BTreeMap::new(),
+            drop_status_acks: 0,
         })))
     }
 
@@ -1170,7 +1205,289 @@ impl FakeState {
         let ack = self.sign_with_active(&self.config.profile.typ_report_ack.clone(), &ack_claims);
         self.report_receipts.insert(key, (business, ack.clone()));
         self.current_acks.insert(obligation_id, ack.clone());
+        self.accepted_digests
+            .push(crate::canonical::sha256_tagged(body));
         self.ack_response(&ack, None)
+    }
+
+    /// Issues a `quarantine_release` bound to an accepted report's exact
+    /// digest (§11.1 C); it is carried on page 0 until a status finalizes it.
+    pub fn issue_release(&mut self, bound_report_digest: &str, approved_count: u64) -> String {
+        let instruction_id = self.next_id("ins_");
+        self.instructions.push(json!({
+            "instruction_id": instruction_id,
+            "kind": "quarantine_release",
+            "bound_report_digest": bound_report_digest,
+            "approved_count": approved_count,
+            "issued_seq": self.seq + 1,
+        }));
+        self.commit();
+        instruction_id
+    }
+
+    /// Whether `instruction_id` is still carried in lists.
+    pub fn outstanding(&self, instruction_id: &str) -> bool {
+        self.instructions
+            .iter()
+            .any(|i| i["instruction_id"] == instruction_id)
+    }
+
+    /// H.9: a human declines a pending release; every obligation whose only
+    /// remaining blocker is unattributed quarantine becomes `blocked`.
+    pub fn decline(&mut self, holding_ids: &[&str]) {
+        for holding_id in holding_ids {
+            self.set_obligation_state(holding_id, "blocked");
+        }
+    }
+
+    fn status_ack_response(&self, ack: &str) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            content_type: Some(self.config.profile.status_ack_content_type()),
+            retry_after_s: None,
+            headers: Vec::new(),
+            body: ack.as_bytes().to_vec(),
+        }
+    }
+
+    fn status_grammar(claims: &Map<String, Value>) -> bool {
+        const ALLOWED: [&str; 13] = [
+            "iss",
+            "sub",
+            "aud",
+            "htu",
+            "iat",
+            "exp",
+            "jti",
+            "idempotency_key",
+            "list_ref",
+            "quarantined_unattributed",
+            "quarantine_manifest_digest",
+            "holder_state",
+            "release_result",
+        ];
+        let text = |name: &str| claims.get(name).and_then(Value::as_str);
+        claims.keys().all(|k| ALLOWED.contains(&k.as_str()))
+            && ALLOWED[..12].iter().all(|k| claims.contains_key(*k))
+            && text("idempotency_key").is_some_and(grammar::idempotency_key)
+            && text("jti").is_some_and(grammar::jti)
+            && claims.get("list_ref").is_some_and(Self::well_formed_ref)
+            && claims["quarantined_unattributed"].is_u64()
+            && text("quarantine_manifest_digest").is_some_and(|d| !d.is_empty())
+            && matches!(text("holder_state"), Some("ok" | "reset"))
+            && claims.get("release_result").is_none_or(|r| {
+                r.as_object().is_some_and(|o| {
+                    o.len() == 3
+                        && o.get("instruction_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|i| i.starts_with("ins_"))
+                        && matches!(
+                            o.get("result").and_then(Value::as_str),
+                            Some("executed" | "mismatch")
+                        )
+                        && o.get("observed_manifest_digest")
+                            .is_some_and(Value::is_string)
+                })
+            })
+    }
+
+    /// `POST /holders/status` in the H.12 order (§11.3, H.4).
+    fn handle_status(&mut self, content_type: &str, body: &[u8]) -> HttpResponse {
+        if body.len() > REQUEST_MAX_BYTES {
+            return self.report_problem(413, "payload_too_large", None);
+        }
+        if self.rollback_suspected {
+            return self.report_problem(503, "authority_epoch_mismatch", None);
+        }
+        if self.custody_unreadable {
+            return self.report_problem(503, "lifecycle_unavailable", None);
+        }
+        let issuer = self.config.issuer.clone();
+        let verified = std::str::from_utf8(body)
+            .ok()
+            .and_then(|text| jws::parse(text).ok())
+            .filter(|request| {
+                content_type == self.config.profile.status_request_content_type()
+                    && request.typ == self.config.profile.typ_status_request
+                    && request.alg == "EdDSA"
+                    && request.kid == self.holder_jkt
+                    && self
+                        .holder_key
+                        .is_some_and(|key| request.verify_eddsa(&key))
+            })
+            .map(|request| request.claims)
+            .filter(|claims| {
+                let text = |name: &str| claims.get(name).and_then(Value::as_str);
+                text("iss") == Some(self.holder_id.as_str())
+                    && text("sub") == Some(self.holder_id.as_str())
+                    && text("aud") == Some(issuer.as_str())
+                    && text("htu") == Some(format!("{issuer}{ROUTE_STATUS}").as_str())
+            });
+        let Some(claims) = verified else {
+            return self.report_problem(401, "invalid_holder_proof", None);
+        };
+        let answer = self.status_after_signature(body, &claims);
+        self.statuses.push((claims, answer.status));
+        answer
+    }
+
+    fn status_after_signature(&mut self, body: &[u8], claims: &Map<String, Value>) -> HttpResponse {
+        // 4. Rollback witness.
+        if let Some(reference) = claims.get("list_ref")
+            && Self::well_formed_ref(reference)
+            && self.tag_valid(reference)
+        {
+            let epoch = reference["rev"]["epoch"].as_str().unwrap_or_default();
+            let seq = reference["rev"]["seq"].as_u64().unwrap_or_default();
+            if (epoch == self.epoch && seq > self.seq) || !self.lineage.iter().any(|e| e == epoch) {
+                self.rollback_suspected = true;
+                self.audit.push("restore_detected");
+                return self.report_problem(503, "authority_epoch_mismatch", None);
+            }
+        }
+        // 5. Time.
+        let now_s = self.now_ms().div_euclid(1000);
+        let iat = claims
+            .get("iat")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
+        let exp = claims
+            .get("exp")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MIN);
+        if now_s > exp.saturating_add(SKEW_S)
+            || (now_s - iat).abs() > SKEW_S
+            || !(60..=300).contains(&(exp - iat))
+        {
+            return self.report_problem(401, "proof_expired", None);
+        }
+        // 6. Replay.
+        if let Some(jti) = claims.get("jti").and_then(Value::as_str)
+            && !self.seen_jti.insert(jti.to_owned())
+        {
+            return self.report_problem(401, "replay", None);
+        }
+        // 7. Credential scope.
+        if self.disabled && !self.has_open_obligations() {
+            return self.report_problem(403, "holder_not_authorized", None);
+        }
+        let key = claims
+            .get("idempotency_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        // 8. Rate: one new key per 60 s; same-key replays are exempt.
+        if !self.status_receipts.contains_key(&key)
+            && self
+                .last_status_key_ms
+                .is_some_and(|last| self.now_ms() - last < 60_000)
+        {
+            return self.report_problem(429, "rate_limited", None);
+        }
+        // 9. Grammar.
+        if !Self::status_grammar(claims) {
+            return self.report_problem(400, "invalid_request", None);
+        }
+        // 10. Idempotency.
+        let mut business = claims.clone();
+        for volatile in ["jti", "iat", "exp"] {
+            business.remove(volatile);
+        }
+        if let Some((stored, ack)) = self.status_receipts.get(&key) {
+            return if *stored == business {
+                let ack = ack.clone();
+                self.status_ack_response(&ack)
+            } else {
+                self.report_problem(409, "idempotency_conflict", None)
+            };
+        }
+        // `list_ref`: tag-valid, current epoch, at or above the floor.
+        let reference = &claims["list_ref"];
+        let seq = reference["rev"]["seq"].as_u64().unwrap_or(0);
+        let floor = self
+            .status_floor
+            .as_ref()
+            .filter(|(epoch, _)| *epoch == self.epoch)
+            .map_or(0, |(_, seq)| *seq);
+        if !self.tag_valid(reference)
+            || reference["rev"]["epoch"] != self.epoch.as_str()
+            || seq < floor
+        {
+            return self.report_problem(409, "stale_list_ref", None);
+        }
+        // 11. Commit, with the H.13 and H.53 commit-time re-checks.
+        self.clock.advance(self.commit_delay_ms);
+        if self.now_ms().div_euclid(1000) > exp + SKEW_S {
+            return self.report_problem(401, "proof_expired", None);
+        }
+        if reference["rev"]["epoch"] != self.epoch.as_str() {
+            return self.report_problem(409, "stale_list_ref", None);
+        }
+        // `release_result` never refuses (H.4.6).
+        let disposition = claims.get("release_result").map(|result| {
+            let id = result["instruction_id"].as_str().unwrap_or_default();
+            let outcome = result["result"].as_str().unwrap_or_default();
+            if self.outstanding(id) {
+                self.instructions.retain(|i| i["instruction_id"] != id);
+                let finalized = if outcome == "executed" {
+                    "executed"
+                } else {
+                    self.audit.push("reapproval_requested");
+                    "superseded_mismatch"
+                };
+                self.finalized.insert(id.to_owned(), finalized);
+                "applied"
+            } else if self.finalized.contains_key(id) {
+                "already_final"
+            } else {
+                "unknown_instruction"
+            }
+        });
+        // H.9: a status showing zero unattributed unblocks.
+        if claims["quarantined_unattributed"] == 0 {
+            for item in self.items.values_mut() {
+                if item["obligation"]["state"] == "blocked" {
+                    let obligation = item["obligation"].as_object_mut().expect("obligation");
+                    obligation.insert("state".into(), "quarantined".into());
+                    obligation.remove("blocked");
+                }
+            }
+        }
+        self.commit();
+        self.status_floor = Some((self.epoch.clone(), seq));
+        self.last_status_key_ms = Some(self.now_ms());
+        let mut ack_claims = json!({
+            "iss": self.config.issuer,
+            "aud": self.config.profile.holder_audience(&self.holder_id),
+            "sub": self.holder_id,
+            "iat": self.now_ms().div_euclid(1000),
+            "jti": self.next_id("ak_"),
+            "idempotency_key": key,
+            "report_jti": claims["jti"],
+            "report_digest": crate::canonical::sha256_tagged(body),
+            "accepted_quarantined_unattributed": claims["quarantined_unattributed"],
+            "accepted_manifest_digest": claims["quarantine_manifest_digest"],
+            "accepted_holder_state": claims["holder_state"],
+            "rev": { "epoch": self.epoch, "seq": self.seq },
+        });
+        if let Some(disposition) = disposition {
+            ack_claims["release_result_disposition"] = disposition.into();
+        }
+        let ack = self.sign_with_active(&self.config.profile.typ_status_ack.clone(), &ack_claims);
+        self.status_receipts.insert(key, (business, ack.clone()));
+        self.accepted_digests
+            .push(crate::canonical::sha256_tagged(body));
+        self.status_ack_response(&ack)
+    }
+
+    /// Signs a status ack with arbitrary claims under the current key.
+    pub fn sign_status_ack(&self, claims: &Value) -> String {
+        self.sign_with_active(&self.config.profile.typ_status_ack.clone(), claims)
+    }
+
+    /// A status ack response as the status route would send it.
+    pub fn status_ack_answer(&self, ack: &str) -> HttpResponse {
+        self.status_ack_response(ack)
     }
 
     /// Signs an ack with arbitrary claims under the current key.
@@ -1199,6 +1516,28 @@ impl FakeState {
 }
 
 impl Transport for FakeAuthority {
+    #[cfg(all(test, unix))]
+    fn before_dispatch(&self) {
+        let hook = self.state().before_dispatch.take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+    fn post_lifecycle(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: &[u8],
+        timeouts: Timeouts,
+        delivery: crate::client::ResponseDelivery,
+        start: crate::client::PostStart<'_>,
+    ) -> Result<HttpResponse, TransportError> {
+        start.entered();
+        self.state()
+            .deliveries
+            .insert(delivery.request_key().to_owned(), delivery);
+        self.post(url, content_type, body, timeouts)
+    }
     fn post(
         &self,
         url: &str,
@@ -1239,6 +1578,15 @@ impl Transport for FakeAuthority {
                     Ok(answer)
                 }
             }
+            None if url == format!("{}{ROUTE_STATUS}", state.config.issuer) => {
+                let answer = state.handle_status(content_type, body);
+                if answer.status == 200 && state.drop_status_acks > 0 {
+                    state.drop_status_acks -= 1;
+                    Err(TransportError::Timeout)
+                } else {
+                    Ok(answer)
+                }
+            }
             None => Ok(state.problem(None, 404, "not_found")),
         };
         state.clock.advance(rest);
@@ -1246,7 +1594,12 @@ impl Transport for FakeAuthority {
     }
 
     fn get(&self, url: &str, _timeouts: Timeouts) -> Result<HttpResponse, TransportError> {
-        let state = self.state();
+        let mut state = self.state();
+        state.keyset_gets += 1;
+        #[cfg(all(test, unix))]
+        if let Some(response) = state.keyset_response.take() {
+            return response;
+        }
         match &state.keyset_statement {
             Some(statement) if url == format!("{}{ROUTE_KEYSET}", state.config.issuer) => {
                 Ok(HttpResponse {

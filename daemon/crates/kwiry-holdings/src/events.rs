@@ -77,6 +77,8 @@ pub enum HolderEvent {
     ReportBugHalt { status: u16 },
     /// A verified ack that matches no path; nothing was stored.
     AckUnverifiable,
+    /// The delayed response did not name its originating request.
+    UnknownResponseKey,
     /// A replay receipt for a key the authority definitively refused.
     AckContradiction,
     /// A convergence ack (`409 state_regression` or `already_complete`, or a
@@ -91,6 +93,32 @@ pub enum HolderEvent {
     /// `403`: queued, unsent reports were cancelled (possibly sent attempts
     /// are kept as uncertain).
     ReportsCancelled { count: usize },
+    /// The status channel bug-halted (`400`, `413`, `409
+    /// idempotency_conflict`, repeated unverifiable acks). It releases the
+    /// status-first gate; only an operator resume re-derives it.
+    StatusBugHalt { status: u16 },
+    /// The authority definitively refused a status report (`409
+    /// stale_list_ref`); it is re-derived after a relist.
+    StatusRejected { status: u16 },
+    /// Operator resume (N5) of the status channel.
+    StatusResumed,
+    /// Operator resume (N5) of an obligation report channel.
+    ReportResumed,
+    /// A release result was accepted as audit only
+    /// (`unknown_instruction` or `already_final`, H.4.6).
+    ReleaseResultAudit { disposition: &'static str },
+    /// A release did not match the holder's own census exactly (G.5):
+    /// nothing was reserved or deleted.
+    ReleaseMismatch,
+    /// A release matched exactly; its units are reserved for deletion.
+    ReleaseReserved,
+    /// Every unit a release reserved is gone.
+    ReleaseExecuted,
+    /// A release step failed; nothing was assumed and it is retried.
+    ReleaseStepFailed { step: &'static str },
+    /// A recorded release reservation is not confirmed by the purger in
+    /// this process: no list applies until it is.
+    ReleaseReservationPending,
     /// A holder-class profile alert.
     Engine(EngineEvent),
 }
@@ -128,12 +156,23 @@ impl HolderEvent {
             Self::PurgeStepFailed { .. } => "lifecycle_purge_step_failed",
             Self::PurgeScanInvalidated => "lifecycle_purge_scan_invalidated",
             Self::ReportBugHalt { .. } => "lifecycle_report_bug_halt",
+            Self::UnknownResponseKey => "unknown_response_key",
             Self::AckUnverifiable => "ack_unverifiable",
             Self::AckContradiction => "ack_contradiction",
             Self::ReportConverged => "lifecycle_report_converged",
             Self::AckOtherEpoch => "lifecycle_ack_other_epoch",
             Self::ReportRejected { .. } => "lifecycle_report_rejected",
             Self::ReportsCancelled { .. } => "lifecycle_reports_cancelled",
+            Self::StatusBugHalt { .. } => "lifecycle_status_bug_halt",
+            Self::StatusRejected { .. } => "lifecycle_status_rejected",
+            Self::StatusResumed => "lifecycle_status_resumed",
+            Self::ReportResumed => "lifecycle_report_resumed",
+            Self::ReleaseResultAudit { .. } => "lifecycle_release_result_audit",
+            Self::ReleaseMismatch => "lifecycle_release_mismatch",
+            Self::ReleaseReserved => "lifecycle_release_reserved",
+            Self::ReleaseExecuted => "lifecycle_release_executed",
+            Self::ReleaseStepFailed { .. } => "lifecycle_release_step_failed",
+            Self::ReleaseReservationPending => "lifecycle_release_reservation_pending",
             Self::Engine(event) => event.code(),
         }
     }

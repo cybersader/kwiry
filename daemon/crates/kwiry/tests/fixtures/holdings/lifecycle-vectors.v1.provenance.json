@@ -1,5 +1,5 @@
 {
-  "fixture": "openclast-lifecycle-vectors.v1.json",
+  "fixture": "lifecycle-vectors.v1.json",
   "sha256": "6849181dbf41286ecdc18942a7b6194de3f843733c9d9431b0652600ccfe9da0",
   "source": {
     "repository": "https://github.com/cybersader/openclast",
@@ -20,6 +20,8 @@
     "typ_keyset": "openclast-lifecycle-keyset+jwt",
     "typ_report_request": "openclast-obligation-report+jwt",
     "typ_report_ack": "openclast-obligation-ack+jwt",
+    "typ_status_request": "openclast-holder-status+jwt",
+    "typ_status_ack": "openclast-holder-status-ack+jwt",
     "outcome_header": "OpenClast-Lifecycle-Outcome",
     "audience_prefix": "openclast-lifecycle:",
     "authority_key_id_prefix": "lc-",

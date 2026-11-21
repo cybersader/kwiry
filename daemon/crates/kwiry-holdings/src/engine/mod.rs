@@ -2,7 +2,7 @@
 //!
 //! Normative source: Part II of the authority workspace file
 //! `.workspace/kwiry-integration/HOLDINGS-WIRE-v2.md` (sha256
-//! `b55bf6b2282a602c1574dd63e1b9e9b711b3a0f1cfd0bcb0da291b4ab90e8456`).
+//! `a3d5220c0a2f0a1114f0ca93247f3b8b705313e029c568afc751f9c837c25ea0`).
 //! One module per section that binds a holder:
 //!
 //! | Module | v2 section | What it adds to the core |
@@ -190,7 +190,9 @@ pub enum EngineEvent {
     /// S.6: the set was initialised fresh; walk exclusions are weaker until
     /// lists refill it. Once per start.
     PinHistoryUnavailable,
-    /// S.6: the ceiling would be exceeded; it was raised, never evicted.
+    /// S.6 advance warning: A1 must raise the ceiling to avoid evicting pairs.
+    PinHistoryCeilingWillRise { from: u64, to: u64 },
+    /// Confirmation: A1 has durably committed the higher ceiling.
     PinHistoryCeilingRaised { from: u64, to: u64 },
     /// S.4: a signed page or capability proved a lag of more than 30 s.
     ClockHoldRaised { lag_lower_bound_ms: i64 },
@@ -212,6 +214,7 @@ impl EngineEvent {
     pub fn code(&self) -> &'static str {
         match self {
             Self::PinHistoryUnavailable => "pin_history_unavailable",
+            Self::PinHistoryCeilingWillRise { .. } => "pin_history_ceiling_will_rise",
             Self::PinHistoryCeilingRaised { .. } => "pin_history_ceiling_raised",
             Self::ClockHoldRaised { .. } => "clock_behind_authority",
             Self::ClockHoldCleared { .. } => "clock_behind_authority_cleared",

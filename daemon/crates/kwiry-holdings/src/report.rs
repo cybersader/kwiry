@@ -48,7 +48,6 @@ use crate::store::{ArtifactPurger, ResourceStore};
 use crate::verify::VerifiedList;
 use crate::wire::{ObligationState, Phase, ReportState, Rev};
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
 
 /// Report transmissions per holder per second (H.8).
 pub const REPORTS_PER_SECOND: usize = 10;
@@ -60,8 +59,9 @@ pub const QUEUE_CAP_MS: u64 = 30_000;
 pub const ABSENCE_BOUND_S: i64 = 120;
 /// Unverifiable acks in a row before the channel halts (R17).
 pub const UNVERIFIABLE_HALT: u8 = 3;
-const BACKOFF_START_MS: u64 = 10_000;
-const BACKOFF_MAX_MS: u64 = 300_000;
+// Positive permission to recover the live queue after an operator restart.
+// Removing an existing file does not need space for another lifecycle record.
+const QUEUE_SEAL: &str = "report-queue.seal";
 
 /// A verified obligation ack (v2 §4.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +114,18 @@ pub struct ReportSummary {
     pub waiting: usize,
 }
 
+impl ReportSummary {
+    pub(crate) fn record(&mut self, answer: Answer) {
+        match answer {
+            Answer::Receipt => self.receipts += 1,
+            Answer::Converged => self.converged += 1,
+            Answer::Rejected => self.rejected += 1,
+            Answer::Halted => self.halted += 1,
+            _ => {}
+        }
+    }
+}
+
 enum Guard {
     Pass,
     /// The claim may still hold, but its proof is not available yet.
@@ -125,6 +137,7 @@ enum Guard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
     Receipt,
+    Duplicate,
     Converged,
     Rejected,
     Halted,
@@ -186,7 +199,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         )
     }
 
-    fn high_water_epoch(&self) -> Option<String> {
+    pub(crate) fn high_water_epoch(&self) -> Option<String> {
         self.writer
             .state()
             .high_water
@@ -355,13 +368,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// and reports may run again.
     pub(crate) fn after_apply(&mut self, prune: &[Attempt]) {
         self.relist_before_report = false;
+        self.release_list_rejected = false;
+        self.authority_evidence_lost = false;
         self.apply_failed_since_admit = false;
+        self.lifecycle_unavailable = false;
         self.rollback_suspected = false;
         self.prune_sent(prune);
+        self.resolve_status_uncertain();
     }
 
     /// Removes sent bytes nothing refers to any more (best effort).
-    fn prune_sent(&mut self, attempts: &[Attempt]) {
+    pub(crate) fn prune_sent(&mut self, attempts: &[Attempt]) {
         for attempt in attempts {
             let _ = self.writer.remove_side_file(&sent_file(&attempt.digest));
         }
@@ -373,9 +390,31 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &dyn ArtifactPurger,
     ) -> Result<ReportSummary, ObligationsRefused> {
+        let (received, _, mut summary) = self.drain_deliveries();
+        if received || self.traffic_halted() {
+            return Ok(summary);
+        }
+        let debts: Vec<_> = self
+            .writer
+            .state()
+            .status
+            .owed
+            .iter()
+            .filter(|o| o.for_report())
+            .cloned()
+            .collect();
+        if !debts.is_empty() {
+            for owed in debts {
+                summary.record(self.apply_owed(owed));
+            }
+            return Ok(summary);
+        }
         self.obligations_allowed()?;
-        let mut summary = ReportSummary::default();
-        if self.route != RouteHealth::Normal || self.apply_failed_since_admit {
+        if self.apply_failed_since_admit {
+            return Ok(summary);
+        }
+        if let Some((ob, key, response)) = self.late_reports.pop_front() {
+            summary.record(self.delayed_report(&ob, &key, response));
             return Ok(summary);
         }
         let Ok(inventory) = self.inventory(purger) else {
@@ -388,9 +427,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.invalidate_failing(&targets, &inventory, &mut summary);
         for target in &targets {
             self.obligations_allowed()?;
-            if self.derive_and_store(target, &inventory) {
-                summary.derived += 1;
-            }
+            self.derive_and_store(target, &inventory, &mut summary);
         }
         for target in &targets {
             self.obligations_allowed()?;
@@ -564,7 +601,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     ) {
         let book = self.writer.state().obligations.clone();
         let mut next = book.clone();
-        let mut changed = false;
+        let mut changed = 0;
         for (ob, channel) in &book.channels {
             let Some(pending) = channel.pending.as_ref().filter(|p| p.live()) else {
                 continue;
@@ -575,12 +612,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             };
             if failing {
                 invalidate(&mut next, ob);
-                summary.invalidated += 1;
-                changed = true;
+                changed += 1;
             }
         }
-        if changed {
-            self.commit_book(next);
+        if changed != 0 {
+            self.commit_books_then(Some(next), None, false, |_| summary.invalidated += changed);
         }
     }
 
@@ -601,16 +637,21 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .max()
     }
 
-    /// R1 with its enqueue guard. Returns whether a new report was stored.
-    fn derive_and_store(&mut self, target: &Target, inventory: &Inventory) -> bool {
+    /// R1 with its enqueue guard.
+    fn derive_and_store(
+        &mut self,
+        target: &Target,
+        inventory: &Inventory,
+        summary: &mut ReportSummary,
+    ) {
         if self.relist_before_report {
-            return false;
+            return;
         }
         let Some(epoch) = self.high_water_epoch() else {
-            return false;
+            return;
         };
         let Some(body) = self.derive(target, inventory) else {
-            return false;
+            return;
         };
         let book = self.writer.state().obligations.clone();
         let channel = book
@@ -619,12 +660,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .cloned()
             .unwrap_or_else(|| Channel::new(&target.holding_id, target.resource.clone()));
         if channel.halted {
-            return false;
+            return;
         }
         let state = body.state;
         // §4.4: never below a state that may already have been sent.
         if Self::possibly_sent_max(&book, &target.obligation_id).is_some_and(|max| state < max) {
-            return false;
+            return;
         }
         let now = self.clock.wall_ms();
         let same_state = match channel.floor_in(&epoch) {
@@ -637,11 +678,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     .last_same_state_ms
                     .is_none_or(|last| now - last >= crate::obligations::SAME_STATE_WINDOW_MS);
                 if !update || !window_open {
-                    return false;
+                    return;
                 }
                 true
             }
-            Some(_) => return false,
+            Some(_) => return,
         };
         let mut uncertain_from_pending = None;
         let mut answered: Vec<Attempt> = Vec::new();
@@ -651,7 +692,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             }
             if pending.live() {
                 if state <= pending.body.state {
-                    return false;
+                    return;
                 }
                 uncertain_from_pending = Some(pending.clone());
             } else if !pending.attempts.is_empty() && pending.status == PendingStatus::Invalidated {
@@ -675,19 +716,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 .write_side_file(&format!("scan.{key}.json"), &scan.record)
                 .is_err()
         {
-            return false;
+            return;
         }
-        let units: BTreeSet<String> = inventory.unattributed.clone();
         if self
             .writer
             .write_side_file(
                 &format!("manifest.{key}.json"),
-                &manifest_bytes(&holder_id, &units),
+                &manifest_bytes(&holder_id, &inventory.unattributed),
             )
             .is_err()
         {
             self.events.emit(HolderEvent::StorageExhausted);
-            return false;
+            return;
         }
         let mut next = book;
         if let Some(previous) = uncertain_from_pending {
@@ -708,11 +748,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             attempts: Vec::new(),
             epoch,
         });
-        let stored = self.commit_book(next);
-        if stored {
-            self.prune_sent(&answered);
-        }
-        stored
+        self.commit_books_then(Some(next), None, false, |holder| {
+            holder.prune_sent(&answered);
+            summary.derived += 1;
+        });
     }
 
     fn rate_allows(&mut self) -> bool {
@@ -728,15 +767,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     fn back_off(&mut self, retry_after_s: Option<u64>) {
-        let now = self.clock.mono_ms();
-        self.report_backoff_ms = self
-            .report_backoff_ms
-            .saturating_mul(2)
-            .clamp(BACKOFF_START_MS, BACKOFF_MAX_MS);
-        let wait = retry_after_s
-            .map_or(0, |s| s.saturating_mul(1000))
-            .max(self.report_backoff_ms);
-        self.report_backoff_until = now.saturating_add(wait);
+        let wait = crate::schedule::defer_post(
+            self.clock.mono_ms(),
+            &mut self.report_backoff_ms,
+            &mut self.report_backoff_until,
+            retry_after_s,
+        );
+        let mut book = self.writer.state().obligations.clone();
+        book.restart_wait_ms = Some(wait);
+        if !self.commit_book(book) {
+            self.writer.mark_unwritable();
+        }
     }
 
     /// R2 → R2d → the answer, for one obligation's live report.
@@ -748,9 +789,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     ) {
         let ob = target.obligation_id.clone();
         let mut replay_retried = false;
-        let mut expiry_retried = false;
         loop {
-            if self.fail_stopped() || self.route != RouteHealth::Normal {
+            if self.drain_deliveries().0
+                || !self.late_reports.is_empty()
+                || self.fail_stopped()
+                || self.route != RouteHealth::Normal
+                || self.relist_before_report
+            {
                 return;
             }
             let book = self.writer.state().obligations.clone();
@@ -760,7 +805,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let Some(pending) = channel.pending.clone().filter(Pending::live) else {
                 return;
             };
-            if channel.halted {
+            if channel.halted
+                || self
+                    .writer
+                    .state()
+                    .status
+                    .owed
+                    .iter()
+                    .any(|o| o.blocks_report(&ob))
+            {
                 return;
             }
             // H.22, H.27: a first send waits while the status-first gate is
@@ -785,8 +838,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 Guard::Fail => {
                     let mut next = book;
                     invalidate(&mut next, &ob);
-                    self.commit_book(next);
-                    summary.invalidated += 1;
+                    self.commit_books_then(Some(next), None, false, |_| summary.invalidated += 1);
                     return;
                 }
             }
@@ -809,62 +861,61 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             // send completes, so nothing can appear in between. A moved
             // inventory, an auth halt, a fail-stop, an aged attempt or a
             // freeze the adapter cannot give cancels it as never transmitted.
+            let url = format!("{}{ROUTE_REPORT}", self.writer.enrollment().issuer);
+            let content_type = self.config.profile.report_request_content_type();
+            let delivery = self.inbox.bind(
+                crate::client::Origin::Report(ob.clone()),
+                &pending.key,
+                &pending.body.list_ref,
+            );
+            let inbox = self.inbox.clone();
+            let ticket = inbox.ticket();
             let freeze = purger.freeze_publications().ok();
             let first_byte_ok = freeze.is_some()
                 && !self.fail_stopped()
                 && self.route == RouteHealth::Normal
-                && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS
                 && self.inventory(purger).is_ok_and(|now| {
                     now.binding(&target.resource) == inventory.binding(&target.resource)
                         && self
                             .derive(target, &now)
                             .is_some_and(|c| c.counts == pending.body.counts)
-                });
-            if !first_byte_ok {
+                })
+                && self.clock.mono_ms().saturating_sub(sent.armed_mono) < QUEUE_CAP_MS;
+            #[cfg(all(test, unix))]
+            self.transport.before_dispatch();
+            let dispatched_at = self.clock.mono_ms();
+            let Some(start) = first_byte_ok.then(|| inbox.admit(ticket)).flatten() else {
                 drop(freeze);
-                self.cancel_attempt(&ob, &sent.attempt);
-                summary.cancelled += 1;
+                self.cancel_attempt(&ob, &sent.attempt, summary);
+                self.drain_deliveries();
                 return;
-            }
-            self.report_sends.push_back(self.clock.mono_ms());
-            summary.sent += 1;
-            let url = format!("{}{ROUTE_REPORT}", self.writer.enrollment().issuer);
-            let response = self.transport.post(
+            };
+            let response = self.transport.post_lifecycle(
                 &url,
-                &self.config.profile.report_request_content_type(),
+                &content_type,
                 sent.compact.as_bytes(),
                 LIST_TIMEOUTS,
+                delivery,
+                start,
             );
+            self.report_sends.push_back(dispatched_at);
+            summary.sent += 1;
             drop(freeze);
             let answer = self.classify(&ob, &pending, response);
+            summary.record(answer);
             match answer {
                 Answer::Receipt => {
-                    summary.receipts += 1;
                     self.report_backoff_ms = 0;
                     return;
                 }
-                Answer::Converged => {
-                    summary.converged += 1;
-                    return;
-                }
-                Answer::Rejected => {
-                    summary.rejected += 1;
-                    return;
-                }
-                Answer::Halted => {
-                    summary.halted += 1;
-                    return;
-                }
-                Answer::Unverifiable | Answer::AuthHalted => return,
+                Answer::Converged | Answer::Rejected | Answer::Halted => return,
+                Answer::Duplicate | Answer::Unverifiable | Answer::AuthHalted => return,
                 Answer::RetryReplay if !replay_retried => replay_retried = true,
-                Answer::RetryExpired if !expiry_retried => expiry_retried = true,
-                Answer::RetryExpired => {
-                    self.events.emit(HolderEvent::ProofExpiredClockAlert);
-                    self.back_off(None);
-                    return;
-                }
+                Answer::RetryExpired => {}
                 Answer::RetryReplay | Answer::BackOff => {
-                    self.back_off(None);
+                    if self.clock.mono_ms() >= self.report_backoff_until {
+                        self.back_off(None);
+                    }
                     return;
                 }
             }
@@ -905,30 +956,46 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             exp_s: iat_s + crate::wire::REQUEST_LIFETIME_SECONDS,
         };
         let mut next = self.writer.state().obligations.clone();
+        next.restart_wait_ms = None;
         let channel = next.channels.get_mut(ob)?;
         let record = channel.pending.as_mut()?;
         record.attempts.push(attempt.clone());
         record.status = PendingStatus::Armed;
-        if !self.commit_book(next) {
+        // G.3: a release may bind to these exact bytes; the manifest their
+        // body names is indexed by their digest in the same commit.
+        let mut status = self.writer.state().status.clone();
+        status.manifests.insert(
+            attempt.digest.clone(),
+            crate::status::ManifestRef {
+                key: pending.key.clone(),
+                manifest_digest: pending.body.counts.quarantine_manifest_digest.clone(),
+                recorded_ms: self.clock.wall_ms(),
+            },
+        );
+        let armed_mono = self.clock.mono_ms();
+        if !self.commit_lifecycle(Some(next), Some(status), false) {
             return None;
         }
         Some(Armed {
             compact,
             attempt,
-            armed_mono: self.clock.mono_ms(),
+            armed_mono,
         })
     }
 
     /// R2q → R2x: the attempt never left; prune it and invalidate the report.
-    fn cancel_attempt(&mut self, ob: &str, attempt: &Attempt) {
+    fn cancel_attempt(&mut self, ob: &str, attempt: &Attempt, summary: &mut ReportSummary) {
         let mut next = self.writer.state().obligations.clone();
         if let Some(pending) = next.channels.get_mut(ob).and_then(|c| c.pending.as_mut()) {
             pending.attempts.retain(|a| a != attempt);
         }
         invalidate(&mut next, ob);
-        if self.commit_book(next) {
-            self.prune_sent(std::slice::from_ref(attempt));
-        }
+        let mut status = self.writer.state().status.clone();
+        status.manifests.remove(&attempt.digest);
+        self.commit_books_then(Some(next), Some(status), false, |holder| {
+            holder.prune_sent(std::slice::from_ref(attempt));
+            summary.cancelled += 1;
+        });
     }
 
     pub(crate) fn classify(
@@ -937,11 +1004,51 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         pending: &Pending,
         response: Result<HttpResponse, TransportError>,
     ) -> Answer {
-        let response = match response {
-            Ok(response) => response,
-            // R10 / R2c: sent, outcome unknown; the attempt stays recorded.
-            Err(_) => return Answer::BackOff,
-        };
+        if let Ok(response) = &response {
+            self.observe_list_refusal(&pending.body.list_ref, response);
+        }
+        self.classify_report(ob, &pending.key, Some(pending), response)
+    }
+
+    pub(crate) fn delayed_report(&mut self, ob: &str, key: &str, response: HttpResponse) -> Answer {
+        let pending = self
+            .writer
+            .state()
+            .obligations
+            .channels
+            .get(ob)
+            .and_then(|c| c.pending.as_ref())
+            .filter(|p| p.live() && p.key == key)
+            .cloned();
+        let answer = self.classify_report(ob, key, pending.as_ref(), Ok(response));
+        if answer == Answer::BackOff && self.clock.mono_ms() >= self.report_backoff_until {
+            self.back_off(None);
+        }
+        answer
+    }
+
+    fn classify_report(
+        &mut self,
+        ob: &str,
+        key: &str,
+        pending: Option<&Pending>,
+        response: Result<HttpResponse, TransportError>,
+    ) -> Answer {
+        self.classify_post(
+            crate::client::Origin::Report(ob.into()),
+            key,
+            response,
+            |holder, response| holder.report_answer(ob, key, pending, response),
+        )
+    }
+
+    fn report_answer(
+        &mut self,
+        ob: &str,
+        key: &str,
+        pending: Option<&Pending>,
+        response: HttpResponse,
+    ) -> Answer {
         let code = problem_code(&response);
         match (response.status, code.as_deref()) {
             (200, _) => {
@@ -956,13 +1063,16 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 let Ok(compact) = String::from_utf8(response.body) else {
                     return self.unverifiable(ob);
                 };
-                match self.verify_ack(&compact) {
+                match self.verify_with_refresh(&compact, Self::verify_ack) {
                     Ok(ack) => self.on_ack(
                         ob,
+                        key,
                         pending,
                         ack,
                         outcome.as_deref() == Some("already_complete"),
                     ),
+                    Err(crate::transition::ReceiptFailure::Refused(answer)) => answer,
+                    Err(crate::transition::ReceiptFailure::PinWrite) => Answer::BackOff,
                     Err(_) => self.unverifiable(ob),
                 }
             }
@@ -974,8 +1084,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                             .and_then(Value::as_str)
                             .map(str::to_owned)
                     });
-                match current.map(|c| self.verify_ack(&c)) {
-                    Some(Ok(ack)) => self.on_ack(ob, pending, ack, true),
+                match current.map(|c| self.verify_with_refresh(&c, Self::verify_ack)) {
+                    Some(Ok(ack)) => self.on_ack(ob, key, pending, ack, true),
+                    Some(Err(crate::transition::ReceiptFailure::Refused(answer))) => answer,
+                    Some(Err(crate::transition::ReceiptFailure::PinWrite)) => Answer::BackOff,
                     _ => self.unverifiable(ob),
                 }
             }
@@ -983,29 +1095,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 if matches!(code.as_deref(), Some("stale_list_ref")) || response.status == 404 {
                     self.relist_before_report = true;
                 }
-                self.reject(ob, pending, response.status);
-                Answer::Rejected
+                self.record_refusal(crate::transition::Owed::ReportRejected {
+                    ob: ob.into(),
+                    key: key.into(),
+                    code: response.status,
+                    relist: self.relist_before_report,
+                })
             }
             (409, Some("idempotency_conflict")) | (400 | 413, _) => {
-                self.halt(ob, response.status);
-                Answer::Halted
-            }
-            (401, Some("replay")) => Answer::RetryReplay,
-            (401, Some("proof_expired")) => Answer::RetryExpired,
-            (401, _) => {
-                self.route = RouteHealth::AuthHalt(AuthHalt::InvalidProof);
-                self.events.emit(HolderEvent::HolderUnauthorized);
-                Answer::AuthHalted
-            }
-            (403, _) => {
-                self.on_not_authorized();
-                Answer::AuthHalted
-            }
-            (503, Some("authority_epoch_mismatch")) => {
-                // H.12 step 2 or 4: no purge until a verified list applies.
-                self.rollback_suspected = true;
-                self.events.emit(HolderEvent::AuthorityRollbackSuspected);
-                Answer::BackOff
+                self.record_refusal(crate::transition::Owed::ReportHalt {
+                    ob: ob.into(),
+                    code: response.status,
+                })
             }
             _ => {
                 if response.status == 429 {
@@ -1021,39 +1122,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let count = self.unverifiable.entry(ob.to_owned()).or_insert(0);
         *count += 1;
         if *count >= UNVERIFIABLE_HALT {
-            self.halt(ob, 0);
-            return Answer::Halted;
+            return self.record_refusal(crate::transition::Owed::ReportHalt {
+                ob: ob.into(),
+                code: 0,
+            });
         }
         Answer::Unverifiable
-    }
-
-    /// R9 (and R17 after repeated unverifiable acks): bug halt.
-    fn halt(&mut self, ob: &str, status: u16) {
-        let mut next = self.writer.state().obligations.clone();
-        if let Some(channel) = next.channels.get_mut(ob) {
-            channel.halted = true;
-        }
-        self.commit_book(next);
-        self.events.emit(HolderEvent::ReportBugHalt { status });
-    }
-
-    /// R7, R8: definitively not accepted; the key's bytes are pruned.
-    fn reject(&mut self, ob: &str, pending: &Pending, status: u16) {
-        let mut next = self.writer.state().obligations.clone();
-        let mut prune = Vec::new();
-        if let Some(record) = next
-            .channels
-            .get_mut(ob)
-            .and_then(|c| c.pending.as_mut())
-            .filter(|p| p.key == pending.key)
-        {
-            prune = std::mem::take(&mut record.attempts);
-            record.status = PendingStatus::Rejected;
-        }
-        if self.commit_book(next) {
-            self.prune_sent(&prune);
-        }
-        self.events.emit(HolderEvent::ReportRejected { status });
     }
 
     /// M10: `403` on any route. Nothing is servable, no traffic runs, and
@@ -1063,32 +1137,66 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.route = RouteHealth::AuthHalt(AuthHalt::NotAuthorized);
         self.gate.set_auth_halt();
         self.events.emit(HolderEvent::HolderNotAuthorized);
+        self.record_refusal(crate::transition::Owed::Cancel);
+    }
+
+    pub(crate) fn recover_cancellation(&mut self) -> Result<(), crate::holder::ConfigError> {
+        use crate::holder::ConfigError::CancellationRecovery;
+        let seal = self
+            .writer
+            .dir()
+            .read(QUEUE_SEAL)
+            .map_err(|_| CancellationRecovery)?;
+        if seal.as_deref() != Some(self.writer.enrollment().holder_id.as_bytes()) {
+            if self.record_refusal(crate::transition::Owed::Cancel) == Answer::BackOff {
+                return Err(CancellationRecovery);
+            }
+            let id = self.writer.enrollment().holder_id.clone();
+            self.writer
+                .write_side_file(QUEUE_SEAL, id.as_bytes())
+                .map_err(|failure| {
+                    crate::holder::report_write_failure(
+                        self.events.as_ref(),
+                        &crate::state::WriteError::Io(failure.error),
+                    );
+                    CancellationRecovery
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Traffic stops immediately on 403, but cancellation is only observable
+    /// as complete after the queue commit. Halted passes retry the write, not HTTP.
+    pub(crate) fn traffic_halted(&mut self) -> bool {
+        if self
+            .writer
+            .state()
+            .status
+            .owed
+            .contains(&crate::transition::Owed::Cancel)
+            && !self.fail_stopped()
+        {
+            self.apply_owed(crate::transition::Owed::Cancel);
+        }
+        self.route != RouteHealth::Normal
+    }
+
+    /// N5: an audited operator resume of a bug-halted report channel. Its
+    /// report moves to `invalidated` (attempts that may have been sent
+    /// become uncertain) and the next pass re-derives it under a new key.
+    /// Returns whether the channel was halted.
+    pub fn resume_report(&mut self, obligation_id: &str) -> bool {
         let mut next = self.writer.state().obligations.clone();
-        let mut cancelled = 0;
-        let obligations: Vec<String> = next.channels.keys().cloned().collect();
-        for ob in obligations {
-            let Some(pending) = next.channels.get(&ob).and_then(|c| c.pending.clone()) else {
-                continue;
-            };
-            if !pending.live() {
-                continue;
-            }
-            cancelled += 1;
-            if pending.attempts.is_empty() {
-                if let Some(channel) = next.channels.get_mut(&ob) {
-                    channel.pending = None;
-                }
-            } else {
-                invalidate(&mut next, &ob);
-            }
-        }
-        // The route halt above already stops every send in memory; the
-        // durable record only matters across the operator restart.
-        if cancelled > 0 {
-            self.commit_book(next);
-            self.events
-                .emit(HolderEvent::ReportsCancelled { count: cancelled });
-        }
+        let Some(channel) = next.channels.get_mut(obligation_id).filter(|c| c.halted) else {
+            return false;
+        };
+        channel.halted = false;
+        invalidate(&mut next, obligation_id);
+        self.commit_books_then(Some(next), None, false, |holder| {
+            holder.unverifiable.remove(obligation_id);
+            holder.events.emit(HolderEvent::ReportResumed);
+        })
+        .is_some()
     }
 
     /// Stores an ack's bytes under `name` in the holder directory.
@@ -1098,26 +1206,32 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .is_ok()
     }
 
-    fn on_ack(&mut self, ob: &str, pending: &Pending, ack: Ack, convergence: bool) -> Answer {
-        let answer = self.on_ack_inner(ob, pending, ack, convergence);
-        let epoch = self.high_water_epoch().unwrap_or_default();
-        let channel = self.writer.state().obligations.channels.get(ob);
-        let complete = channel.and_then(|c| c.floor_in(&epoch)) == Some(ReportState::Complete);
-        let owed = channel.is_some_and(|c| c.reconfirm_pending);
-        if complete {
-            self.verified.remove(ob);
-            if owed && channel.is_some_and(|c| c.pending.is_none()) {
-                let mut next = self.writer.state().obligations.clone();
-                if let Some(channel) = next.channels.get_mut(ob) {
-                    channel.reconfirm_pending = false;
-                }
-                self.commit_book(next);
-            }
+    // Uncertain records retain exact sent bytes rather than a second copy of
+    // the business claims. Read the cited revision from those same bytes.
+    fn uncertain_receipt_advances(&self, ack: &Ack) -> Option<bool> {
+        let bytes = self
+            .writer
+            .dir()
+            .read(&sent_file(&ack.report_digest))
+            .ok()??;
+        if sha256_tagged(&bytes) != ack.report_digest {
+            return None;
         }
-        answer
+        std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|s| crate::jws::parse(s).ok())
+            .and_then(|j| j.claims.get("list_ref")?.get("rev")?.get("seq")?.as_u64())
+            .map(|seq| ack.rev.seq > seq)
     }
 
-    fn on_ack_inner(&mut self, ob: &str, pending: &Pending, ack: Ack, convergence: bool) -> Answer {
+    fn on_ack(
+        &mut self,
+        ob: &str,
+        request_key: &str,
+        pending: Option<&Pending>,
+        ack: Ack,
+        convergence: bool,
+    ) -> Answer {
         let Some(epoch) = self.high_water_epoch() else {
             return self.unverifiable(ob);
         };
@@ -1125,16 +1239,23 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         // H.5: a replay path is taken only when both the key and the
         // obligation are the ones this request reported; anything else is
         // convergence (which itself requires the reported obligation).
-        let own_obligation = ack.obligation_id == ob && pending.body.obligation_id == ob;
-        if !convergence && own_obligation && ack.idempotency_key == pending.key {
+        let own_obligation =
+            ack.obligation_id == ob && pending.is_none_or(|p| p.body.obligation_id == ob);
+        let replay = !convergence && ack.idempotency_key == request_key;
+        if replay
+            && own_obligation
+            && let Some(pending) = pending.filter(|p| ack.idempotency_key == p.key)
+        {
             // Replay path (R5): a receipt for this key's own claims.
             let matches = pending
                 .attempts
                 .iter()
-                .any(|a| a.digest == ack.report_digest)
+                .any(|a| a.digest == ack.report_digest && a.jti == ack.report_jti)
                 && ack.obligation_id == pending.body.obligation_id
                 && ack.holding_id == pending.body.holding_id
-                && ack.accepted_state == pending.body.state;
+                && ack.accepted_state == pending.body.state
+                && ack.rev.epoch == pending.body.list_ref.rev.epoch
+                && ack.rev.seq > pending.body.list_ref.rev.seq;
             if !matches {
                 // V2: the attempt the ack names is not on record.
                 return self.unverifiable(ob);
@@ -1156,13 +1277,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 }
             }
             prune_covered_uncertain(&mut next, ob, &epoch);
-            self.unverifiable.remove(ob);
-            if self.commit_book(next) {
-                self.prune_sent(&prune);
-            }
-            return Answer::Receipt;
+            return self.commit_ack(ob, &epoch, (next, None), &prune, None, Answer::Receipt);
         }
-        if !convergence
+        if replay
             && own_obligation
             && let Some(uncertain) = book
                 .uncertain
@@ -1174,12 +1291,18 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             let matches = uncertain.obligation_id == ack.obligation_id
                 && uncertain.holding_id == ack.holding_id
                 && uncertain.state == ack.accepted_state
+                && ack.rev.epoch == uncertain.epoch
                 && uncertain
                     .attempts
                     .iter()
-                    .any(|a| a.digest == ack.report_digest);
+                    .any(|a| a.digest == ack.report_digest && a.jti == ack.report_jti);
             if !matches {
                 return self.unverifiable(ob);
+            }
+            match self.uncertain_receipt_advances(&ack) {
+                Some(true) => {}
+                Some(false) => return self.unverifiable(ob),
+                None => return Answer::BackOff, // local evidence unavailable, not an authority strike
             }
             if !self.store_receipt(&format!("receipt.{}.jws", ack.idempotency_key), &ack) {
                 return Answer::BackOff;
@@ -1198,14 +1321,31 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 {
                     channel.pending = None;
                 }
-            } else {
-                self.events.emit(HolderEvent::AckOtherEpoch);
             }
-            self.unverifiable.remove(ob);
-            if self.commit_book(next) {
-                self.prune_sent(&uncertain.attempts);
+            let audit = (ack.rev.epoch != epoch || uncertain.epoch != epoch)
+                .then_some(HolderEvent::AckOtherEpoch);
+            return self.commit_ack(
+                ob,
+                &epoch,
+                (next, None),
+                &uncertain.attempts,
+                audit,
+                Answer::Receipt,
+            );
+        }
+        if replay && own_obligation && pending.is_none() {
+            // A receipt side file alone is not proof of the holder W: an
+            // outstanding pending/uncertain key was handled above. Verify under
+            // live pins before comparing bytes, including on replay (H.37).
+            if self
+                .writer
+                .dir()
+                .read(&format!("receipt.{request_key}.jws"))
+                .is_ok_and(|b| b.as_deref() == Some(ack.compact.as_bytes()))
+            {
+                return Answer::Duplicate;
             }
-            return Answer::Receipt;
+            return self.unverifiable(ob);
         }
         // Convergence path (R6, R6e): never a receipt for the sent claims.
         let Some(channel) = book.channels.get(ob) else {
@@ -1218,41 +1358,104 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         {
             return self.unverifiable(ob);
         }
-        if !self.store_receipt(&format!("conv.{}.jws", ack.jti), &ack) {
+        self.record_refusal(crate::transition::Owed::Converge(
+            crate::transition::Convergence {
+                ob: ob.into(),
+                key: request_key.into(),
+                receipt_jti: ack.jti,
+                receipt: ack.compact,
+                epoch: ack.rev.epoch,
+                floor: ack.accepted_state,
+            },
+        ))
+    }
+
+    pub(crate) fn commit_convergence(
+        &mut self,
+        c: crate::transition::Convergence,
+        mut next: ObligationBook,
+        status: crate::status::StatusBook,
+    ) -> Answer {
+        let Some(epoch) = self.high_water_epoch() else {
+            return Answer::BackOff;
+        };
+        if self
+            .writer
+            .write_side_file(&format!("conv.{}.jws", c.receipt_jti), c.receipt.as_bytes())
+            .is_err()
+        {
+            self.events.emit(HolderEvent::StorageExhausted);
             return Answer::BackOff;
         }
-        let mut next = book;
+        let ob = c.ob.as_str();
         let mut prune = Vec::new();
-        if ack.rev.epoch == epoch {
+        if c.epoch == epoch {
             if let Some(channel) = next.channels.get_mut(ob) {
-                channel.raise_floor(ack.accepted_state, &epoch);
+                channel.raise_floor(c.floor, &epoch);
                 if let Some(record) = channel.pending.as_ref()
-                    && record.body.state <= ack.accepted_state
+                    && record.body.state <= c.floor
                 {
                     prune = record.attempts.clone();
                     channel.pending = None;
                 }
             }
             prune_covered_uncertain(&mut next, ob, &epoch);
-            self.events.emit(HolderEvent::ReportConverged);
         } else {
             // R6e: audit only; no floor change; relist before re-deriving.
             if let Some(record) = next
                 .channels
                 .get_mut(ob)
                 .and_then(|c| c.pending.as_mut())
-                .filter(|p| p.key == pending.key)
+                .filter(|p| p.key == c.key)
             {
                 record.status = PendingStatus::Rejected;
             }
             self.relist_before_report = true;
-            self.events.emit(HolderEvent::AckOtherEpoch);
         }
-        self.unverifiable.remove(ob);
-        if self.commit_book(next) {
-            self.prune_sent(&prune);
+        let audit = if c.epoch == epoch {
+            HolderEvent::ReportConverged
+        } else {
+            HolderEvent::AckOtherEpoch
+        };
+        self.commit_ack(
+            ob,
+            &epoch,
+            (next, Some(status)),
+            &prune,
+            Some(audit),
+            Answer::Converged,
+        )
+    }
+
+    /// Reconfirmation, the receipt floor and consuming the key are one W.
+    fn commit_ack(
+        &mut self,
+        ob: &str,
+        epoch: &str,
+        (mut next, status): (ObligationBook, Option<crate::status::StatusBook>),
+        prune: &[Attempt],
+        event: Option<HolderEvent>,
+        answer: Answer,
+    ) -> Answer {
+        let mut complete = false;
+        if let Some(channel) = next.channels.get_mut(ob) {
+            complete = channel.floor_in(epoch) == Some(ReportState::Complete);
+            if complete && channel.pending.is_none() {
+                channel.reconfirm_pending = false;
+            }
         }
-        Answer::Converged
+        self.commit_books_then(Some(next), status, false, |holder| {
+            if complete {
+                holder.verified.remove(ob);
+            }
+            if let Some(event) = event {
+                holder.events.emit(event);
+            }
+            holder.unverifiable.remove(ob);
+            holder.prune_sent(prune);
+            answer
+        })
+        .unwrap_or(Answer::BackOff)
     }
 
     /// v2 H.22, H.27 hook (S5 calls it): an epoch acceptance was consumed,
@@ -1260,20 +1463,23 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     pub fn arm_status_gate(&mut self, epoch: &str) -> bool {
         let mut next = self.writer.state().obligations.clone();
         next.status_gate.armed_epoch = Some(epoch.to_owned());
-        next.status_gate.status_halted = false;
+        next.status_gate.status_halted = self.writer.state().status.halted;
         self.commit_book(next)
     }
 
-    /// v2 H.27 hook (S3 calls it): a verified status ack minted in `epoch`.
+    /// v2 H.27: a verified status ack minted in `epoch`. The status channel
+    /// records this itself, in the receipt's own commit; the hook stays for
+    /// hosts and tests.
     pub fn record_status_ack(&mut self, epoch: &str) -> bool {
         let mut next = self.writer.state().obligations.clone();
         next.status_gate.acked_epoch = Some(epoch.to_owned());
         self.commit_book(next)
     }
 
-    /// v2 H.22.3, H.27 hook (S3 calls it): the status channel entered a bug
-    /// halt (opens the gate) or an operator resume invalidated it (closes it
-    /// again until a current-epoch ack).
+    /// v2 H.22.3, H.27: the status channel entered a bug halt (opens the
+    /// gate) or an operator resume invalidated it (closes it again until a
+    /// current-epoch ack). `status` records both itself, in the same commit
+    /// as the halt or resume.
     pub fn record_status_halted(&mut self, halted: bool) -> bool {
         let mut next = self.writer.state().obligations.clone();
         next.status_gate.status_halted = halted;
@@ -1313,7 +1519,7 @@ fn move_to_uncertain(book: &mut ObligationBook, ob: &str, pending: &Pending) {
 
 /// R3: the report becomes invalidated; any attempt that may have been sent
 /// moves to `uncertain`.
-fn invalidate(book: &mut ObligationBook, ob: &str) {
+pub(crate) fn invalidate(book: &mut ObligationBook, ob: &str) {
     let Some(pending) = book.channels.get(ob).and_then(|c| c.pending.clone()) else {
         return;
     };

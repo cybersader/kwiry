@@ -8,7 +8,7 @@
 //!   `escalated`, or `retired` with `complete` and residual data (§3.4.4);
 //! - the resource is durably tombstoned;
 //! - the purger's independent census attributes the unit to that resource,
-//!   the unit has no open handle and no release reserved it;
+//!   the unit has no open handle, and no release reserved or holds it;
 //! - the claim was durably recorded first, and the holder has not
 //!   fail-stopped (H.45).
 //!
@@ -82,15 +82,23 @@ pub struct Inventory {
     pub attributed: BTreeMap<ResourceKey, Vec<ObservedUnit>>,
     /// Units no listed holding accounts for: unknown, tombstoned-unlisted,
     /// unattributable, or reserved by a release until deleted.
-    pub unattributed: BTreeSet<String>,
+    pub unattributed: crate::store::ManifestUnits,
 }
 
 impl Inventory {
     pub fn new(census: &Census, plan: &PublishPlan) -> Self {
+        Self::with_held(census, plan, &BTreeSet::new())
+    }
+
+    /// As [`new`](Self::new), with `held` units a release holds: whatever
+    /// the census says, they are counted unattributed and no obligation
+    /// can claim them.
+    pub fn with_held(census: &Census, plan: &PublishPlan, held: &BTreeSet<String>) -> Self {
         let mut inventory = Self::default();
         for unit in &census.units {
             let attributed = unit.attribution.as_ref().filter(|key| {
                 !unit.reserved
+                    && !held.contains(&unit.unit_id)
                     && plan
                         .dispositions
                         .get(*key)
@@ -103,7 +111,9 @@ impl Inventory {
                     .or_default()
                     .push(unit.clone()),
                 None => {
-                    inventory.unattributed.insert(unit.unit_id.clone());
+                    inventory
+                        .unattributed
+                        .insert(unit.unit_id.clone(), unit.attribution.clone());
                 }
             }
         }
@@ -174,6 +184,10 @@ pub struct PurgeSummary {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObligationsRefused {
+    /// Authority reported custody unavailable; a successful list apply clears it.
+    LifecycleUnavailable,
+    /// No current positive list evidence, including route halt or list failure.
+    NoCurrentAuthority,
     /// v2 H.45: the holder fail-stopped; no purge, report or write runs.
     HolderStateUnwritable,
     /// No list was applied in this process: nothing is known to be owed.
@@ -204,7 +218,17 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &self,
         purger: &dyn ArtifactPurger,
     ) -> Result<Inventory, crate::store::StoreError> {
-        Ok(Inventory::new(&purger.census()?, &self.plan()))
+        Ok(self.inventory_of(&purger.census()?))
+    }
+
+    /// `census` against the current classification and the units releases
+    /// hold.
+    pub(crate) fn inventory_of(&self, census: &Census) -> Inventory {
+        Inventory::with_held(
+            census,
+            &self.plan(),
+            &self.writer.state().status.release_held_units(),
+        )
     }
 
     /// Every obligation of the applied list that authorizes a purge now.
@@ -262,11 +286,56 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         Ok(())
     }
 
-    /// Deletion needs everything reporting needs, and no rollback suspicion.
-    pub(crate) fn purge_allowed(&self) -> Result<(), ObligationsRefused> {
+    /// Every adapter delete requires a successfully applied, still-current list
+    /// and uninterrupted authority evidence. Only a fresh apply restores it.
+    pub(crate) fn deletion_permitted(&mut self) -> Result<(), ObligationsRefused> {
+        self.drain_deliveries();
+        self.check_deletion()
+    }
+
+    /// Order each adapter delete and the first durable release evaluation
+    /// against deliveries. Drain earlier replies; later ones wait for the step.
+    pub(crate) fn with_deletion_permission<R>(
+        &mut self,
+        step: impl FnOnce(&mut Self) -> R,
+    ) -> Result<R, ObligationsRefused> {
+        let inbox = self.inbox.clone();
+        let guard = loop {
+            let mut guard = inbox.lock();
+            if guard.deliveries.is_empty() {
+                break guard;
+            }
+            let batch = std::mem::take(&mut guard.deliveries);
+            drop(guard);
+            // Intake may call event/storage adapters. Reacquire and drain again
+            // so callbacks cannot deadlock or slip a delivery past the final check.
+            self.intake(batch);
+        };
+        self.check_deletion()?;
+        let result = step(self);
+        drop(guard);
+        Ok(result)
+    }
+
+    fn check_deletion(&self) -> Result<(), ObligationsRefused> {
         self.obligations_allowed()?;
+        if self.apply_failed_since_admit {
+            return Err(ObligationsRefused::ApplyIncomplete);
+        }
+        if self.lifecycle_unavailable {
+            return Err(ObligationsRefused::LifecycleUnavailable);
+        }
         if self.rollback_suspected {
             return Err(ObligationsRefused::AuthorityRollbackSuspected);
+        }
+        if self.route != crate::holder::RouteHealth::Normal
+            || self.authority_evidence_lost
+            || self.list_request_invalid
+            || !self.applied.as_ref().is_some_and(|a| {
+                self.clock.wall_ms() < a.expires_wall_ms && self.clock.mono_ms() < a.expires_mono_ms
+            })
+        {
+            return Err(ObligationsRefused::NoCurrentAuthority);
         }
         Ok(())
     }
@@ -298,7 +367,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &mut dyn ArtifactPurger,
     ) -> Result<usize, ObligationsRefused> {
-        self.purge_allowed()?;
+        self.deletion_permitted()?;
         let Ok(inventory) = self.inventory(purger) else {
             self.events
                 .emit(HolderEvent::PurgeStepFailed { step: "census" });
@@ -306,7 +375,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         let mut detached = 0;
         for target in self.targets(&inventory) {
-            self.purge_allowed()?;
+            self.deletion_permitted()?;
             let step = self
                 .writer
                 .state()
@@ -348,7 +417,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         &mut self,
         purger: &mut dyn ArtifactPurger,
     ) -> Result<PurgeSummary, ObligationsRefused> {
-        self.purge_allowed()?;
+        self.deletion_permitted()?;
         let mut summary = PurgeSummary::default();
         let Ok(inventory) = self.inventory(purger) else {
             self.events
@@ -380,7 +449,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 return Ok(summary);
             }
         };
-        let inventory = Inventory::new(&census, &self.plan());
+        let inventory = self.inventory_of(&census);
         for target in passed {
             let scan = self.final_scan(&target, &census, &inventory, barrier_ok);
             self.verified.insert(target.obligation_id.clone(), scan);
@@ -468,8 +537,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let mut failed = 0;
         for unit in &claims {
             // H.45: nothing runs after a fail-stop, deletions included.
-            self.purge_allowed()?;
-            match purger.delete(unit, &claimant) {
+            match self.with_deletion_permission(|_| purger.delete(unit, &claimant))? {
                 Ok(DeleteOutcome::Deleted | DeleteOutcome::Absent) => {
                     deleted.insert(unit.clone());
                 }
@@ -489,7 +557,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             self.events
                 .emit(HolderEvent::PurgeDeleteFailed { count: failed });
         }
-        summary.deleted += deleted.len();
+        let count = deleted.len();
 
         // After: what was deleted.
         let mut book = self.book();
@@ -498,7 +566,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         record.claimed.clear();
         record.step = PurgeStep::Deleted;
         record.passes += 1;
-        Ok(self.commit_book(book))
+        Ok(self
+            .commit_books_then(Some(book), None, false, |_| summary.deleted += count)
+            .is_some())
     }
 
     fn final_scan(

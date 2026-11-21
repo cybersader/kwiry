@@ -247,6 +247,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     /// counted as a list start, never applied. `None` when no probe is
     /// needed or allowed now.
     pub fn probe_clock(&mut self) -> Option<Result<(), FetchFailure>> {
+        self.drain_deliveries();
         if self.fail_stopped() {
             return Some(Err(FetchFailure::HolderStateUnwritable));
         }

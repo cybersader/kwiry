@@ -57,6 +57,8 @@ pub enum ConfigError {
     EngineSettings,
     #[error("the enrolled holder kind is not the kind the engine profile binds")]
     HolderKind,
+    #[error("could not recover durable lifecycle transitions")]
+    CancellationRecovery,
 }
 
 /// The cause of an auth halt (v2 §C.0).
@@ -98,6 +100,9 @@ pub enum ListOutcome {
     RateLimited {
         until_mono_ms: u64,
     },
+    /// A recorded release reservation is not yet confirmed by the purger:
+    /// no list applies until `honor_reservations` confirms it.
+    ReservationPending,
 }
 
 pub struct Holder<S: ResourceStore, T: Transport> {
@@ -112,7 +117,10 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     pub(crate) engine: Option<EngineGate>,
     pub(crate) route: RouteHealth,
     /// v2 H.40: raised on a list-route `400`/`413`, until a list applies.
-    list_request_invalid: bool,
+    pub(crate) list_request_invalid: bool,
+    /// A failed list or unreachable authority on any route blocks deletion
+    /// until a complete list applies. This does not change serving leases.
+    pub(crate) authority_evidence_lost: bool,
     /// Profile S (H.24): pins of the list last applied in this process, by
     /// holding id. Empty at process start.
     baseline: HashMap<String, Option<RootPin>>,
@@ -128,15 +136,32 @@ pub struct Holder<S: ResourceStore, T: Transport> {
     /// A report answer said the list is stale (`stale_list_ref`, `404`, an
     /// other-epoch ack): nothing is re-derived until a list applies.
     pub(crate) relist_before_report: bool,
+    /// A POST citing this exact applied list was rejected as stale. It can
+    /// no longer authorize new release evaluations; durable reservations
+    /// are separate and may drain if normal deletion checks allow it.
+    pub(crate) release_list_rejected: bool,
     /// An admitted list failed to apply: its floors are not durable, so no
     /// report is derived or sent until a list applies (K2x).
     pub(crate) apply_failed_since_admit: bool,
+    pub(crate) lifecycle_unavailable: bool,
     /// `503 authority_epoch_mismatch` on any route (H.12 steps 2 and 4):
     /// treated as unreachable, and no purge runs until a verified list
     /// applies (§4.5).
     pub(crate) rollback_suspected: bool,
     pub(crate) report_backoff_ms: u64,
     pub(crate) report_backoff_until: u64,
+    pub(crate) status_backoff_ms: u64,
+    pub(crate) status_backoff_until: u64,
+    /// Unverifiable status acks in a row (T6c after three).
+    pub(crate) status_unverifiable: u8,
+    pub(crate) status_spacing_until: u64,
+    pub(crate) proof_retry:
+        std::collections::BTreeMap<crate::client::Origin, (String, crate::report::Answer)>,
+    pub(crate) dispatched_key: Option<String>,
+    pub(crate) inbox: crate::client::ResponseInbox,
+    pub(crate) late_reports:
+        std::collections::VecDeque<(String, String, crate::client::HttpResponse)>,
+    pub(crate) late_acks: std::collections::VecDeque<(String, crate::client::HttpResponse)>,
 }
 
 /// The parts of the list last applied in this process that obligations and
@@ -145,9 +170,14 @@ pub struct Holder<S: ResourceStore, T: Transport> {
 pub struct Applied {
     pub list_ref: crate::wire::ListRef,
     pub page0_iat_ms: i64,
+    pub(crate) expires_wall_ms: i64,
+    pub(crate) expires_mono_ms: u64,
     /// Every item that is not `active`.
     pub items: Vec<Item>,
     pub plan: PublishPlan,
+    /// Page 0's `quarantine_release` instructions (unknown kinds were
+    /// skipped whole at verification).
+    pub instructions: Vec<crate::release::Instruction>,
 }
 
 impl<S: ResourceStore, T: Transport> Holder<S, T> {
@@ -181,9 +211,22 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             .engine
             .map(|settings| EngineGate::new(gate.clone(), settings));
         let list_request_invalid = state.list_request_invalid;
+        // Monotonic clocks do not span boots. Without trusted elapsed time, wait
+        // a full interval for a different key, even if the wall clock jumped.
+        let status_spacing_until = if state.status.last_new_key_ms.is_some() {
+            clock
+                .mono_ms()
+                .saturating_add(crate::status::STATUS_NEW_KEY_SPACING_MS as u64)
+        } else {
+            0
+        };
         if engine.is_some() && state.reset_pending {
             events.emit(HolderEvent::Engine(EngineEvent::PinHistoryUnavailable));
         }
+        let now = clock.mono_ms();
+        let restart_deadline = |delay: Option<u64>| delay.map_or(0, |ms| now.saturating_add(ms));
+        let report_backoff_until = restart_deadline(state.obligations.restart_wait_ms);
+        let status_backoff_until = restart_deadline(state.status.restart_wait_ms);
         let mut writer = started.writer;
         {
             // v2 H.45: the instant durable state becomes untrustworthy, every
@@ -196,7 +239,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 events.emit(HolderEvent::HolderStateUnwritable);
             }));
         }
-        Ok(Self {
+        let inbox = crate::client::ResponseInbox::new(gate.clone(), events.clone());
+        let mut holder = Self {
+            inbox,
+            late_acks: Default::default(),
+            late_reports: Default::default(),
             config,
             writer,
             key: started.key,
@@ -208,6 +255,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             engine,
             route: RouteHealth::Normal,
             list_request_invalid,
+            authority_evidence_lost: false,
             baseline: HashMap::new(),
             scheduler: RelistScheduler::new(300),
             applied: None,
@@ -215,11 +263,26 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             report_sends: std::collections::VecDeque::new(),
             unverifiable: HashMap::new(),
             relist_before_report: false,
+            release_list_rejected: false,
             apply_failed_since_admit: false,
             rollback_suspected: false,
+            lifecycle_unavailable: false,
             report_backoff_ms: 0,
-            report_backoff_until: 0,
-        })
+            report_backoff_until,
+            status_backoff_ms: 0,
+            status_backoff_until,
+            status_unverifiable: 0,
+            status_spacing_until,
+            dispatched_key: None,
+            proof_retry: Default::default(),
+        };
+        holder.recover_cancellation()?;
+        for owed in holder.writer.state().status.owed.clone() {
+            if holder.apply_owed(owed) == crate::report::Answer::BackOff {
+                return Err(ConfigError::CancellationRecovery);
+            }
+        }
+        Ok(holder)
     }
 
     /// The core serving gate.
@@ -276,11 +339,25 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
 
     /// Fetches, verifies, admits and applies one list.
     pub fn list_once(&mut self) -> ListOutcome {
+        self.drain_deliveries();
         if self.fail_stopped() {
             return ListOutcome::Failed(FetchFailure::HolderStateUnwritable);
         }
-        if self.route != RouteHealth::Normal {
+        if self.traffic_halted() {
             return ListOutcome::AuthHalted;
+        }
+        // A list must not adopt, replace or retire a channel ahead of its
+        // durably received refusal.
+        for owed in self.writer.state().status.owed.clone() {
+            if self.apply_owed(owed) == crate::report::Answer::BackOff {
+                return ListOutcome::Failed(FetchFailure::Local("refusal transition pending"));
+            }
+        }
+        // Startup honours a recorded release reservation before any list
+        // applies, so no list can re-map a unit a human approved deleting.
+        if self.writer.state().status.reservation_pending() {
+            self.events.emit(HolderEvent::ReleaseReservationPending);
+            return ListOutcome::ReservationPending;
         }
         let now = self.clock.mono_ms();
         let start_at = self.scheduler.next_start_at();
@@ -313,7 +390,10 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                     self.events.emit(HolderEvent::ListRequestInvalidCleared);
                 }
             }
-            ListOutcome::Failed(failure) => self.schedule_after_failure(failure, finished),
+            ListOutcome::Failed(failure) => {
+                self.authority_evidence_lost = true;
+                self.schedule_after_failure(failure, finished);
+            }
             _ => self.scheduler.on_failure(finished, None),
         }
         outcome
@@ -323,7 +403,8 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     pub(crate) fn schedule_after_failure(&mut self, failure: &FetchFailure, finished: u64) {
         match failure {
             FetchFailure::RequestInvalid { .. } => self.scheduler.on_request_invalid(finished),
-            FetchFailure::Unreachable { retry_after_s } => {
+            FetchFailure::Unreachable { retry_after_s }
+            | FetchFailure::LifecycleUnavailable { retry_after_s } => {
                 let retry_ms = retry_after_s.map(|s| s.saturating_mul(1000));
                 self.scheduler.on_failure(finished, retry_ms);
             }
@@ -358,6 +439,7 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let high_water = writer.state().high_water.clone();
         let last_list_ref = writer.state().last_list_ref.clone();
         let mut observer = Observer {
+            inbox: &self.inbox,
             writer,
             gate,
             events: events.as_ref(),
@@ -381,10 +463,15 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             last_list_ref: last_list_ref.as_ref(),
             page_size: config.page_size,
         };
-        if probe {
+        let outcome = if probe {
             client::probe_clock(&mut env, &params).map(|()| None)
         } else {
             client::fetch_list(&mut env, &params).map(Some)
+        };
+        if self.drain_deliveries().0 && outcome.is_ok() {
+            Err(FetchFailure::Local("delayed refusal during list"))
+        } else {
+            outcome
         }
     }
 
@@ -401,8 +488,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
     }
 
     pub(crate) fn on_failure(&mut self, failure: &FetchFailure) {
+        self.authority_evidence_lost = true;
+        self.apply_failure(failure);
+    }
+    pub(crate) fn apply_failure(&mut self, failure: &FetchFailure) {
         let event = match failure {
-            FetchFailure::Unreachable { .. } => HolderEvent::AuthorityUnreachable,
+            FetchFailure::LifecycleUnavailable { .. } => {
+                self.lifecycle_unavailable = true;
+                HolderEvent::AuthorityUnreachable
+            }
+            FetchFailure::Unreachable { .. } => {
+                self.authority_evidence_lost = true;
+                HolderEvent::AuthorityUnreachable
+            }
             FetchFailure::Deadline => HolderEvent::ListDeadline,
             FetchFailure::Invalid(error) => HolderEvent::ListInvalid {
                 reason: error.to_string(),
@@ -417,6 +515,9 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
             }
             FetchFailure::ProofExpiredTwice => HolderEvent::ProofExpiredClockAlert,
             FetchFailure::Unauthorized => {
+                if self.route == RouteHealth::AuthHalt(AuthHalt::NotAuthorized) {
+                    return;
+                }
                 self.route = RouteHealth::AuthHalt(AuthHalt::InvalidProof);
                 HolderEvent::HolderUnauthorized
             }
@@ -610,18 +711,19 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         let plan = classify(&list, &held, &tombstoned);
 
         // Apply, durable part: one atomic commit.
-        if engine_on {
-            let engine_state = &self.writer.state().engine;
-            let size = engine_state.pin_history.len() + new_pairs.len();
-            let size = u64::try_from(size).unwrap_or(u64::MAX);
-            let ceiling = engine_state.pin_history_ceiling;
-            if let Some(raised) = engine::pin_history::raised_ceiling(size, ceiling) {
-                self.events
-                    .emit(HolderEvent::Engine(EngineEvent::PinHistoryCeilingRaised {
-                        from: ceiling,
-                        to: raised,
-                    }));
-            }
+        let ceiling_change = engine_on
+            .then(|| {
+                let state = &self.writer.state().engine;
+                let size =
+                    u64::try_from(state.pin_history.len() + new_pairs.len()).unwrap_or(u64::MAX);
+                engine::pin_history::raised_ceiling(size, state.pin_history_ceiling)
+                    .map(|to| (state.pin_history_ceiling, to))
+            })
+            .flatten();
+        if let Some((from, to)) = ceiling_change {
+            self.events.emit(HolderEvent::Engine(
+                EngineEvent::PinHistoryCeilingWillRise { from, to },
+            ));
         }
         // Floors, ended channels and resolved attempts ride in A1 (R12, R13,
         // R15): if they cannot be made durable, the apply fails whole.
@@ -634,6 +736,13 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         };
         if let Err(error) = self.writer.apply_list(mutation) {
             return self.apply_failed("A1", Some(&error));
+        }
+        if let Some((from, to)) = ceiling_change {
+            self.events
+                .emit(HolderEvent::Engine(EngineEvent::PinHistoryCeilingRaised {
+                    from,
+                    to,
+                }));
         }
         // A1 superseded the list applied before: nothing may be purged or
         // reported on its strength any more. Until this apply reaches A4,
@@ -655,7 +764,12 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
         self.scheduler
             .set_relist_seconds(list.head.lease.relist_seconds);
         self.store.revoke(&plan);
+        let lease_ms = list.head.lease.serve_seconds.saturating_mul(1000);
         self.applied = Some(Applied {
+            expires_wall_ms: list
+                .page0_iat_ms
+                .saturating_add(i64::try_from(lease_ms).unwrap_or(i64::MAX)),
+            expires_mono_ms: list.page0_received_mono_ms.saturating_add(lease_ms),
             list_ref: list.list_ref(),
             page0_iat_ms: list.page0_iat_ms,
             items: list
@@ -665,6 +779,11 @@ impl<S: ResourceStore, T: Transport> Holder<S, T> {
                 .map(|listed| listed.item.clone())
                 .collect(),
             plan: plan.clone(),
+            instructions: list
+                .instructions
+                .iter()
+                .filter_map(crate::release::Instruction::parse)
+                .collect(),
         });
         self.after_apply(&prune);
         self.emit_reserve_uses();
@@ -861,6 +980,7 @@ pub(crate) fn report_write_failure(events: &dyn EventSink, error: &WriteError) {
 /// Everything a running fetch hands back, applied at once and in order with
 /// the single holder-state writer.
 struct Observer<'a> {
+    inbox: &'a crate::client::ResponseInbox,
     writer: &'a mut StateWriter,
     gate: &'a ServingGate,
     events: &'a dyn EventSink,
@@ -868,6 +988,12 @@ struct Observer<'a> {
 }
 
 impl FetchHooks for Observer<'_> {
+    fn admit_post(&self) -> Option<crate::client::PostStart<'_>> {
+        self.inbox.admit(self.inbox.ticket())
+    }
+    fn refusal_pending(&self) -> bool {
+        self.inbox.has_refusal()
+    }
     fn accept_pins(&mut self, pins: &PinnedKeys) -> bool {
         let accepted = self.writer.pin_keys(pins.clone()).is_ok();
         if accepted && let Some(keyset_seq) = pins.keyset_seq {
