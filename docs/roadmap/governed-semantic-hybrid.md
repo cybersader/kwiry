@@ -20,6 +20,8 @@ The design review must compare:
 
 ### IG-2A — authorized vector baseline
 
+Implementation design (owner review pending): [`ig2a-governed-semantic-design.md`](ig2a-governed-semantic-design.md).
+
 - define partition/opening behavior;
 - prove forbidden vectors cannot alter authorized nearest neighbors;
 - bind model/version and vector schema to status and rebuild behavior;
