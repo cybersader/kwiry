@@ -19,14 +19,14 @@ use unicode_normalization::char::is_combining_mark;
 use crate::chunk::ingest_vault_files;
 use crate::error::{Error, Result};
 use crate::format::SourceFormat;
-use crate::generation::DataRoot;
+use crate::generation::{CandidateGeneration, DataRoot};
 use crate::lexical::{fold_lexical, normalize_raw};
 use crate::manifest::{Manifest, registration_fingerprint};
 use crate::model::{
     Config, HostProfile, IndexStats, PreparedChunk, PropertyBag, PropertyValue, ResourceKey,
     RetrievalMetadata, VaultRegistration,
 };
-use crate::partition::{GenerationLayout, partition_index_dir};
+use crate::partition::{GenerationLayout, PartitionEvidence, partition_index_dir};
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
 const MAX_RAW_PROPERTY_TOKEN_BYTES: usize = 39;
@@ -224,13 +224,7 @@ pub fn build_index(config: &Config, data_dir: &Path) -> Result<IndexStats> {
         HostProfile::Desktop => {
             build_desktop_candidate(config, &candidate.index_dir, &candidate.manifest_path())
         }
-        HostProfile::OpenClast => build_openclast_candidate(
-            config,
-            &candidate.partitions_dir,
-            &candidate.manifest_path(),
-            &candidate.layout_path(),
-            data_dir,
-        ),
+        HostProfile::OpenClast => build_openclast_candidate(config, &candidate, data_dir),
     };
     let stats = match result {
         Ok(stats) => stats,
@@ -322,24 +316,11 @@ fn build_desktop_candidate(
 
 fn build_openclast_candidate(
     config: &Config,
-    partitions_dir: &Path,
-    manifest_path: &Path,
-    layout_path: &Path,
+    candidate: &CandidateGeneration,
     data_dir: &Path,
 ) -> Result<IndexStats> {
-    let resources: Vec<_> = config
-        .vaults
-        .iter()
-        .map(|vault| {
-            config.resource_key(vault).ok_or_else(|| {
-                Error::State(format!(
-                    "openclast vault {} is missing an exact resource classification",
-                    vault.id
-                ))
-            })
-        })
-        .collect::<Result<_>>()?;
-    let layout = GenerationLayout::openclast(resources)?;
+    let partitions_dir = &candidate.partitions_dir;
+    let mut resources = BTreeMap::new();
     let mut manifest = Manifest::default();
     let mut stats = IndexStats::default();
 
@@ -354,7 +335,7 @@ fn build_openclast_candidate(
         let index_dir = partition_index_dir(partitions_dir, &resource);
         fs::create_dir_all(&index_dir)
             .map_err(|error| crate::error::io_error(&index_dir, error))?;
-        build_partition(
+        let complete = build_partition(
             vault,
             &resource,
             &index_dir,
@@ -362,11 +343,20 @@ fn build_openclast_candidate(
             &mut stats,
             &room_roots,
         )?;
+        resources.insert(
+            resource,
+            PartitionEvidence::Walk {
+                configured: vault.snapshot_id.as_ref(),
+                clean_and_exact: complete,
+            }
+            .publication_label(),
+        );
     }
 
+    let layout = GenerationLayout::with_snapshots(resources)?;
     manifest.mark_synced()?;
-    manifest.save(manifest_path)?;
-    layout.save(layout_path)?;
+    manifest.save(&candidate.manifest_path())?;
+    layout.save_candidate(candidate, &mut stats.warnings)?;
 
     let indexed_chunks = layout
         .partitions
@@ -412,7 +402,7 @@ fn build_partition(
     manifest: &mut Manifest,
     stats: &mut IndexStats,
     room_roots: &crate::room_walk::RoomRoots,
-) -> Result<()> {
+) -> Result<bool> {
     if vault.id != resource.vault_id || vault.room.as_deref() != Some(resource.room_id.as_str()) {
         return Err(Error::State(format!(
             "vault {} does not match its resource partition",
@@ -445,6 +435,9 @@ fn build_partition(
         enumeration = crate::room_walk::nesting_failure(vault);
         outcomes.clear();
     }
+    let complete = room.is_some()
+        && enumeration.completeness.may_infer_deletions()
+        && outcomes.iter().all(|o| o.clean_snapshot_input());
     stats.warnings.extend(enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
@@ -473,7 +466,108 @@ fn build_partition(
     writer
         .wait_merging_threads()
         .map_err(|error| Error::Index(error.to_string()))?;
-    Ok(())
+    if !complete || vault.snapshot_id.is_none() {
+        return Ok(false);
+    }
+    fresh_partition_matches(index_dir, manifest, resource)
+}
+
+pub(crate) fn fresh_partition_matches(
+    index_dir: &Path,
+    manifest: &Manifest,
+    resource: &ResourceKey,
+) -> Result<bool> {
+    let mut physical = partition_sources(index_dir)?;
+    Ok(manifest
+        .files
+        .iter()
+        .filter(|(_, f)| f.resource.as_ref() == Some(resource))
+        .all(|(key, file)| source_matches(physical.remove(key), file))
+        && physical.is_empty())
+}
+
+type SourceState = (usize, Option<std::sync::Arc<str>>);
+
+pub(crate) fn source_matches(
+    state: Option<SourceState>,
+    file: &crate::manifest::ManifestFile,
+) -> bool {
+    match state {
+        None => file.chunk_count == 0,
+        Some((count, hash)) => {
+            count == file.chunk_count && hash.as_deref() == Some(&file.content_hash)
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! { pub(crate) static PARTITION_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// Once per room being certified: before planning repairs to inherited chunks, or
+/// after writing a fresh partition. Never
+/// on ordinary no-op passes. Join only the two exact STRING fields' postings by
+/// live segment-local doc ID; no stored bodies, all-address query, or cross-room map.
+pub(crate) fn partition_sources(index_dir: &Path) -> Result<BTreeMap<String, SourceState>> {
+    use std::sync::Arc;
+    use tantivy::{DocSet, TERMINATED};
+    #[cfg(test)]
+    PARTITION_SCANS.set(PARTITION_SCANS.get() + 1);
+    let (index, fields) = open_index_dir(index_dir)?;
+    let key = fields
+        .source_key
+        .ok_or_else(|| Error::Index("missing source_key field".into()))?;
+    let err = |e: tantivy::TantivyError| Error::Index(e.to_string());
+    let searcher = index.reader().map_err(err)?.searcher();
+    let mut sources = BTreeMap::<String, SourceState>::new();
+    for segment in searcher.segment_readers() {
+        let mut docs = vec![(None, false); segment.max_doc() as usize];
+        for field in [fields.content_hash, key] {
+            let inv = segment.inverted_index(field).map_err(err)?;
+            let mut terms = inv
+                .terms()
+                .stream()
+                .map_err(|e| Error::Index(e.to_string()))?;
+            while terms.advance() {
+                let value =
+                    std::str::from_utf8(terms.key()).map_err(|e| Error::Index(e.to_string()))?;
+                let hash = (field != key).then(|| Arc::<str>::from(value));
+                let mut postings = inv
+                    .read_postings_from_terminfo(terms.value(), IndexRecordOption::Basic)
+                    .map_err(|e| Error::Index(e.to_string()))?;
+                while postings.doc() != TERMINATED {
+                    let doc = postings.doc();
+                    postings.advance();
+                    if segment.is_deleted(doc) {
+                        continue;
+                    }
+                    let (stored, seen) = &mut docs[doc as usize];
+                    if field == key {
+                        if *seen {
+                            return Err(Error::Index("ambiguous source_key".into()));
+                        }
+                        *seen = true;
+                        let state = sources
+                            .entry(value.to_owned())
+                            .or_insert_with(|| (0, stored.clone()));
+                        state.0 += 1;
+                        if state.1 != *stored {
+                            state.1 = None;
+                        }
+                    } else if stored.is_some() {
+                        *stored = Some(Arc::from("")); // multiple hashes cannot match a digest
+                    } else {
+                        *stored = hash.clone();
+                    }
+                }
+            }
+        }
+        if docs.iter().filter(|(_, seen)| *seen).count() != segment.num_docs() as usize {
+            return Err(Error::Index(
+                "resource partition document is missing source_key".into(),
+            ));
+        }
+    }
+    Ok(sources)
 }
 
 pub(crate) fn open_index(data_dir: &Path) -> Result<(Index, Fields)> {
@@ -1452,6 +1546,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1513,6 +1608,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1666,6 +1762,7 @@ mod tests {
         fs::write(vault_path.join("unreadable.canvas"), [0xff]).unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1795,6 +1892,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1835,6 +1933,7 @@ mod tests {
         .unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,
@@ -1874,6 +1973,7 @@ mod tests {
         fs::write(vault_path.join("note.md"), "stable phosphorescent").unwrap();
         let config = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path.clone(),
                 room: None,
@@ -1894,6 +1994,7 @@ mod tests {
         fs::remove_dir_all(&vault_path).unwrap();
         let broken = Config {
             vaults: vec![VaultRegistration {
+                snapshot_id: None,
                 id: "fixture".into(),
                 path: vault_path,
                 room: None,

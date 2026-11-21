@@ -87,6 +87,7 @@ fn governed_search_wire_errors_do_not_echo_request_text() {
     fs::write(room.join("note.md"), "# Orchard\nSample notes.").unwrap();
     let mut config = format_daemon_config(config_path.parent().unwrap());
     config.vaults.push(VaultRegistration {
+        snapshot_id: None,
         id: REGISTERED.0.into(),
         path: room,
         room: Some(REGISTERED.1.into()),
@@ -192,6 +193,7 @@ fn governed_search_wire_matches_deployed_fixtures() {
     let mut config = format_daemon_config(config_path.parent().unwrap());
     config.indexing.max_stale_serve_seconds = 60;
     config.vaults.push(VaultRegistration {
+        snapshot_id: None,
         id: REGISTERED.0.into(),
         path: room,
         room: Some(REGISTERED.1.into()),

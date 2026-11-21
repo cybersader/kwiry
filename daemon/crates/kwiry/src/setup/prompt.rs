@@ -194,6 +194,7 @@ pub fn resolve_setup_input(
 
     Ok(ResolvedSetupInput {
         vault: VaultRegistration {
+            snapshot_id: None,
             id: vault_id,
             path,
             room: request

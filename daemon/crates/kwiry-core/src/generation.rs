@@ -13,7 +13,12 @@ use crate::manifest::{INDEX_FORMAT_VERSION, Manifest};
 use crate::partition::GenerationLayout;
 use crate::state::{read_json, sync_directory, sync_tree, write_json_atomic};
 
-const LAYOUT_VERSION: u32 = crate::partition::GENERATION_LAYOUT_VERSION;
+// The CURRENT pointer format is independent of the per-partition layout.
+pub(crate) const LAYOUT_VERSION: u32 = if crate::source::ROOM_INCLUSIVE_IDS {
+    3
+} else {
+    2
+};
 const RETAINED_GENERATIONS: usize = 3;
 static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -193,7 +198,7 @@ impl DataRoot {
     pub fn create_candidate_from(&self, source: &GenerationPaths) -> Result<CandidateGeneration> {
         source.validate()?;
         let candidate = self.create_candidate()?;
-        if let Err(error) = copy_tree_contents(&source.root, &candidate.staging_dir) {
+        if let Err(error) = copy_tree_contents(&source.root, &candidate.staging_dir, true) {
             let _ = fs::remove_dir_all(&candidate.staging_dir);
             return Err(error);
         }
@@ -219,6 +224,12 @@ impl DataRoot {
     }
 
     pub fn active(&self) -> Result<Option<GenerationPaths>> {
+        Ok(self.active_with_layout()?.map(|(paths, _)| paths))
+    }
+
+    pub(crate) fn active_with_layout(
+        &self,
+    ) -> Result<Option<(GenerationPaths, Option<GenerationLayout>)>> {
         let current_path = self.root.join("current.json");
         if !current_path.is_file() {
             return Ok(None);
@@ -229,8 +240,8 @@ impl DataRoot {
             current.generation.clone(),
             self.root.join("generations").join(&current.generation),
         );
-        paths.validate()?;
-        Ok(Some(paths))
+        let layout = paths.validated_layout()?;
+        Ok(Some((paths, layout)))
     }
 
     /// The index directory a **reader** may open, or a refusal.
@@ -546,6 +557,10 @@ impl GenerationPaths {
     }
 
     fn validate(&self) -> Result<()> {
+        self.validated_layout().map(drop)
+    }
+
+    fn validated_layout(&self) -> Result<Option<GenerationLayout>> {
         if !is_generation_id(&self.id) || !self.root.is_dir() {
             return Err(Error::State(format!(
                 "generation is missing or invalid: {}",
@@ -568,6 +583,7 @@ impl GenerationPaths {
                         self.root.display()
                     )));
                 }
+                Ok(None)
             }
             (false, true) => {
                 let layout = GenerationLayout::load(&self.layout_path)?;
@@ -602,15 +618,13 @@ impl GenerationPaths {
                     // source state whose content is deliberately withheld until the
                     // registration can be verified and reindexed.
                 }
+                Ok(Some(layout))
             }
-            _ => {
-                return Err(Error::State(format!(
-                    "generation is incomplete or has ambiguous profile state: {}",
-                    self.root.display()
-                )));
-            }
+            _ => Err(Error::State(format!(
+                "generation is incomplete or has ambiguous profile state: {}",
+                self.root.display()
+            ))),
         }
-        Ok(())
     }
 }
 
@@ -665,6 +679,8 @@ fn inject_publish_fault(fault: Option<PublishFault>, step: PublishFault) -> Resu
     Ok(())
 }
 
+pub(crate) const GENERATED_ID_BYTES: usize = 94;
+
 fn generation_id() -> Result<String> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -674,11 +690,13 @@ fn generation_id() -> Result<String> {
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random)
         .map_err(|error| Error::State(format!("could not generate generation ID: {error}")))?;
-    Ok(format!(
+    let id = format!(
         "g-{nanos:039}-{:010}-{sequence:020}-{:020}",
         std::process::id(),
         u64::from_le_bytes(random)
-    ))
+    );
+    debug_assert_eq!(id.len(), GENERATED_ID_BYTES);
+    Ok(id)
 }
 
 fn is_generation_id(id: &str) -> bool {
@@ -708,7 +726,7 @@ fn validate_index_dir(index_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_tree_contents(source: &Path, destination: &Path) -> Result<()> {
+fn copy_tree_contents(source: &Path, destination: &Path, generation_root: bool) -> Result<()> {
     let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
     if metadata.file_type().is_symlink() {
         return Err(Error::State(format!(
@@ -734,7 +752,10 @@ fn copy_tree_contents(source: &Path, destination: &Path) -> Result<()> {
         .map_err(|error| io_error(source, error))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        copy_tree_contents(&entry.path(), &destination.join(entry.file_name()))?;
+        if generation_root && entry.file_name() == crate::partition::LABEL_SIDECAR {
+            continue;
+        }
+        copy_tree_contents(&entry.path(), &destination.join(entry.file_name()), false)?;
     }
     Ok(())
 }

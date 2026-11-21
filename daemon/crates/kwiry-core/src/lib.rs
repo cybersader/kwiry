@@ -143,13 +143,13 @@ pub use manifest::{
 pub use model::{
     AuthConfig, Config, DEFAULT_BIND, HolderProfile, HolderSettings, HostProfile, IndexStats,
     IndexingConfig, IngestReport, IngestWarning, LexicalSearchRequest, OpenClastAuthConfig,
-    ResourceKey, SemanticConfig, ServerConfig, VaultRegistration,
+    ResourceKey, SemanticConfig, ServerConfig, SnapshotId, VaultRegistration,
 };
 #[cfg(feature = "portable")]
 pub use model::{
-    CHUNKING_VERSION, Chunk, ExtractionCoverageCounts, Frontmatter, IndexFreshnessBasis,
-    MAX_FILE_BYTES, PreparedChunk, PropertyBag, PropertyValue, RetrievalMetadata, SearchHit,
-    SourceFormatCounts,
+    CHUNKING_VERSION, Chunk, ContentSha256, ExtractionCoverageCounts, Frontmatter,
+    IndexFreshnessBasis, MAX_FILE_BYTES, PreparedChunk, PropertyBag, PropertyValue,
+    RetrievalMetadata, SearchHit, SourceFormatCounts,
 };
 #[cfg(feature = "portable")]
 pub use policy::{
@@ -271,6 +271,7 @@ fn fr11_ingest_config_refuses_openclast_before_desktop_discovery() {
     std::fs::write(fixture.path().join("note.md"), "synthetic evidence").unwrap();
     let mut config = Config::default();
     config.vaults.push(VaultRegistration {
+        snapshot_id: None,
         id: "fixture".into(),
         path: fixture.path().to_owned(),
         room: Some("room".into()),

@@ -9,6 +9,7 @@ use tempfile::NamedTempFile;
 
 use crate::error::{Error, Result, io_error};
 use crate::model::{Config, HostProfile, IndexFreshnessBasis, MAX_FILE_BYTES, VaultRegistration};
+use crate::partition::{MAX_LABELED_ROOMS, label_resource_fits};
 
 const ROOM_FORMAT: crate::OpenClastRoomFormat = crate::openclast_room_format!();
 
@@ -227,7 +228,8 @@ fn load_config_unlocked(path: &Path) -> Result<Config> {
     let source = fs::read_to_string(path).map_err(|error| io_error(path, error))?;
     let config: Config = toml::from_str(&source).map_err(|error| Error::InvalidConfig {
         path: path.to_path_buf(),
-        message: error.to_string(),
+        // Display would echo the source line, including producer labels.
+        message: error.message().to_owned(),
     })?;
 
     if config.version != 1 {
@@ -331,6 +333,27 @@ fn validate_room_registrations(path: &Path, config: &Config) -> Result<()> {
 }
 
 fn validate_config(path: &Path, config: &Config) -> Result<()> {
+    if config.vaults.iter().any(|v| {
+        v.snapshot_id.is_some()
+            && (config.server.profile != HostProfile::OpenClast || v.room.is_none())
+    }) {
+        return Err(Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: "snapshot_id requires an OpenClast room registration".into(),
+        });
+    }
+    if config
+        .vaults
+        .iter()
+        .filter(|v| v.snapshot_id.is_some())
+        .count()
+        > MAX_LABELED_ROOMS
+    {
+        return Err(Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: format!("at most {MAX_LABELED_ROOMS} OpenClast rooms may have a snapshot_id"),
+        });
+    }
     if config.server.bind.trim().is_empty() {
         return Err(Error::InvalidConfig {
             path: path.to_path_buf(),
@@ -415,6 +438,20 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
                         message: format!("auth.openclast.{name} must not be empty"),
                     });
                 }
+            }
+            if config.vaults.iter().any(|vault| {
+                vault.snapshot_id.is_some()
+                    && vault
+                        .room
+                        .as_deref()
+                        .is_some_and(|room| !label_resource_fits(&auth.tenant_id, &vault.id, room))
+            }) {
+                return Err(Error::InvalidConfig {
+                    path: path.to_path_buf(),
+                    message:
+                        "OpenClast resource identifiers are too long for snapshot label storage"
+                            .into(),
+                });
             }
             if crate::source::ROOM_INCLUSIVE_IDS && !valid_tenant_identifier(&auth.tenant_id) {
                 return Err(Error::InvalidConfig {
@@ -607,6 +644,7 @@ pub fn add_vault(
 
     let canonical_path = registration_root(config.server.profile, path)?;
     let registration = VaultRegistration {
+        snapshot_id: None,
         id,
         path: canonical_path,
         room,
@@ -661,6 +699,7 @@ pub fn ensure_vault_registration(
     }
 
     let registration = VaultRegistration {
+        snapshot_id: None,
         id,
         path: canonical_path,
         room,
@@ -718,6 +757,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_snapshot_grammar_is_rejected_at_load_without_echoing_the_value() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for value in [
+            "".to_owned(),
+            "peach/branch".into(),
+            "a b".into(),
+            "ä".into(),
+            "x".repeat(129),
+        ] {
+            let encoded = serde_json::to_string(&value).unwrap();
+            fs::write(&path,format!("[[vaults]]\nvault_id = 'garden'\npath = '/synthetic'\nsnapshot_id = {encoded}\n")).unwrap();
+            let error = load_config(&path).unwrap_err().to_string();
+            assert!(error.contains(crate::SnapshotId::INVALID), "{error}");
+            if !value.is_empty() {
+                assert!(!error.contains(&value));
+            }
+        }
+        for valid in ["0".into(), "AZaz09._:-".into(), "x".repeat(128)] {
+            assert!(valid.parse::<crate::SnapshotId>().is_ok());
+        }
+    }
+
+    #[test]
+    fn snapshot_id_rejected_in_desktop_profile_or_without_room() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (profile, room) in [("desktop", "room = 'room'"), ("openclast", "")] {
+            fs::write(&path,format!("[server]\nprofile = '{profile}'\n[[vaults]]\nvault_id = 'garden'\npath = '/synthetic'\nsnapshot_id = 'sample.label'\n{room}")).unwrap();
+            let error = load_config(&path).unwrap_err().to_string();
+            assert!(error.contains("snapshot_id requires"));
+            assert!(!error.contains("sample.label"));
+        }
+    }
+
+    #[test]
+    fn config_rejects_more_than_the_snapshot_labeled_room_bound() {
+        use std::fmt::Write as _;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = String::from("[server]\nprofile = 'openclast'\n");
+        for i in 0..=MAX_LABELED_ROOMS {
+            writeln!(
+                config,
+                "[[vaults]]\nvault_id = 'vault-{i}'\nroom = 'room-{i}'\npath = '/synthetic/{i}'\nsnapshot_id = 'sample.label'"
+            )
+            .unwrap();
+        }
+        fs::write(&path, config).unwrap();
+        let error = load_config(&path).unwrap_err().to_string();
+        assert!(error.contains(&format!("at most {MAX_LABELED_ROOMS} OpenClast rooms")));
+        assert!(!error.contains("sample.label"));
+    }
+
+    #[test]
     fn config_round_trips_and_sorts_vaults() {
         let temporary = tempdir().unwrap();
         let first = temporary.path().join("first");
@@ -769,6 +864,7 @@ mod tests {
         let mut config = Config::default();
         config.server.profile = HostProfile::OpenClast;
         config.vaults.push(VaultRegistration {
+            snapshot_id: None,
             id: "notes".into(),
             path: fs::canonicalize(vault).unwrap(),
             room: None,
@@ -1034,11 +1130,13 @@ mod tests {
             fs::canonicalize(root).unwrap()
         };
         let a = VaultRegistration {
+            snapshot_id: None,
             id: "VaultOne_0123456789abc".into(),
             path: root("a"),
             room: Some("RoomAaaa_0123456789abc".into()),
         };
         let b = VaultRegistration {
+            snapshot_id: None,
             id: a.id.clone(),
             path: root("b"),
             room: Some("RoomBbbb_0123456789abc".into()),
@@ -1214,6 +1312,7 @@ mod tests {
         let vault = temporary.path().join("vault");
         config.holder.as_mut().unwrap().state_dir = vault.join("holder");
         config.vaults.push(VaultRegistration {
+            snapshot_id: None,
             id: "notes".into(),
             path: vault,
             room: Some("room".into()),

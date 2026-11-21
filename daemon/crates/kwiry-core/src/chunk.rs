@@ -309,6 +309,7 @@ mod tests {
         let temporary = tempdir().unwrap();
         fs::write(temporary.path().join("nul.txt"), b"text\0binary").unwrap();
         let vault = VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: temporary.path().to_path_buf(),
             room: None,
@@ -340,6 +341,7 @@ mod tests {
         let temporary = tempdir().unwrap();
         fs::write(temporary.path().join("paper.pdf"), b"not a pdf at all").unwrap();
         let vault = VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: temporary.path().to_path_buf(),
             room: None,
@@ -378,6 +380,7 @@ mod tests {
             .set_len(crate::model::MAX_FILE_BYTES + 1)
             .unwrap();
         let vault = VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: temporary.path().to_path_buf(),
             room: None,
@@ -405,6 +408,7 @@ mod tests {
     fn native_ingest_delegates_all_source_outcomes_to_portable_preparation() {
         let temporary = tempdir().unwrap();
         let vault = VaultRegistration {
+            snapshot_id: None,
             id: "fixture".into(),
             path: temporary.path().to_path_buf(),
             room: None,

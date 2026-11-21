@@ -327,6 +327,7 @@ fn openclast_startup_creates_no_desktop_credentials_or_descriptor() {
         legacy_identity_accept_until: None,
     });
     config.vaults = vec![VaultRegistration {
+        snapshot_id: None,
         id: "VaultOne_0123456789abc".into(),
         path: vault,
         room: Some("RoomAaaa_0123456789abc".into()),
@@ -465,11 +466,13 @@ fn format_release_p17_p19_n30_n32_n35_to_n39_and_governed_watcher() {
     });
     config.vaults = vec![
         VaultRegistration {
+            snapshot_id: None,
             id: "VaultOne_0123456789abc".into(),
             path: a,
             room: Some("RoomAaaa_0123456789abc".into()),
         },
         VaultRegistration {
+            snapshot_id: None,
             id: "VaultTwo_0123456789abc".into(),
             path: b.clone(),
             room: Some("RoomBbbb_0123456789abc".into()),
@@ -882,6 +885,7 @@ fn format_release_fr3_refuses_state_overlap_in_both_directions() {
         }
         let mut config = format_daemon_config(root);
         config.vaults.push(VaultRegistration {
+            snapshot_id: None,
             id: "VaultOne_0123456789abc".into(),
             path: room,
             room: Some("RoomAaaa_0123456789abc".into()),
@@ -949,6 +953,7 @@ fn format_release_fr11_http_refuses_ingestion_and_boot_uses_guarded_walker() {
     let room_id = "RoomAaaa_0123456789abc";
     let mut config = format_daemon_config(root);
     config.vaults.push(VaultRegistration {
+        snapshot_id: None,
         id: vault_id.into(),
         path: room,
         room: Some(room_id.into()),
@@ -991,6 +996,7 @@ fn format_release_fr12_http_reports_all_missing_signed_indexes() {
     ];
     let mut config = format_daemon_config(root);
     config.vaults.push(VaultRegistration {
+        snapshot_id: None,
         id: signed[1].0.into(),
         path: room,
         room: Some(signed[1].1.into()),
@@ -1094,6 +1100,7 @@ fn format_release_n31_rb3_refuses_admission_registration() {
         fs::create_dir(&room_root).unwrap();
         fs::write(room_root.join("index.md"), "synthetic rollback fixture").unwrap();
         config.vaults.push(VaultRegistration {
+            snapshot_id: None,
             id: "VaultOne_0123456789abc".into(),
             path: room_root,
             room: Some(room.into()),
@@ -1188,6 +1195,7 @@ fn n34_openat2_probe_refuses_all_errors_even_with_no_rooms() {
             let room = root.join("room");
             fs::create_dir_all(&room).unwrap();
             settings.vaults.push(VaultRegistration {
+                snapshot_id: None,
                 id: "VaultOne_0123456789abc".into(),
                 path: room,
                 room: Some("RoomAaaa_0123456789abc".into()),

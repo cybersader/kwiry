@@ -158,6 +158,7 @@ fn native_sparse_prefix_fallback_admits_each_real_format_below_a_standard_three_
     write_vault(&vault);
     let config = Config {
         vaults: vec![VaultRegistration {
+            snapshot_id: None,
             id: VAULT_ID.to_owned(),
             path: vault,
             room: None,

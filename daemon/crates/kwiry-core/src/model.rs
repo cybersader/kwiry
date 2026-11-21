@@ -275,11 +275,54 @@ const fn default_racy_window_millis() -> u64 {
 #[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VaultRegistration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<SnapshotId>,
     #[serde(rename = "vault_id")]
     pub id: String,
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<String>,
+}
+
+/// Opaque producer label. It identifies a supplied snapshot, not an authorization grant.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct SnapshotId(String);
+
+#[cfg(feature = "native")]
+impl SnapshotId {
+    pub(crate) const INVALID: &'static str =
+        "snapshot_id must be 1 to 128 ASCII letters, digits, or . _ : -";
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(feature = "native")]
+impl std::str::FromStr for SnapshotId {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if (1..=128).contains(&value.len())
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+        {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(Self::INVALID)
+        }
+    }
+}
+
+#[cfg(feature = "native")]
+impl<'de> Deserialize<'de> for SnapshotId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)
+            .map_err(|_| serde::de::Error::custom(Self::INVALID))?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 // This is a call-stack safety boundary for maliciously recursive YAML, not a content-policy
@@ -642,8 +685,30 @@ pub struct LexicalSearchRequest {
     pub vault_id: Option<String>,
 }
 
+/// SHA-256 of the exact source bytes from which the hit was indexed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentSha256(String);
+
+impl ContentSha256 {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(feature = "native")]
+    pub(crate) fn from_stored(text: &str) -> Option<Self> {
+        (text.len() == 64
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .then(|| Self(text.to_owned()))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchHit {
+    /// Internal evidence only. Legacy wire hits carry no source proof.
+    #[serde(skip)]
+    pub content_sha256: Option<ContentSha256>,
     pub chunk_id: String,
     pub vault_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -656,6 +721,15 @@ pub struct SearchHit {
     pub score: f32,
     pub excerpt: String,
     pub frontmatter: Frontmatter,
+}
+
+#[cfg(feature = "native")]
+impl SearchHit {
+    pub fn require_content_sha256(&self) -> crate::Result<&ContentSha256> {
+        self.content_sha256
+            .as_ref()
+            .ok_or_else(|| crate::Error::Index("stored source hash is missing or invalid".into()))
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -810,6 +884,15 @@ pub(crate) struct FileIngestOutcome {
     pub warning: Option<IngestWarning>,
 }
 
+#[cfg(feature = "native")]
+impl FileIngestOutcome {
+    pub(crate) fn clean_snapshot_input(&self) -> bool {
+        self.kind == FileOutcomeKind::Indexed
+            && self.coverage == ExtractionCoverage::IndexedComplete
+            && self.content_hash.is_some()
+    }
+}
+
 #[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
@@ -904,6 +987,7 @@ mod tests {
         let baseline = Config::default();
         let mut vault_change = baseline.clone();
         vault_change.vaults.push(VaultRegistration {
+            snapshot_id: None,
             id: "notes".into(),
             path: PathBuf::from("/vaults/notes"),
             room: None,
