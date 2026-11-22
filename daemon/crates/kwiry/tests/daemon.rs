@@ -19,6 +19,10 @@ use tempfile::tempdir;
 #[path = "support/governed_search_wire.rs"]
 mod governed_search_wire;
 
+#[cfg(target_os = "linux")]
+#[path = "support/governed_search_live_check.rs"]
+mod governed_search_live_check;
+
 struct Daemon {
     child: Child,
     address: String,
@@ -699,7 +703,28 @@ fn sign_format_token(
     jti: usize,
     now: u64,
 ) -> String {
-    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    sign_format_token_with_limit(keys, legacy, typ, jti, now, serde_json::json!(20))
+}
+
+fn sign_format_token_with_limit(
+    keys: &[(&str, &str)],
+    legacy: bool,
+    typ: Option<&str>,
+    jti: usize,
+    now: u64,
+    ceiling: serde_json::Value,
+) -> String {
+    let claims = format_claims(keys, legacy, jti, now, ceiling);
+    sign_fixture_claims(&claims, typ, "ed01", PRIVATE_DER)
+}
+
+fn format_claims(
+    keys: &[(&str, &str)],
+    legacy: bool,
+    jti: usize,
+    now: u64,
+    ceiling: serde_json::Value,
+) -> serde_json::Value {
     let resources: Vec<_> = keys
         .iter()
         .map(|(vault, room)| {
@@ -713,17 +738,26 @@ fn sign_format_token(
         "jti": format!("synthetic-request-{jti}"), "iat": now, "nbf": now, "exp": now + 60,
         "tenant": "tenant_AAAAAAAAAAAAAAAAAAAA", "actions": ["search:lexical"],
         "resources": resources,
-        "constraints": {"max_limit": 20}
+        "constraints": {"max_limit": ceiling}
     });
     if legacy {
         claims["sub"] = serde_json::json!("synthetic-user-sentinel");
         claims["actor"] = serde_json::json!("synthetic-actor-sentinel");
         claims["subject_revision"] = serde_json::json!("synthetic-identity-revision");
     }
+    claims
+}
+fn sign_fixture_claims(
+    claims: &serde_json::Value,
+    typ: Option<&str>,
+    kid: &str,
+    key: &[u8],
+) -> String {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     let mut header = Header::new(Algorithm::EdDSA);
-    header.kid = Some("ed01".into());
+    header.kid = Some(kid.into());
     header.typ = typ.map(str::to_owned);
-    encode(&header, &claims, &EncodingKey::from_ed_der(PRIVATE_DER)).unwrap()
+    encode(&header, claims, &EncodingKey::from_ed_der(key)).unwrap()
 }
 
 fn format_daemon_config(root: &Path) -> Config {
@@ -1107,12 +1141,12 @@ fn format_release_n31_rb3_refuses_admission_registration() {
         });
     }
     fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
-    let expected_error = kwiry_core::Error::DuplicateVaultId(config.vaults[0].id.clone());
+    let expected_error = "vaults.vault_id: duplicate vault ID";
     assert!(matches!(
         load_config(&path),
-        Err(kwiry_core::Error::DuplicateVaultId(_))
+        Err(kwiry_core::Error::InvalidConfig { .. })
     ));
-    assert_startup_refused(&path, &data, &expected_error.to_string(), |_| {}); // N31, RB3
+    assert_startup_refused(&path, &data, expected_error, |_| {}); // N31, RB3
     let b = config.vaults.pop().unwrap();
     save_config(&path, &config).unwrap();
     config = kwiry_core::load_config(&path).unwrap();

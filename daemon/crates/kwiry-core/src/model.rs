@@ -109,6 +109,9 @@ pub enum HostProfile {
 #[cfg(feature = "native")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerConfig {
+    /// Require profile negotiation on the only search route.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub profile_required: bool,
     #[serde(default)]
     pub profile: HostProfile,
     #[serde(default = "default_bind")]
@@ -120,6 +123,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             profile: HostProfile::Desktop,
+            profile_required: false,
             bind: default_bind(),
         }
     }
@@ -292,6 +296,10 @@ pub struct SnapshotId(String);
 
 #[cfg(feature = "native")]
 impl SnapshotId {
+    pub fn is_live_check_label(&self) -> bool {
+        valid_lower_sha256(&self.0)
+    }
+
     pub(crate) const INVALID: &'static str =
         "snapshot_id must be 1 to 128 ASCII letters, digits, or . _ : -";
 
@@ -689,6 +697,13 @@ pub struct LexicalSearchRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentSha256(String);
 
+#[cfg(feature = "native")]
+pub fn valid_lower_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 impl ContentSha256 {
     pub fn as_str(&self) -> &str {
         &self.0
@@ -696,11 +711,7 @@ impl ContentSha256 {
 
     #[cfg(feature = "native")]
     pub(crate) fn from_stored(text: &str) -> Option<Self> {
-        (text.len() == 64
-            && text
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-        .then(|| Self(text.to_owned()))
+        valid_lower_sha256(text).then(|| Self(text.to_owned()))
     }
 }
 
@@ -887,7 +898,13 @@ pub(crate) struct FileIngestOutcome {
 #[cfg(feature = "native")]
 impl FileIngestOutcome {
     pub(crate) fn clean_snapshot_input(&self) -> bool {
-        self.kind == FileOutcomeKind::Indexed
+        self.format == SourceFormat::Markdown
+            && self
+                .path
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md"))
+            && self.kind == FileOutcomeKind::Indexed
+            && self.warning.is_none()
             && self.coverage == ExtractionCoverage::IndexedComplete
             && self.content_hash.is_some()
     }

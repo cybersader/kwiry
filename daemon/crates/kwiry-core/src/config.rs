@@ -226,20 +226,132 @@ fn load_config_unlocked(path: &Path) -> Result<Config> {
     }
 
     let source = fs::read_to_string(path).map_err(|error| io_error(path, error))?;
-    let config: Config = toml::from_str(&source).map_err(|error| Error::InvalidConfig {
-        path: path.to_path_buf(),
-        // Display would echo the source line, including producer labels.
-        message: error.message().to_owned(),
+    let de = toml::Deserializer::parse(&source).map_err(|_| Error::InvalidConfig {
+        path: path.to_owned(),
+        message: "<document>: invalid TOML".into(),
     })?;
+    let config: Config =
+        serde_path_to_error::deserialize(de).map_err(|error| Error::InvalidConfig {
+            path: path.to_path_buf(),
+            message: config_parse_diagnostic(&error),
+        })?;
 
     if config.version != 1 {
         return Err(Error::InvalidConfig {
             path: path.to_path_buf(),
-            message: format!("unsupported config version {}", config.version),
+            message: "version: unsupported config version".into(),
         });
     }
 
     Ok(config)
+}
+
+// Error::message() itself may quote configured values. Only report a fixed
+// category and a structural path; enum variants and unknown keys are input.
+fn config_parse_diagnostic(error: &serde_path_to_error::Error<toml::de::Error>) -> String {
+    let detail = error.inner().message();
+    let kind = if detail == crate::SnapshotId::INVALID {
+        crate::SnapshotId::INVALID
+    } else if detail.starts_with("invalid type") {
+        "invalid type"
+    } else if detail.starts_with("unknown variant") {
+        "unknown variant"
+    } else if detail.starts_with("missing field") {
+        "missing required field"
+    } else if detail.starts_with("unknown field") {
+        "unknown field"
+    } else {
+        "invalid TOML or setting"
+    };
+    let mut key = String::new();
+    let mut schema = "";
+    let mut whole_path_known = true;
+    for segment in error.path() {
+        match segment {
+            serde_path_to_error::Segment::Map { key: field } => {
+                let Some(&field) = config_schema_fields(schema)
+                    .iter()
+                    .find(|&&known| known == field)
+                else {
+                    whole_path_known = false;
+                    break;
+                };
+                if !key.is_empty() {
+                    key.push('.');
+                }
+                key.push_str(field);
+                schema = field;
+            }
+            serde_path_to_error::Segment::Seq { index }
+                if matches!(schema, "vaults" | "workload_subject_allowlist") =>
+            {
+                key.push_str(&format!("[{index}]"));
+                schema = if schema == "vaults" { "vault" } else { "item" };
+            }
+            _ => {
+                whole_path_known = false;
+                break;
+            }
+        }
+    }
+    // Serde's path ends at the containing table when a field is missing.
+    // Match the message against schema names, and emit only a static name.
+    if whole_path_known
+        && let Some(field) = detail
+            .strip_prefix("missing field `")
+            .and_then(|detail| detail.strip_suffix('`'))
+        && let Some(&field) = config_schema_fields(schema)
+            .iter()
+            .find(|&&known| known == field)
+    {
+        if !key.is_empty() {
+            key.push('.');
+        }
+        key.push_str(field);
+    }
+    if key.is_empty() {
+        key.push_str("<document>");
+    }
+    format!("{key}: {kind}")
+}
+
+// Allowlist by containing table, not just by spelling: e.g. `path` is
+// safe to report in a vault, but is an unknown key under `[holder]`.
+fn config_schema_fields(table: &str) -> &'static [&'static str] {
+    match table {
+        "" => &[
+            "version", "server", "auth", "semantic", "indexing", "vaults", "holder",
+        ],
+        "server" => &["profile_required", "profile", "bind"],
+        "auth" => &["token_file", "openclast"],
+        "openclast" => &[
+            "tenant_id",
+            "issuer",
+            "audience",
+            "jwks_file",
+            "max_token_ttl_seconds",
+            "workload_subject_allowlist",
+            "legacy_identity_accept_until",
+        ],
+        "semantic" => &["enabled"],
+        "indexing" => &[
+            "basis",
+            "audit_sources_per_pass",
+            "audit_bytes_per_pass",
+            "racy_window_millis",
+            "max_stale_serve_seconds",
+        ],
+        "holder" => &[
+            "profile",
+            "issuer",
+            "state_dir",
+            "page_size",
+            "clock_skew_allowance_seconds",
+            "max_stale_serve_seconds",
+        ],
+        "vault" => &["snapshot_id", "vault_id", "path", "room"],
+        _ => &[],
+    }
 }
 
 fn save_config_unlocked(path: &Path, config: &Config) -> Result<()> {
@@ -308,7 +420,7 @@ fn validate_room_registrations(path: &Path, config: &Config) -> Result<()> {
     };
     for vault in &config.vaults {
         if !vaults.insert(&vault.id) && !allows_repeated_vault(config) {
-            return Err(Error::DuplicateVaultId(vault.id.clone()));
+            return Err(invalid("vaults.vault_id: duplicate vault ID"));
         }
         if config.server.profile == HostProfile::OpenClast {
             let room = vault
@@ -335,11 +447,13 @@ fn validate_room_registrations(path: &Path, config: &Config) -> Result<()> {
 fn validate_config(path: &Path, config: &Config) -> Result<()> {
     if config.vaults.iter().any(|v| {
         v.snapshot_id.is_some()
-            && (config.server.profile != HostProfile::OpenClast || v.room.is_none())
+            && (config.server.profile != HostProfile::OpenClast
+                || v.room.is_none()
+                || !config.server.profile_required)
     }) {
         return Err(Error::InvalidConfig {
             path: path.to_path_buf(),
-            message: "snapshot_id requires an OpenClast room registration".into(),
+            message: "snapshot_id requires a profile-required governed room registration".into(),
         });
     }
     if config
@@ -353,6 +467,22 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
             path: path.to_path_buf(),
             message: format!("at most {MAX_LABELED_ROOMS} OpenClast rooms may have a snapshot_id"),
         });
+    }
+    if config.server.profile_required
+        && !(config.server.profile == HostProfile::OpenClast
+            && crate::ROOM_INCLUSIVE_IDS
+            && config.indexing.basis == IndexFreshnessBasis::StrictHash
+            && config
+                .server
+                .bind
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|addr| addr.ip().is_loopback())
+            && config.auth.openclast.as_ref().is_some_and(|auth| {
+                auth.legacy_identity_accept_until == Some(0)
+                    && !auth.workload_subject_allowlist.is_empty()
+            }))
+    {
+        return Err(Error::InvalidConfig { path: path.to_path_buf(), message: "profile_required requires governed room identity, loopback, strict_hash and workload-only authentication".into() });
     }
     if config.server.bind.trim().is_empty() {
         return Err(Error::InvalidConfig {
@@ -498,7 +628,7 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
         if config.server.profile == HostProfile::Desktop && !vault.path.is_absolute() {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
-                message: format!("vault path must be absolute: {}", vault.path.display()),
+                message: "vaults.path: vault path must be absolute".into(),
             });
         }
         if vault
@@ -508,16 +638,13 @@ fn validate_config(path: &Path, config: &Config) -> Result<()> {
         {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
-                message: format!("vault room must not be empty: {}", vault.id),
+                message: "vaults.room: vault room must not be empty".into(),
             });
         }
         if config.server.profile == HostProfile::OpenClast && vault.room.is_none() {
             return Err(Error::InvalidConfig {
                 path: path.to_path_buf(),
-                message: format!(
-                    "openclast profile requires a nonempty room for vault {}",
-                    vault.id
-                ),
+                message: "vaults.room: openclast profile requires a nonempty room".into(),
             });
         }
     }
@@ -545,10 +672,9 @@ fn validate_holder(path: &Path, config: &Config) -> Result<()> {
     }
     for vault in &config.vaults {
         if holder.state_dir.starts_with(&vault.path) || vault.path.starts_with(&holder.state_dir) {
-            return Err(invalid(format!(
-                "holder.state_dir must not overlap registered vault {}",
-                vault.id
-            )));
+            return Err(invalid(
+                "holder.state_dir must not overlap registered vault paths".into(),
+            ));
         }
     }
     if let Some(page_size) = holder.page_size
@@ -757,6 +883,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_parse_diagnostic_never_renders_values_or_unknown_keys() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let marker = "synthetic-whisper-106";
+        for (source, key, kind) in [
+            (
+                format!("[server]\nprofile_required = '{marker}'"),
+                "server.profile_required",
+                "invalid type",
+            ),
+            (
+                format!("[server]\nprofile = '{marker}'"),
+                "server.profile",
+                "unknown variant",
+            ),
+            (
+                format!("[holder]\n{marker} = true"),
+                "holder",
+                "unknown field",
+            ),
+            (format!("[{marker}"), "<document>", "invalid TOML"),
+        ] {
+            fs::write(&path, source).unwrap();
+            let err = load_config(&path).unwrap_err().to_string();
+            assert!(
+                err.contains(key) && err.contains(kind) && !err.contains(marker),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_parse_diagnostic_names_only_schema_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (source, expected) in [
+            (
+                "[[vaults]]\nvault_id = 'synthetic-marker'",
+                "vaults[0].path: missing required field",
+            ),
+            (
+                "[[vaults]]\nvault_id = 'synthetic-vault'\npath = ['synthetic-marker']",
+                "vaults[0].path: invalid type",
+            ),
+            (
+                "[holder]\nprofile = 'synthetic-marker'",
+                "holder.profile: unknown variant",
+            ),
+            ("[holder]\nsynthetic-marker = true", "holder: unknown field"),
+            (
+                "[holder]\npath = 'synthetic-marker'",
+                "holder: unknown field",
+            ),
+        ] {
+            fs::write(&path, source).unwrap();
+            let Error::InvalidConfig { message, .. } = load_config(&path).unwrap_err() else {
+                panic!("expected a config diagnostic");
+            };
+            assert_eq!(message, expected);
+        }
+    }
+
+    #[test]
     fn invalid_snapshot_grammar_is_rejected_at_load_without_echoing_the_value() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -784,11 +973,69 @@ mod tests {
     fn snapshot_id_rejected_in_desktop_profile_or_without_room() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        for (profile, room) in [("desktop", "room = 'room'"), ("openclast", "")] {
+        for (profile, room) in [
+            ("desktop", "room = 'room'"),
+            ("openclast", ""),
+            ("openclast", "room = 'room'"),
+        ] {
             fs::write(&path,format!("[server]\nprofile = '{profile}'\n[[vaults]]\nvault_id = 'garden'\npath = '/synthetic'\nsnapshot_id = 'sample.label'\n{room}")).unwrap();
             let error = load_config(&path).unwrap_err().to_string();
             assert!(error.contains("snapshot_id requires"));
             assert!(!error.contains("sample.label"));
+        }
+    }
+
+    #[test]
+    fn config_profile_required_precludes_unsafe_serving_settings() {
+        let path = Path::new("config.toml");
+        let mut base = Config::default();
+        base.server.profile = HostProfile::OpenClast;
+        base.server.profile_required = true;
+        base.auth.openclast = Some(crate::OpenClastAuthConfig {
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
+            issuer: "issuer".into(),
+            audience: "search".into(),
+            jwks_file: std::env::temp_dir().join("synthetic-public-jwks"),
+            workload_subject_allowlist: vec!["synthetic-workload".into()],
+            max_token_ttl_seconds: 60,
+            legacy_identity_accept_until: Some(0),
+        });
+        assert_eq!(
+            validate_config(path, &base).is_ok(),
+            crate::ROOM_INCLUSIVE_IDS
+        );
+        for kind in ["profile", "external", "basis", "legacy", "subject", "ttl"] {
+            let mut candidate = base.clone();
+            match kind {
+                "profile" => candidate.server.profile = HostProfile::Desktop,
+                "external" => candidate.server.bind = "0.0.0.0:0".into(),
+                "basis" => candidate.indexing.basis = IndexFreshnessBasis::MetadataAudit,
+                "legacy" => {
+                    candidate
+                        .auth
+                        .openclast
+                        .as_mut()
+                        .unwrap()
+                        .legacy_identity_accept_until = None
+                }
+                "subject" => candidate
+                    .auth
+                    .openclast
+                    .as_mut()
+                    .unwrap()
+                    .workload_subject_allowlist
+                    .clear(),
+                "ttl" => {
+                    candidate
+                        .auth
+                        .openclast
+                        .as_mut()
+                        .unwrap()
+                        .max_token_ttl_seconds = 61
+                }
+                _ => unreachable!(),
+            }
+            assert!(validate_config(path, &candidate).is_err(), "{kind}");
         }
     }
 
@@ -798,7 +1045,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let mut config = String::from("[server]\nprofile = 'openclast'\n");
+        let mut config = String::from("[server]\nprofile = 'openclast'\nprofile_required = true\n");
         for i in 0..=MAX_LABELED_ROOMS {
             writeln!(
                 config,

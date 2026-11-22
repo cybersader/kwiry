@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "live-check-v1 search request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "q",
+    "mode",
+    "limit"
+  ],
+  "properties": {
+    "q": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Literal Unicode 15.1 query; UTF-8 byte, word, planner budgets and grammar are checked separately; see headers.md."
+    },
+    "mode": {
+      "const": "lexical"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "JSON integer literal, equal to the signed ceiling. Reject decimal or exponent syntax even if mathematically integral."
+    }
+  }
+}

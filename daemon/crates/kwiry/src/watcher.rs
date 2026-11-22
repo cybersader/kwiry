@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -21,6 +21,42 @@ const SAFETY_RECONCILE: Duration = Duration::from_secs(60);
 /// Distinct pending watcher paths before escalating to one full pass.
 const MAX_PENDING_PATHS: usize = 4_096;
 
+/// Even epochs are closed. An event received during a reload invalidates its
+/// ticket, so an older read can never reopen the gate over a newer notification.
+#[derive(Default)]
+pub(crate) struct ConfigGate(AtomicU64);
+impl ConfigGate {
+    pub(crate) fn open(&self) -> bool {
+        self.ticket() & 1 == 1
+    }
+    fn ticket(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn invalidations(&self) -> u64 {
+        self.ticket() >> 1
+    }
+    fn invalidate(&self) {
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some((n | 1).wrapping_add(1))
+            })
+            .unwrap();
+    }
+    pub(crate) fn validated(&self, ticket: u64) {
+        let _ = self
+            .0
+            .compare_exchange(ticket, ticket | 1, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+fn config_may_have_changed(event: &notify::Result<Event>, path: &Path) -> bool {
+    matches!(
+        classify_event(event, &[], path),
+        EventEffect::ConfigChanged | EventEffect::Rescan(_)
+    )
+}
+
 pub(crate) struct WatcherHandle {
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
@@ -34,6 +70,10 @@ impl WatcherHandle {
 }
 
 struct WatcherContext {
+    live_gate: Option<Arc<ConfigGate>>,
+    #[cfg(test)]
+    safety_ticks: Option<mpsc::Receiver<()>>,
+    initial_check: Option<(bool, bool)>, // config watch armed, bootstrap config still current
     paths: Paths,
     config: Config,
     manager: ManagerHandle,
@@ -235,21 +275,70 @@ fn watch_roots(config: &Config) -> Vec<WatchRoot> {
         .collect()
 }
 
+fn deliver_event(
+    events: mpsc::Sender<notify::Result<Event>>,
+    overflow: Arc<AtomicBool>,
+    gate: Option<Arc<ConfigGate>>,
+    config_path: PathBuf,
+) -> impl FnMut(notify::Result<Event>) {
+    move |event| {
+        if let Some(gate) = &gate
+            && config_may_have_changed(&event, &config_path)
+        {
+            gate.invalidate();
+        }
+        if events.try_send(event).is_err() {
+            if let Some(gate) = &gate {
+                gate.invalidate();
+            }
+            overflow.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn watch_config_parent(watcher: &mut impl Watcher, config_path: &Path) -> bool {
+    watcher
+        .watch(
+            config_path.parent().unwrap_or(Path::new(".")),
+            RecursiveMode::NonRecursive,
+        )
+        .is_ok()
+}
+
+fn arm_config_watch(
+    watcher: &mut impl Watcher,
+    gate: &ConfigGate,
+    paths: &Paths,
+    boot: &Config,
+) -> (bool, bool) {
+    let armed = watch_config_parent(watcher, &paths.config);
+    let ticket = gate.ticket();
+    let unchanged = load_config_for_paths(paths).is_ok_and(|now| now == *boot);
+    if armed && unchanged {
+        gate.validated(ticket);
+    }
+    (armed, unchanged)
+}
+
 pub(crate) fn spawn_watcher(
     paths: Paths,
     initial_config: Config,
     manager: ManagerHandle,
     status: Arc<RwLock<DaemonStatus>>,
+    live_gate: Option<Arc<ConfigGate>>,
 ) -> Result<WatcherHandle> {
     let (events, receiver) = mpsc::channel(1_024);
     let overflow = Arc::new(AtomicBool::new(false));
-    let callback_overflow = overflow.clone();
-    let watcher = notify::recommended_watcher(move |event| {
-        if events.try_send(event).is_err() {
-            callback_overflow.store(true, Ordering::Release);
-        }
-    })
+    let mut watcher = notify::recommended_watcher(deliver_event(
+        events,
+        overflow.clone(),
+        live_gate.clone(),
+        paths.config.clone(),
+    ))
     .context("failed to create filesystem watcher")?;
+    let initial_check = live_gate
+        .as_ref()
+        .map(|gate| arm_config_watch(&mut watcher, gate, &paths, &initial_config));
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let task = tokio::spawn(run_watcher(
         watcher,
@@ -257,6 +346,10 @@ pub(crate) fn spawn_watcher(
         overflow,
         shutdown_receiver,
         WatcherContext {
+            live_gate,
+            #[cfg(test)]
+            safety_ticks: None,
+            initial_check,
             paths,
             config: initial_config,
             manager,
@@ -264,6 +357,38 @@ pub(crate) fn spawn_watcher(
         },
     ));
     Ok(WatcherHandle { shutdown, task })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn spawn_watcher_with_test_ticks(
+    paths: Paths,
+    config: Config,
+    manager: ManagerHandle,
+    status: Arc<RwLock<DaemonStatus>>,
+    gate: Arc<ConfigGate>,
+) -> (WatcherHandle, mpsc::Sender<()>) {
+    // Install real watches, but deliver neither config nor room notifications.
+    let mut watcher = notify::recommended_watcher(|_| {}).unwrap();
+    let initial_check = arm_config_watch(&mut watcher, &gate, &paths, &config);
+    let (_events, receiver) = mpsc::channel(1);
+    let (ticks, safety_ticks) = mpsc::channel(1);
+    let (shutdown, receiver_shutdown) = watch::channel(false);
+    let task = tokio::spawn(run_watcher(
+        watcher,
+        receiver,
+        Arc::new(AtomicBool::new(false)),
+        receiver_shutdown,
+        WatcherContext {
+            live_gate: Some(gate),
+            safety_ticks: Some(safety_ticks),
+            initial_check: Some(initial_check),
+            paths,
+            config,
+            manager,
+            status,
+        },
+    ));
+    (WatcherHandle { shutdown, task }, ticks)
 }
 
 async fn run_watcher(
@@ -274,21 +399,24 @@ async fn run_watcher(
     context: WatcherContext,
 ) {
     let WatcherContext {
+        live_gate,
+        #[cfg(test)]
+        mut safety_ticks,
+        initial_check,
         paths,
         mut config,
         manager,
         status,
     } = context;
     let startup_config = config.clone();
-    let config_parent = paths
-        .config
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    if watcher
-        .watch(&config_parent, RecursiveMode::NonRecursive)
-        .is_err()
-    {
+    let mut config_watch_ok = initial_check.map_or_else(
+        || watch_config_parent(&mut watcher, &paths.config),
+        |(armed, _)| armed,
+    );
+    if !config_watch_ok {
+        if let Some(gate) = &live_gate {
+            gate.invalidate();
+        }
         mark_degraded(&status).await;
     }
     let mut pending = PendingPaths::default();
@@ -300,11 +428,14 @@ async fn run_watcher(
     }
     let mut roots = watch_roots(&config);
 
-    let mut config_dirty = false;
+    let mut config_dirty = initial_check.is_some_and(|(_, unchanged)| !unchanged);
+    if config_dirty {
+        pending.note_rescan(RescanCause::ConfigChanged);
+    }
     let mut config_invalid = false;
     let mut restart_required = false;
-    let mut first_dirty: Option<Instant> = None;
-    let mut last_dirty: Option<Instant> = None;
+    let mut first_dirty = config_dirty.then(Instant::now);
+    let mut last_dirty = first_dirty;
     let mut debounce = tokio::time::interval(Duration::from_millis(100));
     debounce.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut safety = tokio::time::interval(SAFETY_RECONCILE);
@@ -339,7 +470,10 @@ async fn run_watcher(
                         config_dirty = true;
                         pending.note_rescan(RescanCause::ConfigChanged);
                     }
-                    EventEffect::Rescan(cause) => pending.note_rescan(cause),
+                    EventEffect::Rescan(cause) => {
+                        config_dirty |= live_gate.is_some();
+                        pending.note_rescan(cause);
+                    }
                     EventEffect::TouchedRooms(touched) => {
                         for key in touched { pending.insert_room(key); }
                     }
@@ -369,11 +503,13 @@ async fn run_watcher(
                 let quiet = last_dirty.is_some_and(|last| now.duration_since(last) >= DEBOUNCE);
                 let overdue = first_dirty.is_some_and(|first| now.duration_since(first) >= MAX_DEBOUNCE);
                 if quiet || overdue {
+                    let ticket = live_gate.as_ref().map(|gate| gate.ticket());
                     if config_dirty {
                         match load_config_for_paths(&paths) {
                             Ok(next) => {
                                 config_invalid = false;
                                 if startup_config.requires_restart_for(&next) {
+                                    if let Some(gate) = &live_gate { gate.invalidate(); }
                                     restart_required = true;
                                     mark_degraded(&status).await;
                                 } else {
@@ -387,6 +523,7 @@ async fn run_watcher(
                                 }
                             }
                             Err(_) => {
+                                if let Some(gate) = &live_gate { gate.invalidate(); }
                                 config_invalid = true;
                                 mark_degraded(&status).await;
                                 pending = PendingPaths::default();
@@ -404,6 +541,7 @@ async fn run_watcher(
                         pending.note_rescan(RescanCause::WatchRootFailed);
                     }
                     let scope = pending.take_scope();
+                    let validating = config_dirty;
                     config_dirty = false;
                     first_dirty = None;
                     last_dirty = None;
@@ -412,10 +550,13 @@ async fn run_watcher(
                         &config,
                         &status,
                         scope.clone(),
-                        config_invalid || restart_required || unwatched_roots,
+                        config_invalid || restart_required || unwatched_roots
+                            || (live_gate.is_some() && !config_watch_ok),
                     )
                     .await;
+                    if validating && succeeded && !restart_required && !config_invalid && config_watch_ok && let (Some(gate), Some(ticket)) = (&live_gate, ticket) { gate.validated(ticket); }
                     if !succeeded {
+                        config_dirty |= validating && live_gate.is_some();
                         // Requeue so the retry happens at the next quiet
                         // debounce window, not the next safety tick.
                         pending.merge_back(scope);
@@ -426,7 +567,31 @@ async fn run_watcher(
                     }
                 }
             }
-            _ = safety.tick() => {
+            _ = async {
+                #[cfg(test)]
+                if let Some(ticks) = &mut safety_ticks && ticks.recv().await.is_some() {
+                    return;
+                }
+                safety.tick().await;
+            } => {
+                if let Some(gate) = &live_gate {
+                    if !config_watch_ok {
+                        config_watch_ok = watch_config_parent(&mut watcher, &paths.config);
+                    }
+                    if !load_config_for_paths(&paths).is_ok_and(|next| next == config) {
+                        gate.invalidate();
+                    }
+                    if config_dirty || !gate.open() {
+                        // Reopen only through the normal reload and reconcile path,
+                        // including when an initially missing watch is now armed.
+                        config_dirty = true;
+                        pending.note_rescan(RescanCause::ConfigChanged);
+                        let now = Instant::now();
+                        first_dirty.get_or_insert(now);
+                        last_dirty.get_or_insert(now);
+                        continue;
+                    }
+                }
                 unwatched_roots = add_roots(&mut watcher, &config, &mut watched_roots);
                 reconcile_and_update(
                     &manager,
@@ -553,6 +718,120 @@ mod tests {
 
     fn config_path() -> PathBuf {
         PathBuf::from("/state/config.toml")
+    }
+
+    #[tokio::test]
+    async fn governed_search_live_check_config_watch_reloads_after_uncertain_delivery() {
+        use kwiry_core::{IndexManager, SearchRuntime, build_index, save_config};
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(
+            Some(tmp.path().join("config.toml")),
+            Some(tmp.path().join("data")),
+        )
+        .unwrap();
+        let mut boot = Config::default();
+        let root = tmp.path().join("room");
+        std::fs::create_dir(&root).unwrap();
+        boot.vaults.push(kwiry_core::VaultRegistration {
+            id: "test".into(),
+            path: root,
+            room: None,
+            snapshot_id: None,
+        });
+        save_config(&paths.config, &boot).unwrap();
+        let runtime = SearchRuntime::new();
+        build_index(&boot, &paths.data_dir).unwrap();
+        let (manager, actor) = crate::runtime::spawn_manager(
+            IndexManager::open(boot.clone(), &paths.data_dir, runtime.clone()).unwrap(),
+            runtime,
+        );
+        let gate = Arc::new(ConfigGate::default());
+        let status = Arc::new(RwLock::new(DaemonStatus::starting("test")));
+        // Boot saw a valid config. Change it before arming; this event will
+        // never be delivered. Subsequent backend notifications are injected
+        // through the same delivery function as the native watcher.
+        std::fs::write(&paths.config, "[invalid").unwrap();
+        let mut watcher = notify::recommended_watcher(|_| {}).unwrap();
+        let check = arm_config_watch(&mut watcher, &gate, &paths, &boot);
+        assert_eq!(check, (true, false));
+        assert!(!gate.open());
+        let (events, rx) = mpsc::channel(1);
+        let overflow = Arc::new(AtomicBool::new(false));
+        let mut deliver = deliver_event(
+            events,
+            overflow.clone(),
+            Some(gate.clone()),
+            paths.config.clone(),
+        );
+        let (stop, shutdown) = watch::channel(false);
+        let task = tokio::spawn(run_watcher(
+            watcher,
+            rx,
+            overflow,
+            shutdown,
+            WatcherContext {
+                live_gate: Some(gate.clone()),
+                safety_ticks: None,
+                initial_check: Some(check),
+                paths: paths.clone(),
+                config: boot.clone(),
+                manager: manager.clone(),
+                status: status.clone(),
+            },
+        ));
+        let wait = |open| {
+            let gate = gate.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while gate.open() != open {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while status.read().await.state != DaemonState::Degraded {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // No file notification accompanies the repair. Only backend error or
+        // rescan evidence can cause the watcher to reread and reopen.
+        for event in [
+            Err(notify::Error::generic("synthetic")),
+            Ok(Event::new(EventKind::Any).set_flag(Flag::Rescan)),
+        ] {
+            save_config(&paths.config, &boot).unwrap();
+            deliver(event);
+            wait(true).await;
+            let old_ticket = gate.ticket();
+            std::fs::write(&paths.config, "[invalid").unwrap();
+            deliver(Ok(Event::new(EventKind::Any).add_path(paths.config.clone())));
+            // Synchronous: the task has not even been scheduled for debounce.
+            assert!(!gate.open());
+            gate.validated(old_ticket);
+            assert!(!gate.open());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while status.read().await.state != DaemonState::Degraded {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        // Drop a delivery with no config path: overflow alone must also reread.
+        save_config(&paths.config, &boot).unwrap();
+        let unrelated = || Ok(Event::new(EventKind::Any));
+        deliver(unrelated());
+        deliver(unrelated());
+        wait(true).await;
+        stop.send(true).unwrap();
+        task.await.unwrap();
+        manager.shutdown().await.unwrap();
+        actor.await.unwrap();
     }
 
     #[test]

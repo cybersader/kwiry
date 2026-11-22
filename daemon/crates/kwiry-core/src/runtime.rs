@@ -235,6 +235,21 @@ impl SearchRuntime {
         index.search_opened(&opened, query, limit, filters, resources)
     }
 
+    /// Bind the signed resource to the acquired physical reader before ranking. Neither
+    /// registration nor the active pointer is consulted again for the result's label.
+    pub fn search_labeled_resource(
+        &self,
+        query: &str,
+        limit: usize,
+        resource: &ResourceKey,
+    ) -> Result<GenerationSearchResult> {
+        let filters = SearchFilters::default();
+        let resources = std::slice::from_ref(resource);
+        let (index, opened) = self.open_authorized_snapshot(&filters, resources)?;
+        index.require_live_reader(&opened, resource)?;
+        index.search_opened(&opened, query, limit, &filters, resources)
+    }
+
     /// Semantic-only search: nearest chunks by embedding distance, then
     /// hydrated and filter-checked against the lexical index.
     pub fn search_semantic(
@@ -503,6 +518,30 @@ impl SearchRuntime {
         resources: &[ResourceKey],
         served_generation: &str,
     ) -> Result<IndexFreshness> {
+        self.scoped_freshness(filters, resources, served_generation, None)
+    }
+
+    /// Recheck eligibility on the installed reader, never relabel the answering one.
+    pub fn labeled_resource_freshness(
+        &self,
+        resource: &ResourceKey,
+        served_generation: &str,
+    ) -> Result<IndexFreshness> {
+        self.scoped_freshness(
+            &SearchFilters::default(),
+            std::slice::from_ref(resource),
+            served_generation,
+            Some(resource),
+        )
+    }
+
+    fn scoped_freshness(
+        &self,
+        filters: &SearchFilters,
+        resources: &[ResourceKey],
+        served_generation: &str,
+        live_resource: Option<&ResourceKey>,
+    ) -> Result<IndexFreshness> {
         // Read freshness before loading the active snapshot, under the same
         // lock that finishes a pass. Otherwise a completed publication between
         // those reads could label a superseded response current.
@@ -517,7 +556,11 @@ impl SearchRuntime {
             ));
         };
         let effective = effective_resources(filters, resources);
-        self.open_authorized_resources_with_state(index, filters, resources, &states)?;
+        let opened =
+            self.open_authorized_resources_with_state(index, filters, resources, &states)?;
+        if let Some(resource) = live_resource {
+            index.require_live_reader(&opened, resource)?;
+        }
         let current_generation = index.scoped_generation(filters, resources)?;
         let mut worst = IndexFreshnessState::Current;
         for resource in effective {
@@ -847,6 +890,21 @@ impl PartitionedSearchIndex {
         }
     }
 
+    fn require_live_reader(
+        &self,
+        opened: &OpenedResources<'_>,
+        resource: &ResourceKey,
+    ) -> Result<()> {
+        let label = self
+            .partitions
+            .get(resource)
+            .and_then(|p| p.snapshot_id.as_ref());
+        if !opened.contains_key(resource) || !label.is_some_and(|id| id.is_live_check_label()) {
+            return Err(Error::UnavailableResourceIndexes(vec![0]));
+        }
+        Ok(())
+    }
+
     fn search_opened(
         &self,
         opened: &OpenedResources<'_>,
@@ -855,12 +913,13 @@ impl PartitionedSearchIndex {
         filters: &SearchFilters,
         resources: &[ResourceKey],
     ) -> Result<GenerationSearchResult> {
+        let snapshot_ids = opened
+            .keys()
+            .map(|&key| (key.clone(), self.partitions[key].snapshot_id.clone()))
+            .collect();
         let outcome = search_opened_with_quality(opened, query, limit, filters)?;
         Ok(GenerationSearchResult {
-            snapshot_ids: opened
-                .keys()
-                .map(|&key| (key.clone(), self.partitions[key].snapshot_id.clone()))
-                .collect(),
+            snapshot_ids,
             generation: self.scoped_generation(filters, resources)?,
             hits: outcome.hits,
             lexical_match_quality: Some(outcome.match_quality),
@@ -1966,7 +2025,8 @@ impl OpenClastIndexManager {
                 &mut audit,
                 |files, outcomes| {
                     if !certify && vault.snapshot_id.is_some() {
-                        certify = files != previous_keys.len()
+                        certify = outcomes.iter().any(|o| !o.clean_snapshot_input())
+                            || files != previous_keys.len()
                             || outcomes.iter().any(|o| {
                                 ManifestFile::from_outcome(o, fingerprint, Some(&resource))
                                     .is_none_or(|(k, f)| self.manifest.files.get(&k) != Some(&f))

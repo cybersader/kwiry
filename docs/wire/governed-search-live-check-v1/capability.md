@@ -1,0 +1,7 @@
+# Private workload capability
+
+Use the [baseline compact-JWS verifier and replay pipeline](../governed-search-v0/capability.md), **workload branch only**. Require `typ:kwiry-cap+jwt`, exact `alg/kid` pinned to an approved asymmetric public key, issuer, audience, bytewise allowlisted workload `sub`, `iat/nbf/exp`, single-use `jti`, configured `tenant`, `actions:["search:lexical"]`, signed `resources` and `constraints.max_limit`. No actor, legacy or revision claims. Never send a session token, seed or private signing key. Use explicit legacy cutoff zero and a TTL ceiling of 1–60 seconds.
+
+Each signed resource is exactly `{tenant_id,vault_id,room_id}`. Tenant matches `^tenant_[A-Za-z0-9_-]{20}$` and agrees with both signed and configured tenant. Vault and room each match `^[A-Za-z0-9_-]{22}$`. These are syntax/equality checks, not enrollment or checks on entropy/pad bits. Real participants use the issuer's existing genuine enrollment, custody and locked exact-tuple lookup.
+
+Signed noninteger ceiling → 401; signed integer outside 1–100 → 403; remaining baseline checks precede durable replay reservation. Valid auth consumes the JTI even for subsequent method, negotiation or body failure. A baseline-admissible multi-resource claim reaches negotiation; after selection only **one** signed tuple is authorized, regardless of the body. Only search the signed physical partition, with no filters or empty-intersection shortcut. Request limit must equal the signed ceiling; never clamp. See [ordered failures](headers.md).

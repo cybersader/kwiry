@@ -60,14 +60,36 @@ pub(crate) fn run(paths: &Paths, command: HolderCommand) -> Result<()> {
             paths.config.display()
         )
     })?;
-    let settings = holder_settings(&config)?;
+    let private = config.server.profile_required;
+    if private {
+        crate::private_panic_hook();
+    }
+    let result = run_configured(paths, command, &config, private);
+    if private {
+        result.map_err(|_| anyhow!("holder_failed"))
+    } else {
+        result
+    }
+}
+
+fn run_configured(
+    paths: &Paths,
+    command: HolderCommand,
+    config: &Config,
+    private: bool,
+) -> Result<()> {
+    let settings = holder_settings(config)?;
     match command {
         HolderCommand::Key => {
-            let dir = open_holder_dir(&settings, &config, &paths.data_dir)?;
+            let dir = open_holder_dir(&settings, config, &paths.data_dir)?;
             let key = kwiry_holdings::startup::create_key(&dir, &FsIo)
                 .map_err(|error| anyhow!("holder key: {error}"))?;
-            println!("holder key created; thumbprint {}", key.thumbprint());
-            println!("{}", serde_json::to_string_pretty(&key.public_jwk())?);
+            if private {
+                println!("holder key created");
+            } else {
+                println!("holder key created; thumbprint {}", key.thumbprint());
+                println!("{}", serde_json::to_string_pretty(&key.public_jwk())?);
+            }
         }
         HolderCommand::Enroll { holder_id, jwks } => {
             let bytes = std::fs::read(&jwks)
@@ -80,7 +102,7 @@ pub(crate) fn run(paths: &Paths, command: HolderCommand) -> Result<()> {
                 .as_ref()
                 .map(|engine| engine.holder_kind.clone())
                 .ok_or_else(|| anyhow!("the configured profile has no engine holder kind"))?;
-            let dir = open_holder_dir(&settings, &config, &paths.data_dir)?;
+            let dir = open_holder_dir(&settings, config, &paths.data_dir)?;
             kwiry_holdings::startup::enroll(
                 dir,
                 Box::new(FsIo),
@@ -97,10 +119,15 @@ pub(crate) fn run(paths: &Paths, command: HolderCommand) -> Result<()> {
             println!("holder enrolled");
         }
         HolderCommand::Relist { json } => {
-            let (mut holder, fail_stop) = start(&settings, &config, &paths.data_dir)?;
+            let (mut holder, fail_stop) = start(&settings, config, &paths.data_dir)?;
             let outcome = holder.list_once();
             let report = HolderReport::from_holder(&holder, now_ms());
-            if json {
+            if private {
+                if !matches!(outcome, kwiry_holdings::holder::ListOutcome::Applied(_)) {
+                    bail!("holder_failed");
+                }
+                println!("list applied");
+            } else if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
@@ -118,7 +145,9 @@ pub(crate) fn run(paths: &Paths, command: HolderCommand) -> Result<()> {
         }
         HolderCommand::Status { json } => {
             let report = read_status(&settings, &paths.data_dir)?;
-            if json {
+            if private {
+                println!("holder status read");
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print_report(&report);

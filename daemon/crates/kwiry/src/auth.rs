@@ -12,6 +12,7 @@ use crate::capability::{CapabilityFailure, CapabilityVerifier};
 
 #[derive(Clone)]
 pub(crate) struct AuthState {
+    profile_required: bool,
     method: AuthMethod,
     runtime: SearchRuntime,
 }
@@ -25,6 +26,7 @@ enum AuthMethod {
 impl AuthState {
     pub(crate) fn desktop(token: String) -> Self {
         Self {
+            profile_required: false,
             method: AuthMethod::Desktop(Arc::from(token)),
             runtime: SearchRuntime::new(),
         }
@@ -32,9 +34,15 @@ impl AuthState {
 
     pub(crate) fn openclast(verifier: CapabilityVerifier) -> Self {
         Self {
+            profile_required: false,
             method: AuthMethod::OpenClast(Arc::new(verifier)),
             runtime: SearchRuntime::new(),
         }
+    }
+
+    pub(crate) fn with_required_profile(mut self, required: bool) -> Self {
+        self.profile_required = required;
+        self
     }
 
     pub(crate) fn with_runtime(mut self, runtime: SearchRuntime) -> Self {
@@ -48,11 +56,15 @@ pub(crate) async fn require_auth(
     mut request: Request,
     next: Next,
 ) -> Response {
+    if auth.profile_required && request.headers().get_all(AUTHORIZATION).iter().count() != 1 {
+        return unauthorized();
+    }
     let supplied = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !auth.profile_required || !value.contains(','));
     let principal = match (&auth.method, supplied) {
         (AuthMethod::Desktop(expected), Some(supplied)) if token_matches(expected, supplied) => {
             Ok(Principal::desktop())

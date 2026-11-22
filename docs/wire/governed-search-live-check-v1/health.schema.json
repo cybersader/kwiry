@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Governed liveness (live-check-v1)",
+  "description": "Unauthenticated GET /v0/health HTTP 200 body. Liveness and build format only; not room availability, index freshness or authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "id_scheme",
+    "multi_room"
+  ],
+  "properties": {
+    "status": {
+      "const": "ok"
+    },
+    "id_scheme": {
+      "const": "room-v1"
+    },
+    "multi_room": {
+      "const": "closed"
+    }
+  }
+}

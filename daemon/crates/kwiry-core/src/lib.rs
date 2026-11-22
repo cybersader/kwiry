@@ -286,6 +286,8 @@ fn fr11_ingest_config_refuses_openclast_before_desktop_discovery() {
 #[cfg(feature = "native")]
 pub use config::{valid_room_identifier, valid_tenant_identifier};
 #[cfg(feature = "native")]
+pub use model::valid_lower_sha256;
+#[cfg(feature = "native")]
 pub use room_format::{HOLDINGS_SERVING_IMPLEMENTED, OpenClastRoomFormat};
 #[cfg(feature = "native")]
 pub use room_walk::probe_openclast_ingestion;

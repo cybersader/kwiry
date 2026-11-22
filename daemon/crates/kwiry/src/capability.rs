@@ -361,22 +361,12 @@ impl CapabilityVerifier {
         {
             return Err(CapabilityFailure::Unauthorized);
         }
-        let raw_limit = claims.constraints.max_limit.get();
-        let integer = raw_limit.strip_prefix('-').unwrap_or(raw_limit);
-        if !integer.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(CapabilityFailure::Unauthorized);
-        }
-        let max_limit = match raw_limit.parse::<usize>() {
-            Ok(limit) => limit,
-            Err(_) if ROOM_INCLUSIVE_IDS => 0, // integer out of range
-            Err(_) => return Err(CapabilityFailure::Unauthorized),
-        };
+        let max_limit = signed_page_ceiling(&claims.constraints.max_limit)?;
         if claims.tenant != self.tenant_id
             || (ROOM_INCLUSIVE_IDS && !valid_tenant_identifier(&claims.tenant))
             || claims.actions != [SEARCH_ACTION]
             || claims.resources.is_empty()
             || claims.resources.len() > MAX_RESOURCES
-            || !(1..=MAX_SEARCH_LIMIT).contains(&max_limit)
         {
             return Err(CapabilityFailure::Forbidden);
         }
@@ -429,6 +419,25 @@ impl CapabilityVerifier {
             },
             (ROOM_INCLUSIVE_IDS && workload).then_some((claims.iat, now)),
         ))
+    }
+}
+
+/// Check the original JSON spelling before negotiation or replay reservation.
+/// A fractional/exponent literal is a shape failure, not an inadmissible integer.
+fn signed_page_ceiling(raw: &serde_json::value::RawValue) -> Result<usize, CapabilityFailure> {
+    let literal = raw.get();
+    if !literal
+        .strip_prefix('-')
+        .unwrap_or(literal)
+        .bytes()
+        .all(|b| b.is_ascii_digit())
+    {
+        return Err(CapabilityFailure::Unauthorized);
+    }
+    match literal.parse::<usize>() {
+        Ok(n) if (1..=MAX_SEARCH_LIMIT).contains(&n) => Ok(n),
+        Err(_) if !ROOM_INCLUSIVE_IDS => Err(CapabilityFailure::Unauthorized),
+        _ => Err(CapabilityFailure::Forbidden),
     }
 }
 

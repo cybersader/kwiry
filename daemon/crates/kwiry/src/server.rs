@@ -1,3 +1,5 @@
+mod live_check;
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,7 +28,7 @@ use crate::auth::{AuthState, require_auth};
 use crate::capability::{CapabilityVerifier, ROOM_FORMAT};
 use crate::logging::Redacted;
 use crate::runtime::{ManagerHandle, spawn_manager};
-use crate::watcher::spawn_watcher;
+use crate::watcher::{ConfigGate, spawn_watcher};
 
 const INDEX_FRESHNESS_HEADER: &str = "x-kwiry-index-freshness";
 const GENERATION_HEADER: &str = "x-kwiry-generation";
@@ -37,6 +39,8 @@ const FIELD_EMPHASIS_HEADER: &str = "x-kwiry-field-emphasis";
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    /// Present only on the dedicated listener. Reload failures close the gate.
+    live_gate: Option<Arc<ConfigGate>>,
     profile: HostProfile,
     runtime: SearchRuntime,
     status: Arc<RwLock<DaemonStatus>>,
@@ -57,11 +61,27 @@ pub(crate) async fn serve(
     semantic: bool,
 ) -> Result<()> {
     let initial_config = load_config_for_paths(&paths)?;
+    if initial_config.server.profile_required {
+        // Even an unexpected dependency panic must not print private diagnostics.
+        crate::private_panic_hook();
+        return serve_configured(paths, bind_override, semantic, initial_config)
+            .await
+            .map_err(|_| anyhow!("the private search service could not start or continue"));
+    }
+    serve_configured(paths, bind_override, semantic, initial_config).await
+}
+
+async fn serve_configured(
+    paths: Paths,
+    bind_override: Option<String>,
+    semantic: bool,
+    initial_config: Config,
+) -> Result<()> {
     let profile = initial_config.server.profile;
     if profile == HostProfile::OpenClast {
         probe_openclast_ingestion(&paths.data_dir, &initial_config.vaults)?;
     }
-    let _logging = crate::logging::init(&paths.logs_dir())?;
+    let _logging = crate::logging::init(&paths.logs_dir(), initial_config.server.profile_required)?;
     tracing::info!(
         config = %paths.config.display(),
         data_dir = %paths.data_dir.display(),
@@ -110,6 +130,14 @@ pub(crate) async fn serve(
             "kwiry desktop profile accepts loopback bind addresses only: {address}"
         ));
     }
+    if config.server.profile_required
+        && (!address.ip().is_loopback()
+            || !matches!(ROOM_FORMAT, kwiry_core::OpenClastRoomFormat::Closed))
+    {
+        return Err(anyhow!(
+            "profile-required service needs a closed room-v1 build and isolated loopback"
+        ));
+    }
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind {address}"))?;
@@ -133,7 +161,7 @@ pub(crate) async fn serve(
     // below — so it must not be the quieter of the two. The gate's message is
     // produced and then classified away inside `prepare`; this is where it is
     // handed back to the operator.
-    if let Some(discarded) = discarded {
+    if let Some(discarded) = discarded.filter(|_| !config.server.profile_required) {
         let generation = discarded.generation.as_deref().unwrap_or("<unreadable>");
         tracing::warn!(
             generation,
@@ -162,7 +190,12 @@ pub(crate) async fn serve(
     let status = Arc::new(RwLock::new(DaemonStatus::starting(env!(
         "CARGO_PKG_VERSION"
     ))));
+    let live_gate = config
+        .server
+        .profile_required
+        .then(|| Arc::new(ConfigGate::default()));
     let state = AppState {
+        live_gate: live_gate.clone(),
         profile,
         runtime: runtime.clone(),
         status: status.clone(),
@@ -223,7 +256,7 @@ pub(crate) async fn serve(
     // reindex that follows is explicable rather than mysterious.
     {
         let evictions = manager.open_evictions();
-        if !evictions.is_empty() {
+        if !evictions.is_empty() && !config.server.profile_required {
             let formats = evictions
                 .by_format
                 .iter()
@@ -256,14 +289,24 @@ pub(crate) async fn serve(
     }
 
     let (manager_handle, manager_task) = spawn_manager(manager, runtime.clone());
-    // The watcher is armed before the boot pass so nothing observed while
-    // it runs is lost; the manager actor serializes the passes.
-    let watcher = spawn_watcher(
-        paths.clone(),
-        config.clone(),
-        manager_handle.clone(),
-        status.clone(),
-    )?;
+    // Preserve the ordinary startup ordering. The private gate remains closed
+    // until boot finishes and its watched configuration is checked below.
+    let start_watcher = || {
+        spawn_watcher(
+            paths.clone(),
+            config.clone(),
+            manager_handle.clone(),
+            status.clone(),
+            live_gate.clone(),
+        )
+    };
+    // On the private listener, do not race a stale boot pass against a reload.
+    // Its watcher arms, then checks the boot configuration before first admission.
+    let watcher = if live_gate.is_none() {
+        Some(start_watcher()?)
+    } else {
+        None
+    };
     if semantic_enabled {
         // Owner ruling (KWIRY-Q-0022): the embedding model loads in the
         // background; semantic and hybrid answer an honest mode_unavailable
@@ -327,6 +370,10 @@ pub(crate) async fn serve(
         }
     }
 
+    let watcher = match watcher {
+        Some(watcher) => watcher,
+        None => start_watcher()?,
+    };
     if let Some((listener, router)) = pending_server {
         serving = Some(spawn_server(listener, router));
     }
@@ -516,25 +563,37 @@ fn install_semantic(_paths: &Paths, _runtime: &SearchRuntime) -> Result<()> {
 }
 
 pub(crate) fn build_router(state: AppState, auth: AuthState, profile: HostProfile) -> Router {
-    let mut protected = Router::new().route("/v0/search", post(search));
+    let required = state.live_gate.is_some();
+    let handler = if required {
+        post(live_check::search)
+    } else {
+        post(search)
+    };
+    let mut protected = Router::new().route("/v0/search", handler);
     if profile == HostProfile::Desktop {
         protected = protected.route("/v0/status", get(status));
     }
     protected = protected
         .method_not_allowed_fallback(method_not_allowed)
         .route_layer(middleware::from_fn_with_state(
-            auth.with_runtime(state.runtime.clone()),
+            auth.with_runtime(state.runtime.clone())
+                .with_required_profile(required),
             require_auth,
         ));
     if profile == HostProfile::OpenClast {
         protected = protected.route_layer(middleware::from_fn(room_format_headers));
     }
-    Router::new()
+    let router = Router::new()
         .route("/v0/health", get(health))
         .merge(protected)
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
-        .with_state(state)
+        .with_state(state);
+    if required {
+        router.layer(middleware::from_fn(live_check::no_store))
+    } else {
+        router
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Response {
@@ -1051,11 +1110,202 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState {
+            live_gate: None,
             profile: HostProfile::Desktop,
             runtime: SearchRuntime::new(),
             status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
             holder_gate: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn governed_search_live_check_safety_tick_rearms_missing_config_watch() {
+        exercise_config_safety_ticks(true).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn governed_search_live_check_safety_tick_keeps_unchanged_gate_open() {
+        exercise_config_safety_ticks(false).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn exercise_config_safety_ticks(start_without_parent: bool) {
+        use std::time::Duration;
+        use tokio::time::{sleep, timeout};
+
+        let directory = tempdir().unwrap();
+        let control = directory.path().join("control");
+        let paths = Paths::resolve(
+            Some(control.join("config.toml")),
+            Some(directory.path().join("data")),
+        )
+        .unwrap();
+        let room = directory.path().join("room");
+        fs::create_dir(&room).unwrap();
+        fs::write(room.join("note.md"), "marigold").unwrap();
+        let mut config = Config::default();
+        config.server.profile = HostProfile::OpenClast;
+        config.server.profile_required = true;
+        let mut auth = openclast_auth_config(directory.path());
+        auth.legacy_identity_accept_until = Some(0);
+        auth.workload_subject_allowlist = vec!["workload:synthetic-search".into()];
+        config.auth.openclast = Some(auth);
+        config.vaults.push(VaultRegistration {
+            id: "A".repeat(22),
+            path: room,
+            room: Some("B".repeat(22)),
+            snapshot_id: Some("a".repeat(64).parse().unwrap()),
+        });
+        kwiry_core::save_config(&paths.config, &config).unwrap();
+        let mut config = load_config_for_paths(&paths).unwrap();
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        let gate = Arc::new(ConfigGate::default());
+        let mut state = test_state();
+        state.profile = HostProfile::OpenClast;
+        state.live_gate = Some(gate.clone());
+        state.runtime.set_openclast_registrations(&config);
+        let (mut index, _) = boot_index(&config, &paths, &state.runtime).await.unwrap();
+        index.reconcile(config.clone()).unwrap();
+        let (manager, actor) = spawn_manager(index, state.runtime.clone());
+        let search = || {
+            live_check::search(
+                State(state.clone()),
+                Extension(Principal {
+                    profile: HostProfile::OpenClast,
+                    resources: vec![resource.clone()],
+                    max_limit: 1,
+                    ..Principal::desktop()
+                }),
+                Request::post("/v0/search")
+                    .header("kwiry-profile", "live-check-v1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"q":"marigold","mode":"lexical","limit":1}"#))
+                    .unwrap(),
+            )
+        };
+        let wait_for_open = || async {
+            timeout(Duration::from_secs(5), async {
+                while !gate.open() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        };
+        let moved = directory.path().join("control-offline");
+        if start_without_parent {
+            fs::rename(&control, &moved).unwrap();
+        }
+        let (watcher, ticks) = crate::watcher::spawn_watcher_with_test_ticks(
+            paths.clone(),
+            config.clone(),
+            manager.clone(),
+            state.status.clone(),
+            gate.clone(),
+        );
+        if start_without_parent {
+            assert!(!gate.open());
+            let refused = search().await;
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let error: ApiErrorEnvelope =
+                serde_json::from_slice(&refused.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(error.error.code, "resource_unavailable");
+            assert_eq!(error.error.resource_indexes, None);
+            fs::rename(&moved, &control).unwrap();
+            ticks.send(()).await.unwrap();
+            wait_for_open().await;
+            assert_eq!(search().await.status(), StatusCode::OK);
+        } else {
+            assert!(gate.open());
+            for _ in 0..2 {
+                // Wait for each full room reconcile; no native events are delivered.
+                state.status.write().await.generation = None;
+                ticks.send(()).await.unwrap();
+                timeout(Duration::from_secs(5), async {
+                    while state.status.read().await.generation.is_none() {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(gate.invalidations(), 0);
+                assert_eq!(search().await.status(), StatusCode::OK);
+            }
+            let new_label = "b".repeat(64);
+            config.vaults[0].snapshot_id = Some(new_label.parse().unwrap());
+            kwiry_core::save_config(&paths.config, &config).unwrap();
+            assert_eq!(gate.invalidations(), 0, "no config event was delivered");
+            ticks.send(()).await.unwrap();
+            timeout(Duration::from_secs(5), async {
+                while gate.invalidations() == 0 {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            wait_for_open().await;
+            let response = search().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let answer: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(answer["resource_snapshots"][0]["snapshot_id"], new_label);
+        }
+        watcher.shutdown().await;
+        manager.shutdown().await.unwrap();
+        actor.await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn governed_search_live_check_holder_revocation_discards_staged_success() {
+        use kwiry_holdings::testkit::Rig;
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("room");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("note.md"), "marigold").unwrap();
+        let data = directory.path().join("data");
+        let mut config = Config::default();
+        config.server.profile = HostProfile::OpenClast;
+        config.auth.openclast = Some(openclast_auth_config(directory.path()));
+        config.vaults.push(VaultRegistration {
+            id: "garden".into(),
+            room: Some("orchard".into()),
+            snapshot_id: Some("a".repeat(64).parse().unwrap()),
+            path: root,
+        });
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        build_index(&config, &data).unwrap();
+        let mut state = test_state();
+        state.profile = HostProfile::OpenClast;
+        state.live_gate = Some(Arc::new(ConfigGate::default()));
+        state.live_gate.as_ref().unwrap().validated(0);
+        let mut manager = IndexManager::open(config.clone(), &data, state.runtime.clone()).unwrap();
+        manager.reconcile(config).unwrap();
+        let mut rig = Rig::new(&directory.path().join("holder"));
+        state.holder_gate = Some(rig.gate());
+        let result = state
+            .runtime
+            .search_labeled_resource("marigold", 10, &resource)
+            .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        let emit = || {
+            live_check::finish(
+                &state,
+                &resource,
+                &result.generation,
+                Json(&result.hits).into_response(),
+            )
+        };
+        assert!(emit().is_ok());
+        drop(rig.take_holder());
+        let refusal = emit().unwrap_err();
+        assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refusal.body.error.resource_indexes, None);
+        manager.shutdown().unwrap();
     }
 
     #[tokio::test]
@@ -1377,6 +1627,7 @@ mod tests {
         status.dirty = false;
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::Desktop,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
@@ -1495,6 +1746,7 @@ mod tests {
         status.dirty = false;
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::Desktop,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
@@ -1638,6 +1890,7 @@ mod tests {
         let token = search_capability(&resource, 20);
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::OpenClast,
                 runtime: SearchRuntime::new(),
                 status: Arc::new(RwLock::new(DaemonStatus::starting("0.1.0"))),
@@ -1755,6 +2008,7 @@ mod tests {
         status.dirty = false;
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::OpenClast,
                 runtime,
                 status: Arc::new(RwLock::new(status)),
@@ -1913,6 +2167,7 @@ mod tests {
             .unwrap();
         let app = build_router(
             AppState {
+                live_gate: None,
                 profile: HostProfile::OpenClast,
                 runtime: runtime.clone(),
                 status: status.clone(),
