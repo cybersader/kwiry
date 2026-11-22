@@ -26,6 +26,10 @@ This plugin bundles `@sqlite.org/sqlite-wasm` version `3.53.0-build1`.
 
 Package source and notices are available from <https://github.com/sqlite/sqlite-wasm>, <https://sqlite.org/wasm/>, and <https://sqlite.org/copyright.html>.
 
+## Embedded WASM decompression
+
+The production Worker bundles the synchronous decoder from [snappyjs](https://github.com/zhipeng-jia/snappyjs), under the MIT License. Its copyright and terms are included inline in `main.js`.
+
 ## Omnisearch UX provenance
 
 The search modal UX is informed by Omnisearch by Simon Cambier and contributors, licensed GPL-3.0. Adapted source files carry provenance comments.

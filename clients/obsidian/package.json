@@ -55,6 +55,7 @@
     "vitest": "^3.2.7"
   },
   "dependencies": {
-    "@sqlite.org/sqlite-wasm": "3.53.0-build1"
+    "@sqlite.org/sqlite-wasm": "3.53.0-build1",
+    "snappyjs": "0.7.0"
   }
 }
