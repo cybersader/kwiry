@@ -6,9 +6,14 @@ import {
   DAEMON_HOST_UNAVAILABLE_GUIDANCE,
   type BackendStatus,
 } from "./backend";
+import type { HostBackendStatus } from "./backends/host-search-backend";
+import { HOST_SEARCH_GUIDANCE, HOST_SEARCH_LABEL } from "./host-search";
 import { formatIndexProgressSummary } from "./index-progress-format";
 
-export function formatStatus(status: BackendStatus): string {
+export function formatStatus(status: BackendStatus | HostBackendStatus): string {
+  if ("kind" in status) {
+    return `Kwiry: ${status.available ? HOST_SEARCH_LABEL : HOST_SEARCH_GUIDANCE}`;
+  }
   if (status.issue?.code === DAEMON_HOST_UNAVAILABLE.code) {
     return `Kwiry: ${DAEMON_HOST_UNAVAILABLE_GUIDANCE}`;
   }
