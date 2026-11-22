@@ -119,26 +119,32 @@ export default class KwiryPlugin extends Plugin {
     this.startupTimeline = this.createStartupTimeline(pluginEpoch);
     await this.diagnostics.capture("info", "plugin.load", { pluginEpoch }, async (event) => {
       try {
-        const storedData = await this.loadData();
-        const fresh = storedData === null || storedData === undefined;
+        let storedData: unknown = await this.loadData();
         if (pluginEpoch !== this.pluginEpoch) {
           event.set({ outcome: "cancelled" });
           return;
         }
-        const autoSelectHost = fresh && lookupHostSearch() !== null;
-        this.settings = loadSettings(storedData, this.daemonBackendAvailable, autoSelectHost);
-        this.startupTimeline?.setProfile(this.settings.backendProfile);
-        event.set({ profile: this.settings.backendProfile });
+        const autoSelectHost = (storedData === null || storedData === undefined) && lookupHostSearch() !== null;
         if (autoSelectHost) {
-          // Remember only the choice so capability loss cannot trigger local search next time.
           try {
-            await this.saveData({ backendProfile: "host" });
+            // Saving replaces the whole object. Re-read just before writing; the host offers no atomic check-and-save.
+            storedData = await this.loadData();
+            if (pluginEpoch === this.pluginEpoch && (storedData === null || storedData === undefined)) {
+              await this.saveData({ backendProfile: "host" });
+            }
           } catch {
             if (pluginEpoch === this.pluginEpoch) {
               new Notice("Kwiry: Could not remember host search. Fix settings storage before reloading.");
             }
           }
         }
+        if (pluginEpoch !== this.pluginEpoch) {
+          event.set({ outcome: "cancelled" });
+          return;
+        }
+        this.settings = loadSettings(storedData, this.daemonBackendAvailable, autoSelectHost);
+        this.startupTimeline?.setProfile(this.settings.backendProfile);
+        event.set({ profile: this.settings.backendProfile });
         // The core identity is independent of the enabled source formats.
         if (this.settings.backendProfile !== "host") {
           this.sourcePolicyHash = await corePolicyFingerprint();

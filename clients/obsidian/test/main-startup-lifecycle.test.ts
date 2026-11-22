@@ -16,6 +16,7 @@ interface SettingRow {
   description?: string;
   options?: Record<string, { label: string; disabled: boolean }>;
   value?: string;
+  disabled?: boolean;
   onChange?: (value: string) => Promise<void>;
 }
 
@@ -78,6 +79,7 @@ interface LifecycleHarness {
   pathLookups: string[];
   openError: unknown;
   beforeSave?: () => Promise<void>;
+  afterLoad?: () => void;
   exactSettings: boolean;
   hoverSources: Array<{ id: string; display: string; defaultMod: boolean }>;
   layoutReady: (() => void) | null;
@@ -283,6 +285,7 @@ function stubSource(path: string): string {
                 return this;
               },
               setValue(value) { row.value = value; return this; },
+              setDisabled(disabled) { row.disabled = disabled; return this; },
               onChange(callback) { row.onChange = callback; return this; },
             });
             return this;
@@ -326,7 +329,11 @@ function stubSource(path: string): string {
           manifest = { version: "0.5.2", name: "Kwiry Search" };
           registerHoverLinkSource(id, info) { harness.hoverSources.push({ id, ...info }); }
           async loadData() {
-            if (harness.exactSettings || harness.storedData === null) return harness.storedData;
+            if (harness.exactSettings || harness.storedData === null) {
+              const snapshot = harness.storedData;
+              harness.afterLoad?.();
+              return snapshot;
+            }
             return {
               backendProfile: "in_plugin",
               diagnosticsLogLevel: "info",
@@ -626,6 +633,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.pathLookups.length = 0;
     harness.openError = undefined;
     delete harness.beforeSave;
+    delete harness.afterLoad;
     harness.exactSettings = false;
     harness.hoverSources.length = 0;
     harness.layoutReady = null;
@@ -1084,6 +1092,28 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     second.onunload();
   });
 
+  it("final regression: adopts settings a second writer saved after the first empty read", async () => {
+    const host = scriptedHost();
+    harness.storedData = null;
+    harness.exactSettings = true;
+    const otherTab = { backendProfile: "in_plugin", resultLimit: 31, showRibbonIcon: false };
+    harness.afterLoad = () => {
+      harness.storedData = otherTab;
+      delete harness.afterLoad;
+    };
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.statusBarText).not.toMatch(/starting…$/u));
+    expect({ writes: harness.savedData, activeIndex: harness.backendInitializations,
+      profile: plugin.settings.backendProfile }).toEqual({ writes: [], activeIndex: 1, profile: "in_plugin" });
+    expect(harness.storedData).toBe(otherTab);
+    expect(plugin.settings).toMatchObject(otherTab);
+    expect(host.search).not.toHaveBeenCalled();
+    plugin.onunload();
+  });
+
   it("keeps host mode and reports when the initial choice cannot be saved", async () => {
     const host = scriptedHost();
     harness.beforeSave = async () => { throw new Error(RAW); };
@@ -1148,6 +1178,43 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     resolution.resolve({ path: PATH });
     await settled();
     expect(harness.pathLookups).toEqual([]);
+    plugin.onunload();
+  });
+
+  it.each([true, false])("final regression: locks the dropdown until the saved profile is shown (save succeeds=%s)", async (succeeds) => {
+    scriptedHost();
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.backendInitializations).toBe(1));
+    const gate = deferred<void>();
+    harness.beforeSave = async () => {
+      await gate.promise;
+      if (!succeeds) throw new Error(RAW);
+    };
+    const control = () => harness.settingRows.find((row) => row.name === "Search backend");
+    const choose = async (value: string) => {
+      const row = control();
+      if (!row || row.disabled) return;
+      row.value = value;
+      await row.onChange?.(value);
+    };
+    harness.displaySettings?.();
+    const switching = choose("host");
+    const latched = control()?.disabled === true;
+    harness.displaySettings?.();
+    const latchedAfterRedraw = control()?.disabled === true;
+    const attempted = choose("in_plugin");
+    gate.resolve();
+    await Promise.all([switching, attempted]);
+    const selected = succeeds ? "host" : "in_plugin";
+    expect({ latched, latchedAfterRedraw, disabled: control()?.disabled, displayed: control()?.value,
+      runtime: plugin.settings.backendProfile, writes: harness.savedData.map((write) => Reflect.get(write as object, "backendProfile")),
+    }).toEqual({ latched: true, latchedAfterRedraw: true, disabled: false, displayed: selected,
+      runtime: selected, writes: succeeds ? ["host"] : [] });
+    if (succeeds) await openHost();
+    else await expect(plugin.api.ready()).resolves.toBeUndefined();
     plugin.onunload();
   });
 

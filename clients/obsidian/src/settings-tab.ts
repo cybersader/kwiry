@@ -22,6 +22,8 @@ import {
 } from "./source-formats";
 
 export class KwirySettingTab extends PluginSettingTab {
+  private changingBackend = false;
+
   constructor(
     app: App,
     private readonly plugin: KwiryPlugin,
@@ -50,10 +52,20 @@ export class KwirySettingTab extends PluginSettingTab {
             ...(hostAvailable || hostSelected ? { host: HOST_SEARCH_LABEL } : {}),
           })
           .setValue(this.plugin.settings.backendProfile)
+          .setDisabled(this.changingBackend)
           .onChange(async (value) => {
-            if (value !== "daemon" && value !== "in_plugin" && value !== "host") return;
-            await this.plugin.changeBackendProfile(value);
-            this.display();
+            if (this.changingBackend || (value !== "daemon" && value !== "in_plugin" && value !== "host")) {
+              dropdown.setValue(this.plugin.settings.backendProfile);
+              return;
+            }
+            this.changingBackend = true;
+            dropdown.setDisabled(true);
+            try {
+              await this.plugin.changeBackendProfile(value);
+            } finally {
+              this.changingBackend = false;
+              this.display();
+            }
           });
         if (!daemonAvailable) {
           const daemonOption = dropdown.selectEl.querySelector<HTMLOptionElement>('option[value="daemon"]');

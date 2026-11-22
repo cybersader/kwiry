@@ -44,7 +44,7 @@
   },
   "src/main.ts": {
     "@typescript-eslint/no-unsafe-assignment": {
-      "count": 2
+      "count": 1
     }
   },
   "src/worker/d5c-playground-worker.ts": {
