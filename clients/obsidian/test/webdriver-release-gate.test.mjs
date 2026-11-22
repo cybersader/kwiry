@@ -139,6 +139,7 @@ describe("WebDriver release gate", () => {
     const modules = [
       "webdriver-release-gate.mjs", "production-package.mjs", "stored-zip.mjs",
       "webdriver-release-gate-schema.mjs", "gate5-evidence-schema.mjs", "privacy-policy.mjs",
+      "community-main-size.mjs",
     ];
     for (const name of modules) {
       await writeFile(resolve(scriptDir, name), await readFile(resolve(repositoryRoot, "scripts", name)));

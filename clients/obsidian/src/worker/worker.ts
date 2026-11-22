@@ -4,7 +4,7 @@
 
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
 import sqliteWasmBytes from "@sqlite.org/sqlite-wasm/sqlite3.wasm";
-import rustWasmBytes from "virtual:kwiry-rust-wasm-bytes";
+import rustWasmArtifact from "virtual:kwiry-rust-wasm-artifact";
 import { createInternalD5cPreviewHandler } from "virtual:kwiry-internal-d5c-preview";
 import { createInternalPrototypeHandler } from "virtual:kwiry-internal-prototype";
 import {
@@ -195,9 +195,23 @@ async function initialize(
     reportProgress();
     await verifyArtifact(sqliteWasmBytes, SQLITE_WASM_SIZE, SQLITE_WASM_SHA256);
     reportProgress();
+    let rustWasmBytes: Uint8Array;
+    if (rustWasmArtifact instanceof Uint8Array) {
+      rustWasmBytes = rustWasmArtifact;
+    } else {
+      // The decoder only handles build-verified bytes, never a damaged stream.
+      const { packed, packedSize, packedSha256, decode } = rustWasmArtifact;
+      await verifyArtifact(packed, packedSize, packedSha256);
+      reportProgress();
+      try {
+        rustWasmBytes = decode();
+      } catch {
+        throw artifactMismatch();
+      }
+    }
     await verifyArtifact(rustWasmBytes, RUST_WASM_SIZE, RUST_WASM_SHA256);
     reportProgress();
-    const rustIdentity = initializeRustAdapter();
+    const rustIdentity = initializeRustAdapter(rustWasmBytes);
     reportProgress();
     declaredChunkingVersion = rustIdentity.chunking_version;
     initializedVaultId = vaultId;
@@ -1743,13 +1757,13 @@ async function verifyArtifact(
   expectedSize: number,
   expectedSha256: string,
 ): Promise<void> {
-  if (bytes.byteLength !== expectedSize) {
-    throw fixedWorkerError("artifact_mismatch", "artifact", "Embedded WASM artifact mismatch.", false);
+  if (bytes.byteLength !== expectedSize || await sha256Hex(bytes.slice()) !== expectedSha256) {
+    throw artifactMismatch();
   }
-  const actual = await sha256Hex(bytes.slice());
-  if (actual !== expectedSha256) {
-    throw fixedWorkerError("artifact_mismatch", "artifact", "Embedded WASM artifact mismatch.", false);
-  }
+}
+
+function artifactMismatch(): WorkerError {
+  return fixedWorkerError("artifact_mismatch", "artifact", "Embedded WASM artifact mismatch.", false);
 }
 
 function wrapInitialBuildCheckpoint(payload: Uint8Array): Uint8Array {

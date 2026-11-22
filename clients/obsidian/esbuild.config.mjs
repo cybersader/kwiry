@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 import builtins from "builtin-modules";
 import esbuild from "esbuild";
 
+import { compressedRustWasmPlugin } from "./scripts/community-bundle.mjs";
+import { assertCommunityMainSize } from "./scripts/community-main-size.mjs";
 import {
   assertWorkerAuthorityGraph,
   embedWorkerPrivacyBoundary,
@@ -200,7 +202,7 @@ function rustVirtualPlugin(identities, adapter) {
       build.onResolve({ filter: /^virtual:kwiry-rust-wasm-bindings$/ }, () => ({
         path: adapter.bindings,
       }));
-      build.onResolve({ filter: /^virtual:kwiry-rust-wasm-bytes$/ }, () => ({
+      build.onResolve({ filter: /^virtual:kwiry-rust-wasm-(?:bytes|artifact)$/ }, () => ({
         path: adapter.wasm,
       }));
       build.onResolve({ filter: /^virtual:kwiry-artifact-identities$/ }, () => ({
@@ -505,6 +507,10 @@ export async function buildPlugin({
   if (internalVariants > 1) {
     throw new Error("internal Worker variants must be built separately");
   }
+  const communityBuild = optimized && internalVariants === 0;
+  // The private playground adds a separate Worker; its primary Worker must
+  // stay byte-identical to the regular build's primary Worker.
+  const packPrimaryWorker = communityBuild || (optimized && internalD5cPlayground);
   if (internalD5cOwnerHost && activeVaultCache) {
     throw new Error("D5C owner host must compile without the active-vault cache");
   }
@@ -550,6 +556,7 @@ export async function buildPlugin({
       logLevel: "silent",
       plugins: [
         rustVirtualPlugin(identities, rustAdapter),
+        ...(packPrimaryWorker ? [compressedRustWasmPlugin(rustAdapter)] : []),
         internalPrototypePlugin(Boolean(internalTypoPrototype)),
         internalD5cPreviewPlugin(Boolean(internalD5cOwnerHost)),
         ownerWorkerProtocolPlugin(Boolean(internalD5cOwnerHost)),
@@ -627,7 +634,7 @@ export async function buildPlugin({
     external: ["obsidian", "electron", "@electron/remote", ...builtins],
     format: "cjs",
     target: "es2022",
-    write,
+    write: false,
     logLevel: write ? "info" : "silent",
     minify: optimized,
     sourcemap: optimized ? false : "inline",
@@ -647,9 +654,13 @@ export async function buildPlugin({
   } else {
     assertDiagnosticsExportGraph(mainBuild.metafile, workerBuild.metafile);
   }
-  const mainText = write
-    ? readFileSync(resolve(root, "main.js"), "utf8")
-    : mainBuild.outputFiles[0].text;
+  const mainOutput = mainBuild.outputFiles[0];
+  if (communityBuild) assertCommunityMainSize(mainOutput.contents.byteLength);
+  if (write) {
+    writeFileSync(mainOutput.path, mainOutput.contents);
+    if (communityBuild) console.log(`Built main.js (${mainOutput.contents.byteLength} bytes)`);
+  }
+  const mainText = mainOutput.text;
   return {
     identities,
     rustArtifactBytes: rustAdapter.bytes,

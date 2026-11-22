@@ -14,6 +14,7 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { assertCommunityMainSize } from "./community-main-size.mjs";
 import { validateGate5Evidence } from "./gate5-evidence-schema.mjs";
 import { assertPackagePrivacy, assertSourcePrivacy } from "./privacy-policy.mjs";
 import { buildStoredZip, parseStoredZip } from "./stored-zip.mjs";
@@ -275,6 +276,7 @@ function containsPath(parent, child) {
 }
 
 function validateReleaseEvidence(evidence, mainBytes, label) {
+  assertCommunityMainSize(mainBytes.byteLength);
   if (evidence.kind !== "kwiry_gate5_automated_evidence") {
     throw new Error("production release requires automated Gate 5 evidence");
   }

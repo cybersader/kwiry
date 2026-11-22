@@ -412,6 +412,18 @@ describe("production release package", () => {
     })).rejects.toThrow("Gate 5 evidence main artifact does not match source main.js");
   });
 
+  it("rejects oversized main.js even with matching Gate 5 evidence", async () => {
+    const sourceRoot = await createSourceFixture();
+    const main = MAIN_JS.padEnd(8_388_609, " ");
+    await writeFile(resolve(sourceRoot, "main.js"), main);
+    await writeJson(resolve(sourceRoot, "gate5.evidence.json"), validEvidence(main));
+
+    await expect(prepareProductionPackage({
+      sourceRoot,
+      outputRoot: resolve(sourceRoot, ".tmp/release"),
+    })).rejects.toThrow(/8388609.*8388608/u);
+  });
+
   it("rejects main.js changed after its Gate 5 evidence was produced", async () => {
     const sourceRoot = await createSourceFixture();
     await writeFile(resolve(sourceRoot, "main.js"), `${MAIN_JS}// changed after evidence\n`);
