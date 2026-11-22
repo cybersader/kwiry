@@ -32,6 +32,10 @@ impl ConfigGate {
     fn ticket(&self) -> u64 {
         self.0.load(Ordering::Acquire)
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn invalidations(&self) -> u64 {
+        self.ticket() >> 1
+    }
     fn invalidate(&self) {
         self.0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
@@ -67,6 +71,8 @@ impl WatcherHandle {
 
 struct WatcherContext {
     live_gate: Option<Arc<ConfigGate>>,
+    #[cfg(test)]
+    safety_ticks: Option<mpsc::Receiver<()>>,
     initial_check: Option<(bool, bool)>, // config watch armed, bootstrap config still current
     paths: Paths,
     config: Config,
@@ -290,18 +296,22 @@ fn deliver_event(
     }
 }
 
+fn watch_config_parent(watcher: &mut impl Watcher, config_path: &Path) -> bool {
+    watcher
+        .watch(
+            config_path.parent().unwrap_or(Path::new(".")),
+            RecursiveMode::NonRecursive,
+        )
+        .is_ok()
+}
+
 fn arm_config_watch(
     watcher: &mut impl Watcher,
     gate: &ConfigGate,
     paths: &Paths,
     boot: &Config,
 ) -> (bool, bool) {
-    let armed = watcher
-        .watch(
-            paths.config.parent().unwrap_or(Path::new(".")),
-            RecursiveMode::NonRecursive,
-        )
-        .is_ok();
+    let armed = watch_config_parent(watcher, &paths.config);
     let ticket = gate.ticket();
     let unchanged = load_config_for_paths(paths).is_ok_and(|now| now == *boot);
     if armed && unchanged {
@@ -337,6 +347,8 @@ pub(crate) fn spawn_watcher(
         shutdown_receiver,
         WatcherContext {
             live_gate,
+            #[cfg(test)]
+            safety_ticks: None,
             initial_check,
             paths,
             config: initial_config,
@@ -345,6 +357,38 @@ pub(crate) fn spawn_watcher(
         },
     ));
     Ok(WatcherHandle { shutdown, task })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn spawn_watcher_with_test_ticks(
+    paths: Paths,
+    config: Config,
+    manager: ManagerHandle,
+    status: Arc<RwLock<DaemonStatus>>,
+    gate: Arc<ConfigGate>,
+) -> (WatcherHandle, mpsc::Sender<()>) {
+    // Install real watches, but deliver neither config nor room notifications.
+    let mut watcher = notify::recommended_watcher(|_| {}).unwrap();
+    let initial_check = arm_config_watch(&mut watcher, &gate, &paths, &config);
+    let (_events, receiver) = mpsc::channel(1);
+    let (ticks, safety_ticks) = mpsc::channel(1);
+    let (shutdown, receiver_shutdown) = watch::channel(false);
+    let task = tokio::spawn(run_watcher(
+        watcher,
+        receiver,
+        Arc::new(AtomicBool::new(false)),
+        receiver_shutdown,
+        WatcherContext {
+            live_gate: Some(gate),
+            safety_ticks: Some(safety_ticks),
+            initial_check: Some(initial_check),
+            paths,
+            config,
+            manager,
+            status,
+        },
+    ));
+    (WatcherHandle { shutdown, task }, ticks)
 }
 
 async fn run_watcher(
@@ -356,6 +400,8 @@ async fn run_watcher(
 ) {
     let WatcherContext {
         live_gate,
+        #[cfg(test)]
+        mut safety_ticks,
         initial_check,
         paths,
         mut config,
@@ -363,17 +409,8 @@ async fn run_watcher(
         status,
     } = context;
     let startup_config = config.clone();
-    let config_parent = paths
-        .config
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    let config_watch_ok = initial_check.map_or_else(
-        || {
-            watcher
-                .watch(&config_parent, RecursiveMode::NonRecursive)
-                .is_ok()
-        },
+    let mut config_watch_ok = initial_check.map_or_else(
+        || watch_config_parent(&mut watcher, &paths.config),
         |(armed, _)| armed,
     );
     if !config_watch_ok {
@@ -513,7 +550,8 @@ async fn run_watcher(
                         &config,
                         &status,
                         scope.clone(),
-                        config_invalid || restart_required || unwatched_roots,
+                        config_invalid || restart_required || unwatched_roots
+                            || (live_gate.is_some() && !config_watch_ok),
                     )
                     .await;
                     if validating && succeeded && !restart_required && !config_invalid && config_watch_ok && let (Some(gate), Some(ticket)) = (&live_gate, ticket) { gate.validated(ticket); }
@@ -529,14 +567,30 @@ async fn run_watcher(
                     }
                 }
             }
-            _ = safety.tick() => {
+            _ = async {
+                #[cfg(test)]
+                if let Some(ticks) = &mut safety_ticks && ticks.recv().await.is_some() {
+                    return;
+                }
+                safety.tick().await;
+            } => {
                 if let Some(gate) = &live_gate {
-                    gate.invalidate();
-                    config_dirty = true;
-                    pending.note_rescan(RescanCause::ConfigChanged);
-                    first_dirty.get_or_insert(Instant::now());
-                    last_dirty = first_dirty;
-                    continue;
+                    if !config_watch_ok {
+                        config_watch_ok = watch_config_parent(&mut watcher, &paths.config);
+                    }
+                    if !load_config_for_paths(&paths).is_ok_and(|next| next == config) {
+                        gate.invalidate();
+                    }
+                    if config_dirty || !gate.open() {
+                        // Reopen only through the normal reload and reconcile path,
+                        // including when an initially missing watch is now armed.
+                        config_dirty = true;
+                        pending.note_rescan(RescanCause::ConfigChanged);
+                        let now = Instant::now();
+                        first_dirty.get_or_insert(now);
+                        last_dirty.get_or_insert(now);
+                        continue;
+                    }
                 }
                 unwatched_roots = add_roots(&mut watcher, &config, &mut watched_roots);
                 reconcile_and_update(
@@ -717,6 +771,7 @@ mod tests {
             shutdown,
             WatcherContext {
                 live_gate: Some(gate.clone()),
+                safety_ticks: None,
                 initial_check: Some(check),
                 paths: paths.clone(),
                 config: boot.clone(),

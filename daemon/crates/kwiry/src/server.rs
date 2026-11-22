@@ -1119,6 +1119,147 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn governed_search_live_check_safety_tick_rearms_missing_config_watch() {
+        exercise_config_safety_ticks(true).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn governed_search_live_check_safety_tick_keeps_unchanged_gate_open() {
+        exercise_config_safety_ticks(false).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn exercise_config_safety_ticks(start_without_parent: bool) {
+        use std::time::Duration;
+        use tokio::time::{sleep, timeout};
+
+        let directory = tempdir().unwrap();
+        let control = directory.path().join("control");
+        let paths = Paths::resolve(
+            Some(control.join("config.toml")),
+            Some(directory.path().join("data")),
+        )
+        .unwrap();
+        let room = directory.path().join("room");
+        fs::create_dir(&room).unwrap();
+        fs::write(room.join("note.md"), "marigold").unwrap();
+        let mut config = Config::default();
+        config.server.profile = HostProfile::OpenClast;
+        config.server.profile_required = true;
+        let mut auth = openclast_auth_config(directory.path());
+        auth.legacy_identity_accept_until = Some(0);
+        auth.workload_subject_allowlist = vec!["workload:synthetic-search".into()];
+        config.auth.openclast = Some(auth);
+        config.vaults.push(VaultRegistration {
+            id: "A".repeat(22),
+            path: room,
+            room: Some("B".repeat(22)),
+            snapshot_id: Some("a".repeat(64).parse().unwrap()),
+        });
+        kwiry_core::save_config(&paths.config, &config).unwrap();
+        let mut config = load_config_for_paths(&paths).unwrap();
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        let gate = Arc::new(ConfigGate::default());
+        let mut state = test_state();
+        state.profile = HostProfile::OpenClast;
+        state.live_gate = Some(gate.clone());
+        state.runtime.set_openclast_registrations(&config);
+        let (mut index, _) = boot_index(&config, &paths, &state.runtime).await.unwrap();
+        index.reconcile(config.clone()).unwrap();
+        let (manager, actor) = spawn_manager(index, state.runtime.clone());
+        let search = || {
+            live_check::search(
+                State(state.clone()),
+                Extension(Principal {
+                    profile: HostProfile::OpenClast,
+                    resources: vec![resource.clone()],
+                    max_limit: 1,
+                    ..Principal::desktop()
+                }),
+                Request::post("/v0/search")
+                    .header("kwiry-profile", "live-check-v1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"q":"marigold","mode":"lexical","limit":1}"#))
+                    .unwrap(),
+            )
+        };
+        let wait_for_open = || async {
+            timeout(Duration::from_secs(5), async {
+                while !gate.open() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        };
+        let moved = directory.path().join("control-offline");
+        if start_without_parent {
+            fs::rename(&control, &moved).unwrap();
+        }
+        let (watcher, ticks) = crate::watcher::spawn_watcher_with_test_ticks(
+            paths.clone(),
+            config.clone(),
+            manager.clone(),
+            state.status.clone(),
+            gate.clone(),
+        );
+        if start_without_parent {
+            assert!(!gate.open());
+            let refused = search().await;
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let error: ApiErrorEnvelope =
+                serde_json::from_slice(&refused.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(error.error.code, "resource_unavailable");
+            assert_eq!(error.error.resource_indexes, None);
+            fs::rename(&moved, &control).unwrap();
+            ticks.send(()).await.unwrap();
+            wait_for_open().await;
+            assert_eq!(search().await.status(), StatusCode::OK);
+        } else {
+            assert!(gate.open());
+            for _ in 0..2 {
+                // Wait for each full room reconcile; no native events are delivered.
+                state.status.write().await.generation = None;
+                ticks.send(()).await.unwrap();
+                timeout(Duration::from_secs(5), async {
+                    while state.status.read().await.generation.is_none() {
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(gate.invalidations(), 0);
+                assert_eq!(search().await.status(), StatusCode::OK);
+            }
+            let new_label = "b".repeat(64);
+            config.vaults[0].snapshot_id = Some(new_label.parse().unwrap());
+            kwiry_core::save_config(&paths.config, &config).unwrap();
+            assert_eq!(gate.invalidations(), 0, "no config event was delivered");
+            ticks.send(()).await.unwrap();
+            timeout(Duration::from_secs(5), async {
+                while gate.invalidations() == 0 {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            wait_for_open().await;
+            let response = search().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let answer: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(answer["resource_snapshots"][0]["snapshot_id"], new_label);
+        }
+        watcher.shutdown().await;
+        manager.shutdown().await.unwrap();
+        actor.await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn governed_search_live_check_holder_revocation_discards_staged_success() {
         use kwiry_holdings::testkit::Rig;

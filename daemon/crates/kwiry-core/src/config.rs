@@ -264,58 +264,94 @@ fn config_parse_diagnostic(error: &serde_path_to_error::Error<toml::de::Error>) 
         "invalid TOML or setting"
     };
     let mut key = String::new();
+    let mut schema = "";
+    let mut whole_path_known = true;
     for segment in error.path() {
         match segment {
-            serde_path_to_error::Segment::Map { key: field }
-                if matches!(
-                    field.as_str(),
-                    "version"
-                        | "server"
-                        | "auth"
-                        | "semantic"
-                        | "indexing"
-                        | "vaults"
-                        | "holder"
-                        | "profile_required"
-                        | "profile"
-                        | "bind"
-                        | "token_file"
-                        | "openclast"
-                        | "tenant_id"
-                        | "issuer"
-                        | "audience"
-                        | "jwks_file"
-                        | "max_token_ttl_seconds"
-                        | "workload_subject_allowlist"
-                        | "legacy_identity_accept_until"
-                        | "state_dir"
-                        | "page_size"
-                        | "clock_skew_allowance_seconds"
-                        | "max_stale_serve_seconds"
-                        | "enabled"
-                        | "basis"
-                        | "audit_sources_per_pass"
-                        | "audit_bytes_per_pass"
-                        | "racy_window_millis"
-                        | "snapshot_id"
-                        | "vault_id"
-                        | "path"
-                        | "room"
-                ) =>
-            {
+            serde_path_to_error::Segment::Map { key: field } => {
+                let Some(&field) = config_schema_fields(schema)
+                    .iter()
+                    .find(|&&known| known == field)
+                else {
+                    whole_path_known = false;
+                    break;
+                };
                 if !key.is_empty() {
                     key.push('.');
                 }
                 key.push_str(field);
+                schema = field;
             }
-            serde_path_to_error::Segment::Seq { index } => key.push_str(&format!("[{index}]")),
-            _ => break,
+            serde_path_to_error::Segment::Seq { index }
+                if matches!(schema, "vaults" | "workload_subject_allowlist") =>
+            {
+                key.push_str(&format!("[{index}]"));
+                schema = if schema == "vaults" { "vault" } else { "item" };
+            }
+            _ => {
+                whole_path_known = false;
+                break;
+            }
         }
+    }
+    // Serde's path ends at the containing table when a field is missing.
+    // Match the message against schema names, and emit only a static name.
+    if whole_path_known
+        && let Some(field) = detail
+            .strip_prefix("missing field `")
+            .and_then(|detail| detail.strip_suffix('`'))
+        && let Some(&field) = config_schema_fields(schema)
+            .iter()
+            .find(|&&known| known == field)
+    {
+        if !key.is_empty() {
+            key.push('.');
+        }
+        key.push_str(field);
     }
     if key.is_empty() {
         key.push_str("<document>");
     }
     format!("{key}: {kind}")
+}
+
+// Allowlist by containing table, not just by spelling: e.g. `path` is
+// safe to report in a vault, but is an unknown key under `[holder]`.
+fn config_schema_fields(table: &str) -> &'static [&'static str] {
+    match table {
+        "" => &[
+            "version", "server", "auth", "semantic", "indexing", "vaults", "holder",
+        ],
+        "server" => &["profile_required", "profile", "bind"],
+        "auth" => &["token_file", "openclast"],
+        "openclast" => &[
+            "tenant_id",
+            "issuer",
+            "audience",
+            "jwks_file",
+            "max_token_ttl_seconds",
+            "workload_subject_allowlist",
+            "legacy_identity_accept_until",
+        ],
+        "semantic" => &["enabled"],
+        "indexing" => &[
+            "basis",
+            "audit_sources_per_pass",
+            "audit_bytes_per_pass",
+            "racy_window_millis",
+            "max_stale_serve_seconds",
+        ],
+        "holder" => &[
+            "profile",
+            "issuer",
+            "state_dir",
+            "page_size",
+            "clock_skew_allowance_seconds",
+            "max_stale_serve_seconds",
+        ],
+        "vault" => &["snapshot_id", "vault_id", "path", "room"],
+        _ => &[],
+    }
 }
 
 fn save_config_unlocked(path: &Path, config: &Config) -> Result<()> {
@@ -875,6 +911,37 @@ mod tests {
                 err.contains(key) && err.contains(kind) && !err.contains(marker),
                 "{err}"
             );
+        }
+    }
+
+    #[test]
+    fn config_parse_diagnostic_names_only_schema_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (source, expected) in [
+            (
+                "[[vaults]]\nvault_id = 'synthetic-marker'",
+                "vaults[0].path: missing required field",
+            ),
+            (
+                "[[vaults]]\nvault_id = 'synthetic-vault'\npath = ['synthetic-marker']",
+                "vaults[0].path: invalid type",
+            ),
+            (
+                "[holder]\nprofile = 'synthetic-marker'",
+                "holder.profile: unknown variant",
+            ),
+            ("[holder]\nsynthetic-marker = true", "holder: unknown field"),
+            (
+                "[holder]\npath = 'synthetic-marker'",
+                "holder: unknown field",
+            ),
+        ] {
+            fs::write(&path, source).unwrap();
+            let Error::InvalidConfig { message, .. } = load_config(&path).unwrap_err() else {
+                panic!("expected a config diagnostic");
+            };
+            assert_eq!(message, expected);
         }
     }
 
