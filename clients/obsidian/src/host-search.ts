@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { isNormalizedVaultFilePath } from "./vault-path";
+import { isVaultRelativePath } from "./vault-path";
 
 // Provisional host global for the draft capability lookup.
 export const HOST_GLOBAL = "openclast";
@@ -9,6 +9,8 @@ const NOTICE = "Results may be incomplete.";
 
 export const HOST_SEARCH_LABEL = "Host search · Lexical";
 export const HOST_SEARCH_GUIDANCE = "Host search is unavailable. Use a host that supports search version 1.";
+export const HOST_SEARCH_STARTING = "Host search is starting…";
+export const HOST_SEARCH_ACCESS_LOST = "Access to host search was denied.";
 export const HOST_SEARCH_IDLE = "Enter words separated by spaces to search.";
 export const HOST_SEARCH_UNAVAILABLE = "Host search is unavailable.";
 export const HOST_RESULT_UNAVAILABLE = "This result is no longer available to open.";
@@ -17,7 +19,7 @@ const stateLabels = {
   ready: "Results from the host",
   building: "Host search is being prepared.",
   unavailable: HOST_SEARCH_UNAVAILABLE,
-  not_enabled: "Host search is not enabled for this workspace.",
+  not_enabled: "Host search is not enabled here.",
 } as const;
 
 type HostSearchState = keyof typeof stateLabels;
@@ -58,19 +60,20 @@ export function lookupHostSearch(realm: object = globalThis): HostSearchOperatio
     const get = capabilities?.get;
     if (typeof get !== "function") return null;
     const wire = record(Reflect.apply(get, capabilities, ["search", 1]));
-    if (typeof wire?.page !== "function" || typeof wire.resolveNote !== "function") return null;
-    const capability = wire as unknown as WireSearchCapability;
+    const page = wire?.page as WireSearchCapability["page"] | undefined;
+    const resolveNote = wire?.resolveNote as WireSearchCapability["resolveNote"] | undefined;
+    if (typeof page !== "function" || typeof resolveNote !== "function") return null;
     return {
       async page(query, signal, continuation) {
         // This UI uses the host defaults and never selects a room or a page size.
-        return decodePage(await capability.page({
+        return decodePage(await page.call(wire, {
           query,
           ...(continuation === undefined ? {} : { cursor: continuation }),
         }, { signal }));
       },
       async resolveNote(ref, signal) {
-        const path = record(await capability.resolveNote(ref, { signal }))?.path;
-        if (typeof path !== "string" || !isNormalizedVaultFilePath(path) || /^[a-z]:/iu.test(path)) {
+        const path = record(await resolveNote.call(wire, ref, { signal }))?.path;
+        if (typeof path !== "string" || !isVaultRelativePath(path) || /^[a-z]:/iu.test(path)) {
           throw hostSearchFault.staleResult();
         }
         return path;
@@ -93,34 +96,34 @@ function malformedPage(): never {
 
 function decodePage(value: unknown): HostSearchPage {
   const page = record(value);
-  if (!page || page.notice !== NOTICE) return malformedPage();
-  const { room, state, items, next } = page;
-  if (typeof state !== "string" || !Object.hasOwn(stateLabels, state)
-    || !Array.isArray(items) || (next !== null && typeof next !== "string")
-    || (state !== "ready" && items.length > 0)
-    || (room === null && (state === "ready" || items.length > 0))) return malformedPage();
-  const roomRecord = record(room);
-  const roomLabel = roomRecord?.label;
-  if (room !== null && (typeof roomLabel !== "string" || typeof roomRecord?.ref !== "string")) {
-    return malformedPage();
-  }
+  if (!page) return malformedPage();
+  const { room, state, items, next, notice } = page;
+  if (notice !== NOTICE || typeof state !== "string" || !Object.hasOwn(stateLabels, state)
+    || !Array.isArray(items) || (next !== null && typeof next !== "string")) return malformedPage();
+  const itemCount = items.length;
+  if (!safeInteger(itemCount) || (state !== "ready" && itemCount > 0)
+    || (room === null && state === "ready")) return malformedPage();
+  const { label: roomLabel, ref: roomRef } = record(room) ?? {};
+  if (room !== null && (typeof roomLabel !== "string" || typeof roomRef !== "string")) return malformedPage();
 
   const rows: HostSearchPage["rows"] = [];
   const seen = new Set<string>();
-  for (const value of items as unknown[]) {
-    const hit = record(value);
-    if (!hit || typeof hit.ref !== "string" || typeof hit.path !== "string"
-      || typeof hit.title !== "string" || typeof hit.excerpt !== "string") return malformedPage();
-    if (seen.has(hit.ref)) continue;
-    seen.add(hit.ref);
-    rows.push({ noteRef: hit.ref, path: hit.path, title: hit.title, excerpt: hit.excerpt });
+  for (let index = 0; index < itemCount; index++) {
+    const hit = record((items as unknown[])[index]);
+    if (!hit) return malformedPage();
+    const { ref, path, title, excerpt } = hit;
+    if (typeof ref !== "string" || typeof path !== "string"
+      || typeof title !== "string" || typeof excerpt !== "string") return malformedPage();
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    rows.push({ noteRef: ref, path, title, excerpt });
   }
   return { roomLabel: typeof roomLabel === "string" ? roomLabel : null,
     rows, continuation: next, status: stateLabels[state as HostSearchState], notice: NOTICE };
 }
 
 export interface HostSearchFailure {
-  action: "clear" | "discard_continuation" | "discard_result" | "keep";
+  action: "access_lost" | "clear" | "discard_continuation" | "discard_result" | "keep";
   message?: string;
 }
 
@@ -134,7 +137,7 @@ export function hostSearchFailure(error: unknown): HostSearchFailure {
       case "unsupported_mode":
         return { action: "clear", message: "This search request is not supported by the host." };
       case "access_denied":
-        return { action: "clear", message: "Access to host search was denied." };
+        return { action: "access_lost" };
       case "invalid_cursor":
         return { action: "discard_continuation", message: "This page can no longer be continued. Submit a new search." };
       case "result_unavailable":
@@ -162,15 +165,16 @@ function safeInteger(value: unknown): value is number {
 }
 
 function limitMessage(failure: Record<string, unknown>): string {
-  const limit = record(failure.limit);
+  const { limit, retryAfterMs } = failure;
+  const { dimension, origin, maximum } = record(limit) ?? {};
   let message = "Host search reached a limit.";
-  if (limit && typeof limit.dimension === "string" && Object.hasOwn(limitDimensions, limit.dimension)
-    && typeof limit.origin === "string" && limitOrigins.includes(limit.origin) && safeInteger(limit.maximum)) {
-    const dimension = limitDimensions[limit.dimension as keyof typeof limitDimensions];
-    message += ` Maximum: ${limit.maximum} ${dimension} (${limit.origin}).`;
+  if (typeof dimension === "string" && Object.hasOwn(limitDimensions, dimension)
+    && typeof origin === "string" && limitOrigins.includes(origin) && safeInteger(maximum)) {
+    const label = limitDimensions[dimension as keyof typeof limitDimensions];
+    message += ` Maximum: ${maximum} ${label} (${origin}).`;
   }
-  if (safeInteger(failure.retryAfterMs)) {
-    message += ` Try again in ${Math.ceil(failure.retryAfterMs / 1_000)} seconds.`;
+  if (safeInteger(retryAfterMs)) {
+    message += ` Try again in ${Math.ceil(retryAfterMs / 1_000)} seconds.`;
   }
   return message;
 }

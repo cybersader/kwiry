@@ -52,12 +52,7 @@ export class KwirySettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.backendProfile)
           .onChange(async (value) => {
             if (value !== "daemon" && value !== "in_plugin" && value !== "host") return;
-            const switchingHost = value === "host" || this.plugin.settings.backendProfile === "host";
-            this.plugin.settings.backendProfile = value;
-            // Invalidate an open host modal before waiting on settings storage.
-            const activation = switchingHost ? this.plugin.activateBackendProfile() : null;
-            await this.plugin.saveSettings();
-            await (activation ?? this.plugin.activateBackendProfile());
+            await this.plugin.changeBackendProfile(value);
             this.display();
           });
         if (!daemonAvailable) {

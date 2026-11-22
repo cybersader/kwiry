@@ -1264,6 +1264,15 @@ function validateStartupDetails(validated: Readonly<DiagnosticDetails>): void {
   } else if (validated.firstCacheSearchableMs !== null || validated.cacheBytes !== undefined) {
     throw new TypeError("Invalid startup diagnostic details");
   }
+  if (validated.profile === "host") {
+    if ((validated.outcome === "succeeded") !== (validated.reason === "host_search_supported")
+      || validated.reason === "fully_current" || validated.fullyCurrentMs !== null
+      || validated.firstProgressMs !== null || validated.cacheHit) {
+      throw new TypeError("Invalid startup diagnostic details");
+    }
+    return;
+  }
+  if (validated.reason === "host_search_supported") throw new TypeError("Invalid startup diagnostic details");
   if (validated.outcome === "succeeded") {
     if (validated.reason !== "fully_current" || validated.fullyCurrentMs === null) {
       throw new TypeError("Invalid startup diagnostic details");

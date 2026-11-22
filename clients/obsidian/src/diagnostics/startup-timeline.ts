@@ -85,6 +85,11 @@ export class StartupTimeline {
   beginActivation(profile: "daemon" | "in_plugin" | "host", activationEpoch: number): void {
     if (this.finished) return;
     this.profile = profile;
+    if (profile === "host") {
+      this.firstProgressMs = this.firstCacheSearchableMs = null;
+      this.cacheHit = false;
+      this.cacheBytes = undefined;
+    }
     this.activationEpoch = nonNegativeInteger(activationEpoch);
   }
 

@@ -4,11 +4,13 @@
 import { Modal, TFile, type App } from "obsidian";
 
 import {
+  HOST_RESULT_UNAVAILABLE,
+  HOST_SEARCH_ACCESS_LOST,
   HOST_SEARCH_GUIDANCE,
   HOST_SEARCH_IDLE,
   HOST_SEARCH_LABEL,
   hostSearchFailure,
-  hostSearchFault,
+  type HostSearchFailure,
   type HostSearchOperations,
   type HostSearchPage,
 } from "./host-search";
@@ -21,16 +23,15 @@ export class HostSearchModal extends Modal {
   private displayed: HostSearchPage | null = null;
   private renderRevision = 0;
   private view: ReturnType<HostSearchModal["createView"]> | null = null;
-  private unsubscribe: (() => void) | null = null;
 
   constructor(
     app: App,
     private readonly host: HostSearchOperations,
     private readonly available: boolean,
-    onInvalidated: (callback: () => void) => () => void,
+    private readonly onClosed: () => void,
+    private readonly onAccessLost: () => void,
   ) {
     super(app);
-    this.unsubscribe = onInvalidated(() => this.close());
   }
 
   onOpen(): void {
@@ -66,14 +67,25 @@ export class HostSearchModal extends Modal {
   }
 
   onClose(): void {
-    this.cancel();
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    this.activeQuery = null;
-    this.draw(null);
-    if (this.view) this.view.input.value = "";
+    this.clearInteraction();
     this.view = null;
     this.contentEl.empty();
+    this.onClosed();
+  }
+
+  clearAccess(): void {
+    this.clearInteraction();
+    this.setStatus(HOST_SEARCH_ACCESS_LOST);
+  }
+
+  private clearInteraction(): void {
+    this.activeQuery = null;
+    this.draw(null);
+    if (this.view) {
+      this.view.input.value = "";
+      this.view.pageControls.disabled = false;
+    }
+    this.cancel();
   }
 
   private createView() {
@@ -121,7 +133,7 @@ export class HostSearchModal extends Modal {
       this.draw(page);
       this.setStatus(page.status, continuation !== undefined);
     } catch (error) {
-      if (this.interaction.isCurrent(epoch)) this.showFailure(error);
+      this.handleHostFailure(hostSearchFailure(error), epoch);
     } finally {
       this.finish(epoch);
     }
@@ -136,24 +148,38 @@ export class HostSearchModal extends Modal {
       if (!this.interaction.isCurrent(epoch)) return;
       try {
         const file = this.app.vault.getAbstractFileByPath(path);
-        if (!(file instanceof TFile) || file.path !== path) throw hostSearchFault.staleResult();
+        if (!this.interaction.isCurrent(epoch)) return;
+        if (!(file instanceof TFile) || file.path !== path) {
+          this.showFailure({ action: "discard_result", message: HOST_RESULT_UNAVAILABLE }, index);
+          return;
+        }
         const leaf = this.app.workspace.getLeaf(false);
         if (!this.interaction.isCurrent(epoch)) return;
         await leaf.openFile(file);
-      } catch {
-        if (this.interaction.isCurrent(epoch)) this.showFailure(hostSearchFault.staleResult(), index);
+      } catch (error) {
+        if (hostSearchFailure(error).action === "access_lost") {
+          this.onAccessLost();
+        } else if (this.interaction.isCurrent(epoch)) {
+          // We cannot establish that only the selected row became stale.
+          this.clearInteraction();
+          this.setStatus(HOST_RESULT_UNAVAILABLE, true);
+        }
         return;
       }
       if (this.interaction.isCurrent(epoch)) this.close();
     } catch (error) {
-      if (this.interaction.isCurrent(epoch)) this.showFailure(error, index);
+      this.handleHostFailure(hostSearchFailure(error), epoch, index);
     } finally {
       this.finish(epoch);
     }
   }
 
-  private showFailure(error: unknown, index?: number): void {
-    const failure = hostSearchFailure(error);
+  private handleHostFailure(failure: HostSearchFailure, epoch: number, index?: number): void {
+    if (failure.action === "access_lost") this.onAccessLost();
+    else if (this.interaction.isCurrent(epoch)) this.showFailure(failure, index);
+  }
+
+  private showFailure(failure: HostSearchFailure, index?: number): void {
     if (failure.action === "clear") this.draw(null);
     if (failure.action === "discard_continuation" && this.displayed) {
       this.draw({ ...this.displayed, continuation: null });

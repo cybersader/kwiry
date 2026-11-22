@@ -76,7 +76,8 @@ interface LifecycleHarness {
   vaultFiles: Map<string, "file" | "folder" | { alias: string }>;
   openedPaths: string[];
   pathLookups: string[];
-  openFails: boolean;
+  openError: unknown;
+  beforeSave?: () => Promise<void>;
   exactSettings: boolean;
   hoverSources: Array<{ id: string; display: string; defaultMod: boolean }>;
   layoutReady: (() => void) | null;
@@ -120,7 +121,7 @@ const harness: LifecycleHarness = {
   vaultFiles: new Map(),
   openedPaths: [],
   pathLookups: [],
-  openFails: false,
+  openError: undefined,
   exactSettings: false,
   hoverSources: [],
   layoutReady: null,
@@ -316,7 +317,7 @@ function stubSource(path: string): string {
               getLeaf(explicitNewLeaf) {
                 if (explicitNewLeaf !== false) throw new Error("unexpected leaf request");
                 return { openFile: async (file) => {
-                  if (harness.openFails) throw new Error("untrusted open error");
+                  if (harness.openError !== undefined) throw harness.openError;
                   harness.openedPaths.push(file.path);
                 } };
               },
@@ -333,7 +334,10 @@ function stubSource(path: string): string {
               ...harness.storedData,
             };
           }
-          async saveData(value) { harness.savedData.push(value); }
+          async saveData(value) {
+            await harness.beforeSave?.();
+            harness.savedData.push(value);
+          }
           addSettingTab(tab) { harness.displaySettings = () => tab.display(); }
           addCommand({ id, callback }) { harness.commands.set(id, callback); }
           addRibbonIcon() {}
@@ -620,7 +624,8 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.vaultFiles.clear();
     harness.openedPaths.length = 0;
     harness.pathLookups.length = 0;
-    harness.openFails = false;
+    harness.openError = undefined;
+    delete harness.beforeSave;
     harness.exactSettings = false;
     harness.hoverSources.length = 0;
     harness.layoutReady = null;
@@ -740,7 +745,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     } else {
       await vi.waitFor(() => expect(harness.statusBarText).not.toBe("kwiry: starting…"), { interval: 5 });
     }
-    expect(harness.savedData).toEqual([]);
+    expect(harness.savedData).toEqual(stored === "fresh" && expectedProfile === "host" ? [{ backendProfile: "host" }] : []);
     plugin.onunload();
   });
 
@@ -792,7 +797,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     ["ready", "Results from the host"],
     ["building", "Host search is being prepared."],
     ["unavailable", "Host search is unavailable."],
-    ["not_enabled", "Host search is not enabled for this workspace."],
+    ["not_enabled", "Host search is not enabled here."],
   ])("shows the %s host state, notice, and only a supplied continuation", async (state, label) => {
     const host = scriptedHost();
     host.search.mockResolvedValueOnce(page({ state, items: [], next: CURSOR }))
@@ -964,17 +969,13 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     plugin.onunload();
   });
 
-  it.each(["missing", "folder", "alias", "open failure"] as const)(
+  it.each(["missing", "folder", "alias"] as const)(
     "clears a selected result when its resolved target is %s", async (kind) => {
       const host = scriptedHost();
       const plugin = await startedHost();
       const modal = await openHost();
       if (kind === "folder") harness.vaultFiles.set(PATH, "folder");
       if (kind === "alias") harness.vaultFiles.set(PATH, { alias: hitTwin.path });
-      if (kind === "open failure") {
-        harness.vaultFiles.set(PATH, "file");
-        harness.openFails = true;
-      }
       harness.vaultFiles.set(hitTwin.path, "file");
       submit(modal, QUERY);
       await settled();
@@ -988,6 +989,180 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       plugin.onunload();
     },
   );
+
+  it("review regression: an observed denial clears both live modals and aborts a sibling resolve", async () => {
+    const host = scriptedHost();
+    const resolution = deferred<unknown>();
+    host.resolve.mockReturnValueOnce(resolution.promise);
+    host.search.mockResolvedValueOnce(page({ next: CURSOR }))
+      .mockResolvedValueOnce(page({ room: secondRoom, items: [hitTwin], next: "opaque-other-page" }))
+      .mockRejectedValueOnce({ code: "access_denied", message: RAW });
+    const plugin = await startedHost();
+    const one = await openHost();
+    const two = await openHost();
+    submit(one, QUERY);
+    submit(two, "lark");
+    await settled();
+    harness.vaultFiles.set(hitTwin.path, "file");
+    two.contentEl.find("button", hitTwin.title).fire("click");
+    const signal = host.resolve.mock.calls[0]?.[1].signal;
+    expect(signal?.aborted).toBe(false);
+    one.contentEl.find("button", "Next page").fire("click");
+    await settled();
+    const wasAborted = signal?.aborted;
+    const cleared = [one, two].map(({ contentEl }) => ({
+      input: contentEl.all("input")[0]?.value ?? "",
+      rows: contentEl.all("li").length,
+      continuation: contentEl.all("button").some((el) => el.textContent === "Next page" && !el.hidden),
+      room: contentEl.all("h3")[0]?.textContent ?? "",
+    }));
+    resolution.resolve({ path: hitTwin.path });
+    await settled();
+    expect({ wasAborted, cleared, opened: harness.openedPaths }).toEqual({
+      wasAborted: true,
+      cleared: Array(2).fill({ input: "", rows: 0, continuation: false, room: "" }),
+      opened: [],
+    });
+    expect(harness.pathLookups).toEqual([]);
+    plugin.onunload();
+  });
+
+  it.each(["coded denial", "uncertain open failure"])('review regression: discards the full page after %s at openFile', async (kind) => {
+    const host = scriptedHost();
+    host.search.mockResolvedValue(page({ items: [HIT, hitTwin], next: CURSOR }));
+    harness.vaultFiles.set(PATH, "file");
+    harness.openError = Object.assign(new Error(RAW), kind === "coded denial" ? { code: "access_denied" } : {});
+    const plugin = await startedHost();
+    const one = await openHost();
+    const two = await openHost();
+    submit(one, QUERY);
+    submit(two, "lark");
+    await settled();
+    one.contentEl.all("li")[0]?.find("button").fire("click");
+    await settled();
+    expect(one.contentEl.all("li")).toHaveLength(0);
+    expect(one.contentEl.find("input").value).toBe("");
+    expect(one.contentEl.find("button", "Next page").hidden).toBe(true);
+    expect(one.contentEl.text).not.toContain(RAW);
+    expect(harness.pathLookups).toEqual([PATH]);
+    if (kind === "coded denial") {
+      expect(two.contentEl.all("li")).toHaveLength(0);
+      expect(two.contentEl.find("input").value).toBe("");
+    }
+    plugin.onunload();
+  });
+
+  it("review regression: remembers only the fresh host choice across a later launch without v1", async () => {
+    const host = scriptedHost();
+    const worker = vi.fn();
+    const fetch = vi.fn();
+    vi.stubGlobal("Worker", worker);
+    vi.stubGlobal("fetch", fetch);
+    harness.desktopApp = false;
+    harness.exactSettings = true;
+    const first = await startedHost();
+    first.onunload();
+    const writes = [...harness.savedData];
+    harness.storedData = (harness.savedData[0] ?? null) as typeof harness.storedData;
+    vi.stubGlobal(HOST_GLOBAL, undefined);
+    const KwiryPlugin = await loadProductionPlugin();
+    const second = new KwiryPlugin();
+    await second.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.statusBarText).not.toMatch(/(?:starting…|Host search · Lexical)$/u));
+    await second.refreshStatus();
+    expect({ writes, profile: second.settings.backendProfile, status: harness.statusBarText,
+      backendInitializations: harness.backendInitializations, cache: harness.cachePolicyHashes,
+      source: harness.sourcePolicies, probes: harness.forbidden }).toEqual({
+      writes: [{ backendProfile: "host" }], profile: "host", status: `Kwiry: ${HOST_GUIDANCE}`,
+      backendInitializations: 0, cache: [], source: [], probes: [],
+    });
+    expect(worker).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(host.search).not.toHaveBeenCalled();
+    expect(harness.savedData).toEqual(writes);
+    second.onunload();
+  });
+
+  it("keeps host mode and reports when the initial choice cannot be saved", async () => {
+    const host = scriptedHost();
+    harness.beforeSave = async () => { throw new Error(RAW); };
+    const plugin = await startedHost();
+    expect(harness.notices.at(-1)).toContain("Could not remember host search");
+    expect(harness.notices.join(" ")).not.toContain(RAW);
+    expect(harness.savedData).toEqual([]);
+    expect(harness.backendInitializations).toBe(0);
+    expect(harness.cachePolicyHashes).toEqual([]);
+    expect(harness.sourcePolicies).toEqual([]);
+    expect(harness.forbidden).toEqual([]);
+    expect(host.search).not.toHaveBeenCalled();
+    plugin.onunload();
+  });
+
+  it("records one supported-host startup without reporting index readiness", async () => {
+    scriptedHost();
+    const plugin = await startedHost();
+    await plugin.refreshStatus();
+    await plugin.copyDiagnostics();
+    const records = harness.clipboardWrites.join("\n").split("\n").filter((line) => line.includes("startup.lifecycle"));
+    expect(records).toHaveLength(1);
+    expect(records[0]).toContain("profile=host");
+    expect(records[0]).toContain("outcome=succeeded");
+    expect(records[0]).toContain("reason=host_search_supported");
+    expect(records[0]).not.toMatch(/fullyCurrentMs=\d/u);
+    plugin.onunload();
+  });
+
+  it.each([true, false])("waits for persistence before activating a replacement (save succeeds=%s)", async (succeeds) => {
+    const host = scriptedHost();
+    const resolution = deferred<unknown>();
+    host.resolve.mockReturnValueOnce(resolution.promise);
+    const plugin = await startedHost();
+    const modal = await openHost();
+    submit(modal, QUERY);
+    await settled();
+    modal.contentEl.find("button", HIT.title).fire("click");
+    const gate = deferred<void>();
+    harness.beforeSave = async () => {
+      await gate.promise;
+      if (!succeeds) throw new Error(RAW);
+    };
+    harness.displaySettings?.();
+    const switchProfile = harness.settingRows.find((row) => row.name === "Search backend")?.onChange;
+    if (!switchProfile) throw new Error("missing profile control");
+    const changing = switchProfile("in_plugin");
+    const outcome = changing.catch(() => "rejected");
+    expect(host.resolve.mock.calls[0]?.[1].signal.aborted).toBe(true);
+    await settled();
+    const initializedWhileSaving = harness.backendInitializations;
+    harness.layoutReady?.();
+    await settled();
+    const cacheWhileSaving = harness.cachePolicyHashes.length;
+    gate.resolve();
+    expect(await outcome).toBeUndefined();
+    expect({ initializedWhileSaving, cacheWhileSaving }).toEqual({ initializedWhileSaving: 0, cacheWhileSaving: 0 });
+    expect(harness.backendInitializations).toBe(succeeds ? 1 : 0);
+    expect(plugin.settings.backendProfile).toBe(succeeds ? "in_plugin" : "host");
+    if (!succeeds) expect(harness.notices.at(-1)).toContain("Could not save the search backend selection");
+    expect(harness.notices.join(" ")).not.toContain(RAW);
+    resolution.resolve({ path: PATH });
+    await settled();
+    expect(harness.pathLookups).toEqual([]);
+    plugin.onunload();
+  });
+
+  it("shows neutral host startup copy before layout readiness", async () => {
+    const host = scriptedHost();
+    harness.storedData = null;
+    const KwiryPlugin = await loadProductionPlugin();
+    const plugin = new KwiryPlugin();
+    await plugin.onload();
+    harness.commands.get("open-search")?.();
+    await settled();
+    expect(harness.notices.at(-1)).toBe("Kwiry: Host search is starting…");
+    expect(host.search).not.toHaveBeenCalled();
+    plugin.onunload();
+  });
 
   it("keeps two modals independent and never saves, logs or exports host search data", async () => {
     const host = scriptedHost();
@@ -1017,7 +1192,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     await plugin.exportDiagnosticsFile();
     harness.desktopExportAvailable = false;
     await plugin.exportDiagnosticsFile();
-    expect(harness.savedData).toHaveLength(1);
+    expect(harness.savedData).toHaveLength(2);
     expect(harness.clipboardWrites).toHaveLength(1);
     expect(harness.exportReports).toHaveLength(1);
     expect(harness.fullClipboardReports).toHaveLength(1);

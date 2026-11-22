@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { BackendManager } from "../src/backend-manager";
 import { HostSearchBackend } from "../src/backends/host-search-backend";
-import { HOST_GLOBAL, lookupHostSearch } from "../src/host-search";
+import { HOST_GLOBAL, hostSearchFailure, lookupHostSearch } from "../src/host-search";
 import { createPublicSearchApi } from "../src/public-api";
 
 const page = vi.fn();
@@ -66,6 +66,56 @@ describe("host capability lifecycle", () => {
       notice: "Results may be incomplete.",
     });
     await expect(host?.resolveNote("opaque-lynx", signal)).resolves.toBe("Mauve/Lynx.md");
+  });
+
+  it("review regression: snapshots page, room and hit accessors once before display", async () => {
+    const secondRead = vi.fn(() => "unvalidated replacement");
+    const changing = <T>(value: T) => vi.fn<() => T | string>().mockReturnValueOnce(value).mockImplementation(secondRead);
+    const fields = { ref: changing("opaque-sparrow"), path: changing("Lime/Sparrow.md"),
+      title: changing("Sparrow"), excerpt: changing("a **literal** leaf") };
+    const room = { ref: changing("room-lime"), label: changing("Lime") };
+    const accessor = <T extends Record<string, () => unknown>>(getters: T) =>
+      Object.defineProperties({}, Object.fromEntries(Object.entries(getters).map(([key, get]) => [key, { get }])));
+    const boundary = { room: changing(accessor(room)), state: changing("ready"), items: changing([accessor(fields)]),
+      next: changing("opaque-next"), notice: changing("Results may be incomplete.") };
+    const capability = lookupHostSearch(hostRealm({ page: async () => accessor(boundary), resolveNote }));
+    const snapshot = await capability?.page("lime sparrow", new AbortController().signal);
+    expect({ snapshot, repeatedReads: secondRead.mock.calls.length }).toEqual({
+      snapshot: { roomLabel: "Lime", rows: [{ noteRef: "opaque-sparrow", path: "Lime/Sparrow.md", title: "Sparrow",
+        excerpt: "a **literal** leaf" }], continuation: "opaque-next", status: "Results from the host",
+      notice: "Results may be incomplete." }, repeatedReads: 0,
+    });
+    for (const get of [...Object.values(fields), ...Object.values(room), ...Object.values(boundary)]) {
+      expect(get).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("review regression: snapshots error and limit accessors once before formatting", () => {
+    const secondRead = vi.fn(() => "unvalidated replacement");
+    const changing = (value: unknown) => vi.fn<() => unknown>().mockReturnValueOnce(value).mockImplementation(secondRead);
+    const dimension = changing("queryBytes");
+    const origin = changing("grant");
+    const maximum = changing(19);
+    const limit = changing(Object.defineProperties({}, { dimension: { get: dimension }, origin: { get: origin }, maximum: { get: maximum } }));
+    const retryAfterMs = changing(1_500);
+    const code = changing("limited");
+    const error = Object.defineProperties({}, { code: { get: code }, limit: { get: limit }, retryAfterMs: { get: retryAfterMs } });
+    expect({ snapshot: hostSearchFailure(error), repeatedReads: secondRead.mock.calls.length }).toEqual({
+      snapshot: { action: "keep", message: "Host search reached a limit. Maximum: 19 query bytes (grant). Try again in 2 seconds." },
+      repeatedReads: 0,
+    });
+    for (const get of [code, limit, retryAfterMs, dimension, origin, maximum]) expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts long exact host paths without accepting empty, absolute or traversal paths", async () => {
+    const path = `${"Lime/".repeat(1_000)}Sparrow.md`;
+    const open = vi.fn().mockResolvedValueOnce({ path }).mockResolvedValueOnce({ path: "" })
+      .mockResolvedValueOnce({ path: "/Lime/Sparrow.md" }).mockResolvedValueOnce({ path: "Lime/../Sparrow.md" })
+      .mockResolvedValueOnce({ path: "C:/Lime/Sparrow.md" });
+    const host = lookupHostSearch(hostRealm({ page, resolveNote: open }));
+    const resolve = () => host?.resolveNote("opaque-sparrow", new AbortController().signal);
+    await expect(resolve()).resolves.toBe(path);
+    for (let index = 0; index < 4; index++) await expect(resolve()).rejects.toMatchObject({ code: "result_unavailable" });
   });
 
   it.each([false, true])("never constructs another backend or dispatches through the public API (supported=%s)", async (supported) => {

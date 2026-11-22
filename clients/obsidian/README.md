@@ -11,9 +11,9 @@ The presentation plugin does not own parsing, chunking, ranking, authorization, 
 
 ## Host search (provisional)
 
-A fresh install selects **Host search · Lexical** only when the host exposes a compatible v1 search capability. Without it, fresh installs still select **Daemon** where supported and **In-plugin · Lexical** elsewhere. Stored selections (including older settings) are not migrated to host search. A selected host profile without a compatible capability stays unavailable; it never switches backends automatically.
+A fresh install selects **Host search · Lexical** only when the host exposes a compatible v1 search capability. Without it, fresh installs still select **Daemon** where supported and **In-plugin · Lexical** elsewhere. The plugin saves that first host choice without adding other settings. Stored selections (including older settings) are not migrated to host search. A selected host profile without a compatible capability stays unavailable; it never switches backends automatically.
 
-Use **Kwiry Search: Search notes**, submit terms explicitly, and choose **Next page** when offered. The modal shows one host-supplied group at a time. The plugin neither builds nor restores an index for this profile and does not keep a query or result history. Host search is modal-only: the cross-plugin API's `ready()` and valid `search()` calls reject with `backend_unavailable` while this profile is selected.
+Use **Kwiry Search: Search notes**, submit terms explicitly, and choose **Next page** when offered. The modal shows one host-supplied group at a time. If the host denies access, all open host search modals clear their searches and results. The plugin neither builds nor restores an index for this profile and does not keep a query or result history. Host search is modal-only: the cross-plugin API's `ready()` and valid `search()` calls reject with `backend_unavailable` while this profile is selected.
 
 ## In-plugin profile status
 
