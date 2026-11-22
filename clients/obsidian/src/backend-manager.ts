@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import {
-  type BackendProfile,
+  type ManagedBackend,
+  type SearchProfile,
   type SearchBackend,
+  type HostBackend,
   KwiryBackendError,
 } from "./backend";
+import { HostSearchBackend } from "./backends/host-search-backend";
 import type {
   DiagnosticDetails,
   DiagnosticEventBuilder,
@@ -17,6 +20,7 @@ import type {
 export interface BackendFactories {
   daemon: (instanceId: string) => SearchBackend;
   in_plugin: (instanceId: string) => SearchBackend;
+  host?: (instanceId: string) => HostBackend;
 }
 
 export interface BackendManagerDiagnostics {
@@ -38,9 +42,9 @@ const NOOP_DIAGNOSTICS: BackendManagerDiagnostics = {
 };
 
 export class BackendManager {
-  private activeBackend: SearchBackend | null = null;
+  private activeBackend: ManagedBackend | null = null;
   private nextInstance = 1;
-  private activation: Promise<SearchBackend | null> = Promise.resolve(null);
+  private activation: Promise<ManagedBackend | null> = Promise.resolve(null);
   private activationEpoch = 0;
   private closed = false;
   private disposal: Promise<void> | null = null;
@@ -50,7 +54,7 @@ export class BackendManager {
     private readonly diagnostics: BackendManagerDiagnostics = NOOP_DIAGNOSTICS,
   ) {}
 
-  activate(profile: BackendProfile): Promise<SearchBackend> {
+  activate(profile: SearchProfile): Promise<ManagedBackend> {
     if (this.closed) return Promise.reject(managerDisposedError());
     const epoch = ++this.activationEpoch;
     const previousNow = this.activeBackend;
@@ -76,7 +80,9 @@ export class BackendManager {
 
       const instanceId = `${profile}-${this.nextInstance}`;
       this.nextInstance += 1;
-      const backend = this.factories[profile](instanceId);
+      const backend = profile === "host"
+        ? (this.factories.host ?? ((id) => new HostSearchBackend(id)))(instanceId)
+        : this.factories[profile](instanceId);
       this.activeBackend = backend;
       try {
         await backend.initialize();
@@ -108,7 +114,7 @@ export class BackendManager {
     return activation;
   }
 
-  async current(): Promise<SearchBackend> {
+  async current(): Promise<ManagedBackend> {
     if (this.closed) throw managerDisposedError();
     const backend = await this.activation.catch(() => this.activeBackend);
     if (this.closed) throw managerDisposedError();

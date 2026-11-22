@@ -6,6 +6,7 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 import type KwiryPlugin from "./main";
 import type { SearchMode } from "./api";
 import { DAEMON_HOST_UNAVAILABLE_GUIDANCE } from "./backend";
+import { HOST_SEARCH_GUIDANCE, HOST_SEARCH_LABEL, lookupHostSearch } from "./host-search";
 import {
   SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
   SOURCE_ROW_LIMIT_SETTING_NAME,
@@ -21,6 +22,8 @@ import {
 } from "./source-formats";
 
 export class KwirySettingTab extends PluginSettingTab {
+  private changingBackend = false;
+
   constructor(
     app: App,
     private readonly plugin: KwiryPlugin,
@@ -33,23 +36,36 @@ export class KwirySettingTab extends PluginSettingTab {
     containerEl.empty();
 
     const daemonAvailable = this.plugin.daemonBackendAvailable;
+    const hostAvailable = lookupHostSearch() !== null;
+    const hostSelected = this.plugin.settings.backendProfile === "host";
     new Setting(containerEl)
       .setName("Search backend")
-      .setDesc(daemonAvailable
-        ? "Backend selection is explicit. A daemon failure never activates in-plugin search."
-        : DAEMON_HOST_UNAVAILABLE_GUIDANCE)
+      .setDesc(hostSelected ? "Host search never switches to another backend on failure."
+        : daemonAvailable
+          ? "Backend selection is explicit. A daemon failure never activates in-plugin search."
+          : DAEMON_HOST_UNAVAILABLE_GUIDANCE)
       .addDropdown((dropdown) => {
         dropdown
           .addOptions({
             daemon: daemonAvailable ? "Daemon" : "Daemon (unavailable)",
             in_plugin: "In-plugin · Lexical",
+            ...(hostAvailable || hostSelected ? { host: HOST_SEARCH_LABEL } : {}),
           })
           .setValue(this.plugin.settings.backendProfile)
+          .setDisabled(this.changingBackend)
           .onChange(async (value) => {
-            this.plugin.settings.backendProfile = value === "in_plugin" ? "in_plugin" : "daemon";
-            await this.plugin.saveSettings();
-            await this.plugin.activateBackendProfile();
-            this.display();
+            if (this.changingBackend || (value !== "daemon" && value !== "in_plugin" && value !== "host")) {
+              dropdown.setValue(this.plugin.settings.backendProfile);
+              return;
+            }
+            this.changingBackend = true;
+            dropdown.setDisabled(true);
+            try {
+              await this.plugin.changeBackendProfile(value);
+            } finally {
+              this.changingBackend = false;
+              this.display();
+            }
           });
         if (!daemonAvailable) {
           const daemonOption = dropdown.selectEl.querySelector<HTMLOptionElement>('option[value="daemon"]');
@@ -57,7 +73,11 @@ export class KwirySettingTab extends PluginSettingTab {
         }
       });
 
-    if (this.plugin.settings.backendProfile === "daemon") {
+    if (hostSelected) {
+      new Setting(containerEl).setName(HOST_SEARCH_LABEL).setDesc(hostAvailable
+        ? "Search runs in the host. This plugin does not build an index in this mode."
+        : HOST_SEARCH_GUIDANCE);
+    } else if (this.plugin.settings.backendProfile === "daemon") {
       this.renderDaemonSettings(containerEl);
     } else {
       new Setting(containerEl)
@@ -76,18 +96,20 @@ export class KwirySettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("Search").setHeading();
 
-    new Setting(containerEl)
-      .setName(SOURCE_ROW_LIMIT_SETTING_NAME)
-      .setDesc(SOURCE_ROW_LIMIT_SETTING_DESCRIPTION)
-      .addText((text) =>
-        text.setValue(String(this.plugin.settings.resultLimit)).onChange(async (value) => {
-          const parsed = Number.parseInt(value, 10);
-          if (Number.isInteger(parsed)) {
-            this.plugin.settings.resultLimit = Math.min(100, Math.max(1, parsed));
-            await this.plugin.saveSettings();
-          }
-        }),
-      );
+    if (!hostSelected) {
+      new Setting(containerEl)
+        .setName(SOURCE_ROW_LIMIT_SETTING_NAME)
+        .setDesc(SOURCE_ROW_LIMIT_SETTING_DESCRIPTION)
+        .addText((text) =>
+          text.setValue(String(this.plugin.settings.resultLimit)).onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            if (Number.isInteger(parsed)) {
+              this.plugin.settings.resultLimit = Math.min(100, Math.max(1, parsed));
+              await this.plugin.saveSettings();
+            }
+          }),
+        );
+    }
 
     new Setting(containerEl)
       .setName("Show ribbon icon")

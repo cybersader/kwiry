@@ -1,13 +1,19 @@
 # Kwiry Search (Obsidian plugin)
 
-Kwiry Search publishes two explicit profiles. **Daemon** provides lexical (BM25), semantic (local embeddings), and hybrid (RRF) retrieval over registered trees. **In-plugin · Lexical** performs active-vault lexical retrieval inside desktop Obsidian through portable Kwiry Rust plus official SQLite FTS5-WASM, without a daemon or token file. The profiles never silently fall back into one another.
+Kwiry Search has three backend profiles. **Daemon** provides lexical (BM25), semantic (local embeddings), and hybrid (RRF) retrieval over registered trees. **In-plugin · Lexical** performs active-vault lexical retrieval inside desktop Obsidian through portable Kwiry Rust plus official SQLite FTS5-WASM, without a daemon or token file. The profiles never silently fall back into one another.
 
-The presentation plugin does not own parsing, chunking, ranking, authorization, or index behavior. Project-owned Rust and engine adapters retain those responsibilities in both profiles.
+The presentation plugin does not own parsing, chunking, ranking, authorization, or index behavior. Project-owned Rust and engine adapters retain those responsibilities in the desktop profiles. **Host search · Lexical** is provisional and delegates them to the host.
 
 ## Current requirements
 
 - **Daemon** profile: a running kwiry daemon (`kwiry serve`, add `--semantic` for semantic/hybrid modes).
 - **In-plugin · Lexical:** desktop Obsidian; no daemon or token file; supported multi-format extraction, with HTML on by default and PDF and Excel off by default.
+
+## Host search (provisional)
+
+A fresh install selects **Host search · Lexical** only when the host exposes a compatible v1 search capability. Without it, fresh installs still select **Daemon** where supported and **In-plugin · Lexical** elsewhere. The plugin saves that first host choice without adding other settings. Stored selections (including older settings) are not migrated to host search. A selected host profile without a compatible capability stays unavailable; it never switches backends automatically.
+
+Use **Kwiry Search: Search notes**, submit terms explicitly, and choose **Next page** when offered. The modal shows one host-supplied group at a time. If the host denies access, all open host search modals clear their searches and results. The plugin neither builds nor restores an index for this profile and does not keep a query or result history. Host search is modal-only: the cross-plugin API's `ready()` and valid `search()` calls reject with `backend_unavailable` while this profile is selected.
 
 ## In-plugin profile status
 
@@ -35,7 +41,7 @@ See [`../../docs/design/obsidian-lite.md`](../../docs/design/obsidian-lite.md), 
 - In **Daemon** mode, the plugin communicates only with a configured literal loopback HTTP origin, using Obsidian's `requestUrl` for `POST /v0/search`, `GET /v0/status`, and `GET /v0/health`.
 - In **In-plugin · Lexical** mode, the embedded Worker has no network, filesystem/OPFS persistence, helper-Worker, daemon URL, or daemon-token capability.
 - A main-thread machine-local cache port outside the vault owns the published disposable warm-start cache; the Worker receives/returns only bounded validated generation bytes.
-- Daemon search queries are sent only to the selected local daemon. In-plugin queries remain inside the Worker and are never written to the cache.
+- Daemon search queries are sent only to the selected local daemon. In-plugin queries remain inside the Worker and are never written to the cache. Host search queries go only to the host capability; the plugin does not record or export them, result content, or continuation tokens.
 - The daemon bearer token is read from a bounded regular non-symlink file immediately before each authenticated request and is never stored in plugin data, sent to the Worker, logged, or displayed.
 - No telemetry of any kind.
 
@@ -49,10 +55,10 @@ BRAT installs `main.js`, `manifest.json`, and `styles.css` from each versioned G
 
 ## Setup
 
-1. In **Settings → Kwiry Search**, choose **In-plugin · Lexical** or **Daemon** explicitly.
+1. In **Settings → Kwiry Search**, choose **In-plugin · Lexical**, **Daemon**, or **Host search · Lexical** (when offered).
 2. For In-plugin · Lexical, configure any desired supported extractors. HTML is enabled by default; PDF and Excel are disabled by default. No daemon or token is required.
 3. For Daemon, start `kwiry serve`, configure the literal-loopback URL and token path, and map the current vault for local open actions.
-4. Run **Kwiry Search: Search notes**. `Tab` cycles only modes supported by the selected profile. `Enter` opens a grouped source generally; `Ctrl+L` toggles between Sources and that source's already returned sections, where `Enter` opens the exact selected heading, view, or PDF page. `Ctrl+H` remains a compatibility return to Sources, and `Ctrl+Enter` opens the selected target in a new tab.
+4. Run **Kwiry Search: Search notes**. In the Daemon and In-plugin profiles, `Tab` cycles only modes supported by the selected profile. `Enter` opens a grouped source generally; `Ctrl+L` toggles between Sources and that source's already returned sections, where `Enter` opens the exact selected heading, view, or PDF page. `Ctrl+H` remains a compatibility return to Sources, and `Ctrl+Enter` opens the selected target in a new tab.
 
 File previews use Obsidian's core **Page preview** plugin. Enable it, then hold `Ctrl` (Windows/Linux) or `Cmd` (macOS) while hovering a source or section row; native Page preview preferences can override the modifier requirement for Kwiry Search. Both row types request the whole file, not a heading, PDF page, or sheet; supported preview formats depend on Obsidian.
 

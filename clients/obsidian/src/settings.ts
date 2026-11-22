@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import type { SearchMode } from "./api";
-import type { BackendProfile } from "./backend";
+import type { SearchProfile } from "./backend";
 import {
   DEFAULT_ENABLED_SOURCE_FORMATS,
   SOURCE_FORMATS,
@@ -22,7 +22,7 @@ export const SOURCE_ROW_LIMIT_SETTING_DESCRIPTION =
   "Sources shown per search (1–100). Grouping examines up to 100 ranked sections.";
 
 export interface KwiryPluginSettings {
-  backendProfile: BackendProfile;
+  backendProfile: SearchProfile;
   daemonUrl: string;
   /** Absolute path to the daemon's bearer-token file. The token itself is
    * never persisted in plugin data. */
@@ -56,19 +56,25 @@ export const DEFAULT_SETTINGS: KwiryPluginSettings = {
 };
 
 /** Merges stored data over defaults, discarding unknown keys. */
-export function loadSettings(stored: unknown, daemonBackendAvailable = true): KwiryPluginSettings {
+export function loadSettings(
+  stored: unknown,
+  daemonBackendAvailable = true,
+  hostSearchAvailable = false,
+): KwiryPluginSettings {
   const settings: KwiryPluginSettings = {
     ...DEFAULT_SETTINGS,
     enabledSourceFormats: { ...DEFAULT_ENABLED_SOURCE_FORMATS },
   };
   if (stored === null || stored === undefined) {
-    if (!daemonBackendAvailable) settings.backendProfile = "in_plugin";
+    if (hostSearchAvailable) settings.backendProfile = "host";
+    else if (!daemonBackendAvailable) settings.backendProfile = "in_plugin";
     return settings;
   }
   if (typeof stored !== "object") return settings;
   // Legacy settings without a profile keep the original implicit daemon choice.
   const source = stored as Record<string, unknown>;
-  if (source.backendProfile === "daemon" || source.backendProfile === "in_plugin") {
+  if (source.backendProfile === "daemon" || source.backendProfile === "in_plugin"
+    || source.backendProfile === "host") {
     settings.backendProfile = source.backendProfile;
   }
   if (typeof source.daemonUrl === "string") settings.daemonUrl = source.daemonUrl;

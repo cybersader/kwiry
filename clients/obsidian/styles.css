@@ -328,3 +328,43 @@
     animation: none;
   }
 }
+
+.kwiry-host-search-form {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: var(--size-4-2);
+}
+
+.kwiry-host-search-form label {
+  display: grid;
+  gap: var(--size-4-1);
+  flex: 1;
+}
+
+.kwiry-host-search-page {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
+}
+
+.kwiry-host-search-results {
+  overflow-wrap: anywhere;
+  padding-inline-start: var(--size-4-4);
+}
+
+.kwiry-host-search-results li + li {
+  margin-block-start: var(--size-4-3);
+}
+
+.kwiry-host-search-results button {
+  white-space: normal;
+  height: auto;
+  max-inline-size: 100%;
+}
+
+.kwiry-host-search-path {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}

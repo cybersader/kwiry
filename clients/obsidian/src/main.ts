@@ -14,10 +14,12 @@ import { BackendManager } from "./backend-manager";
 import {
   type BackendIdentity,
   type BackendStatus,
-  type SearchBackend,
+  type ManagedBackend,
+  type SearchProfile,
   DAEMON_HOST_UNAVAILABLE,
   KwiryBackendError,
 } from "./backend";
+import type { HostBackendIdentity, HostBackendStatus } from "./backends/host-search-backend";
 import { DaemonBackend } from "./backends/daemon-backend";
 import {
   InPluginLexicalBackend,
@@ -46,6 +48,8 @@ import type {
 } from "./diagnostics/log";
 import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
 import { LatestRequestEpoch } from "./latest-request-epoch";
+import { HOST_SEARCH_GUIDANCE, HOST_SEARCH_STARTING, lookupHostSearch } from "./host-search";
+import { HostSearchModal } from "./host-search-modal";
 import { createPublicSearchApi, type KwirySearchApiV1 } from "./public-api";
 import { KwirySearchModal } from "./search-modal";
 import { corePolicyFingerprint, enabledSourceFormatList } from "./source-formats";
@@ -81,10 +85,14 @@ export default class KwiryPlugin extends Plugin {
     && hasDaemonTokenFileSupport();
   hoverPreviewSource: string | null = null;
   private readonly backendInvalidationCallbacks = new Set<() => void>();
+  private readonly hostSearchModals = new Set<HostSearchModal>();
+  private hostActivationFailed = false;
+  private savingBackendProfile = false;
+  private settingsWrites = Promise.resolve();
   private statusBar: HTMLElement | null = null;
   private statusBarRenderer: StatusBarRenderer | null = null;
   private backendManager!: BackendManager;
-  private activeBackendIdentity: BackendIdentity | null = null;
+  private activeBackendIdentity: BackendIdentity | HostBackendIdentity | null = null;
   private statusUnsubscribe: (() => void) | null = null;
   private pluginEpoch = 0;
   private activationEpoch = 0;
@@ -98,6 +106,7 @@ export default class KwiryPlugin extends Plugin {
   private sourcePolicyHash: string | null = null;
   private readonly publicSearch = createPublicSearchApi({
     currentBackend: async () => this.backendManager?.current(),
+    hostSearchSelected: () => this.settings.backendProfile === "host",
     defaultMode: () => this.settings.defaultMode,
   });
 
@@ -110,16 +119,38 @@ export default class KwiryPlugin extends Plugin {
     this.startupTimeline = this.createStartupTimeline(pluginEpoch);
     await this.diagnostics.capture("info", "plugin.load", { pluginEpoch }, async (event) => {
       try {
-        const storedData = await this.loadData();
-        this.settings = loadSettings(storedData, this.daemonBackendAvailable);
-        // The core identity no longer depends on which formats are enabled, so
-        // this value survives a Settings toggle: the cache is restored and
-        // projected down to the new set rather than discarded.
-        this.sourcePolicyHash = await corePolicyFingerprint();
-        this.privateTools = createPrivateTools(this, storedData);
-        this.diagnostics.setLevel(this.settings.diagnosticsLogLevel);
+        let storedData: unknown = await this.loadData();
+        if (pluginEpoch !== this.pluginEpoch) {
+          event.set({ outcome: "cancelled" });
+          return;
+        }
+        const autoSelectHost = (storedData === null || storedData === undefined) && lookupHostSearch() !== null;
+        if (autoSelectHost) {
+          try {
+            // Saving replaces the whole object. Re-read just before writing; the host offers no atomic check-and-save.
+            storedData = await this.loadData();
+            if (pluginEpoch === this.pluginEpoch && (storedData === null || storedData === undefined)) {
+              await this.saveData({ backendProfile: "host" });
+            }
+          } catch {
+            if (pluginEpoch === this.pluginEpoch) {
+              new Notice("Kwiry: Could not remember host search. Fix settings storage before reloading.");
+            }
+          }
+        }
+        if (pluginEpoch !== this.pluginEpoch) {
+          event.set({ outcome: "cancelled" });
+          return;
+        }
+        this.settings = loadSettings(storedData, this.daemonBackendAvailable, autoSelectHost);
         this.startupTimeline?.setProfile(this.settings.backendProfile);
         event.set({ profile: this.settings.backendProfile });
+        // The core identity is independent of the enabled source formats.
+        if (this.settings.backendProfile !== "host") {
+          this.sourcePolicyHash = await corePolicyFingerprint();
+        }
+        this.privateTools = createPrivateTools(this, storedData);
+        this.diagnostics.setLevel(this.settings.diagnosticsLogLevel);
         if (pluginEpoch !== this.pluginEpoch) {
           event.set({ outcome: "cancelled" });
           this.startupTimeline?.finish("cancelled", "plugin_unloaded");
@@ -202,7 +233,8 @@ export default class KwiryPlugin extends Plugin {
 
         this.statusBar = this.addStatusBarItem();
         this.statusBarRenderer = createStatusBarRenderer(this.statusBar);
-        this.setStatusBarText("kwiry: starting…");
+        this.setStatusBarText(this.settings.backendProfile === "host"
+          ? `Kwiry: ${HOST_SEARCH_STARTING}` : "kwiry: starting…");
         this.registerInterval(
           window.setInterval(() => void this.refreshStatus(), STATUS_POLL_MS),
         );
@@ -214,6 +246,7 @@ export default class KwiryPlugin extends Plugin {
         // Vault event listeners are still registered inside the backend before its
         // first await, so changes during the wait are not lost.
         this.app.workspace.onLayoutReady(() => {
+          if (pluginEpoch !== this.pluginEpoch) return;
           this.startupTimeline?.markLayoutReady();
           void this.activateBackendProfile();
         });
@@ -245,9 +278,46 @@ export default class KwiryPlugin extends Plugin {
     void disposal?.catch(() => undefined);
   }
 
-  async saveSettings(): Promise<void> {
+  saveSettings(): Promise<void> {
+    const pluginEpoch = this.pluginEpoch;
+    return this.enqueueSettingsWrite(async () => {
+      if (pluginEpoch === this.pluginEpoch) await this.persistSettings(this.settings);
+    });
+  }
+
+  async changeBackendProfile(profile: SearchProfile): Promise<void> {
+    if (this.savingBackendProfile || profile === this.settings.backendProfile) return;
+    const pluginEpoch = this.pluginEpoch;
+    this.savingBackendProfile = true;
+    this.closeHostSearchModals();
     try {
-      await this.saveData(this.privateTools.prepareStoredData(this.settings));
+      try {
+        await this.enqueueSettingsWrite(async () => {
+          if (pluginEpoch !== this.pluginEpoch) return;
+          await this.persistSettings({ ...this.settings, backendProfile: profile });
+          if (pluginEpoch === this.pluginEpoch) this.settings.backendProfile = profile;
+        });
+      } catch {
+        if (pluginEpoch === this.pluginEpoch) {
+          new Notice("Kwiry: Could not save the search backend selection. The previous backend is still selected.");
+        }
+        return;
+      }
+      if (pluginEpoch === this.pluginEpoch) await this.activateBackendProfile();
+    } finally {
+      this.savingBackendProfile = false;
+    }
+  }
+
+  private enqueueSettingsWrite(write: () => Promise<void>): Promise<void> {
+    const pending = this.settingsWrites.then(write);
+    this.settingsWrites = pending.catch(() => undefined);
+    return pending;
+  }
+
+  private async persistSettings(settings: KwiryPluginSettings): Promise<void> {
+    try {
+      await this.saveData(this.privateTools.prepareStoredData(settings));
     } catch (error) {
       this.recordCaughtFailure("settings", "save", error);
       throw error;
@@ -444,11 +514,13 @@ export default class KwiryPlugin extends Plugin {
     const activationEpoch = ++this.activationEpoch;
     const profile = this.settings.backendProfile;
     this.startupTimeline?.beginActivation(profile, activationEpoch);
+    this.hostActivationFailed = false;
     this.statusRefresh.invalidate();
     this.statusUnsubscribe?.();
     this.statusUnsubscribe = null;
     this.setActiveBackendIdentity(null);
-    this.setStatusBarText("kwiry: starting…");
+    this.setStatusBarText(this.settings.backendProfile === "host"
+      ? `Kwiry: ${HOST_SEARCH_STARTING}` : "kwiry: starting…");
 
     try {
       if (profile === "in_plugin") {
@@ -469,6 +541,12 @@ export default class KwiryPlugin extends Plugin {
         this.isCurrent(pluginEpoch, activationEpoch) ? "failed" : "superseded",
       );
       if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
+      if (profile === "host") {
+        this.hostActivationFailed = true;
+        this.startupTimeline?.finish("failed", "activation_failed");
+        this.setStatusBarText(`Kwiry: ${HOST_SEARCH_GUIDANCE}`);
+        return;
+      }
       try {
         const backend = await this.backendManager.current();
         if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
@@ -489,7 +567,7 @@ export default class KwiryPlugin extends Plugin {
   }
 
   getActiveBackendIdentity(): BackendIdentity | null {
-    return this.activeBackendIdentity;
+    return this.activeBackendIdentity?.profile === "host" ? null : this.activeBackendIdentity;
   }
 
   onBackendInvalidated(callback: () => void): () => void {
@@ -497,10 +575,11 @@ export default class KwiryPlugin extends Plugin {
     return () => { this.backendInvalidationCallbacks.delete(callback); };
   }
 
-  private setActiveBackendIdentity(identity: BackendIdentity | null): void {
+  private setActiveBackendIdentity(identity: BackendIdentity | HostBackendIdentity | null): void {
     const changed = this.activeBackendIdentity?.instanceId !== identity?.instanceId;
     this.activeBackendIdentity = identity;
     if (changed) {
+      this.closeHostSearchModals();
       for (const callback of this.backendInvalidationCallbacks) callback();
     }
   }
@@ -538,6 +617,10 @@ export default class KwiryPlugin extends Plugin {
   }
 
   async rebuildInPluginIndex(): Promise<void> {
+    if (this.settings.backendProfile === "host") {
+      new Notice("Kwiry: manual rebuild is available only for In-plugin · Lexical.");
+      return;
+    }
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = this.activationEpoch;
     await this.diagnostics.capture("info", "index.lifecycle", {
@@ -549,6 +632,7 @@ export default class KwiryPlugin extends Plugin {
     }, async (event) => {
       try {
         const backend = await this.backendManager.current();
+        if (!("search" in backend)) return;
         const status = await backend.status();
         if (!this.isCurrent(pluginEpoch, activationEpoch)
           || this.activeBackendIdentity?.instanceId !== backend.identity.instanceId) {
@@ -578,25 +662,30 @@ export default class KwiryPlugin extends Plugin {
   }
 
   private bindBackend(
-    backend: SearchBackend,
+    backend: ManagedBackend,
     pluginEpoch: number,
     activationEpoch: number,
   ): void {
     this.setActiveBackendIdentity(backend.identity);
     this.lastDiagnosticStatus = "";
     this.statusUnsubscribe?.();
-    this.statusUnsubscribe = backend.subscribeStatus?.((status) => {
+    this.statusUnsubscribe = "search" in backend ? backend.subscribeStatus?.((status) => {
       if (!this.isCurrent(pluginEpoch, activationEpoch)
         || this.activeBackendIdentity?.instanceId !== backend.identity.instanceId) return;
       this.statusRefresh.invalidate();
       this.recordBackendStatus(status, pluginEpoch, activationEpoch);
       this.setStatusBarText(formatStatus(status));
-    }) ?? null;
+    }) ?? null : null;
   }
 
   private async openSearch(): Promise<void> {
+    if (this.savingBackendProfile) return;
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = this.activationEpoch;
+    if (this.settings.backendProfile === "host") {
+      await this.openHostSearch(pluginEpoch, activationEpoch);
+      return;
+    }
     await this.diagnostics.capture("info", "search.lifecycle", {
       profile: this.settings.backendProfile,
       operation: "open",
@@ -605,6 +694,7 @@ export default class KwiryPlugin extends Plugin {
     }, async (event) => {
       try {
         const backend = await this.backendManager.current();
+        if (!("search" in backend)) return;
         const status = await backend.status();
         if (!this.isCurrent(pluginEpoch, activationEpoch)
           || this.activeBackendIdentity?.instanceId !== backend.identity.instanceId) {
@@ -625,11 +715,50 @@ export default class KwiryPlugin extends Plugin {
     });
   }
 
+  private closeHostSearchModals(): void {
+    for (const modal of this.hostSearchModals) modal.close();
+  }
+
+  private async openHostSearch(pluginEpoch: number, activationEpoch: number): Promise<void> {
+    if (this.activeBackendIdentity?.profile !== "host") {
+      new Notice(`Kwiry: ${this.hostActivationFailed ? HOST_SEARCH_GUIDANCE : HOST_SEARCH_STARTING}`);
+      return;
+    }
+    try {
+      const backend = await this.backendManager.current();
+      if (!("page" in backend)) return;
+      const status = await backend.status();
+      if (!this.isCurrent(pluginEpoch, activationEpoch) || this.savingBackendProfile
+        || this.activeBackendIdentity?.instanceId !== backend.identity.instanceId) return;
+      const modal = new HostSearchModal(this.app, backend, status.available,
+        () => { this.hostSearchModals.delete(modal); },
+        () => {
+          // A late denial from a closed modal still invalidates this launch.
+          if (pluginEpoch !== this.pluginEpoch) return;
+          for (const live of this.hostSearchModals) live.clearAccess();
+        });
+      this.hostSearchModals.add(modal);
+      try {
+        modal.open();
+      } catch (error) {
+        this.hostSearchModals.delete(modal);
+        throw error;
+      }
+    } catch {
+      if (this.isCurrent(pluginEpoch, activationEpoch)) new Notice(`Kwiry: ${HOST_SEARCH_GUIDANCE}`);
+    }
+  }
+
   private recordBackendStatus(
-    status: BackendStatus,
+    status: BackendStatus | HostBackendStatus,
     pluginEpoch: number,
     activationEpoch: number,
   ): void {
+    if ("kind" in status) {
+      if (status.available) this.startupTimeline?.finish("succeeded", "host_search_supported");
+      else this.startupTimeline?.finish("failed", "backend_unavailable");
+      return;
+    }
     const quarantinedSources = status.quarantinedSources ?? 0;
     const unreadableSources = status.unreadableSources ?? 0;
     const unreadableSourceCauses = status.unreadableSourceCauses ?? [];

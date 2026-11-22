@@ -5,6 +5,7 @@ export type StartupOutcome = "succeeded" | "degraded" | "failed" | "cancelled";
 
 export type StartupReason =
   | "fully_current"
+  | "host_search_supported"
   | "sources_omitted"
   | "vault_unavailable"
   | "index_capacity"
@@ -14,7 +15,7 @@ export type StartupReason =
   | "plugin_unloaded";
 
 export interface StartupAggregateDetails {
-  readonly profile: "daemon" | "in_plugin";
+  readonly profile: "daemon" | "in_plugin" | "host";
   readonly outcome: StartupOutcome;
   readonly reason: StartupReason;
   readonly pluginEpoch: number;
@@ -35,7 +36,7 @@ export interface StartupTimelineRecord {
 }
 
 export interface StartupTimelineOptions {
-  profile: "daemon" | "in_plugin";
+  profile: "daemon" | "in_plugin" | "host";
   pluginEpoch: number;
   activationEpoch?: number;
   wallNow?: () => number;
@@ -53,7 +54,7 @@ export class StartupTimeline {
   private readonly monotonicStartedAtMs: number;
   private readonly monotonicNow: () => number;
   private readonly record: StartupTimelineOptions["record"];
-  private profile: "daemon" | "in_plugin";
+  private profile: "daemon" | "in_plugin" | "host";
   private readonly pluginEpoch: number;
   private activationEpoch: number;
   private pluginLoadCompleteMs: number | null = null;
@@ -77,13 +78,18 @@ export class StartupTimeline {
     this.activationEpoch = nonNegativeInteger(options.activationEpoch ?? 0);
   }
 
-  setProfile(profile: "daemon" | "in_plugin"): void {
+  setProfile(profile: "daemon" | "in_plugin" | "host"): void {
     if (!this.finished) this.profile = profile;
   }
 
-  beginActivation(profile: "daemon" | "in_plugin", activationEpoch: number): void {
+  beginActivation(profile: "daemon" | "in_plugin" | "host", activationEpoch: number): void {
     if (this.finished) return;
     this.profile = profile;
+    if (profile === "host") {
+      this.firstProgressMs = this.firstCacheSearchableMs = null;
+      this.cacheHit = false;
+      this.cacheBytes = undefined;
+    }
     this.activationEpoch = nonNegativeInteger(activationEpoch);
   }
 

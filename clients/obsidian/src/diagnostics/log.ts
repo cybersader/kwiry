@@ -37,6 +37,7 @@ export type DiagnosticTextValue =
   | "internal"
   | "daemon"
   | "in_plugin"
+  | "host"
   | "connecting"
   | "starting"
   | "building"
@@ -209,6 +210,7 @@ export type DiagnosticTextValue =
   | "worker_crashed"
   | "timeout"
   | "fully_current"
+  | "host_search_supported"
   | "sources_omitted"
   | "vault_unavailable"
   | "index_capacity"
@@ -338,7 +340,7 @@ export type DiagnosticLexicalExecution =
   | { schemaVersion: 1; availability: "unavailable" | "not_applicable" };
 
 export interface DiagnosticDetails {
-  profile?: "daemon" | "in_plugin";
+  profile?: "daemon" | "in_plugin" | "host";
   phase?: DiagnosticTextValue;
   stage?: DiagnosticTextValue;
   activity?: "inventory" | "read" | "prepare" | "apply";
@@ -483,7 +485,7 @@ export interface DiagnosticExportContext {
   readonly pluginVersion: string;
   readonly obsidianVersion: string;
   readonly platform: DiagnosticPlatform;
-  readonly backendProfile: "daemon" | "in_plugin";
+  readonly backendProfile: "daemon" | "in_plugin" | "host";
 }
 
 const LEVELS: readonly DiagnosticLevel[] = ["debug", "info", "warn", "error"];
@@ -502,7 +504,7 @@ const EVENT_CODES: readonly DiagnosticEventCode[] = [
   "promise.rejected",
 ];
 const TEXT_VALUES: readonly DiagnosticTextValue[] = [
-  "daemon", "in_plugin", "connecting", "starting", "building", "ready", "degraded",
+  "daemon", "in_plugin", "host", "connecting", "starting", "building", "ready", "degraded",
   "unavailable", "disposed", "unknown", "alive", "unreachable", "terminated", "lexical",
   "semantic", "hybrid", "configuration", "transport", "protocol", "index", "query",
   "lifecycle", "inventory", "read", "prepare", "apply", "source_read_timeout",
@@ -538,7 +540,7 @@ const TEXT_VALUES: readonly DiagnosticTextValue[] = [
   "ReferenceError", "SyntaxError", "Error", "other", "rust", "sqlite", "plan_rejected",
   "bounds_exceeded", "internal", "artifact",
   "fts5_unavailable", "rust_init_failed", "sqlite_init_failed", "artifact_mismatch", "protocol_mismatch", "invalid_request", "invalid_state", "source_rejected", "explicit_query_unsupported", "invalid_query", "invalid_query_plan", "query_execution_failed", "integrity_failed", "cache_identity_mismatch", "cache_version_mismatch", "cache_digest_mismatch", "cache_image_invalid", "cache_blob_too_large", "checkpoint_kind_mismatch", "checkpoint_identity_mismatch", "checkpoint_version_mismatch", "checkpoint_digest_mismatch", "checkpoint_image_invalid", "checkpoint_blob_too_large", "worker_crashed", "timeout",
-  "fully_current", "sources_omitted", "vault_unavailable", "index_capacity", "backend_unavailable",
+  "fully_current", "host_search_supported", "sources_omitted", "vault_unavailable", "index_capacity", "backend_unavailable",
   "plugin_load_failed", "activation_failed", "plugin_unloaded",
 ];
 const DETAIL_KEYS: readonly (keyof DiagnosticDetails)[] = [
@@ -588,7 +590,7 @@ const STARTUP_OUTCOMES = new Set<DiagnosticTextValue>([
   "succeeded", "degraded", "failed", "cancelled",
 ]);
 const STARTUP_REASONS = new Set<DiagnosticTextValue>([
-  "fully_current", "sources_omitted", "vault_unavailable", "index_capacity",
+  "fully_current", "host_search_supported", "sources_omitted", "vault_unavailable", "index_capacity",
   "backend_unavailable", "plugin_load_failed", "activation_failed", "plugin_unloaded",
 ]);
 const COUNTERS = new Set<DiagnosticCounter>([
@@ -625,7 +627,7 @@ const LEVEL_SET = new Set<DiagnosticLevel>(LEVELS);
 const PLATFORM_SET = new Set<DiagnosticPlatform>([
   "android", "ios", "linux", "macos", "windows", "unknown",
 ]);
-const PROFILE_SET = new Set<DiagnosticExportContext["backendProfile"]>(["daemon", "in_plugin"]);
+const PROFILE_SET = new Set<DiagnosticExportContext["backendProfile"]>(["daemon", "in_plugin", "host"]);
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const IN_PLUGIN_GENERATION_PATTERN = /^(?:daemon|in_plugin)-[1-9][0-9]*-generation-[1-9][0-9]*$/u;
 const DAEMON_GENERATION_PATTERN = /^g-[0-9]{39}-[0-9]{10}-[0-9]{20}-[0-9]{20}$/u;
@@ -1262,6 +1264,15 @@ function validateStartupDetails(validated: Readonly<DiagnosticDetails>): void {
   } else if (validated.firstCacheSearchableMs !== null || validated.cacheBytes !== undefined) {
     throw new TypeError("Invalid startup diagnostic details");
   }
+  if (validated.profile === "host") {
+    if ((validated.outcome === "succeeded") !== (validated.reason === "host_search_supported")
+      || validated.reason === "fully_current" || validated.fullyCurrentMs !== null
+      || validated.firstProgressMs !== null || validated.cacheHit) {
+      throw new TypeError("Invalid startup diagnostic details");
+    }
+    return;
+  }
+  if (validated.reason === "host_search_supported") throw new TypeError("Invalid startup diagnostic details");
   if (validated.outcome === "succeeded") {
     if (validated.reason !== "fully_current" || validated.fullyCurrentMs === null) {
       throw new TypeError("Invalid startup diagnostic details");

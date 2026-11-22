@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import type { SearchMode } from "./api";
-import { KwiryBackendError, type SearchBackend } from "./backend";
+import { KwiryBackendError, type ManagedBackend, type SearchBackend } from "./backend";
 import { validateOpenResult } from "./open-result";
 
 export interface KwirySearchOptions {
@@ -61,7 +61,9 @@ export class KwiryApiError extends Error {
 
 /** Internal wiring only: the published api object contains no host references. */
 export function createPublicSearchApi(host: {
-  currentBackend(): Promise<SearchBackend | undefined>;
+  currentBackend(): Promise<ManagedBackend | undefined>;
+  /** Check the selected profile even while prior backend disposal is pending. */
+  hostSearchSelected?(): boolean;
   defaultMode(): SearchMode;
 }): { api: KwirySearchApiV1; dispose(): void } {
   let unloaded = false;
@@ -72,13 +74,16 @@ export function createPublicSearchApi(host: {
     requireLoaded();
     const current = await host.currentBackend();
     requireLoaded();
-    if (current !== backend) throw new KwiryApiError("backend_changed");
+    if (current !== backend || host.hostSearchSelected?.()) throw new KwiryApiError("backend_changed");
   };
   const available = async () => {
     requireLoaded();
+    if (host.hostSearchSelected?.()) throw new KwiryApiError("backend_unavailable");
     const backend = await host.currentBackend();
     requireLoaded();
-    if (!backend) throw new KwiryApiError("backend_unavailable");
+    if (!backend || !("search" in backend) || host.hostSearchSelected?.()) {
+      throw new KwiryApiError("backend_unavailable");
+    }
     const status = await backend.status();
     await requireCurrent(backend);
     if (status.phase === "unavailable" || status.phase === "disposed") {

@@ -4,9 +4,13 @@
 import { classifySourcePath, type SourceFormat } from "./source-formats";
 
 export function isNormalizedVaultFilePath(value: string): boolean {
+  return value.length <= 4_096 && isVaultRelativePath(value);
+}
+
+/** Checks path structure without imposing a backend-specific size limit. */
+export function isVaultRelativePath(value: string): boolean {
   if (
     value.length === 0
-    || value.length > 4_096
     || value.startsWith("/")
     || value.includes("\\")
     || value.includes("\0")
