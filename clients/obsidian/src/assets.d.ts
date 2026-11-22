@@ -67,6 +67,16 @@ declare module "virtual:kwiry-rust-wasm-bytes" {
   export default bytes;
 }
 
+declare module "virtual:kwiry-rust-wasm-artifact" {
+  const artifact: Uint8Array | {
+    readonly packed: Uint8Array;
+    readonly packedSize: number;
+    readonly packedSha256: string;
+    readonly decode: () => Uint8Array;
+  };
+  export default artifact;
+}
+
 declare module "virtual:kwiry-artifact-identities" {
   export const RUST_WASM_SIZE: number;
   export const RUST_WASM_SHA256: string;

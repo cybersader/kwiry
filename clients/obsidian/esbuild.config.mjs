@@ -17,7 +17,8 @@ import { fileURLToPath } from "node:url";
 import builtins from "builtin-modules";
 import esbuild from "esbuild";
 
-import { assertCommunityMainSize, compressedRustWasmPlugin } from "./scripts/community-bundle.mjs";
+import { compressedRustWasmPlugin } from "./scripts/community-bundle.mjs";
+import { assertCommunityMainSize } from "./scripts/community-main-size.mjs";
 import {
   assertWorkerAuthorityGraph,
   embedWorkerPrivacyBoundary,
@@ -201,7 +202,7 @@ function rustVirtualPlugin(identities, adapter) {
       build.onResolve({ filter: /^virtual:kwiry-rust-wasm-bindings$/ }, () => ({
         path: adapter.bindings,
       }));
-      build.onResolve({ filter: /^virtual:kwiry-rust-wasm-bytes$/ }, () => ({
+      build.onResolve({ filter: /^virtual:kwiry-rust-wasm-(?:bytes|artifact)$/ }, () => ({
         path: adapter.wasm,
       }));
       build.onResolve({ filter: /^virtual:kwiry-artifact-identities$/ }, () => ({

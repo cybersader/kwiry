@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import rustWasmBytes from "virtual:kwiry-rust-wasm-bytes";
 import {
   abi_identity,
   finalize_lexical_v2_rank,
@@ -393,7 +392,7 @@ export class RustAdapterError extends Error {
   }
 }
 
-export function initializeRustAdapter(): RustIdentity {
+export function initializeRustAdapter(rustWasmBytes: Uint8Array): RustIdentity {
   try {
     initSync({ module: rustWasmBytes.slice() });
   } catch {
