@@ -507,6 +507,9 @@ export async function buildPlugin({
     throw new Error("internal Worker variants must be built separately");
   }
   const communityBuild = optimized && internalVariants === 0;
+  // The private playground adds a separate Worker; its primary Worker must
+  // stay byte-identical to the regular build's primary Worker.
+  const packPrimaryWorker = communityBuild || (optimized && internalD5cPlayground);
   if (internalD5cOwnerHost && activeVaultCache) {
     throw new Error("D5C owner host must compile without the active-vault cache");
   }
@@ -552,7 +555,7 @@ export async function buildPlugin({
       logLevel: "silent",
       plugins: [
         rustVirtualPlugin(identities, rustAdapter),
-        ...(communityBuild ? [compressedRustWasmPlugin(rustAdapter)] : []),
+        ...(packPrimaryWorker ? [compressedRustWasmPlugin(rustAdapter)] : []),
         internalPrototypePlugin(Boolean(internalTypoPrototype)),
         internalD5cPreviewPlugin(Boolean(internalD5cOwnerHost)),
         ownerWorkerProtocolPlugin(Boolean(internalD5cOwnerHost)),
