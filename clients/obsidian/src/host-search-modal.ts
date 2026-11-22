@@ -36,6 +36,7 @@ export class HostSearchModal extends Modal {
 
   onOpen(): void {
     this.setTitle(HOST_SEARCH_LABEL);
+    this.contentEl.addClass("kwiry-host-search");
     const view = this.view = this.createView();
     const { form, input, status, next } = view;
     const initial = this.available ? HOST_SEARCH_IDLE : HOST_SEARCH_GUIDANCE;

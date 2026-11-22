@@ -58,6 +58,8 @@ class HostElement {
     return this.createEl("div", options);
   }
 
+  addClass(cls: string): void { this.cls = [this.cls, cls].filter(Boolean).join(" "); }
+
   addEventListener(type: string, callback: (event: { preventDefault(): void }) => void): void {
     this.handlers.set(type, callback);
   }
@@ -768,6 +770,8 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     const plugin = await startedHost();
     const modal = await openHost();
     const { contentEl } = modal;
+    expect(contentEl.cls.split(" ")).toContain("kwiry-host-search");
+    expect(contentEl.find("button", "Next page").hidden).toBe(true);
     inputText(modal, QUERY);
     expect(host.search).not.toHaveBeenCalled();
     expect(contentEl.text).not.toContain(NOTICE);

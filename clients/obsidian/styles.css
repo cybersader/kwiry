@@ -329,6 +329,11 @@
   }
 }
 
+/* Host button styles can otherwise override the browser's hidden default. */
+.kwiry-host-search [hidden] {
+  display: none !important;
+}
+
 .kwiry-host-search-form {
   display: flex;
   align-items: end;
