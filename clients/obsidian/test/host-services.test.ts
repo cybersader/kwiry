@@ -303,6 +303,21 @@ describe("local indexing watch", () => {
     watch.dispose();
   });
 
+  it("N6: the same answer delivered again with a fresh deciding-level object is not a change", async () => {
+    const host = policyHost({ value: "refuse", decidedBy: { level: "organization" } });
+    const states: string[] = [];
+    const watch = new LocalIndexingWatch((state) => states.push(state.kind), host.window);
+    watch.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    host.emit({ type: "change", snapshot: { localIndexing: { value: "refuse", decidedBy: { level: "organization" } } } });
+    host.emit({ type: "change", snapshot: { localIndexing: { value: "refuse", decidedBy: { level: "organization" } } } });
+    expect(states).toEqual(["pending", "refused"]);
+    host.emit({ type: "change", snapshot: { localIndexing: { value: "refuse", decidedBy: "folder" } } });
+    expect(states).toEqual(["pending", "refused", "refused"]);
+    watch.dispose();
+  });
+
   it("a refresh with the same service object does not subscribe twice", () => {
     const host = policyHost();
     const watch = new LocalIndexingWatch(() => undefined, host.window);

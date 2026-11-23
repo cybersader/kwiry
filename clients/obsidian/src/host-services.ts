@@ -332,11 +332,20 @@ export class LocalIndexingWatch {
 
 function sameState(left: LocalIndexingState, right: LocalIndexingState): boolean {
   if (left.kind !== right.kind) return false;
-  if (left.kind === "memory_only" && right.kind === "memory_only") return left.decidedBy === right.decidedBy;
+  if (left.kind === "memory_only" && right.kind === "memory_only") {
+    return sameDecider(left.decidedBy, right.decidedBy);
+  }
   if (left.kind === "refused" && right.kind === "refused") {
-    return left.decidedBy === right.decidedBy && left.limited === right.limited;
+    return sameDecider(left.decidedBy, right.decidedBy) && left.limited === right.limited;
   }
   return true;
+}
+
+/// By value, as this plugin uses it: a repeated answer whose deciding level reads
+/// the same is the same answer, even when it arrives as a fresh object. Nothing
+/// beyond the fixed label is read from a host value.
+function sameDecider(left: unknown, right: unknown): boolean {
+  return Object.is(left, right) || decidingLevelLabel(left) === decidingLevelLabel(right);
 }
 
 /// Calls a registration function and returns an idempotent, non-throwing disposer.
