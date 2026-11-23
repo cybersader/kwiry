@@ -38,6 +38,20 @@ export interface KwiryPluginSettings {
   diagnosticsLogLevel: DiagnosticsLogLevel;
   diagnosticsReportLevel: DiagnosticsReportLevel;
   diagnosticsReportScope: DiagnosticsReportScope;
+  /** A fact about this plugin's own data, not a choice: set when a stricter
+   * local indexing policy made the plugin delete its stored index cache. */
+  derivedDataDeleted: DerivedDataDeletionRecord | null;
+}
+
+export const DERIVED_DATA_DELETED_MESSAGE =
+  "Local index cache deleted because this workspace's policy does not allow stored indexes.";
+
+export type DerivedDataDeletionReason ="policy_memory_only" | "policy_refuse";
+
+/** Non-identifying: a time and a fixed reason; no path, vault name or identity. */
+export interface DerivedDataDeletionRecord {
+  readonly at: string;
+  readonly reason: DerivedDataDeletionReason;
 }
 
 export const DEFAULT_SETTINGS: KwiryPluginSettings = {
@@ -53,6 +67,7 @@ export const DEFAULT_SETTINGS: KwiryPluginSettings = {
   diagnosticsLogLevel: "info",
   diagnosticsReportLevel: "info",
   diagnosticsReportScope: "all",
+  derivedDataDeleted: null,
 };
 
 /** Stored in place of a profile when no person chose one, so every start chooses again. */
@@ -144,7 +159,16 @@ export function loadSettings(
   ) {
     settings.diagnosticsReportScope = source.diagnosticsReportScope;
   }
+  settings.derivedDataDeleted = readDerivedDataDeletion(source.derivedDataDeleted);
   return settings;
+}
+
+function readDerivedDataDeletion(value: unknown): DerivedDataDeletionRecord | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { at, reason } = value as Record<string, unknown>;
+  if (typeof at !== "string" || Number.isNaN(Date.parse(at))) return null;
+  if (reason !== "policy_memory_only" && reason !== "policy_refuse") return null;
+  return { at, reason };
 }
 
 /// The backend for a start where no person chose one. Computed from the current

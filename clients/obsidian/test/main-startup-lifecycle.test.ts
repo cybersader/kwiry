@@ -91,6 +91,13 @@ interface LifecycleHarness {
   backendInitializations: number;
   backendDisposals: number;
   cachePolicyHashes: string[];
+  /** A stored index cache for this vault exists on the simulated disk. */
+  cacheOnDisk: boolean;
+  /** False models a browser tab: no vault path or Node file system. */
+  cacheAvailable: boolean;
+  cacheEvents: string[];
+  beforeCacheDelete?: () => Promise<void>;
+  beforeDispose?: () => Promise<void>;
   sourcePolicies: Array<Record<string, boolean>>;
   clipboardWrites: string[];
   exportReports: string[];
@@ -135,6 +142,9 @@ const harness: LifecycleHarness = {
   backendInitializations: 0,
   backendDisposals: 0,
   cachePolicyHashes: [],
+  cacheOnDisk: false,
+  cacheAvailable: true,
+  cacheEvents: [],
   sourcePolicies: [],
   clipboardWrites: [],
   exportReports: [],
@@ -483,15 +493,39 @@ function stubSource(path: string): string {
             };
           }
           async rebuild() { return harness.rebuildResult; }
-          async dispose() { harness.backendDisposals += 1; }
+          async dispose() {
+            harness.cacheEvents.push("backend:dispose:start");
+            await harness.beforeDispose?.();
+            harness.backendDisposals += 1;
+            harness.cacheEvents.push("backend:dispose:done");
+          }
         }
       `;
     case "cache-options":
       return `
         const harness = globalThis.__kwiryStartupLifecycleHarness;
-        export function createInPluginCacheOptions(_vault, sourcePolicyHash) {
+        function cacheOptions(sourcePolicyHash) {
           harness.cachePolicyHashes.push(sourcePolicyHash);
+          // A backend given the persistent cache writes it to disk.
+          if (harness.cacheAvailable) harness.cacheOnDisk = true;
           return { sourcePolicyHash, openStore: async () => ({ kind: "unavailable" }) };
+        }
+        export function createInPluginCacheOptions(_vault, sourcePolicyHash) {
+          return cacheOptions(sourcePolicyHash);
+        }
+        export function createInPluginCacheCustody(_vault) {
+          return {
+            options: cacheOptions,
+            async deleteForPolicy() {
+              harness.cacheEvents.push("cache:delete:start");
+              await harness.beforeCacheDelete?.();
+              if (!harness.cacheAvailable) return { kind: "unavailable", reason: "vault_location_unavailable" };
+              const stored = harness.cacheOnDisk;
+              harness.cacheOnDisk = false;
+              harness.cacheEvents.push(stored ? "cache:deleted" : "cache:absent");
+              return { kind: stored ? "deleted" : "absent" };
+            },
+          };
         }
       `;
     case "desktop-export-host":
@@ -789,6 +823,11 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.backendInitializations = 0;
     harness.backendDisposals = 0;
     harness.cachePolicyHashes.length = 0;
+    harness.cacheOnDisk = false;
+    harness.cacheAvailable = true;
+    harness.cacheEvents.length = 0;
+    delete harness.beforeCacheDelete;
+    delete harness.beforeDispose;
     harness.sourcePolicies.length = 0;
     harness.clipboardWrites.length = 0;
     harness.exportReports.length = 0;
@@ -979,6 +1018,45 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     plugin.onunload();
   });
 
+  it("H-13: isolates the direction of every service-supplied string and keeps it unaltered", async () => {
+    const host = scriptedHost();
+    const controls = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069";
+    const room = { ref: "room-bidi", label: `Room ${controls}end` };
+    const item = {
+      ref: "opaque-bidi",
+      path: `Folder${controls}/Note.md`,
+      title: `Title ${controls}tail`,
+      excerpt: `Excerpt ${controls}tail`,
+    };
+    host.search.mockResolvedValueOnce(page({ room, items: [item] }));
+    const plugin = await startedHost();
+    const modal = await openHost();
+    submit(modal, "bidi");
+    await settled();
+    const { contentEl } = modal;
+    const fields: Array<[HostElement, string]> = [
+      [contentEl.find("h3"), room.label],
+      [contentEl.find("button", item.title), item.title],
+      [contentEl.find("div", item.path), item.path],
+      [contentEl.find("div", item.excerpt), item.excerpt],
+    ];
+    for (const [element, raw] of fields) {
+      expect(element.attrs.dir).toBe("auto");
+      expect(element.textContent).toBe(raw);
+    }
+    // No service string is placed in an attribute, a notice, the status line or the status bar.
+    const elsewhere = [
+      ...contentEl.all("p").map((element) => element.textContent),
+      ...contentEl.all("button").flatMap((element) => Object.values(element.attrs)),
+      ...harness.notices,
+      harness.statusBarText,
+    ].join("\n");
+    for (const raw of [room.label, item.title, item.path, item.excerpt, controls]) {
+      expect(elsewhere).not.toContain(raw);
+    }
+    plugin.onunload();
+  });
+
   it.each([
     [page({ state: "ready", items: [], next: CURSOR }), "Results from the host"],
     [page({ state: "building", items: [], next: CURSOR }), "Host search is being prepared."],
@@ -1134,9 +1212,10 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(harness.pathLookups).toEqual([]);
     expect(harness.openedPaths).toEqual([]);
     expect(harness.forbidden).toEqual([]);
-    // A successful open closes the modal and releases its invalidation listener.
+    // A successful open closes the modal and releases its invalidation listener;
+    // the one left is the plugin's status listener.
     expect(modal.contentEl.text).toBe("");
-    expect(host.listeners.size).toBe(0);
+    expect(host.listeners.size).toBe(1);
     plugin.onunload();
   });
 
@@ -1244,9 +1323,9 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
   });
 
   it.each([
-    ["access", "You no longer have access to these results.", 2],
-    ["workspace", "The workspace changed. Search again.", 2],
-    ["lifecycle", "These results expired. Search again.", 2],
+    ["access", "You no longer have access to these results.", 3],
+    ["workspace", "The workspace changed. Search again.", 3],
+    ["lifecycle", "These results expired. Search again.", 3],
     ["withdrawn", "Host search is no longer offered here.", 0],
     ["a-future-reason", "These results expired. Search again.", 0],
   ])("an invalidation (%s) clears every open modal and aborts calls in flight", async (reason, message, listenersAfter) => {
@@ -1256,8 +1335,9 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     const plugin = await startedHost();
     const one = await openHost();
     const two = await openHost();
-    // Each modal registers its listener when it opens, before the first page.
-    expect(host.listeners.size).toBe(2);
+    // Each modal registers its listener when it opens, before the first page;
+    // the plugin holds one more for its status.
+    expect(host.listeners.size).toBe(3);
     expect(host.search).not.toHaveBeenCalled();
     submit(one, QUERY);
     await settled();
@@ -1278,8 +1358,34 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(host.listeners.size).toBe(listenersAfter);
     one.close();
     two.close();
-    expect(host.listeners.size).toBe(0);
+    expect(host.listeners.size).toBe(listenersAfter === 0 ? 0 : 1);
     plugin.onunload();
+    expect(host.listeners.size).toBe(0);
+  });
+
+  it("the status bar follows a withdrawal and a returning provider at once, without the poll", async () => {
+    const host = scriptedHost();
+    const plugin = await startedHost();
+    expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`);
+    // The plugin follows the service only to keep its status current.
+    expect(host.listeners.size).toBe(1);
+    removeSlot();
+    host.invalidate("withdrawn");
+    await settled();
+    expect(harness.statusBarText).toBe(`Kwiry: ${NO_HOST}`);
+    expect({ listeners: host.listeners.size, pending: clock.pending }).toEqual({ listeners: 0, pending: [] });
+    host.install();
+    announceProvider();
+    await settled();
+    expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`);
+    expect(host.listeners.size).toBe(1);
+    // A non-withdrawn invalidation keeps following the same service.
+    host.invalidate("lifecycle");
+    await settled();
+    expect({ text: harness.statusBarText, listeners: host.listeners.size })
+      .toEqual({ text: `Kwiry: ${HOST_LABEL}`, listeners: 1 });
+    plugin.onunload();
+    expect(host.listeners.size).toBe(0);
   });
 
   it("nothing is saved from presence or absence across two launches", async () => {
@@ -1555,9 +1661,14 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       announceProvider();
       await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
       expect(plugin.settings.backendProfile).toBe("host");
-      // Switching to host search stops the local index; nothing is saved.
+      // Switching to host search stops the local index. Presence is never saved
+      // as a choice; the only write is the A2 record that the cache the
+      // ungoverned start had stored was deleted under the memory_only default.
       expect(harness.backendDisposals).toBe(1);
-      expect({ saved: harness.savedData, timers: clock.set }).toEqual({ saved: [], timers: [] });
+      await vi.waitFor(() => expect(storedProfiles()).toEqual(["automatic"]), { interval: 5 });
+      expect((harness.savedData[0] as { derivedDataDeleted: { reason: string } }).derivedDataDeleted.reason)
+        .toBe("policy_memory_only");
+      expect(clock.set).toEqual([]);
       const modal = await openHost();
       submit(modal, QUERY);
       await settled();
@@ -1601,8 +1712,15 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       host.install();
       announceProvider();
       await settled();
-      expect({ timers: clock.set, saved: harness.savedData, profile: plugin.settings.backendProfile })
-        .toEqual({ timers: [], saved: [], profile: stored === "legacy" ? "daemon" : stored });
+      await settled();
+      // Only an in-plugin start stored a cache; deleting it under the memory_only
+      // default is recorded with the saved choice unchanged.
+      expect({ timers: clock.set, saved: storedProfiles(), profile: plugin.settings.backendProfile })
+        .toEqual({
+          timers: [],
+          saved: stored === "in_plugin" ? ["in_plugin"] : [],
+          profile: stored === "legacy" ? "daemon" : stored,
+        });
       plugin.onunload();
     });
 
@@ -1805,6 +1923,174 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
       expect({ inits: harness.backendInitializations, cache: harness.cachePolicyHashes }).toEqual({ inits: 1, cache: [] });
       await expect(plugin.api.ready()).resolves.toBeUndefined();
+      plugin.onunload();
+    });
+  });
+
+  describe("a stricter policy deletes stored derived data (A2)", () => {
+    const DELETED_LINE = "Local index cache deleted because this workspace's policy does not allow stored indexes.";
+
+    async function startInPlugin(kind: "without search" | "late", policy: PolicyScript) {
+      const host = scriptedHost(kind, policy);
+      vi.stubGlobal("Worker", vi.fn());
+      harness.desktopApp = false;
+      harness.exactSettings = true;
+      harness.storedData = { backendProfile: "in_plugin" };
+      const KwiryPlugin = await loadProductionPlugin();
+      const plugin = new KwiryPlugin();
+      await plugin.onload();
+      harness.layoutReady?.();
+      await settled();
+      return { host, plugin };
+    }
+
+    function deletionRecords(): unknown[] {
+      return harness.savedData
+        .map((saved) => (saved as { derivedDataDeleted?: unknown }).derivedDataDeleted)
+        .filter((record) => record !== undefined && record !== null);
+    }
+
+    function deletedLineShown(): boolean {
+      harness.displaySettings?.();
+      return harness.settingRows.some(({ description }) => description === DELETED_LINE);
+    }
+
+    it("a first memory_only answer deletes a cache stored before it, records it, and keeps the in-memory backend", async () => {
+      harness.cacheOnDisk = true;
+      const { plugin } = await startInPlugin("without search", { value: "memory_only", decidedBy: "workspace" });
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:deleted"), { interval: 5 });
+      await vi.waitFor(() => expect(deletionRecords()).toHaveLength(1), { interval: 5 });
+      expect(harness.cacheOnDisk).toBe(false);
+      const [record] = deletionRecords() as Array<{ at: string; reason: string }>;
+      expect(Object.keys(record!).sort()).toEqual(["at", "reason"]);
+      expect(record!.reason).toBe("policy_memory_only");
+      expect(new Date(record!.at).toISOString()).toBe(record!.at);
+      // The saved choice is the person's earlier one, unchanged.
+      expect((harness.savedData.at(-1) as { backendProfile: string }).backendProfile).toBe("in_plugin");
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
+      expect(harness.backendInitializations).toBe(1);
+      expect(harness.cachePolicyHashes).toEqual([]);
+      expect(deletedLineShown()).toBe(true);
+      expect(harness.notices).toEqual([]);
+      plugin.onunload();
+    });
+
+    it("a refuse answer stops the backend first, then deletes the cache it was using", async () => {
+      const { host, plugin } = await startInPlugin("late", { value: "refuse", decidedBy: "organization" });
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      expect(harness.cacheOnDisk).toBe(true);
+      host.install();
+      announceProvider();
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:deleted"), { interval: 5 });
+      expect(harness.cacheEvents.indexOf("backend:dispose:done"))
+        .toBeLessThan(harness.cacheEvents.indexOf("cache:delete:start"));
+      await vi.waitFor(() => expect(deletionRecords()).toEqual([
+        expect.objectContaining({ reason: "policy_refuse" }),
+      ]), { interval: 5 });
+      expect(harness.statusBarText).toBe("Kwiry: Local indexing is turned off by your organization.");
+      await expect(plugin.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+      plugin.onunload();
+    });
+
+    it("issue #163: a cache written in the late-provider window is deleted when the memory_only answer arrives", async () => {
+      const { host, plugin } = await startInPlugin("late", { value: "memory_only", hang: true });
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      expect({ hashes: harness.cachePolicyHashes.length, onDisk: harness.cacheOnDisk })
+        .toEqual({ hashes: 1, onDisk: true });
+      host.install();
+      announceProvider();
+      await vi.waitFor(() => expect(harness.backendDisposals).toBe(1), { interval: 5 });
+      // Pending is not yet an answer: nothing is deleted on it.
+      expect(harness.cacheEvents).not.toContain("cache:delete:start");
+      host.changePolicy({ value: "memory_only", decidedBy: "workspace" });
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:deleted"), { interval: 5 });
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(2), { interval: 5 });
+      expect(harness.cacheOnDisk).toBe(false);
+      expect(harness.cachePolicyHashes).toHaveLength(1);
+      await vi.waitFor(() => expect(deletionRecords()).toHaveLength(1), { interval: 5 });
+      plugin.onunload();
+    });
+
+    it("waits for the backend teardown before deleting", async () => {
+      const gate = deferred<void>();
+      const { host, plugin } = await startInPlugin("late", { value: "memory_only" });
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      harness.beforeDispose = () => gate.promise;
+      host.install();
+      announceProvider();
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("backend:dispose:start"), { interval: 5 });
+      await settled();
+      await settled();
+      expect(harness.cacheEvents).not.toContain("cache:delete:start");
+      expect(harness.cacheOnDisk).toBe(true);
+      gate.resolve();
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:deleted"), { interval: 5 });
+      expect(harness.cacheEvents.indexOf("backend:dispose:done"))
+        .toBeLessThan(harness.cacheEvents.indexOf("cache:delete:start"));
+      plugin.onunload();
+    });
+
+    it("deletes a stored cache even while another backend is selected", async () => {
+      scriptedHost("without search", { value: "memory_only" });
+      harness.cacheOnDisk = true;
+      harness.exactSettings = true;
+      harness.storedData = { backendProfile: "daemon" };
+      const KwiryPlugin = await loadProductionPlugin();
+      const plugin = new KwiryPlugin();
+      await plugin.onload();
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:deleted"), { interval: 5 });
+      await vi.waitFor(() => expect(deletionRecords()).toHaveLength(1), { interval: 5 });
+      expect((harness.savedData.at(-1) as { backendProfile: string }).backendProfile).toBe("daemon");
+      plugin.onunload();
+    });
+
+    it("ungoverned desktop keeps the cache and records nothing", async () => {
+      const { plugin } = await startInPlugin("late", "absent");
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
+      advance(60_000);
+      await settled();
+      expect({ onDisk: harness.cacheOnDisk, events: harness.cacheEvents, saved: harness.savedData })
+        .toEqual({ onDisk: true, events: [], saved: [] });
+      expect(deletedLineShown()).toBe(false);
+      plugin.onunload();
+    });
+
+    it("a browser tab with no disk cache records nothing", async () => {
+      harness.cacheAvailable = false;
+      harness.adapterBasePath = null;
+      harness.nodeFilesystemAvailable = false;
+      const { plugin } = await startInPlugin("without search", { value: "memory_only" });
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
+      await settled();
+      expect({ saved: harness.savedData, notices: harness.notices }).toEqual({ saved: [], notices: [] });
+      expect(deletedLineShown()).toBe(false);
+      plugin.onunload();
+    });
+
+    it("N3: a deletion still running at unload records nothing and shows nothing", async () => {
+      harness.cacheOnDisk = true;
+      const gate = deferred<void>();
+      harness.beforeCacheDelete = () => gate.promise;
+      const { plugin } = await startInPlugin("without search", { value: "memory_only" });
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:delete:start"), { interval: 5 });
+      plugin.onunload();
+      gate.resolve();
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:deleted"), { interval: 5 });
+      await settled();
+      await settled();
+      expect({ saved: harness.savedData, notices: harness.notices }).toEqual({ saved: [], notices: [] });
+      expect((plugin.settings as { derivedDataDeleted?: unknown }).derivedDataDeleted).toBeNull();
+    });
+
+    it("a failed settings write shows a notice and the deletion stands", async () => {
+      harness.cacheOnDisk = true;
+      harness.beforeSave = async () => { throw new Error(RAW); };
+      const { plugin } = await startInPlugin("without search", { value: "memory_only" });
+      await vi.waitFor(() => expect(harness.notices).toEqual([`Kwiry: ${DELETED_LINE} The plugin settings could not record this.`]),
+        { interval: 5 });
+      expect(harness.cacheOnDisk).toBe(false);
+      expect(harness.savedData).toEqual([]);
+      expect(harness.notices.join("\n")).not.toContain(RAW);
       plugin.onunload();
     });
   });

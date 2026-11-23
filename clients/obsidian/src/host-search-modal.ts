@@ -124,7 +124,9 @@ export class HostSearchModal extends Modal {
     const status = this.contentEl.createEl("p", { attr: { role: "status", tabindex: "-1" } });
     const notice = this.contentEl.createEl("p", { attr: { role: "status" } });
     const pageControls = this.contentEl.createEl("fieldset", { cls: "kwiry-host-search-page" });
-    const room = pageControls.createEl("h3");
+    // Every element holding service-supplied text isolates its direction, so
+    // embedded bidirectional controls cannot reorder the text around it.
+    const room = pageControls.createEl("h3", { attr: { dir: "auto" } });
     const results = pageControls.createEl("ul", { cls: "kwiry-host-search-results" });
     const next = pageControls.createEl("button", { text: "Next page", attr: { type: "button" } });
     next.hidden = true;
@@ -144,9 +146,9 @@ export class HostSearchModal extends Modal {
     if (!page) return;
     for (const [index, row] of page.rows.entries()) {
       const item = results.createEl("li");
-      const button = item.createEl("button", { text: row.title, attr: { type: "button" } });
-      item.createDiv({ cls: "kwiry-host-search-path", text: row.path });
-      if (row.excerpt) item.createDiv({ text: row.excerpt });
+      const button = item.createEl("button", { text: row.title, attr: { type: "button", dir: "auto" } });
+      item.createDiv({ cls: "kwiry-host-search-path", text: row.path, attr: { dir: "auto" } });
+      if (row.excerpt) item.createDiv({ text: row.excerpt, attr: { dir: "auto" } });
       button.addEventListener("click", () => {
         if (!this.operation && this.renderRevision === revision) void this.openRow(index);
       });

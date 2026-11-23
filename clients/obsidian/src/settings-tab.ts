@@ -9,6 +9,7 @@ import { DAEMON_HOST_UNAVAILABLE_GUIDANCE } from "./backend";
 import { HOST_SEARCH_LABEL, hostSearchSituation, hostSearchSituationMessage } from "./host-search";
 import { localIndexingMessage } from "./host-services";
 import {
+  DERIVED_DATA_DELETED_MESSAGE,
   SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
   SOURCE_ROW_LIMIT_SETTING_NAME,
   type DiagnosticsReportLevel,
@@ -108,6 +109,9 @@ export class KwirySettingTab extends PluginSettingTab {
             .setButtonText("Rebuild")
             .onClick(() => void this.plugin.rebuildInPluginIndex()),
         );
+    }
+    if (this.plugin.settings.derivedDataDeleted !== null) {
+      new Setting(containerEl).setName("Local index cache").setDesc(DERIVED_DATA_DELETED_MESSAGE);
     }
 
     new Setting(containerEl).setName("Search").setHeading();

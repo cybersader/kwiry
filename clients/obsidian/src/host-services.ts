@@ -32,7 +32,9 @@ export function lookupHostService(name: string, major: number, realm: object = w
   }
   if (slot === undefined) return NO_HOST;
   try {
-    if ((typeof slot !== "object" && typeof slot !== "function") || slot === null) return WITHOUT_SERVICE;
+    // Only a plain non-null object can be a slot; anything else, a function
+    // included, is a broken slot: a host without the service.
+    if (typeof slot !== "object" || slot === null) return WITHOUT_SERVICE;
     const get: unknown = Reflect.get(slot, "get");
     if (typeof get !== "function") return WITHOUT_SERVICE;
     const service: unknown = Reflect.apply(get, slot, [name, major]);
@@ -209,6 +211,8 @@ export class LocalIndexingWatch {
   private disposers: Array<() => void> = [];
   private governed = false;
   private disposed = false;
+  /** The last decoded answer. A pending state (resync, unknown event) never erases it. */
+  private lastAnswer: LocalIndexingState | null = null;
 
   constructor(
     private readonly onChange: (state: LocalIndexingState) => void,
@@ -249,7 +253,7 @@ export class LocalIndexingWatch {
     const { current, subscribe, onInvalidated } = service;
     if (!hasMajor(service, 1) || typeof current !== "function" || typeof subscribe !== "function"
       || typeof onInvalidated !== "function") {
-      this.set({ kind: "refused", decidedBy: "protocol", limited: false });
+      this.answer({ kind: "refused", decidedBy: "protocol", limited: false });
       return;
     }
     const stop = this.stop = new AbortController();
@@ -261,10 +265,11 @@ export class LocalIndexingWatch {
       let reason: unknown;
       try { reason = record(event)?.reason; } catch { reason = undefined; }
       this.unfollow();
-      // A withdrawn provider leaves no slot behind; keep the last answer, or the
-      // contract's default when no answer had arrived.
+      // A withdrawn provider leaves no slot behind; the last answer stands for
+      // the rest of the page, even across a resync that left the state pending.
+      // The contract's default applies only when no answer ever arrived.
       if (reason === "withdrawn") {
-        if (this.stateValue.kind === "pending") this.set(POLICY_DEFAULT_STATE);
+        if (this.stateValue.kind === "pending") this.set(this.lastAnswer ?? POLICY_DEFAULT_STATE);
         return;
       }
       this.set({ kind: "pending" });
@@ -282,7 +287,7 @@ export class LocalIndexingWatch {
         type = undefined;
       }
       subscribed = true;
-      if (type === "snapshot" || type === "change") this.set(decodeLocalIndexing(snapshot));
+      if (type === "snapshot" || type === "change") this.answer(decodeLocalIndexing(snapshot));
       // `resync`, and any type this plugin does not know: the answer is unknown
       // until the fresh snapshot arrives.
       else this.set({ kind: "pending" });
@@ -290,9 +295,9 @@ export class LocalIndexingWatch {
     void (async () => {
       try {
         const snapshot: unknown = await Reflect.apply(current, service, [{ signal: stop.signal }]);
-        if (live() && !subscribed) this.set(decodeLocalIndexing(snapshot));
+        if (live() && !subscribed) this.answer(decodeLocalIndexing(snapshot));
       } catch {
-        if (live() && !subscribed) this.set({ kind: "refused", decidedBy: "protocol", limited: false });
+        if (live() && !subscribed) this.answer({ kind: "refused", decidedBy: "protocol", limited: false });
       }
     })();
   }
@@ -312,6 +317,12 @@ export class LocalIndexingWatch {
     for (const dispose of disposers) dispose();
   }
 
+  private answer(state: LocalIndexingState): void {
+    if (this.disposed) return;
+    this.lastAnswer = state;
+    this.set(state);
+  }
+
   private set(state: LocalIndexingState): void {
     if (this.disposed || sameState(this.stateValue, state)) return;
     this.stateValue = state;
@@ -321,11 +332,20 @@ export class LocalIndexingWatch {
 
 function sameState(left: LocalIndexingState, right: LocalIndexingState): boolean {
   if (left.kind !== right.kind) return false;
-  if (left.kind === "memory_only" && right.kind === "memory_only") return left.decidedBy === right.decidedBy;
+  if (left.kind === "memory_only" && right.kind === "memory_only") {
+    return sameDecider(left.decidedBy, right.decidedBy);
+  }
   if (left.kind === "refused" && right.kind === "refused") {
-    return left.decidedBy === right.decidedBy && left.limited === right.limited;
+    return sameDecider(left.decidedBy, right.decidedBy) && left.limited === right.limited;
   }
   return true;
+}
+
+/// By value, as this plugin uses it: a repeated answer whose deciding level reads
+/// the same is the same answer, even when it arrives as a fresh object. Nothing
+/// beyond the fixed label is read from a host value.
+function sameDecider(left: unknown, right: unknown): boolean {
+  return Object.is(left, right) || decidingLevelLabel(left) === decidingLevelLabel(right);
 }
 
 /// Calls a registration function and returns an idempotent, non-throwing disposer.

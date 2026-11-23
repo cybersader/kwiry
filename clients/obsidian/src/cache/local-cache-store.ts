@@ -38,6 +38,7 @@ import {
   type CacheRecord,
   type CacheStoreBundleAvailability,
   type CacheStoreBundlePort,
+  type CacheStoreUnavailableReason,
   type CacheWrite,
   type InitialBuildCheckpointCursor,
   type InitialBuildCheckpointLoad,
@@ -368,6 +369,260 @@ export async function openVaultCacheStore(options: {
     rootInputs: options.rootInputs,
     fs: options.fs,
   });
+}
+
+/**
+ * What deleting this vault's cache directory did. Only `deleted` means bytes
+ * were removed; `absent` means there was nothing to remove.
+ */
+export type VaultCacheDeletion =
+  | { readonly kind: "deleted" }
+  | { readonly kind: "absent" }
+  | { readonly kind: "unavailable"; readonly reason: CacheStoreUnavailableReason }
+  /** Another writer holds a fresh lock on this vault's cache. Try again later. */
+  | { readonly kind: "locked" }
+  /** The path failed a safety check (symlink, junction, non-directory, escape). */
+  | { readonly kind: "refused" }
+  | { readonly kind: "failed" };
+
+export interface LocalVaultCacheDeletionOptions {
+  readonly canonicalVaultPath: string;
+  readonly vaultConfigDirName: string;
+  readonly rootInputs?: CacheRootInputs;
+  /** Tests only. Subject to the same containment checks as a resolved root. */
+  readonly rootOverride?: string;
+  readonly fs?: CacheFileSystem;
+  readonly now?: () => number;
+}
+
+/**
+ * Deletes this vault's cache: `<cache root>/vaults/<identity of this vault>`,
+ * resolved the same way `openLocalCacheStore` resolves it, plus any
+ * `vaults/.<identity>.deleting-*` directory an interrupted earlier deletion of
+ * this vault left behind. Nothing above them (the shared root, `vaults/`, other
+ * vaults' directories) and nothing inside the vault or its configuration
+ * directory is ever a target.
+ *
+ * It never creates the root: a missing root, `vaults/` or vault directory is
+ * `absent`. Every component is checked to be a real directory whose canonical
+ * spelling is the path itself, so a symlink or junction cannot redirect the
+ * removal; a root the store itself would refuse is `unavailable`.
+ *
+ * What is guaranteed: the vault directory leaves its path only while this
+ * function holds the directory's writer lock, so a write another window has
+ * under way is never cut off (a fresh foreign lock is `locked`, not a forced
+ * removal). It leaves in one rename within `vaults/`, before anything inside it
+ * is removed, so another window finds either the whole directory or none; it
+ * never finds a half-deleted one or takes the lock inside one. Every path that
+ * returns without removing the directory releases the lock it took. If removal
+ * of the renamed directory fails, it is no longer at the vault's path, and the
+ * next deletion sweeps it.
+ */
+export async function deleteLocalVaultCache(
+  options: LocalVaultCacheDeletionOptions,
+): Promise<VaultCacheDeletion> {
+  const platform = options.rootInputs?.platform ?? process.platform;
+  const io = options.fs ?? nodeCacheFileSystem();
+  const now = options.now ?? (() => Date.now());
+  const resolver = resolverFor(platform);
+  const canonicalVaultPath = options.canonicalVaultPath.trim();
+  if (canonicalVaultPath.length === 0 || !resolver.isAbsolute(canonicalVaultPath)) {
+    return { kind: "unavailable", reason: "vault_location_unavailable" };
+  }
+
+  let root: string;
+  if (options.rootOverride !== undefined) {
+    if (!resolver.isAbsolute(options.rootOverride)) {
+      return { kind: "unavailable", reason: "root_not_absolute" };
+    }
+    if (isWindowsNetworkPath(options.rootOverride) && platform === "win32") {
+      return { kind: "unavailable", reason: "root_not_machine_local" };
+    }
+    root = options.rootOverride;
+  } else {
+    const resolution = resolveCacheRoot(options.rootInputs ?? {
+      platform: process.platform,
+      env: process.env,
+      homedir: () => os.homedir(),
+    });
+    if (resolution.kind !== "root") return resolution;
+    root = resolution.path;
+  }
+  if (cacheRootTouchesVault(platform, root, canonicalVaultPath, options.vaultConfigDirName)) {
+    return { kind: "unavailable", reason: "root_inside_vault" };
+  }
+
+  let canonicalRoot: string;
+  try {
+    const stats = await io.lstat(root);
+    // The store refuses such a root and never writes there: nothing to delete.
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      return { kind: "unavailable", reason: "root_not_a_directory" };
+    }
+    canonicalRoot = await io.realpath(root);
+  } catch (error) {
+    return isNotFoundError(error) ? { kind: "absent" } : { kind: "failed" };
+  }
+  if (cacheRootTouchesVault(platform, canonicalRoot, canonicalVaultPath, options.vaultConfigDirName)) {
+    return { kind: "unavailable", reason: "root_inside_vault" };
+  }
+
+  const identity = deriveVaultCacheIdentity({ platform, canonicalVaultPath });
+  if (!isSha256Hex(identity)) return { kind: "refused" };
+  const vaultsDirectory = path.join(canonicalRoot, "vaults");
+  const target = path.join(vaultsDirectory, identity);
+  // Exactly two segments below the canonical root, by construction and by check.
+  if (path.relative(canonicalRoot, target) !== path.join("vaults", identity)) {
+    return { kind: "refused" };
+  }
+  const vaults = await realDirectory(io, platform, vaultsDirectory);
+  if (vaults !== "directory") return vaults === "absent" ? { kind: "absent" } : { kind: "refused" };
+  const swept = await sweepDeletionLeftovers(io, platform, vaultsDirectory, identity);
+  const current = await realDirectory(io, platform, target);
+  if (current === "absent") return swept === "failed" ? { kind: "failed" } : swept;
+  if (current !== "directory") return { kind: "refused" };
+
+  const lockPath = path.join(target, "writer.lock");
+  if (!await createDeletionLock(io, lockPath, now)) {
+    let stale = false;
+    try {
+      stale = now() - (await io.lstat(lockPath)).mtimeMs > STALE_LOCK_MS;
+    } catch (error) {
+      if (isNotFoundError(error)) stale = true;
+    }
+    if (!stale) return { kind: "locked" };
+    try {
+      await io.unlink(lockPath);
+    } catch {
+      // Absent is the desired state.
+    }
+    if (!await createDeletionLock(io, lockPath, now)) return { kind: "locked" };
+  }
+  // Re-check under the lock: the directory must still be the one checked above.
+  if (await realDirectory(io, platform, target) !== "directory") {
+    await unlinkQuietly(io, lockPath);
+    return { kind: "refused" };
+  }
+  // Same parent, so the move is atomic: the vault's path is whole or empty.
+  const leftover = path.join(vaultsDirectory, `.${identity}${DELETING_MARKER}${randomSuffix()}`);
+  try {
+    await io.rename(target, leftover);
+  } catch {
+    await unlinkQuietly(io, lockPath);
+    return { kind: "failed" };
+  }
+  try {
+    // Recursive removal unlinks symbolic links it meets; it never follows them.
+    await io.rm(leftover, { recursive: true, force: true });
+  } catch {
+    // The lock moved with the directory; release it there too.
+    await unlinkQuietly(io, path.join(leftover, "writer.lock"));
+    return { kind: "failed" };
+  }
+  // A leftover that could not be swept is still derived data on disk.
+  return swept === "failed" ? { kind: "failed" } : { kind: "deleted" };
+}
+
+const DELETING_MARKER = ".deleting-";
+
+/// Removes `.<identity>.deleting-*` directories in `vaults/` that an interrupted
+/// deletion of this vault left. Only real directories with exactly that name
+/// shape for this identity are touched.
+async function sweepDeletionLeftovers(
+  io: CacheFileSystem,
+  platform: NodeJS.Platform,
+  vaultsDirectory: string,
+  identity: string,
+): Promise<{ readonly kind: "deleted" } | { readonly kind: "absent" } | "failed"> {
+  const prefix = `.${identity}${DELETING_MARKER}`;
+  let entries: string[];
+  try {
+    entries = await io.readdir(vaultsDirectory);
+  } catch {
+    return "failed";
+  }
+  let removed = false;
+  let failed = false;
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix) || !/^[a-z0-9-]+$/u.test(entry.slice(prefix.length))) continue;
+    const leftover = path.join(vaultsDirectory, entry);
+    if (path.dirname(leftover) !== vaultsDirectory) continue;
+    if (await realDirectory(io, platform, leftover) !== "directory") continue;
+    try {
+      await io.rm(leftover, { recursive: true, force: true });
+      removed = true;
+    } catch {
+      failed = true;
+    }
+  }
+  if (failed) return "failed";
+  return removed ? { kind: "deleted" } : { kind: "absent" };
+}
+
+async function unlinkQuietly(io: CacheFileSystem, target: string): Promise<void> {
+  try {
+    await io.unlink(target);
+  } catch {
+    // Absent is the desired state.
+  }
+}
+
+/** Composition entry: resolves this vault's location from its adapter first. */
+export async function deleteVaultCache(options: {
+  readonly adapter: unknown;
+  readonly vaultConfigDirName: string;
+  readonly locationIo?: VaultLocationIo;
+  readonly rootInputs?: CacheRootInputs;
+  readonly fs?: CacheFileSystem;
+}): Promise<VaultCacheDeletion> {
+  // A host without Node's file system (a browser tab) holds no disk cache.
+  if (options.fs === undefined && typeof fsPromises.rm !== "function") {
+    return { kind: "unavailable", reason: "unsupported_platform" };
+  }
+  const location = resolveCanonicalVaultPath(options.adapter, options.locationIo);
+  if (location.kind !== "path") return { kind: "unavailable", reason: location.reason };
+  return deleteLocalVaultCache({
+    canonicalVaultPath: location.canonicalPath,
+    vaultConfigDirName: options.vaultConfigDirName,
+    rootInputs: options.rootInputs,
+    fs: options.fs,
+  });
+}
+
+async function realDirectory(
+  io: CacheFileSystem,
+  platform: NodeJS.Platform,
+  target: string,
+): Promise<"directory" | "absent" | "unsafe"> {
+  try {
+    const stats = await io.lstat(target);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) return "unsafe";
+    const canonical = await io.realpath(target);
+    return foldPathForComparison(platform, canonical) === foldPathForComparison(platform, target)
+      ? "directory" : "unsafe";
+  } catch (error) {
+    return isNotFoundError(error) ? "absent" : "unsafe";
+  }
+}
+
+async function createDeletionLock(
+  io: CacheFileSystem,
+  lockPath: string,
+  now: () => number,
+): Promise<boolean> {
+  try {
+    const handle = await io.open(lockPath, "wx", FILE_MODE);
+    try {
+      await handle.write(new TextEncoder().encode(
+        JSON.stringify({ pid: process.pid, startedAtMs: now() }),
+      ));
+    } finally {
+      await handle.close();
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 interface LocalCacheStoreDependencies {

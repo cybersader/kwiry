@@ -60,6 +60,14 @@ describe("slot lookup: three situations", () => {
     expect(lookupHostService("search", 1, realm(slot))).toEqual({ kind: "without_service" });
   });
 
+  it("a function-valued slot with a callable get is a broken slot, not a slot", () => {
+    const service = Object.freeze({ major: 1, minor: 0 });
+    const get = vi.fn(() => service);
+    const slot = Object.assign(() => undefined, { get });
+    expect(lookupHostService("search", 1, realm(slot))).toEqual({ kind: "without_service" });
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("a throwing key read counts as a host, never as no host", () => {
     const hostile = Object.defineProperty({}, HOST_SLOT_KEY, { get() { throw new Error("stub failure"); } });
     expect(lookupHostService("search", 1, hostile)).toEqual({ kind: "without_service" });
@@ -272,6 +280,41 @@ describe("local indexing watch", () => {
     expect(watch.state).toEqual({ kind: "memory_only", decidedBy: "protocol" });
     watch.refresh();
     expect(watch.state).toEqual({ kind: "memory_only", decidedBy: "protocol" });
+    watch.dispose();
+  });
+
+  it.each([
+    ["a resync", { type: "resync" }],
+    ["an unknown event", { type: "a-future-event" }],
+  ])("withdrawal after %s keeps the last refuse answer, never the looser default", async (_name, event) => {
+    const host = policyHost({ value: "refuse", decidedBy: "organization" });
+    const watch = new LocalIndexingWatch(() => undefined, host.window);
+    watch.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(watch.state.kind).toBe("refused");
+    host.emit(event);
+    expect(watch.state.kind).toBe("pending");
+    delete host.window[HOST_SLOT_KEY];
+    host.invalidate("withdrawn");
+    expect(watch.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+    watch.refresh();
+    expect(watch.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+    watch.dispose();
+  });
+
+  it("N6: the same answer delivered again with a fresh deciding-level object is not a change", async () => {
+    const host = policyHost({ value: "refuse", decidedBy: { level: "organization" } });
+    const states: string[] = [];
+    const watch = new LocalIndexingWatch((state) => states.push(state.kind), host.window);
+    watch.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    host.emit({ type: "change", snapshot: { localIndexing: { value: "refuse", decidedBy: { level: "organization" } } } });
+    host.emit({ type: "change", snapshot: { localIndexing: { value: "refuse", decidedBy: { level: "organization" } } } });
+    expect(states).toEqual(["pending", "refused"]);
+    host.emit({ type: "change", snapshot: { localIndexing: { value: "refuse", decidedBy: "folder" } } });
+    expect(states).toEqual(["pending", "refused", "refused"]);
     watch.dispose();
   });
 

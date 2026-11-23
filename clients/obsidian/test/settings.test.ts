@@ -406,6 +406,18 @@ describe("loadSettings", () => {
     expect(DEFAULT_SETTINGS).not.toHaveProperty("__kwiry_internal_d5c_playground");
   });
 
+  it("keeps only a well-formed, non-identifying record of a policy deletion", () => {
+    const at = "2026-11-23T12:00:00.000Z";
+    expect(loadSettings({ derivedDataDeleted: { at, reason: "policy_refuse" } }).derivedDataDeleted)
+      .toEqual({ at, reason: "policy_refuse" });
+    expect(loadSettings({ derivedDataDeleted: { at, reason: "policy_memory_only", path: "/x" } })
+      .derivedDataDeleted).toEqual({ at, reason: "policy_memory_only" });
+    for (const record of [null, "yes", [], { at: "soon", reason: "policy_refuse" }, { at, reason: "other" }]) {
+      expect(loadSettings({ derivedDataDeleted: record }).derivedDataDeleted).toBeNull();
+    }
+    expect(DEFAULT_SETTINGS.derivedDataDeleted).toBeNull();
+  });
+
   it("never contains a token value field", () => {
     const keys = Object.keys(DEFAULT_SETTINGS);
     expect(keys.some((key) => key === "token" || key === "bearerToken")).toBe(false);
