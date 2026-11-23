@@ -8,8 +8,8 @@
 
 // PROVISIONAL: the slot key and the event name are not frozen yet. They live
 // here and nowhere else; change them only in this module.
-export const HOST_SLOT_KEY = "org.openclast.workspace-host";
-export const HOST_AVAILABLE_EVENT = "org.openclast.workspace-host:available";
+export const HOST_SLOT_KEY = "com.openclast.workspace-host";
+export const HOST_AVAILABLE_EVENT = "com.openclast.workspace-host:available";
 
 export type HostSituation =
   | { readonly kind: "no_host" }
