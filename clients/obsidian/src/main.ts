@@ -48,7 +48,13 @@ import type {
 } from "./diagnostics/log";
 import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
 import { LatestRequestEpoch } from "./latest-request-epoch";
-import { HOST_SEARCH_GUIDANCE, HOST_SEARCH_STARTING, lookupHostSearch, watchForHostSearch } from "./host-search";
+import { HOST_SEARCH_STARTING, hostSearchSituation, hostSearchSituationMessage } from "./host-search";
+import {
+  HOST_AVAILABLE_EVENT,
+  LocalIndexingWatch,
+  localIndexingMessage,
+  type LocalIndexingState,
+} from "./host-services";
 import { HostSearchModal } from "./host-search-modal";
 import { createPublicSearchApi, type KwirySearchApiV1 } from "./public-api";
 import { KwirySearchModal } from "./search-modal";
@@ -60,8 +66,10 @@ import {
 import { formatStatus } from "./status-format";
 import { SOURCE_FORMATS } from "./worker/protocol";
 import {
+  AUTOMATIC_BACKEND_PROFILE,
   DEFAULT_SETTINGS,
   loadSettings,
+  storedBackendProfileChosen,
   type DiagnosticsLogLevel,
   type KwiryPluginSettings,
 } from "./settings";
@@ -87,10 +95,14 @@ export default class KwiryPlugin extends Plugin {
   private readonly backendInvalidationCallbacks = new Set<() => void>();
   private readonly hostSearchModals = new Set<HostSearchModal>();
   private hostActivationFailed = false;
-  /** A fresh install found no host capability at load and has not chosen yet.
-   * Settings stay locked until the choice is made, so absence is never saved. */
-  private lateHostPending = false;
-  private cancelLateHostWatch: (() => void) | null = null;
+  /** True only when a person chose the backend. An automatic choice is
+   * recomputed at every start and never saved. */
+  private backendProfileChosen = false;
+  private localIndexing: LocalIndexingWatch | null = null;
+  private hostEvents: AbortController | null = null;
+  private layoutReady = false;
+  /** The running in-plugin backend keeps a persistent cache. */
+  private inPluginCacheActive = false;
   private settingTab: KwirySettingTab | null = null;
   private savingBackendProfile = false;
   private settingsWrites = Promise.resolve();
@@ -124,33 +136,22 @@ export default class KwiryPlugin extends Plugin {
     this.startupTimeline = this.createStartupTimeline(pluginEpoch);
     await this.diagnostics.capture("info", "plugin.load", { pluginEpoch }, async (event) => {
       try {
-        let storedData: unknown = await this.loadData();
+        const storedData: unknown = await this.loadData();
         if (pluginEpoch !== this.pluginEpoch) {
           event.set({ outcome: "cancelled" });
           return;
         }
-        const freshInstall = storedData === null || storedData === undefined;
-        const autoSelectHost = freshInstall && lookupHostSearch() !== null;
-        if (autoSelectHost) {
-          try {
-            // Saving replaces the whole object. Re-read just before writing; the host offers no atomic check-and-save.
-            storedData = await this.loadData();
-            if (pluginEpoch === this.pluginEpoch && (storedData === null || storedData === undefined)) {
-              await this.saveData({ backendProfile: "host" });
-            }
-          } catch {
-            if (pluginEpoch === this.pluginEpoch) {
-              new Notice("Kwiry: Could not remember host search. Fix settings storage before reloading.");
-            }
-          }
-        }
-        if (pluginEpoch !== this.pluginEpoch) {
-          event.set({ outcome: "cancelled" });
-          return;
-        }
-        this.settings = loadSettings(storedData, this.daemonBackendAvailable, autoSelectHost);
-        // An absent capability is not a choice: a provider may still arrive.
-        this.lateHostPending = freshInstall && !autoSelectHost;
+        // Presence and absence are looked at again at every start and never saved;
+        // only a backend a person chose is kept.
+        this.backendProfileChosen = storedBackendProfileChosen(storedData);
+        this.settings = loadSettings(storedData, this.daemonBackendAvailable,
+          !this.backendProfileChosen && hostSearchSituation() === "available");
+        this.localIndexing = new LocalIndexingWatch((state) => this.onLocalIndexingChanged(state, pluginEpoch));
+        this.localIndexing.refresh();
+        this.hostEvents?.abort();
+        this.hostEvents = new AbortController();
+        window.addEventListener(HOST_AVAILABLE_EVENT, () => this.onHostAvailable(pluginEpoch),
+          { signal: this.hostEvents.signal });
         this.startupTimeline?.setProfile(this.settings.backendProfile);
         event.set({ profile: this.settings.backendProfile });
         // The core identity is independent of the enabled source formats.
@@ -174,10 +175,12 @@ export default class KwiryPlugin extends Plugin {
             hostAvailable: this.daemonBackendAvailable,
           }),
           in_plugin: (instanceId) => {
-            const cache = createInPluginCacheOptions(
-              this.app.vault,
-              this.requireSourcePolicyHash(),
-            );
+            // Under a host, local indexing may keep nothing beyond the page:
+            // the persistent cache is switched off explicitly, not by capability.
+            const cache = this.localIndexing?.state.kind === "ungoverned"
+              ? createInPluginCacheOptions(this.app.vault, this.requireSourcePolicyHash())
+              : undefined;
+            this.inPluginCacheActive = cache !== undefined;
             const activationEpoch = this.activationEpoch;
             return new InPluginLexicalBackend({
               instanceId,
@@ -257,8 +260,8 @@ export default class KwiryPlugin extends Plugin {
         this.app.workspace.onLayoutReady(() => {
           if (pluginEpoch !== this.pluginEpoch) return;
           this.startupTimeline?.markLayoutReady();
-          if (this.lateHostPending) this.awaitLateHost(pluginEpoch);
-          else void this.activateBackendProfile();
+          this.layoutReady = true;
+          void this.activateBackendProfile();
         });
         this.startupTimeline?.markPluginLoadComplete();
       } catch (error) {
@@ -270,7 +273,10 @@ export default class KwiryPlugin extends Plugin {
   }
 
   onunload(): void {
-    this.endLateHostWait();
+    this.hostEvents?.abort();
+    this.hostEvents = null;
+    this.localIndexing?.dispose();
+    this.layoutReady = false;
     this.publicSearch.dispose();
     this.startupTimeline?.finish("cancelled", "plugin_unloaded");
     this.pluginEpoch += 1;
@@ -289,24 +295,27 @@ export default class KwiryPlugin extends Plugin {
     void disposal?.catch(() => undefined);
   }
 
-  /** True while a fresh install is still waiting to learn whether host search exists. */
-  get startingUp(): boolean {
-    return this.lateHostPending;
+  /** Local indexing answer for this page; `ungoverned` when no host slot exists. */
+  get localIndexingState(): LocalIndexingState {
+    return this.localIndexing?.state ?? { kind: "ungoverned" };
   }
 
   saveSettings(): Promise<void> {
-    // The in-memory profile is only a provisional fallback during the wait.
-    if (this.lateHostPending) return Promise.resolve();
     const pluginEpoch = this.pluginEpoch;
     return this.enqueueSettingsWrite(async () => {
       if (pluginEpoch === this.pluginEpoch) await this.persistSettings(this.settings);
     });
   }
 
+  /// Saving daemon connection settings (URL, token file, vault IDs) while the
+  /// daemon is selected is a person's deliberate choice of the daemon backend.
+  saveDaemonConnectionSettings(): Promise<void> {
+    if (this.settings.backendProfile === "daemon") this.backendProfileChosen = true;
+    return this.saveSettings();
+  }
+
   async changeBackendProfile(profile: SearchProfile): Promise<void> {
     if (this.savingBackendProfile) return;
-    // A deliberate choice ends any wait, so the deadline cannot activate the fallback.
-    this.endLateHostWait();
     if (profile === this.settings.backendProfile) return;
     const pluginEpoch = this.pluginEpoch;
     this.savingBackendProfile = true;
@@ -315,8 +324,11 @@ export default class KwiryPlugin extends Plugin {
       try {
         await this.enqueueSettingsWrite(async () => {
           if (pluginEpoch !== this.pluginEpoch) return;
-          await this.persistSettings({ ...this.settings, backendProfile: profile });
-          if (pluginEpoch === this.pluginEpoch) this.settings.backendProfile = profile;
+          await this.persistSettings({ ...this.settings, backendProfile: profile }, true);
+          if (pluginEpoch === this.pluginEpoch) {
+            this.settings.backendProfile = profile;
+            this.backendProfileChosen = true;
+          }
         });
       } catch {
         if (pluginEpoch === this.pluginEpoch) {
@@ -336,9 +348,12 @@ export default class KwiryPlugin extends Plugin {
     return pending;
   }
 
-  private async persistSettings(settings: KwiryPluginSettings): Promise<void> {
+  private async persistSettings(settings: KwiryPluginSettings, chosen = this.backendProfileChosen): Promise<void> {
     try {
-      await this.saveData(this.privateTools.prepareStoredData(settings));
+      const stored = this.privateTools.prepareStoredData(settings);
+      // An automatic backend is stored as "automatic" so the next start chooses again.
+      await this.saveData(chosen || typeof stored !== "object" || stored === null
+        ? stored : { ...stored, backendProfile: AUTOMATIC_BACKEND_PROFILE });
     } catch (error) {
       this.recordCaughtFailure("settings", "save", error);
       throw error;
@@ -346,8 +361,7 @@ export default class KwiryPlugin extends Plugin {
   }
 
   async onSourcePolicyChanged(): Promise<void> {
-    // A pending fresh install activates with the current policy when the wait ends.
-    if (this.lateHostPending || this.settings.backendProfile !== "in_plugin") return;
+    if (this.settings.backendProfile !== "in_plugin") return;
     await this.activateBackendProfile();
   }
 
@@ -531,60 +545,60 @@ export default class KwiryPlugin extends Plugin {
     this.statusBarRenderer?.render(text);
   }
 
-  /// Re-checks for a host capability provided after load for a bounded window.
-  /// Nothing local starts during the wait, and absence is never saved.
-  private awaitLateHost(pluginEpoch: number): void {
-    let reported = false;
-    const cancel = watchForHostSearch((found) => {
-      reported = true;
-      this.cancelLateHostWatch = null;
-      if (pluginEpoch !== this.pluginEpoch || !this.lateHostPending) return;
-      if (found) {
-        void this.adoptLateHost(pluginEpoch);
-      } else {
-        this.endLateHostWait();
-        void this.activateBackendProfile();
-      }
-    });
-    if (!reported) this.cancelLateHostWatch = cancel;
-  }
-
-  /// Ends the wait (settled, superseded or unloaded) and unlocks an open settings tab.
-  private endLateHostWait(): void {
-    const wasPending = this.lateHostPending;
-    this.lateHostPending = false;
-    this.cancelLateHostWatch?.();
-    this.cancelLateHostWatch = null;
-    if (wasPending) this.settingTab?.redrawIfShown();
-  }
-
-  /// Settings stay locked until the host choice is recorded or abandoned.
-  private async adoptLateHost(pluginEpoch: number): Promise<void> {
-    try {
-      await this.enqueueSettingsWrite(async () => {
-        if (pluginEpoch !== this.pluginEpoch || !this.lateHostPending) return;
-        // Settings written meanwhile by another writer are an explicit choice and win.
-        const stored: unknown = await this.loadData();
-        if (pluginEpoch !== this.pluginEpoch || !this.lateHostPending) return;
-        if (stored !== null && stored !== undefined) {
-          this.settings.backendProfile = loadSettings(stored, this.daemonBackendAvailable).backendProfile;
-          return;
-        }
-        this.settings.backendProfile = "host";
-        await this.saveData({ backendProfile: "host" });
-      });
-    } catch {
-      if (pluginEpoch === this.pluginEpoch) {
-        new Notice("Kwiry: Could not remember host search. Fix settings storage before reloading.");
-      }
+  /// The provider-arrived event: look again, and switch only if the answer changed.
+  private onHostAvailable(pluginEpoch: number): void {
+    if (pluginEpoch !== this.pluginEpoch) return;
+    const switchToHost = !this.backendProfileChosen && !this.savingBackendProfile
+      && this.settings.backendProfile !== "host" && hostSearchSituation() === "available";
+    if (switchToHost) {
+      // An automatic choice follows presence for this session only; nothing is saved.
+      this.settings.backendProfile = "host";
+      this.startupTimeline?.setProfile("host");
     }
-    if (pluginEpoch !== this.pluginEpoch || !this.lateHostPending) return;
-    this.endLateHostWait();
-    await this.activateBackendProfile();
+    // After the profile is settled, so a policy answer cannot restart a backend being replaced.
+    this.localIndexing?.refresh();
+    if (switchToHost && this.layoutReady) void this.activateBackendProfile();
+    else if (this.layoutReady) void this.refreshStatus();
+    this.settingTab?.redrawIfShown();
+  }
+
+  /// A stricter answer drops what was built; a permitted one starts what waited.
+  private onLocalIndexingChanged(state: LocalIndexingState, pluginEpoch: number): void {
+    if (pluginEpoch !== this.pluginEpoch) return;
+    this.settingTab?.redrawIfShown();
+    if (!this.layoutReady) return;
+    const running = this.activeBackendIdentity?.profile === "in_plugin";
+    if (this.settings.backendProfile !== "in_plugin" && !running) return;
+    // Stopping is never deferred, not even while a backend switch is saving:
+    // it supersedes any activation in flight, and every activation re-reads policy.
+    if (state.kind === "refused" || (state.kind === "pending" && this.inPluginCacheActive)) {
+      // An unanswered policy cannot permit the persistent cache; a plain re-check
+      // (pending with no cache) keeps an in-memory index running.
+      void this.stopInPluginForPolicy(state);
+    } else if (state.kind === "memory_only" && !this.savingBackendProfile
+      && this.settings.backendProfile === "in_plugin" && (!running || this.inPluginCacheActive)) {
+      // Start what waited for the answer, or restart without the persistent cache.
+      void this.activateBackendProfile();
+    }
+  }
+
+  private async stopInPluginForPolicy(state: LocalIndexingState): Promise<void> {
+    const pluginEpoch = this.pluginEpoch;
+    const activationEpoch = ++this.activationEpoch;
+    this.statusRefresh.invalidate();
+    this.statusUnsubscribe?.();
+    this.statusUnsubscribe = null;
+    this.setActiveBackendIdentity(null);
+    this.inPluginCacheActive = false;
+    this.setStatusBarText(`Kwiry: ${localIndexingMessage(state) ?? ""}`);
+    try {
+      await this.backendManager.deactivate();
+    } catch (error) {
+      this.recordCaughtFailure("ui", "activate", error, { profile: "in_plugin", pluginEpoch, activationEpoch });
+    }
   }
 
   async activateBackendProfile(): Promise<void> {
-    this.endLateHostWait();
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = ++this.activationEpoch;
     const profile = this.settings.backendProfile;
@@ -596,6 +610,19 @@ export default class KwiryPlugin extends Plugin {
     this.setActiveBackendIdentity(null);
     this.setStatusBarText(this.settings.backendProfile === "host"
       ? `Kwiry: ${HOST_SEARCH_STARTING}` : "kwiry: starting…");
+
+    if (profile === "in_plugin") {
+      const policy = this.localIndexingState;
+      if (policy.kind === "pending" || policy.kind === "refused") {
+        // Nothing local starts until the answer permits it.
+        this.inPluginCacheActive = false;
+        await this.backendManager.deactivate().catch(() => undefined);
+        if (!this.isCurrent(pluginEpoch, activationEpoch)) return;
+        if (policy.kind === "refused") this.startupTimeline?.finish("failed", "backend_unavailable");
+        this.setStatusBarText(`Kwiry: ${localIndexingMessage(policy) ?? ""}`);
+        return;
+      }
+    }
 
     try {
       if (profile === "in_plugin") {
@@ -619,7 +646,7 @@ export default class KwiryPlugin extends Plugin {
       if (profile === "host") {
         this.hostActivationFailed = true;
         this.startupTimeline?.finish("failed", "activation_failed");
-        this.setStatusBarText(`Kwiry: ${HOST_SEARCH_GUIDANCE}`);
+        this.setStatusBarText(`Kwiry: ${hostSearchSituationMessage(hostSearchSituation())}`);
         return;
       }
       try {
@@ -692,14 +719,11 @@ export default class KwiryPlugin extends Plugin {
   }
 
   async rebuildInPluginIndex(): Promise<void> {
-    if (this.lateHostPending) {
-      new Notice("Kwiry: search is starting…");
-      return;
-    }
     if (this.settings.backendProfile === "host") {
       new Notice("Kwiry: manual rebuild is available only for In-plugin · Lexical.");
       return;
     }
+    if (this.policyBlocksInPlugin()) return;
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = this.activationEpoch;
     await this.diagnostics.capture("info", "index.lifecycle", {
@@ -759,10 +783,7 @@ export default class KwiryPlugin extends Plugin {
 
   private async openSearch(): Promise<void> {
     if (this.savingBackendProfile) return;
-    if (this.lateHostPending) {
-      new Notice("Kwiry: search is starting…");
-      return;
-    }
+    if (this.policyBlocksInPlugin()) return;
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = this.activationEpoch;
     if (this.settings.backendProfile === "host") {
@@ -798,28 +819,33 @@ export default class KwiryPlugin extends Plugin {
     });
   }
 
+  /// Shows the policy wording when local indexing may not run for the selected in-plugin backend.
+  private policyBlocksInPlugin(): boolean {
+    if (this.settings.backendProfile !== "in_plugin") return false;
+    const policy = this.localIndexingState;
+    if (policy.kind !== "pending" && policy.kind !== "refused") return false;
+    new Notice(`Kwiry: ${localIndexingMessage(policy) ?? ""}`);
+    return true;
+  }
+
   private closeHostSearchModals(): void {
     for (const modal of this.hostSearchModals) modal.close();
   }
 
   private async openHostSearch(pluginEpoch: number, activationEpoch: number): Promise<void> {
     if (this.activeBackendIdentity?.profile !== "host") {
-      new Notice(`Kwiry: ${this.hostActivationFailed ? HOST_SEARCH_GUIDANCE : HOST_SEARCH_STARTING}`);
+      new Notice(`Kwiry: ${this.hostActivationFailed
+        ? hostSearchSituationMessage(hostSearchSituation()) : HOST_SEARCH_STARTING}`);
       return;
     }
     try {
       const backend = await this.backendManager.current();
-      if (!("page" in backend)) return;
-      const status = await backend.status();
+      if (!("lookup" in backend)) return;
       if (!this.isCurrent(pluginEpoch, activationEpoch) || this.savingBackendProfile
         || this.activeBackendIdentity?.instanceId !== backend.identity.instanceId) return;
-      const modal = new HostSearchModal(this.app, backend, status.available,
-        () => { this.hostSearchModals.delete(modal); },
-        () => {
-          // A late denial from a closed modal still invalidates this launch.
-          if (pluginEpoch !== this.pluginEpoch) return;
-          for (const live of this.hostSearchModals) live.clearAccess();
-        });
+      // Each modal looks the service up and listens for invalidation itself.
+      const modal = new HostSearchModal(this.app, backend,
+        () => { this.hostSearchModals.delete(modal); });
       this.hostSearchModals.add(modal);
       try {
         modal.open();
@@ -828,7 +854,9 @@ export default class KwiryPlugin extends Plugin {
         throw error;
       }
     } catch {
-      if (this.isCurrent(pluginEpoch, activationEpoch)) new Notice(`Kwiry: ${HOST_SEARCH_GUIDANCE}`);
+      if (this.isCurrent(pluginEpoch, activationEpoch)) {
+        new Notice(`Kwiry: ${hostSearchSituationMessage(hostSearchSituation())}`);
+      }
     }
   }
 
@@ -838,7 +866,7 @@ export default class KwiryPlugin extends Plugin {
     activationEpoch: number,
   ): void {
     if ("kind" in status) {
-      if (status.available) this.startupTimeline?.finish("succeeded", "host_search_supported");
+      if (status.situation === "available") this.startupTimeline?.finish("succeeded", "host_search_supported");
       else this.startupTimeline?.finish("failed", "backend_unavailable");
       return;
     }

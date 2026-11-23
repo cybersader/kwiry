@@ -7,6 +7,7 @@ import {
   SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
   SOURCE_ROW_LIMIT_SETTING_NAME,
   loadSettings,
+  storedBackendProfileChosen,
 } from "../src/settings";
 import {
   identityAfterBump,
@@ -72,6 +73,23 @@ describe("loadSettings", () => {
     }
     expect(loadSettings({ resultLimit: 42 }, supported)).toEqual({ ...DEFAULT_SETTINGS, resultLimit: 42 });
   });
+
+  it.each([
+    [null, false], [undefined, false], [{ backendProfile: "automatic", resultLimit: 7 }, false],
+    [{ backendProfile: "host" }, false], [{ backendProfile: "host", resultLimit: 20 }, true],
+    [{ backendProfile: "in_plugin" }, true], [{ resultLimit: 42 }, true],
+  ])("only an explicit choice counts as a chosen backend: %j -> %s", (stored, chosen) => {
+    expect(storedBackendProfileChosen(stored)).toBe(chosen);
+  });
+
+  it.each([[true, true, "host"], [true, false, "daemon"], [false, false, "in_plugin"], [false, true, "host"]] as const)(
+    "chooses an automatic backend from the current situation (daemon=%s, host search=%s)", (daemon, host, profile) => {
+      for (const stored of [null, { backendProfile: "automatic", resultLimit: 7 }, { backendProfile: "host" }]) {
+        expect(loadSettings(stored, daemon, host).backendProfile).toBe(profile);
+      }
+      expect(loadSettings({ backendProfile: "in_plugin", resultLimit: 7 }, daemon, host).backendProfile).toBe("in_plugin");
+    },
+  );
 
   it("migrates existing daemon settings and drops unknown keys", () => {
     const loaded = loadSettings({

@@ -103,8 +103,12 @@ export class BackendManager {
         throw error;
       }
       if (this.closed || epoch !== this.activationEpoch) {
-        if (this.activeBackend === backend) this.activeBackend = null;
-        await backend.dispose();
+        // Whoever cleared the active slot (dispose, deactivate or a newer
+        // activation) has already disposed this backend.
+        if (this.activeBackend === backend) {
+          this.activeBackend = null;
+          await backend.dispose();
+        }
         event.set({ outcome: "cancelled", code: "disposed" });
         throw managerDisposedError();
       }
@@ -128,6 +132,30 @@ export class BackendManager {
       );
     }
     return backend;
+  }
+
+  /// Stops the active backend, and any activation still in flight, without
+  /// closing the manager. Used when policy forbids the selected backend.
+  deactivate(): Promise<void> {
+    if (this.closed) return this.disposal ?? Promise.resolve();
+    const epoch = ++this.activationEpoch;
+    const active = this.activeBackend;
+    this.activeBackend = null;
+    const pending = this.activation;
+    const stopped = this.diagnostics.capture("info", "backend.dispose", {
+      activationEpoch: epoch,
+      subsystem: "backend_manager",
+      operation: "dispose",
+    }, async (event) => {
+      if (active) await active.dispose();
+      const late = await pending.catch(() => {
+        event.increment("warningCount");
+        return null;
+      });
+      if (late && late !== active) await late.dispose();
+    });
+    this.activation = stopped.then(() => null, () => null);
+    return stopped;
   }
 
   dispose(): Promise<void> {

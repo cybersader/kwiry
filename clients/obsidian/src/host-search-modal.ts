@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { Modal, TFile, type App } from "obsidian";
+import { Modal, type App } from "obsidian";
 
+import type { HostSearchAccess } from "./backends/host-search-backend";
 import {
-  HOST_RESULT_UNAVAILABLE,
-  HOST_SEARCH_ACCESS_LOST,
-  HOST_SEARCH_GUIDANCE,
   HOST_SEARCH_IDLE,
   HOST_SEARCH_LABEL,
+  hostInvalidationMessage,
   hostSearchFailure,
+  hostSearchSituationMessage,
   type HostSearchFailure,
-  type HostSearchOperations,
   type HostSearchPage,
+  type HostSearchSession,
 } from "./host-search";
 import { LatestRequestEpoch } from "./latest-request-epoch";
 
@@ -23,13 +23,13 @@ export class HostSearchModal extends Modal {
   private displayed: HostSearchPage | null = null;
   private renderRevision = 0;
   private view: ReturnType<HostSearchModal["createView"]> | null = null;
+  private session: HostSearchSession | null = null;
+  private stopInvalidation: (() => void) | null = null;
 
   constructor(
     app: App,
-    private readonly host: HostSearchOperations,
-    private readonly available: boolean,
+    private readonly host: HostSearchAccess,
     private readonly onClosed: () => void,
-    private readonly onAccessLost: () => void,
   ) {
     super(app);
   }
@@ -39,22 +39,28 @@ export class HostSearchModal extends Modal {
     this.contentEl.addClass("kwiry-host-search");
     const view = this.view = this.createView();
     const { form, input, status, next } = view;
-    const initial = this.available ? HOST_SEARCH_IDLE : HOST_SEARCH_GUIDANCE;
-    status.textContent = initial;
+    // The invalidation listener is registered here, before the first page.
+    const unavailable = this.attach();
+    status.textContent = unavailable ?? HOST_SEARCH_IDLE;
     this.draw(null);
-    input.disabled = view.submit.disabled = !this.available;
     input.addEventListener("input", () => {
       this.cancel();
       this.activeQuery = null;
       this.draw(null);
-      status.textContent = initial;
+      status.textContent = this.session ? HOST_SEARCH_IDLE : status.textContent;
       view.pageControls.disabled = false;
     });
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      if (!this.view || !this.available) return;
+      if (!this.view) return;
       this.draw(null);
-      status.textContent = initial;
+      // A provider may have arrived, or a withdrawn one returned: look again.
+      const missing = this.attach();
+      if (missing !== null) {
+        this.setStatus(missing, true);
+        return;
+      }
+      status.textContent = HOST_SEARCH_IDLE;
       this.activeQuery = input.value;
       void this.requestPage(this.activeQuery);
     });
@@ -64,19 +70,40 @@ export class HostSearchModal extends Modal {
         void this.requestPage(this.activeQuery, continuation);
       }
     });
-    if (this.available) input.focus();
+    input.focus();
   }
 
   onClose(): void {
     this.clearInteraction();
+    this.detach();
     this.view = null;
     this.contentEl.empty();
     this.onClosed();
   }
 
-  clearAccess(): void {
-    this.clearInteraction();
-    this.setStatus(HOST_SEARCH_ACCESS_LOST);
+  /// Holds the service object while this view is on screen. Returns the
+  /// message to show when no service is offered.
+  private attach(): string | null {
+    if (this.session) return null;
+    const found = this.host.lookup();
+    if (found.situation !== "available") return hostSearchSituationMessage(found.situation);
+    const session = found.session;
+    this.session = session;
+    this.stopInvalidation = session.onInvalidated((reason) => {
+      if (this.session !== session) return;
+      const { message, detach } = hostInvalidationMessage(reason);
+      this.clearInteraction();
+      if (detach) this.detach();
+      this.setStatus(message, true);
+    });
+    return null;
+  }
+
+  private detach(): void {
+    const stop = this.stopInvalidation;
+    this.stopInvalidation = null;
+    this.session = null;
+    stop?.();
   }
 
   private clearInteraction(): void {
@@ -127,61 +154,42 @@ export class HostSearchModal extends Modal {
   }
 
   private async requestPage(query: string, continuation?: string): Promise<void> {
+    const session = this.session;
+    if (!session) return;
     const { signal, epoch } = this.start("Searching the host…");
     try {
-      const page = await this.host.page(query, signal, continuation);
+      const page = await session.page(query, signal, continuation);
       if (!this.interaction.isCurrent(epoch)) return;
       this.draw(page);
       this.setStatus(page.status, continuation !== undefined);
     } catch (error) {
-      this.handleHostFailure(hostSearchFailure(error), epoch);
+      if (this.interaction.isCurrent(epoch)) this.showFailure(hostSearchFailure(error));
     } finally {
       this.finish(epoch);
     }
   }
 
   private async openRow(index: number): Promise<void> {
+    const session = this.session;
     const ref = this.displayed?.rows[index]?.noteRef;
-    if (ref === undefined) return;
-    const { signal, epoch } = this.start("Checking the selected note…");
+    if (!session || ref === undefined) return;
+    const { signal, epoch } = this.start("Opening the selected note…");
     try {
-      const path = await this.host.resolveNote(ref, signal);
-      if (!this.interaction.isCurrent(epoch)) return;
-      try {
-        const file = this.app.vault.getAbstractFileByPath(path);
-        if (!this.interaction.isCurrent(epoch)) return;
-        if (!(file instanceof TFile) || file.path !== path) {
-          this.showFailure({ action: "discard_result", message: HOST_RESULT_UNAVAILABLE }, index);
-          return;
-        }
-        const leaf = this.app.workspace.getLeaf(false);
-        if (!this.interaction.isCurrent(epoch)) return;
-        await leaf.openFile(file);
-      } catch (error) {
-        if (hostSearchFailure(error).action === "access_lost") {
-          this.onAccessLost();
-        } else if (this.interaction.isCurrent(epoch)) {
-          // We cannot establish that only the selected row became stale.
-          this.clearInteraction();
-          this.setStatus(HOST_RESULT_UNAVAILABLE, true);
-        }
-        return;
-      }
+      await session.open(ref, signal);
       if (this.interaction.isCurrent(epoch)) this.close();
     } catch (error) {
-      this.handleHostFailure(hostSearchFailure(error), epoch, index);
+      if (this.interaction.isCurrent(epoch)) this.showFailure(hostSearchFailure(error), index);
     } finally {
       this.finish(epoch);
     }
   }
 
-  private handleHostFailure(failure: HostSearchFailure, epoch: number, index?: number): void {
-    if (failure.action === "access_lost") this.onAccessLost();
-    else if (this.interaction.isCurrent(epoch)) this.showFailure(failure, index);
-  }
-
   private showFailure(failure: HostSearchFailure, index?: number): void {
-    if (failure.action === "clear") this.draw(null);
+    // An ordinary denial clears this view only; whole-view loss arrives as an invalidation.
+    if (failure.action === "clear" || failure.action === "access_lost") {
+      this.activeQuery = null;
+      this.draw(null);
+    }
     if (failure.action === "discard_continuation" && this.displayed) {
       this.draw({ ...this.displayed, continuation: null });
     }

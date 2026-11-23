@@ -4,9 +4,9 @@
 import type { BackendLifecycle } from "../backend";
 import {
   HOST_SEARCH_LABEL,
-  hostSearchFault,
   lookupHostSearch,
-  type HostSearchOperations,
+  type HostSearchLookup,
+  type HostSearchSituation,
 } from "../host-search";
 
 export interface HostBackendIdentity {
@@ -18,14 +18,20 @@ export interface HostBackendIdentity {
 export interface HostBackendStatus {
   readonly kind: "host";
   readonly identity: HostBackendIdentity;
-  /** Protocol presence, not a readiness or entitlement check. */
-  readonly available: boolean;
+  /** Protocol presence at this look, not a readiness or entitlement check. */
+  readonly situation: HostSearchSituation;
 }
 
+export interface HostSearchAccess {
+  /** One fresh look. A view holds the returned session only while it is on screen. */
+  lookup(): HostSearchLookup;
+}
+
+/// The host search profile. It holds no service object: each view looks the
+/// service up when it opens and releases it when it closes.
 export class HostSearchBackend implements
-  BackendLifecycle<HostBackendIdentity, HostBackendStatus>, HostSearchOperations {
+  BackendLifecycle<HostBackendIdentity, HostBackendStatus>, HostSearchAccess {
   readonly identity: HostBackendIdentity;
-  private operations: HostSearchOperations | null = null;
   private disposed = false;
 
   constructor(instanceId: string) {
@@ -33,29 +39,19 @@ export class HostSearchBackend implements
   }
 
   async initialize(): Promise<void> {
-    if (!this.disposed) this.operations = lookupHostSearch();
+    // Nothing to start: the host does the work.
   }
 
   async status(): Promise<HostBackendStatus> {
-    return { kind: "host", identity: this.identity, available: this.operations !== null };
+    return { kind: "host", identity: this.identity, situation: this.lookup().situation };
   }
 
-  async page(query: string, signal: AbortSignal, continuation?: string) {
-    return this.requireOperations(signal).page(query, signal, continuation);
-  }
-
-  async resolveNote(ref: string, signal: AbortSignal): Promise<string> {
-    return this.requireOperations(signal).resolveNote(ref, signal);
+  lookup(): HostSearchLookup {
+    if (this.disposed) return { situation: "without_service" };
+    return lookupHostSearch();
   }
 
   async dispose(): Promise<void> {
     this.disposed = true;
-    this.operations = null;
-  }
-
-  private requireOperations(signal: AbortSignal): HostSearchOperations {
-    if (this.disposed || signal.aborted) throw hostSearchFault.cancelled();
-    if (!this.operations) throw hostSearchFault.unavailable();
-    return this.operations;
   }
 }
