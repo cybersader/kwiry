@@ -1018,6 +1018,45 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     plugin.onunload();
   });
 
+  it("H-13: isolates the direction of every service-supplied string and keeps it unaltered", async () => {
+    const host = scriptedHost();
+    const controls = "\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069";
+    const room = { ref: "room-bidi", label: `Room ${controls}end` };
+    const item = {
+      ref: "opaque-bidi",
+      path: `Folder${controls}/Note.md`,
+      title: `Title ${controls}tail`,
+      excerpt: `Excerpt ${controls}tail`,
+    };
+    host.search.mockResolvedValueOnce(page({ room, items: [item] }));
+    const plugin = await startedHost();
+    const modal = await openHost();
+    submit(modal, "bidi");
+    await settled();
+    const { contentEl } = modal;
+    const fields: Array<[HostElement, string]> = [
+      [contentEl.find("h3"), room.label],
+      [contentEl.find("button", item.title), item.title],
+      [contentEl.find("div", item.path), item.path],
+      [contentEl.find("div", item.excerpt), item.excerpt],
+    ];
+    for (const [element, raw] of fields) {
+      expect(element.attrs.dir).toBe("auto");
+      expect(element.textContent).toBe(raw);
+    }
+    // No service string is placed in an attribute, a notice, the status line or the status bar.
+    const elsewhere = [
+      ...contentEl.all("p").map((element) => element.textContent),
+      ...contentEl.all("button").flatMap((element) => Object.values(element.attrs)),
+      ...harness.notices,
+      harness.statusBarText,
+    ].join("\n");
+    for (const raw of [room.label, item.title, item.path, item.excerpt, controls]) {
+      expect(elsewhere).not.toContain(raw);
+    }
+    plugin.onunload();
+  });
+
   it.each([
     [page({ state: "ready", items: [], next: CURSOR }), "Results from the host"],
     [page({ state: "building", items: [], next: CURSOR }), "Host search is being prepared."],
