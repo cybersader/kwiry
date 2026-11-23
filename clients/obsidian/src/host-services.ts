@@ -32,7 +32,9 @@ export function lookupHostService(name: string, major: number, realm: object = w
   }
   if (slot === undefined) return NO_HOST;
   try {
-    if ((typeof slot !== "object" && typeof slot !== "function") || slot === null) return WITHOUT_SERVICE;
+    // Only a plain non-null object can be a slot; anything else, a function
+    // included, is a broken slot: a host without the service.
+    if (typeof slot !== "object" || slot === null) return WITHOUT_SERVICE;
     const get: unknown = Reflect.get(slot, "get");
     if (typeof get !== "function") return WITHOUT_SERVICE;
     const service: unknown = Reflect.apply(get, slot, [name, major]);

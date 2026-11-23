@@ -60,6 +60,14 @@ describe("slot lookup: three situations", () => {
     expect(lookupHostService("search", 1, realm(slot))).toEqual({ kind: "without_service" });
   });
 
+  it("a function-valued slot with a callable get is a broken slot, not a slot", () => {
+    const service = Object.freeze({ major: 1, minor: 0 });
+    const get = vi.fn(() => service);
+    const slot = Object.assign(() => undefined, { get });
+    expect(lookupHostService("search", 1, realm(slot))).toEqual({ kind: "without_service" });
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("a throwing key read counts as a host, never as no host", () => {
     const hostile = Object.defineProperty({}, HOST_SLOT_KEY, { get() { throw new Error("stub failure"); } });
     expect(lookupHostService("search", 1, hostile)).toEqual({ kind: "without_service" });
