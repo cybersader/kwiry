@@ -4,12 +4,15 @@
 // Owner decision A2: on a stricter local indexing answer the plugin deletes
 // the index cache it stored for this vault, and nothing else.
 
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -20,13 +23,21 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createInPluginCacheCustody } from "../src/cache/build-cache-options";
-import type { CacheStoreBundleAvailability, CacheStoreBundlePort } from "../src/cache/cache-store";
+import type {
+  CacheStoreBundleAvailability,
+  CacheStoreBundlePort,
+  CacheWrite,
+} from "../src/cache/cache-store";
 import {
   deleteLocalVaultCache,
   deleteVaultCache,
+  nodeCacheFileSystem,
+  openLocalCacheStore,
+  type CacheFileSystem,
   type VaultCacheDeletion,
 } from "../src/cache/local-cache-store";
 import { deriveVaultCacheIdentity } from "../src/cache/vault-identity";
+import { WORKER_PROTOCOL_VERSION } from "../src/worker/protocol";
 
 let workspace: string;
 let vaultPath: string;
@@ -222,6 +233,234 @@ describe("cache custody", () => {
     });
     await expect(custody.deleteForPolicy()).resolves.toEqual({ kind: "deleted" });
     expect(existsSync(vaultCacheDirectory())).toBe(false);
+    notesIntact();
+  });
+});
+
+/** Real file system with chosen calls replaced. */
+function fileSystem(overrides: Partial<CacheFileSystem>): CacheFileSystem {
+  return { ...nodeCacheFileSystem(), ...overrides };
+}
+
+function removeWith(fs: CacheFileSystem): Promise<VaultCacheDeletion> {
+  return deleteLocalVaultCache({
+    canonicalVaultPath: vaultPath,
+    vaultConfigDirName: ".obsidian",
+    rootOverride: rootPath,
+    fs,
+  });
+}
+
+function leftovers(): string[] {
+  return readdirSync(path.join(rootPath, "vaults")).filter((entry) => entry.includes(".deleting-"));
+}
+
+describe("deleting under the writer lock (review N1, N2, N4)", () => {
+  it("N1: a failed removal leaves no writer lock at the vault's path, and the next deletion sweeps what is left", async () => {
+    storeCache();
+    const failing = fileSystem({ rm: async () => { throw new Error("synthetic removal failure"); } });
+    await expect(removeWith(failing)).resolves.toEqual({ kind: "failed" });
+    expect(existsSync(path.join(vaultCacheDirectory(), "writer.lock"))).toBe(false);
+    for (const entry of leftovers()) {
+      expect(existsSync(path.join(rootPath, "vaults", entry, "writer.lock"))).toBe(false);
+    }
+    await expect(remove()).resolves.toEqual({ kind: "deleted" });
+    expect({ target: existsSync(vaultCacheDirectory()), leftovers: leftovers() })
+      .toEqual({ target: false, leftovers: [] });
+  });
+
+  it("N1: a directory that changed under the lock is refused and the lock is released", async () => {
+    storeCache();
+    const target = vaultCacheDirectory();
+    const real = nodeCacheFileSystem();
+    let locked = false;
+    const swapped = fileSystem({
+      open: async (file, flags, mode) => {
+        if (file === path.join(target, "writer.lock")) locked = true;
+        return real.open(file, flags, mode);
+      },
+      realpath: async (file) => locked && file === target ? `${file}-elsewhere` : real.realpath(file),
+    });
+    await expect(removeWith(swapped)).resolves.toEqual({ kind: "refused" });
+    expect(existsSync(path.join(target, "writer.lock"))).toBe(false);
+    expect(existsSync(path.join(target, "current.json"))).toBe(true);
+  });
+
+  it("N2: the vault directory leaves its path in one rename before anything inside it is removed", async () => {
+    storeCache();
+    const target = vaultCacheDirectory();
+    const real = nodeCacheFileSystem();
+    const calls: string[] = [];
+    const recording = fileSystem({
+      rename: async (from, to) => {
+        calls.push(`rename ${path.relative(rootPath, from)} -> ${path.relative(rootPath, to)}`);
+        await real.rename(from, to);
+      },
+      rm: async (file, options) => {
+        // Nothing is removed while the directory is still at the vault's path.
+        expect(existsSync(target)).toBe(false);
+        calls.push(`rm ${path.relative(rootPath, file)}`);
+        await real.rm(file, options);
+      },
+    });
+    await expect(removeWith(recording)).resolves.toEqual({ kind: "deleted" });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatch(new RegExp(`^rename vaults/${identity} -> vaults/\\.${identity}\\.deleting-[a-z0-9-]+$`, "u"));
+    expect(calls[1]).toBe(`rm ${calls[0]!.split(" -> ")[1]}`);
+    expect(leftovers()).toEqual([]);
+  });
+
+  it("N2: sweeps only this vault's leftovers, and never through a symlink", async () => {
+    storeCache();
+    const vaults = path.join(rootPath, "vaults");
+    const own = path.join(vaults, `.${identity}.deleting-abc123`);
+    const other = path.join(vaults, `.${"f".repeat(64)}.deleting-abc123`);
+    mkdirSync(own);
+    writeFileSync(path.join(own, "g0.kwc"), "image");
+    mkdirSync(other);
+    writeFileSync(path.join(other, "g0.kwc"), "image");
+    const outside = path.join(workspace, "outside-leftover");
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, "precious.txt"), "keep");
+    symlinkSync(outside, path.join(vaults, `.${identity}.deleting-linked`), "dir");
+    await expect(remove()).resolves.toEqual({ kind: "deleted" });
+    expect(existsSync(own)).toBe(false);
+    expect(existsSync(path.join(other, "g0.kwc"))).toBe(true);
+    expect(readFileSync(path.join(outside, "precious.txt"), "utf8")).toBe("keep");
+  });
+
+  it("N2: a leftover alone is swept on the next deletion", async () => {
+    const own = path.join(rootPath, "vaults", `.${identity}.deleting-abc123`);
+    mkdirSync(own, { recursive: true });
+    writeFileSync(path.join(own, "g0.kwc"), "image");
+    await expect(remove()).resolves.toEqual({ kind: "deleted" });
+    expect(existsSync(own)).toBe(false);
+  });
+
+  it("N4: a symlinked cache root is unavailable, not refused, and is left alone", async () => {
+    const realRoot = path.join(workspace, "real-root");
+    mkdirSync(path.join(realRoot, "vaults", identity), { recursive: true });
+    writeFileSync(path.join(realRoot, "vaults", identity, "current.json"), "{}");
+    mkdirSync(path.dirname(rootPath), { recursive: true });
+    symlinkSync(realRoot, rootPath, "dir");
+    await expect(remove()).resolves.toEqual({ kind: "unavailable", reason: "root_not_a_directory" });
+    expect(existsSync(path.join(realRoot, "vaults", identity, "current.json"))).toBe(true);
+  });
+});
+
+describe("end to end with real stores", () => {
+  function envelopeWrite(generationId: string, seed: number): CacheWrite {
+    const bytes = new Uint8Array(256).fill(seed);
+    return {
+      generationId,
+      byteLength: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      identity: {
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        cache_schema_version: 1,
+        chunking_version: 1,
+        sqlite_version: "3.53.0",
+        sqlite_wasm_sha256: "b".repeat(64),
+        rust_wasm_sha256: "c".repeat(64),
+        plugin_id: "kwiry-search",
+        plugin_version: "0.1.0",
+        cache_identity: identity,
+        source_policy_hash: "d".repeat(64),
+      },
+      bytes,
+    };
+  }
+
+  function snapshotOutside(): Record<string, string> {
+    const files: Record<string, string> = {};
+    const excluded = vaultCacheDirectory();
+    const walk = (directory: string) => {
+      for (const entry of readdirSync(directory)) {
+        const full = path.join(directory, entry);
+        if (full === excluded || entry.includes(".deleting-") || entry.startsWith(".store-probe-")) continue;
+        const stats = statSync(full);
+        if (stats.isDirectory()) walk(full);
+        else files[path.relative(workspace, full)] = readFileSync(full, "utf8");
+      }
+    };
+    walk(workspace);
+    return files;
+  }
+
+  async function open(fs?: CacheFileSystem): Promise<CacheStoreBundlePort> {
+    const availability = await openLocalCacheStore({
+      canonicalVaultPath: vaultPath,
+      vaultConfigDirName: ".obsidian",
+      rootOverride: rootPath,
+      ...(fs === undefined ? {} : { fs }),
+    });
+    if (availability.kind !== "available") throw new Error(`store unavailable: ${availability.reason}`);
+    return availability.store;
+  }
+
+  it("deletes after a second window's write in progress finishes, and touches nothing outside the vault directory", async () => {
+    // This page's store writes a generation through the custody.
+    const outcomes: VaultCacheDeletion[] = [];
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    let otherWrite: Promise<unknown> = Promise.resolve();
+    let duringLock: { pointer: boolean; lock: boolean } | null = null;
+    const custody = createInPluginCacheCustody({ adapter: {}, configDir: ".obsidian" } as never, {
+      open: () => openLocalCacheStore({
+        canonicalVaultPath: vaultPath,
+        vaultConfigDirName: ".obsidian",
+        rootOverride: rootPath,
+      }),
+      remove: async () => {
+        const outcome = await remove();
+        outcomes.push(outcome);
+        return outcome;
+      },
+      wait: async () => {
+        duringLock ??= {
+          pointer: existsSync(path.join(vaultCacheDirectory(), "current.json")),
+          lock: existsSync(path.join(vaultCacheDirectory(), "writer.lock")),
+        };
+        releaseWrite();
+        await otherWrite;
+      },
+    });
+    const opened = await custody.options("d".repeat(64)).openStore();
+    if (opened.kind !== "available") throw new Error("store unavailable");
+    await opened.store.put(envelopeWrite("g1", 1));
+    expect(existsSync(path.join(vaultCacheDirectory(), "current.json"))).toBe(true);
+
+    // A second window's store is mid-write: it holds the lock and waits
+    // before committing its pointer.
+    const real = nodeCacheFileSystem();
+    let reached!: () => void;
+    const atCommit = new Promise<void>((resolve) => { reached = resolve; });
+    const other = await open(fileSystem({
+      rename: async (from, to) => {
+        if (to.endsWith("current.json")) {
+          reached();
+          await writeGate;
+        }
+        await real.rename(from, to);
+      },
+    }));
+    mkdirSync(path.join(rootPath, "vaults", "f".repeat(64)), { recursive: true });
+    writeFileSync(path.join(rootPath, "vaults", "f".repeat(64), "current.json"), "other vault");
+    writeFileSync(path.join(rootPath, "unrelated.txt"), "keep");
+    otherWrite = other.put(envelopeWrite("g2", 2));
+    await atCommit;
+    const before = snapshotOutside();
+
+    await expect(custody.deleteForPolicy()).resolves.toEqual({ kind: "deleted" });
+    // The first attempt met the other window's lock and left everything in place.
+    expect(outcomes.map(({ kind }) => kind)).toEqual(["locked", "deleted"]);
+    expect(duringLock).toEqual({ pointer: true, lock: true });
+    // The other window's write was not cut off.
+    await expect(otherWrite).resolves.toMatchObject({ generationId: "g2" });
+    await other.dispose();
+    expect({ target: existsSync(vaultCacheDirectory()), leftovers: leftovers() })
+      .toEqual({ target: false, leftovers: [] });
+    expect(snapshotOutside()).toEqual(before);
     notesIntact();
   });
 });
