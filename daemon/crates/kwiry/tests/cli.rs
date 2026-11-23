@@ -286,6 +286,8 @@ fn search_json(config: &Path, data: &Path, query: &str, vault: Option<&str>) -> 
     serde_json::from_slice(&output).unwrap()
 }
 
+// checkroom refuses with exit 2 off Linux, as governed ingestion does.
+#[cfg(target_os = "linux")]
 #[test]
 fn checkroom_reports_offenders_without_content_and_uses_stable_exit_codes() {
     use predicates::prelude::PredicateBooleanExt;
@@ -416,6 +418,8 @@ fn checkroom_reports_offenders_without_content_and_uses_stable_exit_codes() {
         .stdout(predicates::str::contains("walk_defect .: room_boundary"));
 }
 
+// checkroom refuses with exit 2 off Linux, as governed ingestion does.
+#[cfg(target_os = "linux")]
 #[test]
 fn checkroom_and_selfcheck_report_the_same_engine() {
     let temporary = tempdir().unwrap();
