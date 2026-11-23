@@ -261,8 +261,12 @@ export class LocalIndexingWatch {
       let reason: unknown;
       try { reason = record(event)?.reason; } catch { reason = undefined; }
       this.unfollow();
-      // A withdrawn provider leaves no slot behind; keep the last answer.
-      if (reason === "withdrawn") return;
+      // A withdrawn provider leaves no slot behind; keep the last answer, or the
+      // contract's default when no answer had arrived.
+      if (reason === "withdrawn") {
+        if (this.stateValue.kind === "pending") this.set(POLICY_DEFAULT_STATE);
+        return;
+      }
       this.set({ kind: "pending" });
       this.refresh();
     }])));

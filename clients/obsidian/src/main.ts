@@ -307,6 +307,13 @@ export default class KwiryPlugin extends Plugin {
     });
   }
 
+  /// Saving daemon connection settings (URL, token file, vault IDs) while the
+  /// daemon is selected is a person's deliberate choice of the daemon backend.
+  saveDaemonConnectionSettings(): Promise<void> {
+    if (this.settings.backendProfile === "daemon") this.backendProfileChosen = true;
+    return this.saveSettings();
+  }
+
   async changeBackendProfile(profile: SearchProfile): Promise<void> {
     if (this.savingBackendProfile) return;
     if (profile === this.settings.backendProfile) return;
@@ -559,11 +566,17 @@ export default class KwiryPlugin extends Plugin {
   private onLocalIndexingChanged(state: LocalIndexingState, pluginEpoch: number): void {
     if (pluginEpoch !== this.pluginEpoch) return;
     this.settingTab?.redrawIfShown();
-    if (!this.layoutReady || this.settings.backendProfile !== "in_plugin" || this.savingBackendProfile) return;
+    if (!this.layoutReady) return;
     const running = this.activeBackendIdentity?.profile === "in_plugin";
-    if (state.kind === "refused") {
+    if (this.settings.backendProfile !== "in_plugin" && !running) return;
+    // Stopping is never deferred, not even while a backend switch is saving:
+    // it supersedes any activation in flight, and every activation re-reads policy.
+    if (state.kind === "refused" || (state.kind === "pending" && this.inPluginCacheActive)) {
+      // An unanswered policy cannot permit the persistent cache; a plain re-check
+      // (pending with no cache) keeps an in-memory index running.
       void this.stopInPluginForPolicy(state);
-    } else if (state.kind === "memory_only" && (!running || this.inPluginCacheActive)) {
+    } else if (state.kind === "memory_only" && !this.savingBackendProfile
+      && this.settings.backendProfile === "in_plugin" && (!running || this.inPluginCacheActive)) {
       // Start what waited for the answer, or restart without the persistent cache.
       void this.activateBackendProfile();
     }

@@ -103,8 +103,12 @@ export class BackendManager {
         throw error;
       }
       if (this.closed || epoch !== this.activationEpoch) {
-        if (this.activeBackend === backend) this.activeBackend = null;
-        await backend.dispose();
+        // Whoever cleared the active slot (dispose, deactivate or a newer
+        // activation) has already disposed this backend.
+        if (this.activeBackend === backend) {
+          this.activeBackend = null;
+          await backend.dispose();
+        }
         event.set({ outcome: "cancelled", code: "disposed" });
         throw managerDisposedError();
       }

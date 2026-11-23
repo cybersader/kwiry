@@ -302,7 +302,7 @@ export class KwirySettingTab extends PluginSettingTab {
       .addText((text) =>
         text.setValue(this.plugin.settings.vaultId).onChange(async (value) => {
           this.plugin.settings.vaultId = value.trim();
-          await this.plugin.saveSettings();
+          await this.plugin.saveDaemonConnectionSettings();
         }),
       );
 
@@ -320,7 +320,7 @@ export class KwirySettingTab extends PluginSettingTab {
   }
 
   private async reconfigureDaemon(): Promise<void> {
-    await this.plugin.saveSettings();
+    await this.plugin.saveDaemonConnectionSettings();
     await this.plugin.activateBackendProfile();
   }
 }

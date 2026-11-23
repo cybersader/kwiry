@@ -81,6 +81,7 @@ interface LifecycleHarness {
   pathLookups: string[];
   openError: unknown;
   beforeSave?: () => Promise<void>;
+  beforeInitialize?: () => void;
   afterLoad?: () => void;
   exactSettings: boolean;
   hoverSources: Array<{ id: string; display: string; defaultMod: boolean }>;
@@ -273,7 +274,15 @@ function stubSource(path: string): string {
           setName(name) { this.row.name = name; return this; }
           setDesc(description) { this.row.description = description; return this; }
           setHeading() { return this; }
-          addText() { return this; }
+          addText(configure) {
+            const row = this.row;
+            configure?.({
+              setPlaceholder() { return this; },
+              setValue() { return this; },
+              onChange(callback) { row.onChange = callback; return this; },
+            });
+            return this;
+          }
           addToggle() { return this; }
           addButton() { return this; }
           addDropdown(configure) {
@@ -425,6 +434,7 @@ function stubSource(path: string): string {
             harness.startupObserver = options.onStartupObservation ?? null;
           }
           async initialize() {
+            harness.beforeInitialize?.();
             harness.backendInitializations += 1;
             harness.statusListener?.({
               ...this.statusValue,
@@ -769,6 +779,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     harness.pathLookups.length = 0;
     harness.openError = undefined;
     delete harness.beforeSave;
+    delete harness.beforeInitialize;
     delete harness.afterLoad;
     harness.exactSettings = false;
     harness.hoverSources.length = 0;
@@ -1729,6 +1740,105 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       expect(plugin.settings.backendProfile).toBe("in_plugin");
       plugin.onunload();
     });
+
+    it("review regression: a refuse that arrives while a switch to in-plugin is starting stops it", async () => {
+      const host = scriptedHost("without search", { value: "memory_only" });
+      harness.desktopApp = false;
+      harness.exactSettings = true;
+      harness.storedData = { backendProfile: "daemon" };
+      const KwiryPlugin = await loadProductionPlugin();
+      const plugin = new KwiryPlugin();
+      await plugin.onload();
+      harness.layoutReady?.();
+      await vi.waitFor(() => expect(harness.statusBarText).not.toBe("kwiry: starting…"), { interval: 5 });
+      harness.beforeInitialize = () => {
+        delete harness.beforeInitialize;
+        host.changePolicy({ value: "refuse", decidedBy: "organization" });
+      };
+      await plugin.changeBackendProfile("in_plugin");
+      await settled();
+      await settled();
+      expect(plugin.settings.backendProfile).toBe("in_plugin");
+      expect(harness.statusBarText).toBe("Kwiry: Local indexing is turned off by your organization.");
+      expect(harness.backendDisposals).toBe(1);
+      await expect(plugin.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+      plugin.onunload();
+    });
+
+    it("review regression: a refuse during a failed switch away from in-plugin still stops it", async () => {
+      const { host, plugin } = await inPluginUnder({ value: "memory_only" });
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
+      harness.beforeSave = async () => {
+        host.changePolicy({ value: "refuse", decidedBy: "folder" });
+        throw new Error(RAW);
+      };
+      await plugin.changeBackendProfile("daemon");
+      await settled();
+      expect(plugin.settings.backendProfile).toBe("in_plugin");
+      expect(harness.notices.at(-1)).toContain("Could not save the search backend selection");
+      expect(harness.statusBarText).toBe("Kwiry: Local indexing is turned off by this folder.");
+      expect(harness.backendDisposals).toBe(1);
+      await expect(plugin.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+      plugin.onunload();
+    });
+
+    it("review regression: a late provider whose policy has not answered stops a cached in-plugin index", async () => {
+      const { host, plugin } = await inPluginUnder({ value: "memory_only", hang: true }, "late");
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      expect(harness.cachePolicyHashes).toHaveLength(1);
+      host.install();
+      announceProvider();
+      await vi.waitFor(() => expect(harness.backendDisposals).toBe(1), { interval: 5 });
+      await settled();
+      expect(harness.statusBarText).toBe("Kwiry: Waiting for the local indexing policy…");
+      expect(harness.backendInitializations).toBe(1);
+      await expect(plugin.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+      plugin.onunload();
+    });
+
+    it("review regression: withdrawal while the policy answer is pending applies the memory-only default", async () => {
+      const { host, plugin } = await inPluginUnder({ value: "memory_only", hang: true });
+      await settled();
+      expect(harness.statusBarText).toBe("Kwiry: Waiting for the local indexing policy…");
+      removeSlot();
+      host.invalidate("withdrawn");
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
+      expect({ inits: harness.backendInitializations, cache: harness.cachePolicyHashes }).toEqual({ inits: 1, cache: [] });
+      await expect(plugin.api.ready()).resolves.toBeUndefined();
+      plugin.onunload();
+    });
+  });
+
+  describe("daemon connection settings", () => {
+    it.each(["Token file path", "Current vault daemon ID", "Search vault ID filter"])(
+      "review regression: configuring %s on a fresh install records the daemon choice", async (rowName) => {
+        harness.desktopApp = true;
+        harness.exactSettings = true;
+        harness.storedData = null;
+        const KwiryPlugin = await loadProductionPlugin();
+        const first = new KwiryPlugin();
+        await first.onload();
+        expect(first.settings.backendProfile).toBe("daemon");
+        harness.layoutReady?.();
+        harness.displaySettings?.();
+        const row = harness.settingRows.find(({ name }) => name === rowName);
+        expect(row?.onChange).toBeTypeOf("function");
+        await row?.onChange?.("/synthetic/daemon-value");
+        expect(storedProfiles().at(-1)).toBe("daemon");
+        // A provider arriving later in the same session does not switch a configured daemon.
+        const host = scriptedHost("late");
+        host.install();
+        announceProvider();
+        await settled();
+        expect(first.settings.backendProfile).toBe("daemon");
+        first.onunload();
+        harness.storedData = harness.savedData.at(-1) as Record<string, unknown>;
+        const second = new KwiryPlugin();
+        await second.onload();
+        expect(second.settings.backendProfile).toBe("daemon");
+        second.onunload();
+      },
+    );
   });
 
   it("keeps the fresh desktop daemon default, settings controls, and status", async () => {

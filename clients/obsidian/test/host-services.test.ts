@@ -261,6 +261,20 @@ describe("local indexing watch", () => {
     watch.dispose();
   });
 
+  it("review regression: withdrawal before the first answer applies the memory-only default", () => {
+    const host = policyHost();
+    host.policy.current.mockImplementation(() => new Promise(() => undefined));
+    const watch = new LocalIndexingWatch(() => undefined, host.window);
+    watch.refresh();
+    expect(watch.state.kind).toBe("pending");
+    delete host.window[HOST_SLOT_KEY];
+    host.invalidate("withdrawn");
+    expect(watch.state).toEqual({ kind: "memory_only", decidedBy: "protocol" });
+    watch.refresh();
+    expect(watch.state).toEqual({ kind: "memory_only", decidedBy: "protocol" });
+    watch.dispose();
+  });
+
   it("a refresh with the same service object does not subscribe twice", () => {
     const host = policyHost();
     const watch = new LocalIndexingWatch(() => undefined, host.window);
