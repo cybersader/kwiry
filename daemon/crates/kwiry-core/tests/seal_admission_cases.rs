@@ -105,6 +105,7 @@ fn kwiry_reason(partner: &str) -> RoomCheckReason {
         "section_limit" => RoomCheckReason::SectionLimit,
         "heading_path_limit" => RoomCheckReason::HeadingPathLimit,
         "not_markdown" => RoomCheckReason::NonMarkdownFormat,
+        "path_unsafe" => RoomCheckReason::InvalidPath,
         other => panic!("no Kwiry reason for partner reason {other:?}"),
     }
 }
@@ -159,7 +160,7 @@ fn verdict(case: &Case, report: &RoomCheckReport) -> Verdict {
 #[test]
 fn seal_admission_cases_match_the_stated_verdict() {
     let cases = cases();
-    assert_eq!(cases.len(), 89);
+    assert_eq!(cases.len(), 90);
     let ids: BTreeSet<_> = cases.iter().map(|case| case.id.as_str()).collect();
     assert_eq!(ids.len(), cases.len(), "case ids are unique");
     let skipped: BTreeMap<_, _> = SKIPPED.iter().copied().collect();
@@ -179,6 +180,15 @@ fn seal_admission_cases_match_the_stated_verdict() {
     {
         let report = check(&scratch, case);
         let actual = verdict(case, &report);
+        if case.id == "name-backslash" {
+            // A `\` is a legal Linux name byte; the walk admits the file and
+            // source preparation refuses the path, as the daemon does.
+            assert_eq!(case.path, "back\\slash.md");
+            assert_eq!(
+                actual,
+                Some((RoomCheckReason::InvalidPath, RoomCheckClass::Structural))
+            );
+        }
         let expected: Verdict = if case.labelled {
             None
         } else {
@@ -209,7 +219,7 @@ fn seal_admission_cases_match_the_stated_verdict() {
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     assert_eq!(agreed + known.len() + skipped.len(), cases.len());
-    // 78 cases carry a stated verdict; these 11 do not and are held to the
+    // 79 cases carry a stated verdict; these 11 do not and are held to the
     // measured column instead.
     assert_eq!(
         null_stated,

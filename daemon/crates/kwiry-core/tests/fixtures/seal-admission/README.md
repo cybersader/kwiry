@@ -6,12 +6,12 @@ the format changes) when the partner revises it.
 
 - Repository: OpenClast (`openclast`)
 - Branch: `task/search-sealer-20261123`
-- Commit: `ecd07def1636ecf69dd42dee975e0d99a2bc1a80`
+- Commit: `9c3ae182ddf458faefef1b594e440534506da135`
 - Path: `sync-core/test/fixtures/seal-admission-cases.v1.json`
 
 All content is synthetic test data: file names and bytes made up to exercise
 frontmatter fences, YAML edge cases, encodings, size and section limits, and
-file extensions. Nothing in it comes from a real vault.
+file extensions and names. Nothing in it comes from a real vault.
 
 Each case gives a room-relative `path`, its exact bytes (`base64`, or `prefix`
 + `repeat` × `times` + `suffix`), Kwiry's stated verdict at commit 657bced6
