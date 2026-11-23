@@ -58,6 +58,7 @@ pub(super) fn markdown_sections_with_budget(
     budget: &mut ExtractionBudget,
 ) -> Result<Vec<ExtractedSection>, ExtractionError> {
     let mut markers = Vec::new();
+    let mut first_start = None;
     let mut heading_stack: Vec<(usize, String)> = Vec::new();
     let mut active_heading: Option<(usize, usize, String)> = None;
 
@@ -90,17 +91,36 @@ pub(super) fn markdown_sections_with_budget(
                         .map(|(_, heading)| heading.clone())
                         .collect::<Vec<_>>();
                     budget.reserve_section(&path)?;
-                    markers.push(HeadingMarker { start, path });
+                    first_start.get_or_insert(start);
+                    if !budget.is_counting() {
+                        markers.push(HeadingMarker { start, path });
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    if markers.is_empty() || markers[0].start > 0 {
+    if first_start.is_none_or(|start| start > 0) {
         budget.reserve_section(&[])?;
     }
+    if budget.is_counting() {
+        return Ok(Vec::new());
+    }
     Ok(sections_from_markers(source, markers))
+}
+
+/// Section count and heading-path bytes of a Markdown source, charged exactly
+/// as [`markdown_sections_with_budget`] charges its extraction budget, but
+/// without refusing at a limit. `None` when the source would not reach
+/// section extraction (non-UTF-8 or NUL bytes).
+#[cfg(feature = "native")]
+pub(crate) fn section_usage(bytes: &[u8]) -> Option<(usize, usize)> {
+    let source = decode_utf8(bytes).ok()?;
+    let (_, _, _, body, _) = parse_frontmatter(source);
+    let mut budget = ExtractionBudget::counting();
+    markdown_sections_with_budget(body, &mut budget).ok()?;
+    Some(budget.usage())
 }
 
 fn sections_from_markers(source: &str, markers: Vec<HeadingMarker>) -> Vec<ExtractedSection> {

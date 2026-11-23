@@ -14,6 +14,9 @@ mod text;
 use crate::extract::{ExtractedSource, ExtractionError, ExtractionNotice};
 use crate::format::SourceFormat;
 
+#[cfg(feature = "native")]
+pub(crate) use markdown::section_usage;
+
 #[cfg(feature = "internal-docx-extractor")]
 pub use docx::{
     DocxCandidate, DocxProperties, ExtractionScope, SemanticSection, extract_candidate_outcome,

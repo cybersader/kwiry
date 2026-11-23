@@ -1,5 +1,7 @@
 mod auth;
 mod capability;
+mod checkroom;
+mod engine;
 mod holdings;
 mod logging;
 mod replay;
@@ -86,6 +88,10 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check, offline and read-only, whether a room directory would receive
+    /// its publication label, and which files prevent it. Exits 0 if it
+    /// would, 1 if not, 2 on a usage or setup error.
+    Checkroom(CheckroomArgs),
     /// Search the lexical index.
     Search {
         query: String,
@@ -119,6 +125,20 @@ struct SetupArgs {
     json: bool,
     #[arg(long, value_name = "SECONDS")]
     timeout: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+struct CheckroomArgs {
+    /// The room directory to check.
+    #[arg(value_name = "DIRECTORY")]
+    room: PathBuf,
+    /// Check the room as if this registration in `--config` pointed at it:
+    /// other registered rooms and Kwiry state are then checked for overlap.
+    #[arg(long, value_name = "VAULT_ID")]
+    vault: Option<String>,
+    /// Print one JSON object on stdout instead of human lines.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -262,9 +282,15 @@ impl SetupServiceManager for SetupServiceAdapter<'_> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let command = match cli.command {
+        Command::Checkroom(args) => {
+            std::process::exit(checkroom::run(cli.config, cli.data_dir, &args))
+        }
+        command => command,
+    };
     let paths = Paths::resolve(cli.config, cli.data_dir)?;
 
-    match cli.command {
+    match command {
         Command::Setup(args) => {
             require_desktop_profile(&paths)?;
             run_setup(&paths, args)?;
@@ -321,6 +347,7 @@ async fn main() -> Result<()> {
                 .await
                 .context("holder command failed")??;
         }
+        Command::Checkroom(_) => unreachable!("checkroom returns before path resolution"),
         Command::Selfcheck { json } => {
             if !run_selfcheck(&paths, json) {
                 std::process::exit(1);
@@ -441,6 +468,7 @@ struct SelfcheckReport<'a> {
     schema_version: u32,
     ok: bool,
     checks: &'a [kwiry_core::HostCheck],
+    engine: engine::Engine,
 }
 
 /// Core checks, then the signing key set (parsed by the verifier startup
@@ -503,6 +531,7 @@ fn run_selfcheck(paths: &Paths, json: bool) -> bool {
             schema_version: 1,
             ok,
             checks: &report.checks,
+            engine: engine::engine(),
         };
         println!(
             "{}",

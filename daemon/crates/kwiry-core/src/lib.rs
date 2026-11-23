@@ -52,6 +52,8 @@ mod reconcile;
 #[cfg(feature = "native")]
 mod room_boundary;
 #[cfg(feature = "native")]
+mod room_check;
+#[cfg(feature = "native")]
 mod room_format;
 #[cfg(feature = "native")]
 mod room_walk;
@@ -296,6 +298,11 @@ pub use host_check::{
 };
 #[cfg(feature = "native")]
 pub use model::valid_lower_sha256;
+#[cfg(feature = "native")]
+pub use room_check::{
+    ROOM_CHECK_LIMITS, RoomCheckClass, RoomCheckFinding, RoomCheckLimits, RoomCheckReason,
+    RoomCheckReport, SectionUsage, check_room,
+};
 #[cfg(feature = "native")]
 pub use room_format::{HOLDINGS_SERVING_IMPLEMENTED, OpenClastRoomFormat};
 #[cfg(feature = "native")]
