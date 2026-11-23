@@ -296,6 +296,18 @@ fn deliver_event(
     config_path: PathBuf,
 ) -> impl FnMut(notify::Result<Event>) {
     move |event| {
+        // Read-only access cannot change bytes, and `classify_event` would
+        // discard it anyway. Drop it before the bounded queue: a full pass
+        // opens every file it reads (notify subscribes to `IN_OPEN` with no
+        // opt-out), and while the pass runs nothing drains the queue, so those
+        // self-inflicted opens overflowed it, closed the gate and scheduled
+        // the next full pass, forever. Rescan-flagged events still escalate.
+        if let Ok(inner) = &event
+            && !inner.need_rescan()
+            && is_read_only_access(&inner.kind)
+        {
+            return;
+        }
         if let Some(gate) = &gate
             && config_may_have_changed(&event, &config_path)
         {
@@ -341,6 +353,48 @@ pub(crate) fn spawn_watcher(
     status: Arc<RwLock<DaemonStatus>>,
     live_gate: Option<Arc<ConfigGate>>,
 ) -> Result<WatcherHandle> {
+    spawn_native_watcher(
+        paths,
+        initial_config,
+        manager,
+        status,
+        live_gate,
+        #[cfg(test)]
+        None,
+    )
+}
+
+/// Like [`spawn_watcher`], with native delivery, but safety ticks are driven by
+/// the test instead of the 60 s interval.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn spawn_native_watcher_with_test_ticks(
+    paths: Paths,
+    config: Config,
+    manager: ManagerHandle,
+    status: Arc<RwLock<DaemonStatus>>,
+    gate: Arc<ConfigGate>,
+) -> (WatcherHandle, mpsc::Sender<()>) {
+    let (ticks, safety_ticks) = mpsc::channel(1);
+    let handle = spawn_native_watcher(
+        paths,
+        config,
+        manager,
+        status,
+        Some(gate),
+        Some(safety_ticks),
+    )
+    .unwrap();
+    (handle, ticks)
+}
+
+fn spawn_native_watcher(
+    paths: Paths,
+    initial_config: Config,
+    manager: ManagerHandle,
+    status: Arc<RwLock<DaemonStatus>>,
+    live_gate: Option<Arc<ConfigGate>>,
+    #[cfg(test)] safety_ticks: Option<mpsc::Receiver<()>>,
+) -> Result<WatcherHandle> {
     let (events, receiver) = mpsc::channel(1_024);
     let overflow = Arc::new(AtomicBool::new(false));
     let mut watcher = notify::recommended_watcher(deliver_event(
@@ -362,7 +416,7 @@ pub(crate) fn spawn_watcher(
         WatcherContext {
             live_gate,
             #[cfg(test)]
-            safety_ticks: None,
+            safety_ticks,
             initial_check,
             paths,
             config: initial_config,
@@ -846,6 +900,84 @@ mod tests {
         task.await.unwrap();
         manager.shutdown().await.unwrap();
         actor.await.unwrap();
+    }
+
+    #[test]
+    fn delivery_drops_only_read_only_access_before_the_bounded_queue() {
+        use notify::event::{DataChange, MetadataKind, ModifyKind, RemoveKind, RenameMode};
+        let config = config_path();
+        let note = PathBuf::from("/vaults/outer/note.md");
+        let fresh = || {
+            let gate = Arc::new(ConfigGate::default());
+            gate.validated(gate.ticket());
+            assert!(gate.open());
+            let (events, receiver) = mpsc::channel(1);
+            let overflow = Arc::new(AtomicBool::new(false));
+            let deliver =
+                deliver_event(events, overflow.clone(), Some(gate.clone()), config.clone());
+            (gate, receiver, overflow, deliver)
+        };
+        let inert = [
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Execute)),
+        ];
+        let (gate, mut receiver, overflow, mut deliver) = fresh();
+        for kind in inert {
+            // Far more than the one-slot queue holds, and even on the config file.
+            for _ in 0..2_000 {
+                deliver(Ok(Event::new(kind).add_path(note.clone())));
+            }
+            deliver(Ok(Event::new(kind).add_path(config.clone())));
+        }
+        assert!(receiver.try_recv().is_err(), "nothing was queued");
+        assert!(!overflow.load(Ordering::Acquire));
+        assert!(gate.open());
+
+        // Everything that could indicate a change still occupies the queue,
+        // and a dropped one still closes the gate and is recorded.
+        let changes: Vec<notify::Result<Event>> = vec![
+            Ok(Event::new(EventKind::Access(AccessKind::Close(
+                AccessMode::Write,
+            )))),
+            Ok(Event::new(EventKind::Access(AccessKind::Close(
+                AccessMode::Any,
+            )))),
+            Ok(
+                Event::new(EventKind::Access(AccessKind::Open(AccessMode::Any)))
+                    .set_flag(Flag::Rescan),
+            ),
+            Ok(Event::new(EventKind::Access(AccessKind::Any))),
+            Ok(Event::new(EventKind::Access(AccessKind::Other))),
+            Ok(Event::new(EventKind::Create(CreateKind::File))),
+            Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                DataChange::Any,
+            )))),
+            Ok(Event::new(EventKind::Modify(ModifyKind::Metadata(
+                MetadataKind::Any,
+            )))),
+            Ok(Event::new(EventKind::Modify(ModifyKind::Name(
+                RenameMode::Both,
+            )))),
+            Ok(Event::new(EventKind::Remove(RemoveKind::File))),
+            Ok(Event::new(EventKind::Any)),
+            Ok(Event::new(EventKind::Other)),
+            Err(notify::Error::generic("synthetic")),
+        ];
+        for change in changes {
+            let (gate, mut receiver, overflow, mut deliver) = fresh();
+            deliver(Ok(Event::new(EventKind::Any).add_path(note.clone())));
+            assert!(gate.open());
+            let described = format!("{change:?}");
+            deliver(change.map(|event| event.add_path(note.clone())));
+            assert!(
+                overflow.load(Ordering::Acquire),
+                "{described} was dropped silently"
+            );
+            assert!(!gate.open(), "{described} overflowed with the gate open");
+            assert!(receiver.try_recv().is_ok());
+        }
     }
 
     #[test]
