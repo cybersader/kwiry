@@ -25,7 +25,8 @@ import {
   InPluginLexicalBackend,
   type InPluginBackendStartupObservation,
 } from "./backends/in-plugin-lexical-backend";
-import { createInPluginCacheOptions } from "./cache/build-cache-options";
+import { createInPluginCacheCustody, type InPluginCacheCustody } from "./cache/build-cache-options";
+import type { VaultCacheDeletion } from "./cache/local-cache-store";
 import { hasDaemonTokenFileSupport, readDaemonToken } from "./credentials";
 import { createProductionDesktopDiagnosticsExportHost } from "./diagnostics/desktop-export-host";
 import type { DiagnosticsExportResult } from "./diagnostics/export-contract";
@@ -68,6 +69,8 @@ import { SOURCE_FORMATS } from "./worker/protocol";
 import {
   AUTOMATIC_BACKEND_PROFILE,
   DEFAULT_SETTINGS,
+  DERIVED_DATA_DELETED_MESSAGE,
+  type DerivedDataDeletionReason,
   loadSettings,
   storedBackendProfileChosen,
   type DiagnosticsLogLevel,
@@ -84,6 +87,11 @@ const obsidianTransport: Transport = async ({ url, method, headers, body }) => {
 };
 
 const VAULT_ACTIVITY_INTERVAL_MS = 5_000;
+const DERIVED_DATA_RECORD_FAILED =
+  `Kwiry: ${DERIVED_DATA_DELETED_MESSAGE} The plugin settings could not record this.`;
+const DERIVED_DATA_DELETE_FAILED =
+  "Kwiry: This workspace's policy does not allow stored indexes, but the local index cache "
+  + "could not be deleted. It will be tried again at the next start.";
 
 export default class KwiryPlugin extends Plugin {
   settings: KwiryPluginSettings = DEFAULT_SETTINGS;
@@ -103,6 +111,12 @@ export default class KwiryPlugin extends Plugin {
   private layoutReady = false;
   /** The running in-plugin backend keeps a persistent cache. */
   private inPluginCacheActive = false;
+  /** Owns every persistent cache store this page opens, and deletes the cache. */
+  private cacheCustody: InPluginCacheCustody | null = null;
+  /** Deletions run one after another, never two at once. */
+  private derivedDataDeletion: Promise<void> = Promise.resolve();
+  /** Settles when `onload` has finished, so a deletion never records into half-loaded settings. */
+  private loadFinished: Promise<void> = Promise.resolve();
   private settingTab: KwirySettingTab | null = null;
   private savingBackendProfile = false;
   private settingsWrites = Promise.resolve();
@@ -134,6 +148,16 @@ export default class KwiryPlugin extends Plugin {
   async onload(): Promise<void> {
     const pluginEpoch = ++this.pluginEpoch;
     this.startupTimeline = this.createStartupTimeline(pluginEpoch);
+    let finishLoad!: () => void;
+    this.loadFinished = new Promise((resolve) => { finishLoad = resolve; });
+    try {
+      await this.loadPlugin(pluginEpoch);
+    } finally {
+      finishLoad();
+    }
+  }
+
+  private async loadPlugin(pluginEpoch: number): Promise<void> {
     await this.diagnostics.capture("info", "plugin.load", { pluginEpoch }, async (event) => {
       try {
         const storedData: unknown = await this.loadData();
@@ -146,6 +170,8 @@ export default class KwiryPlugin extends Plugin {
         this.backendProfileChosen = storedBackendProfileChosen(storedData);
         this.settings = loadSettings(storedData, this.daemonBackendAvailable,
           !this.backendProfileChosen && hostSearchSituation() === "available");
+        // Before the first policy look: a stricter first answer deletes through it.
+        this.cacheCustody = createInPluginCacheCustody(this.app.vault);
         this.localIndexing = new LocalIndexingWatch((state) => this.onLocalIndexingChanged(state, pluginEpoch));
         this.localIndexing.refresh();
         this.hostEvents?.abort();
@@ -178,7 +204,7 @@ export default class KwiryPlugin extends Plugin {
             // Under a host, local indexing may keep nothing beyond the page:
             // the persistent cache is switched off explicitly, not by capability.
             const cache = this.localIndexing?.state.kind === "ungoverned"
-              ? createInPluginCacheOptions(this.app.vault, this.requireSourcePolicyHash())
+              ? this.cacheCustody?.options(this.requireSourcePolicyHash())
               : undefined;
             this.inPluginCacheActive = cache !== undefined;
             const activationEpoch = this.activationEpoch;
@@ -566,20 +592,94 @@ export default class KwiryPlugin extends Plugin {
   private onLocalIndexingChanged(state: LocalIndexingState, pluginEpoch: number): void {
     if (pluginEpoch !== this.pluginEpoch) return;
     this.settingTab?.redrawIfShown();
-    if (!this.layoutReady) return;
+    const teardown = this.applyLocalIndexing(state);
+    // Memory-only is the baseline under a host: any index this plugin stored on
+    // disk, including one saved before the first answer arrived, is deleted on
+    // the first stricter answer and on every later change to one.
+    if (state.kind === "memory_only" || state.kind === "refused") {
+      this.deleteDerivedDataForPolicy(state.kind === "refused" ? "policy_refuse" : "policy_memory_only",
+        teardown, pluginEpoch);
+    }
+  }
+
+  /** Returns the backend stop or restart this answer started, if any. */
+  private applyLocalIndexing(state: LocalIndexingState): Promise<void> | undefined {
+    if (!this.layoutReady) return undefined;
     const running = this.activeBackendIdentity?.profile === "in_plugin";
-    if (this.settings.backendProfile !== "in_plugin" && !running) return;
+    if (this.settings.backendProfile !== "in_plugin" && !running) return undefined;
     // Stopping is never deferred, not even while a backend switch is saving:
     // it supersedes any activation in flight, and every activation re-reads policy.
     if (state.kind === "refused" || (state.kind === "pending" && this.inPluginCacheActive)) {
       // An unanswered policy cannot permit the persistent cache; a plain re-check
       // (pending with no cache) keeps an in-memory index running.
-      void this.stopInPluginForPolicy(state);
-    } else if (state.kind === "memory_only" && !this.savingBackendProfile
+      return this.stopInPluginForPolicy(state);
+    }
+    if (state.kind === "memory_only" && !this.savingBackendProfile
       && this.settings.backendProfile === "in_plugin" && (!running || this.inPluginCacheActive)) {
       // Start what waited for the answer, or restart without the persistent cache.
-      void this.activateBackendProfile();
+      return this.activateBackendProfile();
     }
+    return undefined;
+  }
+
+  /// Deletes this vault's stored index cache after the backend that used it has
+  /// stopped. The custody then closes every store this page opened and waits
+  /// for writes already queued on them, so nothing is deleted under a write.
+  private deleteDerivedDataForPolicy(
+    reason: DerivedDataDeletionReason,
+    teardown: Promise<void> | undefined,
+    pluginEpoch: number,
+  ): void {
+    const custody = this.cacheCustody;
+    if (custody === null) return;
+    this.derivedDataDeletion = this.derivedDataDeletion.then(async () => {
+      await teardown?.catch(() => undefined);
+      await this.loadFinished;
+      let outcome: VaultCacheDeletion;
+      try {
+        outcome = await custody.deleteForPolicy();
+      } catch {
+        outcome = { kind: "failed" };
+      }
+      this.recordDerivedDataDeletion(outcome);
+      // A browser tab or a vault without a disk cache holds nothing: nothing to report.
+      if (outcome.kind === "absent" || outcome.kind === "unavailable") return;
+      if (outcome.kind !== "deleted") {
+        if (pluginEpoch === this.pluginEpoch) new Notice(DERIVED_DATA_DELETE_FAILED);
+        return;
+      }
+      // A fact about this plugin's own data, not a backend choice: recording it
+      // does not conflict with the rule that only a person's explicit choices are
+      // persisted. `persistSettings` still stores an automatic backend as automatic.
+      this.settings.derivedDataDeleted = { at: new Date().toISOString(), reason };
+      this.settingTab?.redrawIfShown();
+      try {
+        await this.saveSettings();
+      } catch {
+        // The deletion stands; only the record of it could not be saved.
+        if (pluginEpoch === this.pluginEpoch) new Notice(DERIVED_DATA_RECORD_FAILED);
+      }
+    });
+  }
+
+  private recordDerivedDataDeletion(outcome: VaultCacheDeletion): void {
+    void this.diagnostics.capture(
+      outcome.kind === "deleted" || outcome.kind === "absent" || outcome.kind === "unavailable"
+        ? "info" : "warn",
+      "index.lifecycle",
+      {
+        profile: "in_plugin",
+        subsystem: "cache_store",
+        operation: "discard",
+        outcome: outcome.kind === "deleted" ? "discarded"
+          : outcome.kind === "absent" || outcome.kind === "unavailable" ? "skipped" : "failed",
+        ...(outcome.kind === "unavailable" ? { code: outcome.reason }
+          : outcome.kind === "locked" ? { code: "locked" }
+            : outcome.kind === "refused" ? { code: "unsafe_path" }
+              : outcome.kind === "failed" ? { code: "discard_failed" } : {}),
+      },
+      () => undefined,
+    );
   }
 
   private async stopInPluginForPolicy(state: LocalIndexingState): Promise<void> {
