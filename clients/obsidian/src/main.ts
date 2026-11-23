@@ -49,7 +49,13 @@ import type {
 } from "./diagnostics/log";
 import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
 import { LatestRequestEpoch } from "./latest-request-epoch";
-import { HOST_SEARCH_STARTING, hostSearchSituation, hostSearchSituationMessage } from "./host-search";
+import {
+  HOST_SEARCH_STARTING,
+  hostInvalidationMessage,
+  hostSearchSituation,
+  hostSearchSituationMessage,
+  lookupHostSearch,
+} from "./host-search";
 import {
   HOST_AVAILABLE_EVENT,
   LocalIndexingWatch,
@@ -103,6 +109,8 @@ export default class KwiryPlugin extends Plugin {
   private readonly backendInvalidationCallbacks = new Set<() => void>();
   private readonly hostSearchModals = new Set<HostSearchModal>();
   private hostActivationFailed = false;
+  /** Stops following the host search service; set only while host search is active. */
+  private hostStatusFollow: (() => void) | null = null;
   /** True only when a person chose the backend. An automatic choice is
    * recomputed at every start and never saved. */
   private backendProfileChosen = false;
@@ -584,7 +592,10 @@ export default class KwiryPlugin extends Plugin {
     // After the profile is settled, so a policy answer cannot restart a backend being replaced.
     this.localIndexing?.refresh();
     if (switchToHost && this.layoutReady) void this.activateBackendProfile();
-    else if (this.layoutReady) void this.refreshStatus();
+    else if (this.layoutReady) {
+      this.followHostStatus(this.pluginEpoch, this.activationEpoch);
+      void this.refreshStatus();
+    }
     this.settingTab?.redrawIfShown();
   }
 
@@ -781,6 +792,7 @@ export default class KwiryPlugin extends Plugin {
     const changed = this.activeBackendIdentity?.instanceId !== identity?.instanceId;
     this.activeBackendIdentity = identity;
     if (changed) {
+      this.releaseHostStatus();
       this.closeHostSearchModals();
       for (const callback of this.backendInvalidationCallbacks) callback();
     }
@@ -870,6 +882,7 @@ export default class KwiryPlugin extends Plugin {
     activationEpoch: number,
   ): void {
     this.setActiveBackendIdentity(backend.identity);
+    this.followHostStatus(pluginEpoch, activationEpoch);
     this.lastDiagnosticStatus = "";
     this.statusUnsubscribe?.();
     this.statusUnsubscribe = "search" in backend ? backend.subscribeStatus?.((status) => {
@@ -879,6 +892,40 @@ export default class KwiryPlugin extends Plugin {
       this.recordBackendStatus(status, pluginEpoch, activationEpoch);
       this.setStatusBarText(formatStatus(status));
     }) ?? null : null;
+  }
+
+  /// While host search is the active backend, listen for the service's
+  /// invalidations so the status bar never contradicts the search dialog: each
+  /// one refreshes the status at once instead of at the next poll. Like the
+  /// dialog, a withdrawn or unknown reason releases the service; the
+  /// provider-arrived event follows it again.
+  private followHostStatus(pluginEpoch: number, activationEpoch: number): void {
+    if (this.hostStatusFollow !== null || !this.isCurrent(pluginEpoch, activationEpoch)
+      || this.activeBackendIdentity?.profile !== "host") return;
+    const found = lookupHostSearch();
+    if (found.situation !== "available") return;
+    let live = true;
+    let stop: (() => void) | null = null;
+    const release = () => {
+      if (!live) return;
+      live = false;
+      if (this.hostStatusFollow === release) this.hostStatusFollow = null;
+      stop?.();
+    };
+    stop = found.session.onInvalidated((reason) => {
+      if (!live) return;
+      if (hostInvalidationMessage(reason).detach) release();
+      void this.refreshStatus(pluginEpoch, activationEpoch);
+    });
+    // An invalidation delivered during registration has already released it.
+    if (live) this.hostStatusFollow = release;
+    else stop();
+  }
+
+  private releaseHostStatus(): void {
+    const release = this.hostStatusFollow;
+    this.hostStatusFollow = null;
+    release?.();
   }
 
   private async openSearch(): Promise<void> {

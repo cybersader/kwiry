@@ -1212,9 +1212,10 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(harness.pathLookups).toEqual([]);
     expect(harness.openedPaths).toEqual([]);
     expect(harness.forbidden).toEqual([]);
-    // A successful open closes the modal and releases its invalidation listener.
+    // A successful open closes the modal and releases its invalidation listener;
+    // the one left is the plugin's status listener.
     expect(modal.contentEl.text).toBe("");
-    expect(host.listeners.size).toBe(0);
+    expect(host.listeners.size).toBe(1);
     plugin.onunload();
   });
 
@@ -1322,9 +1323,9 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
   });
 
   it.each([
-    ["access", "You no longer have access to these results.", 2],
-    ["workspace", "The workspace changed. Search again.", 2],
-    ["lifecycle", "These results expired. Search again.", 2],
+    ["access", "You no longer have access to these results.", 3],
+    ["workspace", "The workspace changed. Search again.", 3],
+    ["lifecycle", "These results expired. Search again.", 3],
     ["withdrawn", "Host search is no longer offered here.", 0],
     ["a-future-reason", "These results expired. Search again.", 0],
   ])("an invalidation (%s) clears every open modal and aborts calls in flight", async (reason, message, listenersAfter) => {
@@ -1334,8 +1335,9 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     const plugin = await startedHost();
     const one = await openHost();
     const two = await openHost();
-    // Each modal registers its listener when it opens, before the first page.
-    expect(host.listeners.size).toBe(2);
+    // Each modal registers its listener when it opens, before the first page;
+    // the plugin holds one more for its status.
+    expect(host.listeners.size).toBe(3);
     expect(host.search).not.toHaveBeenCalled();
     submit(one, QUERY);
     await settled();
@@ -1356,8 +1358,34 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(host.listeners.size).toBe(listenersAfter);
     one.close();
     two.close();
-    expect(host.listeners.size).toBe(0);
+    expect(host.listeners.size).toBe(listenersAfter === 0 ? 0 : 1);
     plugin.onunload();
+    expect(host.listeners.size).toBe(0);
+  });
+
+  it("the status bar follows a withdrawal and a returning provider at once, without the poll", async () => {
+    const host = scriptedHost();
+    const plugin = await startedHost();
+    expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`);
+    // The plugin follows the service only to keep its status current.
+    expect(host.listeners.size).toBe(1);
+    removeSlot();
+    host.invalidate("withdrawn");
+    await settled();
+    expect(harness.statusBarText).toBe(`Kwiry: ${NO_HOST}`);
+    expect({ listeners: host.listeners.size, pending: clock.pending }).toEqual({ listeners: 0, pending: [] });
+    host.install();
+    announceProvider();
+    await settled();
+    expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`);
+    expect(host.listeners.size).toBe(1);
+    // A non-withdrawn invalidation keeps following the same service.
+    host.invalidate("lifecycle");
+    await settled();
+    expect({ text: harness.statusBarText, listeners: host.listeners.size })
+      .toEqual({ text: `Kwiry: ${HOST_LABEL}`, listeners: 1 });
+    plugin.onunload();
+    expect(host.listeners.size).toBe(0);
   });
 
   it("nothing is saved from presence or absence across two launches", async () => {
