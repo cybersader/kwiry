@@ -659,13 +659,19 @@ export default class KwiryPlugin extends Plugin {
         if (pluginEpoch === this.pluginEpoch) new Notice(DERIVED_DATA_DELETE_FAILED);
         return;
       }
+      // Unloaded while the deletion ran: a re-enabled instance owns the settings
+      // now, so this one records nothing and shows nothing.
+      if (pluginEpoch !== this.pluginEpoch) return;
       // A fact about this plugin's own data, not a backend choice: recording it
       // does not conflict with the rule that only a person's explicit choices are
       // persisted. `persistSettings` still stores an automatic backend as automatic.
       this.settings.derivedDataDeleted = { at: new Date().toISOString(), reason };
       this.settingTab?.redrawIfShown();
       try {
-        await this.saveSettings();
+        // The epoch is the one this deletion started in, not the current one.
+        await this.enqueueSettingsWrite(async () => {
+          if (pluginEpoch === this.pluginEpoch) await this.persistSettings(this.settings);
+        });
       } catch {
         // The deletion stands; only the record of it could not be saved.
         if (pluginEpoch === this.pluginEpoch) new Notice(DERIVED_DATA_RECORD_FAILED);

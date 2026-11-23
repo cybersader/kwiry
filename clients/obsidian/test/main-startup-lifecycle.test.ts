@@ -2067,6 +2067,21 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       plugin.onunload();
     });
 
+    it("N3: a deletion still running at unload records nothing and shows nothing", async () => {
+      harness.cacheOnDisk = true;
+      const gate = deferred<void>();
+      harness.beforeCacheDelete = () => gate.promise;
+      const { plugin } = await startInPlugin("without search", { value: "memory_only" });
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:delete:start"), { interval: 5 });
+      plugin.onunload();
+      gate.resolve();
+      await vi.waitFor(() => expect(harness.cacheEvents).toContain("cache:deleted"), { interval: 5 });
+      await settled();
+      await settled();
+      expect({ saved: harness.savedData, notices: harness.notices }).toEqual({ saved: [], notices: [] });
+      expect((plugin.settings as { derivedDataDeleted?: unknown }).derivedDataDeleted).toBeNull();
+    });
+
     it("a failed settings write shows a notice and the deletion stands", async () => {
       harness.cacheOnDisk = true;
       harness.beforeSave = async () => { throw new Error(RAW); };
