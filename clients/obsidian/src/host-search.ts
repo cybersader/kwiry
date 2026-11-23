@@ -3,8 +3,18 @@
 
 import { isVaultRelativePath } from "./vault-path";
 
-// Provisional host global for the draft capability lookup.
-export const HOST_GLOBAL = "openclast";
+// Provisional name of the host services slot on `window`. The contract fixes the
+// final name later; change it only here.
+export const HOST_SERVICES_SLOT = "obsidianHostServices";
+
+/// A host may install its services slot after this plugin loads, for example
+/// from another plugin that loads later. A fresh install keeps checking for this
+/// long after layout-ready before it falls back. Plugin onload calls have all run
+/// by layout-ready, so the window only has to cover a provider that installs its
+/// slot after asynchronous setup. Five seconds covers that with margin and delays
+/// a fallback's first index build by at most five seconds.
+export const LATE_HOST_WINDOW_MS = 5_000;
+export const LATE_HOST_CHECK_MS = 250;
 const NOTICE = "Results may be incomplete.";
 
 export const HOST_SEARCH_LABEL = "Host search · Lexical";
@@ -52,14 +62,14 @@ class HostSearchFault extends Error {
   constructor(readonly code: string) { super(code); }
 }
 
-// Look in the plugin realm, not the active popout.
-export function lookupHostSearch(realm: object = globalThis): HostSearchOperations | null {
+// Look on the plugin realm's window, not the active popout. An absent slot or
+// capability is a normal answer.
+export function lookupHostSearch(realm: object = window): HostSearchOperations | null {
   try {
-    const root = record((realm as Record<string, unknown>)[HOST_GLOBAL]);
-    const capabilities = record(root?.capabilities);
-    const get = capabilities?.get;
+    const slot = record((realm as Record<string, unknown>)[HOST_SERVICES_SLOT]);
+    const get = slot?.get;
     if (typeof get !== "function") return null;
-    const wire = record(Reflect.apply(get, capabilities, ["search", 1]));
+    const wire = record(Reflect.apply(get, slot, ["search", 1]));
     const page = wire?.page as WireSearchCapability["page"] | undefined;
     const resolveNote = wire?.resolveNote as WireSearchCapability["resolveNote"] | undefined;
     if (typeof page !== "function" || typeof resolveNote !== "function") return null;
@@ -82,6 +92,37 @@ export function lookupHostSearch(realm: object = globalThis): HostSearchOperatio
   } catch {
     return null;
   }
+}
+
+/// Checks now, then every `checkMs`, until the capability appears or `windowMs`
+/// has passed, and reports the outcome once. Nothing runs after the window
+/// closes. The returned function cancels a pending watch without reporting.
+export function watchForHostSearch(
+  report: (found: boolean) => void,
+  { windowMs = LATE_HOST_WINDOW_MS, checkMs = LATE_HOST_CHECK_MS } = {},
+): () => void {
+  let done = false;
+  let tick: number | null = null;
+  const stop = () => {
+    done = true;
+    window.clearTimeout(deadline);
+    if (tick !== null) window.clearTimeout(tick);
+    tick = null;
+  };
+  const finish = (found: boolean) => {
+    if (done) return;
+    stop();
+    report(found);
+  };
+  const check = () => {
+    tick = null;
+    if (done) return;
+    if (lookupHostSearch() !== null) finish(true);
+    else tick = window.setTimeout(check, checkMs);
+  };
+  const deadline = window.setTimeout(() => finish(lookupHostSearch() !== null), windowMs);
+  check();
+  return stop;
 }
 
 function record(value: unknown): Record<string, unknown> | null {

@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BackendManager } from "../src/backend-manager";
 import { HostSearchBackend } from "../src/backends/host-search-backend";
-import { HOST_GLOBAL, hostSearchFailure, lookupHostSearch } from "../src/host-search";
+import { HOST_SERVICES_SLOT, hostSearchFailure, lookupHostSearch, watchForHostSearch } from "../src/host-search";
 import { createPublicSearchApi } from "../src/public-api";
 
 const page = vi.fn();
 const resolveNote = vi.fn();
 
 function hostRealm(implementation: unknown) {
-  return { [HOST_GLOBAL]: { capabilities: { get: () => implementation } } };
+  return { [HOST_SERVICES_SLOT]: { get: () => implementation } };
 }
 
 function unexpectedRankedFactory(): never {
@@ -33,7 +33,7 @@ describe("host capability lifecycle", () => {
 
   it("fails closed if the lookup throws", () => {
     expect(lookupHostSearch({
-      [HOST_GLOBAL]: { capabilities: { get() { throw new Error("stub lookup failure"); } } },
+      [HOST_SERVICES_SLOT]: { get() { throw new Error("stub lookup failure"); } },
     })).toBeNull();
   });
 
@@ -60,7 +60,7 @@ describe("host capability lifecycle", () => {
         return { path: "Mauve/Lynx.md", futureField: "not part of v1" };
       },
     };
-    const host = lookupHostSearch({ [HOST_GLOBAL]: { capabilities } });
+    const host = lookupHostSearch({ [HOST_SERVICES_SLOT]: capabilities });
     await expect(host?.page("mauve lynx", signal)).resolves.toEqual({
       roomLabel: null, rows: [], continuation: null, status: "Host search is being prepared.",
       notice: "Results may be incomplete.",
@@ -119,7 +119,7 @@ describe("host capability lifecycle", () => {
   });
 
   it.each([false, true])("never constructs another backend or dispatches through the public API (supported=%s)", async (supported) => {
-    vi.stubGlobal(HOST_GLOBAL, hostRealm(supported ? { page, resolveNote } : undefined)[HOST_GLOBAL]);
+    vi.stubGlobal("window", hostRealm(supported ? { page, resolveNote } : undefined));
     const daemon = vi.fn(unexpectedRankedFactory);
     const in_plugin = vi.fn(unexpectedRankedFactory);
     const host = vi.fn((id: string) => new HostSearchBackend(id));
@@ -138,5 +138,74 @@ describe("host capability lifecycle", () => {
     expect(resolveNote).not.toHaveBeenCalled();
     await manager.dispose();
     expect(await backend.status()).toMatchObject({ available: false });
+  });
+});
+
+describe("late host provider watch", () => {
+  const realm: Record<string, unknown> = {};
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    for (const key of Object.keys(realm)) Reflect.deleteProperty(realm, key);
+    Object.assign(realm, {
+      setTimeout: (callback: () => void, ms: number) => setTimeout(callback, ms),
+      clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
+    });
+    vi.stubGlobal("window", realm);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const provide = () => { realm[HOST_SERVICES_SLOT] = { get: () => ({ page, resolveNote }) }; };
+
+  it("reports a present capability synchronously and leaves no timers", () => {
+    provide();
+    const report = vi.fn();
+    watchForHostSearch(report);
+    expect(report.mock.calls).toEqual([[true]]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("reports a capability that appears inside the window at the next check", () => {
+    const report = vi.fn();
+    watchForHostSearch(report, { windowMs: 1_000, checkMs: 100 });
+    vi.advanceTimersByTime(450);
+    provide();
+    expect(report).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(50);
+    expect(report.mock.calls).toEqual([[true]]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("reports absence once at the deadline and stops checking", () => {
+    const report = vi.fn();
+    watchForHostSearch(report, { windowMs: 1_000, checkMs: 100 });
+    vi.advanceTimersByTime(1_000);
+    expect(report.mock.calls).toEqual([[false]]);
+    expect(vi.getTimerCount()).toBe(0);
+    provide();
+    vi.advanceTimersByTime(10_000);
+    expect(report.mock.calls).toEqual([[false]]);
+  });
+
+  it("ignores a slot on globalThis that is not on window", () => {
+    vi.stubGlobal(HOST_SERVICES_SLOT, { get: () => ({ page, resolveNote }) });
+    const report = vi.fn();
+    watchForHostSearch(report, { windowMs: 200, checkMs: 100 });
+    vi.advanceTimersByTime(200);
+    expect(report.mock.calls).toEqual([[false]]);
+  });
+
+  it("cancels without reporting", () => {
+    const report = vi.fn();
+    const cancel = watchForHostSearch(report, { windowMs: 1_000, checkMs: 100 });
+    cancel();
+    provide();
+    vi.advanceTimersByTime(2_000);
+    expect(report).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
