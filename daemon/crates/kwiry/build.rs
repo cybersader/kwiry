@@ -1,5 +1,7 @@
 //! Embed the build identity that `engine` reports. Never fails: without git or
-//! a commit in the environment, the commit is reported as unknown.
+//! a commit in the environment, the commit is reported as unknown. An empty
+//! `KWIRY_GIT_COMMIT`/`GIT_COMMIT` counts as unset. A CI build of a pull
+//! request records the commit it checked out, typically the merge commit.
 use std::path::Path;
 use std::process::Command;
 
@@ -8,7 +10,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KWIRY_GIT_COMMIT");
     let commit = ["KWIRY_GIT_COMMIT", "GIT_COMMIT"]
         .iter()
-        .find_map(|name| std::env::var(name).ok())
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
         .or_else(git_head)
         .map(|commit| commit.trim().to_ascii_lowercase())
         .filter(|commit| commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()))

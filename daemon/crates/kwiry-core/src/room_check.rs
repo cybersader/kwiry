@@ -324,21 +324,103 @@ pub fn check_room(
     })
 }
 
+/// Walk messages the classifier recognises, exactly as `room_walk.rs` emits
+/// them. A test pins each one to its producer, so a renamed message fails
+/// there instead of silently changing class here.
+const WALK_MESSAGES: &[(&str, RoomCheckReason)] = &[
+    (
+        "entry excluded by room boundary",
+        RoomCheckReason::BoundaryEscape,
+    ),
+    (
+        "entry is not a regular file or directory",
+        RoomCheckReason::SpecialFile,
+    ),
+    ("hard-linked file excluded", RoomCheckReason::HardLink),
+    (
+        "file exceeds source size budget",
+        RoomCheckReason::OverSizeBudget,
+    ),
+    (
+        "directory entry is not valid UTF-8",
+        RoomCheckReason::NonUtf8Name,
+    ),
+    // A directory, the root included, that could not be reopened, changed
+    // identity or could not be listed: a read failure, not a boundary.
+    (
+        "directory could not be opened within the room",
+        RoomCheckReason::IoUnavailable,
+    ),
+    (
+        "directory could not be enumerated safely",
+        RoomCheckReason::IoUnavailable,
+    ),
+    (
+        "entry could not be opened safely",
+        RoomCheckReason::IoUnavailable,
+    ),
+    (
+        "entry metadata could not be read safely",
+        RoomCheckReason::IoUnavailable,
+    ),
+];
+
+/// Exact per-source warnings, as `chunk.rs`, `formats/mod.rs`,
+/// `frontmatter.rs` and `source.rs` emit them.
+const OUTCOME_MESSAGES: &[(&str, RoomCheckReason)] = &[
+    (
+        "host_read: source changed during bounded read",
+        RoomCheckReason::ChangedDuringRead,
+    ),
+    (
+        "host_read: source is unavailable",
+        RoomCheckReason::IoUnavailable,
+    ),
+    (
+        "host_read: oversized source could not be recorded",
+        RoomCheckReason::IoUnavailable,
+    ),
+    (
+        "skipped binary file containing NUL bytes",
+        RoomCheckReason::NulByte,
+    ),
+    (
+        "invalid YAML frontmatter",
+        RoomCheckReason::InvalidFrontmatter,
+    ),
+    (
+        "path must be a normalized vault-relative forward-slash file path",
+        RoomCheckReason::InvalidPath,
+    ),
+    (
+        "prepared source exceeds the heading-path memory limit",
+        RoomCheckReason::HeadingPathLimit,
+    ),
+    (
+        "prepared source exceeds the chunk inventory limit",
+        RoomCheckReason::ChunkInventoryLimit,
+    ),
+];
+
+/// Per-source warnings that carry a formatted suffix, matched by prefix.
+const OUTCOME_PREFIXES: &[(&str, RoomCheckReason)] = &[
+    ("frontmatter exceeds ", RoomCheckReason::FrontmatterOverSize),
+    ("skipped non-UTF-8 file", RoomCheckReason::NonUtf8Content),
+    ("skipped file larger than ", RoomCheckReason::OverSizeBudget),
+];
+
 fn walk_reason(message: &str, root: bool) -> RoomCheckReason {
-    use RoomCheckReason as R;
-    match message {
-        "entry excluded by room boundary" => R::BoundaryEscape,
-        "entry is not a regular file or directory" => R::SpecialFile,
-        "hard-linked file excluded" => R::HardLink,
-        "file exceeds source size budget" => R::OverSizeBudget,
-        "directory entry is not valid UTF-8" => R::NonUtf8Name,
-        _ if root => R::RoomBoundary,
-        "directory could not be opened within the room"
-        | "directory could not be enumerated safely"
-        | "entry could not be opened safely"
-        | "entry metadata could not be read safely" => R::IoUnavailable,
-        _ => R::Unclassified,
-    }
+    WALK_MESSAGES
+        .iter()
+        .find(|(known, _)| *known == message)
+        .map(|(_, reason)| *reason)
+        .unwrap_or(if root {
+            // Every other root-level failure is the root itself refusing:
+            // missing, not canonical, shared, overlapping or misplaced.
+            RoomCheckReason::RoomBoundary
+        } else {
+            RoomCheckReason::Unclassified
+        })
 }
 
 fn classify_outcome(
@@ -359,21 +441,20 @@ fn classify_outcome(
         .warning
         .as_ref()
         .map_or("", |warning| warning.message.as_str());
-    let reason = match message {
-        "host_read: source changed during bounded read" => R::ChangedDuringRead,
-        "host_read: source is unavailable"
-        | "host_read: oversized source could not be recorded" => R::IoUnavailable,
-        "skipped binary file containing NUL bytes" => R::NulByte,
-        "invalid YAML frontmatter" => R::InvalidFrontmatter,
-        _ if message.starts_with("frontmatter exceeds ") => R::FrontmatterOverSize,
-        "path must be a normalized vault-relative forward-slash file path" => R::InvalidPath,
-        "prepared source exceeds the heading-path memory limit" => R::HeadingPathLimit,
-        "prepared source exceeds the chunk inventory limit" => R::ChunkInventoryLimit,
-        _ if message.starts_with("skipped non-UTF-8 file") => R::NonUtf8Content,
-        _ if message.starts_with("skipped file larger than ") => R::OverSizeBudget,
-        _ if outcome.kind == FileOutcomeKind::TransientError => R::IoUnavailable,
-        _ if outcome.coverage != ExtractionCoverage::IndexedComplete => R::IncompleteExtraction,
-        _ => R::Unclassified,
+    let known = OUTCOME_MESSAGES
+        .iter()
+        .find(|(known, _)| *known == message)
+        .or_else(|| {
+            OUTCOME_PREFIXES
+                .iter()
+                .find(|(prefix, _)| message.starts_with(prefix))
+        })
+        .map(|(_, reason)| *reason);
+    let reason = match known {
+        Some(reason) => reason,
+        None if outcome.kind == FileOutcomeKind::TransientError => R::IoUnavailable,
+        None if outcome.coverage != ExtractionCoverage::IndexedComplete => R::IncompleteExtraction,
+        None => R::Unclassified,
     };
     let mut finding = RoomCheckFinding::new(path, reason);
     if matches!(reason, R::HeadingPathLimit | R::ChunkInventoryLimit) {
@@ -413,6 +494,48 @@ fn section_usage(room: &RoomRead<'_>, relative: &str) -> Option<SectionUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every message the classifier matches must still be emitted, verbatim,
+    /// by the code that produces it.
+    #[test]
+    fn classified_messages_are_pinned_to_their_producers() {
+        let walk = include_str!("room_walk.rs");
+        let sources = [
+            include_str!("chunk.rs"),
+            include_str!("formats/mod.rs"),
+            include_str!("frontmatter.rs"),
+            include_str!("source.rs"),
+            include_str!("extract.rs"),
+        ]
+        .concat();
+        for (message, _) in WALK_MESSAGES {
+            assert!(walk.contains(&format!("\"{message}\"")), "{message}");
+        }
+        for (message, _) in OUTCOME_MESSAGES {
+            assert!(sources.contains(&format!("\"{message}\"")), "{message}");
+        }
+        for (prefix, _) in OUTCOME_PREFIXES {
+            assert!(sources.contains(&format!("\"{prefix}")), "{prefix}");
+        }
+        // Root failures that stay structural; the transient ones are above.
+        for message in [
+            "room root could not be opened safely",
+            "room root path is not canonical",
+            "room root is shared with another registration",
+            "walk encountered another registered room root",
+        ] {
+            assert!(walk.contains(&format!("\"{message}\"")), "{message}");
+            assert_eq!(walk_reason(message, true), RoomCheckReason::RoomBoundary);
+        }
+        assert_eq!(
+            walk_reason("directory could not be opened within the room", true),
+            RoomCheckReason::IoUnavailable
+        );
+        assert_eq!(
+            walk_reason("directory could not be enumerated safely", true),
+            RoomCheckReason::IoUnavailable
+        );
+    }
 
     #[test]
     fn reason_names_are_unique_and_snake_case() {

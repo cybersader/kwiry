@@ -349,6 +349,22 @@ fn checkroom_reports_offenders_without_content_and_uses_stable_exit_codes() {
     // Usage and setup errors.
     let missing = temporary.path().join("missing");
     checkroom(&[missing.to_str().unwrap()]).code(2);
+    // A non-canonical spelling of a real room is a usage error, not a verdict.
+    checkroom(&[&format!("{room_arg}/")])
+        .code(2)
+        .stderr(predicates::str::contains("room path must be canonical"));
+    checkroom(&[&format!("{room_arg}/../room")])
+        .code(2)
+        .stderr(predicates::str::contains("room path must be canonical"));
+    // A canonically spelled path through a symbolic link is the daemon's
+    // refusal, reported as a structural verdict.
+    let alias = temporary.path().join("alias");
+    std::os::unix::fs::symlink(&room, &alias).unwrap();
+    checkroom(&[alias.to_str().unwrap()])
+        .code(1)
+        .stdout(predicates::str::contains(
+            "walk_defect .: room_boundary [structural]",
+        ));
     checkroom(&[]).code(2);
     let config = temporary.path().join("config.toml");
     checkroom(&[

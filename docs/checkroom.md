@@ -15,6 +15,16 @@ admitted source through the same bounded, identity-checked reader, prepares it
 with the same extractor and chunker, and applies the same per-source predicate
 ([`clean_snapshot_input`](../daemon/crates/kwiry-core/src/model.rs), line 900).
 
+What is shared, and what is not: the walker, the reader, the parser and
+chunker, and the per-file test are the daemon's own code, and the governed
+build's room-level decision is made by `prepare_room` itself. The live daemon's
+room-level labelling decision during reconcile is made separately in
+[`runtime.rs`](../daemon/crates/kwiry-core/src/runtime.rs) (`observe_vault`,
+around lines 1159–1290, and the label test around lines 2042–2048), which adds
+metadata reuse on top of the same walk and per-file test. That path is not
+shared code; it is covered by the agreement test's relabel pass, which forces a
+strict-hash walk through it on every fixture room.
+
 It builds no index, needs no data directory, takes no lock, uses no network and
 writes nothing. Linux only, as governed room ingestion is.
 
@@ -34,8 +44,10 @@ overlap with every other registered room, the data directory and the other
 Kwiry state paths, as the daemon checks it. The config must currently load.
 
 The room path should be the absolute, canonical path the config will name. A
-relative path is made absolute; a path through a symbolic link is reported as
-`room_boundary`, because the daemon refuses it.
+relative path is made absolute. A spelling the daemon would refuse — a
+trailing separator, `.`, `..` or a doubled separator — is a usage error (exit
+2), not a verdict. A canonically spelled path through a symbolic link is
+reported as `room_boundary` (exit 1), because the daemon refuses that root.
 
 There are no format or labelling knobs to pass: the set of admitted formats is
 fixed by the build, and certification always uses the `strict_hash` basis.
@@ -46,7 +58,7 @@ Exit codes:
 |---|---|
 | 0 | The room would be labelled. |
 | 1 | The room would not be labelled; see `offenders` and `walk_defects`. |
-| 2 | Usage or setup error: bad arguments, the room is not a directory, the config is missing or does not load, the `--vault` ID is not registered, or not Linux. |
+| 2 | Usage or setup error: bad arguments, a non-canonical room spelling, the room is not a directory, the config is missing or does not load, the `--vault` ID is not registered, or not Linux. |
 
 A panic prints a fixed line and exits with Rust's panic code (101).
 
@@ -104,8 +116,10 @@ the same build:
 - `version` — the `kwiry` crate version.
 - `commit` — the full 40-hex commit the binary was built from: taken from the
   `KWIRY_GIT_COMMIT` or `GIT_COMMIT` build environment variable, else from
-  `git rev-parse HEAD` at build time; `null` when neither is available. A
-  build never fails for lack of git.
+  `git rev-parse HEAD` at build time; `null` when neither is available. An
+  empty variable counts as unset. A build never fails for lack of git. A CI
+  build of a pull request records the commit CI checked out, typically the
+  merge commit rather than the branch head.
 - `build` — `<target triple>/<cargo profile>`.
 - `extraction_policy_fingerprint` — the fingerprint the daemon uses to bind
   prepared sources to this build's extractors.
@@ -129,6 +143,13 @@ Each finding carries a `class`:
 - `structural` — the room's shape withholds the label: a format, name, link,
   entry type or the root itself. Treat the copy as defective.
 
+Reasons are matched on the fixed messages the walker, reader and extractors
+emit. A unit test pins every matched message to the code that emits it, so a
+renamed message fails the build's tests rather than changing class silently.
+An unrecognised per-file message falls back to `io_unavailable` for a failed
+read, `incomplete_extraction` for any other non-complete extraction, and
+otherwise `unclassified`.
+
 A file has one reason. Where several apply, structural reasons win over
 content ones (a non-UTF-8 `.txt` file is `non_markdown_format`), so a
 `content` finding is never hiding a structural cause.
@@ -150,9 +171,9 @@ content ones (a non-UTF-8 `.txt` file is `non_markdown_format`), so a
 | `special_file` | structural | offenders | A socket, FIFO or device node. |
 | `boundary_escape` | structural | offenders | A symbolic link (to a file or a directory) or an entry on another filesystem. |
 | `non_utf8_name` | structural | walk_defects | The directory at `path` holds an entry whose name is not UTF-8. The name itself cannot be printed. |
-| `io_unavailable` | transient | either | An entry or directory could not be opened or read. |
+| `io_unavailable` | transient | either | An entry or directory — the room root included — could not be opened, listed or read, or a directory changed identity during the walk. |
 | `changed_during_read` | transient | offenders | The file changed while it was read. Check again on a quiescent copy. |
-| `room_boundary` | structural | walk_defects | The room root cannot be walked: missing, not canonical, shared with or overlapping another registered room, overlapping Kwiry state, not on its expected mount, or another registered room root found inside it. |
+| `room_boundary` | structural | walk_defects | The room root itself is refused: missing or unopenable, not canonical (for example a symbolic link), shared with or overlapping another registered room, overlapping Kwiry state, not on its expected mount, or another registered room root found inside it. |
 | `unclassified` | structural | either | Withheld for a reason this build does not classify. Treat as not labelled. |
 
 Names that start with `.` are skipped by the walk at every depth and never

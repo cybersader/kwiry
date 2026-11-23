@@ -1,6 +1,6 @@
 //! `kwiry checkroom`: the governed labelling pass, run offline and read-only
 //! over one room directory. No index, data directory, lock, network or write.
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use kwiry_core::{
@@ -70,6 +70,22 @@ fn setup(
         bail!("checkroom requires Linux, as governed room ingestion does");
     }
     let room = std::path::absolute(&args.room).context("room path cannot be made absolute")?;
+    // The daemon only walks a root spelled exactly as its canonical path. A
+    // trailing separator, `.`, `..` or a doubled separator is a spelling to
+    // fix, not a property of the room, so refuse it as a usage error. A path
+    // through a symbolic link is spelled canonically and is left to the walk,
+    // which reports it as `room_boundary`, as the daemon would refuse it.
+    let respelled: PathBuf = room.components().collect();
+    if respelled.as_os_str() != room.as_os_str()
+        || room
+            .components()
+            .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+    {
+        bail!(
+            "room path must be canonical (no trailing separator, `.` or `..`): {}",
+            room.display()
+        );
+    }
     if !room.is_dir() {
         bail!("room is not a directory: {}", room.display());
     }
