@@ -275,6 +275,26 @@ describe("local indexing watch", () => {
     watch.dispose();
   });
 
+  it.each([
+    ["a resync", { type: "resync" }],
+    ["an unknown event", { type: "a-future-event" }],
+  ])("withdrawal after %s keeps the last refuse answer, never the looser default", async (_name, event) => {
+    const host = policyHost({ value: "refuse", decidedBy: "organization" });
+    const watch = new LocalIndexingWatch(() => undefined, host.window);
+    watch.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(watch.state.kind).toBe("refused");
+    host.emit(event);
+    expect(watch.state.kind).toBe("pending");
+    delete host.window[HOST_SLOT_KEY];
+    host.invalidate("withdrawn");
+    expect(watch.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+    watch.refresh();
+    expect(watch.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+    watch.dispose();
+  });
+
   it("a refresh with the same service object does not subscribe twice", () => {
     const host = policyHost();
     const watch = new LocalIndexingWatch(() => undefined, host.window);
