@@ -1,7 +1,38 @@
-//! Stop only the requesting thread in the unmodified debug build; watchers,
-//! publisher, fresh requests and the runtime pool keep running. No production
-//! pause switch, HTTP hook, elapsed-delay assumption, or test signer bypass.
+//! Stop only the requesting thread; watchers, publisher, fresh requests and the
+//! runtime pool keep running. Two equivalent barriers drive one scenario: a
+//! debugger breakpoint on the unmodified debug build, and the test-only stall
+//! hook (`internal-stall-hook-test` feature, debug assertions, explicit env
+//! var). No production pause switch, HTTP hook, elapsed-delay assumption, or
+//! test signer bypass.
 use super::*;
+
+/// Holds exactly one search between opening its reader and searching it.
+trait Barrier {
+    fn pause(&mut self, lab: &Lab, q: &str) -> thread::JoinHandle<Value>;
+    fn release(&mut self, call: thread::JoinHandle<Value>) -> Value;
+}
+
+fn pinned_search(lab: &Lab, q: &str) -> thread::JoinHandle<Value> {
+    let addr = lab.address.clone();
+    let body = page(q, 20);
+    let headers = format!("{}{PROFILE}{MEDIA}", lab.auth(&[R], json!(20)));
+    thread::spawn(move || request_at(&addr, "POST", SEARCH, &headers, &body))
+}
+
+fn until(root: &Path, mut predicate: impl FnMut() -> bool, diagnostics: impl Fn() -> String) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "synthetic reader barrier not reached in {}: {}",
+        root.display(),
+        diagnostics()
+    );
+}
 
 struct Debugger {
     child: Child,
@@ -64,31 +95,25 @@ run --config control/config.toml --data-dir index-data serve --bind 127.0.0.1:0 
         lab.at = format_release_token_time(&lab.data);
         dbg
     }
-    fn until(&self, mut predicate: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if predicate() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        panic!(
-            "synthetic debugger barrier not reached: {} {}",
-            fs::read_to_string(self.root.join("debug.out")).unwrap(),
-            fs::read_to_string(self.root.join("debug.err")).unwrap()
-        );
+    fn until(&self, predicate: impl FnMut() -> bool) {
+        until(&self.root, predicate, || {
+            format!(
+                "{} {}",
+                fs::read_to_string(self.root.join("debug.out")).unwrap_or_default(),
+                fs::read_to_string(self.root.join("debug.err")).unwrap_or_default()
+            )
+        });
     }
     fn cmd(&mut self, cmd: &str) {
         writeln!(self.child.stdin.as_mut().unwrap(), "{cmd}").unwrap();
     }
+}
+impl Barrier for Debugger {
     fn pause(&mut self, lab: &Lab, q: &str) -> thread::JoinHandle<Value> {
         self.cmd("enable 1\nshell touch armed");
         self.until(|| self.root.join("armed").exists());
         fs::remove_file(self.root.join("armed")).unwrap();
-        let addr = lab.address.clone();
-        let body = page(q, 20);
-        let headers = format!("{}{PROFILE}{MEDIA}", lab.auth(&[R], json!(20)));
-        let call = thread::spawn(move || request_at(&addr, "POST", SEARCH, &headers, &body));
+        let call = pinned_search(lab, q);
         self.until(|| self.root.join("pinned").exists());
         fs::remove_file(self.root.join("pinned")).unwrap();
         call
@@ -123,6 +148,11 @@ fn governed_search_live_check_stalled_answering_reader() {
     }
     let mut lab = Lab::new();
     let mut dbg = Debugger::start(&mut lab);
+    stalled_answering_reader(&mut lab, &mut dbg);
+}
+
+/// Shared by both barriers so each must produce the same recorded wire family.
+fn stalled_answering_reader(lab: &mut Lab, dbg: &mut impl Barrier) {
     let mut cap = Capture::new();
     for (case, old_text, q, new_text, same_root) in [
         ("byte-identical-hits", true, "moonflower", true, false),
@@ -139,7 +169,7 @@ fn governed_search_live_check_stalled_answering_reader() {
         lab.config.vaults[0].snapshot_id = Some(LABEL_A.parse().unwrap());
         save_config(&lab.path, &lab.config).unwrap();
         wait_for(|| lab.query(q)["body"]["resource_snapshots"][0]["snapshot_id"] == LABEL_A);
-        let call = dbg.pause(&lab, q);
+        let call = dbg.pause(lab, q);
         if !same_root {
             let new = lab._root.path().join(format!("{case}-b"));
             fs::create_dir(&new).unwrap();
@@ -159,7 +189,7 @@ fn governed_search_live_check_stalled_answering_reader() {
         );
         cap.check(case, old, 200, "", true);
     }
-    let call = dbg.pause(&lab, "moonflower");
+    let call = dbg.pause(lab, "moonflower");
     // Publish the same tuple with a generic (not live-check) label. A fresh
     // indexed refusal distinguishes publication from the closed reload gate.
     lab.config.vaults[0].snapshot_id = Some("generic-synthetic".parse().unwrap());
@@ -177,7 +207,7 @@ fn governed_search_live_check_stalled_answering_reader() {
     lab.config.vaults[0].snapshot_id = Some(LABEL_B.parse().unwrap());
     save_config(&lab.path, &lab.config).unwrap();
     wait_for(|| lab.query("moonflower")["body"]["resource_snapshots"][0]["snapshot_id"] == LABEL_B);
-    let call = dbg.pause(&lab, "moonflower");
+    let call = dbg.pause(lab, "moonflower");
     let removed = lab.config.vaults.pop().unwrap();
     save_config(&lab.path, &lab.config).unwrap();
     wait_for(|| lab.query("moonflower")["body"]["error"]["resource_indexes"] == json!([0]));
@@ -193,7 +223,7 @@ fn governed_search_live_check_stalled_answering_reader() {
     lab.config.vaults.push(removed);
     save_config(&lab.path, &lab.config).unwrap();
     wait_for(|| lab.query("moonflower")["status"] == 200);
-    let call = dbg.pause(&lab, "moonflower");
+    let call = dbg.pause(lab, "moonflower");
     fs::write(&lab.path, "[invalid").unwrap();
     wait_for(|| lab.post(&[R], PROFILE, MEDIA, b"{")["status"] == 503);
     let reply = dbg.release(call);
@@ -206,4 +236,69 @@ fn governed_search_live_check_stalled_answering_reader() {
         true,
     );
     cap.save("stalled-reader");
+}
+
+/// The same barrier with no debugger: the reader path's test-only stall point.
+/// The hook exists only with the feature and debug assertions; the variable
+/// below is inert in any other build.
+#[cfg(debug_assertions)]
+struct StallHook {
+    dir: PathBuf,
+}
+#[cfg(debug_assertions)]
+impl StallHook {
+    fn start(lab: &mut Lab) -> Self {
+        lab.stop();
+        lab.config.vaults[0].snapshot_id = Some("c".repeat(64).parse().unwrap());
+        let dir = lab._root.path().join("stall");
+        fs::create_dir(&dir).unwrap();
+        let env = dir.clone();
+        lab.start_with(move |cmd| {
+            cmd.env(kwiry_core::stall_hook::STALL_DIR_ENV, env);
+        });
+        Self { dir }
+    }
+}
+#[cfg(debug_assertions)]
+impl Barrier for StallHook {
+    fn pause(&mut self, lab: &Lab, q: &str) -> thread::JoinHandle<Value> {
+        fs::write(self.dir.join("arm"), b"").unwrap();
+        let call = pinned_search(lab, q);
+        let pinned = self.dir.join("pinned");
+        until(&self.dir, || pinned.exists(), String::new);
+        fs::remove_file(pinned).unwrap();
+        call
+    }
+    fn release(&mut self, call: thread::JoinHandle<Value>) -> Value {
+        fs::write(self.dir.join("release"), b"").unwrap();
+        call.join().unwrap()
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn governed_search_live_check_stalled_answering_reader_via_stall_hook() {
+    let mut lab = Lab::new();
+    let mut hook = StallHook::start(&mut lab);
+    stalled_answering_reader(&mut lab, &mut hook);
+}
+
+/// Run by CI's release-binary step: the stall point is absent from a release
+/// build, so an armed directory never pauses a search.
+#[cfg(not(debug_assertions))]
+#[test]
+fn format_release_binary_has_no_reader_stall_point() {
+    let mut lab = Lab::new();
+    lab.stop();
+    let dir = lab._root.path().join("stall");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("arm"), b"").unwrap();
+    let env = dir.clone();
+    lab.start_with(move |cmd| {
+        cmd.env("KWIRY_TEST_STALL_READER_DIR", env);
+    });
+    assert_eq!(lab.query("moonflower")["status"], 200);
+    assert!(dir.join("arm").exists());
+    assert!(!dir.join("pinned").exists());
+    lab.stop();
 }

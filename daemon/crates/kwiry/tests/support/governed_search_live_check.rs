@@ -71,6 +71,9 @@ impl Lab {
         lab
     }
     fn start(&mut self) {
+        self.start_with(|_| {});
+    }
+    fn start_with(&mut self, customize: impl FnOnce(&mut Command)) {
         save_config(&self.path, &self.config).unwrap();
         self.daemon = Some(Daemon::start_custom(
             &self.path,
@@ -78,6 +81,7 @@ impl Lab {
             "kwiry OpenClast sidecar listening on http://",
             |cmd| {
                 cmd.env("RUST_LOG", "debug");
+                customize(cmd);
             },
         ));
         self.address = self.daemon.as_ref().unwrap().address.clone();
@@ -736,6 +740,9 @@ mod publication;
 
 #[path = "live_check_barrier.rs"]
 mod barrier;
+
+#[path = "live_check_selfcheck.rs"]
+mod selfcheck;
 
 #[test]
 fn governed_search_live_check_jwks_restart_rotation() {

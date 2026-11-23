@@ -78,6 +78,14 @@ enum Command {
         #[command(subcommand)]
         command: holdings::cli::HolderCommand,
     },
+    /// Check, without serving, that this host and config can run the
+    /// governed profile. Read-only apart from a removed write probe in the
+    /// data directory; no network access. Exits 0 only if every check passes.
+    Selfcheck {
+        /// Print the human lines on stderr and one JSON summary on stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// Search the lexical index.
     Search {
         query: String,
@@ -313,6 +321,11 @@ async fn main() -> Result<()> {
                 .await
                 .context("holder command failed")??;
         }
+        Command::Selfcheck { json } => {
+            if !run_selfcheck(&paths, json) {
+                std::process::exit(1);
+            }
+        }
         Command::Search {
             query,
             limit,
@@ -421,6 +434,71 @@ fn run_config(paths: &Paths, command: ConfigCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct SelfcheckReport<'a> {
+    schema_version: u32,
+    ok: bool,
+    checks: &'a [kwiry_core::HostCheck],
+}
+
+/// Core checks, then the signing key set (parsed by the verifier startup
+/// uses, without opening replay state). Returns whether every check passed.
+fn run_selfcheck(paths: &Paths, json: bool) -> bool {
+    // Same rule as the private service: no dependency panic text.
+    private_panic_hook();
+    let mut report = kwiry_core::governed_host_checks(paths);
+    match report
+        .config
+        .as_ref()
+        .map(|config| config.auth.openclast.as_ref())
+    {
+        None => report.skip("jwks_readable", "config did not parse"),
+        Some(None) => report.push(
+            "jwks_readable",
+            Err("auth.openclast is not configured".into()),
+        ),
+        Some(Some(auth)) => report.push(
+            "jwks_readable",
+            capability::CapabilityVerifier::check_jwks(auth),
+        ),
+    }
+    let config = report.config.take();
+    kwiry_core::redact_paths(&mut report, config.as_ref(), paths);
+    let ok = report.passed();
+    let mut lines = String::new();
+    for check in &report.checks {
+        let status = match check.status {
+            kwiry_core::HostCheckStatus::Pass => "pass",
+            kwiry_core::HostCheckStatus::Fail => "FAIL",
+            kwiry_core::HostCheckStatus::Skipped => "skip",
+        };
+        match &check.detail {
+            Some(detail) => lines.push_str(&format!("{status} {}: {detail}\n", check.name)),
+            None => lines.push_str(&format!("{status} {}\n", check.name)),
+        }
+    }
+    lines.push_str(if ok {
+        "selfcheck: ok\n"
+    } else {
+        "selfcheck: failed\n"
+    });
+    if json {
+        eprint!("{lines}");
+        let summary = SelfcheckReport {
+            schema_version: 1,
+            ok,
+            checks: &report.checks,
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&summary).expect("selfcheck summary serializes")
+        );
+    } else {
+        print!("{lines}");
+    }
+    ok
 }
 
 fn private_cli(paths: &Paths) -> Result<bool> {

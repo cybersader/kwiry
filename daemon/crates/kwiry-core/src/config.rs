@@ -146,6 +146,51 @@ pub fn load_config_for_paths(paths: &Paths) -> Result<Config> {
 
 fn prepare_config(path: &Path, config: &mut Config, paths: Option<&Paths>) -> Result<()> {
     validate_config(path, config)?;
+    record_governed_state_paths(path, config, paths)?;
+    if config.server.profile == HostProfile::OpenClast {
+        crate::room_boundary::validate(config, None)?;
+    }
+    Ok(())
+}
+
+/// The steps [`load_config_for_paths`] performs, as separate results, so a
+/// read-only host check can report each one instead of the first failure.
+pub(crate) struct ConfigStages {
+    pub parsed: Result<Config>,
+    pub validated: Result<()>,
+}
+
+pub(crate) fn staged_config_for_paths(paths: &Paths) -> ConfigStages {
+    if !paths.config.is_file() {
+        // Loading treats a missing file as the default config; a check must not.
+        return ConfigStages {
+            parsed: Err(Error::InvalidConfig {
+                path: paths.config.clone(),
+                message: "<document>: config file not found".to_owned(),
+            }),
+            validated: Ok(()),
+        };
+    }
+    let mut parsed = load_config_unlocked(&paths.config);
+    let validated = match &mut parsed {
+        Ok(config) => validate_config(&paths.config, config)
+            .and_then(|()| record_governed_state_paths(&paths.config, config, Some(paths))),
+        Err(_) => Ok(()),
+    };
+    if validated.is_err()
+        && let Ok(config) = &mut parsed
+    {
+        // Keep checking the remaining host facts against the parsed document.
+        let _ = record_governed_state_paths(&paths.config, config, Some(paths));
+    }
+    ConfigStages { parsed, validated }
+}
+
+fn record_governed_state_paths(
+    path: &Path,
+    config: &mut Config,
+    paths: Option<&Paths>,
+) -> Result<()> {
     if config.server.profile == HostProfile::OpenClast {
         let config_path = absolutize(path.to_path_buf())?;
         let config_dir = config_path
@@ -178,7 +223,6 @@ fn prepare_config(path: &Path, config: &mut Config, paths: Option<&Paths>) -> Re
             protected.push(holder.state_dir.clone());
         }
         config.openclast_state_paths = protected;
-        crate::room_boundary::validate(config, None)?;
     }
     Ok(())
 }

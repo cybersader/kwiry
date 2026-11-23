@@ -72,6 +72,35 @@ impl DataRoot {
         STORAGE_PROBE_TEST_FAULT.with(|fault| fault.set(true));
     }
 
+    /// Read-only host check: the root must already exist on local storage
+    /// and accept a throwaway file, which is removed before returning. Takes
+    /// no lock and creates nothing that outlives the call.
+    pub fn check_writable(&self) -> Result<()> {
+        if !fs::metadata(&self.root)
+            .map_err(|error| io_error(&self.root, error))?
+            .is_dir()
+        {
+            return Err(Error::State(format!(
+                "data directory is not a directory: {}",
+                self.root.display()
+            )));
+        }
+        reject_known_network_filesystem(&self.root)?;
+        let probe = self.root.join(format!(".write-check-{}", generation_id()?));
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                file.write_all(b"kwiry write check\n")?;
+                file.sync_all()
+            });
+        let removed = fs::remove_file(&probe);
+        written.map_err(|error| io_error(&probe, error))?;
+        removed.map_err(|error| io_error(&probe, error))
+    }
+
     /// Takes the writer lock and probes storage before returning it, without
     /// cleaning generations. Inspect the as-found index before calling
     /// [`DataRootLock::prepare`].

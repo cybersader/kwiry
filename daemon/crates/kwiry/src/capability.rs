@@ -161,13 +161,7 @@ fn present_optional_string<'de, D: serde::Deserializer<'de>>(
 
 impl CapabilityVerifier {
     pub(crate) fn load(config: &OpenClastAuthConfig, data_root: &Path) -> Result<Self, String> {
-        let source = fs::read_to_string(&config.jwks_file).map_err(|error| {
-            format!(
-                "could not read OpenClast JWKS at {}: {error}",
-                config.jwks_file.display()
-            )
-        })?;
-        let mut verifier = Self::from_jwks(config, &source)?;
+        let mut verifier = Self::read_jwks(config)?;
         if ROOM_INCLUSIVE_IDS {
             verifier.replay = Some(Arc::new(
                 ReplayState::start(data_root, unix_time()?)
@@ -175,6 +169,22 @@ impl CapabilityVerifier {
             ));
         }
         Ok(verifier)
+    }
+
+    /// Read and validate the key set exactly as startup does, without
+    /// establishing replay state. Used by the read-only host check.
+    pub(crate) fn check_jwks(config: &OpenClastAuthConfig) -> Result<(), String> {
+        Self::read_jwks(config).map(drop)
+    }
+
+    fn read_jwks(config: &OpenClastAuthConfig) -> Result<Self, String> {
+        let source = fs::read_to_string(&config.jwks_file).map_err(|error| {
+            format!(
+                "could not read OpenClast JWKS at {}: {error}",
+                config.jwks_file.display()
+            )
+        })?;
+        Self::from_jwks(config, &source)
     }
 
     fn from_jwks(config: &OpenClastAuthConfig, source: &str) -> Result<Self, String> {

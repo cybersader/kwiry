@@ -8,6 +8,9 @@ license.workspace = true
 [features]
 default = ["semantic-onnx"]
 semantic-onnx = ["kwiry-core/semantic-onnx"]
+# Test-only: builds the reader stall point into a debug binary (see
+# kwiry-core `internal-stall-hook-test`). Release builds never contain it.
+internal-stall-hook-test = ["kwiry-core/internal-stall-hook-test"]
 
 [dependencies]
 anyhow.workspace = true
@@ -44,7 +47,7 @@ tantivy.workspace = true
 assert_cmd.workspace = true
 http-body-util.workspace = true
 jsonschema = { version = "0.33", default-features = false }
-kwiry-core = { path = "../kwiry-core", features = ["internal-storage-probe-test"] }
+kwiry-core = { path = "../kwiry-core", features = ["internal-storage-probe-test", "internal-stall-hook-test"] }
 kwiry-holdings = { path = "../kwiry-holdings", features = ["testkit"] }
 predicates.workspace = true
 tower.workspace = true

@@ -26,6 +26,8 @@ mod frontmatter;
 #[cfg(feature = "native")]
 mod generation;
 #[cfg(feature = "native")]
+mod host_check;
+#[cfg(feature = "native")]
 mod index;
 #[cfg(feature = "portable")]
 mod lexical;
@@ -61,6 +63,9 @@ mod search;
 mod semantic;
 #[cfg(feature = "portable")]
 mod source;
+#[cfg(all(feature = "internal-stall-hook-test", debug_assertions))]
+#[doc(hidden)]
+pub mod stall_hook;
 #[cfg(feature = "native")]
 mod state;
 #[cfg(feature = "portable")]
@@ -285,6 +290,10 @@ fn fr11_ingest_config_refuses_openclast_before_desktop_discovery() {
 
 #[cfg(feature = "native")]
 pub use config::{valid_room_identifier, valid_tenant_identifier};
+#[cfg(feature = "native")]
+pub use host_check::{
+    GovernedHostReport, HOST_CHECKS, HostCheck, HostCheckStatus, governed_host_checks, redact_paths,
+};
 #[cfg(feature = "native")]
 pub use model::valid_lower_sha256;
 #[cfg(feature = "native")]

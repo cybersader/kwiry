@@ -963,3 +963,5 @@ fn empty_participating_set_does_not_satisfy_required_labels() {
     result.snapshot_ids.clear();
     assert!(result.require_snapshot_ids().is_err());
 }
+
+mod label_edges;
