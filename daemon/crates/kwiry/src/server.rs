@@ -1259,6 +1259,153 @@ mod tests {
         actor.await.unwrap();
     }
 
+    /// A full pass reads every note under a live native watcher. Its own opens
+    /// must not overflow the watcher queue, close the gate, or start another
+    /// full pass; a real edit must still be picked up.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn governed_search_live_check_large_room_stays_open_across_safety_ticks() {
+        use std::time::Duration;
+        use tokio::time::{sleep, timeout};
+
+        const NOTES: usize = 2_000;
+        let directory = tempdir().unwrap();
+        let paths = Paths::resolve(
+            Some(directory.path().join("control").join("config.toml")),
+            Some(directory.path().join("data")),
+        )
+        .unwrap();
+        let room = directory.path().join("room");
+        for folder in 0..20 {
+            fs::create_dir_all(room.join(format!("f{folder:02}"))).unwrap();
+        }
+        for note in 0..NOTES {
+            let path = room.join(format!("f{:02}/note-{note:04}.md", note % 20));
+            fs::write(path, format!("marigold filler{note}\n")).unwrap();
+        }
+        let mut config = Config::default();
+        config.server.profile = HostProfile::OpenClast;
+        config.server.profile_required = true;
+        let mut auth = openclast_auth_config(directory.path());
+        auth.legacy_identity_accept_until = Some(0);
+        auth.workload_subject_allowlist = vec!["workload:synthetic-search".into()];
+        config.auth.openclast = Some(auth);
+        config.vaults.push(VaultRegistration {
+            id: "A".repeat(22),
+            path: room.clone(),
+            room: Some("B".repeat(22)),
+            snapshot_id: Some("a".repeat(64).parse().unwrap()),
+        });
+        kwiry_core::save_config(&paths.config, &config).unwrap();
+        let config = load_config_for_paths(&paths).unwrap();
+        let resource = config.resource_key(&config.vaults[0]).unwrap();
+        let gate = Arc::new(ConfigGate::default());
+        let mut state = test_state();
+        state.profile = HostProfile::OpenClast;
+        state.live_gate = Some(gate.clone());
+        state.runtime.set_openclast_registrations(&config);
+        let (mut index, _) = boot_index(&config, &paths, &state.runtime).await.unwrap();
+        index.reconcile(config.clone()).unwrap();
+        let (manager, actor) = spawn_manager(index, state.runtime.clone());
+        let search = |query: &'static str| {
+            live_check::search(
+                State(state.clone()),
+                Extension(Principal {
+                    profile: HostProfile::OpenClast,
+                    resources: vec![resource.clone()],
+                    max_limit: 1,
+                    ..Principal::desktop()
+                }),
+                Request::post("/v0/search")
+                    .header("kwiry-profile", "live-check-v1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"q":"{query}","mode":"lexical","limit":1}}"#
+                    )))
+                    .unwrap(),
+            )
+        };
+        // (hit count, freshness header) of a 200 answer.
+        let answer = |response: Response| async move {
+            assert_eq!(response.status(), StatusCode::OK);
+            let freshness = response.headers()[INDEX_FRESHNESS_HEADER]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let answer: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            (answer["hits"].as_array().unwrap().len(), freshness)
+        };
+        let current = || (1, "current; basis=strict_hash".to_owned());
+        let pass_finished = || async {
+            timeout(Duration::from_secs(20), async {
+                while state.status.read().await.generation.is_none() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("pass finished");
+        };
+        // After a pass, nothing may follow it: no overflow, no invalidation,
+        // no back-to-back full pass on an unchanged room.
+        let settled = || async {
+            state.status.write().await.generation = None;
+            sleep(Duration::from_millis(1_500)).await;
+            assert_eq!(gate.invalidations(), 0, "the gate was closed");
+            assert!(gate.open());
+            assert!(
+                state.status.read().await.generation.is_none(),
+                "another pass ran on an unchanged room"
+            );
+        };
+
+        let (watcher, ticks) = crate::watcher::spawn_native_watcher_with_test_ticks(
+            paths.clone(),
+            config.clone(),
+            manager.clone(),
+            state.status.clone(),
+            gate.clone(),
+        );
+        assert!(gate.open());
+        assert_eq!(answer(search("marigold").await).await, current());
+        for _ in 0..3 {
+            state.status.write().await.generation = None;
+            ticks.send(()).await.unwrap();
+            pass_finished().await;
+            settled().await;
+            assert_eq!(answer(search("marigold").await).await, current());
+        }
+
+        // A real modification during steady state still makes the room
+        // non-current at once (before the debounced pass) and is picked up.
+        assert_eq!(answer(search("zinnia").await).await.0, 0);
+        fs::write(room.join("f07/note-0007.md"), "marigold zinnia\n").unwrap();
+        timeout(Duration::from_secs(2), async {
+            while answer(search("marigold").await).await == current() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the edit made the room non-current");
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let response = search("zinnia").await;
+                if response.status() == StatusCode::OK && answer(response).await == current() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("edit became searchable");
+        settled().await;
+
+        watcher.shutdown().await;
+        manager.shutdown().await.unwrap();
+        actor.await.unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn governed_search_live_check_holder_revocation_discards_staged_success() {
