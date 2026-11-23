@@ -205,7 +205,11 @@ fn classify_event(
         // re-dirty the corpus, so freshness never settled to current.
         return EventEffect::Touched(Vec::new());
     }
-    if event.paths.iter().any(|path| path == config_path) {
+    if event
+        .paths
+        .iter()
+        .any(|path| path == config_path || is_projected_config_swap(path, config_path))
+    {
         return EventEffect::ConfigChanged;
     }
     let mut touched = Vec::new();
@@ -234,6 +238,16 @@ fn classify_event(
     } else {
         EventEffect::TouchedRooms(touched_rooms)
     }
+}
+
+/// A projected-volume config directory (for example a Kubernetes ConfigMap)
+/// publishes a new revision by atomically replacing its `..data` symlink; no
+/// event names the config file itself. Only that exact sibling counts, not the
+/// timestamped revision directories created beside it.
+fn is_projected_config_swap(path: &Path, config_path: &Path) -> bool {
+    config_path
+        .parent()
+        .is_some_and(|dir| path == dir.join("..data"))
 }
 
 /// Access notifications that cannot have changed file contents.
@@ -941,6 +955,37 @@ mod tests {
             classify_event(&Ok(event), &roots(), &config_path()),
             EventEffect::Rescan(RescanCause::BackendRescan)
         );
+    }
+
+    #[test]
+    fn classify_event_treats_a_projected_config_swap_as_a_config_change() {
+        // The atomic rename of `..data` onto the new revision's symlink.
+        let event =
+            Event::new(EventKind::Create(CreateKind::Any)).add_path(PathBuf::from("/state/..data"));
+        assert_eq!(
+            classify_event(&Ok(event.clone()), &roots(), &config_path()),
+            EventEffect::ConfigChanged
+        );
+        // The same classification closes the private service's admission gate.
+        assert!(config_may_have_changed(&Ok(event), &config_path()));
+    }
+
+    #[test]
+    fn classify_event_ignores_projected_revision_siblings() {
+        for sibling in [
+            "/state/..2026_11_23_tmp",
+            "/state/..data_tmp",
+            "/elsewhere/..data",
+        ] {
+            let event =
+                Event::new(EventKind::Create(CreateKind::Any)).add_path(PathBuf::from(sibling));
+            assert_eq!(
+                classify_event(&Ok(event.clone()), &roots(), &config_path()),
+                EventEffect::Touched(Vec::new()),
+                "{sibling}"
+            );
+            assert!(!config_may_have_changed(&Ok(event), &config_path()));
+        }
     }
 
     #[test]
