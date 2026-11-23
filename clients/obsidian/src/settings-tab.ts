@@ -6,7 +6,8 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 import type KwiryPlugin from "./main";
 import type { SearchMode } from "./api";
 import { DAEMON_HOST_UNAVAILABLE_GUIDANCE } from "./backend";
-import { HOST_SEARCH_GUIDANCE, HOST_SEARCH_LABEL, lookupHostSearch } from "./host-search";
+import { HOST_SEARCH_LABEL, hostSearchSituation, hostSearchSituationMessage } from "./host-search";
+import { localIndexingMessage } from "./host-services";
 import {
   SOURCE_ROW_LIMIT_SETTING_DESCRIPTION,
   SOURCE_ROW_LIMIT_SETTING_NAME,
@@ -37,7 +38,7 @@ export class KwirySettingTab extends PluginSettingTab {
     super.hide();
   }
 
-  /** Redraws an open tab, for example when a fresh install finishes starting. */
+  /** Redraws an open tab, for example when a host provider arrives or policy changes. */
   redrawIfShown(): void {
     if (this.shown) this.display();
   }
@@ -47,15 +48,9 @@ export class KwirySettingTab extends PluginSettingTab {
     this.shown = true;
     containerEl.empty();
 
-    // Until a fresh install knows whether host search exists, its profile is only
-    // a provisional fallback; offering no controls means nothing can save it.
-    if (this.plugin.startingUp) {
-      new Setting(containerEl).setName("Kwiry is starting; settings are available in a few seconds.");
-      return;
-    }
-
     const daemonAvailable = this.plugin.daemonBackendAvailable;
-    const hostAvailable = lookupHostSearch() !== null;
+    const hostSituation = hostSearchSituation();
+    const hostAvailable = hostSituation === "available";
     const hostSelected = this.plugin.settings.backendProfile === "host";
     new Setting(containerEl)
       .setName("Search backend")
@@ -95,13 +90,15 @@ export class KwirySettingTab extends PluginSettingTab {
     if (hostSelected) {
       new Setting(containerEl).setName(HOST_SEARCH_LABEL).setDesc(hostAvailable
         ? "Search runs in the host. This plugin does not build an index in this mode."
-        : HOST_SEARCH_GUIDANCE);
+        : hostSearchSituationMessage(hostSituation));
     } else if (this.plugin.settings.backendProfile === "daemon") {
       this.renderDaemonSettings(containerEl);
     } else {
       new Setting(containerEl)
         .setName("In-plugin · Lexical")
         .setDesc(IN_PLUGIN_SOURCE_SUPPORT_DESCRIPTION);
+      const policy = localIndexingMessage(this.plugin.localIndexingState);
+      if (policy !== null) new Setting(containerEl).setName("Local indexing").setDesc(policy);
       this.renderSourceFormatSettings(containerEl);
       new Setting(containerEl)
         .setName("Rebuild in-plugin lexical index")

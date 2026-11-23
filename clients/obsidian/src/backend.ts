@@ -8,8 +8,7 @@ import type {
   SearchRequest,
   SearchResponse,
 } from "./api";
-import type { HostBackendIdentity, HostBackendStatus } from "./backends/host-search-backend";
-import type { HostSearchOperations } from "./host-search";
+import type { HostBackendIdentity, HostBackendStatus, HostSearchAccess } from "./backends/host-search-backend";
 import type { ExcerptSegment } from "./excerpt";
 import type {
   SourceFormat,
@@ -178,7 +177,7 @@ export interface SearchBackend extends BackendLifecycle<BackendIdentity, Backend
   search(request: SearchRequest): Promise<SearchExecution>;
 }
 
-export type HostBackend = BackendLifecycle<HostBackendIdentity, HostBackendStatus> & HostSearchOperations;
+export type HostBackend = BackendLifecycle<HostBackendIdentity, HostBackendStatus> & HostSearchAccess;
 export type ManagedBackend = SearchBackend | HostBackend;
 
 export class KwiryBackendError extends Error {

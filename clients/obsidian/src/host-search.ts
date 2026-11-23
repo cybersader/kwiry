@@ -1,38 +1,48 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { isVaultRelativePath } from "./vault-path";
+import {
+  callDisposer,
+  decidingLevelLabel,
+  hasMajor,
+  lookupHostService,
+  readHostError,
+  record,
+  safeCount,
+  type SharedCode,
+} from "./host-services";
 
-// Provisional name of the host services slot on `window`. The contract fixes the
-// final name later; change it only here.
-export const HOST_SERVICES_SLOT = "obsidianHostServices";
-
-/// A host may install its services slot after this plugin loads, for example
-/// from another plugin that loads later. A fresh install keeps checking for this
-/// long after layout-ready before it falls back. Plugin onload calls have all run
-/// by layout-ready, so the window only has to cover a provider that installs its
-/// slot after asynchronous setup. Five seconds covers that with margin and delays
-/// a fallback's first index build by at most five seconds.
-export const LATE_HOST_WINDOW_MS = 5_000;
-export const LATE_HOST_CHECK_MS = 250;
 const NOTICE = "Results may be incomplete.";
 
 export const HOST_SEARCH_LABEL = "Host search · Lexical";
-export const HOST_SEARCH_GUIDANCE = "Host search is unavailable. Use a host that supports search version 1.";
+export const HOST_SEARCH_NO_HOST = "Host search is unavailable: no host is providing it here.";
+export const HOST_SEARCH_NOT_OFFERED = "Host search is unavailable: this host does not offer search version 1.";
 export const HOST_SEARCH_STARTING = "Host search is starting…";
-export const HOST_SEARCH_ACCESS_LOST = "Access to host search was denied.";
+export const HOST_SEARCH_ACCESS_LOST = "You no longer have access to these results.";
 export const HOST_SEARCH_IDLE = "Enter words separated by spaces to search.";
-export const HOST_SEARCH_UNAVAILABLE = "Host search is unavailable.";
-export const HOST_RESULT_UNAVAILABLE = "This result is no longer available to open.";
+export const HOST_SEARCH_UNAVAILABLE = "Host search is unavailable right now.";
+export const HOST_SEARCH_EXPIRED = "These results expired. Search again.";
+export const HOST_SEARCH_WITHDRAWN = "Host search is no longer offered here.";
+export const HOST_RESULT_UNAVAILABLE = "That note is no longer available.";
 
-const stateLabels = {
+const KNOWN_STATES = ["ready", "building", "unavailable", "not_enabled"] as const;
+type KnownState = typeof KNOWN_STATES[number];
+
+const stateLabels: Readonly<Record<Exclude<KnownState, "not_enabled">, string>> = {
   ready: "Results from the host",
   building: "Host search is being prepared.",
   unavailable: HOST_SEARCH_UNAVAILABLE,
-  not_enabled: "Host search is not enabled here.",
-} as const;
+};
 
-type HostSearchState = keyof typeof stateLabels;
+/** Search codes beyond the shared base, each with its family. */
+export const SEARCH_CODE_FAMILIES: Readonly<Record<string, SharedCode>> = Object.freeze({
+  invalid_query: "invalid_request",
+  unsupported_mode: "invalid_request",
+  invalid_cursor: "invalidated",
+  result_unavailable: "invalidated",
+});
+
+export type HostSearchSituation = "no_host" | "without_service" | "available";
 
 export interface HostSearchPage {
   roomLabel: string | null;
@@ -42,125 +52,114 @@ export interface HostSearchPage {
   notice: typeof NOTICE;
 }
 
-interface WireSearchCapability {
-  page(request: { query: string; cursor?: string }, options: { signal: AbortSignal }): Promise<unknown>;
-  resolveNote(ref: string, options: { signal: AbortSignal }): Promise<unknown>;
+/** One search service object, held only while a view that uses it is on screen. */
+export interface HostSearchSession {
+  page(query: string, signal: AbortSignal, continuation?: string): Promise<HostSearchPage>;
+  /** The host resolves and opens the note; nothing here touches vault files. */
+  open(ref: string, signal: AbortSignal): Promise<void>;
+  /** Returns an idempotent disposer. */
+  onInvalidated(listener: (reason: string | null) => void): () => void;
 }
 
-export interface HostSearchOperations {
-  page(query: string, signal: AbortSignal, continuation?: string): Promise<HostSearchPage>;
-  resolveNote(ref: string, signal: AbortSignal): Promise<string>;
-}
+export type HostSearchLookup =
+  | { readonly situation: "no_host" | "without_service" }
+  | { readonly situation: "available"; readonly session: HostSearchSession };
 
 export const hostSearchFault = {
   cancelled: () => new HostSearchFault("cancelled"),
-  unavailable: () => new HostSearchFault("search_unavailable"),
-  staleResult: () => new HostSearchFault("result_unavailable"),
+  unavailable: () => new HostSearchFault("unavailable"),
 };
 
 class HostSearchFault extends Error {
-  constructor(readonly code: string) { super(code); }
-}
-
-// Look on the plugin realm's window, not the active popout. An absent slot or
-// capability is a normal answer.
-export function lookupHostSearch(realm: object = window): HostSearchOperations | null {
-  try {
-    const slot = record((realm as Record<string, unknown>)[HOST_SERVICES_SLOT]);
-    const get = slot?.get;
-    if (typeof get !== "function") return null;
-    const wire = record(Reflect.apply(get, slot, ["search", 1]));
-    const page = wire?.page as WireSearchCapability["page"] | undefined;
-    const resolveNote = wire?.resolveNote as WireSearchCapability["resolveNote"] | undefined;
-    if (typeof page !== "function" || typeof resolveNote !== "function") return null;
-    return {
-      async page(query, signal, continuation) {
-        // This UI uses the host defaults and never selects a room or a page size.
-        return decodePage(await page.call(wire, {
-          query,
-          ...(continuation === undefined ? {} : { cursor: continuation }),
-        }, { signal }));
-      },
-      async resolveNote(ref, signal) {
-        const path = record(await resolveNote.call(wire, ref, { signal }))?.path;
-        if (typeof path !== "string" || !isVaultRelativePath(path) || /^[a-z]:/iu.test(path)) {
-          throw hostSearchFault.staleResult();
-        }
-        return path;
-      },
-    };
-  } catch {
-    return null;
+  readonly family: SharedCode;
+  constructor(readonly code: SharedCode) {
+    super(code);
+    this.family = code;
   }
 }
 
-/// Checks now, then every `checkMs`, until the capability appears or `windowMs`
-/// has passed, and reports the outcome once. Nothing runs after the window
-/// closes. The returned function cancels a pending watch without reporting.
-export function watchForHostSearch(
-  report: (found: boolean) => void,
-  { windowMs = LATE_HOST_WINDOW_MS, checkMs = LATE_HOST_CHECK_MS } = {},
-): () => void {
-  let done = false;
-  let tick: number | null = null;
-  const stop = () => {
-    done = true;
-    window.clearTimeout(deadline);
-    if (tick !== null) window.clearTimeout(tick);
-    tick = null;
-  };
-  const finish = (found: boolean) => {
-    if (done) return;
-    stop();
-    report(found);
-  };
-  const check = () => {
-    tick = null;
-    if (done) return;
-    if (lookupHostSearch() !== null) finish(true);
-    else tick = window.setTimeout(check, checkMs);
-  };
-  const deadline = window.setTimeout(() => finish(lookupHostSearch() !== null), windowMs);
-  check();
-  return stop;
+/// One synchronous look on this plugin's window, not the active popout. Absence
+/// and a malformed service are normal answers; nothing is cached.
+export function lookupHostSearch(realm: object = window): HostSearchLookup {
+  const found = lookupHostService("search", 1, realm);
+  if (found.kind !== "available") return { situation: found.kind };
+  const service = found.service;
+  try {
+    const { page, open, onInvalidated } = service;
+    if (!hasMajor(service, 1) || typeof page !== "function" || typeof open !== "function"
+      || typeof onInvalidated !== "function") return { situation: "without_service" };
+    return {
+      situation: "available",
+      session: {
+        async page(query, signal, continuation) {
+          // This UI uses the host defaults and never selects a room, mode or page size.
+          return decodePage(await Reflect.apply(page, service, [{
+            query,
+            ...(continuation === undefined ? {} : { cursor: continuation }),
+          }, { signal }]));
+        },
+        async open(ref, signal) {
+          await Reflect.apply(open, service, [ref, { signal }]);
+        },
+        onInvalidated(listener) {
+          return callDisposer(() => Reflect.apply(onInvalidated, service, [(event: unknown) => {
+            let reason: unknown;
+            try { reason = record(event)?.reason; } catch { reason = undefined; }
+            listener(typeof reason === "string" ? reason : null);
+          }]));
+        },
+      },
+    };
+  } catch {
+    return { situation: "without_service" };
+  }
 }
 
-function record(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
+export function hostSearchSituation(realm: object = window): HostSearchSituation {
+  return lookupHostSearch(realm).situation;
+}
+
+export function hostSearchSituationMessage(situation: HostSearchSituation): string {
+  return situation === "no_host" ? HOST_SEARCH_NO_HOST
+    : situation === "without_service" ? HOST_SEARCH_NOT_OFFERED
+      : HOST_SEARCH_LABEL;
 }
 
 function malformedPage(): never {
   throw hostSearchFault.unavailable();
 }
 
+/// Reads every field of the page once. Unknown states are shown as unavailable
+/// with no rows; result references are kept as given (equality is not meaningful).
 function decodePage(value: unknown): HostSearchPage {
   const page = record(value);
   if (!page) return malformedPage();
-  const { room, state, items, next, notice } = page;
-  if (notice !== NOTICE || typeof state !== "string" || !Object.hasOwn(stateLabels, state)
-    || !Array.isArray(items) || (next !== null && typeof next !== "string")) return malformedPage();
+  const { room, state, items, next, notice, decidedBy } = page;
+  if (notice !== NOTICE || typeof state !== "string" || !Array.isArray(items)
+    || (next !== null && typeof next !== "string")) return malformedPage();
+  const known = (KNOWN_STATES as readonly string[]).includes(state) ? state as KnownState : null;
   const itemCount = items.length;
-  if (!safeInteger(itemCount) || (state !== "ready" && itemCount > 0)
-    || (room === null && state === "ready")) return malformedPage();
+  if (!safeCount(itemCount) || (known === "ready" && room === null)) return malformedPage();
+  if (known !== null && known !== "ready" && itemCount > 0) return malformedPage();
   const { label: roomLabel, ref: roomRef } = record(room) ?? {};
   if (room !== null && (typeof roomLabel !== "string" || typeof roomRef !== "string")) return malformedPage();
 
   const rows: HostSearchPage["rows"] = [];
-  const seen = new Set<string>();
-  for (let index = 0; index < itemCount; index++) {
-    const hit = record((items as unknown[])[index]);
-    if (!hit) return malformedPage();
-    const { ref, path, title, excerpt } = hit;
-    if (typeof ref !== "string" || typeof path !== "string"
-      || typeof title !== "string" || typeof excerpt !== "string") return malformedPage();
-    if (seen.has(ref)) continue;
-    seen.add(ref);
-    rows.push({ noteRef: ref, path, title, excerpt });
+  if (known === "ready") {
+    for (let index = 0; index < itemCount; index++) {
+      const hit = record((items as unknown[])[index]);
+      if (!hit) return malformedPage();
+      const { ref, path, title, excerpt } = hit;
+      if (typeof ref !== "string" || typeof path !== "string"
+        || typeof title !== "string" || typeof excerpt !== "string") return malformedPage();
+      rows.push({ noteRef: ref, path, title, excerpt });
+    }
   }
+  const status = known === "not_enabled"
+    ? `Host search is turned off by ${decidingLevelLabel(decidedBy)}.`
+    : stateLabels[known ?? "unavailable"];
   return { roomLabel: typeof roomLabel === "string" ? roomLabel : null,
-    rows, continuation: next, status: stateLabels[state as HostSearchState], notice: NOTICE };
+    rows, continuation: next, status, notice: NOTICE };
 }
 
 export interface HostSearchFailure {
@@ -168,53 +167,76 @@ export interface HostSearchFailure {
   message?: string;
 }
 
+/// Maps a rejection by its code, or by its family when the code is unknown.
 export function hostSearchFailure(error: unknown): HostSearchFailure {
-  try {
-    const failure = record(error);
-    switch (failure?.code) {
-      case "invalid_query":
-        return { action: "clear", message: "Use words separated by spaces, without spaces at the ends." };
-      case "invalid_request":
-      case "unsupported_mode":
-        return { action: "clear", message: "This search request is not supported by the host." };
-      case "access_denied":
-        return { action: "access_lost" };
-      case "invalid_cursor":
-        return { action: "discard_continuation", message: "This page can no longer be continued. Submit a new search." };
-      case "result_unavailable":
-        return { action: "discard_result", message: HOST_RESULT_UNAVAILABLE };
-      case "limited":
-        return { action: "keep", message: limitMessage(failure) };
-      case "cancelled":
-        return { action: "keep" };
-    }
-  } catch {
-    // A malformed rejection cannot supply display text or escape to diagnostics.
+  const failure = readHostError(error, SEARCH_CODE_FAMILIES);
+  switch (failure.code) {
+    case "invalid_query":
+      return { action: "clear", message: "Use words separated by spaces, without spaces at the ends." };
+    case "invalid_cursor":
+      return { action: "discard_continuation", message: "This page can no longer be continued. Submit a new search." };
+    case "result_unavailable":
+      return { action: "discard_result", message: HOST_RESULT_UNAVAILABLE };
   }
-  return { action: "clear", message: HOST_SEARCH_UNAVAILABLE };
+  switch (failure.family) {
+    case "invalid_request":
+      return { action: "clear", message: "This search request is not supported by the host." };
+    case "access_denied":
+      return { action: "access_lost", message: HOST_SEARCH_ACCESS_LOST };
+    case "limited":
+      return { action: "keep", message: limitMessage(failure.limit, failure.retryAfterMs) };
+    case "cancelled":
+    case "declined":
+      return { action: "keep" };
+    case "invalidated":
+      return { action: "clear", message: HOST_SEARCH_EXPIRED };
+    case "not_enabled":
+      return { action: "clear", message: `Host search is turned off by ${decidingLevelLabel(failure.decidedBy)}.` };
+    case "conflict":
+      return { action: "clear", message: "Changed elsewhere. Search again." };
+    case "read_only":
+      return { action: "clear", message: "Read-only right now." };
+    case "unavailable":
+      return { action: "clear", message: HOST_SEARCH_UNAVAILABLE };
+  }
 }
 
-const limitDimensions = {
+/// Fixed wording for an invalidation, by reason. Unknown reasons are a full invalidation.
+export function hostInvalidationMessage(reason: string | null): { message: string; detach: boolean } {
+  switch (reason) {
+    case "access":
+      return { message: HOST_SEARCH_ACCESS_LOST, detach: false };
+    case "workspace":
+      return { message: "The workspace changed. Search again.", detach: false };
+    case "lifecycle":
+      return { message: HOST_SEARCH_EXPIRED, detach: false };
+    case "withdrawn":
+      return { message: HOST_SEARCH_WITHDRAWN, detach: true };
+    default:
+      return { message: HOST_SEARCH_EXPIRED, detach: true };
+  }
+}
+
+const limitDimensions: Readonly<Record<string, string>> = {
   queryBytes: "query bytes", queryTerms: "query terms", pageItems: "items per page",
   replyBytes: "reply bytes", requests: "requests", concurrency: "concurrent requests",
   deadlineMs: "milliseconds per request",
 };
-const limitOrigins = ["protocol", "implementation", "deployment", "organization", "folder", "workspace", "grant"];
 
-function safeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function limitMessage(failure: Record<string, unknown>): string {
-  const { limit, retryAfterMs } = failure;
-  const { dimension, origin, maximum } = record(limit) ?? {};
+function limitMessage(
+  limit: { dimension: string | null; maximum: number | null; origin: unknown } | null,
+  retryAfterMs: number | null,
+): string {
   let message = "Host search reached a limit.";
-  if (typeof dimension === "string" && Object.hasOwn(limitDimensions, dimension)
-    && typeof origin === "string" && limitOrigins.includes(origin) && safeInteger(maximum)) {
-    const label = limitDimensions[dimension as keyof typeof limitDimensions];
-    message += ` Maximum: ${maximum} ${label} (${origin}).`;
+  if (limit) {
+    const by = decidingLevelLabel(limit.origin);
+    const label = limit.dimension !== null && Object.hasOwn(limitDimensions, limit.dimension)
+      ? limitDimensions[limit.dimension] : undefined;
+    message += label !== undefined && limit.maximum !== null
+      ? ` Maximum: ${limit.maximum} ${label}, set by ${by}.`
+      : ` The limit is set by ${by}.`;
   }
-  if (safeInteger(retryAfterMs)) {
+  if (retryAfterMs !== null) {
     message += ` Try again in ${Math.ceil(retryAfterMs / 1_000)} seconds.`;
   }
   return message;

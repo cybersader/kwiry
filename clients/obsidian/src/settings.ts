@@ -55,6 +55,22 @@ export const DEFAULT_SETTINGS: KwiryPluginSettings = {
   diagnosticsReportScope: "all",
 };
 
+/** Stored in place of a profile when no person chose one, so every start chooses again. */
+export const AUTOMATIC_BACKEND_PROFILE = "automatic";
+
+/// True only when stored data records a backend a person chose. Earlier builds
+/// saved exactly `{ backendProfile: "host" }` on their own when a host was
+/// present; that record is automatic, not a choice. Legacy settings without a
+/// profile keep the original implicit daemon choice, which was the user's.
+export function storedBackendProfileChosen(stored: unknown): boolean {
+  if (stored === null || stored === undefined) return false;
+  if (typeof stored !== "object" || Array.isArray(stored)) return true;
+  const source = stored as Record<string, unknown>;
+  if (source.backendProfile === AUTOMATIC_BACKEND_PROFILE) return false;
+  const keys = Object.keys(source);
+  return !(keys.length === 1 && keys[0] === "backendProfile" && source.backendProfile === "host");
+}
+
 /** Merges stored data over defaults, discarding unknown keys. */
 export function loadSettings(
   stored: unknown,
@@ -66,14 +82,15 @@ export function loadSettings(
     enabledSourceFormats: { ...DEFAULT_ENABLED_SOURCE_FORMATS },
   };
   if (stored === null || stored === undefined) {
-    if (hostSearchAvailable) settings.backendProfile = "host";
-    else if (!daemonBackendAvailable) settings.backendProfile = "in_plugin";
+    settings.backendProfile = automaticBackendProfile(daemonBackendAvailable, hostSearchAvailable);
     return settings;
   }
   if (typeof stored !== "object") return settings;
   // Legacy settings without a profile keep the original implicit daemon choice.
   const source = stored as Record<string, unknown>;
-  if (source.backendProfile === "daemon" || source.backendProfile === "in_plugin"
+  if (!storedBackendProfileChosen(stored)) {
+    settings.backendProfile = automaticBackendProfile(daemonBackendAvailable, hostSearchAvailable);
+  } else if (source.backendProfile === "daemon" || source.backendProfile === "in_plugin"
     || source.backendProfile === "host") {
     settings.backendProfile = source.backendProfile;
   }
@@ -128,4 +145,11 @@ export function loadSettings(
     settings.diagnosticsReportScope = source.diagnosticsReportScope;
   }
   return settings;
+}
+
+/// The backend for a start where no person chose one. Computed from the current
+/// situation at every start; never saved.
+function automaticBackendProfile(daemonBackendAvailable: boolean, hostSearchAvailable: boolean): SearchProfile {
+  if (hostSearchAvailable) return "host";
+  return daemonBackendAvailable ? "daemon" : "in_plugin";
 }

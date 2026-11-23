@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { build, type Plugin as EsbuildPlugin } from "esbuild";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { HOST_SERVICES_SLOT, LATE_HOST_CHECK_MS, LATE_HOST_WINDOW_MS } from "../src/host-search";
+import { HOST_AVAILABLE_EVENT, HOST_SLOT_KEY } from "../src/host-services";
 import type { SearchProfile } from "../src/backend";
 import type { KwirySearchApiV1 } from "../src/public-api";
 
@@ -481,7 +481,7 @@ function stubSource(path: string): string {
         const harness = globalThis.__kwiryStartupLifecycleHarness;
         export function createInPluginCacheOptions(_vault, sourcePolicyHash) {
           harness.cachePolicyHashes.push(sourcePolicyHash);
-          return undefined;
+          return { sourcePolicyHash, openStore: async () => ({ kind: "unavailable" }) };
         }
       `;
     case "desktop-export-host":
@@ -549,7 +549,8 @@ function stubSource(path: string): string {
 
 const NOTICE = "Results may be incomplete.";
 const HOST_LABEL = "Host search · Lexical";
-const HOST_GUIDANCE = "Host search is unavailable. Use a host that supports search version 1.";
+const NO_HOST = "Host search is unavailable: no host is providing it here.";
+const NOT_OFFERED = "Host search is unavailable: this host does not offer search version 1.";
 const QUERY = "  cobalt marmot  ";
 const CURSOR = "opaque-continuation-marmot";
 const REF = "opaque-note-marmot";
@@ -569,6 +570,7 @@ function page(overrides: {
   items?: unknown[];
   next?: string | null;
   notice?: string;
+  decidedBy?: string;
 } = {}) {
   return { room: firstRoom, state: "ready", items: [HIT], next: null, notice: NOTICE, ...overrides };
 }
@@ -577,12 +579,15 @@ interface PendingTimer { id: number; at: number; callback: () => void }
 
 /** Deterministic window timers: nothing fires until a test advances the clock. */
 const clock = { now: 0, nextId: 1, pending: [] as PendingTimer[], set: [] as number[] };
+/** Window event listeners, so tests can count them and dispatch the provider-arrived event. */
+const windowEvents = new Map<string, Set<(event: unknown) => void>>();
 
 function fakeWindow() {
   clock.now = 0;
   clock.nextId = 1;
   clock.pending.length = 0;
   clock.set.length = 0;
+  windowEvents.clear();
   return {
     setInterval: () => 1,
     setTimeout(callback: () => void, ms: number) {
@@ -594,6 +599,20 @@ function fakeWindow() {
     clearTimeout(id: number) {
       const index = clock.pending.findIndex((timer) => timer.id === id);
       if (index >= 0) clock.pending.splice(index, 1);
+    },
+    addEventListener(type: string, callback: (event: unknown) => void, options?: { signal?: AbortSignal }) {
+      if (options?.signal?.aborted) return;
+      const listeners = windowEvents.get(type) ?? new Set();
+      windowEvents.set(type, listeners);
+      listeners.add(callback);
+      options?.signal?.addEventListener("abort", () => listeners.delete(callback), { once: true });
+    },
+    removeEventListener(type: string, callback: (event: unknown) => void) {
+      windowEvents.get(type)?.delete(callback);
+    },
+    dispatchEvent(event: { type: string }) {
+      for (const callback of [...windowEvents.get(event.type) ?? []]) callback(event);
+      return true;
     },
   };
 }
@@ -611,32 +630,93 @@ function advance(ms: number): void {
   clock.now = target;
 }
 
+function availableListeners(): number {
+  return windowEvents.get(HOST_AVAILABLE_EVENT)?.size ?? 0;
+}
+
+function announceProvider(): void {
+  (window as unknown as { dispatchEvent(event: { type: string }): boolean })
+    .dispatchEvent({ type: HOST_AVAILABLE_EVENT });
+}
+
 function installSlot(slot: unknown): void {
-  Reflect.set(window, HOST_SERVICES_SLOT, slot);
+  Reflect.set(window, HOST_SLOT_KEY, slot);
 }
 
 function removeSlot(): void {
-  Reflect.deleteProperty(window, HOST_SERVICES_SLOT);
+  Reflect.deleteProperty(window, HOST_SLOT_KEY);
 }
 
-function scriptedHost(kind: "present" | "absent" | "late" | "wrong major" | "malformed" = "present") {
+type PolicyScript =
+  | "absent"
+  | { value: unknown; decidedBy?: string; limit?: unknown; hang?: boolean };
+
+/** A scripted provider: search v1 and, optionally, policy v1, plus an invalidation hook. */
+function scriptedHost(
+  kind: "present" | "absent" | "late" | "wrong major" | "malformed" | "without search" = "present",
+  policyScript: PolicyScript = "absent",
+) {
   const search = vi.fn<(request: PageRequest, options: { signal: AbortSignal }) => Promise<unknown>>();
-  const resolve = vi.fn<(ref: string, options: { signal: AbortSignal }) => Promise<unknown>>();
+  const open = vi.fn<(ref: string, options: { signal: AbortSignal }) => Promise<unknown>>();
   search.mockResolvedValue(page());
-  resolve.mockResolvedValue({ path: PATH });
-  const get = vi.fn((name: string, major: number) => {
-    if (name !== "search" || major !== (kind === "wrong major" ? 2 : 1)) return undefined;
-    return { page: search, resolveNote: kind === "malformed" ? 1 : resolve };
+  open.mockResolvedValue(undefined);
+  const listeners = new Set<(event: { reason: string }) => void>();
+  const onInvalidated = vi.fn((listener: (event: { reason: string }) => void) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
   });
-  const slot = { get };
+  const service = Object.freeze({
+    major: kind === "wrong major" ? 2 : 1,
+    minor: 0,
+    page: search,
+    open: kind === "malformed" ? 1 : open,
+    onInvalidated,
+  });
+  const policyListeners = new Set<(event: unknown) => void>();
+  const snapshot = (answer: { value: unknown; decidedBy?: string; limit?: unknown }) => ({
+    localIndexing: { value: answer.value, decidedBy: answer.decidedBy ?? "protocol",
+      ...(answer.limit === undefined ? {} : { limit: answer.limit }) },
+  });
+  const policy = policyScript === "absent" ? undefined : Object.freeze({
+    major: 1,
+    minor: 0,
+    current: vi.fn(async () => policyScript.hang ? new Promise(() => undefined) : snapshot(policyScript)),
+    subscribe: vi.fn((listener: (event: unknown) => void, options?: { signal?: AbortSignal }) => {
+      policyListeners.add(listener);
+      options?.signal?.addEventListener("abort", () => policyListeners.delete(listener), { once: true });
+      if (!policyScript.hang) queueMicrotask(() => listener({ type: "snapshot", snapshot: snapshot(policyScript) }));
+      return () => { policyListeners.delete(listener); };
+    }),
+    onInvalidated,
+  });
+  const get = vi.fn((name: string, major: number) => {
+    if (name === "search" && major === 1 && kind !== "without search") return service;
+    if (name === "policy" && major === 1) return policy;
+    return undefined;
+  });
+  const slot = Object.freeze({ get });
   if (kind !== "absent" && kind !== "late") installSlot(slot);
-  return { search, resolve, get, install: () => installSlot(slot) };
+  return {
+    search,
+    open,
+    get,
+    listeners,
+    policyListeners,
+    install: () => installSlot(slot),
+    invalidate(reason: string) {
+      for (const listener of [...listeners]) listener({ reason });
+    },
+    changePolicy(answer: { value: unknown; decidedBy?: string }) {
+      for (const listener of [...policyListeners]) listener({ type: "change", snapshot: snapshot(answer) });
+    },
+  };
 }
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 async function settled(): Promise<void> {
@@ -673,6 +753,10 @@ function inputText(modal: HostModalDouble, text: string): void {
 function submit(modal: HostModalDouble, text: string): void {
   inputText(modal, text);
   modal.contentEl.find("form").fire("submit");
+}
+
+function storedProfiles(): unknown[] {
+  return harness.savedData.map((write) => Reflect.get(write as object, "backendProfile"));
 }
 
 describe("KwiryPlugin startup lifecycle wiring", () => {
@@ -736,7 +820,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
   });
 
   const selectionCases = [true, false].flatMap((desktop) =>
-    (["present", "absent", "wrong major", "malformed"] as const).flatMap((kind) =>
+    (["present", "absent", "wrong major", "malformed", "without search"] as const).flatMap((kind) =>
       (["fresh", "daemon", "in_plugin", "host", "legacy"] as const).map((stored) => ({ desktop, kind, stored }))));
 
   it.each(selectionCases)("selects before activation: desktop=$desktop, host=$kind, settings=$stored", async ({ desktop, kind, stored }) => {
@@ -754,6 +838,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     const expectedProfile = stored === "fresh"
       ? (kind === "present" ? "host" : desktop ? "daemon" : "in_plugin")
       : stored === "legacy" ? "daemon" : stored;
+    const slotPresent = kind !== "absent";
     const KwiryPlugin = await loadProductionPlugin();
     const plugin = new KwiryPlugin();
     await plugin.onload();
@@ -765,36 +850,16 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     if (expectedProfile === "host") {
       await expect(plugin.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
     }
-    const waits = stored === "fresh" && kind !== "present";
     harness.displaySettings?.();
-    const checkChoice = () => {
-      const choice = harness.settingRows.find((row) => row.name === "Search backend");
-      expect(choice?.options?.host?.label).toBe(expectedProfile === "host" || kind === "present" ? HOST_LABEL : undefined);
-      expect(choice?.value).toBe(expectedProfile);
-    };
-    if (waits) {
-      expect(harness.settingRows).toEqual([{ name: "Kwiry is starting; settings are available in a few seconds." }]);
-    } else {
-      checkChoice();
-    }
-    expect(host.get.mock.calls.every(([name, major]) => name === "search" && major === 1)).toBe(true);
+    const choice = harness.settingRows.find((row) => row.name === "Search backend");
+    expect(choice?.options?.host?.label).toBe(expectedProfile === "host" || kind === "present" ? HOST_LABEL : undefined);
+    expect(choice?.value).toBe(expectedProfile);
+    expect(host.get.mock.calls.every(([name, major]) => (name === "search" || name === "policy") && major === 1)).toBe(true);
     harness.layoutReady?.();
-    if (waits) {
-      // Absence at load is not a choice: wait for a late provider before falling back.
-      await settled();
-      expect({ status: harness.statusBarText, inits: harness.backendInitializations, cache: harness.cachePolicyHashes,
-        source: harness.sourcePolicies, probes: harness.forbidden, saved: harness.savedData }).toEqual({
-        status: "kwiry: starting…", inits: 0, cache: [], source: [], probes: [], saved: [] });
-      expect(worker).not.toHaveBeenCalled();
-      expect(fetch).not.toHaveBeenCalled();
-      advance(LATE_HOST_WINDOW_MS);
-      // The open tab redraws with the real controls once the wait ends.
-      checkChoice();
-    } else {
-      expect(clock.set).toEqual([]);
-    }
+    // Nothing waits: there is no polling window.
+    expect(clock.set).toEqual([]);
     if (expectedProfile === "host") {
-      const status = kind === "present" ? HOST_LABEL : HOST_GUIDANCE;
+      const status = kind === "present" ? HOST_LABEL : kind === "absent" ? NO_HOST : NOT_OFFERED;
       await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${status}`), { interval: 5 });
       await settled();
       await plugin.refreshStatus();
@@ -802,18 +867,18 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       await expect(plugin.api.search("purple tern")).rejects.toMatchObject({ code: "backend_unavailable" });
       const modal = await openHost();
       expect(host.search).not.toHaveBeenCalled();
-      expect(host.resolve).not.toHaveBeenCalled();
+      expect(host.open).not.toHaveBeenCalled();
       if (kind === "present") {
-        host.search.mockRejectedValueOnce({ code: "search_unavailable", message: RAW });
+        host.search.mockRejectedValueOnce({ code: "unavailable", family: "unavailable", message: RAW });
         submit(modal, QUERY);
         await settled();
         expect(host.search.mock.calls).toEqual([[{ query: QUERY }, { signal: expect.any(AbortSignal) }]]);
       } else {
-        expect(modal.contentEl.find("input").disabled).toBe(true);
-        expect(modal.contentEl.text).toContain(HOST_GUIDANCE);
+        expect(modal.contentEl.text).toContain(status);
         submit(modal, QUERY);
         await settled();
         expect(host.search).not.toHaveBeenCalled();
+        expect(modal.contentEl.text).toContain(status);
       }
       expect(harness.backendInitializations).toBe(0);
       expect(harness.cachePolicyHashes).toEqual([]);
@@ -824,14 +889,18 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       expect(harness.pathLookups).toEqual([]);
     } else if (expectedProfile === "in_plugin") {
       await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      // Under a host slot the persistent cache is switched off explicitly.
+      expect(harness.cachePolicyHashes).toHaveLength(slotPresent ? 0 : 1);
     } else {
       await vi.waitFor(() => expect(harness.statusBarText).not.toBe("kwiry: starting…"), { interval: 5 });
     }
-    expect(harness.savedData).toEqual(stored === "fresh" && expectedProfile === "host" ? [{ backendProfile: "host" }] : []);
+    // Presence and absence are never saved.
+    expect(harness.savedData).toEqual([]);
     plugin.onunload();
+    expect(availableListeners()).toBe(0);
   });
 
-  it("submits exactly, preserves order and plain text, and replaces room groups only on Next", async () => {
+  it("submits exactly, preserves order and plain text, keeps every row, and replaces room groups only on Next", async () => {
     const host = scriptedHost();
     host.search.mockResolvedValueOnce(page({ items: [], next: CURSOR }))
       .mockResolvedValueOnce(page({
@@ -857,7 +926,8 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     contentEl.find("button", "Next page").fire("click");
     await settled();
     expect(contentEl.find("h3").text).toBe(firstRoom.label);
-    expect(contentEl.all("li").map((li) => li.find("button").text)).toEqual(["Field Log", "Alder"]);
+    // Reference equality is not meaningful, so nothing is deduplicated.
+    expect(contentEl.all("li").map((li) => li.find("button").text)).toEqual(["Field Log", "Alder", "Field Log"]);
     expect(contentEl.find("div", EXCERPT).children).toHaveLength(0);
     expect(contentEl.all("img")).toHaveLength(0);
     contentEl.find("button", "Next page").fire("click");
@@ -873,25 +943,51 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       [{ query: QUERY, cursor: CURSOR }, { signal: expect.any(AbortSignal) }],
       [{ query: QUERY, cursor: "advance" }, { signal: expect.any(AbortSignal) }],
     ]);
-    expect(host.resolve).not.toHaveBeenCalled();
+    expect(host.open).not.toHaveBeenCalled();
+    plugin.onunload();
+  });
+
+  it("renders hostile host strings literally as text", async () => {
+    const host = scriptedHost();
+    const hostile = {
+      ref: "opaque-hostile",
+      path: "Blue/Budget.md",
+      title: "<img src=x onerror=\"window.__pwned=1\">",
+      excerpt: "![](https://beacon.invalid/p) [x](javascript:alert(1)) ‮evil‬</h4><script>1</script>",
+    };
+    host.search.mockResolvedValueOnce(page({ room: { ref: "room-x", label: "</h3><b>Blue</b>" }, items: [hostile] }));
+    const plugin = await startedHost();
+    const modal = await openHost();
+    submit(modal, "hostile");
+    await settled();
+    const { contentEl } = modal;
+    expect(contentEl.find("h3").textContent).toBe("</h3><b>Blue</b>");
+    expect(contentEl.find("button", hostile.title).children).toHaveLength(0);
+    expect(contentEl.find("div", hostile.excerpt).children).toHaveLength(0);
+    for (const tag of ["img", "script", "b", "a"]) expect(contentEl.all(tag)).toHaveLength(0);
     plugin.onunload();
   });
 
   it.each([
-    ["ready", "Results from the host"],
-    ["building", "Host search is being prepared."],
-    ["unavailable", "Host search is unavailable."],
-    ["not_enabled", "Host search is not enabled here."],
-  ])("shows the %s host state, notice, and only a supplied continuation", async (state, label) => {
+    [page({ state: "ready", items: [], next: CURSOR }), "Results from the host"],
+    [page({ state: "building", items: [], next: CURSOR }), "Host search is being prepared."],
+    [page({ state: "unavailable", items: [], next: CURSOR }), "Host search is unavailable right now."],
+    [page({ state: "not_enabled", items: [], next: CURSOR }), "Host search is turned off by policy."],
+    [page({ state: "not_enabled", items: [], next: CURSOR, decidedBy: "organization" }), "Host search is turned off by your organization."],
+    [page({ state: "not_enabled", items: [], next: CURSOR, decidedBy: "galaxy" }), "Host search is turned off by policy."],
+    [page({ state: "paused-by-future-minor", items: [HIT], next: CURSOR }), "Host search is unavailable right now."],
+  ])("shows a host state, the notice, and only a supplied continuation: %j", async (first, label) => {
     const host = scriptedHost();
-    host.search.mockResolvedValueOnce(page({ state, items: [], next: CURSOR }))
-      .mockResolvedValueOnce(page({ state, items: [], room: state === "ready" ? secondRoom : null }));
+    host.search.mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(page({ state: first.state, items: [], room: first.state === "ready" ? secondRoom : null }));
     const plugin = await startedHost();
     const modal = await openHost();
     submit(modal, QUERY);
     await settled();
     expect(modal.contentEl.find("p", label)).toBeDefined();
     expect(modal.contentEl.find("p", NOTICE)).toBeDefined();
+    // An unknown state is treated as unavailable: its rows are never shown.
+    expect(modal.contentEl.all("li")).toHaveLength(0);
     expect(host.search).toHaveBeenCalledTimes(1);
     modal.contentEl.find("button", "Next page").fire("click");
     await settled();
@@ -902,21 +998,34 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
   });
 
   it.each([
-    ["invalid_query", "Use words separated by spaces, without spaces at the ends."],
-    ["invalid_request", "This search request is not supported by the host."],
-    ["unsupported_mode", "This search request is not supported by the host."],
-    ["access_denied", "Access to host search was denied."],
-    ["invalid_cursor", "This page can no longer be continued. Submit a new search."],
-    ["result_unavailable", "This result is no longer available to open."],
-    ["limited", "Host search reached a limit. Maximum: 11 query bytes (workspace). Try again in 3 seconds."],
-    ["search_unavailable", "Host search is unavailable."],
-    ["cancelled", "Results from the host"],
-    ["unknown", "Host search is unavailable."],
-  ])("handles %s safely without a replacement request", async (code, label) => {
+    ["invalid_query", undefined, "Use words separated by spaces, without spaces at the ends."],
+    ["unsupported_mode", undefined, "This search request is not supported by the host."],
+    ["invalid_request", undefined, "This search request is not supported by the host."],
+    ["access_denied", undefined, "You no longer have access to these results."],
+    ["invalid_cursor", undefined, "This page can no longer be continued. Submit a new search."],
+    ["result_unavailable", undefined, "That note is no longer available."],
+    ["limited", undefined, "Host search reached a limit. Maximum: 11 query bytes, set by this workspace. Try again in 3 seconds."],
+    ["unavailable", undefined, "Host search is unavailable right now."],
+    ["invalidated", undefined, "These results expired. Search again."],
+    ["not_enabled", undefined, "Host search is turned off by your organization."],
+    ["conflict", undefined, "Changed elsewhere. Search again."],
+    ["read_only", undefined, "Read-only right now."],
+    ["declined", undefined, "Results from the host"],
+    ["cancelled", undefined, "Results from the host"],
+    // Unknown codes are handled by their family, then as unavailable.
+    ["search_unavailable", undefined, "Host search is unavailable right now."],
+    ["future_cursor_code", "invalidated", "These results expired. Search again."],
+    ["future_shape_code", "invalid_request", "This search request is not supported by the host."],
+    ["future_denial", "access_denied", "You no longer have access to these results."],
+    ["future_code", "made_up_family", "Host search is unavailable right now."],
+  ])("handles %s (family %s) safely without a replacement request", async (code, family, label) => {
     const host = scriptedHost();
-    const failure = Object.assign(new Error(RAW), { code, limit: { dimension: "queryBytes", maximum: 11, origin: "workspace" }, retryAfterMs: 2_500 });
+    const failure = Object.assign(new Error(RAW), {
+      code, ...(family === undefined ? {} : { family }), decidedBy: "organization",
+      limit: { dimension: "queryBytes", maximum: 11, origin: "workspace" }, retryAfterMs: 2_500,
+    });
     host.search.mockResolvedValueOnce(page({ next: CURSOR }));
-    if (code === "result_unavailable") host.resolve.mockRejectedValueOnce(failure);
+    if (code === "result_unavailable") host.open.mockRejectedValueOnce(failure);
     else host.search.mockRejectedValueOnce(failure);
     const plugin = await startedHost();
     const modal = await openHost();
@@ -928,12 +1037,15 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(modal.contentEl.text).not.toContain(RAW);
     expect(host.search).toHaveBeenCalledTimes(code === "result_unavailable" ? 1 : 2);
     expect(harness.openedPaths).toEqual([]);
-    if (code === "access_denied") {
+    if (code === "access_denied" || family === "access_denied") {
       expect(modal.contentEl.text).not.toContain(firstRoom.label);
       expect(modal.contentEl.text).not.toContain(PATH);
       expect(modal.contentEl.find("button", "Next page").hidden).toBe(true);
     }
-    if (code === "result_unavailable") expect(modal.contentEl.all("li")).toHaveLength(0);
+    if (code === "result_unavailable") {
+      expect(modal.contentEl.all("li")).toHaveLength(0);
+      expect(modal.contentEl.find("p", NOTICE)).toBeDefined();
+    }
     if (code === "invalid_cursor") {
       const next = modal.contentEl.find("button", "Next page");
       expect(next.hidden).toBe(true);
@@ -948,17 +1060,17 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
 
   it("shows no unsafe limit values or partial rows from a malformed page", async () => {
     const host = scriptedHost();
-    host.search.mockRejectedValueOnce({ code: "limited", limit: { dimension: "replyBytes", maximum: 55, origin: RAW }, retryAfterMs: Infinity })
+    host.search.mockRejectedValueOnce({ code: "limited", limit: { dimension: RAW, maximum: 55, origin: RAW }, retryAfterMs: Infinity })
       .mockResolvedValueOnce(page({ items: [HIT, { ref: "malformed" }] }));
     const plugin = await startedHost();
     const modal = await openHost();
     submit(modal, QUERY);
     await settled();
-    expect(modal.contentEl.find("p", "Host search reached a limit.")).toBeDefined();
+    expect(modal.contentEl.find("p", "Host search reached a limit. The limit is set by policy.")).toBeDefined();
     expect(modal.contentEl.text).not.toContain(RAW);
     submit(modal, QUERY);
     await settled();
-    expect(modal.contentEl.find("p", "Host search is unavailable.")).toBeDefined();
+    expect(modal.contentEl.find("p", "Host search is unavailable right now.")).toBeDefined();
     expect(modal.contentEl.all("li")).toHaveLength(0);
     expect(modal.contentEl.text).not.toContain(PATH);
     plugin.onunload();
@@ -993,21 +1105,47 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     last.resolve(page());
     await settled();
     expect(modal.contentEl.text).toBe("");
+    expect(host.listeners.size).toBe(0);
+  });
+
+  it("opens through the host with the reference and a signal, and touches no vault files", async () => {
+    const host = scriptedHost();
+    host.search.mockResolvedValueOnce(page({ items: [HIT, hitTwin] }));
+    harness.vaultFiles.set(hitTwin.path, "file");
+    const plugin = await startedHost();
+    const modal = await openHost();
+    submit(modal, QUERY);
+    await settled();
+    expect(host.open).not.toHaveBeenCalled();
+    modal.contentEl.all("li")[1]?.find("button", hitTwin.title).fire("click");
+    await settled();
+    expect(host.open.mock.calls).toEqual([[hitTwin.ref, { signal: expect.any(AbortSignal) }]]);
+    expect(harness.pathLookups).toEqual([]);
+    expect(harness.openedPaths).toEqual([]);
+    expect(harness.forbidden).toEqual([]);
+    // A successful open closes the modal and releases its invalidation listener.
+    expect(modal.contentEl.text).toBe("");
+    expect(host.listeners.size).toBe(0);
+    plugin.onunload();
   });
 
   it.each(["dismiss", "switch profile", "unload", "replace query"] as const)(
-    "aborts a late click resolution on %s without any local file access", async (action) => {
+    "aborts an open before the host's open step on %s; it rejects cancelled and nothing opens", async (action) => {
       const host = scriptedHost();
-      const resolution = deferred<unknown>();
-      host.resolve.mockReturnValueOnce(resolution.promise);
+      const opening = deferred<unknown>();
+      let openedByHost = false;
+      host.open.mockImplementationOnce((_ref, { signal }) => {
+        // A conforming host: an abort before the open step means nothing opens.
+        signal.addEventListener("abort", () => opening.reject({ code: "cancelled", family: "cancelled" }), { once: true });
+        return opening.promise.then(() => { openedByHost = true; });
+      });
       const plugin = await startedHost();
       const modal = await openHost();
-      harness.vaultFiles.set(PATH, "file");
       submit(modal, QUERY);
       await settled();
       modal.contentEl.find("button", HIT.title).fire("click");
-      const signal = host.resolve.mock.calls[0]?.[1].signal;
-      expect(host.resolve.mock.calls).toEqual([[REF, { signal: expect.any(AbortSignal) }]]);
+      const signal = host.open.mock.calls[0]?.[1].signal;
+      expect(host.open.mock.calls).toEqual([[REF, { signal: expect.any(AbortSignal) }]]);
       expect(signal?.aborted).toBe(false);
       let change: Promise<void> | undefined;
       if (action === "dismiss") modal.close();
@@ -1019,190 +1157,194 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
         expect(change).toBeDefined();
       }
       expect(signal?.aborted).toBe(true);
-      resolution.resolve({ path: PATH });
       await settled();
       await change;
+      expect(openedByHost).toBe(false);
       expect(harness.pathLookups).toEqual([]);
-      expect(harness.openedPaths).toEqual([]);
       expect(modal.contentEl.text).not.toContain(PATH);
       if (action !== "unload") plugin.onunload();
     },
   );
 
-  it("opens only the exact newly resolved path after a deliberate click, not a matching basename", async () => {
+  it("an open the host already handed off completes, and a later abort changes nothing", async () => {
     const host = scriptedHost();
-    host.search.mockResolvedValueOnce(page({ items: [HIT, hitTwin] }));
-    const currentPath = "Ecru/Field Log.md";
-    host.resolve.mockResolvedValueOnce({ path: currentPath });
-    for (const path of [PATH, hitTwin.path, currentPath]) harness.vaultFiles.set(path, "file");
+    const handedOff = deferred<unknown>();
+    host.open.mockReturnValueOnce(handedOff.promise);
     const plugin = await startedHost();
     const modal = await openHost();
     submit(modal, QUERY);
     await settled();
-    expect(host.resolve).not.toHaveBeenCalled();
-    expect(harness.pathLookups).toEqual([]);
-    const second = modal.contentEl.all("li")[1];
-    expect(second?.text).toContain(hitTwin.path);
-    second?.find("button", hitTwin.title).fire("click");
+    modal.contentEl.find("button", HIT.title).fire("click");
+    // The host ignores aborts once it has begun opening; the result still arrives.
+    handedOff.resolve(undefined);
     await settled();
-    expect(host.resolve.mock.calls).toEqual([[hitTwin.ref, { signal: expect.any(AbortSignal) }]]);
-    expect(harness.pathLookups).toEqual([currentPath]);
-    expect(harness.openedPaths).toEqual([currentPath]);
-    expect(harness.forbidden).toEqual([]);
     expect(modal.contentEl.text).toBe("");
+    expect(host.open).toHaveBeenCalledTimes(1);
     plugin.onunload();
   });
 
-  it.each(["missing", "folder", "alias"] as const)(
-    "clears a selected result when its resolved target is %s", async (kind) => {
-      const host = scriptedHost();
-      const plugin = await startedHost();
-      const modal = await openHost();
-      if (kind === "folder") harness.vaultFiles.set(PATH, "folder");
-      if (kind === "alias") harness.vaultFiles.set(PATH, { alias: hitTwin.path });
-      harness.vaultFiles.set(hitTwin.path, "file");
-      submit(modal, QUERY);
-      await settled();
-      modal.contentEl.find("button", HIT.title).fire("click");
-      await settled();
-      expect(harness.pathLookups).toEqual([PATH]);
-      expect(harness.openedPaths).toEqual([]);
-      expect(modal.contentEl.all("li")).toHaveLength(0);
-      expect(modal.contentEl.find("p", "This result is no longer available to open.")).toBeDefined();
-      expect(modal.contentEl.find("p", NOTICE)).toBeDefined();
-      plugin.onunload();
-    },
-  );
+  it.each([
+    [{ code: "result_unavailable", family: "invalidated" }, "That note is no longer available.", 1],
+    [{ code: "unavailable", family: "unavailable" }, "Host search is unavailable right now.", 0],
+  ])("reports a refused open %j without opening anything locally", async (failure, message, rowsLeft) => {
+    const host = scriptedHost();
+    host.search.mockResolvedValueOnce(page({ items: [HIT, hitTwin], next: CURSOR }));
+    host.open.mockRejectedValueOnce(Object.assign(new Error(RAW), failure));
+    const plugin = await startedHost();
+    const modal = await openHost();
+    submit(modal, QUERY);
+    await settled();
+    modal.contentEl.all("li")[0]?.find("button").fire("click");
+    await settled();
+    expect(modal.contentEl.find("p", message)).toBeDefined();
+    expect(modal.contentEl.all("li")).toHaveLength(rowsLeft);
+    expect(modal.contentEl.text).not.toContain(RAW);
+    expect(harness.pathLookups).toEqual([]);
+    expect(harness.openedPaths).toEqual([]);
+    plugin.onunload();
+  });
 
-  it("review regression: an observed denial clears both live modals and aborts a sibling resolve", async () => {
+  it("an ordinary access denial clears only the modal that received it", async () => {
     const host = scriptedHost();
     const resolution = deferred<unknown>();
-    host.resolve.mockReturnValueOnce(resolution.promise);
+    host.open.mockReturnValueOnce(resolution.promise);
     host.search.mockResolvedValueOnce(page({ next: CURSOR }))
       .mockResolvedValueOnce(page({ room: secondRoom, items: [hitTwin], next: "opaque-other-page" }))
-      .mockRejectedValueOnce({ code: "access_denied", message: RAW });
+      .mockRejectedValueOnce({ code: "access_denied", family: "access_denied", message: RAW });
     const plugin = await startedHost();
     const one = await openHost();
     const two = await openHost();
     submit(one, QUERY);
     submit(two, "lark");
     await settled();
-    harness.vaultFiles.set(hitTwin.path, "file");
     two.contentEl.find("button", hitTwin.title).fire("click");
-    const signal = host.resolve.mock.calls[0]?.[1].signal;
-    expect(signal?.aborted).toBe(false);
+    const signal = host.open.mock.calls[0]?.[1].signal;
     one.contentEl.find("button", "Next page").fire("click");
     await settled();
-    const wasAborted = signal?.aborted;
-    const cleared = [one, two].map(({ contentEl }) => ({
-      input: contentEl.all("input")[0]?.value ?? "",
-      rows: contentEl.all("li").length,
-      continuation: contentEl.all("button").some((el) => el.textContent === "Next page" && !el.hidden),
-      room: contentEl.all("h3")[0]?.textContent ?? "",
-    }));
-    resolution.resolve({ path: hitTwin.path });
+    expect(one.contentEl.all("li")).toHaveLength(0);
+    expect(one.contentEl.find("p", "You no longer have access to these results.")).toBeDefined();
+    // The sibling keeps its rows and its open in flight.
+    expect(signal?.aborted).toBe(false);
+    expect(two.contentEl.text).toContain(hitTwin.path);
+    resolution.resolve(undefined);
     await settled();
-    expect({ wasAborted, cleared, opened: harness.openedPaths }).toEqual({
-      wasAborted: true,
-      cleared: Array(2).fill({ input: "", rows: 0, continuation: false, room: "" }),
-      opened: [],
-    });
-    expect(harness.pathLookups).toEqual([]);
+    expect(two.contentEl.text).toBe("");
     plugin.onunload();
   });
 
-  it.each(["coded denial", "uncertain open failure"])('review regression: discards the full page after %s at openFile', async (kind) => {
+  it.each([
+    ["access", "You no longer have access to these results.", 2],
+    ["workspace", "The workspace changed. Search again.", 2],
+    ["lifecycle", "These results expired. Search again.", 2],
+    ["withdrawn", "Host search is no longer offered here.", 0],
+    ["a-future-reason", "These results expired. Search again.", 0],
+  ])("an invalidation (%s) clears every open modal and aborts calls in flight", async (reason, message, listenersAfter) => {
     const host = scriptedHost();
-    host.search.mockResolvedValue(page({ items: [HIT, hitTwin], next: CURSOR }));
-    harness.vaultFiles.set(PATH, "file");
-    harness.openError = Object.assign(new Error(RAW), kind === "coded denial" ? { code: "access_denied" } : {});
+    const waiting = deferred<unknown>();
+    host.search.mockResolvedValueOnce(page({ next: CURSOR })).mockReturnValueOnce(waiting.promise);
     const plugin = await startedHost();
     const one = await openHost();
     const two = await openHost();
+    // Each modal registers its listener when it opens, before the first page.
+    expect(host.listeners.size).toBe(2);
+    expect(host.search).not.toHaveBeenCalled();
     submit(one, QUERY);
+    await settled();
     submit(two, "lark");
+    const signal = host.search.mock.calls[1]?.[1].signal;
+    host.invalidate(reason);
+    expect(signal?.aborted).toBe(true);
+    waiting.resolve(page({ items: [hitTwin] }));
     await settled();
-    one.contentEl.all("li")[0]?.find("button").fire("click");
-    await settled();
-    expect(one.contentEl.all("li")).toHaveLength(0);
-    expect(one.contentEl.find("input").value).toBe("");
-    expect(one.contentEl.find("button", "Next page").hidden).toBe(true);
-    expect(one.contentEl.text).not.toContain(RAW);
-    expect(harness.pathLookups).toEqual([PATH]);
-    if (kind === "coded denial") {
-      expect(two.contentEl.all("li")).toHaveLength(0);
-      expect(two.contentEl.find("input").value).toBe("");
+    for (const modal of [one, two]) {
+      expect(modal.contentEl.all("li")).toHaveLength(0);
+      expect(modal.contentEl.all("h3")[0]?.textContent).toBe("");
+      expect(modal.contentEl.text).not.toContain(NOTICE);
+      expect(modal.contentEl.find("button", "Next page").hidden).toBe(true);
+      expect(modal.contentEl.find("p", message)).toBeDefined();
     }
+    // A withdrawn or unknown invalidation releases the service object.
+    expect(host.listeners.size).toBe(listenersAfter);
+    one.close();
+    two.close();
+    expect(host.listeners.size).toBe(0);
     plugin.onunload();
   });
 
-  it("review regression: remembers only the fresh host choice across a later launch without v1", async () => {
-    const host = scriptedHost();
-    const worker = vi.fn();
-    const fetch = vi.fn();
-    vi.stubGlobal("Worker", worker);
-    vi.stubGlobal("fetch", fetch);
+  it("nothing is saved from presence or absence across two launches", async () => {
+    scriptedHost();
     harness.desktopApp = false;
     harness.exactSettings = true;
     const first = await startedHost();
     first.onunload();
-    const writes = [...harness.savedData];
-    harness.storedData = (harness.savedData[0] ?? null) as typeof harness.storedData;
+    expect(harness.savedData).toEqual([]);
+    harness.storedData = null;
     removeSlot();
     const KwiryPlugin = await loadProductionPlugin();
     const second = new KwiryPlugin();
     await second.onload();
+    expect(second.settings.backendProfile).toBe("in_plugin");
     harness.layoutReady?.();
-    await vi.waitFor(() => expect(harness.statusBarText).not.toMatch(/(?:starting…|Host search · Lexical)$/u));
-    await second.refreshStatus();
-    expect({ writes, profile: second.settings.backendProfile, status: harness.statusBarText,
-      backendInitializations: harness.backendInitializations, cache: harness.cachePolicyHashes,
-      source: harness.sourcePolicies, probes: harness.forbidden }).toEqual({
-      writes: [{ backendProfile: "host" }], profile: "host", status: `Kwiry: ${HOST_GUIDANCE}`,
-      backendInitializations: 0, cache: [], source: [], probes: [],
-    });
-    expect(worker).not.toHaveBeenCalled();
-    expect(fetch).not.toHaveBeenCalled();
-    expect(host.search).not.toHaveBeenCalled();
-    expect(harness.savedData).toEqual(writes);
+    await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
+    expect({ saved: harness.savedData, timers: clock.set, inits: harness.backendInitializations })
+      .toEqual({ saved: [], timers: [], inits: 1 });
     second.onunload();
   });
 
-  it("final regression: adopts settings a second writer saved after the first empty read", async () => {
-    const host = scriptedHost();
-    harness.storedData = null;
+  it("an automatic choice saved alongside other settings is stored as automatic and chosen again next start", async () => {
+    scriptedHost();
+    harness.desktopApp = false;
     harness.exactSettings = true;
-    const otherTab = { backendProfile: "in_plugin", resultLimit: 31, showRibbonIcon: false };
-    harness.afterLoad = () => {
-      harness.storedData = otherTab;
-      delete harness.afterLoad;
-    };
+    const first = await startedHost();
+    first.settings.resultLimit = 37;
+    await first.saveSettings();
+    first.onunload();
+    expect(storedProfiles()).toEqual(["automatic"]);
+    harness.storedData = harness.savedData[0] as Record<string, unknown>;
+    removeSlot();
+    const KwiryPlugin = await loadProductionPlugin();
+    const second = new KwiryPlugin();
+    await second.onload();
+    expect({ profile: second.settings.backendProfile, limit: second.settings.resultLimit })
+      .toEqual({ profile: "in_plugin", limit: 37 });
+    second.onunload();
+  });
+
+  it("treats a bare host record saved by an earlier build as automatic", async () => {
+    harness.desktopApp = false;
+    harness.exactSettings = true;
+    harness.storedData = { backendProfile: "host" };
     const KwiryPlugin = await loadProductionPlugin();
     const plugin = new KwiryPlugin();
     await plugin.onload();
-    harness.layoutReady?.();
-    await vi.waitFor(() => expect(harness.statusBarText).not.toMatch(/starting…$/u));
-    expect({ writes: harness.savedData, activeIndex: harness.backendInitializations,
-      profile: plugin.settings.backendProfile }).toEqual({ writes: [], activeIndex: 1, profile: "in_plugin" });
-    expect(harness.storedData).toBe(otherTab);
-    expect(plugin.settings).toMatchObject(otherTab);
-    expect(host.search).not.toHaveBeenCalled();
+    expect(plugin.settings.backendProfile).toBe("in_plugin");
     plugin.onunload();
   });
 
-  it("keeps host mode and reports when the initial choice cannot be saved", async () => {
+  it("an explicit choice is still saved and kept when the host is gone", async () => {
+    harness.desktopApp = false;
+    harness.exactSettings = true;
+    harness.storedData = null;
     const host = scriptedHost();
-    harness.beforeSave = async () => { throw new Error(RAW); };
-    const plugin = await startedHost();
-    expect(harness.notices.at(-1)).toContain("Could not remember host search");
-    expect(harness.notices.join(" ")).not.toContain(RAW);
-    expect(harness.savedData).toEqual([]);
-    expect(harness.backendInitializations).toBe(0);
-    expect(harness.cachePolicyHashes).toEqual([]);
-    expect(harness.sourcePolicies).toEqual([]);
-    expect(harness.forbidden).toEqual([]);
+    const KwiryPlugin = await loadProductionPlugin();
+    const first = new KwiryPlugin();
+    await first.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
+    await first.changeBackendProfile("in_plugin");
+    await first.changeBackendProfile("host");
+    expect(storedProfiles()).toEqual(["in_plugin", "host"]);
+    first.onunload();
+    harness.storedData = harness.savedData.at(-1) as Record<string, unknown>;
+    removeSlot();
+    const second = new KwiryPlugin();
+    await second.onload();
+    harness.layoutReady?.();
+    await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${NO_HOST}`), { interval: 5 });
+    expect(second.settings.backendProfile).toBe("host");
+    expect(harness.backendInitializations).toBe(1);
     expect(host.search).not.toHaveBeenCalled();
-    plugin.onunload();
+    second.onunload();
   });
 
   it("records one supported-host startup without reporting index readiness", async () => {
@@ -1222,7 +1364,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
   it.each([true, false])("waits for persistence before activating a replacement (save succeeds=%s)", async (succeeds) => {
     const host = scriptedHost();
     const resolution = deferred<unknown>();
-    host.resolve.mockReturnValueOnce(resolution.promise);
+    host.open.mockReturnValueOnce(resolution.promise);
     const plugin = await startedHost();
     const modal = await openHost();
     submit(modal, QUERY);
@@ -1238,7 +1380,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     if (!switchProfile) throw new Error("missing profile control");
     const changing = switchProfile("in_plugin");
     const outcome = changing.catch(() => "rejected");
-    expect(host.resolve.mock.calls[0]?.[1].signal.aborted).toBe(true);
+    expect(host.open.mock.calls[0]?.[1].signal.aborted).toBe(true);
     await settled();
     const initializedWhileSaving = harness.backendInitializations;
     harness.layoutReady?.();
@@ -1251,7 +1393,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     expect(plugin.settings.backendProfile).toBe(succeeds ? "in_plugin" : "host");
     if (!succeeds) expect(harness.notices.at(-1)).toContain("Could not save the search backend selection");
     expect(harness.notices.join(" ")).not.toContain(RAW);
-    resolution.resolve({ path: PATH });
+    resolution.resolve(undefined);
     await settled();
     expect(harness.pathLookups).toEqual([]);
     plugin.onunload();
@@ -1286,7 +1428,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     await Promise.all([switching, attempted]);
     const selected = succeeds ? "host" : "in_plugin";
     expect({ latched, latchedAfterRedraw, disabled: control()?.disabled, displayed: control()?.value,
-      runtime: plugin.settings.backendProfile, writes: harness.savedData.map((write) => Reflect.get(write as object, "backendProfile")),
+      runtime: plugin.settings.backendProfile, writes: storedProfiles(),
     }).toEqual({ latched: true, latchedAfterRedraw: true, disabled: false, displayed: selected,
       runtime: selected, writes: succeeds ? ["host"] : [] });
     if (succeeds) await openHost();
@@ -1311,7 +1453,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     const host = scriptedHost();
     const waiting = deferred<unknown>();
     host.search.mockReturnValueOnce(waiting.promise).mockResolvedValueOnce(page({ next: CURSOR }))
-      .mockRejectedValueOnce({ code: "access_denied", message: RAW });
+      .mockRejectedValueOnce({ code: "access_denied", family: "access_denied", message: RAW });
     const consoleCalls = ["debug", "info", "log", "warn", "error"].map((method) =>
       vi.spyOn(console, method as "log").mockImplementation(() => undefined));
     const plugin = await startedHost();
@@ -1335,7 +1477,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     await plugin.exportDiagnosticsFile();
     harness.desktopExportAvailable = false;
     await plugin.exportDiagnosticsFile();
-    expect(harness.savedData).toHaveLength(2);
+    expect(storedProfiles()).toEqual(["automatic"]);
     expect(harness.clipboardWrites).toHaveLength(1);
     expect(harness.exportReports).toHaveLength(1);
     expect(harness.fullClipboardReports).toHaveLength(1);
@@ -1352,240 +1494,90 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     plugin.onunload();
   });
 
-  describe("late host provider on a fresh install", () => {
+  describe("late provider and the provider-arrived event", () => {
     async function freshWithoutHost(desktop = false) {
       const host = scriptedHost("late");
       const worker = vi.fn();
-      const fetch = vi.fn();
       vi.stubGlobal("Worker", worker);
-      vi.stubGlobal("fetch", fetch);
       harness.desktopApp = desktop;
       harness.exactSettings = true;
       harness.storedData = null;
       const KwiryPlugin = await loadProductionPlugin();
       const plugin = new KwiryPlugin();
       await plugin.onload();
-      return { host, worker, fetch, plugin };
+      return { host, worker, plugin };
     }
 
-    function localWork() {
-      return { inits: harness.backendInitializations, cache: harness.cachePolicyHashes,
-        source: harness.sourcePolicies, probes: harness.forbidden };
-    }
-
-    const noLocalWork = { inits: 0, cache: [], source: [], probes: [] };
-
-    it("does no local work and saves nothing while it waits", async () => {
-      const { worker, fetch, plugin } = await freshWithoutHost();
+    it.each([true, false])("starts the fallback at layout-ready with no polling and saves nothing (desktop=%s)", async (desktop) => {
+      const { host, plugin } = await freshWithoutHost(desktop);
+      expect(availableListeners()).toBe(1);
       harness.layoutReady?.();
-      await settled();
-      const statuses = [harness.statusBarText];
-      for (let elapsed = 0; elapsed < LATE_HOST_WINDOW_MS - LATE_HOST_CHECK_MS; elapsed += LATE_HOST_CHECK_MS) {
-        advance(LATE_HOST_CHECK_MS);
-        await settled();
-        statuses.push(harness.statusBarText);
-      }
-      harness.commands.get("open-search")?.();
-      await plugin.rebuildInPluginIndex();
-      await plugin.onSourcePolicyChanged();
-      await settled();
-      expect(new Set(statuses)).toEqual(new Set(["kwiry: starting…"]));
-      expect(localWork()).toEqual(noLocalWork);
-      expect(harness.savedData).toEqual([]);
-      expect(harness.notices).toEqual(["Kwiry: search is starting…", "Kwiry: search is starting…"]);
-      expect(worker).not.toHaveBeenCalled();
-      expect(fetch).not.toHaveBeenCalled();
-      plugin.onunload();
-      expect(clock.pending).toEqual([]);
-    });
-
-    it("selects host search and saves only the profile once when a provider arrives inside the window", async () => {
-      const { host, worker, plugin } = await freshWithoutHost();
-      expect(plugin.settings.backendProfile).toBe("in_plugin");
-      harness.layoutReady?.();
-      advance(1_500);
-      await settled();
-      host.install();
-      advance(LATE_HOST_CHECK_MS);
-      await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
-      expect(plugin.settings.backendProfile).toBe("host");
-      expect(harness.savedData).toEqual([{ backendProfile: "host" }]);
-      expect(localWork()).toEqual(noLocalWork);
-      expect(worker).not.toHaveBeenCalled();
-      expect(clock.pending).toEqual([]);
-      const modal = await openHost();
-      submit(modal, QUERY);
-      await settled();
-      expect(host.search.mock.calls).toEqual([[{ query: QUERY }, { signal: expect.any(AbortSignal) }]]);
-      advance(LATE_HOST_WINDOW_MS * 4);
-      await settled();
-      expect(harness.savedData).toEqual([{ backendProfile: "host" }]);
-      plugin.onunload();
-    });
-
-    it("finds a provider installed between load and layout-ready without waiting", async () => {
-      const { host, plugin } = await freshWithoutHost();
-      host.install();
-      harness.layoutReady?.();
-      await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
-      expect({ saved: harness.savedData, now: clock.now, pending: clock.pending })
-        .toEqual({ saved: [{ backendProfile: "host" }], now: 0, pending: [] });
-      plugin.onunload();
-    });
-
-    it.each([true, false])("falls back as before and saves nothing when no provider arrives (desktop=%s)", async (desktop) => {
-      const { host, fetch, plugin } = await freshWithoutHost(desktop);
-      harness.layoutReady?.();
-      advance(LATE_HOST_WINDOW_MS - 1);
-      await settled();
-      expect(localWork()).toEqual(noLocalWork);
-      advance(1);
       if (desktop) {
         await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Index unavailable"), { interval: 5 });
       } else {
         await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
         expect(harness.backendInitializations).toBe(1);
+        // No slot: ordinary desktop behaviour, persistent cache included.
+        expect(harness.cachePolicyHashes).toHaveLength(1);
       }
-      expect(plugin.settings.backendProfile).toBe(desktop ? "daemon" : "in_plugin");
-      expect(harness.savedData).toEqual([]);
-      expect(clock.pending).toEqual([]);
-      // One deadline plus bounded re-checks, then nothing.
-      expect(clock.set).toEqual([LATE_HOST_WINDOW_MS,
-        ...Array.from({ length: LATE_HOST_WINDOW_MS / LATE_HOST_CHECK_MS }, () => LATE_HOST_CHECK_MS)]);
+      advance(60_000);
+      await settled();
+      expect({ timers: clock.set, pending: clock.pending, saved: harness.savedData, lookups: host.get.mock.calls.length })
+        .toEqual({ timers: [], pending: [], saved: [], lookups: 0 });
+      plugin.onunload();
+    });
+
+    it("looks at start, listens, and looks again only when the event fires", async () => {
+      const { host, plugin } = await freshWithoutHost();
+      harness.layoutReady?.();
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
       expect(host.get).not.toHaveBeenCalled();
-      expect(fetch).not.toHaveBeenCalled();
-      plugin.onunload();
-    });
-
-    it("stays on the fallback without saving or switching when a provider arrives after the window", async () => {
-      const { host, plugin } = await freshWithoutHost();
-      harness.layoutReady?.();
-      advance(LATE_HOST_WINDOW_MS);
-      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
-      const checks = host.get.mock.calls.length;
-      host.install();
-      advance(LATE_HOST_WINDOW_MS * 10);
+      // A spoofed or early event with no slot only causes a fresh look.
+      announceProvider();
       await settled();
-      await plugin.refreshStatus();
-      expect({ profile: plugin.settings.backendProfile, saved: harness.savedData, status: harness.statusBarText,
-        inits: harness.backendInitializations, checks: host.get.mock.calls.length, pending: clock.pending })
-        .toEqual({ profile: "in_plugin", saved: [], status: "Kwiry: Ready", inits: 1, checks, pending: [] });
-      plugin.onunload();
-    });
-
-    const STARTING_SETTINGS = [{ name: "Kwiry is starting; settings are available in a few seconds." }];
-
-    it("review regression: saving settings during the wait writes nothing and a late provider is still adopted", async () => {
-      const { host, plugin } = await freshWithoutHost();
-      harness.layoutReady?.();
-      advance(LATE_HOST_CHECK_MS);
-      plugin.settings.resultLimit = 37;
-      await plugin.saveSettings();
-      expect(harness.savedData).toEqual([]);
+      expect(plugin.settings.backendProfile).toBe("in_plugin");
       host.install();
-      advance(LATE_HOST_CHECK_MS);
+      advance(60_000);
+      await settled();
+      expect(plugin.settings.backendProfile).toBe("in_plugin");
+      expect(host.get).not.toHaveBeenCalled();
+      announceProvider();
       await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
-      expect({ profile: plugin.settings.backendProfile, saved: harness.savedData })
-        .toEqual({ profile: "host", saved: [{ backendProfile: "host" }] });
-      plugin.onunload();
-    });
-
-    it.each([true, false])("review regression: the settings tab has no controls during the wait and redraws when it ends (provider=%s)", async (provider) => {
-      const { host, plugin } = await freshWithoutHost();
-      harness.layoutReady?.();
-      harness.displaySettings?.();
-      expect(harness.settingRows).toEqual(STARTING_SETTINGS);
-      if (provider) {
-        host.install();
-        advance(LATE_HOST_CHECK_MS);
-        await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
-      } else {
-        advance(LATE_HOST_WINDOW_MS);
-        await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
-      }
-      // No second displaySettings call: the open tab redraws itself.
-      const backendRow = harness.settingRows.find(({ name }) => name === "Search backend");
-      expect(backendRow?.value).toBe(provider ? "host" : "in_plugin");
-      expect(backendRow?.onChange).toBeTypeOf("function");
-      expect(harness.savedData).toEqual(provider ? [{ backendProfile: "host" }] : []);
-      plugin.onunload();
-    });
-
-    it("review regression: a closed settings tab is not redrawn when the wait ends", async () => {
-      const { plugin } = await freshWithoutHost();
-      harness.layoutReady?.();
-      advance(LATE_HOST_WINDOW_MS);
-      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
-      expect(harness.settingRows).toEqual([]);
-      plugin.onunload();
-    });
-
-    it("review regression: a profile switch saving when the deadline fires initialises only the chosen backend", async () => {
-      const { plugin } = await freshWithoutHost(true);
-      expect(plugin.settings.backendProfile).toBe("daemon");
-      harness.layoutReady?.();
-      advance(LATE_HOST_CHECK_MS);
-      const gate = deferred<void>();
-      harness.beforeSave = () => gate.promise;
-      const switching = plugin.changeBackendProfile("in_plugin");
-      advance(LATE_HOST_WINDOW_MS);
+      expect(plugin.settings.backendProfile).toBe("host");
+      // Switching to host search stops the local index; nothing is saved.
+      expect(harness.backendDisposals).toBe(1);
+      expect({ saved: harness.savedData, timers: clock.set }).toEqual({ saved: [], timers: [] });
+      const modal = await openHost();
+      submit(modal, QUERY);
       await settled();
-      const whileSaving = { inits: harness.backendInitializations, events: [...harness.statusBarEvents] };
-      gate.resolve();
-      await switching;
-      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
-      expect(whileSaving.inits).toBe(0);
-      expect(whileSaving.events).not.toContain("text:Kwiry: Index unavailable");
-      expect(harness.statusBarEvents).not.toContain("text:Kwiry: Index unavailable");
-      expect({ inits: harness.backendInitializations, profile: plugin.settings.backendProfile, pending: clock.pending })
-        .toEqual({ inits: 1, profile: "in_plugin", pending: [] });
-      expect(harness.savedData).toEqual([expect.objectContaining({ backendProfile: "in_plugin" })]);
+      expect(host.search.mock.calls).toEqual([[{ query: QUERY }, { signal: expect.any(AbortSignal) }]]);
       plugin.onunload();
     });
 
-    it("review regression: unload during the late adoption re-read saves and activates nothing", async () => {
+    it("an event before layout-ready selects host search for the first activation", async () => {
       const { host, plugin } = await freshWithoutHost();
-      harness.layoutReady?.();
-      harness.afterLoad = () => {
-        delete harness.afterLoad;
-        plugin.onunload();
-      };
       host.install();
-      advance(LATE_HOST_CHECK_MS);
-      await settled();
-      await settled();
-      expect({ saved: harness.savedData, status: harness.statusBarText, pending: clock.pending, ...localWork() })
-        .toEqual({ saved: [], status: "kwiry: starting…", pending: [], ...noLocalWork });
-      expect(host.search).not.toHaveBeenCalled();
-    });
-
-    it("review regression: a save failure during late adoption keeps host search for the session and reports it", async () => {
-      const { host, plugin } = await freshWithoutHost();
+      announceProvider();
+      expect(plugin.settings.backendProfile).toBe("host");
       harness.layoutReady?.();
-      harness.beforeSave = async () => { throw new Error(RAW); };
-      host.install();
-      advance(LATE_HOST_CHECK_MS);
       await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
-      expect({ profile: plugin.settings.backendProfile, saved: harness.savedData, ...localWork() })
-        .toEqual({ profile: "host", saved: [], ...noLocalWork });
-      expect(harness.notices.at(-1)).toContain("Could not remember host search");
-      expect(harness.notices.join(" ")).not.toContain(RAW);
+      expect({ inits: harness.backendInitializations, saved: harness.savedData }).toEqual({ inits: 0, saved: [] });
       plugin.onunload();
     });
 
-    it("stops waiting on unload without activating anything", async () => {
+    it("removes its listener on unload; a later event does nothing", async () => {
       const { host, plugin } = await freshWithoutHost();
       harness.layoutReady?.();
-      advance(LATE_HOST_CHECK_MS);
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
       plugin.onunload();
+      expect(availableListeners()).toBe(0);
       host.install();
-      advance(LATE_HOST_WINDOW_MS);
+      announceProvider();
       await settled();
-      expect({ pending: clock.pending, saved: harness.savedData, ...localWork() })
-        .toEqual({ pending: [], saved: [], ...noLocalWork });
+      expect({ lookups: host.get.mock.calls.length, saved: harness.savedData }).toEqual({ lookups: 0, saved: [] });
     });
 
-    it.each(["daemon", "in_plugin", "host", "legacy"] as const)("never waits for saved %s settings", async (stored) => {
+    it.each(["daemon", "in_plugin", "legacy"] as const)("never overrides a saved %s choice when a provider arrives", async (stored) => {
       const host = scriptedHost("late");
       harness.desktopApp = false;
       harness.exactSettings = true;
@@ -1594,17 +1586,147 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       const plugin = new KwiryPlugin();
       await plugin.onload();
       harness.layoutReady?.();
-      if (stored === "host") {
-        await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_GUIDANCE}`), { interval: 5 });
-      } else {
-        await vi.waitFor(() => expect(harness.statusBarText).not.toBe("kwiry: starting…"), { interval: 5 });
-      }
+      await vi.waitFor(() => expect(harness.statusBarText).not.toBe("kwiry: starting…"), { interval: 5 });
       host.install();
-      advance(LATE_HOST_WINDOW_MS * 2);
+      announceProvider();
       await settled();
       expect({ timers: clock.set, saved: harness.savedData, profile: plugin.settings.backendProfile })
         .toEqual({ timers: [], saved: [], profile: stored === "legacy" ? "daemon" : stored });
-      if (stored === "host") expect(harness.statusBarText).toBe(`Kwiry: ${HOST_GUIDANCE}`);
+      plugin.onunload();
+    });
+
+    it("a saved host choice with no provider shows the no-host wording and switches to available on the event", async () => {
+      const host = scriptedHost("late");
+      harness.desktopApp = false;
+      harness.exactSettings = true;
+      harness.storedData = { backendProfile: "host", resultLimit: 20 };
+      const KwiryPlugin = await loadProductionPlugin();
+      const plugin = new KwiryPlugin();
+      await plugin.onload();
+      harness.layoutReady?.();
+      await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${NO_HOST}`), { interval: 5 });
+      const modal = await openHost();
+      submit(modal, QUERY);
+      await settled();
+      expect(modal.contentEl.text).toContain(NO_HOST);
+      host.install();
+      announceProvider();
+      await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
+      // The open modal looks again at its next use.
+      submit(modal, QUERY);
+      await settled();
+      expect(host.search).toHaveBeenCalledTimes(1);
+      expect(harness.backendInitializations).toBe(0);
+      plugin.onunload();
+    });
+
+    it("withdrawal never switches to local computation", async () => {
+      const { host, plugin } = await freshWithoutHost();
+      host.install();
+      announceProvider();
+      harness.layoutReady?.();
+      await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
+      const modal = await openHost();
+      submit(modal, QUERY);
+      await settled();
+      removeSlot();
+      host.invalidate("withdrawn");
+      await settled();
+      expect(modal.contentEl.find("p", "Host search is no longer offered here.")).toBeDefined();
+      expect(host.listeners.size).toBe(0);
+      submit(modal, QUERY);
+      await settled();
+      expect(modal.contentEl.text).toContain(NO_HOST);
+      await plugin.refreshStatus();
+      expect({ profile: plugin.settings.backendProfile, inits: harness.backendInitializations, status: harness.statusBarText })
+        .toEqual({ profile: "host", inits: 0, status: `Kwiry: ${NO_HOST}` });
+      modal.close();
+      plugin.onunload();
+    });
+  });
+
+  describe("local indexing policy under a host slot", () => {
+    async function inPluginUnder(policy: PolicyScript, kind: "without search" | "late" = "without search") {
+      const host = scriptedHost(kind, policy);
+      const worker = vi.fn();
+      vi.stubGlobal("Worker", worker);
+      harness.desktopApp = false;
+      harness.exactSettings = true;
+      harness.storedData = { backendProfile: "in_plugin" };
+      const KwiryPlugin = await loadProductionPlugin();
+      const plugin = new KwiryPlugin();
+      await plugin.onload();
+      harness.layoutReady?.();
+      await settled();
+      return { host, plugin };
+    }
+
+    it.each([
+      ["no policy service", "absent" as const, "Kwiry: Ready"],
+      ["memory_only", { value: "memory_only", decidedBy: "organization" }, "Kwiry: Ready"],
+    ])("%s builds in memory with the persistent cache off", async (_name, policy, status) => {
+      const { plugin } = await inPluginUnder(policy);
+      await vi.waitFor(() => expect(harness.statusBarText).toBe(status), { interval: 5 });
+      expect({ inits: harness.backendInitializations, cache: harness.cachePolicyHashes, saved: harness.savedData })
+        .toEqual({ inits: 1, cache: [], saved: [] });
+      harness.displaySettings?.();
+      expect(harness.settingRows.find(({ name }) => name === "Local indexing")?.description)
+        .toMatch(/^Local indexing: memory only \((default|your organization)\)\. Nothing is kept after this session\.$/u);
+      plugin.onunload();
+    });
+
+    it.each([
+      [{ value: "refuse", decidedBy: "organization" }, "Local indexing is turned off by your organization."],
+      [{ value: "persistent_custodied", decidedBy: "workspace" }, "Local indexing is turned off by this workspace."],
+      [{ value: 7, decidedBy: "galaxy" }, "Local indexing is turned off by policy."],
+      [{ value: "memory_only", decidedBy: "deployment", limit: { dimension: "memoryBytes", maximum: 1, origin: "organization" } },
+        "Local indexing has a limit set by your organization that this plugin cannot check, so it builds no index."],
+    ])("%j never starts the in-plugin backend, also from a saved profile", async (policy, message) => {
+      const { plugin } = await inPluginUnder(policy);
+      await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${message}`), { interval: 5 });
+      harness.commands.get("open-search")?.();
+      await plugin.rebuildInPluginIndex();
+      await expect(plugin.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+      expect({ inits: harness.backendInitializations, cache: harness.cachePolicyHashes, sources: harness.sourcePolicies })
+        .toEqual({ inits: 0, cache: [], sources: [] });
+      expect(harness.notices).toEqual([`Kwiry: ${message}`, `Kwiry: ${message}`]);
+      plugin.onunload();
+    });
+
+    it("starts nothing while the policy answer is still unknown", async () => {
+      const { plugin } = await inPluginUnder({ value: "memory_only", hang: true });
+      await settled();
+      expect(harness.statusBarText).toBe("Kwiry: Waiting for the local indexing policy…");
+      expect(harness.backendInitializations).toBe(0);
+      plugin.onunload();
+    });
+
+    it("a change from memory_only to refuse tears down the running backend and its in-memory index", async () => {
+      const { host, plugin } = await inPluginUnder({ value: "memory_only" });
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      expect(host.policyListeners.size).toBe(1);
+      host.changePolicy({ value: "refuse", decidedBy: "folder" });
+      await vi.waitFor(() => expect(harness.backendDisposals).toBe(1), { interval: 5 });
+      expect(harness.statusBarText).toBe("Kwiry: Local indexing is turned off by this folder.");
+      await expect(plugin.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+      host.changePolicy({ value: "memory_only" });
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(2), { interval: 5 });
+      expect(harness.cachePolicyHashes).toEqual([]);
+      plugin.onunload();
+      expect(host.policyListeners.size).toBe(0);
+      expect(host.listeners.size).toBe(0);
+    });
+
+    it("a late provider on plain desktop restarts a cached in-plugin index without its persistent cache", async () => {
+      const { host, plugin } = await inPluginUnder("absent", "late");
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      expect(harness.cachePolicyHashes).toHaveLength(1);
+      host.install();
+      announceProvider();
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(2), { interval: 5 });
+      expect(harness.backendDisposals).toBe(1);
+      expect(harness.cachePolicyHashes).toHaveLength(1);
+      expect(plugin.settings.backendProfile).toBe("in_plugin");
       plugin.onunload();
     });
   });
@@ -1617,7 +1739,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     await plugin.onload();
     expect(plugin.settings.backendProfile).toBe("daemon");
     harness.layoutReady?.();
-    advance(LATE_HOST_WINDOW_MS);
+    expect(clock.set).toEqual([]);
     harness.displaySettings?.();
     expect(harness.settingRows.find(({ name }) => name === "Search backend")).toMatchObject({
       value: "daemon",
@@ -1643,7 +1765,7 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       await plugin.onload();
       expect(plugin.settings.backendProfile).toBe("in_plugin");
       harness.layoutReady?.();
-      advance(LATE_HOST_WINDOW_MS);
+      expect(clock.set).toEqual([]);
       await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"));
       expect(harness.backendInitializations).toBe(1);
       expect(harness.savedData).toEqual([]);

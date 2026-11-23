@@ -1,74 +1,114 @@
 // SPDX-FileCopyrightText: 2026 cybersader
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { BackendManager } from "../src/backend-manager";
 import { HostSearchBackend } from "../src/backends/host-search-backend";
-import { HOST_SERVICES_SLOT, hostSearchFailure, lookupHostSearch, watchForHostSearch } from "../src/host-search";
+import {
+  hostInvalidationMessage,
+  hostSearchFailure,
+  lookupHostSearch,
+  type HostSearchSession,
+} from "../src/host-search";
+import { HOST_SLOT_KEY } from "../src/host-services";
 import { createPublicSearchApi } from "../src/public-api";
 
+const NOTICE = "Results may be incomplete.";
 const page = vi.fn();
-const resolveNote = vi.fn();
+const open = vi.fn();
+const onInvalidated = vi.fn(() => () => undefined);
+
+function service(overrides: Record<string, unknown> = {}) {
+  return { major: 1, minor: 0, page, open, onInvalidated, ...overrides };
+}
 
 function hostRealm(implementation: unknown) {
-  return { [HOST_SERVICES_SLOT]: { get: () => implementation } };
+  return { [HOST_SLOT_KEY]: { get: (name: string, major: number) => name === "search" && major === 1 ? implementation : undefined } };
+}
+
+function session(implementation: unknown = service()): HostSearchSession {
+  const found = lookupHostSearch(hostRealm(implementation));
+  if (found.situation !== "available") throw new Error(`expected search, got ${found.situation}`);
+  return found.session;
 }
 
 function unexpectedRankedFactory(): never {
   throw new Error("A ranked backend must not be constructed in host mode.");
 }
 
-describe("host capability lifecycle", () => {
+describe("search v1 lookup", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
-  it.each([undefined, 2, [], { page, resolveNote: 2 }, { page: "method", resolveNote }].map((invalid) => ({ invalid })))(
-    "fails closed for a non-callable implementation: $invalid", ({ invalid }) => {
-      expect(lookupHostSearch(hostRealm(invalid))).toBeNull();
-    },
-  );
-
-  it("fails closed if the lookup throws", () => {
-    expect(lookupHostSearch({
-      [HOST_SERVICES_SLOT]: { get() { throw new Error("stub lookup failure"); } },
-    })).toBeNull();
+  it("reports the three situations", () => {
+    expect(lookupHostSearch({}).situation).toBe("no_host");
+    expect(lookupHostSearch(hostRealm(undefined)).situation).toBe("without_service");
+    expect(lookupHostSearch(hostRealm(service())).situation).toBe("available");
   });
 
-  it("uses exact major and preserves capability and implementation receivers", async () => {
+  it.each([
+    ["a primitive", 2],
+    ["an array", []],
+    ["a non-callable open", service({ open: 2 })],
+    ["a non-callable page", service({ page: "method" })],
+    ["no invalidation hook", service({ onInvalidated: undefined })],
+    ["a draft-1 shape", { page, resolveNote: open }],
+    ["the wrong major", service({ major: 2 })],
+    ["a non-integer minor", service({ minor: 0.5 })],
+  ])("a malformed service (%s) is a host without the service", (_name, implementation) => {
+    expect(lookupHostSearch(hostRealm(implementation)).situation).toBe("without_service");
+  });
+
+  it("calls page and open on the service object with exactly the closed request and options", async () => {
     const signal = new AbortController().signal;
-    const capabilities = {
-      get(name: string, major: number) {
-        expect(this).toBe(capabilities);
-        expect([name, major]).toEqual(["search", 1]);
-        return implementation;
-      },
-    };
-    const implementation = {
-      async page(request: unknown, options: unknown) {
+    const implementation = service({
+      async page(this: unknown, request: unknown, options: unknown) {
         expect(this).toBe(implementation);
         expect(request).toEqual({ query: "mauve lynx" });
         expect(options).toEqual({ signal });
-        return { room: null, state: "building", items: [], next: null, notice: "Results may be incomplete." };
+        return { room: null, state: "building", items: [], next: null, notice: NOTICE };
       },
-      async resolveNote(ref: string, options: unknown) {
+      async open(this: unknown, ref: unknown, options: unknown) {
         expect(this).toBe(implementation);
-        expect(ref).toBe("opaque-lynx");
-        expect(options).toEqual({ signal });
-        return { path: "Mauve/Lynx.md", futureField: "not part of v1" };
+        expect([ref, options]).toEqual(["opaque-lynx", { signal }]);
       },
-    };
-    const host = lookupHostSearch({ [HOST_SERVICES_SLOT]: capabilities });
-    await expect(host?.page("mauve lynx", signal)).resolves.toEqual({
-      roomLabel: null, rows: [], continuation: null, status: "Host search is being prepared.",
-      notice: "Results may be incomplete.",
     });
-    await expect(host?.resolveNote("opaque-lynx", signal)).resolves.toBe("Mauve/Lynx.md");
+    const host = session(implementation);
+    await expect(host.page("mauve lynx", signal)).resolves.toEqual({
+      roomLabel: null, rows: [], continuation: null, status: "Host search is being prepared.", notice: NOTICE,
+    });
+    await expect(host.open("opaque-lynx", signal)).resolves.toBeUndefined();
   });
 
-  it("review regression: snapshots page, room and hit accessors once before display", async () => {
+  it("passes the invalidation reason through and returns a disposer that is safe to call twice", () => {
+    const dispose = vi.fn(() => { throw new Error("stub failure"); });
+    let registered: ((event: unknown) => void) | undefined;
+    const host = session(service({ onInvalidated: (listener: (event: unknown) => void) => { registered = listener; return dispose; } }));
+    const reasons: Array<string | null> = [];
+    const stop = host.onInvalidated((reason) => reasons.push(reason));
+    registered?.({ reason: "withdrawn" });
+    registered?.({ reason: 7 });
+    registered?.(null);
+    stop();
+    stop();
+    expect(reasons).toEqual(["withdrawn", null, null]);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps duplicate references: equality is not meaningful", async () => {
+    const hit = { ref: "same", path: "Lime/A.md", title: "A", excerpt: "" };
+    page.mockResolvedValueOnce({ room: { ref: "r", label: "Lime" }, state: "ready", items: [hit, hit], next: null, notice: NOTICE });
+    const result = await session().page("lime", new AbortController().signal);
+    expect(result.rows).toHaveLength(2);
+  });
+
+  it("snapshots page, room and hit accessors once before display", async () => {
     const secondRead = vi.fn(() => "unvalidated replacement");
     const changing = <T>(value: T) => vi.fn<() => T | string>().mockReturnValueOnce(value).mockImplementation(secondRead);
     const fields = { ref: changing("opaque-sparrow"), path: changing("Lime/Sparrow.md"),
@@ -77,49 +117,55 @@ describe("host capability lifecycle", () => {
     const accessor = <T extends Record<string, () => unknown>>(getters: T) =>
       Object.defineProperties({}, Object.fromEntries(Object.entries(getters).map(([key, get]) => [key, { get }])));
     const boundary = { room: changing(accessor(room)), state: changing("ready"), items: changing([accessor(fields)]),
-      next: changing("opaque-next"), notice: changing("Results may be incomplete.") };
-    const capability = lookupHostSearch(hostRealm({ page: async () => accessor(boundary), resolveNote }));
-    const snapshot = await capability?.page("lime sparrow", new AbortController().signal);
+      next: changing("opaque-next"), notice: changing(NOTICE), decidedBy: changing(undefined) };
+    page.mockResolvedValueOnce(accessor(boundary));
+    const snapshot = await session().page("lime sparrow", new AbortController().signal);
     expect({ snapshot, repeatedReads: secondRead.mock.calls.length }).toEqual({
       snapshot: { roomLabel: "Lime", rows: [{ noteRef: "opaque-sparrow", path: "Lime/Sparrow.md", title: "Sparrow",
-        excerpt: "a **literal** leaf" }], continuation: "opaque-next", status: "Results from the host",
-      notice: "Results may be incomplete." }, repeatedReads: 0,
+        excerpt: "a **literal** leaf" }], continuation: "opaque-next", status: "Results from the host", notice: NOTICE },
+      repeatedReads: 0,
     });
     for (const get of [...Object.values(fields), ...Object.values(room), ...Object.values(boundary)]) {
       expect(get).toHaveBeenCalledTimes(1);
     }
   });
 
-  it("review regression: snapshots error and limit accessors once before formatting", () => {
+  it.each([
+    ["a missing notice", { room: null, state: "building", items: [], next: null }],
+    ["a different notice", { room: null, state: "building", items: [], next: null, notice: "Done." }],
+    ["rows on a known non-ready state", { room: null, state: "building", items: [{}], next: null, notice: NOTICE }],
+    ["a ready page without a room", { room: null, state: "ready", items: [], next: null, notice: NOTICE }],
+    ["a malformed hit", { room: { ref: "r", label: "L" }, state: "ready", items: [{ ref: "x" }], next: null, notice: NOTICE }],
+  ])("rejects a malformed page (%s) whole, as unavailable", async (_name, value) => {
+    page.mockResolvedValueOnce(value);
+    await expect(session().page("lime", new AbortController().signal)).rejects.toMatchObject({ code: "unavailable", family: "unavailable" });
+  });
+
+  it("reads error and limit accessors once before formatting", () => {
     const secondRead = vi.fn(() => "unvalidated replacement");
     const changing = (value: unknown) => vi.fn<() => unknown>().mockReturnValueOnce(value).mockImplementation(secondRead);
     const dimension = changing("queryBytes");
-    const origin = changing("grant");
+    const origin = changing("organization");
     const maximum = changing(19);
     const limit = changing(Object.defineProperties({}, { dimension: { get: dimension }, origin: { get: origin }, maximum: { get: maximum } }));
     const retryAfterMs = changing(1_500);
     const code = changing("limited");
     const error = Object.defineProperties({}, { code: { get: code }, limit: { get: limit }, retryAfterMs: { get: retryAfterMs } });
     expect({ snapshot: hostSearchFailure(error), repeatedReads: secondRead.mock.calls.length }).toEqual({
-      snapshot: { action: "keep", message: "Host search reached a limit. Maximum: 19 query bytes (grant). Try again in 2 seconds." },
+      snapshot: { action: "keep", message: "Host search reached a limit. Maximum: 19 query bytes, set by your organization. Try again in 2 seconds." },
       repeatedReads: 0,
     });
     for (const get of [code, limit, retryAfterMs, dimension, origin, maximum]) expect(get).toHaveBeenCalledTimes(1);
   });
 
-  it("accepts long exact host paths without accepting empty, absolute or traversal paths", async () => {
-    const path = `${"Lime/".repeat(1_000)}Sparrow.md`;
-    const open = vi.fn().mockResolvedValueOnce({ path }).mockResolvedValueOnce({ path: "" })
-      .mockResolvedValueOnce({ path: "/Lime/Sparrow.md" }).mockResolvedValueOnce({ path: "Lime/../Sparrow.md" })
-      .mockResolvedValueOnce({ path: "C:/Lime/Sparrow.md" });
-    const host = lookupHostSearch(hostRealm({ page, resolveNote: open }));
-    const resolve = () => host?.resolveNote("opaque-sparrow", new AbortController().signal);
-    await expect(resolve()).resolves.toBe(path);
-    for (let index = 0; index < 4; index++) await expect(resolve()).rejects.toMatchObject({ code: "result_unavailable" });
+  it.each([
+    ["access", false], ["workspace", false], ["lifecycle", false], ["withdrawn", true], [null, true], ["future", true],
+  ])("invalidation reason %s detaches=%s", (reason, detach) => {
+    expect(hostInvalidationMessage(reason).detach).toBe(detach);
   });
 
   it.each([false, true])("never constructs another backend or dispatches through the public API (supported=%s)", async (supported) => {
-    vi.stubGlobal("window", hostRealm(supported ? { page, resolveNote } : undefined));
+    vi.stubGlobal("window", hostRealm(supported ? service() : undefined));
     const daemon = vi.fn(unexpectedRankedFactory);
     const in_plugin = vi.fn(unexpectedRankedFactory);
     const host = vi.fn((id: string) => new HostSearchBackend(id));
@@ -129,83 +175,43 @@ describe("host capability lifecycle", () => {
     expect(daemon).not.toHaveBeenCalled();
     expect(in_plugin).not.toHaveBeenCalled();
     expect(await manager.current()).toBe(backend);
-    expect(await backend.status()).toEqual({ kind: "host", identity: backend.identity, available: supported });
+    expect(await backend.status()).toEqual({ kind: "host", identity: backend.identity,
+      situation: supported ? "available" : "without_service" });
     expect(backend.identity).toEqual({ profile: "host", label: "Host search · Lexical", instanceId: "host-1" });
     const { api } = createPublicSearchApi({ currentBackend: () => manager.current(), defaultMode: () => "lexical" });
     await expect(api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
     await expect(api.search("mauve lynx")).rejects.toMatchObject({ code: "backend_unavailable" });
     expect(page).not.toHaveBeenCalled();
-    expect(resolveNote).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
     await manager.dispose();
-    expect(await backend.status()).toMatchObject({ available: false });
+    expect(await backend.status()).toMatchObject({ situation: "without_service" });
+  });
+
+  it("no polling remains in the plugin source", () => {
+    const sources = ["host-search.ts", "host-services.ts", "host-search-modal.ts", "main.ts", "settings-tab.ts",
+      "backends/host-search-backend.ts"].map((file) => readFileSync(fileURLToPath(new URL(`../src/${file}`, import.meta.url)), "utf8"));
+    for (const source of sources) {
+      expect(source).not.toMatch(/watchForHostSearch|LATE_HOST|awaitLateHost|adoptLateHost|lateHostPending|startingUp/u);
+    }
+    for (const source of sources.slice(0, 3)) expect(source).not.toMatch(/setTimeout|setInterval/u);
   });
 });
 
-describe("late host provider watch", () => {
-  const realm: Record<string, unknown> = {};
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-    for (const key of Object.keys(realm)) Reflect.deleteProperty(realm, key);
-    Object.assign(realm, {
-      setTimeout: (callback: () => void, ms: number) => setTimeout(callback, ms),
-      clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
+describe("backend manager deactivation", () => {
+  it("stops the active backend without closing the manager", async () => {
+    const dispose = vi.fn(async () => undefined);
+    const backend = { identity: { profile: "in_plugin", instanceId: "", label: "In-plugin", boundVaultId: null },
+      initialize: async () => undefined, status: async () => ({}), search: async () => ({}), dispose };
+    const manager = new BackendManager({
+      daemon: unexpectedRankedFactory,
+      in_plugin: (instanceId) => ({ ...backend, identity: { ...backend.identity, instanceId } }) as never,
     });
-    vi.stubGlobal("window", realm);
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-  });
-
-  const provide = () => { realm[HOST_SERVICES_SLOT] = { get: () => ({ page, resolveNote }) }; };
-
-  it("reports a present capability synchronously and leaves no timers", () => {
-    provide();
-    const report = vi.fn();
-    watchForHostSearch(report);
-    expect(report.mock.calls).toEqual([[true]]);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("reports a capability that appears inside the window at the next check", () => {
-    const report = vi.fn();
-    watchForHostSearch(report, { windowMs: 1_000, checkMs: 100 });
-    vi.advanceTimersByTime(450);
-    provide();
-    expect(report).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(50);
-    expect(report.mock.calls).toEqual([[true]]);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("reports absence once at the deadline and stops checking", () => {
-    const report = vi.fn();
-    watchForHostSearch(report, { windowMs: 1_000, checkMs: 100 });
-    vi.advanceTimersByTime(1_000);
-    expect(report.mock.calls).toEqual([[false]]);
-    expect(vi.getTimerCount()).toBe(0);
-    provide();
-    vi.advanceTimersByTime(10_000);
-    expect(report.mock.calls).toEqual([[false]]);
-  });
-
-  it("ignores a slot on globalThis that is not on window", () => {
-    vi.stubGlobal(HOST_SERVICES_SLOT, { get: () => ({ page, resolveNote }) });
-    const report = vi.fn();
-    watchForHostSearch(report, { windowMs: 200, checkMs: 100 });
-    vi.advanceTimersByTime(200);
-    expect(report.mock.calls).toEqual([[false]]);
-  });
-
-  it("cancels without reporting", () => {
-    const report = vi.fn();
-    const cancel = watchForHostSearch(report, { windowMs: 1_000, checkMs: 100 });
-    cancel();
-    provide();
-    vi.advanceTimersByTime(2_000);
-    expect(report).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(0);
+    await manager.activate("in_plugin");
+    await manager.deactivate();
+    expect(dispose).toHaveBeenCalledTimes(1);
+    await expect(manager.current()).rejects.toMatchObject({ code: "backend_not_selected" });
+    await manager.activate("in_plugin");
+    await expect(manager.current()).resolves.toMatchObject({ identity: { instanceId: "in_plugin-2" } });
+    await manager.dispose();
   });
 });
