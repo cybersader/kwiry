@@ -964,4 +964,5 @@ fn empty_participating_set_does_not_satisfy_required_labels() {
     assert!(result.require_snapshot_ids().is_err());
 }
 
+mod checkroom_agreement;
 mod label_edges;

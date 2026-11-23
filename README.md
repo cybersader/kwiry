@@ -75,6 +75,7 @@ Start with the orientation layer, then follow links to the canonical contract an
 - [`docs/vertical-2.md`](docs/vertical-2.md) — daemon, watcher, authentication, and incremental correctness
 - [`docs/vertical-3.md`](docs/vertical-3.md) — local semantic and hybrid search
 - [`docs/openclast-ig1.md`](docs/openclast-ig1.md) — identity-governed OpenClast lexical gateway and operator configuration
+- [`docs/checkroom.md`](docs/checkroom.md) — `kwiry checkroom`, the offline preflight that reports whether a room would receive its publication label, its reason classes, and the section and heading-path definitions
 - [`clients/obsidian/README.md`](clients/obsidian/README.md) — published Daemon and In-plugin · Lexical behavior, installation, formats, and privacy boundaries
 - [`docs/design/obsidian-lite.md`](docs/design/obsidian-lite.md) — in-plugin architecture, historical feasibility gates, published beta.15 baseline, and remaining acceptance gates
 - [`bench/fts5-wasm/README.md`](bench/fts5-wasm/README.md) — verified standalone official SQLite FTS5-WASM Gate 1 evidence and limitations

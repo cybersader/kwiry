@@ -419,26 +419,16 @@ fn build_partition(
         .writer(WRITER_MEMORY_BYTES)
         .map_err(|error| Error::Index(error.to_string()))?;
     let fingerprint = registration_fingerprint(vault);
-    let (mut enumeration, room) = room_roots.walk(vault);
-    let mut outcomes: Vec<_> = room.as_ref().map_or_else(Vec::new, |room| {
-        enumeration
-            .files
-            .iter()
-            .take_while(|_| !room.nesting_detected())
-            .map(|file| crate::chunk::ingest_file_with_room_handle(vault, file, Some(room)))
-            .collect()
+    // The same pass `checkroom` runs, so the preflight and the label agree.
+    let mut outcomes = Vec::new();
+    let pass = crate::room_check::prepare_room(vault, room_roots, |_, outcome, _| {
+        outcomes.push(outcome);
     });
-    if room
-        .as_ref()
-        .is_some_and(crate::room_walk::RoomRead::nesting_detected)
-    {
-        enumeration = crate::room_walk::nesting_failure(vault);
+    if pass.nesting_detected {
         outcomes.clear();
     }
-    let complete = room.is_some()
-        && enumeration.completeness.may_infer_deletions()
-        && outcomes.iter().all(|o| o.clean_snapshot_input());
-    stats.warnings.extend(enumeration.warnings);
+    let complete = pass.clean_and_exact;
+    stats.warnings.extend(pass.enumeration.warnings);
     for outcome in outcomes {
         if let Some(warning) = outcome.warning.clone() {
             stats.warnings.push(warning);

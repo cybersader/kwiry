@@ -11,13 +11,43 @@ pub(crate) const MAX_EXTRACTED_HEADING_BYTES_PER_SOURCE: usize = MAX_FILE_BYTES 
 pub(crate) struct ExtractionBudget {
     sections: usize,
     heading_bytes: usize,
+    /// Count only: never refuse and retain no sections. Used to explain a
+    /// limit refusal with the same section and heading-path accounting.
+    counting: bool,
 }
 
 impl ExtractionBudget {
+    #[cfg(feature = "native")]
+    pub(crate) fn counting() -> Self {
+        Self {
+            counting: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) const fn is_counting(&self) -> bool {
+        self.counting
+    }
+
+    /// Sections reserved so far and the heading-path bytes they charged.
+    #[cfg(feature = "native")]
+    pub(crate) const fn usage(&self) -> (usize, usize) {
+        (self.sections, self.heading_bytes)
+    }
+
     pub(crate) fn reserve_section(
         &mut self,
         heading_path: &[String],
     ) -> Result<(), ExtractionError> {
+        if self.counting {
+            self.sections = self.sections.saturating_add(1);
+            self.heading_bytes = heading_path
+                .iter()
+                .fold(self.heading_bytes, |total, heading| {
+                    total.saturating_add(heading.len())
+                });
+            return Ok(());
+        }
         if self.sections == MAX_EXTRACTED_SECTIONS_PER_SOURCE {
             return Err(ExtractionError::limit(
                 "prepared source exceeds the chunk inventory limit",
