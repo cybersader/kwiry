@@ -48,7 +48,7 @@ import type {
 } from "./diagnostics/log";
 import { createPrivateTools, type PrivateTools } from "./internal/private-tools";
 import { LatestRequestEpoch } from "./latest-request-epoch";
-import { HOST_SEARCH_GUIDANCE, HOST_SEARCH_STARTING, lookupHostSearch } from "./host-search";
+import { HOST_SEARCH_GUIDANCE, HOST_SEARCH_STARTING, lookupHostSearch, watchForHostSearch } from "./host-search";
 import { HostSearchModal } from "./host-search-modal";
 import { createPublicSearchApi, type KwirySearchApiV1 } from "./public-api";
 import { KwirySearchModal } from "./search-modal";
@@ -87,6 +87,9 @@ export default class KwiryPlugin extends Plugin {
   private readonly backendInvalidationCallbacks = new Set<() => void>();
   private readonly hostSearchModals = new Set<HostSearchModal>();
   private hostActivationFailed = false;
+  /** A fresh install found no host capability at load and has not chosen yet. */
+  private lateHostPending = false;
+  private cancelLateHostWatch: (() => void) | null = null;
   private savingBackendProfile = false;
   private settingsWrites = Promise.resolve();
   private statusBar: HTMLElement | null = null;
@@ -124,7 +127,8 @@ export default class KwiryPlugin extends Plugin {
           event.set({ outcome: "cancelled" });
           return;
         }
-        const autoSelectHost = (storedData === null || storedData === undefined) && lookupHostSearch() !== null;
+        const freshInstall = storedData === null || storedData === undefined;
+        const autoSelectHost = freshInstall && lookupHostSearch() !== null;
         if (autoSelectHost) {
           try {
             // Saving replaces the whole object. Re-read just before writing; the host offers no atomic check-and-save.
@@ -143,6 +147,8 @@ export default class KwiryPlugin extends Plugin {
           return;
         }
         this.settings = loadSettings(storedData, this.daemonBackendAvailable, autoSelectHost);
+        // An absent capability is not a choice: a provider may still arrive.
+        this.lateHostPending = freshInstall && !autoSelectHost;
         this.startupTimeline?.setProfile(this.settings.backendProfile);
         event.set({ profile: this.settings.backendProfile });
         // The core identity is independent of the enabled source formats.
@@ -248,7 +254,8 @@ export default class KwiryPlugin extends Plugin {
         this.app.workspace.onLayoutReady(() => {
           if (pluginEpoch !== this.pluginEpoch) return;
           this.startupTimeline?.markLayoutReady();
-          void this.activateBackendProfile();
+          if (this.lateHostPending) this.awaitLateHost(pluginEpoch);
+          else void this.activateBackendProfile();
         });
         this.startupTimeline?.markPluginLoadComplete();
       } catch (error) {
@@ -260,6 +267,7 @@ export default class KwiryPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.endLateHostWait();
     this.publicSearch.dispose();
     this.startupTimeline?.finish("cancelled", "plugin_unloaded");
     this.pluginEpoch += 1;
@@ -325,7 +333,8 @@ export default class KwiryPlugin extends Plugin {
   }
 
   async onSourcePolicyChanged(): Promise<void> {
-    if (this.settings.backendProfile !== "in_plugin") return;
+    // A pending fresh install activates with the current policy when the wait ends.
+    if (this.lateHostPending || this.settings.backendProfile !== "in_plugin") return;
     await this.activateBackendProfile();
   }
 
@@ -509,7 +518,47 @@ export default class KwiryPlugin extends Plugin {
     this.statusBarRenderer?.render(text);
   }
 
+  /// Re-checks for a host capability provided after load for a bounded window.
+  /// Nothing local starts during the wait, and absence is never saved.
+  private awaitLateHost(pluginEpoch: number): void {
+    const cancel = watchForHostSearch((found) => {
+      if (pluginEpoch !== this.pluginEpoch || !this.lateHostPending) return;
+      this.endLateHostWait();
+      void (found ? this.adoptLateHost(pluginEpoch) : this.activateBackendProfile());
+    });
+    if (this.lateHostPending) this.cancelLateHostWatch = cancel;
+  }
+
+  private endLateHostWait(): void {
+    this.lateHostPending = false;
+    this.cancelLateHostWatch?.();
+    this.cancelLateHostWatch = null;
+  }
+
+  private async adoptLateHost(pluginEpoch: number): Promise<void> {
+    try {
+      await this.enqueueSettingsWrite(async () => {
+        if (pluginEpoch !== this.pluginEpoch) return;
+        // Settings saved meanwhile are an explicit choice and win.
+        const stored: unknown = await this.loadData();
+        if (pluginEpoch !== this.pluginEpoch) return;
+        if (stored !== null && stored !== undefined) {
+          this.settings.backendProfile = loadSettings(stored, this.daemonBackendAvailable).backendProfile;
+          return;
+        }
+        this.settings.backendProfile = "host";
+        await this.saveData({ backendProfile: "host" });
+      });
+    } catch {
+      if (pluginEpoch === this.pluginEpoch) {
+        new Notice("Kwiry: Could not remember host search. Fix settings storage before reloading.");
+      }
+    }
+    if (pluginEpoch === this.pluginEpoch) await this.activateBackendProfile();
+  }
+
   async activateBackendProfile(): Promise<void> {
+    this.endLateHostWait();
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = ++this.activationEpoch;
     const profile = this.settings.backendProfile;
@@ -617,6 +666,10 @@ export default class KwiryPlugin extends Plugin {
   }
 
   async rebuildInPluginIndex(): Promise<void> {
+    if (this.lateHostPending) {
+      new Notice("Kwiry: search is starting…");
+      return;
+    }
     if (this.settings.backendProfile === "host") {
       new Notice("Kwiry: manual rebuild is available only for In-plugin · Lexical.");
       return;
@@ -680,6 +733,10 @@ export default class KwiryPlugin extends Plugin {
 
   private async openSearch(): Promise<void> {
     if (this.savingBackendProfile) return;
+    if (this.lateHostPending) {
+      new Notice("Kwiry: search is starting…");
+      return;
+    }
     const pluginEpoch = this.pluginEpoch;
     const activationEpoch = this.activationEpoch;
     if (this.settings.backendProfile === "host") {
