@@ -72,10 +72,12 @@ impl DataRoot {
         STORAGE_PROBE_TEST_FAULT.with(|fault| fault.set(true));
     }
 
-    /// Read-only host check: the root must already exist on local storage
-    /// and accept a throwaway file, which is removed before returning. Takes
-    /// no lock and creates nothing that outlives the call.
-    pub fn check_writable(&self) -> Result<()> {
+    /// Host check: the storage suitability steps [`Self::lock_writer`] runs at
+    /// startup (local filesystem, enforced exclusive locks, durable rename and
+    /// atomic pointer replacement), without creating the root or taking the
+    /// writer lock. The probe works in a `.storage-probe-*` directory that it
+    /// removes, and that startup sweeps if this process is killed mid-probe.
+    pub fn check_startup_storage(&self) -> Result<()> {
         if !fs::metadata(&self.root)
             .map_err(|error| io_error(&self.root, error))?
             .is_dir()
@@ -86,19 +88,19 @@ impl DataRoot {
             )));
         }
         reject_known_network_filesystem(&self.root)?;
-        let probe = self.root.join(format!(".write-check-{}", generation_id()?));
-        let written = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&probe)
-            .and_then(|mut file| {
-                use std::io::Write as _;
-                file.write_all(b"kwiry write check\n")?;
-                file.sync_all()
-            });
-        let removed = fs::remove_file(&probe);
-        written.map_err(|error| io_error(&probe, error))?;
-        removed.map_err(|error| io_error(&probe, error))
+        probe_storage_semantics(&self.root)
+    }
+
+    /// Whether another process holds the writer lock that startup takes. Never
+    /// creates the lock file; the lock is released before returning.
+    pub fn writer_lock_held(&self) -> Result<bool> {
+        let lock_path = self.root.join("daemon.lock");
+        let file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io_error(&lock_path, error)),
+        };
+        Ok(file.try_lock_exclusive().is_err())
     }
 
     /// Takes the writer lock and probes storage before returning it, without

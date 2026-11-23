@@ -1,8 +1,10 @@
 //! Pin which awkward Markdown inputs withhold a governed room's publication
 //! label. Each case sits beside one healthy note so a hit proves the room
-//! still serves; only the label decides whether a live check may answer (a
-//! withheld label refuses the live check with `503 resource_unavailable`).
-//! These pin current behaviour; a change here is a public-behaviour change.
+//! still serves; only the label decides whether a live check may answer.
+//! These tests observe the label only. That a withheld label refuses the live
+//! check with `503 resource_unavailable` is inferred from the live-reader
+//! label rule, not exercised here. They pin current behaviour; a change here
+//! is a public-behaviour change.
 use super::*;
 
 struct Observed {

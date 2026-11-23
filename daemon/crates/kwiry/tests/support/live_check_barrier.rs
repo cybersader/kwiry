@@ -1,6 +1,7 @@
 //! Stop only the requesting thread; watchers, publisher, fresh requests and the
 //! runtime pool keep running. Two equivalent barriers drive one scenario: a
-//! debugger breakpoint on the unmodified debug build, and the test-only stall
+//! debugger breakpoint on the debug build (no GDB-specific modification; the
+//! inert stall point is compiled in under `cargo test`), and the test-only stall
 //! hook (`internal-stall-hook-test` feature, debug assertions, explicit env
 //! var). No production pause switch, HTTP hook, elapsed-delay assumption, or
 //! test signer bypass.

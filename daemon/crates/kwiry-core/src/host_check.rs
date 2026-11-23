@@ -1,8 +1,11 @@
-//! Read-only checks that a host and config can run the governed profile,
-//! without serving. Each check calls the same function startup uses; this
-//! module only sequences them and records every result instead of stopping at
-//! the first failure. Nothing here opens a network connection. The only write
-//! is [`DataRoot::check_writable`]'s throwaway file, removed before returning.
+//! Checks that a host and config can run the governed profile, without
+//! serving. Config, room-root, storage, ingestion and mount checks call the
+//! same functions startup uses; `governed_profile`, `loopback_bind` and
+//! `snapshot_ids` are rules of this module, deliberately stricter than
+//! startup. This module only sequences the checks and records every result
+//! instead of stopping at the first failure. Nothing here opens a network
+//! connection. The only writes are startup's own storage probe, inside a
+//! `.storage-probe-*` directory that it removes.
 
 use std::path::Path;
 
@@ -31,13 +34,14 @@ pub struct HostCheck {
 
 /// Check names, in report order. The caller appends composition-owned checks
 /// (such as the signing key set) after these.
-pub const HOST_CHECKS: [&str; 8] = [
+pub const HOST_CHECKS: [&str; 9] = [
     "config",
     "governed_profile",
     "loopback_bind",
     "snapshot_ids",
     "room_roots",
-    "data_dir_writable",
+    "data_dir_storage",
+    "data_dir_unlocked",
     "openat2_probe",
     "mount_separation",
 ];
@@ -111,11 +115,22 @@ pub fn governed_host_checks(paths: &Paths) -> GovernedHostReport {
     let roots = room_roots(&config);
     let roots_ok = roots.is_ok();
     report.push("room_roots", roots);
-    let data = DataRoot::new(&paths.data_dir)
-        .check_writable()
-        .map_err(text);
+    let data_root = DataRoot::new(&paths.data_dir);
+    let data = data_root.check_startup_storage().map_err(text);
     let data_ok = data.is_ok();
-    report.push("data_dir_writable", data);
+    report.push("data_dir_storage", data);
+    if data_ok {
+        report.push(
+            "data_dir_unlocked",
+            match data_root.writer_lock_held() {
+                Ok(false) => Ok(()),
+                Ok(true) => Err("another process holds the data directory writer lock".into()),
+                Err(error) => Err(text(error)),
+            },
+        );
+    } else {
+        report.skip("data_dir_unlocked", "data directory storage failed");
+    }
     if roots_ok && data_ok {
         report.push(
             "openat2_probe",

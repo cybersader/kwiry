@@ -1,16 +1,18 @@
 //! `kwiry selfcheck` against the same governed lab the live check serves.
 use super::*;
 
-const ORDER: [&str; 9] = [
+const ORDER: [&str; 11] = [
     "config",
     "governed_profile",
     "loopback_bind",
     "snapshot_ids",
     "room_roots",
-    "data_dir_writable",
+    "data_dir_storage",
+    "data_dir_unlocked",
     "openat2_probe",
     "mount_separation",
     "jwks_readable",
+    "room_format",
 ];
 
 fn selfcheck(lab: &Lab, config: &Path, data: &Path) -> (i32, Value, String) {
@@ -85,8 +87,18 @@ fn governed_selfcheck_reports_each_host_fact_without_serving() {
     assert_eq!(summary["schema_version"], 1);
     assert!(not_passing(&summary).is_empty());
     assert!(stderr.ends_with("selfcheck: ok\n"));
-    // Read-only: the write probe leaves nothing behind.
+    // The startup storage probe leaves nothing behind.
     assert_eq!(before, listing(&lab.data));
+
+    // A running service holds the writer lock that startup would need.
+    lab.start();
+    let (code, summary, _) = selfcheck(&lab, &lab.path, &lab.data);
+    assert_eq!(code, 1);
+    assert_eq!(
+        not_passing(&summary),
+        pairs(&[("data_dir_unlocked", "fail")])
+    );
+    lab.stop();
 
     // A generic label is valid config but cannot answer a live check.
     lab.config.vaults[0].snapshot_id = Some("generic-synthetic".parse().unwrap());
@@ -137,20 +149,24 @@ fn governed_selfcheck_reports_each_host_fact_without_serving() {
     assert_eq!(
         not_passing(&summary),
         pairs(&[
-            ("data_dir_writable", "fail"),
+            ("data_dir_storage", "fail"),
+            ("data_dir_unlocked", "skipped"),
             ("openat2_probe", "skipped"),
             ("mount_separation", "skipped"),
         ])
     );
     assert!(!missing.exists());
 
-    // No config file: nothing else can be judged.
+    // No config file: nothing config-dependent can be judged; the build's room
+    // format is still reported.
     let (code, summary, _) = selfcheck(&lab, &lab.path.with_file_name("absent.toml"), &lab.data);
     assert_eq!(code, 1);
-    assert_eq!(summary["checks"][0]["status"], "fail");
+    let checks = summary["checks"].as_array().unwrap();
+    assert_eq!(checks[0]["status"], "fail");
     assert!(
-        summary["checks"].as_array().unwrap()[1..]
+        checks[1..ORDER.len() - 1]
             .iter()
             .all(|c| c["status"] == "skipped")
     );
+    assert_eq!(checks[ORDER.len() - 1]["status"], "pass");
 }

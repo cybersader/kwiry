@@ -444,7 +444,8 @@ struct SelfcheckReport<'a> {
 }
 
 /// Core checks, then the signing key set (parsed by the verifier startup
-/// uses, without opening replay state). Returns whether every check passed.
+/// uses, without opening replay state) and the build's room format. Returns
+/// whether every check passed.
 fn run_selfcheck(paths: &Paths, json: bool) -> bool {
     // Same rule as the private service: no dependency panic text.
     private_panic_hook();
@@ -464,6 +465,18 @@ fn run_selfcheck(paths: &Paths, json: bool) -> bool {
             capability::CapabilityVerifier::check_jwks(auth),
         ),
     }
+    // A property of this build, required by profile-required startup.
+    report.push(
+        "room_format",
+        if matches!(
+            capability::ROOM_FORMAT,
+            kwiry_core::OpenClastRoomFormat::Closed
+        ) {
+            Ok(())
+        } else {
+            Err("this build does not use the closed room-v1 format".into())
+        },
+    );
     let config = report.config.take();
     kwiry_core::redact_paths(&mut report, config.as_ref(), paths);
     let ok = report.passed();
