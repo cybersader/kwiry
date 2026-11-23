@@ -805,6 +805,9 @@ fn search_opened_with_quality(
     limit: usize,
     filters: &SearchFilters,
 ) -> Result<LexicalSearchOutcome> {
+    // Test-only: hold an opened reader while a new generation publishes.
+    #[cfg(all(feature = "internal-stall-hook-test", debug_assertions))]
+    crate::stall_hook::pause_opened_reader();
     search_partitions_with_quality(&partition_readers(opened), query, limit, filters)
 }
 

@@ -72,6 +72,37 @@ impl DataRoot {
         STORAGE_PROBE_TEST_FAULT.with(|fault| fault.set(true));
     }
 
+    /// Host check: the storage suitability steps [`Self::lock_writer`] runs at
+    /// startup (local filesystem, enforced exclusive locks, durable rename and
+    /// atomic pointer replacement), without creating the root or taking the
+    /// writer lock. The probe works in a `.storage-probe-*` directory that it
+    /// removes, and that startup sweeps if this process is killed mid-probe.
+    pub fn check_startup_storage(&self) -> Result<()> {
+        if !fs::metadata(&self.root)
+            .map_err(|error| io_error(&self.root, error))?
+            .is_dir()
+        {
+            return Err(Error::State(format!(
+                "data directory is not a directory: {}",
+                self.root.display()
+            )));
+        }
+        reject_known_network_filesystem(&self.root)?;
+        probe_storage_semantics(&self.root)
+    }
+
+    /// Whether another process holds the writer lock that startup takes. Never
+    /// creates the lock file; the lock is released before returning.
+    pub fn writer_lock_held(&self) -> Result<bool> {
+        let lock_path = self.root.join("daemon.lock");
+        let file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io_error(&lock_path, error)),
+        };
+        Ok(file.try_lock_exclusive().is_err())
+    }
+
     /// Takes the writer lock and probes storage before returning it, without
     /// cleaning generations. Inspect the as-found index before calling
     /// [`DataRootLock::prepare`].
