@@ -170,11 +170,13 @@ async function loadProductionPlugin(): Promise<new () => {
     enabledSourceFormats: Record<string, boolean>;
     diagnosticsReportLevel: "debug" | "info" | "warn" | "error";
     diagnosticsReportScope: "all" | "indexing" | "search" | "startup" | "failures";
+    resultLimit: number;
   };
   readonly api: KwirySearchApiV1;
   onload(): Promise<void>;
   onunload(): void;
   saveSettings(): Promise<void>;
+  changeBackendProfile(profile: SearchProfile): Promise<void>;
   refreshStatus(): Promise<void>;
   onSourcePolicyChanged(): Promise<void>;
   rebuildInPluginIndex(): Promise<void>;
@@ -263,6 +265,7 @@ function stubSource(path: string): string {
         export class TFile { constructor(path) { this.path = path; } }
         export class PluginSettingTab {
           containerEl = { empty() { harness.settingRows.length = 0; } };
+          hide() {}
         }
         export class Setting {
           row = {};
@@ -762,13 +765,21 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     if (expectedProfile === "host") {
       await expect(plugin.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
     }
+    const waits = stored === "fresh" && kind !== "present";
     harness.displaySettings?.();
-    const choice = harness.settingRows.find((row) => row.name === "Search backend");
-    expect(choice?.options?.host?.label).toBe(expectedProfile === "host" || kind === "present" ? HOST_LABEL : undefined);
-    expect(choice?.value).toBe(expectedProfile);
+    const checkChoice = () => {
+      const choice = harness.settingRows.find((row) => row.name === "Search backend");
+      expect(choice?.options?.host?.label).toBe(expectedProfile === "host" || kind === "present" ? HOST_LABEL : undefined);
+      expect(choice?.value).toBe(expectedProfile);
+    };
+    if (waits) {
+      expect(harness.settingRows).toEqual([{ name: "Kwiry is starting; settings are available in a few seconds." }]);
+    } else {
+      checkChoice();
+    }
     expect(host.get.mock.calls.every(([name, major]) => name === "search" && major === 1)).toBe(true);
     harness.layoutReady?.();
-    if (stored === "fresh" && kind !== "present") {
+    if (waits) {
       // Absence at load is not a choice: wait for a late provider before falling back.
       await settled();
       expect({ status: harness.statusBarText, inits: harness.backendInitializations, cache: harness.cachePolicyHashes,
@@ -777,6 +788,8 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       expect(worker).not.toHaveBeenCalled();
       expect(fetch).not.toHaveBeenCalled();
       advance(LATE_HOST_WINDOW_MS);
+      // The open tab redraws with the real controls once the wait ends.
+      checkChoice();
     } else {
       expect(clock.set).toEqual([]);
     }
@@ -1460,17 +1473,103 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       plugin.onunload();
     });
 
-    it("lets settings saved during the wait win over a late provider", async () => {
+    const STARTING_SETTINGS = [{ name: "Kwiry is starting; settings are available in a few seconds." }];
+
+    it("review regression: saving settings during the wait writes nothing and a late provider is still adopted", async () => {
       const { host, plugin } = await freshWithoutHost();
       harness.layoutReady?.();
       advance(LATE_HOST_CHECK_MS);
+      plugin.settings.resultLimit = 37;
       await plugin.saveSettings();
-      harness.storedData = harness.savedData[0] as typeof harness.storedData;
+      expect(harness.savedData).toEqual([]);
       host.install();
       advance(LATE_HOST_CHECK_MS);
+      await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
+      expect({ profile: plugin.settings.backendProfile, saved: harness.savedData })
+        .toEqual({ profile: "host", saved: [{ backendProfile: "host" }] });
+      plugin.onunload();
+    });
+
+    it.each([true, false])("review regression: the settings tab has no controls during the wait and redraws when it ends (provider=%s)", async (provider) => {
+      const { host, plugin } = await freshWithoutHost();
+      harness.layoutReady?.();
+      harness.displaySettings?.();
+      expect(harness.settingRows).toEqual(STARTING_SETTINGS);
+      if (provider) {
+        host.install();
+        advance(LATE_HOST_CHECK_MS);
+        await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
+      } else {
+        advance(LATE_HOST_WINDOW_MS);
+        await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
+      }
+      // No second displaySettings call: the open tab redraws itself.
+      const backendRow = harness.settingRows.find(({ name }) => name === "Search backend");
+      expect(backendRow?.value).toBe(provider ? "host" : "in_plugin");
+      expect(backendRow?.onChange).toBeTypeOf("function");
+      expect(harness.savedData).toEqual(provider ? [{ backendProfile: "host" }] : []);
+      plugin.onunload();
+    });
+
+    it("review regression: a closed settings tab is not redrawn when the wait ends", async () => {
+      const { plugin } = await freshWithoutHost();
+      harness.layoutReady?.();
+      advance(LATE_HOST_WINDOW_MS);
       await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
-      expect(plugin.settings.backendProfile).toBe("in_plugin");
-      expect(harness.savedData).toHaveLength(1);
+      expect(harness.settingRows).toEqual([]);
+      plugin.onunload();
+    });
+
+    it("review regression: a profile switch saving when the deadline fires initialises only the chosen backend", async () => {
+      const { plugin } = await freshWithoutHost(true);
+      expect(plugin.settings.backendProfile).toBe("daemon");
+      harness.layoutReady?.();
+      advance(LATE_HOST_CHECK_MS);
+      const gate = deferred<void>();
+      harness.beforeSave = () => gate.promise;
+      const switching = plugin.changeBackendProfile("in_plugin");
+      advance(LATE_HOST_WINDOW_MS);
+      await settled();
+      const whileSaving = { inits: harness.backendInitializations, events: [...harness.statusBarEvents] };
+      gate.resolve();
+      await switching;
+      await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Ready"), { interval: 5 });
+      expect(whileSaving.inits).toBe(0);
+      expect(whileSaving.events).not.toContain("text:Kwiry: Index unavailable");
+      expect(harness.statusBarEvents).not.toContain("text:Kwiry: Index unavailable");
+      expect({ inits: harness.backendInitializations, profile: plugin.settings.backendProfile, pending: clock.pending })
+        .toEqual({ inits: 1, profile: "in_plugin", pending: [] });
+      expect(harness.savedData).toEqual([expect.objectContaining({ backendProfile: "in_plugin" })]);
+      plugin.onunload();
+    });
+
+    it("review regression: unload during the late adoption re-read saves and activates nothing", async () => {
+      const { host, plugin } = await freshWithoutHost();
+      harness.layoutReady?.();
+      harness.afterLoad = () => {
+        delete harness.afterLoad;
+        plugin.onunload();
+      };
+      host.install();
+      advance(LATE_HOST_CHECK_MS);
+      await settled();
+      await settled();
+      expect({ saved: harness.savedData, status: harness.statusBarText, pending: clock.pending, ...localWork() })
+        .toEqual({ saved: [], status: "kwiry: starting…", pending: [], ...noLocalWork });
+      expect(host.search).not.toHaveBeenCalled();
+    });
+
+    it("review regression: a save failure during late adoption keeps host search for the session and reports it", async () => {
+      const { host, plugin } = await freshWithoutHost();
+      harness.layoutReady?.();
+      harness.beforeSave = async () => { throw new Error(RAW); };
+      host.install();
+      advance(LATE_HOST_CHECK_MS);
+      await vi.waitFor(() => expect(harness.statusBarText).toBe(`Kwiry: ${HOST_LABEL}`), { interval: 5 });
+      expect({ profile: plugin.settings.backendProfile, saved: harness.savedData, ...localWork() })
+        .toEqual({ profile: "host", saved: [], ...noLocalWork });
+      expect(harness.notices.at(-1)).toContain("Could not remember host search");
+      expect(harness.notices.join(" ")).not.toContain(RAW);
       plugin.onunload();
     });
 
@@ -1517,6 +1616,8 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     const plugin = new KwiryPlugin();
     await plugin.onload();
     expect(plugin.settings.backendProfile).toBe("daemon");
+    harness.layoutReady?.();
+    advance(LATE_HOST_WINDOW_MS);
     harness.displaySettings?.();
     expect(harness.settingRows.find(({ name }) => name === "Search backend")).toMatchObject({
       value: "daemon",
@@ -1527,8 +1628,6 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       },
     });
     expect(harness.settingRows).toContainEqual(expect.objectContaining({ name: "Daemon URL" }));
-    harness.layoutReady?.();
-    advance(LATE_HOST_WINDOW_MS);
     await vi.waitFor(() => expect(harness.statusBarText).toBe("Kwiry: Index unavailable"));
     expect(harness.savedData).toEqual([]);
     plugin.onunload();

@@ -23,6 +23,7 @@ import {
 
 export class KwirySettingTab extends PluginSettingTab {
   private changingBackend = false;
+  private shown = false;
 
   constructor(
     app: App,
@@ -31,9 +32,27 @@ export class KwirySettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  hide(): void {
+    this.shown = false;
+    super.hide();
+  }
+
+  /** Redraws an open tab, for example when a fresh install finishes starting. */
+  redrawIfShown(): void {
+    if (this.shown) this.display();
+  }
+
   display(): void {
     const { containerEl } = this;
+    this.shown = true;
     containerEl.empty();
+
+    // Until a fresh install knows whether host search exists, its profile is only
+    // a provisional fallback; offering no controls means nothing can save it.
+    if (this.plugin.startingUp) {
+      new Setting(containerEl).setName("Kwiry is starting; settings are available in a few seconds.");
+      return;
+    }
 
     const daemonAvailable = this.plugin.daemonBackendAvailable;
     const hostAvailable = lookupHostSearch() !== null;
