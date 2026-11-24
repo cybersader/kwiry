@@ -6,8 +6,9 @@
 // local indexing policy. Nothing here names a product; only the two string
 // constants below come from the contract.
 
-// PROVISIONAL: the slot key and the event name are not frozen yet. They live
-// here and nowhere else; change them only in this module.
+// FROZEN (2026-11-24): the slot key, the get(name, major) lookup and the event
+// name are permanent. Services behind the slot evolve by major/minor version;
+// these constants must never change. They live here and nowhere else.
 export const HOST_SLOT_KEY = "com.openclast.workspace-host";
 export const HOST_AVAILABLE_EVENT = "com.openclast.workspace-host:available";
 

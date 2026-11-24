@@ -11,7 +11,7 @@ The presentation plugin does not own parsing, chunking, ranking, authorization, 
 
 ## Host search (provisional)
 
-The plugin follows the host services contract (draft; the slot and event names are provisional and kept in one module). At every start it looks once for a host slot on the window, and it listens for the host's "provider arrived" event for as long as it runs, looking again each time the event fires. There is no polling and no startup wait.
+The plugin follows the host services contract (the slot and event names are frozen as of 2026-11-24 and kept in one module). At every start it looks once for a host slot on the window, and it listens for the host's "provider arrived" event for as long as it runs, looking again each time the event fires. There is no polling and no startup wait.
 
 Until someone picks a backend in the settings tab, the backend is chosen automatically at every start and never saved: **Host search · Lexical** when the host offers search version 1, otherwise **Daemon** where supported and **In-plugin · Lexical** elsewhere. If a host offering search appears later in the session, an automatic choice switches to host search for that session. A backend picked in the settings tab is saved and kept; a saved host choice without host search shows that host search is unavailable and never switches backends. Earlier builds that saved only an automatic host selection are treated as automatic.
 
