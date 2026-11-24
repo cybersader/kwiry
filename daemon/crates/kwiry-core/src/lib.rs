@@ -41,6 +41,8 @@ mod model;
 mod partition;
 #[cfg(feature = "portable")]
 mod policy;
+#[cfg(feature = "native")]
+mod provider;
 #[cfg(feature = "portable")]
 mod query;
 #[cfg(feature = "portable")]
@@ -163,6 +165,14 @@ pub use policy::{
     EXTRACTION_POLICY_SCHEMA_VERSION, ExtractionProfile, FORMAT_IDENTITY_SCHEMA_VERSION,
     active_extraction_policy, active_format_identities, extraction_policy_fingerprint,
     extraction_profile_for, extractor_version_for, format_identity_fingerprint,
+};
+#[cfg(feature = "native")]
+pub use provider::{
+    PROVIDER_MAX_ID_BYTES, PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT,
+    PROVIDER_MAX_PARTITION_BYTES, PROVIDER_MAX_PATH_BYTES, PROVIDER_MAX_QUERY_PARTITIONS,
+    PROVIDER_OVER_TRANSPORT_CAP, ProviderAsOf, ProviderCoverage, ProviderError, ProviderErrorKind,
+    ProviderFeedMode, ProviderQueryOutcome, ProviderReference, ProviderResult, ProviderState,
+    ProviderStatus, ProviderStore, hex_sha256,
 };
 #[cfg(feature = "portable")]
 pub use query::{

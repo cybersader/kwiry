@@ -4,6 +4,8 @@ mod checkroom;
 mod engine;
 mod holdings;
 mod logging;
+#[cfg(unix)]
+mod provider_helper;
 mod replay;
 mod runtime;
 mod server;
@@ -92,6 +94,18 @@ enum Command {
     /// its publication label, and which files prevent it. Exits 0 if it
     /// would, 1 if not, 2 on a usage or setup error.
     Checkroom(CheckroomArgs),
+    /// EXPERIMENTAL (trial): serve the push-fed search provider contract on a
+    /// local Unix socket. Desktop, non-governed, no TCP listener, no network,
+    /// no workspace reads; indexes only what a host sends. Requires
+    /// `--data-dir`, which holds disposable indexes and is cleared at start.
+    /// See docs/provider-helper-trial.md.
+    #[cfg(unix)]
+    ProviderHelper {
+        /// Socket file to create (mode 0600). Its directory must be owned by
+        /// this user and not group- or world-writable.
+        #[arg(long, value_name = "PATH")]
+        socket: PathBuf,
+    },
     /// Search the lexical index.
     Search {
         query: String,
@@ -286,6 +300,14 @@ async fn main() -> Result<()> {
         Command::Checkroom(args) => {
             std::process::exit(checkroom::run(cli.config, cli.data_dir, &args))
         }
+        #[cfg(unix)]
+        Command::ProviderHelper { socket } => {
+            // Independent of the daemon's config and data root on purpose.
+            let data_dir = cli
+                .data_dir
+                .ok_or_else(|| anyhow!("provider-helper requires --data-dir"))?;
+            return provider_helper::run(socket, data_dir).await;
+        }
         command => command,
     };
     let paths = Paths::resolve(cli.config, cli.data_dir)?;
@@ -348,6 +370,10 @@ async fn main() -> Result<()> {
                 .context("holder command failed")??;
         }
         Command::Checkroom(_) => unreachable!("checkroom returns before path resolution"),
+        #[cfg(unix)]
+        Command::ProviderHelper { .. } => {
+            unreachable!("provider-helper returns before path resolution")
+        }
         Command::Selfcheck { json } => {
             if !run_selfcheck(&paths, json) {
                 std::process::exit(1);

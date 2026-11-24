@@ -105,26 +105,66 @@ pub(crate) fn search_reader_with_quality(
     limit: usize,
     filters: &SearchFilters,
 ) -> Result<LexicalSearchOutcome> {
+    let searcher = reader.searcher();
+    search_pinned_with_quality(
+        &[PinnedSearcher {
+            index,
+            fields,
+            searcher: &searcher,
+        }],
+        query_text,
+        limit.min(MAX_RESULTS),
+        filters,
+    )
+}
+
+/// One index of a pinned search set: a searcher the caller already took, so
+/// the caller can pair the hits with state captured at the same moment.
+pub(crate) struct PinnedSearcher<'a> {
+    pub index: &'a Index,
+    pub fields: &'a Fields,
+    pub searcher: &'a Searcher,
+}
+
+/// [`search_reader_with_quality`] over one or more pinned searchers. BM25
+/// statistics are summed over exactly this set. Every index must give its
+/// chunks distinct source keys (distinct owner ids), or identical paths in
+/// two indexes would be merged into one candidate. `limit` counts chunks and
+/// is not capped at `MAX_RESULTS`; the plan's own candidate bound
+/// (`MAX_TOTAL_CANDIDATES`) still applies.
+pub(crate) fn search_pinned_with_quality(
+    targets: &[PinnedSearcher<'_>],
+    query_text: &str,
+    limit: usize,
+    filters: &SearchFilters,
+) -> Result<LexicalSearchOutcome> {
     if query_text.trim().is_empty() {
         return Err(Error::Query("query must not be empty".into()));
     }
+    if targets.is_empty() {
+        return Ok(LexicalSearchOutcome {
+            hits: Vec::new(),
+            match_quality: LexicalMatchQuality::None,
+        });
+    }
 
-    let searcher = reader.searcher();
-    let context = NativeSearchContext {
-        index,
-        fields,
-        searcher: &searcher,
-        resource: None,
-    };
-    let resolved = resolve_query_plan(std::slice::from_ref(&context), query_text)?;
-    let statistics = AuthorizedStatistics::new(vec![searcher.clone()]);
-    execute_lexical_plan(
-        std::slice::from_ref(&context),
-        &resolved,
-        limit.min(MAX_RESULTS),
-        filters,
-        &statistics,
-    )
+    let contexts: Vec<_> = targets
+        .iter()
+        .map(|target| NativeSearchContext {
+            index: target.index,
+            fields: target.fields,
+            searcher: target.searcher,
+            resource: None,
+        })
+        .collect();
+    let resolved = resolve_query_plan(&contexts, query_text)?;
+    let statistics = AuthorizedStatistics::new(
+        targets
+            .iter()
+            .map(|target| target.searcher.clone())
+            .collect(),
+    );
+    execute_lexical_plan(&contexts, &resolved, limit, filters, &statistics)
 }
 
 #[cfg(feature = "internal-d5c-preview")]
