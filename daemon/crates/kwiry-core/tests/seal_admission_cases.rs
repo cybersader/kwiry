@@ -12,7 +12,10 @@
 //! withhold the label. Kwiry's verdict must equal the list's stated column
 //! (`engine_rule_657bced6`); where that column is null the measured column
 //! (`engine_0ce9ff91`) is used. A withheld case must also carry the Kwiry reason
-//! and class that the partner's reason code names. Disagreements are listed in
+//! and class that the partner's reason code names. For the cases with no stated
+//! verdict, Kwiry must also give exactly the verdict, exit code, reason and
+//! class the partner recorded from `kwiry checkroom` at 4e3f5446
+//! (`engine_checkroom_4e3f5446`). Disagreements are listed in
 //! `KNOWN_DISAGREEMENTS` with Kwiry's actual verdict, so they stay documented
 //! and a change in either direction fails this test. Kwiry's behaviour is not
 //! adjusted to the list.
@@ -31,6 +34,7 @@ use serde_json::Value;
 const CASES: &str = include_str!("fixtures/seal-admission/seal-admission-cases.v1.json");
 const STATED: &str = "engine_rule_657bced6";
 const MEASURED: &str = "engine_0ce9ff91";
+const CHECKROOM: &str = "engine_checkroom_4e3f5446";
 const CONTROL: &str = "control.md";
 
 /// What Kwiry decides for one case: `None` when labelled, otherwise the
@@ -53,6 +57,38 @@ struct Case {
     labelled: bool,
     stated_is_null: bool,
     partner_reason: Option<String>,
+    /// The partner's recorded `kwiry checkroom` result for this case.
+    checkroom: Verdict,
+}
+
+/// Parses an `engine_checkroom_4e3f5446` entry: `{verdict, exit, reason, class}`.
+fn checkroom_column(id: &str, column: &Value) -> Verdict {
+    let text = |key: &str| column[key].as_str();
+    let exit = column["exit"].as_i64().unwrap();
+    match text("verdict").unwrap() {
+        "labelled" => {
+            assert_eq!(exit, 0, "{id}");
+            assert!(
+                column["reason"].is_null() && column["class"].is_null(),
+                "{id}"
+            );
+            None
+        }
+        "withheld" => {
+            assert_eq!(exit, 1, "{id}");
+            let reason = RoomCheckReason::ALL
+                .into_iter()
+                .find(|reason| Some(reason.as_str()) == text("reason"))
+                .unwrap_or_else(|| panic!("{id}: unknown reason in {column}"));
+            assert_eq!(
+                serde_json::to_value(reason.class()).unwrap(),
+                column["class"],
+                "{id}: reason and class disagree in the column"
+            );
+            Some((reason, reason.class()))
+        }
+        other => panic!("{id}: unknown checkroom verdict {other:?}"),
+    }
 }
 
 fn cases() -> Vec<Case> {
@@ -90,6 +126,7 @@ fn cases() -> Vec<Case> {
                 labelled,
                 stated_is_null,
                 partner_reason: text("reason"),
+                checkroom: checkroom_column(&text("id").unwrap(), &case[CHECKROOM]),
             }
         })
         .collect()
@@ -197,6 +234,12 @@ fn seal_admission_cases_match_the_stated_verdict() {
         };
         if case.stated_is_null {
             null_stated.push(case.id.as_str());
+            if actual != case.checkroom {
+                failures.push(format!(
+                    "{}: {CHECKROOM} records {:?}, Kwiry {actual:?}",
+                    case.id, case.checkroom
+                ));
+            }
         }
         match known.get(case.id.as_str()) {
             Some(listed) if *listed == actual && actual != expected => {}

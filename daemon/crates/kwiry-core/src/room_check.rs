@@ -537,6 +537,188 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    fn one_room(root: &Path) -> Config {
+        Config {
+            vaults: vec![VaultRegistration {
+                snapshot_id: None,
+                id: "count".into(),
+                path: root.to_path_buf(),
+                room: Some("count".into()),
+            }],
+            ..Config::default()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn findings(list: &[RoomCheckFinding]) -> Vec<(String, RoomCheckReason)> {
+        let mut found: Vec<_> = list.iter().map(|f| (f.path.clone(), f.reason)).collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.as_str().cmp(b.1.as_str())));
+        found
+    }
+
+    /// Pins exactly which entries `files_checked` counts, and where every
+    /// other entry ends up (an offender, a walk defect, or nowhere). See the
+    /// `files_checked` table in `docs/checkroom.md`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn files_checked_counts_exactly_the_sources_the_pass_prepared() {
+        use RoomCheckReason as R;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let room = dir.path().canonicalize().unwrap().join("room");
+        fs::create_dir(&room).unwrap();
+        let write = |name: &str, bytes: &[u8]| fs::write(room.join(name), bytes).unwrap();
+        let sparse = |name: &str| {
+            fs::File::create(room.join(name))
+                .unwrap()
+                .set_len(MAX_FILE_BYTES + 1)
+                .unwrap();
+        };
+
+        // Counted: the walk admits them and the pass prepares them.
+        write("clean.md", b"# Clean\nbody\n");
+        write("notes.txt", b"plain text\n"); // non_markdown_format
+        write("broken.md", b"---\na: [\n---\nbody\n"); // invalid_frontmatter
+        write("back\\slash.md", b"# Head\n"); // invalid_path
+        write("unreadable.md", b"# Gone\n"); // io_unavailable, by test hook
+        // HTML is exempt from the walk's size check (room_walk.rs), so an
+        // oversize `.html` is counted and refused as a non-Markdown format.
+        sparse("big.html");
+
+        // Not counted, listed in offenders: the walk refuses them.
+        sparse("big.md"); // over_size_budget
+        sparse("big.txt"); // over_size_budget, not non_markdown_format
+        write("one.md", b"# One\n");
+        fs::hard_link(room.join("one.md"), room.join("two.md")).unwrap();
+        // The link check precedes the format check: a linked image is listed.
+        write("image.png", b"\x89PNG");
+        fs::hard_link(room.join("image.png"), room.join("image-link.png")).unwrap();
+        std::os::unix::fs::symlink(room.join("clean.md"), room.join("link.md")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(room.join("socket")).unwrap();
+
+        // Not counted, listed nowhere.
+        write("photo.png", b"\x89PNG"); // not an extractable format
+        write("README", b"no extension");
+        sparse("huge.png"); // format precedes size: ignored, not oversize
+        write(".hidden.md", b"\xff");
+        fs::create_dir(room.join(".obsidian")).unwrap();
+        fs::write(room.join(".obsidian/bad.md"), b"\xff").unwrap();
+
+        // Not counted, listed in walk_defects at the directory.
+        fs::create_dir(room.join("names")).unwrap();
+        fs::write(
+            room.join("names")
+                .join(std::ffi::OsStr::from_bytes(b"bad\xff.md")),
+            b"# Head\n",
+        )
+        .unwrap();
+        fs::create_dir(room.join("locked")).unwrap();
+        fs::write(room.join("locked/inside.md"), b"# Inside\n").unwrap();
+        fs::set_permissions(room.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged test run can still read the directory; skip that row then.
+        let locked = fs::read_dir(room.join("locked")).is_err();
+        // A listing that fails part-way: entries already listed are counted.
+        fs::create_dir(room.join("listing")).unwrap();
+        fs::write(room.join("listing/first.md"), b"# First\n").unwrap();
+
+        let report = crate::room_walk::with_interrupted_listing(room.join("listing"), || {
+            crate::room_walk::with_unreadable_source("unreadable.md", || {
+                check_room(&one_room(&room), 0, None).unwrap()
+            })
+        });
+        fs::set_permissions(room.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+
+        // clean, notes.txt, broken, back\slash, unreadable, big.html and
+        // listing/first.md (and locked/inside.md when the lock is not enforced).
+        assert_eq!(
+            report.files_checked,
+            if locked { 7 } else { 8 },
+            "{report:?}"
+        );
+        assert!(!report.would_label);
+        let offenders = vec![
+            ("back\\slash.md".to_owned(), R::InvalidPath),
+            ("big.html".to_owned(), R::NonMarkdownFormat),
+            ("big.md".to_owned(), R::OverSizeBudget),
+            ("big.txt".to_owned(), R::OverSizeBudget),
+            ("broken.md".to_owned(), R::InvalidFrontmatter),
+            ("image-link.png".to_owned(), R::HardLink),
+            ("image.png".to_owned(), R::HardLink),
+            ("link.md".to_owned(), R::BoundaryEscape),
+            ("notes.txt".to_owned(), R::NonMarkdownFormat),
+            ("one.md".to_owned(), R::HardLink),
+            ("socket".to_owned(), R::SpecialFile),
+            ("two.md".to_owned(), R::HardLink),
+            ("unreadable.md".to_owned(), R::IoUnavailable),
+        ];
+        assert_eq!(findings(&report.offenders), offenders);
+        let mut defects = vec![
+            ("listing".to_owned(), R::IoUnavailable),
+            ("names".to_owned(), R::NonUtf8Name),
+        ];
+        if locked {
+            defects.insert(1, ("locked".to_owned(), R::IoUnavailable));
+        }
+        assert_eq!(findings(&report.walk_defects), defects);
+    }
+
+    /// A room root whose own name starts with `.` is a room like any other:
+    /// the dot-name skip applies to entries inside the room only. The governed
+    /// daemon's registration, config load and ingestion probe accept it too.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dot_named_room_root_is_walked_and_its_dot_entries_skipped() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let room = base.join(".staging-abc");
+        fs::create_dir_all(room.join("sub/.cache")).unwrap();
+        fs::create_dir(room.join(".obsidian")).unwrap();
+        fs::write(room.join("note.md"), "# Note\nbody\n").unwrap();
+        fs::write(room.join("sub/deep.md"), "# Deep\nbody\n").unwrap();
+        fs::write(room.join(".hidden.md"), b"\xff").unwrap();
+        fs::write(room.join(".obsidian/bad.md"), b"\xff").unwrap();
+        fs::write(room.join("sub/.cache/bad.md"), b"\xff").unwrap();
+
+        let report = check_room(&one_room(&room), 0, None).unwrap();
+        assert!(report.would_label, "{report:?}");
+        assert_eq!(report.files_checked, 2);
+        assert!(report.offenders.is_empty() && report.walk_defects.is_empty());
+
+        // The daemon side: canonical-root check, OpenClast config load (room
+        // registration and mount checks), the startup ingestion probe, and the
+        // same pass compared against a data directory for overlap.
+        assert_eq!(
+            crate::room_boundary::require_canonical_room_root(&room).unwrap(),
+            room
+        );
+        let mut config = one_room(&room);
+        config.server.profile = crate::HostProfile::OpenClast;
+        config.auth.openclast = Some(crate::OpenClastAuthConfig {
+            tenant_id: "tenant_AAAAAAAAAAAAAAAAAAAA".into(),
+            issuer: "synthetic-issuer".into(),
+            audience: "synthetic-audience".into(),
+            jwks_file: base.join("keys.json"),
+            max_token_ttl_seconds: 60,
+            workload_subject_allowlist: vec![],
+            legacy_identity_accept_until: None,
+        });
+        let settings = base.join("settings/config.toml");
+        let data = base.join("data");
+        crate::save_config(&settings, &config).unwrap();
+        let paths = crate::Paths::resolve(Some(settings), Some(data.clone())).unwrap();
+        let loaded = crate::load_config_for_paths(&paths).unwrap();
+        assert_eq!(loaded.vaults[0].path, room);
+        crate::room_walk::probe_openclast_ingestion(&data, &loaded.vaults).unwrap();
+        let report = check_room(&loaded, 0, Some(&data)).unwrap();
+        assert!(report.would_label, "{report:?}");
+        assert_eq!(report.files_checked, 2);
+    }
+
     #[test]
     fn reason_names_are_unique_and_snake_case() {
         let names: std::collections::BTreeSet<_> =
