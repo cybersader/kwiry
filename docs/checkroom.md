@@ -88,14 +88,15 @@ Output never contains file content or labels. Paths are room-relative.
 ```
 
 - `would_label` — the room would receive its configured label.
-- `files_checked` — admitted sources the pass read (Markdown, text and the
-  other extractable formats; files the walk ignores, such as images, are not
-  counted).
+- `files_checked` — sources the walk admitted and the pass then prepared; see
+  [What `files_checked` counts](#what-files_checked-counts).
 - `offenders` — named entries whose removal from the room clears the finding.
   Sorted by path.
 - `walk_defects` — failures no single droppable file explains: the room root
-  itself (`path` is `""`), a directory that could not be read, or a directory
-  holding an entry whose name is not UTF-8 (`path` is that directory).
+  itself (`path` is `""`), a directory that could not be opened or listed, an
+  entry that could not be opened or stat'ed during the walk (`path` is that
+  entry), or a directory holding an entry whose name is not UTF-8 (`path` is
+  that directory).
 - `usage` — present on `section_limit`, `heading_path_limit` and
   `chunk_inventory_limit` findings; see below.
 - `class` — on every finding; see below.
@@ -105,6 +106,75 @@ Output never contains file content or labels. Paths are room-relative.
 `would_label` is the daemon predicate itself, not derived from the findings.
 The agreement test also asserts `would_label` is true exactly when both lists
 are empty.
+
+## What `files_checked` counts
+
+`files_checked` is the number of entries the walk admitted as sources and the
+pass then handed to source preparation
+([`check_room`](../daemon/crates/kwiry-core/src/room_check.rs), the
+`files_checked += 1` in the `prepare_room` callback). The walk
+([`room_walk.rs`](../daemon/crates/kwiry-core/src/room_walk.rs), `RoomRoots::walk`)
+decides each entry in this order, and the first rule that applies wins: name
+starts with `.` → not a valid UTF-8 name → cannot be opened or stat'ed →
+directory → not a regular file → more than one hard link → extension not an
+extractable format → larger than `max_file_bytes` (HTML exempt) → admitted.
+
+| Entry | Counted in `files_checked` | Listed in `offenders` | Listed in `walk_defects` |
+|---|---|---|---|
+| Single-link regular file with an extractable extension (`.md`, `.txt`, `.canvas`, `.base`, `.excalidraw`, `.docx`, `.pdf`, `.xlsx`, `.xlsm`, `.html`, `.htm`; any case), at most `max_file_bytes` | yes | only when it is not a clean `*.md` source: any per-file reason, including `non_markdown_format`, `invalid_path` and a transient `io_unavailable` or `changed_during_read` read failure during preparation | no |
+| Oversize `.html` / `.htm` (HTML is exempt from the walk's size check) | yes | yes, `non_markdown_format` | no |
+| Any other oversize extractable source (`.md`, `.txt`, …) | **no** | yes, `over_size_budget` | no |
+| Regular file whose extension is not an extractable format, or that has no extension (images, `README`), any size | no | no | no |
+| Name starting with `.` at any depth, and everything beneath a dot-named directory | no | no | no |
+| Regular file with more than one hard link, whatever its extension | no | yes, `hard_link` (every link in the room) | no |
+| Symbolic link, or entry on another filesystem | no | yes, `boundary_escape` | no |
+| Socket, FIFO or device node | no | yes, `special_file` | no |
+| Entry whose name is not valid UTF-8 (and, for a directory, its subtree) | no | no | yes, `non_utf8_name` at the containing directory |
+| Entry that could not be opened or stat'ed during the walk | no | no | yes, `io_unavailable` at the entry |
+| Contents of a directory that could not be opened or changed identity | no | no | yes, `io_unavailable` at the directory |
+| Directory whose listing fails part-way | entries listed before the failure: as above; the rest: no | as above, for the entries listed | yes, `io_unavailable` at the directory |
+| Everything, when the room root is refused or another registered room root is found inside the room during the walk | no (`files_checked` is 0) | no | yes, `room_boundary` (or `io_unavailable`) at `""` |
+
+So for a room whose `walk_defects` is empty, every regular file outside
+dot-named paths is exactly one of: counted; an `over_size_budget` offender; a
+`hard_link` offender; or ignored for its extension. For a copy that holds only
+extractable sources, the file count equals `files_checked` plus the
+`over_size_budget` and `hard_link` offenders.
+
+Two edges, reported rather than changed: an oversize `.html` is counted and
+reported as `non_markdown_format` while every other oversize source is not
+counted and is reported as `over_size_budget` (so an oversize `.txt` is a
+`content` finding while a small non-UTF-8 `.txt` is `non_markdown_format`); and
+if another registered room root appears inside the room *during preparation*
+(a directory replaced after the walk), `offenders` is cleared but
+`files_checked` keeps the sources prepared before it was seen.
+`files_checked_counts_exactly_the_sources_the_pass_prepared` in `room_check.rs`
+pins every row except the walk-time open or `stat` failure, which needs a
+failing system call, and the refused-root row (the transient preparation read
+and the part-way listing failure are pinned through test hooks).
+
+## Memory
+
+`checkroom` holds a small record for every admitted source until the pass ends:
+the walk's sorted file list (`enumeration.files`, one `DiscoveredFile` with its
+absolute path, relative path and extension) and the walk's identity map used to
+re-check each file when it is opened (`RoomRead::files`, relative path → device
+and inode). Each source's prepared content is dropped as soon as it has been
+classified. Measured on synthetic one-line notes in 1,000-note directories,
+peak memory grows by about 500 bytes per source (52 MB at 50,000 notes,
+126 MB at 200,000); longer paths cost more. Plan for roughly 0.5–0.8 GB per
+million sources.
+
+## Room roots and dot names
+
+A room root whose own name starts with `.` (for example a staging copy at
+`/srv/rooms/.staging-abc`) is supported: the dot-name rule applies only to
+entries listed inside the room, never to the root or its ancestors. The
+`checkroom` spelling check, the daemon's canonical-root check
+([`room_boundary.rs`](../daemon/crates/kwiry-core/src/room_boundary.rs),
+`canonical_room_root`), its OpenClast config validation and its ingestion probe
+all accept it; `a_dot_named_room_root_is_walked_and_its_dot_entries_skipped`
+pins this. Dot-named entries inside the room are skipped at every depth.
 
 ## Engine identity
 
@@ -176,8 +246,9 @@ content ones (a non-UTF-8 `.txt` file is `non_markdown_format`), so a
 | `room_boundary` | structural | walk_defects | The room root itself is refused: missing or unopenable, not canonical (for example a symbolic link), shared with or overlapping another registered room, overlapping Kwiry state, not on its expected mount, or another registered room root found inside it. |
 | `unclassified` | structural | either | Withheld for a reason this build does not classify. Treat as not labelled. |
 
-Names that start with `.` are skipped by the walk at every depth and never
-affect the label.
+Names that start with `.` inside the room are skipped by the walk at every
+depth and never affect the label; the room root's own name is not subject to
+this rule (see [Room roots and dot names](#room-roots-and-dot-names)).
 
 ## Sections and heading-path bytes
 
