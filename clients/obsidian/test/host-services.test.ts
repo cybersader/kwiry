@@ -469,6 +469,22 @@ describe("local indexing watch", () => {
     });
 
     it.each([
+      ["a number", 1],
+      ["a record that always says memory_only", { answer: () => ({ kind: "memory_only", decidedBy: "protocol" }), note: () => undefined }],
+    ])("R1: a foreign value at the key (%s) never loosens this instance's own refuse after withdrawal", async (_name, value) => {
+      const host = policyHost({ value: "refuse", decidedBy: "organization" });
+      Object.defineProperty(host.window, PAGE_POLICY_MEMORY_KEY, { value, configurable: true });
+      const watch = new LocalIndexingWatch(() => undefined, host.window);
+      await answered(watch);
+      expect(watch.state.kind).toBe("refused");
+      withdraw(host);
+      expect(watch.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+      watch.refresh();
+      expect(watch.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+      watch.dispose();
+    });
+
+    it.each([
       ["claims ungoverned", { kind: "ungoverned" }],
       ["claims pending", { kind: "pending" }],
       ["is unknown", { kind: "persistent" }],

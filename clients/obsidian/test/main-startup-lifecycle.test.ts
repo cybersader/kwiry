@@ -1768,7 +1768,11 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       await vi.waitFor(() => expect(harness.statusBarText).not.toBe("kwiry: starting…"), { interval: 5 });
       host.install();
       announceProvider();
-      await settled();
+      // The A2 record is saved only after the restart awaits a digest, so wait for
+      // it rather than for a fixed number of turns.
+      if (stored === "in_plugin") {
+        await vi.waitFor(() => expect(storedProfiles()).toEqual(["in_plugin"]), { interval: 5 });
+      }
       await settled();
       // Only an in-plugin start stored a cache; deleting it under the memory_only
       // default is recorded with the saved choice unchanged.

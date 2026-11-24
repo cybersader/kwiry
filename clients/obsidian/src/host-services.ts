@@ -223,6 +223,13 @@ export const PAGE_POLICY_MEMORY_KEY = Symbol.for("kwiry-search/local-indexing-pa
 /// write can do is replace a remembered `refuse` with `memory_only` (through
 /// `note`, or by taking the key first), which installing a fake slot already
 /// does. No write can make a page that had a slot read as ungoverned.
+///
+/// Permanent for the life of a page: the key and the record's interface
+/// (`answer()`, `note(state)`) must never change. A renamed or versioned key
+/// would reopen the ungoverned gap after an in-page upgrade of this plugin, and
+/// a changed shape would read as the memory-only default. The record's closures
+/// keep the module scope of the first bundle that installed it in memory for the
+/// page's life: one copy, bounded.
 function installPageMemory(realm: object): void {
   try {
     if (Reflect.getOwnPropertyDescriptor(realm, PAGE_POLICY_MEMORY_KEY) !== undefined) return;
@@ -412,13 +419,14 @@ export class LocalIndexingWatch {
     for (const dispose of disposers) dispose();
   }
 
-  /// The answer that stands while no slot is present: the page memory's, else
-  /// this instance's own (in a realm that refused the memory), else null when
-  /// no slot was ever seen.
+  /// The answer that stands while no slot is present: this instance's own last
+  /// answer first (a foreign value at the page key must never loosen it), else
+  /// the page memory's, else the default once a slot was seen, else null.
   private remembered(): LocalIndexingState | null {
+    if (this.lastAnswer) return this.lastAnswer;
     const page = readPageMemory(this.realm);
     if (page !== null) return page;
-    return this.governed ? this.lastAnswer ?? POLICY_DEFAULT_STATE : null;
+    return this.governed ? POLICY_DEFAULT_STATE : null;
   }
 
   private answer(state: LocalIndexingState): void {
