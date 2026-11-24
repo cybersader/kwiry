@@ -2,27 +2,48 @@
 //! Experimental push-fed search provider store (trial only).
 //!
 //! A host feeds notes into named partitions and asks which notes might
-//! contain some words. Notes are prepared with the same source preparation,
-//! chunking and lexical analyser as the daemon, and ranked by the same
-//! lexical-v2 ladder; answers are note references only.
+//! contain some words, or which notes are nearest in meaning. Notes are
+//! prepared with the same source preparation, chunking and lexical analyser
+//! as the daemon, and ranked by the same lexical-v2 ladder; answers are note
+//! references only.
 //!
 //! Storage is separate from the daemon's generation machinery on purpose:
-//! each partition is one disposable Tantivy index, updated in place by a
-//! `delta` feed and rebuilt into a fresh index by a `full` feed. Writes become
-//! durable at a checkpoint and visible at the commit after it. Nothing here
-//! reads a workspace on disk and nothing is kept across restarts.
+//! each partition is one disposable Tantivy index (plus a small body-words
+//! index for the lexical recall obligation), updated in place by a `delta`
+//! feed and rebuilt by a `full` feed. Writes become durable at a checkpoint
+//! and visible at the commit after it. When an embedding model is loaded,
+//! every commit is also embedded in the background into the partition's own
+//! vector file; that kind has its own state and `asOf`. Nothing here reads a
+//! workspace on disk and nothing is kept across restarts.
 //!
 //! Desktop and non-governed: no access control, no member identity, no
 //! excerpt or score on the way out. See `docs/provider-helper-trial.md`.
 
+mod body_words;
+#[cfg(feature = "semantic-onnx")]
+mod pinned_model;
+mod unicode_tables;
+mod vectors;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, mpsc};
 
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use tantivy::schema::Field;
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Searcher, Term};
+use tantivy::collector::{Collector, DocSetCollector, SegmentCollector};
+use tantivy::columnar::Column;
+use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::schema::{
+    FAST, Field, INDEXED, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value,
+};
+use tantivy::tokenizer::{PreTokenizedString, Token};
+use tantivy::{
+    DocId, Index, IndexReader, IndexWriter, ReloadPolicy, Score, Searcher, SegmentOrdinal,
+    SegmentReader, TantivyDocument, Term,
+};
 
 use crate::api::SearchFilters;
 use crate::extract::ExtractionCoverage;
@@ -30,10 +51,14 @@ use crate::format::SourceFormat;
 use crate::index::{Fields, build_schema, chunk_document, register_lexical_analyzer};
 use crate::model::MAX_FILE_BYTES;
 use crate::query::MAX_TOTAL_CANDIDATES;
-use crate::search::{PinnedSearcher, search_pinned_with_quality};
+use crate::search::{AuthorizedStatistics, PinnedSearcher, search_pinned_with_quality};
+use crate::semantic::{Embedder, embedding_text, rrf_fuse};
 use crate::source::{
     SourceDescriptor, SourcePreparationKind, prepare_source_buffer, room_source_key,
 };
+
+#[cfg(feature = "semantic-onnx")]
+pub use pinned_model::{PINNED_MODEL_FILES, PINNED_MODEL_REVISION, load_pinned_embedder};
 
 /// Largest note body accepted: the daemon's per-file cap (`MAX_FILE_BYTES`).
 pub const PROVIDER_MAX_ITEM_BYTES: u64 = MAX_FILE_BYTES;
@@ -42,15 +67,27 @@ pub const PROVIDER_MAX_ID_BYTES: usize = 256;
 pub const PROVIDER_MAX_PATH_BYTES: usize = 1024;
 pub const PROVIDER_MAX_LIMIT: usize = 200;
 pub const PROVIDER_MAX_QUERY_PARTITIONS: usize = 64;
+/// Most `terms` one query may carry (the host's query grammar allows 128).
+pub const PROVIDER_MAX_TERMS: usize = 128;
+/// The body-words matcher this provider honours for the lexical recall
+/// obligation.
+pub const PROVIDER_MATCHER: &str = body_words::MATCHER_VERSION;
 /// Exclusion reason for a note refused by the transport before its body was
 /// read.
 pub const PROVIDER_OVER_TRANSPORT_CAP: &str = "over_transport_cap";
 
 const WRITER_MEMORY_BYTES: usize = 50_000_000;
+const WORDS_WRITER_MEMORY_BYTES: usize = 20_000_000;
 const DATA_MARKER: &str = ".provider-store";
 /// How often a query re-runs when a commit lands between its search and its
 /// reference lookup.
 const QUERY_ATTEMPTS: usize = 4;
+/// Candidates each side contributes to a hybrid fusion (the daemon's figure).
+const HYBRID_CANDIDATES: usize = 100;
+/// Reciprocal-rank-fusion constant (the daemon's figure).
+const RRF_K: f64 = 60.0;
+/// Notes embedded and written per vector-file transaction during a full feed.
+const EMBED_NOTES_PER_BATCH: usize = 32;
 
 /// Why the store refused a call. The wire adapter maps each to its contract
 /// token and HTTP status; the store knows neither.
@@ -64,6 +101,8 @@ pub enum ProviderErrorCode {
     CheckpointNotIncreasing,
     VersionMismatch,
     TooLarge,
+    /// The asked kind of search is not offered (no embedding model loaded).
+    ModeUnavailable,
     Unavailable,
     Internal,
 }
@@ -96,6 +135,13 @@ impl ProviderError {
     fn no_open_feed() -> Self {
         Self::new(ProviderErrorCode::NoOpenFeed, "send begin first")
     }
+
+    fn mode_unavailable() -> Self {
+        Self::new(
+            ProviderErrorCode::ModeUnavailable,
+            "no embedding model is loaded",
+        )
+    }
 }
 
 pub type ProviderResult<T> = std::result::Result<T, ProviderError>;
@@ -122,6 +168,23 @@ pub enum ProviderFeedMode {
     Delta,
 }
 
+/// A kind of search the query asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderMode {
+    Lexical,
+    Semantic,
+    /// Reciprocal-rank fusion of a lexical and a semantic run.
+    Hybrid,
+}
+
+/// The kind of index one coverage entry describes: `lexical` or `semantic`
+/// (a `hybrid` query reports both for every partition).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Lexical,
+    Semantic,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderReference {
     pub partition: String,
@@ -132,14 +195,37 @@ pub struct ProviderReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCoverage {
     pub partition: String,
+    pub kind: ProviderKind,
     pub state: ProviderState,
     pub as_of: Option<ProviderAsOf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderQueryOutcome {
+    pub mode: ProviderMode,
     pub coverage: Vec<ProviderCoverage>,
     pub refs: Vec<ProviderReference>,
+}
+
+/// One query. `terms` are the host's matcher tokens of `text`
+/// (`current-body-words-v1`), authoritative for the lexical recall
+/// obligation; `None` derives them from `text` with the same matcher.
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderQuery<'a> {
+    pub partitions: &'a [String],
+    pub text: &'a str,
+    pub mode: ProviderMode,
+    pub terms: Option<&'a [String]>,
+    pub limit: usize,
+}
+
+/// State of one kind of index of a partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderKindStatus {
+    pub state: ProviderState,
+    pub as_of: Option<ProviderAsOf>,
+    /// Notes committed lexically whose embedding is not finished yet.
+    pub pending_notes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +240,8 @@ pub struct ProviderStatus {
     /// the body is indexed, the properties are not), counted by reason.
     pub partial: BTreeMap<String, usize>,
     pub index_bytes: u64,
+    /// The semantic kind, present only when an embedding model is loaded.
+    pub semantic: Option<ProviderKindStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +256,8 @@ struct NoteRecord {
     version: String,
     /// Empty for a note excluded before its path was read.
     path: String,
+    /// Body-words document of a searchable note.
+    slot: Option<u64>,
     outcome: NoteOutcome,
 }
 
@@ -177,8 +267,87 @@ impl NoteRecord {
     }
 }
 
-/// A change to the path → reference map that queries resolve hits through.
-type RefChange = (String, Option<ProviderReference>);
+/// A change to the reference maps that queries resolve hits through.
+#[derive(Debug, Clone)]
+struct RefChange {
+    id: String,
+    path: String,
+    slot: u64,
+    reference: Option<Arc<ProviderReference>>,
+}
+
+/// The body-words index of one generation: one document per searchable
+/// note, holding its `current-body-words-v1` words, so "which notes contain
+/// all of these words" is exact.
+struct WordsIndex {
+    writer: IndexWriter,
+    reader: IndexReader,
+    slot: Field,
+    words: Field,
+}
+
+impl WordsIndex {
+    fn create(dir: &Path) -> ProviderResult<Self> {
+        create_private_dir(dir)?;
+        let mut builder = Schema::builder();
+        let slot = builder.add_u64_field("slot", INDEXED | FAST);
+        let words = builder.add_text_field(
+            "words",
+            TextOptions::default().set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("raw")
+                    .set_index_option(IndexRecordOption::WithFreqs),
+            ),
+        );
+        let index = Index::create_in_dir(dir, builder.build()).map_err(ProviderError::internal)?;
+        let writer = index
+            .writer_with_num_threads(1, WORDS_WRITER_MEMORY_BYTES)
+            .map_err(ProviderError::internal)?;
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .map_err(ProviderError::internal)?;
+        Ok(Self {
+            writer,
+            reader,
+            slot,
+            words,
+        })
+    }
+
+    fn add(&mut self, slot: u64, words: &[String]) -> ProviderResult<()> {
+        let tokens = words
+            .iter()
+            .enumerate()
+            .map(|(position, word)| Token {
+                offset_from: 0,
+                offset_to: 0,
+                position,
+                text: word.clone(),
+                position_length: 1,
+            })
+            .collect();
+        let mut document = TantivyDocument::default();
+        document.add_u64(self.slot, slot);
+        document.add_pre_tokenized_text(
+            self.words,
+            PreTokenizedString {
+                text: String::new(),
+                tokens,
+            },
+        );
+        self.writer
+            .add_document(document)
+            .map_err(ProviderError::internal)?;
+        Ok(())
+    }
+
+    fn remove(&mut self, slot: u64) {
+        self.writer
+            .delete_term(Term::from_field_u64(self.slot, slot));
+    }
+}
 
 /// One disposable index: the serving index of a partition, or the one a
 /// `full` feed is building.
@@ -197,6 +366,8 @@ struct Generation {
     source_key: Field,
     writer: IndexWriter,
     reader: IndexReader,
+    words: WordsIndex,
+    next_slot: u64,
     notes: BTreeMap<String, NoteRecord>,
     ids_by_path: HashMap<String, String>,
     /// Undo log for writes since the last checkpoint.
@@ -228,6 +399,7 @@ impl Generation {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(ProviderError::internal)?;
+        let words = WordsIndex::create(&dir.join("words"))?;
         Ok(Self {
             dir,
             partition: partition.to_owned(),
@@ -239,6 +411,8 @@ impl Generation {
             source_key,
             writer,
             reader,
+            words,
+            next_slot: 0,
             notes: BTreeMap::new(),
             ids_by_path: HashMap::new(),
             undo: Vec::new(),
@@ -257,7 +431,15 @@ impl Generation {
         if record.searchable() {
             self.ids_by_path.remove(&record.path);
             self.writer.delete_term(self.key_term(&record.path));
-            self.pending_refs.push((record.path.clone(), None));
+            if let Some(slot) = record.slot {
+                self.words.remove(slot);
+                self.pending_refs.push(RefChange {
+                    id: id.to_owned(),
+                    path: record.path.clone(),
+                    slot,
+                    reference: None,
+                });
+            }
         }
         Some(record)
     }
@@ -299,21 +481,28 @@ impl Generation {
                 .add_document(document)
                 .map_err(ProviderError::internal)?;
         }
-        let record = NoteRecord {
+        let mut record = NoteRecord {
             version: version.to_owned(),
             path: path.to_owned(),
+            slot: None,
             outcome: prepared.outcome,
         };
         if record.searchable() {
+            let slot = self.next_slot;
+            self.next_slot += 1;
+            self.words.add(slot, &prepared.words)?;
+            record.slot = Some(slot);
             self.ids_by_path.insert(path.to_owned(), id.to_owned());
-            self.pending_refs.push((
-                path.to_owned(),
-                Some(ProviderReference {
+            self.pending_refs.push(RefChange {
+                id: id.to_owned(),
+                path: path.to_owned(),
+                slot,
+                reference: Some(Arc::new(ProviderReference {
                     partition: self.partition.clone(),
                     id: id.to_owned(),
                     version: version.to_owned(),
-                }),
-            ));
+                })),
+            });
         }
         self.notes.insert(id.to_owned(), record);
         Ok(())
@@ -322,6 +511,10 @@ impl Generation {
     /// Makes the writes so far durable as checkpoint `n` (not yet visible).
     fn checkpoint(&mut self, n: u64) -> ProviderResult<()> {
         self.writer.commit().map_err(ProviderError::internal)?;
+        self.words
+            .writer
+            .commit()
+            .map_err(ProviderError::internal)?;
         self.n = n;
         self.undo.clear();
         self.checkpointed_refs.append(&mut self.pending_refs);
@@ -334,6 +527,10 @@ impl Generation {
             return Ok(());
         }
         self.writer.rollback().map_err(ProviderError::internal)?;
+        self.words
+            .writer
+            .rollback()
+            .map_err(ProviderError::internal)?;
         while let Some((id, previous)) = self.undo.pop() {
             if let Some(current) = self.notes.remove(&id)
                 && current.searchable()
@@ -351,22 +548,42 @@ impl Generation {
         Ok(())
     }
 
-    /// Reloads the reader onto the last checkpoint and returns what a query
+    /// Reloads the readers onto the last checkpoint and returns what a query
     /// should see, plus the reference changes that came with it.
     fn publish(&mut self) -> ProviderResult<(Served, Vec<RefChange>)> {
         self.rollback()?;
         self.reader.reload().map_err(ProviderError::internal)?;
+        self.words
+            .reader
+            .reload()
+            .map_err(ProviderError::internal)?;
         let served = Served {
             owner: self.owner.clone(),
             index: self.index.clone(),
             fields: self.fields.clone(),
+            source_key: self.source_key,
             searcher: self.reader.searcher(),
+            words: self.words.reader.searcher(),
+            words_field: self.words.words,
             as_of: ProviderAsOf {
                 epoch: self.epoch,
                 n: self.n,
             },
         };
         Ok((served, std::mem::take(&mut self.checkpointed_refs)))
+    }
+
+    /// Every searchable note: `(id, version, path)`.
+    fn searchable_notes(&self) -> Vec<NoteKey> {
+        self.notes
+            .iter()
+            .filter(|(_, record)| record.searchable())
+            .map(|(id, record)| NoteKey {
+                id: id.clone(),
+                version: record.version.clone(),
+                path: record.path.clone(),
+            })
+            .collect()
     }
 
     fn status_counts(&self) -> Counts {
@@ -389,12 +606,16 @@ impl Generation {
     }
 }
 
-/// What a query reads: one pinned searcher at one committed `asOf`.
+/// What a query reads: pinned searchers at one committed `asOf`.
 struct Served {
     owner: String,
     index: Index,
     fields: Fields,
+    source_key: Field,
     searcher: Searcher,
+    /// The body-words index at the same commit.
+    words: Searcher,
+    words_field: Field,
     as_of: ProviderAsOf,
 }
 
@@ -402,18 +623,42 @@ struct Served {
 /// reason.
 type Counts = (usize, BTreeMap<String, usize>, BTreeMap<String, usize>);
 
-/// The committed view of a partition: the searcher, the path → reference map
-/// and the note counts for the same commit, swapped together.
+/// The committed view of a partition: the searchers, the reference maps and
+/// the note counts for the same commit, swapped together.
 #[derive(Default)]
 struct View {
     served: Option<Arc<Served>>,
-    refs: HashMap<String, ProviderReference>,
+    by_path: HashMap<String, Arc<ProviderReference>>,
+    by_slot: HashMap<u64, Arc<ProviderReference>>,
+    by_id: HashMap<String, Arc<ProviderReference>>,
     counts: Counts,
+}
+
+impl View {
+    fn apply(&mut self, changes: &[RefChange]) {
+        for change in changes {
+            match &change.reference {
+                Some(reference) => {
+                    self.by_path
+                        .insert(change.path.clone(), Arc::clone(reference));
+                    self.by_slot.insert(change.slot, Arc::clone(reference));
+                    self.by_id.insert(change.id.clone(), Arc::clone(reference));
+                }
+                None => {
+                    self.by_path.remove(&change.path);
+                    self.by_slot.remove(&change.slot);
+                    self.by_id.remove(&change.id);
+                }
+            }
+        }
+    }
 }
 
 struct Prepared {
     outcome: NoteOutcome,
     documents: Vec<tantivy::TantivyDocument>,
+    /// `current-body-words-v1` words of the note body, in index form.
+    words: Vec<String>,
 }
 
 impl Prepared {
@@ -488,70 +733,209 @@ impl Writes {
     }
 }
 
+/// A read connection to one complete vector file.
+struct VectorSnapshot {
+    read: Mutex<Connection>,
+}
+
+/// The semantic kind of a partition: the vector file queries read and the
+/// last commit whose embeddings it holds completely.
+#[derive(Default)]
+struct SemanticState {
+    snapshot: Option<Arc<VectorSnapshot>>,
+    as_of: Option<ProviderAsOf>,
+    /// Embedding failed; the kind is `unavailable` until the next full feed
+    /// embeds completely.
+    failed: bool,
+}
+
+/// The vector file the embedding worker writes (the one queries read too).
+struct VectorWriter {
+    path: PathBuf,
+    conn: Connection,
+}
+
 struct Partition {
     dir: PathBuf,
     writes: Mutex<Writes>,
     view: RwLock<View>,
+    semantic: RwLock<SemanticState>,
+    /// Used only by the embedding worker.
+    vector_writer: Mutex<Option<VectorWriter>>,
+    /// Sequence number of the latest committed full feed.
+    full_seq: AtomicU64,
+    retired: AtomicBool,
+    /// Notes committed lexically and not yet embedded.
+    pending: AtomicUsize,
+}
+
+fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Partition {
+    fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            writes: Mutex::new(Writes::default()),
+            view: RwLock::new(View::default()),
+            semantic: RwLock::new(SemanticState::default()),
+            vector_writer: Mutex::new(None),
+            full_seq: AtomicU64::new(0),
+            retired: AtomicBool::new(false),
+            pending: AtomicUsize::new(0),
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Writes> {
-        self.writes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.writes)
     }
 
     fn served(&self) -> Option<Arc<Served>> {
-        self.view
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .served
-            .clone()
+        read(&self.view).served.clone()
     }
+}
+
+/// A partial answer: coverage of one kind and its ordered references.
+type KindAnswer = (Vec<ProviderCoverage>, Vec<Arc<ProviderReference>>);
+
+/// `(id, version, path)` of one note.
+#[derive(Debug, Clone)]
+struct NoteKey {
+    id: String,
+    version: String,
+    path: String,
+}
+
+enum EmbedWork {
+    /// Embed every note of a full commit into a fresh vector file.
+    Full(Vec<NoteKey>),
+    /// Apply one delta commit to the current vector file.
+    Delta {
+        remove: Vec<String>,
+        upsert: Vec<NoteKey>,
+    },
+}
+
+impl EmbedWork {
+    fn notes(&self) -> usize {
+        match self {
+            Self::Full(notes) => notes.len(),
+            Self::Delta { remove, upsert } => remove.len() + upsert.len(),
+        }
+    }
+}
+
+/// One commit to embed. Texts are read from `served`, the lexical snapshot
+/// of that same commit, so nothing is kept in memory between put and embed.
+struct EmbedJob {
+    partition: Arc<Partition>,
+    served: Arc<Served>,
+    as_of: ProviderAsOf,
+    /// The full feed this job belongs to; a later full feed makes it moot.
+    base: u64,
+    work: EmbedWork,
+    settled: AtomicBool,
+}
+
+impl EmbedJob {
+    /// Removes this job's notes from the pending count, once. Called under
+    /// the semantic write lock where the job publishes, so a reader never
+    /// sees `ready` at this commit with this job's notes still pending.
+    fn settle(&self) {
+        if !self.settled.swap(true, Ordering::AcqRel) {
+            let count = self.work.notes();
+            let _ = self.partition.pending.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |pending| Some(pending.saturating_sub(count)),
+            );
+        }
+    }
+
+    fn moot(&self) -> bool {
+        self.partition.retired.load(Ordering::Acquire)
+            || self.base < self.partition.full_seq.load(Ordering::Acquire)
+    }
+}
+
+/// The loaded embedding model: one instance answers queries, another (owned
+/// by the background worker) embeds commits, so a long feed never delays a
+/// query behind a passage batch.
+struct SemanticShared {
+    dimensions: usize,
+    query_embedder: Mutex<Box<dyn Embedder>>,
+    jobs: mpsc::Sender<EmbedJob>,
 }
 
 /// The push-fed store: every partition the host has begun and not retired.
 pub struct ProviderStore {
     partitions_dir: PathBuf,
     partitions: Mutex<BTreeMap<String, Arc<Partition>>>,
+    semantic: Option<SemanticShared>,
 }
 
 impl ProviderStore {
-    /// Opens a store in `data_dir`, discarding anything a previous run left
-    /// there. Refuses a non-empty directory this store did not create, so a
-    /// mistyped path cannot wipe unrelated data.
+    /// Opens a lexical-only store in `data_dir`, discarding anything a
+    /// previous run left there. Refuses a non-empty directory this store did
+    /// not create, so a mistyped path cannot wipe unrelated data.
     ///
     /// Directories it creates are private to the user (0700 on Unix); the
     /// files inside follow the process umask, which the helper sets to 0077.
     pub fn open(data_dir: &Path) -> ProviderResult<Self> {
-        create_private_dir(data_dir)?;
-        let marker = data_dir.join(DATA_MARKER);
-        let empty = fs::read_dir(data_dir)
-            .map_err(ProviderError::internal)?
-            .next()
-            .is_none();
-        if !empty && !marker.is_file() {
-            return Err(ProviderError::bad(
-                "data directory is not empty and was not created by this mode",
-            ));
-        }
-        restrict_to_owner(data_dir, 0o700)?;
-        write_private_file(&marker, b"disposable provider store; safe to delete\n")?;
-        let partitions_dir = data_dir.join("partitions");
-        if partitions_dir.exists() {
-            fs::remove_dir_all(&partitions_dir).map_err(ProviderError::internal)?;
-        }
-        create_private_dir(&partitions_dir)?;
+        let partitions_dir = prepare_data_dir(data_dir)?;
         Ok(Self {
             partitions_dir,
             partitions: Mutex::new(BTreeMap::new()),
+            semantic: None,
         })
     }
 
+    /// Opens a store that also offers `semantic` and `hybrid`. Both
+    /// embedders must load the same model: `query_embedder` answers queries,
+    /// `index_embedder` is moved to a background thread that embeds commits.
+    pub fn open_with_semantic(
+        data_dir: &Path,
+        query_embedder: Box<dyn Embedder>,
+        index_embedder: Box<dyn Embedder>,
+    ) -> ProviderResult<Self> {
+        if query_embedder.profile() != index_embedder.profile() {
+            return Err(ProviderError::bad(
+                "query and index embedders load different models",
+            ));
+        }
+        let dimensions = query_embedder.profile().dimensions;
+        let partitions_dir = prepare_data_dir(data_dir)?;
+        let (jobs, receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("provider-embed".to_owned())
+            .spawn(move || embed_worker(receiver, index_embedder, dimensions))
+            .map_err(ProviderError::internal)?;
+        Ok(Self {
+            partitions_dir,
+            partitions: Mutex::new(BTreeMap::new()),
+            semantic: Some(SemanticShared {
+                dimensions,
+                query_embedder: Mutex::new(query_embedder),
+                jobs,
+            }),
+        })
+    }
+
+    /// Whether `semantic` and `hybrid` are offered (an embedding model is
+    /// loaded).
+    pub fn semantic_enabled(&self) -> bool {
+        self.semantic.is_some()
+    }
+
     fn map(&self) -> MutexGuard<'_, BTreeMap<String, Arc<Partition>>> {
-        self.partitions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.partitions)
     }
 
     fn known(&self, name: &str) -> ProviderResult<Option<Arc<Partition>>> {
@@ -577,11 +961,7 @@ impl ProviderStore {
         let partition = {
             let mut map = self.map();
             Arc::clone(map.entry(name.to_owned()).or_insert_with(|| {
-                Arc::new(Partition {
-                    dir: self.partitions_dir.join(owner_tag(name)),
-                    writes: Mutex::new(Writes::default()),
-                    view: RwLock::new(View::default()),
-                })
+                Arc::new(Partition::new(self.partitions_dir.join(owner_tag(name))))
             }))
         };
         let mut writes = partition.lock();
@@ -667,6 +1047,7 @@ impl ProviderStore {
             NoteRecord {
                 version: String::new(),
                 path: String::new(),
+                slot: None,
                 outcome: NoteOutcome::Excluded(PROVIDER_OVER_TRANSPORT_CAP.to_owned()),
             },
         );
@@ -697,58 +1078,78 @@ impl ProviderStore {
     }
 
     /// Closes the open feed and makes everything up to its last checkpoint
-    /// visible; writes after that checkpoint are dropped.
+    /// visible; writes after that checkpoint are dropped. With a model
+    /// loaded, the commit is then embedded in the background: the semantic
+    /// kind stays at its previous `asOf` (state `building`) until done.
     pub fn commit(&self, name: &str) -> ProviderResult<ProviderAsOf> {
         let partition = self.feeding(name)?;
         let mut writes = partition.lock();
         let feed = writes.feed.take().ok_or_else(ProviderError::no_open_feed)?;
-        let as_of = match feed.mode {
+        let (served, work) = match feed.mode {
             ProviderFeedMode::Delta => {
                 let live = writes
                     .live
                     .as_mut()
                     .ok_or_else(ProviderError::no_open_feed)?;
                 let (served, changes) = live.publish()?;
-                let as_of = served.as_of;
+                let served = Arc::new(served);
                 let counts = live.status_counts();
                 let mut view = partition
                     .view
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                apply_ref_changes(&mut view.refs, changes);
-                view.served = Some(Arc::new(served));
+                view.apply(&changes);
+                view.served = Some(Arc::clone(&served));
                 view.counts = counts;
-                as_of
+                drop(view);
+                (served, delta_work(&changes))
             }
             ProviderFeedMode::Full => {
                 let mut staging = feed
                     .staging
                     .ok_or_else(|| ProviderError::internal("full feed without an index"))?;
                 let (served, changes) = staging.publish()?;
-                let as_of = served.as_of;
-                let mut refs = HashMap::with_capacity(staging.ids_by_path.len());
-                apply_ref_changes(&mut refs, changes);
-                {
-                    let mut view = partition
-                        .view
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    *view = View {
-                        served: Some(Arc::new(served)),
-                        refs,
-                        counts: staging.status_counts(),
-                    };
-                }
+                let served = Arc::new(served);
+                let mut view = View {
+                    served: Some(Arc::clone(&served)),
+                    counts: staging.status_counts(),
+                    ..View::default()
+                };
+                view.apply(&changes);
+                *partition
+                    .view
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = view;
+                let work = EmbedWork::Full(staging.searchable_notes());
                 if let Some(previous) = writes.live.replace(staging) {
                     let dir = previous.dir.clone();
                     drop(previous);
                     let _ = fs::remove_dir_all(dir);
                 }
                 writes.needs_full = false;
-                as_of
+                (served, work)
             }
         };
+        let as_of = served.as_of;
         writes.committed = Some(as_of);
+        if let Some(semantic) = &self.semantic {
+            let base = match work {
+                EmbedWork::Full(_) => partition.full_seq.fetch_add(1, Ordering::AcqRel) + 1,
+                EmbedWork::Delta { .. } => partition.full_seq.load(Ordering::Acquire),
+            };
+            partition.pending.fetch_add(work.notes(), Ordering::AcqRel);
+            let job = EmbedJob {
+                partition: Arc::clone(&partition),
+                served,
+                as_of,
+                base,
+                work,
+                settled: AtomicBool::new(false),
+            };
+            if semantic.jobs.send(job).is_err() {
+                write_lock(&partition.semantic).failed = true;
+            }
+        }
         Ok(as_of)
     }
 
@@ -762,25 +1163,48 @@ impl ProviderStore {
         let Some(partition) = map.remove(name) else {
             return Ok(());
         };
+        partition.retired.store(true, Ordering::Release);
         let mut writes = partition.lock();
         *partition
             .view
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = View::default();
+        *write_lock(&partition.semantic) = SemanticState::default();
         *writes = Writes::default();
         let _ = fs::remove_dir_all(&partition.dir);
         Ok(())
     }
 
-    /// Ranks `text` over the requested partitions together: BM25 statistics
-    /// are summed over exactly the partitions that are ready, and each
-    /// partition reports the commit it was read at.
+    /// Lexical query with terms derived from `text` (see [`Self::ask`]).
     pub fn query(
         &self,
         names: &[String],
         text: &str,
         limit: usize,
     ) -> ProviderResult<ProviderQueryOutcome> {
+        self.ask(&ProviderQuery {
+            partitions: names,
+            text,
+            mode: ProviderMode::Lexical,
+            terms: None,
+            limit,
+        })
+    }
+
+    /// Answers one query over exactly the asked partitions.
+    ///
+    /// - `lexical`: Kwiry's lexical-v2 ranking over the asked partitions
+    ///   (BM25 statistics summed over exactly that set), under the recall
+    ///   obligation: every note containing all `terms` as body words is
+    ///   returned when they fit in `limit`, and when they do not, every
+    ///   returned note is one of them. Kwiry's order applies within each tier.
+    /// - `semantic`: nearest notes by best chunk, read from each asked
+    ///   partition's own vector file and merged.
+    /// - `hybrid`: reciprocal-rank fusion of the two.
+    ///
+    /// Equal ranks are ordered by id bytes ascending.
+    pub fn ask(&self, question: &ProviderQuery<'_>) -> ProviderResult<ProviderQueryOutcome> {
+        let names = question.partitions;
         if names.is_empty() || names.len() > PROVIDER_MAX_QUERY_PARTITIONS {
             return Err(ProviderError::bad("partitions must name 1..=64"));
         }
@@ -790,12 +1214,61 @@ impl ProviderStore {
                 return Err(ProviderError::bad("a partition is named twice"));
             }
         }
+        let limit = question.limit;
         if limit == 0 || limit > PROVIDER_MAX_LIMIT {
             return Err(ProviderError::bad("limit must be 1..=200"));
         }
+        if question.mode != ProviderMode::Lexical && self.semantic.is_none() {
+            return Err(ProviderError::mode_unavailable());
+        }
+        let terms = match question.terms {
+            Some(terms) if terms.len() > PROVIDER_MAX_TERMS => {
+                return Err(ProviderError::bad("at most 128 terms"));
+            }
+            Some(terms) => {
+                let mut seen = HashSet::new();
+                terms
+                    .iter()
+                    .map(|term| body_words::index_word(&body_words::fold_for_match(term)))
+                    .filter(|term| !term.is_empty() && seen.insert(term.clone()))
+                    .collect()
+            }
+            None => body_words::query_words(question.text),
+        };
+        let mode = question.mode;
+        let (coverage, refs) = match mode {
+            ProviderMode::Lexical => self.lexical(names, question.text, &terms, limit)?,
+            ProviderMode::Semantic => self.semantic(names, question.text, limit)?,
+            ProviderMode::Hybrid => {
+                let depth = limit.clamp(HYBRID_CANDIDATES, PROVIDER_MAX_LIMIT);
+                let (lexical_coverage, lexical) =
+                    self.lexical(names, question.text, &terms, depth)?;
+                let (semantic_coverage, semantic) = self.semantic(names, question.text, depth)?;
+                let coverage = lexical_coverage
+                    .into_iter()
+                    .zip(semantic_coverage)
+                    .flat_map(|(lexical, semantic)| [lexical, semantic])
+                    .collect();
+                (coverage, fuse(lexical, semantic, limit))
+            }
+        };
+        Ok(ProviderQueryOutcome {
+            mode,
+            coverage,
+            refs: refs.into_iter().map(|r| (*r).clone()).collect(),
+        })
+    }
+
+    fn lexical(
+        &self,
+        names: &[String],
+        text: &str,
+        terms: &[String],
+        limit: usize,
+    ) -> ProviderResult<KindAnswer> {
         for _ in 0..QUERY_ATTEMPTS {
-            if let Some(outcome) = self.query_once(names, text, limit)? {
-                return Ok(outcome);
+            if let Some(answer) = self.lexical_once(names, text, terms, limit)? {
+                return Ok(answer);
             }
         }
         Err(ProviderError::new(
@@ -806,12 +1279,13 @@ impl ProviderStore {
 
     /// One attempt; `None` when a commit landed between the search and the
     /// reference lookup, so the hits cannot be paired with one `asOf`.
-    fn query_once(
+    fn lexical_once(
         &self,
         names: &[String],
         text: &str,
+        terms: &[String],
         limit: usize,
-    ) -> ProviderResult<Option<ProviderQueryOutcome>> {
+    ) -> ProviderResult<Option<KindAnswer>> {
         let mut coverage = Vec::with_capacity(names.len());
         let mut pinned = Vec::new();
         for name in names {
@@ -824,6 +1298,7 @@ impl ProviderStore {
             };
             coverage.push(ProviderCoverage {
                 partition: name.clone(),
+                kind: ProviderKind::Lexical,
                 state,
                 as_of: served.as_ref().map(|s| s.as_of),
             });
@@ -832,10 +1307,7 @@ impl ProviderStore {
             }
         }
         if text.trim().is_empty() || pinned.is_empty() {
-            return Ok(Some(ProviderQueryOutcome {
-                coverage,
-                refs: Vec::new(),
-            }));
+            return Ok(Some((coverage, Vec::new())));
         }
         let targets: Vec<_> = pinned
             .iter()
@@ -857,14 +1329,10 @@ impl ProviderStore {
             crate::Error::Query(message) => ProviderError::bad(message),
             other => ProviderError::internal(other),
         })?;
+        let matches = all_terms_matches(&pinned, terms)?;
         let views: Vec<_> = pinned
             .iter()
-            .map(|(partition, _)| {
-                partition
-                    .view
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-            })
+            .map(|(partition, _)| read(&partition.view))
             .collect();
         for ((_, served), view) in pinned.iter().zip(&views) {
             if !view
@@ -875,12 +1343,10 @@ impl ProviderStore {
                 return Ok(None);
             }
         }
+        // Kwiry's order, one entry per note (its best chunk).
         let mut seen = HashSet::new();
-        let mut refs = Vec::with_capacity(limit);
+        let mut ranked: Vec<(Arc<ProviderReference>, Score)> = Vec::new();
         for hit in outcome.hits {
-            if refs.len() == limit {
-                break;
-            }
             if !seen.insert((hit.vault_id.clone(), hit.path.clone())) {
                 continue;
             }
@@ -888,15 +1354,97 @@ impl ProviderStore {
                 .iter()
                 .zip(&views)
                 .find(|((_, served), _)| served.owner == hit.vault_id)
-                .and_then(|(_, view)| view.refs.get(&hit.path))
+                .and_then(|(_, view)| view.by_path.get(&hit.path))
                 .ok_or_else(|| ProviderError::internal("a hit has no reference at its commit"))?;
-            refs.push(reference.clone());
+            ranked.push((Arc::clone(reference), hit.score));
         }
-        Ok(Some(ProviderQueryOutcome { coverage, refs }))
+        // Notes containing every term, with a body-words BM25 score.
+        let mut all_terms: Vec<(Arc<ProviderReference>, Score)> = Vec::with_capacity(matches.len());
+        for (index, score, slot) in matches {
+            let reference = views[index]
+                .by_slot
+                .get(&slot)
+                .ok_or_else(|| ProviderError::internal("a body-words hit has no reference"))?;
+            all_terms.push((Arc::clone(reference), score));
+        }
+        drop(views);
+        Ok(Some((coverage, superset_order(ranked, all_terms, limit))))
     }
 
-    /// What the last commit made visible. Writes of an open or abandoned
-    /// feed are not counted.
+    fn semantic(&self, names: &[String], text: &str, limit: usize) -> ProviderResult<KindAnswer> {
+        let semantic = self
+            .semantic
+            .as_ref()
+            .ok_or_else(ProviderError::mode_unavailable)?;
+        let query = if text.trim().is_empty() {
+            None
+        } else {
+            let vector = lock(&semantic.query_embedder)
+                .embed_query(text)
+                .map_err(ProviderError::internal)?;
+            if vector.len() != semantic.dimensions {
+                return Err(ProviderError::internal("query vector has the wrong width"));
+            }
+            Some(vector)
+        };
+        let mut coverage = Vec::with_capacity(names.len());
+        let mut hits: Vec<(vectors::NoteHit, Arc<ProviderReference>)> = Vec::new();
+        for name in names {
+            let partition = self.map().get(name).cloned();
+            let Some(partition) = partition else {
+                coverage.push(ProviderCoverage {
+                    partition: name.clone(),
+                    kind: ProviderKind::Semantic,
+                    state: ProviderState::Unavailable,
+                    as_of: None,
+                });
+                continue;
+            };
+            // Both locks are held for the search, so the refs, the state and
+            // `asOf` describe the same vector file and the same lexical commit.
+            let view = read(&partition.view);
+            let state = read(&partition.semantic);
+            let (kind_state, as_of) = semantic_state(view.served.as_ref().map(|s| s.as_of), &state);
+            coverage.push(ProviderCoverage {
+                partition: name.clone(),
+                kind: ProviderKind::Semantic,
+                state: kind_state,
+                as_of,
+            });
+            let (Some(query), Some(snapshot), false) = (&query, &state.snapshot, state.failed)
+            else {
+                continue;
+            };
+            let conn = lock(&snapshot.read);
+            // Only vectors computed from the bytes the lexical commit holds
+            // now: a note edited since its embedding is left out, never
+            // returned with a version its vectors do not describe.
+            let current = |id: &str, version: &str| {
+                view.by_id
+                    .get(id)
+                    .is_some_and(|reference| reference.version == version)
+            };
+            for hit in vectors::nearest_notes(&conn, query, limit, current)? {
+                if let Some(reference) = view.by_id.get(&hit.id) {
+                    hits.push((hit, Arc::clone(reference)));
+                }
+            }
+        }
+        // Distance needs no corpus statistics: the best `limit` notes of the
+        // set are the best `limit` of the merged per-partition bests.
+        hits.sort_by(|(left, left_ref), (right, right_ref)| {
+            left.distance
+                .total_cmp(&right.distance)
+                .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
+                .then_with(|| left_ref.partition.cmp(&right_ref.partition))
+        });
+        hits.truncate(limit);
+        Ok((
+            coverage,
+            hits.into_iter().map(|(_, reference)| reference).collect(),
+        ))
+    }
+
     pub fn status(&self, name: &str) -> ProviderResult<ProviderStatus> {
         let Some(partition) = self.known(name)? else {
             return Ok(ProviderStatus {
@@ -906,40 +1454,463 @@ impl ProviderStore {
                 excluded: BTreeMap::new(),
                 partial: BTreeMap::new(),
                 index_bytes: 0,
+                semantic: self.semantic.as_ref().map(|_| ProviderKindStatus {
+                    state: ProviderState::Unavailable,
+                    as_of: None,
+                    pending_notes: 0,
+                }),
             });
         };
-        let (served, (notes, excluded, partial)) = {
-            let view = partition
-                .view
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (view.served.clone(), view.counts.clone())
+        let (as_of, (notes, excluded, partial)) = {
+            let view = read(&partition.view);
+            (view.served.as_ref().map(|s| s.as_of), view.counts.clone())
         };
+        let semantic = self.semantic.as_ref().map(|_| {
+            let (state, kind_as_of) = semantic_state(as_of, &read(&partition.semantic));
+            ProviderKindStatus {
+                state,
+                as_of: kind_as_of,
+                pending_notes: partition.pending.load(Ordering::Acquire),
+            }
+        });
         Ok(ProviderStatus {
-            state: if served.is_some() {
+            state: if as_of.is_some() {
                 ProviderState::Ready
             } else {
                 ProviderState::Building
             },
-            as_of: served.map(|s| s.as_of),
+            as_of,
             notes,
             excluded,
             partial,
             index_bytes: dir_bytes(&partition.dir),
+            semantic,
         })
     }
 }
 
-fn apply_ref_changes(refs: &mut HashMap<String, ProviderReference>, changes: Vec<RefChange>) {
-    for (path, reference) in changes {
-        match reference {
-            Some(reference) => {
-                refs.insert(path, reference);
-            }
-            None => {
-                refs.remove(&path);
-            }
+fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn prepare_data_dir(data_dir: &Path) -> ProviderResult<PathBuf> {
+    create_private_dir(data_dir)?;
+    let marker = data_dir.join(DATA_MARKER);
+    let empty = fs::read_dir(data_dir)
+        .map_err(ProviderError::internal)?
+        .next()
+        .is_none();
+    if !empty && !marker.is_file() {
+        return Err(ProviderError::bad(
+            "data directory is not empty and was not created by this mode",
+        ));
+    }
+    restrict_to_owner(data_dir, 0o700)?;
+    write_private_file(&marker, b"disposable provider store; safe to delete\n")?;
+    let partitions_dir = data_dir.join("partitions");
+    if partitions_dir.exists() {
+        fs::remove_dir_all(&partitions_dir).map_err(ProviderError::internal)?;
+    }
+    create_private_dir(&partitions_dir)?;
+    Ok(partitions_dir)
+}
+
+/// Semantic state of a partition whose lexical kind is at `lexical`:
+/// `ready` only when the vectors hold that very commit; while embedding
+/// lags, `building` at the last commit embedded completely.
+fn semantic_state(
+    lexical: Option<ProviderAsOf>,
+    state: &SemanticState,
+) -> (ProviderState, Option<ProviderAsOf>) {
+    if state.failed {
+        (ProviderState::Unavailable, None)
+    } else if state.as_of.is_some() && state.as_of == lexical {
+        (ProviderState::Ready, state.as_of)
+    } else {
+        (ProviderState::Building, state.as_of)
+    }
+}
+
+/// The net effect of one delta commit, per id (the last change wins).
+fn delta_work(changes: &[RefChange]) -> EmbedWork {
+    let mut last: BTreeMap<&str, &RefChange> = BTreeMap::new();
+    for change in changes {
+        last.insert(&change.id, change);
+    }
+    let mut remove = Vec::new();
+    let mut upsert = Vec::new();
+    for (id, change) in last {
+        match &change.reference {
+            Some(reference) => upsert.push(NoteKey {
+                id: id.to_owned(),
+                version: reference.version.clone(),
+                path: change.path.clone(),
+            }),
+            None => remove.push(id.to_owned()),
         }
+    }
+    EmbedWork::Delta { remove, upsert }
+}
+
+/// Lexical answer under the recall obligation.
+///
+/// Tier 1 is every note that contains all terms: first those Kwiry ranked,
+/// in Kwiry's order, then the rest by body-words BM25 (statistics over the
+/// asked partitions only). Tier 2 is every other note Kwiry ranked, in
+/// Kwiry's order. Tier 1 always comes first, so when it holds more than
+/// `limit` notes the answer is made of tier-1 notes only, and when it holds
+/// `limit` or fewer all of them are in the answer. Equal scores are ordered
+/// by id bytes ascending.
+fn superset_order(
+    ranked: Vec<(Arc<ProviderReference>, Score)>,
+    all_terms: Vec<(Arc<ProviderReference>, Score)>,
+    limit: usize,
+) -> Vec<Arc<ProviderReference>> {
+    let key = |reference: &ProviderReference| (reference.partition.clone(), reference.id.clone());
+    let matching: HashSet<_> = all_terms.iter().map(|(r, _)| key(r)).collect();
+    let (mut tier_one, mut tier_two): (Vec<_>, Vec<_>) = ranked
+        .into_iter()
+        .partition(|(reference, _)| matching.contains(&key(reference)));
+    tie_break_equal_runs(&mut tier_one);
+    tie_break_equal_runs(&mut tier_two);
+    let ranked_keys: HashSet<_> = tier_one.iter().map(|(r, _)| key(r)).collect();
+    let mut rest: Vec<_> = all_terms
+        .into_iter()
+        .filter(|(reference, _)| !ranked_keys.contains(&key(reference)))
+        .collect();
+    let by_score = |left: &(Arc<ProviderReference>, Score),
+                    right: &(Arc<ProviderReference>, Score)| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.id.as_bytes().cmp(right.0.id.as_bytes()))
+            .then_with(|| left.0.partition.cmp(&right.0.partition))
+    };
+    let need = limit.saturating_sub(tier_one.len());
+    if rest.len() > need {
+        if need == 0 {
+            rest.clear();
+        } else {
+            rest.select_nth_unstable_by(need - 1, by_score);
+            rest.truncate(need);
+        }
+    }
+    rest.sort_by(by_score);
+    tier_one
+        .into_iter()
+        .chain(rest)
+        .chain(tier_two)
+        .take(limit)
+        .map(|(reference, _)| reference)
+        .collect()
+}
+
+/// Orders each run of exactly equal scores by id bytes (then partition),
+/// leaving the order between different scores as it was.
+fn tie_break_equal_runs(entries: &mut [(Arc<ProviderReference>, Score)]) {
+    let mut start = 0;
+    while start < entries.len() {
+        let mut end = start + 1;
+        while end < entries.len() && entries[end].1.to_bits() == entries[start].1.to_bits() {
+            end += 1;
+        }
+        entries[start..end].sort_by(|left, right| {
+            left.0
+                .id
+                .as_bytes()
+                .cmp(right.0.id.as_bytes())
+                .then_with(|| left.0.partition.cmp(&right.0.partition))
+        });
+        start = end;
+    }
+}
+
+/// Note-level reciprocal-rank fusion of a lexical and a semantic answer,
+/// with the daemon's formula (`rrf_fuse`, k = 60). Equal fused scores are
+/// ordered by id bytes ascending.
+fn fuse(
+    lexical: Vec<Arc<ProviderReference>>,
+    semantic: Vec<Arc<ProviderReference>>,
+    limit: usize,
+) -> Vec<Arc<ProviderReference>> {
+    let key =
+        |reference: &ProviderReference| format!("{}\u{1f}{}", reference.partition, reference.id);
+    let mut by_key: HashMap<String, Arc<ProviderReference>> = HashMap::new();
+    // Lexical refs first, so a note in both keeps the lexical commit's version.
+    for reference in semantic.iter().chain(lexical.iter()) {
+        by_key.insert(key(reference), Arc::clone(reference));
+    }
+    let lexical_keys: Vec<_> = lexical.iter().map(|r| key(r)).collect();
+    let semantic_keys: Vec<_> = semantic.iter().map(|r| key(r)).collect();
+    let mut fused: Vec<(Arc<ProviderReference>, f64)> =
+        rrf_fuse(&lexical_keys, &semantic_keys, RRF_K)
+            .into_iter()
+            .filter_map(|(key, score)| by_key.get(&key).map(|r| (Arc::clone(r), score)))
+            .collect();
+    fused.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.id.as_bytes().cmp(right.0.id.as_bytes()))
+            .then_with(|| left.0.partition.cmp(&right.0.partition))
+    });
+    fused.truncate(limit);
+    fused.into_iter().map(|(reference, _)| reference).collect()
+}
+
+/// Every note of the pinned partitions whose body words contain all
+/// `terms`: `(index into pinned, BM25 score, slot)`. Statistics are summed
+/// over exactly the pinned partitions.
+fn all_terms_matches(
+    pinned: &[(Arc<Partition>, Arc<Served>)],
+    terms: &[String],
+) -> ProviderResult<Vec<(usize, Score, u64)>> {
+    if terms.is_empty() || pinned.is_empty() {
+        return Ok(Vec::new());
+    }
+    let statistics = AuthorizedStatistics::new(
+        pinned
+            .iter()
+            .map(|(_, served)| served.words.clone())
+            .collect(),
+    );
+    let mut matches = Vec::new();
+    for (index, (_, served)) in pinned.iter().enumerate() {
+        let clauses: Vec<(Occur, Box<dyn Query>)> = terms
+            .iter()
+            .map(|term| {
+                let query: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(served.words_field, term),
+                    IndexRecordOption::WithFreqs,
+                ));
+                (Occur::Must, query)
+            })
+            .collect();
+        let hits = served
+            .words
+            .search_with_statistics_provider(
+                &BooleanQuery::new(clauses),
+                &SlotCollector,
+                &statistics,
+            )
+            .map_err(ProviderError::internal)?;
+        matches.extend(hits.into_iter().map(|(score, slot)| (index, score, slot)));
+    }
+    Ok(matches)
+}
+
+/// Collects `(score, slot)` of every matching body-words document.
+struct SlotCollector;
+
+struct SlotSegmentCollector {
+    slots: Column<u64>,
+    hits: Vec<(Score, u64)>,
+}
+
+impl Collector for SlotCollector {
+    type Fruit = Vec<(Score, u64)>;
+    type Child = SlotSegmentCollector;
+
+    fn for_segment(
+        &self,
+        _segment_local_id: SegmentOrdinal,
+        segment: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(SlotSegmentCollector {
+            slots: segment.fast_fields().u64("slot")?,
+            hits: Vec::new(),
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        true
+    }
+
+    fn merge_fruits(&self, fruits: Vec<Vec<(Score, u64)>>) -> tantivy::Result<Self::Fruit> {
+        Ok(fruits.into_iter().flatten().collect())
+    }
+}
+
+impl SegmentCollector for SlotSegmentCollector {
+    type Fruit = Vec<(Score, u64)>;
+
+    fn collect(&mut self, doc: DocId, score: Score) {
+        if let Some(slot) = self.slots.first(doc) {
+            self.hits.push((score, slot));
+        }
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        self.hits
+    }
+}
+
+/// The background embedding worker: one job per commit, in commit order.
+fn embed_worker(
+    jobs: mpsc::Receiver<EmbedJob>,
+    mut embedder: Box<dyn Embedder>,
+    dimensions: usize,
+) {
+    while let Ok(job) = jobs.recv() {
+        if let Err(error) = run_job(&job, embedder.as_mut(), dimensions)
+            && !job.moot()
+        {
+            eprintln!("provider helper: embedding failed: {}", error.detail);
+            write_lock(&job.partition.semantic).failed = true;
+        }
+        // Idempotent: a job that published settled its count there already.
+        job.settle();
+    }
+}
+
+fn run_job(job: &EmbedJob, embedder: &mut dyn Embedder, dimensions: usize) -> ProviderResult<()> {
+    if job.moot() {
+        return Ok(());
+    }
+    match &job.work {
+        EmbedWork::Full(notes) => {
+            let path =
+                job.partition
+                    .dir
+                    .join(format!("vectors-{}-{}.sqlite", job.base, unique_suffix()));
+            let mut conn = vectors::open(&path, dimensions)?;
+            for batch in notes.chunks(EMBED_NOTES_PER_BATCH) {
+                if job.moot() {
+                    drop(conn);
+                    remove_vector_file(&path);
+                    return Ok(());
+                }
+                let upsert = embed_notes(&job.served, batch, embedder, dimensions)?;
+                vectors::apply(&mut conn, &[], &upsert)?;
+            }
+            let reader = vectors::open(&path, dimensions)?;
+            let mut writer = lock(&job.partition.vector_writer);
+            {
+                let mut state = write_lock(&job.partition.semantic);
+                if job.moot() {
+                    drop(state);
+                    drop(conn);
+                    drop(reader);
+                    remove_vector_file(&path);
+                    return Ok(());
+                }
+                job.settle();
+                *state = SemanticState {
+                    snapshot: Some(Arc::new(VectorSnapshot {
+                        read: Mutex::new(reader),
+                    })),
+                    as_of: Some(job.as_of),
+                    failed: false,
+                };
+            }
+            if let Some(previous) = writer.replace(VectorWriter { path, conn }) {
+                let old = previous.path.clone();
+                drop(previous);
+                remove_vector_file(&old);
+            }
+            Ok(())
+        }
+        EmbedWork::Delta { remove, upsert } => {
+            if read(&job.partition.semantic).failed {
+                return Ok(());
+            }
+            let upsert = embed_notes(&job.served, upsert, embedder, dimensions)?;
+            let mut writer = lock(&job.partition.vector_writer);
+            let writer = writer
+                .as_mut()
+                .ok_or_else(|| ProviderError::internal("a delta arrived before any full feed"))?;
+            let mut state = write_lock(&job.partition.semantic);
+            if job.moot() {
+                return Ok(());
+            }
+            vectors::apply(&mut writer.conn, remove, &upsert)?;
+            job.settle();
+            state.as_of = Some(job.as_of);
+            Ok(())
+        }
+    }
+}
+
+/// Embeds every chunk of `notes`, reading the chunk texts the lexical
+/// commit stored (heading breadcrumb + content, as the daemon embeds them).
+fn embed_notes(
+    served: &Served,
+    notes: &[NoteKey],
+    embedder: &mut dyn Embedder,
+    dimensions: usize,
+) -> ProviderResult<Vec<vectors::NoteVectors>> {
+    let mut texts = Vec::new();
+    let mut spans = Vec::with_capacity(notes.len());
+    for note in notes {
+        let chunk_texts = chunk_texts(served, &note.path)?;
+        spans.push((note, texts.len(), chunk_texts.len()));
+        texts.extend(chunk_texts);
+    }
+    let embedded = if texts.is_empty() {
+        Vec::new()
+    } else {
+        embedder
+            .embed_passages(&texts)
+            .map_err(ProviderError::internal)?
+    };
+    if embedded.len() != texts.len() || embedded.iter().any(|v| v.len() != dimensions) {
+        return Err(ProviderError::internal(
+            "the embedder returned the wrong number or width of vectors",
+        ));
+    }
+    Ok(spans
+        .into_iter()
+        .map(|(note, start, count)| vectors::NoteVectors {
+            id: note.id.clone(),
+            version: note.version.clone(),
+            vectors: embedded[start..start + count].to_vec(),
+        })
+        .collect())
+}
+
+fn chunk_texts(served: &Served, path: &str) -> ProviderResult<Vec<String>> {
+    let query = TermQuery::new(
+        Term::from_field_text(
+            served.source_key,
+            &room_source_key(&served.owner, None, path),
+        ),
+        IndexRecordOption::Basic,
+    );
+    let mut addresses: Vec<_> = served
+        .searcher
+        .search(&query, &DocSetCollector)
+        .map_err(ProviderError::internal)?
+        .into_iter()
+        .collect();
+    addresses.sort();
+    addresses
+        .into_iter()
+        .map(|address| {
+            let document: TantivyDocument = served
+                .searcher
+                .doc(address)
+                .map_err(ProviderError::internal)?;
+            let heading: Vec<String> = document
+                .get_first(served.fields.heading_path)
+                .and_then(|value| value.as_str())
+                .and_then(|value| serde_json::from_str(value).ok())
+                .unwrap_or_default();
+            let content = document
+                .get_first(served.fields.content)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            Ok(embedding_text(&heading, content))
+        })
+        .collect()
+}
+
+fn remove_vector_file(path: &Path) {
+    let _ = fs::remove_file(path);
+    for suffix in ["-wal", "-shm"] {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        let _ = fs::remove_file(PathBuf::from(name));
     }
 }
 
@@ -947,6 +1918,7 @@ fn prepare(owner: &str, path: &str, bytes: &[u8]) -> ProviderResult<Prepared> {
     let excluded = |reason: &str| Prepared {
         outcome: NoteOutcome::Excluded(reason.to_owned()),
         documents: Vec::new(),
+        words: Vec::new(),
     };
     let Some(format) = SourceFormat::from_path(path) else {
         return Ok(excluded("unsupported_format"));
@@ -992,7 +1964,13 @@ fn prepare(owner: &str, path: &str, bytes: &[u8]) -> ProviderResult<Prepared> {
     } else {
         NoteOutcome::Partial("partial_extraction")
     };
-    Ok(Prepared { outcome, documents })
+    Ok(Prepared {
+        outcome,
+        documents,
+        // Not UTF-8: the host's matcher cannot read it either, so it owes
+        // no body words.
+        words: body_words::note_words(bytes).unwrap_or_default(),
+    })
 }
 
 fn validate_partition(name: &str) -> ProviderResult<()> {
@@ -1103,250 +2081,4 @@ fn dir_bytes(dir: &Path) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn put(store: &ProviderStore, p: &str, id: &str, path: &str, body: &str) {
-        store
-            .put(p, id, &hex_sha256(body.as_bytes()), path, body.as_bytes())
-            .unwrap();
-    }
-
-    fn ids(store: &ProviderStore, partitions: &[&str], q: &str) -> Vec<String> {
-        let names: Vec<_> = partitions.iter().map(|p| (*p).to_owned()).collect();
-        let mut ids: Vec<_> = store
-            .query(&names, q, 10)
-            .unwrap()
-            .refs
-            .into_iter()
-            .map(|r| format!("{}/{}", r.partition, r.id))
-            .collect();
-        ids.sort_unstable();
-        ids
-    }
-
-    fn state(store: &ProviderStore, p: &str) -> (ProviderState, Option<ProviderAsOf>) {
-        let coverage = &store.query(&[p.to_owned()], "x", 5).unwrap().coverage[0];
-        (coverage.state, coverage.as_of)
-    }
-
-    #[test]
-    fn provider_feeds_become_visible_only_at_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProviderStore::open(dir.path()).unwrap();
-        assert_eq!(state(&store, "p"), (ProviderState::Unavailable, None));
-        store.begin("p", 1, ProviderFeedMode::Full).unwrap();
-        assert_eq!(state(&store, "p"), (ProviderState::Building, None));
-        put(
-            &store,
-            "p",
-            "a",
-            "Areas/alpha.md",
-            "# Alpha\n\nquokka habitat\n",
-        );
-        put(&store, "p", "b", "beta.md", "# Beta\n\nunrelated\n");
-        put(
-            &store,
-            "p",
-            "c",
-            "broken.md",
-            "---\n: : [\n---\nbody quokka\n",
-        );
-        put(&store, "p", "d", "blob.bin", "quokka");
-        store.checkpoint("p", 1).unwrap();
-        put(
-            &store,
-            "p",
-            "late",
-            "late.md",
-            "quokka after the checkpoint\n",
-        );
-        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 1 });
-        assert_eq!(ids(&store, &["p"], "quokka"), ["p/a", "p/c"]);
-
-        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
-        put(&store, "p", "b", "beta.md", "# Beta\n\nquokka quokka\n");
-        store.delete("p", "a").unwrap();
-        store.checkpoint("p", 2).unwrap();
-        assert_eq!(
-            ids(&store, &["p"], "quokka"),
-            ["p/a", "p/c"],
-            "not before commit"
-        );
-        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 2 });
-        assert_eq!(ids(&store, &["p"], "quokka"), ["p/b", "p/c"]);
-
-        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
-        let refused = store.checkpoint("p", 2).unwrap_err();
-        assert_eq!(refused.code, ProviderErrorCode::CheckpointNotIncreasing);
-        let mismatch = store.put("p", "e", &hex_sha256(b"other"), "e.md", b"body");
-        assert_eq!(
-            mismatch.unwrap_err().code,
-            ProviderErrorCode::VersionMismatch
-        );
-        store.exclude_over_transport_cap("p", "huge").unwrap();
-        store.checkpoint("p", 3).unwrap();
-        store.commit("p").unwrap();
-
-        let status = store.status("p").unwrap();
-        assert_eq!(status.notes, 2);
-        assert_eq!(status.excluded.get("unsupported_format"), Some(&1));
-        assert_eq!(status.excluded.get(PROVIDER_OVER_TRANSPORT_CAP), Some(&1));
-        assert_eq!(status.partial.get("frontmatter_not_extracted"), Some(&1));
-
-        assert_eq!(
-            store
-                .begin("p", 2, ProviderFeedMode::Delta)
-                .unwrap_err()
-                .code,
-            ProviderErrorCode::EpochMismatch
-        );
-        // A full resync keeps serving epoch 1 until it commits; ids it did
-        // not receive are gone afterwards.
-        store.begin("p", 2, ProviderFeedMode::Full).unwrap();
-        put(&store, "p", "z", "zeta.md", "quokka\n");
-        store.checkpoint("p", 1).unwrap();
-        assert_eq!(state(&store, "p").1, Some(ProviderAsOf { epoch: 1, n: 3 }));
-        store.commit("p").unwrap();
-        assert_eq!(ids(&store, &["p"], "quokka"), ["p/z"]);
-        assert_eq!(
-            store
-                .begin("p", 1, ProviderFeedMode::Full)
-                .unwrap_err()
-                .code,
-            ProviderErrorCode::EpochRegressed
-        );
-        assert_eq!(
-            store.delete("p", "z").unwrap_err().code,
-            ProviderErrorCode::NoOpenFeed
-        );
-
-        store.retire("p").unwrap();
-        assert_eq!(state(&store, "p").0, ProviderState::Unavailable);
-    }
-
-    #[test]
-    fn provider_keeps_same_paths_in_two_partitions_apart() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProviderStore::open(dir.path()).unwrap();
-        for name in ["p", "q"] {
-            store.begin(name, 1, ProviderFeedMode::Full).unwrap();
-            put(
-                &store,
-                name,
-                "same",
-                "shared.md",
-                "# Shared\n\nwombat burrow\n",
-            );
-            store.checkpoint(name, 1).unwrap();
-            store.commit(name).unwrap();
-        }
-        assert_eq!(
-            ids(&store, &["p", "q", "r"], "wombat"),
-            ["p/same", "q/same"]
-        );
-        assert_eq!(ids(&store, &["q"], "wombat"), ["q/same"]);
-        let names = ["p".to_owned(), "p".to_owned()];
-        assert_eq!(
-            store.query(&names, "wombat", 5).unwrap_err().code,
-            ProviderErrorCode::BadRequest
-        );
-    }
-
-    #[test]
-    fn provider_never_serves_an_abandoned_delta_checkpoint() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProviderStore::open(dir.path()).unwrap();
-        store.begin("p", 1, ProviderFeedMode::Full).unwrap();
-        put(&store, "p", "a", "alpha.md", "# Alpha\n\nquokka\n");
-        store.checkpoint("p", 1).unwrap();
-        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 1 });
-
-        // A delta that checkpointed and was then abandoned by a new begin.
-        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
-        put(&store, "p", "ghost", "ghost.md", "# Ghost\n\nquokka\n");
-        store.checkpoint("p", 2).unwrap();
-        let code = |result: ProviderResult<()>| result.unwrap_err().code;
-        assert_eq!(
-            code(store.begin("p", 1, ProviderFeedMode::Delta)),
-            ProviderErrorCode::EpochMismatch
-        );
-        assert_eq!(
-            code(store.checkpoint("p", 2)),
-            ProviderErrorCode::NoOpenFeed
-        );
-        assert_eq!(
-            store.commit("p").unwrap_err().code,
-            ProviderErrorCode::NoOpenFeed
-        );
-        assert_eq!(ids(&store, &["p"], "quokka"), ["p/a"]);
-        assert_eq!(state(&store, "p").1, Some(ProviderAsOf { epoch: 1, n: 1 }));
-        let status = store.status("p").unwrap();
-        assert_eq!(status.notes, 1, "status counts the commit, not the ghost");
-
-        // A full resync with the same epoch counts checkpoints from the
-        // commit, so the host's resend of 2 is accepted.
-        store.begin("p", 1, ProviderFeedMode::Full).unwrap();
-        put(&store, "p", "a", "alpha.md", "# Alpha\n\nquokka\n");
-        store.checkpoint("p", 2).unwrap();
-        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 2 });
-        assert_eq!(ids(&store, &["p"], "quokka"), ["p/a"]);
-        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
-        store.checkpoint("p", 3).unwrap();
-        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 3 });
-
-        // A delta abandoned before any checkpoint leaves nothing behind.
-        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
-        put(&store, "p", "b", "beta.md", "# Beta\n\nquokka\n");
-        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
-        store.checkpoint("p", 4).unwrap();
-        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 4 });
-        assert_eq!(ids(&store, &["p"], "quokka"), ["p/a"]);
-    }
-
-    #[test]
-    fn provider_remembers_an_abandoned_higher_epoch() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProviderStore::open(dir.path()).unwrap();
-        store.begin("p", 1, ProviderFeedMode::Full).unwrap();
-        store.checkpoint("p", 1).unwrap();
-        store.commit("p").unwrap();
-        // A full at epoch 3 is abandoned by a delta at the committed epoch.
-        store.begin("p", 3, ProviderFeedMode::Full).unwrap();
-        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
-        store.checkpoint("p", 2).unwrap();
-        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 2 });
-        assert_eq!(
-            store
-                .begin("p", 2, ProviderFeedMode::Full)
-                .unwrap_err()
-                .code,
-            ProviderErrorCode::EpochRegressed,
-            "the delta must not lower the epoch record"
-        );
-        store.begin("p", 3, ProviderFeedMode::Full).unwrap();
-        store.checkpoint("p", 1).unwrap();
-        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 3, n: 1 });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn provider_data_dir_is_private() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("data");
-        let _store = ProviderStore::open(&data).unwrap();
-        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&data), 0o700);
-        assert_eq!(mode(&data.join("partitions")), 0o700);
-        assert_eq!(mode(&data.join(DATA_MARKER)), 0o600);
-    }
-
-    #[test]
-    fn provider_refuses_a_foreign_data_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("keep.txt"), b"x").unwrap();
-        assert!(ProviderStore::open(dir.path()).is_err());
-        assert!(dir.path().join("keep.txt").is_file());
-    }
-}
+mod tests;

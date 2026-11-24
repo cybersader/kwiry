@@ -16,6 +16,9 @@ local Unix domain socket.
 
 ```bash
 kwiry --data-dir <dir> provider-helper --socket <dir-owned-by-you>/provider.sock
+# with search by meaning (semantic and hybrid), from pinned local model files:
+kwiry --data-dir <dir> provider-helper --socket <dir>/provider.sock \
+    --model-dir <dir-with-pinned-model-files> [--embed-threads N]
 ```
 
 - **Socket:** created with mode `0600`. Its directory must exist, be owned by
@@ -25,7 +28,8 @@ kwiry --data-dir <dir> provider-helper --socket <dir-owned-by-you>/provider.sock
   refused (`403 {"error":{"code":"forbidden"}}`, an adapter rule, §2.4).
 - **No TCP listener at all**, no outbound network, no secrets, no tokens. The
   binary still links the daemon's other code paths (for example the semantic
-  model downloader); this mode never calls them.
+  model downloader); this mode never calls them. The embedding model is read
+  only from `--model-dir` (see "Model files" below) and never downloaded.
 - **Read-only on the workspace:** it never opens a workspace file. It indexes
   only the bytes it is sent.
 - **Data directory:** disposable. Cleared at start (refused if non-empty and
@@ -62,15 +66,145 @@ Retrieval never returns a deleted note, but BM25 document frequencies can
 count dead copies until a merge, so ranking after many edits can differ
 slightly from a rebuild of the same notes.
 
+Each generation also holds a small **body-words index**: one document per
+searchable note with its `current-body-words-v1` words (see below), used only
+to decide which notes contain all of a query's `terms`.
+
+### Lexical: ranking and the recall obligation
+
 Ranking: the query runs over exactly the requested partitions that are ready
 (BM25 statistics summed over that set only). Kwiry ranks chunks; the helper
 ranks the plan's whole candidate window (`MAX_TOTAL_CANDIDATES`, 512 chunks)
-and keeps each note's best chunk, so a reply holds up to `limit` (≤ 200) notes
-in deterministic lexical-v2 order. The ladder includes typo, prefix and
-partial-term fallbacks, so replies can hold notes that do not contain every
-term (false positives, which the contract allows; the host re-checks).
-`terms` is accepted as a hint and not used: ranking runs on `q.text` with
-Kwiry's own analyser.
+and keeps each note's best chunk. The ladder includes typo, prefix and
+partial-term fallbacks, so Kwiry's own list can hold notes that do not contain
+every term.
+
+The partner's **lexical recall obligation (superset-under-limit)** is met on
+top of that ranking:
+
+- **Tier 1** is every committed note of the asked partitions whose body
+  contains all of `terms` under `current-body-words-v1`. Its members that
+  Kwiry ranked come first, in Kwiry's order; the rest follow by a BM25 score
+  over the body words (statistics summed over the asked partitions only).
+- **Tier 2** is every other note Kwiry ranked, in Kwiry's order.
+- The answer is tier 1 then tier 2, cut at `limit`. So when tier 1 fits in
+  `limit` every one of its notes is returned, and when it does not, every
+  returned note is a tier-1 note; a non-matching note only ever fills space
+  left over.
+- Equal ranks (equal Kwiry scores, equal body-words scores) are ordered by
+  `id` bytes ascending.
+
+`terms` is **authoritative** for tier 1. It may be the draft-v1 plain list
+(`"terms": ["quokka"]`) or the draft-v2 form
+(`"terms": {"matcher": "current-body-words-v1", "list": ["quokka"]}`); any
+other matcher is refused with `400 matcher_unavailable`. Absent or empty, the
+terms are derived from `q.text` with the same matcher. Kwiry still ranks on
+`q.text` with its own analyser.
+
+The matcher is a port of the partner's `sync-core/src/search-match.ts`
+(OpenClast commit `5eefd8bf`): the eligible body is the text after an initial
+YAML block (`---` … `---`/`...`, BOM ignored for detection, unclosed block =
+no body); folding is NFD, full default case folding, then every `M*` code
+point dropped; words are maximal runs of `L*`/`Nd`. General categories and
+folding use the partner's generated Unicode 15.1 tables
+(`daemon/crates/kwiry-core/src/provider/unicode_tables.rs`, Unicode License v3,
+`LICENSE-UNICODE` beside it); NFD uses `unicode-normalization`. Words over 240
+bytes are indexed and asked for by digest so neither side drops them. A note
+that is not UTF-8 owes no body words (the host's matcher cannot read it
+either).
+
+### Semantic and hybrid
+
+With `--model-dir`, hello declares `retrieval: ["lexical","semantic","hybrid"]`
+and every commit is also embedded:
+
+- **Storage, per partition:** one SQLite file with a sqlite-vec `vec0` table
+  per partition (`vectors-<n>-<suffix>.sqlite` beside the lexical index),
+  holding each note's chunk vectors with its id and the version (SHA-256 of
+  the exact bytes) they were computed from. Chunk texts are the ones the
+  lexical commit stored (heading breadcrumb + content, as the daemon embeds
+  them), so nothing is held in memory between put and embedding.
+- **Background embedding:** a commit returns as soon as the lexical side is
+  visible. One worker thread then embeds it, in commit order: a `full` commit
+  into a fresh vector file that replaces the old one when complete, a `delta`
+  as one transaction on the current file. A later `full` commit or a retire
+  makes queued work moot.
+- **State per kind:** the semantic kind is `ready` only when its vectors hold
+  exactly the lexical kind's committed `asOf`; while embedding lags it is
+  `building` with `asOf` = the last commit embedded completely (`null` before
+  the first); after an embedding failure it is `unavailable` until a `full`
+  feed embeds completely. A semantic answer never returns a note whose vectors
+  describe bytes the lexical commit no longer holds: such notes are left out
+  (honest lag), never returned with a stale version.
+- **semantic:** the query is embedded once; each asked partition's own file
+  answers with its nearest notes (best chunk, cosine-equivalent L2 on
+  normalized vectors); the per-partition answers are merged by distance, ties
+  by `id` bytes.
+- **hybrid:** reciprocal-rank fusion (`rrf_fuse`, k = 60, the daemon's
+  formula) of the lexical answer and the semantic answer at note level, each
+  up to max(`limit`, 100) deep. Ties by `id` bytes. `coverage` holds two
+  entries per partition: `mode: "lexical"` and `mode: "semantic"`. The
+  recall obligation is a lexical rule and does not apply to `hybrid`.
+- **status** adds `"semantic": {"state", "asOf", "pendingNotes"}` when a model
+  is loaded.
+
+### Partition scoping (why an unasked partition cannot influence a result)
+
+Candidates and statistics come only from the asked partitions:
+
+- Lexical ranking and the body-words BM25 sum their statistics over exactly
+  the asked partitions' searchers.
+- Vectors live in one file per partition and a query opens only the files of
+  the asked partitions; there is no shared vector table to search and then
+  filter. Distance needs no corpus statistics, so a query over a set is
+  exactly the merge of the per-partition queries.
+- Tests: `provider::tests::semantic_search_reads_only_the_asked_partitions`
+  (an unasked partition whose vectors are nearer than every asked vector
+  changes neither membership nor order; a set query equals the merge of
+  per-partition queries in membership and keeps each partition's order;
+  retiring the other partition changes nothing) and
+  `provider::tests::lexical_obligation_counts_only_the_asked_partitions`.
+
+### Model files (offline, pinned)
+
+The helper loads `BAAI/bge-small-en-v1.5` as exported to ONNX by Xenova,
+revision `ea104dacec62c0de699686887e3f920caeb4f3e3` of
+`https://huggingface.co/Xenova/bge-small-en-v1.5`, from five files in
+`--model-dir`, each checked against a pinned SHA-256
+(`PINNED_MODEL_FILES` in `daemon/crates/kwiry-core/src/provider/pinned_model.rs`):
+
+| File in `--model-dir` | Upstream path | SHA-256 |
+|---|---|---|
+| `model.onnx` | `onnx/model.onnx` | `828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35` |
+| `tokenizer.json` | `tokenizer.json` | `d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66` |
+| `config.json` | `config.json` | `fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350` |
+| `special_tokens_map.json` | `special_tokens_map.json` | `b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3` |
+| `tokenizer_config.json` | `tokenizer_config.json` | `9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3` |
+
+An operator fetches them once on a connected machine, for example
+`curl -fL -o model.onnx https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/ea104dacec62c0de699686887e3f920caeb4f3e3/onnx/model.onnx`
+(and the same for the other four), checks the hashes, and copies the
+directory. A missing, unreadable or different file makes the helper **refuse
+to start** (it never fetches and never silently drops to lexical only).
+Without `--model-dir` the helper is lexical only and hello says so.
+
+Two model instances are loaded: one for queries (2 ONNX threads), one owned
+by the background worker (`--embed-threads`, default all CPUs the process may
+use), so a long feed never queues a query behind a passage batch.
+
+**Build-time download.** The `semantic-onnx` feature links ONNX Runtime
+statically through `ort-sys` with its `download-binaries` feature, which
+downloads a prebuilt `libonnxruntime.a` **at build time** (cached under
+`~/.cache/ort.pyke.io/dfbin/<target>/<hash>/`, where `<hash>` pins the
+archive's SHA-256). To build offline, either pre-populate that cache from a
+connected build of the same `ort-sys` version (2.0.0-rc.12) — a cache hit is
+used without any download — or point `ORT_LIB_LOCATION` at a directory holding
+a `libonnxruntime.a` (for example a copy of the cached one, or a local ONNX
+Runtime build). Do **not** set `CARGO_NET_OFFLINE`, `ORT_SKIP_DOWNLOAD` or
+`ORT_OFFLINE` for a semantic build: `ort-sys` then skips linking ONNX Runtime
+altogether and the link fails with `undefined symbol: OrtGetApiBase` (seen
+while building this change). Nothing is downloaded at run time. A lexical-only build (`--no-default-features`) has no
+ONNX Runtime at all and refuses `--model-dir`.
 
 ## Identity, versions and partitions
 
@@ -101,7 +235,7 @@ store.
 
 | Call | Route | Request → reply |
 |---|---|---|
-| hello | `GET /v1/hello` | → `{"contract":"search-provider/1","name":"kwiry","version":"0.1.0","capabilities":{"retrieval":["lexical"],"ordering":"relevance","maxLimit":200,"maxPartitions":64,"maxNoteBytes":10485760},"experimental":true,"build":{"commit":"<sha or null>","target":"x86_64-unknown-linux-gnu/release"}}` |
+| hello | `GET /v1/hello` | → `{"contract":"search-provider/1","name":"kwiry","version":"0.1.0","capabilities":{"retrieval":["lexical"],"matchers":["current-body-words-v1"],"ordering":"relevance","maxLimit":200,"maxPartitions":64,"maxNoteBytes":10485760},"experimental":true,"build":{"commit":"<sha or null>","target":"x86_64-unknown-linux-gnu/release"}}` (`retrieval` is `["lexical","semantic","hybrid"]` with a model loaded) |
 | begin | `POST /v1/partitions/{p}/begin` | `{"epoch":1,"mode":"full"\|"delta"}` → `{}` |
 | put | `PUT /v1/partitions/{p}/items/{id}` | raw bytes, `Content-Type: application/octet-stream`, `Provider-Item-Version: <64 hex>`, `Provider-Item-Path: <percent-encoded>` → `{}` |
 | delete | `DELETE /v1/partitions/{p}/items/{id}` | → `{}` |
@@ -156,16 +290,18 @@ arrives is prepared and searched unless the preparation itself excludes it.
 ```
 
 - `partitions`: 1–64 distinct valid names (else `400 bad_request`).
-- `q.mode` defaults to `lexical`; any other mode is refused with
-  `400 mode_unavailable`, never silently switched.
+- `q.mode` defaults to `lexical`; a mode hello does not declare is refused
+  with `400 mode_unavailable`, never silently switched.
+- `terms`: see "Lexical: ranking and the recall obligation"; at most 128.
 - `limit`: 1–200. `deadlineMs`: absolute Unix time in ms (default: now + 10 s,
   at most 60 s ahead). Past it, or when the search does not finish by it:
   `503 unavailable` with `Retry-After: 1` (the search thread is not
   cancelled; its answer is dropped).
-- `coverage`: exactly one entry per requested partition: `ready` (a committed
-  feed is served, possibly with a newer feed open), `building` (known, nothing
-  committed yet), `unavailable` (unknown or retired). `asOf` is `null` when
-  nothing is committed.
+- `coverage`: exactly one entry per requested partition and kind (two for
+  `hybrid`): `ready` (a committed feed is served, possibly with a newer feed
+  open), `building` (known, nothing committed yet; for the semantic kind also
+  while embedding lags), `unavailable` (unknown or retired; semantic after an
+  embedding failure). `asOf` is `null` when nothing is committed.
 - `refs`: one per (partition, id), deterministic order, with the version that
   was committed at that partition's `asOf`. No scores, text or excerpts.
 
@@ -190,7 +326,7 @@ returned as refs. An unknown partition answers `state: "unavailable"`.
 
 | Status | Codes used |
 |---|---|
-| 400 | `bad_request`, `mode_unavailable` |
+| 400 | `bad_request`, `mode_unavailable`, `matcher_unavailable` |
 | 403 | `forbidden` (peer is another user; adapter rule) |
 | 404 | `not_found` |
 | 405 | `method_not_allowed` |
@@ -206,7 +342,14 @@ returned as refs. An unknown partition answers `state: "unavailable"`.
   whole wire above, including every refusal listed, recovery from an
   abandoned delta checkpoint, data-directory permissions and a chunked body
   over the cap.
-- Store tests: `cargo test -j 2 -p kwiry-core --lib provider::`.
+- Store tests: `cargo test -j 2 -p kwiry-core --lib provider::` (feeds,
+  abandoned-delta recovery, the recall obligation including the partner's
+  `galka` case, partition scoping of vector search, embedding lag, the
+  matcher port, the vector file, and — with `--features semantic-onnx` — the
+  refusal of missing or different model files).
+- Meaning driver: `bench/provider-helper/drive_meaning.py` (feed, lexical and
+  embedding build time, RSS, index size, p50/p95 per kind, one-edit
+  visibility per kind; `--max-notes` for a subset).
 - Measurement driver: `bench/provider-helper/drive.py` (feed time, index size,
   peak RSS, query p50/p95 over the `bench/scale-62k` query set, one-edit and
   delete visibility). The partner's bake-off driver (`--socket PATH --pid PID`)

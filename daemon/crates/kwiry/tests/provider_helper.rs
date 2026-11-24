@@ -384,6 +384,17 @@ fn provider_helper_serves_the_contract_over_a_unix_socket() {
         json!({"partitions": ["p1"], "q": {"text": "quokka", "mode": "semantic"}, "terms": [], "limit": 5}),
     );
     assert_eq!(code(&semantic), (400, "mode_unavailable"));
+    let hybrid = ask(
+        json!({"partitions": ["p1"], "q": {"text": "quokka", "mode": "hybrid"}, "terms": [], "limit": 5}),
+    );
+    assert_eq!(code(&hybrid), (400, "mode_unavailable"));
+    let other_matcher = ask(json!({"partitions": ["p1"], "q": {"text": "quokka"},
+        "terms": {"matcher": "other-v9", "list": ["quokka"]}, "limit": 5}));
+    assert_eq!(code(&other_matcher), (400, "matcher_unavailable"));
+    let named = ask(json!({"partitions": ["p1"], "q": {"text": "quokka"},
+        "terms": {"matcher": "current-body-words-v1", "list": ["quokka"]}, "limit": 5}));
+    assert_eq!(named.0, 200, "{}", named.1);
+    assert_eq!(refs(&named.1), ["p1/id-b", "p1/id-c"]);
     let unknown_key = ask(
         json!({"partitions": ["p1"], "q": {"text": "quokka", "boost": 2}, "terms": [], "limit": 5}),
     );
