@@ -10,6 +10,7 @@ import {
   HOST_AVAILABLE_EVENT,
   HOST_SLOT_KEY,
   LocalIndexingWatch,
+  PAGE_POLICY_MEMORY_KEY,
   SHARED_CODES,
   decidingLevelLabel,
   decodeLocalIndexing,
@@ -325,5 +326,176 @@ describe("local indexing watch", () => {
     watch.refresh();
     expect(host.policy.subscribe).toHaveBeenCalledTimes(1);
     watch.dispose();
+  });
+
+  describe("page memory across plugin restarts (K1, H-2)", () => {
+    async function answered(watch: LocalIndexingWatch): Promise<void> {
+      watch.refresh();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    function withdraw(host: ReturnType<typeof policyHost>): void {
+      delete host.window[HOST_SLOT_KEY];
+      host.invalidate("withdrawn");
+    }
+
+    /** A later instance of this plugin in the same page: a new watch on the same window. */
+    function restart(previous: LocalIndexingWatch, realm: object): LocalIndexingWatch {
+      previous.dispose();
+      const next = new LocalIndexingWatch(() => undefined, realm);
+      next.refresh();
+      return next;
+    }
+
+    it("refuse, resync and withdrawal survive a restart in the same page", async () => {
+      const host = policyHost({ value: "refuse", decidedBy: "organization" });
+      const first = new LocalIndexingWatch(() => undefined, host.window);
+      await answered(first);
+      host.emit({ type: "resync" });
+      withdraw(host);
+      const second = restart(first, host.window);
+      expect(second.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+      const third = restart(second, host.window);
+      expect(third.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+      third.dispose();
+    });
+
+    it("memory_only and withdrawal survive a restart in the same page", async () => {
+      const host = policyHost({ value: "memory_only", decidedBy: "folder" });
+      const first = new LocalIndexingWatch(() => undefined, host.window);
+      await answered(first);
+      withdraw(host);
+      const second = restart(first, host.window);
+      expect(second.state).toEqual({ kind: "memory_only", decidedBy: "folder" });
+      second.dispose();
+    });
+
+    it("withdrawal before any answer applies the memory-only default after a restart", () => {
+      const host = policyHost();
+      host.policy.current.mockImplementation(() => new Promise(() => undefined));
+      const first = new LocalIndexingWatch(() => undefined, host.window);
+      first.refresh();
+      withdraw(host);
+      expect(restart(first, host.window).state).toEqual({ kind: "memory_only", decidedBy: "protocol" });
+    });
+
+    it("a restart while the same slot is still answering waits, and a withdrawal then keeps the page's answer", async () => {
+      const host = policyHost({ value: "refuse", decidedBy: "workspace" });
+      const first = new LocalIndexingWatch(() => undefined, host.window);
+      await answered(first);
+      host.policy.current.mockImplementation(() => new Promise(() => undefined));
+      const second = restart(first, host.window);
+      expect(second.state.kind).toBe("pending");
+      withdraw(host);
+      expect(second.state).toEqual({ kind: "refused", decidedBy: "workspace", limited: false });
+      second.dispose();
+    });
+
+    it("a page that never had a slot stays ungoverned across restarts and remembers nothing", () => {
+      const page: Record<string, unknown> = {};
+      const first = new LocalIndexingWatch(() => undefined, page);
+      first.refresh();
+      const second = restart(first, page);
+      expect(second.state).toEqual({ kind: "ungoverned" });
+      expect(Reflect.ownKeys(page)).toEqual([]);
+      second.dispose();
+    });
+
+    it("a new slot after withdrawal decides, and its answer replaces the page's", async () => {
+      const first = policyHost({ value: "refuse", decidedBy: "organization" });
+      const page = first.window;
+      const one = new LocalIndexingWatch(() => undefined, page);
+      await answered(one);
+      withdraw(first);
+      const two = restart(one, page);
+      expect(two.state.kind).toBe("refused");
+      const second = policyHost({ value: "memory_only", decidedBy: "workspace" });
+      page[HOST_SLOT_KEY] = second.window[HOST_SLOT_KEY];
+      await answered(two);
+      expect(two.state).toEqual({ kind: "memory_only", decidedBy: "workspace" });
+      withdraw(second);
+      delete page[HOST_SLOT_KEY];
+      expect(restart(two, page).state).toEqual({ kind: "memory_only", decidedBy: "workspace" });
+    });
+
+    it("is memory only: one permanent, hidden, read-only window property holding a frozen record", async () => {
+      const host = policyHost({ value: "refuse", decidedBy: "organization" });
+      const watch = new LocalIndexingWatch(() => undefined, host.window);
+      await answered(watch);
+      const descriptor = Reflect.getOwnPropertyDescriptor(host.window, PAGE_POLICY_MEMORY_KEY);
+      expect(descriptor).toMatchObject({ enumerable: false, writable: false, configurable: false });
+      expect(Object.isFrozen(descriptor?.value)).toBe(true);
+      expect(PAGE_POLICY_MEMORY_KEY).toBe(Symbol.for(PAGE_POLICY_MEMORY_KEY.description ?? ""));
+      // Another plugin can neither remove nor replace it.
+      expect(Reflect.deleteProperty(host.window, PAGE_POLICY_MEMORY_KEY)).toBe(false);
+      expect(Reflect.set(host.window, PAGE_POLICY_MEMORY_KEY, undefined)).toBe(false);
+      expect(Reflect.defineProperty(host.window, PAGE_POLICY_MEMORY_KEY, { value: undefined })).toBe(false);
+      withdraw(host);
+      expect(restart(watch, host.window).state.kind).toBe("refused");
+    });
+
+    it("a hostile call on the record can never make a governed page ungoverned", async () => {
+      const host = policyHost({ value: "refuse", decidedBy: "organization" });
+      const watch = new LocalIndexingWatch(() => undefined, host.window);
+      await answered(watch);
+      withdraw(host);
+      const record = Reflect.get(host.window, PAGE_POLICY_MEMORY_KEY) as { note(state: unknown): void };
+      for (const forged of [{ kind: "ungoverned" }, { kind: "pending" }, null, 7, { kind: "memory_only", decidedBy: { toString: () => "x" } }]) {
+        record.note(forged);
+      }
+      const next = restart(watch, host.window);
+      // The most another plugin can do is replace the answer with the loosest
+      // governed one, memory_only, which a fake slot can do just as well.
+      expect(next.state).toEqual({ kind: "memory_only", decidedBy: null });
+      next.dispose();
+    });
+
+    it.each([
+      ["a number", { value: 1 }],
+      ["null", { value: null }],
+      ["an undefined data property", { value: undefined }],
+      ["an empty object", { value: {} }],
+      ["a getter returning undefined", { get: () => undefined }],
+      ["a throwing getter", { get: () => { throw new Error("hostile"); } }],
+      ["a record whose answer throws", { value: { answer: () => { throw new Error("hostile"); }, note: () => undefined } }],
+    ])("a value another plugin put at the key first (%s) means governed, the memory-only default", (_name, descriptor) => {
+      const page = {};
+      Object.defineProperty(page, PAGE_POLICY_MEMORY_KEY, { ...descriptor, configurable: true });
+      const watch = new LocalIndexingWatch(() => undefined, page);
+      watch.refresh();
+      expect(watch.state).toEqual({ kind: "memory_only", decidedBy: "protocol" });
+      watch.dispose();
+    });
+
+    it.each([
+      ["a number", 1],
+      ["a record that always says memory_only", { answer: () => ({ kind: "memory_only", decidedBy: "protocol" }), note: () => undefined }],
+    ])("R1: a foreign value at the key (%s) never loosens this instance's own refuse after withdrawal", async (_name, value) => {
+      const host = policyHost({ value: "refuse", decidedBy: "organization" });
+      Object.defineProperty(host.window, PAGE_POLICY_MEMORY_KEY, { value, configurable: true });
+      const watch = new LocalIndexingWatch(() => undefined, host.window);
+      await answered(watch);
+      expect(watch.state.kind).toBe("refused");
+      withdraw(host);
+      expect(watch.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+      watch.refresh();
+      expect(watch.state).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+      watch.dispose();
+    });
+
+    it.each([
+      ["claims ungoverned", { kind: "ungoverned" }],
+      ["claims pending", { kind: "pending" }],
+      ["is unknown", { kind: "persistent" }],
+      ["refuses", { kind: "refused", decidedBy: "folder", limited: false }],
+    ])("a forged record whose answer %s never reads looser than memory_only", (_name, answer) => {
+      const page = {};
+      Object.defineProperty(page, PAGE_POLICY_MEMORY_KEY, { value: { answer: () => answer, note: () => undefined } });
+      const watch = new LocalIndexingWatch(() => undefined, page);
+      watch.refresh();
+      expect(watch.state.kind).toBe("refused");
+      watch.dispose();
+    });
   });
 });

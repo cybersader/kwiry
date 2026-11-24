@@ -18,6 +18,9 @@ import { LatestRequestEpoch } from "./latest-request-epoch";
 
 export class HostSearchModal extends Modal {
   private readonly interaction = new LatestRequestEpoch();
+  /// Counts user actions only (typing, Search, Next, a result click, closing).
+  /// An invalidation supersedes the interaction but is not a user action.
+  private userActions = 0;
   private operation: AbortController | null = null;
   private activeQuery: string | null = null;
   private displayed: HostSearchPage | null = null;
@@ -44,6 +47,7 @@ export class HostSearchModal extends Modal {
     status.textContent = unavailable ?? HOST_SEARCH_IDLE;
     this.draw(null);
     input.addEventListener("input", () => {
+      this.userActions += 1;
       this.cancel();
       this.activeQuery = null;
       this.draw(null);
@@ -52,6 +56,7 @@ export class HostSearchModal extends Modal {
     });
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      this.userActions += 1;
       if (!this.view) return;
       this.draw(null);
       // A provider may have arrived, or a withdrawn one returned: look again.
@@ -65,6 +70,7 @@ export class HostSearchModal extends Modal {
       void this.requestPage(this.activeQuery);
     });
     next.addEventListener("click", () => {
+      this.userActions += 1;
       const continuation = this.displayed?.continuation;
       if (!this.operation && this.activeQuery !== null && typeof continuation === "string") {
         void this.requestPage(this.activeQuery, continuation);
@@ -74,6 +80,7 @@ export class HostSearchModal extends Modal {
   }
 
   onClose(): void {
+    this.userActions += 1;
     this.clearInteraction();
     this.detach();
     this.view = null;
@@ -175,10 +182,13 @@ export class HostSearchModal extends Modal {
     const session = this.session;
     const ref = this.displayed?.rows[index]?.noteRef;
     if (!session || ref === undefined) return;
+    const action = ++this.userActions;
     const { signal, epoch } = this.start("Opening the selected note…");
     try {
       await session.open(ref, signal);
-      if (this.interaction.isCurrent(epoch)) this.close();
+      // The note is open. Close unless the user has moved on since the click: an
+      // invalidation after the hand-off to Obsidian does not count (H-1).
+      if (this.userActions === action && this.view) this.close();
     } catch (error) {
       if (this.interaction.isCurrent(epoch)) this.showFailure(hostSearchFailure(error), index);
     } finally {

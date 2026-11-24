@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { build, type Plugin as EsbuildPlugin } from "esbuild";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { HOST_AVAILABLE_EVENT, HOST_SLOT_KEY } from "../src/host-services";
+import { HOST_AVAILABLE_EVENT, HOST_SLOT_KEY, PAGE_POLICY_MEMORY_KEY } from "../src/host-services";
 import type { SearchProfile } from "../src/backend";
 import type { KwirySearchApiV1 } from "../src/public-api";
 
@@ -184,6 +184,7 @@ async function loadProductionPlugin(): Promise<new () => {
     resultLimit: number;
   };
   readonly api: KwirySearchApiV1;
+  readonly localIndexingState: { readonly kind: string };
   onload(): Promise<void>;
   onunload(): void;
   saveSettings(): Promise<void>;
@@ -1273,6 +1274,62 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
     plugin.onunload();
   });
 
+  it.each(["access", "workspace", "lifecycle", "withdrawn"])(
+    "K2: an open that resolves after a %s invalidation during hand-off closes the dialog", async (reason) => {
+      const host = scriptedHost();
+      const handedOff = deferred<unknown>();
+      host.open.mockReturnValueOnce(handedOff.promise);
+      const plugin = await startedHost();
+      const modal = await openHost();
+      submit(modal, QUERY);
+      await settled();
+      modal.contentEl.find("button", HIT.title).fire("click");
+      // The host has handed the open to Obsidian; it resolves despite the invalidation (H-1).
+      host.invalidate(reason);
+      await settled();
+      expect(modal.contentEl.text).not.toBe("");
+      handedOff.resolve(undefined);
+      await settled();
+      expect(modal.contentEl.text).toBe("");
+      expect(host.open).toHaveBeenCalledTimes(1);
+      plugin.onunload();
+    },
+  );
+
+  it.each(["new query", "submit", "close"] as const)(
+    "K2: after an invalidation, a newer user action (%s) keeps a late open from closing the dialog", async (action) => {
+      const host = scriptedHost();
+      const handedOff = deferred<unknown>();
+      host.open.mockReturnValueOnce(handedOff.promise);
+      host.search.mockResolvedValueOnce(page()).mockResolvedValueOnce(page({ items: [hitTwin] }));
+      const plugin = await startedHost();
+      const modal = await openHost();
+      let closes = 0;
+      const close = modal.close.bind(modal);
+      modal.close = () => { closes += 1; close(); };
+      submit(modal, QUERY);
+      await settled();
+      modal.contentEl.find("button", HIT.title).fire("click");
+      host.invalidate("access");
+      await settled();
+      if (action === "new query") inputText(modal, "fern");
+      if (action === "submit") submit(modal, "lark");
+      if (action === "close") modal.close();
+      await settled();
+      handedOff.resolve(undefined);
+      await settled();
+      if (action === "close") {
+        expect(closes).toBe(1);
+      } else {
+        expect(closes).toBe(0);
+        expect(modal.contentEl.text).not.toBe("");
+        if (action === "submit") expect(modal.contentEl.text).toContain(hitTwin.path);
+        modal.close();
+      }
+      plugin.onunload();
+    },
+  );
+
   it.each([
     [{ code: "result_unavailable", family: "invalidated" }, "That note is no longer available.", 1],
     [{ code: "unavailable", family: "unavailable" }, "Host search is unavailable right now.", 0],
@@ -1711,7 +1768,11 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       await vi.waitFor(() => expect(harness.statusBarText).not.toBe("kwiry: starting…"), { interval: 5 });
       host.install();
       announceProvider();
-      await settled();
+      // The A2 record is saved only after the restart awaits a digest, so wait for
+      // it rather than for a fixed number of turns.
+      if (stored === "in_plugin") {
+        await vi.waitFor(() => expect(storedProfiles()).toEqual(["in_plugin"]), { interval: 5 });
+      }
       await settled();
       // Only an in-plugin start stored a cache; deleting it under the memory_only
       // default is recorded with the saved choice unchanged.
@@ -1787,7 +1848,27 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       await plugin.onload();
       harness.layoutReady?.();
       await settled();
-      return { host, plugin };
+      return { host, plugin, worker };
+    }
+
+    /** Disables and re-enables the plugin in the same page: a fresh module, the same window. */
+    async function reloadInSamePage(previous: { onunload(): void }) {
+      previous.onunload();
+      const KwiryPlugin = await loadProductionPlugin();
+      const plugin = new KwiryPlugin();
+      await plugin.onload();
+      harness.layoutReady?.();
+      await settled();
+      return plugin;
+    }
+
+    function resyncPolicy(host: ReturnType<typeof scriptedHost>): void {
+      for (const listener of [...host.policyListeners]) listener({ type: "resync" });
+    }
+
+    function withdraw(host: ReturnType<typeof scriptedHost>): void {
+      removeSlot();
+      host.invalidate("withdrawn");
     }
 
     it.each([
@@ -1924,6 +2005,90 @@ describe("KwiryPlugin startup lifecycle wiring", () => {
       expect({ inits: harness.backendInitializations, cache: harness.cachePolicyHashes }).toEqual({ inits: 1, cache: [] });
       await expect(plugin.api.ready()).resolves.toBeUndefined();
       plugin.onunload();
+    });
+
+    it("K1/H-2: refuse, resync and withdrawal, then reloads in the same page stay refused and build nothing", async () => {
+      const { host, plugin, worker } = await inPluginUnder({ value: "refuse", decidedBy: "organization" });
+      const message = "Kwiry: Local indexing is turned off by your organization.";
+      await vi.waitFor(() => expect(harness.statusBarText).toBe(message), { interval: 5 });
+      resyncPolicy(host);
+      withdraw(host);
+      await settled();
+      expect(plugin.localIndexingState.kind).toBe("refused");
+      let current = plugin;
+      for (let reload = 0; reload < 2; reload += 1) {
+        current = await reloadInSamePage(current);
+        await settled();
+        expect(current.localIndexingState).toEqual({ kind: "refused", decidedBy: "organization", limited: false });
+        expect(harness.statusBarText).toBe(message);
+        await current.rebuildInPluginIndex();
+        await expect(current.api.ready()).rejects.toMatchObject({ code: "backend_unavailable" });
+      }
+      expect({ inits: harness.backendInitializations, cache: harness.cachePolicyHashes, sources: harness.sourcePolicies })
+        .toEqual({ inits: 0, cache: [], sources: [] });
+      expect(worker).not.toHaveBeenCalled();
+      expect(harness.savedData).toEqual([]);
+      current.onunload();
+    });
+
+    it("K1/H-2: memory_only then withdrawal, then a reload in the same page stays memory_only with the cache off", async () => {
+      const { host, plugin } = await inPluginUnder({ value: "memory_only", decidedBy: "organization" });
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      withdraw(host);
+      await settled();
+      const reloaded = await reloadInSamePage(plugin);
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(2), { interval: 5 });
+      expect(reloaded.localIndexingState).toEqual({ kind: "memory_only", decidedBy: "organization" });
+      expect(harness.cachePolicyHashes).toEqual([]);
+      harness.displaySettings?.();
+      expect(harness.settingRows.find(({ name }) => name === "Local indexing")?.description)
+        .toBe("Local indexing: memory only (your organization). Nothing is kept after this session.");
+      reloaded.onunload();
+    });
+
+    it("K1/H-2: withdrawal before any answer, then a reload in the same page applies the memory-only default", async () => {
+      const { host, plugin } = await inPluginUnder({ value: "refuse", hang: true });
+      await settled();
+      expect(harness.statusBarText).toBe("Kwiry: Waiting for the local indexing policy…");
+      withdraw(host);
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      const reloaded = await reloadInSamePage(plugin);
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(2), { interval: 5 });
+      expect(reloaded.localIndexingState).toEqual({ kind: "memory_only", decidedBy: "protocol" });
+      expect(harness.cachePolicyHashes).toEqual([]);
+      reloaded.onunload();
+    });
+
+    it("K1: a page that never had a slot stays ungoverned across a reload and remembers nothing", async () => {
+      const { plugin } = await inPluginUnder("absent", "late");
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      expect(harness.cachePolicyHashes).toHaveLength(1);
+      const reloaded = await reloadInSamePage(plugin);
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(2), { interval: 5 });
+      expect(reloaded.localIndexingState).toEqual({ kind: "ungoverned" });
+      expect(harness.cachePolicyHashes).toHaveLength(2);
+      expect(Reflect.getOwnPropertyDescriptor(window, PAGE_POLICY_MEMORY_KEY)).toBeUndefined();
+      reloaded.onunload();
+    });
+
+    it("K1/H-2: a new slot after withdrawal decides, and its answer is what the page remembers next", async () => {
+      const { host, plugin } = await inPluginUnder({ value: "refuse", decidedBy: "organization" });
+      await settled();
+      withdraw(host);
+      const reloaded = await reloadInSamePage(plugin);
+      expect(reloaded.localIndexingState.kind).toBe("refused");
+      expect(harness.backendInitializations).toBe(0);
+      const next = scriptedHost("without search", { value: "memory_only", decidedBy: "workspace" });
+      announceProvider();
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(1), { interval: 5 });
+      expect(reloaded.localIndexingState).toEqual({ kind: "memory_only", decidedBy: "workspace" });
+      withdraw(next);
+      await settled();
+      const again = await reloadInSamePage(reloaded);
+      await vi.waitFor(() => expect(harness.backendInitializations).toBe(2), { interval: 5 });
+      expect(again.localIndexingState).toEqual({ kind: "memory_only", decidedBy: "workspace" });
+      expect(harness.cachePolicyHashes).toEqual([]);
+      again.onunload();
     });
   });
 
