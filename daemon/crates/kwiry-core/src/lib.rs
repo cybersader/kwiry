@@ -170,7 +170,7 @@ pub use policy::{
 pub use provider::{
     PROVIDER_MAX_ID_BYTES, PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT,
     PROVIDER_MAX_PARTITION_BYTES, PROVIDER_MAX_PATH_BYTES, PROVIDER_MAX_QUERY_PARTITIONS,
-    PROVIDER_OVER_TRANSPORT_CAP, ProviderAsOf, ProviderCoverage, ProviderError, ProviderErrorKind,
+    PROVIDER_OVER_TRANSPORT_CAP, ProviderAsOf, ProviderCoverage, ProviderError, ProviderErrorCode,
     ProviderFeedMode, ProviderQueryOutcome, ProviderReference, ProviderResult, ProviderState,
     ProviderStatus, ProviderStore, hex_sha256,
 };

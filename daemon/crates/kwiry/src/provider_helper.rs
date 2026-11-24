@@ -5,7 +5,10 @@
 //! Desktop and non-governed. No TCP listener, no outbound network, no
 //! secrets, no workspace reads: the helper indexes only the bytes a host
 //! pushes. Every name the contract may still rename (routes, headers, JSON
-//! keys, error tokens) lives in [`wire`]; the store knows none of them.
+//! keys and shapes, error tokens and their HTTP statuses) lives in [`wire`];
+//! the store speaks in Rust types and enums and knows none of them. The one
+//! exception is the exclusion reason classes `status` counts by (for example
+//! `over_transport_cap`), which are Kwiry's own and come from the store.
 //! See `docs/provider-helper-trial.md`.
 
 use std::path::{Path, PathBuf};
@@ -22,17 +25,16 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::serve::IncomingStream;
-use kwiry_core::{
-    PROVIDER_MAX_ITEM_BYTES, ProviderError, ProviderErrorKind, ProviderFeedMode, ProviderStore,
-};
+use kwiry_core::{PROVIDER_MAX_ITEM_BYTES, ProviderError, ProviderErrorCode, ProviderStore};
 use serde_json::{Value, json};
 use tokio::net::UnixListener;
 
 /// Everything the partner's contract may rename or reshape.
 pub(crate) mod wire {
+    use axum::http::StatusCode;
     use kwiry_core::{
-        PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT, PROVIDER_MAX_QUERY_PARTITIONS,
-        ProviderQueryOutcome,
+        PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT, PROVIDER_MAX_QUERY_PARTITIONS, ProviderAsOf,
+        ProviderErrorCode, ProviderFeedMode, ProviderQueryOutcome, ProviderState, ProviderStatus,
     };
     use serde::Deserialize;
     use serde_json::{Value, json};
@@ -84,6 +86,14 @@ pub(crate) mod wire {
         pub mode: String,
     }
 
+    pub fn feed_mode(mode: &str) -> Option<ProviderFeedMode> {
+        match mode {
+            "full" => Some(ProviderFeedMode::Full),
+            "delta" => Some(ProviderFeedMode::Delta),
+            _ => None,
+        }
+    }
+
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct CheckpointBody {
@@ -118,13 +128,75 @@ pub(crate) mod wire {
         pub deadline_ms: Option<u64>,
     }
 
+    /// Error tokens raised by the adapter itself, not by the store.
+    pub const FORBIDDEN: &str = "forbidden";
+    pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+    pub const MODE_UNAVAILABLE: &str = "mode_unavailable";
+
+    /// The contract's status and token for a store refusal.
+    pub fn refusal(code: ProviderErrorCode) -> (StatusCode, &'static str) {
+        match code {
+            ProviderErrorCode::BadRequest => (StatusCode::BAD_REQUEST, "bad_request"),
+            ProviderErrorCode::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            ProviderErrorCode::NoOpenFeed => (StatusCode::CONFLICT, "no_open_feed"),
+            ProviderErrorCode::EpochMismatch => (StatusCode::CONFLICT, "epoch_mismatch"),
+            ProviderErrorCode::EpochRegressed => (StatusCode::CONFLICT, "epoch_regressed"),
+            ProviderErrorCode::CheckpointNotIncreasing => {
+                (StatusCode::CONFLICT, "checkpoint_not_increasing")
+            }
+            ProviderErrorCode::VersionMismatch => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "version_mismatch")
+            }
+            ProviderErrorCode::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
+            ProviderErrorCode::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+            ProviderErrorCode::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+        }
+    }
+
+    fn state(state: ProviderState) -> &'static str {
+        match state {
+            ProviderState::Ready => "ready",
+            ProviderState::Building => "building",
+            ProviderState::Unavailable => "unavailable",
+        }
+    }
+
+    pub fn as_of(as_of: Option<ProviderAsOf>) -> Value {
+        as_of.map_or(
+            Value::Null,
+            |as_of| json!({"epoch": as_of.epoch, "n": as_of.n}),
+        )
+    }
+
+    pub fn commit_reply(committed: ProviderAsOf) -> Value {
+        json!({"asOf": as_of(Some(committed))})
+    }
+
     pub fn query_reply(outcome: &ProviderQueryOutcome) -> Value {
         let coverage: Vec<_> = outcome
             .coverage
             .iter()
-            .map(|c| json!({"partition": c.partition, "mode": LEXICAL, "state": c.state, "asOf": c.as_of}))
+            .map(|c| {
+                json!({"partition": c.partition, "mode": LEXICAL, "state": state(c.state), "asOf": as_of(c.as_of)})
+            })
             .collect();
-        json!({"mode": LEXICAL, "coverage": coverage, "refs": outcome.refs})
+        let refs: Vec<_> = outcome
+            .refs
+            .iter()
+            .map(|r| json!({"partition": r.partition, "id": r.id, "version": r.version}))
+            .collect();
+        json!({"mode": LEXICAL, "coverage": coverage, "refs": refs})
+    }
+
+    pub fn status_reply(status: &ProviderStatus) -> Value {
+        json!({
+            "state": state(status.state),
+            "asOf": as_of(status.as_of),
+            "notes": status.notes,
+            "excluded": status.excluded,
+            "partial": status.partial,
+            "indexBytes": status.index_bytes,
+        })
     }
 
     pub fn error_body(code: &str) -> Value {
@@ -145,6 +217,11 @@ impl Connected<IncomingStream<'_, UnixListener>> for PeerUid {
 }
 
 pub(crate) async fn run(socket: PathBuf, data_dir: PathBuf) -> Result<()> {
+    // Everything this mode writes (index files, the marker, the socket) is
+    // for this user only. The helper is its own process, so the mask is set
+    // once, before the first file is created.
+    // SAFETY: umask only swaps the process file-mode mask.
+    unsafe { libc::umask(0o077) };
     let store = tokio::task::spawn_blocking(move || ProviderStore::open(&data_dir))
         .await?
         .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -210,9 +287,9 @@ pub(crate) fn router(store: Store) -> Router {
         .route(wire::ROUTE_CHECKPOINT, post(checkpoint))
         .route(wire::ROUTE_COMMIT, post(commit))
         .route(wire::ROUTE_STATUS, get(status))
-        .fallback(|| async { failure(StatusCode::NOT_FOUND, "not_found") })
+        .fallback(|| async { refuse(ProviderErrorCode::NotFound) })
         .method_not_allowed_fallback(|| async {
-            failure(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed")
+            failure(StatusCode::METHOD_NOT_ALLOWED, wire::METHOD_NOT_ALLOWED)
         })
         .layer(DefaultBodyLimit::max(wire::MAX_JSON_BODY_BYTES))
         .layer(middleware::from_fn(contract_envelope))
@@ -228,13 +305,13 @@ async fn contract_envelope(request: Request, next: Next) -> Response {
         .get::<ConnectInfo<PeerUid>>()
         .map(|info| info.0.0);
     let mut response = if peer.is_some_and(|uid| uid != Some(own_uid())) {
-        failure(StatusCode::FORBIDDEN, "forbidden")
+        failure(StatusCode::FORBIDDEN, wire::FORBIDDEN)
     } else if request
         .headers()
         .get(wire::PROFILE_HEADER)
         .is_none_or(|value| value != wire::PROFILE)
     {
-        failure(StatusCode::BAD_REQUEST, "bad_request")
+        refuse(ProviderErrorCode::BadRequest)
     } else {
         let response = next.run(request).await;
         let is_json = response
@@ -244,20 +321,15 @@ async fn contract_envelope(request: Request, next: Next) -> Response {
         if is_json || response.status().is_success() {
             response
         } else {
-            let status = response.status();
-            let code = match status {
-                StatusCode::NOT_FOUND => "not_found",
-                StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
-                StatusCode::PAYLOAD_TOO_LARGE => "too_large",
-                status if status.is_server_error() => "internal",
-                _ => "bad_request",
-            };
-            let status = if code == "bad_request" {
-                StatusCode::BAD_REQUEST
-            } else {
-                status
-            };
-            failure(status, code)
+            match response.status() {
+                StatusCode::NOT_FOUND => refuse(ProviderErrorCode::NotFound),
+                StatusCode::METHOD_NOT_ALLOWED => {
+                    failure(StatusCode::METHOD_NOT_ALLOWED, wire::METHOD_NOT_ALLOWED)
+                }
+                StatusCode::PAYLOAD_TOO_LARGE => refuse(ProviderErrorCode::TooLarge),
+                status if status.is_server_error() => refuse(ProviderErrorCode::Internal),
+                _ => refuse(ProviderErrorCode::BadRequest),
+            }
         }
     };
     response.headers_mut().insert(
@@ -277,6 +349,12 @@ fn failure(status: StatusCode, code: &str) -> Response {
     response
 }
 
+/// The contract-shaped reply for a store refusal.
+fn refuse(code: ProviderErrorCode) -> Response {
+    let (status, token) = wire::refusal(code);
+    failure(status, token)
+}
+
 struct WireError(Box<Response>);
 
 impl WireError {
@@ -287,19 +365,10 @@ impl WireError {
 
 impl From<ProviderError> for WireError {
     fn from(error: ProviderError) -> Self {
-        let status = match error.kind {
-            ProviderErrorKind::BadRequest => StatusCode::BAD_REQUEST,
-            ProviderErrorKind::NotFound => StatusCode::NOT_FOUND,
-            ProviderErrorKind::Conflict => StatusCode::CONFLICT,
-            ProviderErrorKind::Unprocessable => StatusCode::UNPROCESSABLE_ENTITY,
-            ProviderErrorKind::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            ProviderErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            ProviderErrorKind::Internal => {
-                eprintln!("provider helper internal error: {}", error.detail);
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        };
-        Self::from_response(failure(status, error.code))
+        if error.code == ProviderErrorCode::Internal {
+            eprintln!("provider helper internal error: {}", error.detail);
+        }
+        Self::from_response(refuse(error.code))
     }
 }
 
@@ -310,7 +379,7 @@ impl IntoResponse for WireError {
 }
 
 fn bad_request() -> WireError {
-    WireError::from_response(failure(StatusCode::BAD_REQUEST, "bad_request"))
+    WireError::from_response(refuse(ProviderErrorCode::BadRequest))
 }
 
 type WireResult = std::result::Result<Response, WireError>;
@@ -320,9 +389,9 @@ async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> std::result::Result<T, ProviderError> + Send + 'static,
     render: impl FnOnce(T) -> Value,
 ) -> WireResult {
-    let value = tokio::task::spawn_blocking(work).await.map_err(|_| {
-        WireError::from_response(failure(StatusCode::INTERNAL_SERVER_ERROR, "internal"))
-    })??;
+    let value = tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| WireError::from_response(refuse(ProviderErrorCode::Internal)))??;
     Ok(axum::Json(render(value)).into_response())
 }
 
@@ -344,11 +413,7 @@ async fn begin(
     body: Bytes,
 ) -> WireResult {
     let wire::BeginBody { epoch, mode } = parse(&body)?;
-    let mode = match mode.as_str() {
-        "full" => ProviderFeedMode::Full,
-        "delta" => ProviderFeedMode::Delta,
-        _ => return Err(bad_request()),
-    };
+    let mode = wire::feed_mode(&mode).ok_or_else(bad_request)?;
     blocking(move || store.begin(&partition, epoch, mode), empty).await
 }
 
@@ -364,11 +429,17 @@ async fn put_item(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     let too_large = |store: Store, partition: String, id: String| async move {
-        // Counted as excluded, never silently dropped (§2.3 size caps).
-        let _ =
+        // Counted as excluded, never silently dropped (§2.3 size caps). With
+        // no open feed there is nothing to count it in: the refusal is the
+        // same `no_open_feed` any other put gets.
+        let recorded =
             tokio::task::spawn_blocking(move || store.exclude_over_transport_cap(&partition, &id))
                 .await;
-        WireError::from_response(failure(StatusCode::PAYLOAD_TOO_LARGE, "too_large"))
+        match recorded {
+            Ok(Ok(())) => WireError::from_response(refuse(ProviderErrorCode::TooLarge)),
+            Ok(Err(error)) => WireError::from(error),
+            Err(_) => WireError::from_response(refuse(ProviderErrorCode::Internal)),
+        }
     };
     if declared.is_some_and(|length| length > max) {
         return Err(too_large(store, partition, id).await);
@@ -420,11 +491,7 @@ async fn commit(
     if !body.is_empty() {
         let wire::CommitBody {} = parse(&body)?;
     }
-    blocking(
-        move || store.commit(&partition),
-        |as_of| json!({"asOf": as_of}),
-    )
-    .await
+    blocking(move || store.commit(&partition), wire::commit_reply).await
 }
 
 async fn retire(State(store): State<Store>, UrlPath(partition): UrlPath<String>) -> WireResult {
@@ -434,7 +501,7 @@ async fn retire(State(store): State<Store>, UrlPath(partition): UrlPath<String>)
 async fn status(State(store): State<Store>, UrlPath(partition): UrlPath<String>) -> WireResult {
     blocking(
         move || store.status(&partition),
-        |status| serde_json::to_value(status).unwrap_or_else(|_| json!({})),
+        |status| wire::status_reply(&status),
     )
     .await
 }
@@ -451,7 +518,7 @@ async fn query(State(store): State<Store>, body: Bytes) -> WireResult {
         // Never a silent switch to another kind of search.
         return Err(WireError::from_response(failure(
             StatusCode::BAD_REQUEST,
-            "mode_unavailable",
+            wire::MODE_UNAVAILABLE,
         )));
     }
     let now_ms = SystemTime::now()
@@ -462,9 +529,8 @@ async fn query(State(store): State<Store>, body: Bytes) -> WireResult {
         None => wire::DEFAULT_DEADLINE_MS,
     };
     if budget_ms == 0 {
-        return Err(WireError::from_response(failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
+        return Err(WireError::from_response(refuse(
+            ProviderErrorCode::Unavailable,
         )));
     }
     let text = q.text;
@@ -476,9 +542,8 @@ async fn query(State(store): State<Store>, body: Bytes) -> WireResult {
         Ok(result) => result,
         // Past the deadline the host has stopped waiting; the search thread
         // finishes on its own and its answer is dropped.
-        Err(_) => Err(WireError::from_response(failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
+        Err(_) => Err(WireError::from_response(refuse(
+            ProviderErrorCode::Unavailable,
         ))),
     }
 }

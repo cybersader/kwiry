@@ -20,7 +20,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tantivy::schema::Field;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Searcher, Term};
@@ -53,63 +52,61 @@ const DATA_MARKER: &str = ".provider-store";
 /// reference lookup.
 const QUERY_ATTEMPTS: usize = 4;
 
+/// Why the store refused a call. The wire adapter maps each to its contract
+/// token and HTTP status; the store knows neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderErrorKind {
+pub enum ProviderErrorCode {
     BadRequest,
     NotFound,
-    Conflict,
-    Unprocessable,
+    NoOpenFeed,
+    EpochMismatch,
+    EpochRegressed,
+    CheckpointNotIncreasing,
+    VersionMismatch,
     TooLarge,
     Unavailable,
     Internal,
 }
 
-/// A refusal. `code` is one of the contract's error tokens; `detail` is for
-/// the helper's own diagnostics and is never sent on the wire.
+/// A refusal. `detail` is for the helper's own diagnostics and is never sent
+/// on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{code}: {detail}")]
+#[error("{code:?}: {detail}")]
 pub struct ProviderError {
-    pub kind: ProviderErrorKind,
-    pub code: &'static str,
+    pub code: ProviderErrorCode,
     pub detail: String,
 }
 
 impl ProviderError {
-    fn new(kind: ProviderErrorKind, code: &'static str, detail: impl Into<String>) -> Self {
+    fn new(code: ProviderErrorCode, detail: impl Into<String>) -> Self {
         Self {
-            kind,
             code,
             detail: detail.into(),
         }
     }
 
     fn bad(detail: impl Into<String>) -> Self {
-        Self::new(ProviderErrorKind::BadRequest, "bad_request", detail)
-    }
-
-    fn conflict(code: &'static str, detail: impl Into<String>) -> Self {
-        Self::new(ProviderErrorKind::Conflict, code, detail)
+        Self::new(ProviderErrorCode::BadRequest, detail)
     }
 
     fn internal(error: impl std::fmt::Display) -> Self {
-        Self::new(ProviderErrorKind::Internal, "internal", error.to_string())
+        Self::new(ProviderErrorCode::Internal, error.to_string())
     }
 
     fn no_open_feed() -> Self {
-        Self::conflict("no_open_feed", "send begin first")
+        Self::new(ProviderErrorCode::NoOpenFeed, "send begin first")
     }
 }
 
 pub type ProviderResult<T> = std::result::Result<T, ProviderError>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderAsOf {
     pub epoch: u64,
     pub n: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderState {
     Ready,
     Building,
@@ -125,18 +122,17 @@ pub enum ProviderFeedMode {
     Delta,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderReference {
     pub partition: String,
     pub id: String,
     pub version: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCoverage {
     pub partition: String,
     pub state: ProviderState,
-    #[serde(rename = "asOf")]
     pub as_of: Option<ProviderAsOf>,
 }
 
@@ -146,10 +142,9 @@ pub struct ProviderQueryOutcome {
     pub refs: Vec<ProviderReference>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderStatus {
     pub state: ProviderState,
-    #[serde(rename = "asOf")]
     pub as_of: Option<ProviderAsOf>,
     /// Notes the serving index holds (fully or partly searchable).
     pub notes: usize,
@@ -158,7 +153,6 @@ pub struct ProviderStatus {
     /// Notes searchable only in part (for example, invalid frontmatter:
     /// the body is indexed, the properties are not), counted by reason.
     pub partial: BTreeMap<String, usize>,
-    #[serde(rename = "indexBytes")]
     pub index_bytes: u64,
 }
 
@@ -218,7 +212,7 @@ impl Generation {
         if dir.exists() {
             fs::remove_dir_all(&dir).map_err(ProviderError::internal)?;
         }
-        fs::create_dir_all(&dir).map_err(ProviderError::internal)?;
+        create_private_dir(&dir)?;
         let schema = build_schema();
         let fields = Fields::from_schema(&schema).map_err(ProviderError::internal)?;
         let source_key = fields
@@ -375,7 +369,7 @@ impl Generation {
         Ok((served, std::mem::take(&mut self.checkpointed_refs)))
     }
 
-    fn status_counts(&self) -> (usize, BTreeMap<String, usize>, BTreeMap<String, usize>) {
+    fn status_counts(&self) -> Counts {
         let mut notes = 0;
         let mut excluded = BTreeMap::new();
         let mut partial = BTreeMap::new();
@@ -404,12 +398,17 @@ struct Served {
     as_of: ProviderAsOf,
 }
 
-/// The committed view of a partition: the searcher and the path → reference
-/// map for the same commit, swapped together.
+/// Note counts of one commit: searchable notes, excluded and partial notes by
+/// reason.
+type Counts = (usize, BTreeMap<String, usize>, BTreeMap<String, usize>);
+
+/// The committed view of a partition: the searcher, the path → reference map
+/// and the note counts for the same commit, swapped together.
 #[derive(Default)]
 struct View {
     served: Option<Arc<Served>>,
     refs: HashMap<String, ProviderReference>,
+    counts: Counts,
 }
 
 struct Prepared {
@@ -431,13 +430,50 @@ struct Feed {
 
 #[derive(Default)]
 struct Writes {
-    /// Epoch of the open feed or, with none open, of the last commit.
-    epoch: u64,
+    /// Highest epoch any `begin` has opened, committed or abandoned. A `full`
+    /// feed may not go below it.
+    highest_epoch: u64,
+    /// What the last commit made visible; `None` before the first. Kept apart
+    /// from `live.n`, which also moves at checkpoints that are never
+    /// committed.
+    committed: Option<ProviderAsOf>,
+    /// A delta feed was abandoned after a checkpoint. Its writes are durable
+    /// in `live` and cannot be taken back, so `live` no longer matches
+    /// `committed`: it is never served again, `delta` is refused, and only a
+    /// `full` feed (same epoch allowed) can replace it.
+    needs_full: bool,
     live: Option<Generation>,
     feed: Option<Feed>,
 }
 
 impl Writes {
+    /// Drops the open feed, if any, and everything it wrote that was not
+    /// committed.
+    fn abandon_feed(&mut self) -> ProviderResult<()> {
+        let Some(abandoned) = self.feed.take() else {
+            return Ok(());
+        };
+        match abandoned.staging {
+            Some(staging) => {
+                let dir = staging.dir.clone();
+                drop(staging);
+                let _ = fs::remove_dir_all(dir);
+            }
+            None => {
+                if let Some(live) = self.live.as_mut() {
+                    if self
+                        .committed
+                        .is_some_and(|committed| live.n != committed.n)
+                    {
+                        self.needs_full = true;
+                    }
+                    live.rollback()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn target(&mut self) -> ProviderResult<&mut Generation> {
         match &mut self.feed {
             Some(Feed {
@@ -484,8 +520,11 @@ impl ProviderStore {
     /// Opens a store in `data_dir`, discarding anything a previous run left
     /// there. Refuses a non-empty directory this store did not create, so a
     /// mistyped path cannot wipe unrelated data.
+    ///
+    /// Directories it creates are private to the user (0700 on Unix); the
+    /// files inside follow the process umask, which the helper sets to 0077.
     pub fn open(data_dir: &Path) -> ProviderResult<Self> {
-        fs::create_dir_all(data_dir).map_err(ProviderError::internal)?;
+        create_private_dir(data_dir)?;
         let marker = data_dir.join(DATA_MARKER);
         let empty = fs::read_dir(data_dir)
             .map_err(ProviderError::internal)?
@@ -496,13 +535,13 @@ impl ProviderStore {
                 "data directory is not empty and was not created by this mode",
             ));
         }
-        fs::write(&marker, b"disposable provider store; safe to delete\n")
-            .map_err(ProviderError::internal)?;
+        restrict_to_owner(data_dir, 0o700)?;
+        write_private_file(&marker, b"disposable provider store; safe to delete\n")?;
         let partitions_dir = data_dir.join("partitions");
         if partitions_dir.exists() {
             fs::remove_dir_all(&partitions_dir).map_err(ProviderError::internal)?;
         }
-        fs::create_dir_all(&partitions_dir).map_err(ProviderError::internal)?;
+        create_private_dir(&partitions_dir)?;
         Ok(Self {
             partitions_dir,
             partitions: Mutex::new(BTreeMap::new()),
@@ -524,10 +563,15 @@ impl ProviderStore {
         self.known(name)?.ok_or_else(ProviderError::no_open_feed)
     }
 
-    /// Opens a feed. `full` needs `epoch` ≥ the current epoch and builds a
-    /// fresh index while the committed one keeps serving; `delta` needs
-    /// `epoch` = the current epoch and changes the committed index in place.
-    /// A new `begin` abandons an open, uncommitted feed.
+    /// Opens a feed. `full` needs `epoch` ≥ every epoch begun so far and
+    /// builds a fresh index while the committed one keeps serving; `delta`
+    /// needs `epoch` = the committed epoch and changes the committed index in
+    /// place. Every `begin`, even a refused one, first abandons an open,
+    /// uncommitted feed: the host has lost its place in it. A `delta`
+    /// abandoned after a checkpoint leaves writes that cannot be taken back,
+    /// so the partition then refuses `delta` with `epoch_mismatch` until a
+    /// `full` feed commits (contract §2.2 rule 2: the host resends, or
+    /// resyncs with the same epoch).
     pub fn begin(&self, name: &str, epoch: u64, mode: ProviderFeedMode) -> ProviderResult<()> {
         validate_partition(name)?;
         let partition = {
@@ -541,55 +585,39 @@ impl ProviderStore {
             }))
         };
         let mut writes = partition.lock();
-        let committed_epoch = writes.live.as_ref().map(|live| live.epoch);
+        writes.abandon_feed()?;
+        let committed = writes.committed;
         match mode {
             ProviderFeedMode::Delta => {
-                if committed_epoch != Some(epoch) {
-                    return Err(ProviderError::conflict(
-                        "epoch_mismatch",
-                        "delta needs the committed epoch",
+                if writes.needs_full || committed.map(|c| c.epoch) != Some(epoch) {
+                    return Err(ProviderError::new(
+                        ProviderErrorCode::EpochMismatch,
+                        "delta needs the committed epoch and no pending resync",
                     ));
                 }
             }
             ProviderFeedMode::Full => {
-                if epoch < writes.epoch || committed_epoch.is_some_and(|c| epoch < c) {
-                    return Err(ProviderError::conflict(
-                        "epoch_regressed",
-                        "full needs an epoch at least the current one",
+                if epoch < writes.highest_epoch {
+                    return Err(ProviderError::new(
+                        ProviderErrorCode::EpochRegressed,
+                        "full needs an epoch at least the highest begun",
                     ));
-                }
-            }
-        }
-        if let Some(abandoned) = writes.feed.take() {
-            match abandoned.staging {
-                Some(staging) => {
-                    let dir = staging.dir.clone();
-                    drop(staging);
-                    let _ = fs::remove_dir_all(dir);
-                }
-                None => {
-                    if let Some(live) = writes.live.as_mut() {
-                        live.rollback()?;
-                    }
                 }
             }
         }
         let staging = match mode {
             ProviderFeedMode::Delta => None,
             ProviderFeedMode::Full => {
-                // Checkpoint numbers keep increasing within an epoch.
-                let floor = writes
-                    .live
-                    .as_ref()
-                    .filter(|live| live.epoch == epoch)
-                    .map_or(0, |live| live.n);
+                // Checkpoint numbers keep increasing within an epoch, counted
+                // from the last commit, never from an abandoned checkpoint.
+                let floor = committed.filter(|c| c.epoch == epoch).map_or(0, |c| c.n);
                 let dir = partition
                     .dir
                     .join(format!("epoch-{epoch}-{}", unique_suffix()));
                 Some(Generation::create(dir, name, epoch, floor)?)
             }
         };
-        writes.epoch = epoch;
+        writes.highest_epoch = writes.highest_epoch.max(epoch);
         writes.feed = Some(Feed { mode, staging });
         Ok(())
     }
@@ -609,15 +637,13 @@ impl ProviderStore {
         if bytes.len() as u64 > PROVIDER_MAX_ITEM_BYTES {
             self.exclude_over_transport_cap(name, id)?;
             return Err(ProviderError::new(
-                ProviderErrorKind::TooLarge,
-                "too_large",
+                ProviderErrorCode::TooLarge,
                 "body over the item cap",
             ));
         }
         if hex_sha256(bytes) != version {
             return Err(ProviderError::new(
-                ProviderErrorKind::Unprocessable,
-                "version_mismatch",
+                ProviderErrorCode::VersionMismatch,
                 "version is not the SHA-256 of the body",
             ));
         }
@@ -662,8 +688,8 @@ impl ProviderStore {
         let mut writes = partition.lock();
         let target = writes.target()?;
         if n <= target.n {
-            return Err(ProviderError::conflict(
-                "checkpoint_not_increasing",
+            return Err(ProviderError::new(
+                ProviderErrorCode::CheckpointNotIncreasing,
                 format!("checkpoint must exceed {}", target.n),
             ));
         }
@@ -676,7 +702,7 @@ impl ProviderStore {
         let partition = self.feeding(name)?;
         let mut writes = partition.lock();
         let feed = writes.feed.take().ok_or_else(ProviderError::no_open_feed)?;
-        match feed.mode {
+        let as_of = match feed.mode {
             ProviderFeedMode::Delta => {
                 let live = writes
                     .live
@@ -684,13 +710,15 @@ impl ProviderStore {
                     .ok_or_else(ProviderError::no_open_feed)?;
                 let (served, changes) = live.publish()?;
                 let as_of = served.as_of;
+                let counts = live.status_counts();
                 let mut view = partition
                     .view
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 apply_ref_changes(&mut view.refs, changes);
                 view.served = Some(Arc::new(served));
-                Ok(as_of)
+                view.counts = counts;
+                as_of
             }
             ProviderFeedMode::Full => {
                 let mut staging = feed
@@ -708,6 +736,7 @@ impl ProviderStore {
                     *view = View {
                         served: Some(Arc::new(served)),
                         refs,
+                        counts: staging.status_counts(),
                     };
                 }
                 if let Some(previous) = writes.live.replace(staging) {
@@ -715,9 +744,12 @@ impl ProviderStore {
                     drop(previous);
                     let _ = fs::remove_dir_all(dir);
                 }
-                Ok(as_of)
+                writes.needs_full = false;
+                as_of
             }
-        }
+        };
+        writes.committed = Some(as_of);
+        Ok(as_of)
     }
 
     /// Forgets the partition and deletes its data. Idempotent.
@@ -735,8 +767,7 @@ impl ProviderStore {
             .view
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = View::default();
-        writes.live = None;
-        writes.feed = None;
+        *writes = Writes::default();
         let _ = fs::remove_dir_all(&partition.dir);
         Ok(())
     }
@@ -768,8 +799,7 @@ impl ProviderStore {
             }
         }
         Err(ProviderError::new(
-            ProviderErrorKind::Unavailable,
-            "unavailable",
+            ProviderErrorCode::Unavailable,
             "commits kept landing during the query",
         ))
     }
@@ -865,6 +895,8 @@ impl ProviderStore {
         Ok(Some(ProviderQueryOutcome { coverage, refs }))
     }
 
+    /// What the last commit made visible. Writes of an open or abandoned
+    /// feed are not counted.
     pub fn status(&self, name: &str) -> ProviderResult<ProviderStatus> {
         let Some(partition) = self.known(name)? else {
             return Ok(ProviderStatus {
@@ -876,13 +908,13 @@ impl ProviderStore {
                 index_bytes: 0,
             });
         };
-        let writes = partition.lock();
-        let served = partition.served();
-        let (notes, excluded, partial) = writes
-            .live
-            .as_ref()
-            .map(Generation::status_counts)
-            .unwrap_or_default();
+        let (served, (notes, excluded, partial)) = {
+            let view = partition
+                .view
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (view.served.clone(), view.counts.clone())
+        };
         Ok(ProviderStatus {
             state: if served.is_some() {
                 ProviderState::Ready
@@ -971,8 +1003,7 @@ fn validate_partition(name: &str) -> ProviderResult<()> {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
     {
         return Err(ProviderError::new(
-            ProviderErrorKind::NotFound,
-            "not_found",
+            ProviderErrorCode::NotFound,
             "partition must match [A-Za-z0-9_-]{1,64}",
         ));
     }
@@ -1013,6 +1044,34 @@ fn validate_path(path: &str) -> ProviderResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Creates `dir` (and missing parents) private to the owner (0700 on Unix).
+fn create_private_dir(dir: &Path) -> ProviderResult<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir).map_err(ProviderError::internal)
+}
+
+/// Sets `path`'s permission bits on Unix; a directory that already existed
+/// keeps its old mode through `create_private_dir`.
+fn restrict_to_owner(path: &Path, mode: u32) -> ProviderResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(ProviderError::internal)?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> ProviderResult<()> {
+    fs::write(path, bytes).map_err(ProviderError::internal)?;
+    restrict_to_owner(path, 0o600)
 }
 
 pub fn hex_sha256(bytes: &[u8]) -> String {
@@ -1119,9 +1178,12 @@ mod tests {
 
         store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
         let refused = store.checkpoint("p", 2).unwrap_err();
-        assert_eq!(refused.code, "checkpoint_not_increasing");
+        assert_eq!(refused.code, ProviderErrorCode::CheckpointNotIncreasing);
         let mismatch = store.put("p", "e", &hex_sha256(b"other"), "e.md", b"body");
-        assert_eq!(mismatch.unwrap_err().code, "version_mismatch");
+        assert_eq!(
+            mismatch.unwrap_err().code,
+            ProviderErrorCode::VersionMismatch
+        );
         store.exclude_over_transport_cap("p", "huge").unwrap();
         store.checkpoint("p", 3).unwrap();
         store.commit("p").unwrap();
@@ -1137,7 +1199,7 @@ mod tests {
                 .begin("p", 2, ProviderFeedMode::Delta)
                 .unwrap_err()
                 .code,
-            "epoch_mismatch"
+            ProviderErrorCode::EpochMismatch
         );
         // A full resync keeps serving epoch 1 until it commits; ids it did
         // not receive are gone afterwards.
@@ -1152,9 +1214,12 @@ mod tests {
                 .begin("p", 1, ProviderFeedMode::Full)
                 .unwrap_err()
                 .code,
-            "epoch_regressed"
+            ProviderErrorCode::EpochRegressed
         );
-        assert_eq!(store.delete("p", "z").unwrap_err().code, "no_open_feed");
+        assert_eq!(
+            store.delete("p", "z").unwrap_err().code,
+            ProviderErrorCode::NoOpenFeed
+        );
 
         store.retire("p").unwrap();
         assert_eq!(state(&store, "p").0, ProviderState::Unavailable);
@@ -1184,8 +1249,97 @@ mod tests {
         let names = ["p".to_owned(), "p".to_owned()];
         assert_eq!(
             store.query(&names, "wombat", 5).unwrap_err().code,
-            "bad_request"
+            ProviderErrorCode::BadRequest
         );
+    }
+
+    #[test]
+    fn provider_never_serves_an_abandoned_delta_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::open(dir.path()).unwrap();
+        store.begin("p", 1, ProviderFeedMode::Full).unwrap();
+        put(&store, "p", "a", "alpha.md", "# Alpha\n\nquokka\n");
+        store.checkpoint("p", 1).unwrap();
+        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 1 });
+
+        // A delta that checkpointed and was then abandoned by a new begin.
+        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
+        put(&store, "p", "ghost", "ghost.md", "# Ghost\n\nquokka\n");
+        store.checkpoint("p", 2).unwrap();
+        let code = |result: ProviderResult<()>| result.unwrap_err().code;
+        assert_eq!(
+            code(store.begin("p", 1, ProviderFeedMode::Delta)),
+            ProviderErrorCode::EpochMismatch
+        );
+        assert_eq!(
+            code(store.checkpoint("p", 2)),
+            ProviderErrorCode::NoOpenFeed
+        );
+        assert_eq!(
+            store.commit("p").unwrap_err().code,
+            ProviderErrorCode::NoOpenFeed
+        );
+        assert_eq!(ids(&store, &["p"], "quokka"), ["p/a"]);
+        assert_eq!(state(&store, "p").1, Some(ProviderAsOf { epoch: 1, n: 1 }));
+        let status = store.status("p").unwrap();
+        assert_eq!(status.notes, 1, "status counts the commit, not the ghost");
+
+        // A full resync with the same epoch counts checkpoints from the
+        // commit, so the host's resend of 2 is accepted.
+        store.begin("p", 1, ProviderFeedMode::Full).unwrap();
+        put(&store, "p", "a", "alpha.md", "# Alpha\n\nquokka\n");
+        store.checkpoint("p", 2).unwrap();
+        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 2 });
+        assert_eq!(ids(&store, &["p"], "quokka"), ["p/a"]);
+        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
+        store.checkpoint("p", 3).unwrap();
+        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 3 });
+
+        // A delta abandoned before any checkpoint leaves nothing behind.
+        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
+        put(&store, "p", "b", "beta.md", "# Beta\n\nquokka\n");
+        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
+        store.checkpoint("p", 4).unwrap();
+        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 4 });
+        assert_eq!(ids(&store, &["p"], "quokka"), ["p/a"]);
+    }
+
+    #[test]
+    fn provider_remembers_an_abandoned_higher_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProviderStore::open(dir.path()).unwrap();
+        store.begin("p", 1, ProviderFeedMode::Full).unwrap();
+        store.checkpoint("p", 1).unwrap();
+        store.commit("p").unwrap();
+        // A full at epoch 3 is abandoned by a delta at the committed epoch.
+        store.begin("p", 3, ProviderFeedMode::Full).unwrap();
+        store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
+        store.checkpoint("p", 2).unwrap();
+        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 1, n: 2 });
+        assert_eq!(
+            store
+                .begin("p", 2, ProviderFeedMode::Full)
+                .unwrap_err()
+                .code,
+            ProviderErrorCode::EpochRegressed,
+            "the delta must not lower the epoch record"
+        );
+        store.begin("p", 3, ProviderFeedMode::Full).unwrap();
+        store.checkpoint("p", 1).unwrap();
+        assert_eq!(store.commit("p").unwrap(), ProviderAsOf { epoch: 3, n: 1 });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_data_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let _store = ProviderStore::open(&data).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&data), 0o700);
+        assert_eq!(mode(&data.join("partitions")), 0o700);
+        assert_eq!(mode(&data.join(DATA_MARKER)), 0o600);
     }
 
     #[test]

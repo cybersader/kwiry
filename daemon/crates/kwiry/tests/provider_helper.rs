@@ -1,7 +1,8 @@
 //! Drives the experimental provider-helper mode over its Unix socket with a
 //! minimal HTTP/1.1 client, following the search provider contract (DRAFT
 //! v1) wire form: hello, full feed, commit, query, a delta edit and delete,
-//! status, partition sets, refusals, retire.
+//! status, partition sets, refusals, retire; plus recovery from an abandoned
+//! delta, data-directory permissions and the streamed-body cap.
 #![cfg(unix)]
 
 use std::io::{Read, Write};
@@ -62,8 +63,20 @@ fn exchange(helper: &Helper, head: &str, body: &[u8]) -> Reply {
     let mut stream = UnixStream::connect(&helper.socket).unwrap();
     stream.write_all(head.as_bytes()).unwrap();
     stream.write_all(body).unwrap();
+    read_reply(stream)
+}
+
+/// Reads a whole reply (the request asked for `Connection: close`). When the
+/// helper answers before reading the whole body and closes, Linux reports
+/// `ECONNRESET` after the reply bytes instead of end of file.
+fn read_reply(mut stream: UnixStream) -> Reply {
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
+    if let Err(error) = stream.read_to_end(&mut response) {
+        assert!(
+            error.kind() == std::io::ErrorKind::ConnectionReset && !response.is_empty(),
+            "{error}"
+        );
+    }
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -434,4 +447,197 @@ fn provider_helper_serves_the_contract_over_a_unix_socket() {
     );
     let gone = call(&helper, "DELETE", "/v1/partitions/p1/items/id-z", None);
     assert_eq!(code(&gone), (409, "no_open_feed"));
+}
+
+fn begin(helper: &Helper, p: &str, epoch: u64, mode: &str) -> (u16, Value) {
+    post(
+        helper,
+        &format!("/v1/partitions/{p}/begin"),
+        json!({"epoch": epoch, "mode": mode}),
+    )
+}
+
+fn checkpoint(helper: &Helper, p: &str, n: u64) -> (u16, Value) {
+    post(
+        helper,
+        &format!("/v1/partitions/{p}/checkpoint"),
+        json!({"n": n}),
+    )
+}
+
+fn commit(helper: &Helper, p: &str) -> (u16, Value) {
+    post(helper, &format!("/v1/partitions/{p}/commit"), json!({}))
+}
+
+/// Review B1: a delta abandoned after a checkpoint must not leave its writes
+/// behind, and the host's recovery (§2.2 rule 2: a `full` with the same
+/// epoch, resending from the committed `n`) must be accepted.
+#[test]
+fn provider_helper_recovers_from_an_abandoned_delta_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let helper = start(root.path());
+
+    // 1. Full feed, commit at {1,1}.
+    assert_eq!(begin(&helper, "p1", 1, "full"), (200, json!({})));
+    put(&helper, "p1", "id-a", "alpha.md", "# Alpha\n\nquokka\n");
+    assert_eq!(checkpoint(&helper, "p1", 1), (200, json!({})));
+    assert_eq!(
+        commit(&helper, "p1"),
+        (200, json!({"asOf": {"epoch": 1, "n": 1}}))
+    );
+
+    // 2. begin delta, put ghost, checkpoint 2.
+    assert_eq!(begin(&helper, "p1", 1, "delta"), (200, json!({})));
+    put(&helper, "p1", "ghost", "ghost.md", "# Ghost\n\nquokka\n");
+    assert_eq!(checkpoint(&helper, "p1", 2), (200, json!({})));
+
+    // 3. begin delta again: the abandoned checkpoint cannot be taken back, so
+    // a delta is refused until a full resync commits.
+    assert_eq!(
+        code(&begin(&helper, "p1", 1, "delta")),
+        (409, "epoch_mismatch")
+    );
+    // 4. The abandoned feed is closed; neither its checkpoint nor a commit
+    // can bring the ghost back.
+    assert_eq!(code(&checkpoint(&helper, "p1", 2)), (409, "no_open_feed"));
+    // 5. No commit makes the ghost visible, and coverage and status still
+    // report the last commit.
+    assert_eq!(code(&commit(&helper, "p1")), (409, "no_open_feed"));
+    let answer = query(&helper, &["p1"], "quokka");
+    assert_eq!(refs(&answer), ["p1/id-a"]);
+    assert_eq!(
+        answer["coverage"][0],
+        json!({"partition": "p1", "mode": "lexical", "state": "ready", "asOf": {"epoch": 1, "n": 1}})
+    );
+    let (_, report) = call(&helper, "GET", "/v1/partitions/p1/status", None);
+    assert_eq!(report["asOf"], json!({"epoch": 1, "n": 1}));
+    assert_eq!(report["notes"], 1);
+
+    // Recovery: a full with the same epoch, resending checkpoint 2.
+    assert_eq!(begin(&helper, "p1", 1, "full"), (200, json!({})));
+    put(&helper, "p1", "id-a", "alpha.md", "# Alpha\n\nquokka\n");
+    assert_eq!(checkpoint(&helper, "p1", 2), (200, json!({})));
+    assert_eq!(
+        commit(&helper, "p1"),
+        (200, json!({"asOf": {"epoch": 1, "n": 2}}))
+    );
+    assert_eq!(refs(&query(&helper, &["p1"], "quokka")), ["p1/id-a"]);
+    // Deltas work again afterwards.
+    assert_eq!(begin(&helper, "p1", 1, "delta"), (200, json!({})));
+    assert_eq!(checkpoint(&helper, "p1", 3), (200, json!({})));
+    assert_eq!(
+        commit(&helper, "p1"),
+        (200, json!({"asOf": {"epoch": 1, "n": 3}}))
+    );
+}
+
+/// The data directory is 0700 and nothing under it is readable by others.
+#[test]
+fn provider_helper_keeps_its_data_private() {
+    let root = tempfile::tempdir().unwrap();
+    let helper = start(root.path());
+    assert_eq!(begin(&helper, "p1", 1, "full"), (200, json!({})));
+    put(&helper, "p1", "id-a", "alpha.md", "# Alpha\n\nquokka\n");
+    assert_eq!(checkpoint(&helper, "p1", 1), (200, json!({})));
+    assert_eq!(commit(&helper, "p1").0, 200);
+
+    let data = root.path().join("data");
+    let mode = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(&data), 0o700);
+    let mut pending = vec![data];
+    let mut files = 0;
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                assert_eq!(mode(&path), 0o700, "{}", path.display());
+                pending.push(path);
+            } else {
+                assert_eq!(mode(&path) & 0o077, 0, "{}", path.display());
+                files += 1;
+            }
+        }
+    }
+    assert!(files > 2, "the index wrote files under the data directory");
+}
+
+/// Streams `chunks` chunked-encoding chunks of `chunk` bytes each, reading
+/// the reply concurrently: the helper may answer and close before the body
+/// ends, so write errors are expected and ignored.
+fn put_chunked(helper: &Helper, p: &str, id: &str, chunk: usize, chunks: usize) -> Reply {
+    let head = format!(
+        "PUT /v1/partitions/{p}/items/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Search-Provider-Profile: v1\r\nTransfer-Encoding: chunked\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Provider-Item-Version: {}\r\nProvider-Item-Path: big.md\r\n\r\n",
+        sha256(b"")
+    );
+    let stream = UnixStream::connect(&helper.socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let sender = std::thread::spawn(move || {
+        let data = vec![b'q'; chunk];
+        let _ = (|| -> std::io::Result<()> {
+            writer.write_all(head.as_bytes())?;
+            for _ in 0..chunks {
+                writer.write_all(format!("{chunk:x}\r\n").as_bytes())?;
+                writer.write_all(&data)?;
+                writer.write_all(b"\r\n")?;
+            }
+            writer.write_all(b"0\r\n\r\n")
+        })();
+    });
+    let reply = read_reply(stream);
+    sender.join().unwrap();
+    reply
+}
+
+/// A body sent without a length is read only up to the 10 MiB cap; past it
+/// the id is counted as excluded. With no open feed every over-cap put is
+/// `no_open_feed`, like any other put.
+#[test]
+fn provider_helper_caps_a_chunked_body() {
+    let root = tempfile::tempdir().unwrap();
+    let helper = start(root.path());
+
+    // No feed open: declared and streamed over-cap puts are no_open_feed.
+    let head = format!(
+        "PUT /v1/partitions/p1/items/id-big HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Search-Provider-Profile: v1\r\nContent-Length: 10485761\r\n\
+         Provider-Item-Version: {}\r\nProvider-Item-Path: big.md\r\n\r\n",
+        sha256(b"")
+    );
+    let declared = exchange(&helper, &head, b"");
+    assert_eq!(
+        (declared.status, declared.body),
+        (409, json!({"error": {"code": "no_open_feed"}}))
+    );
+    let streamed = put_chunked(&helper, "p1", "id-big", 1 << 20, 11);
+    assert_eq!(
+        (streamed.status, streamed.body),
+        (409, json!({"error": {"code": "no_open_feed"}}))
+    );
+
+    assert_eq!(begin(&helper, "p1", 1, "full"), (200, json!({})));
+    put(&helper, "p1", "id-a", "alpha.md", "# Alpha\n\nquokka\n");
+    // 11 MiB in 1 MiB chunks: stopped at the cap (LengthLimitError).
+    let big = put_chunked(&helper, "p1", "id-big", 1 << 20, 11);
+    assert_eq!(
+        (big.status, big.profile.as_deref(), big.body),
+        (413, Some("v1"), json!({"error": {"code": "too_large"}}))
+    );
+    assert_eq!(checkpoint(&helper, "p1", 1), (200, json!({})));
+    assert_eq!(commit(&helper, "p1").0, 200);
+    let (_, report) = call(&helper, "GET", "/v1/partitions/p1/status", None);
+    assert_eq!(report["notes"], 1);
+    assert_eq!(report["excluded"], json!({"over_transport_cap": 1}));
+    assert_eq!(refs(&query(&helper, &["p1"], "quokka")), ["p1/id-a"]);
 }

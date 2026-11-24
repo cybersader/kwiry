@@ -31,7 +31,9 @@ kwiry --data-dir <dir> provider-helper --socket <dir-owned-by-you>/provider.sock
 - **Data directory:** disposable. Cleared at start (refused if non-empty and
   not created by this mode — marker file `.provider-store`). Nothing is kept
   across restarts: after a restart every partition is `unavailable` until the
-  host feeds it again with `begin(full)`.
+  host feeds it again with `begin(full)`. The directory and every directory
+  under it are mode `0700`; the helper runs with umask `0077`, so every file
+  it writes (index files, the marker) is `0600`.
 
 ## Engine and storage
 
@@ -91,8 +93,11 @@ Every request must carry `Search-Provider-Profile: v1` (else
 `400 bad_request`); every response carries it. Errors are
 `{"error":{"code":"<token>"}}` with no other text. JSON request bodies are
 capped at 65,536 bytes and refuse unknown keys. Routes, header names, JSON
-keys and error tokens live in one module
-(`daemon/crates/kwiry/src/provider_helper.rs`, `mod wire`).
+keys and shapes, and error tokens with their HTTP statuses live in one
+module (`daemon/crates/kwiry/src/provider_helper.rs`, `mod wire`); the store
+(`kwiry-core`) returns Rust types and an error enum and knows none of them.
+The exclusion reason classes in `status` are Kwiry's own and come from the
+store.
 
 | Call | Route | Request → reply |
 |---|---|---|
@@ -106,20 +111,33 @@ keys and error tokens live in one module
 | query | `POST /v1/query` | see below |
 | status | `GET /v1/partitions/{p}/status` | see below |
 
-**Feed rules.** `full` needs `epoch` ≥ the current epoch (else
-`409 epoch_regressed`); `delta` needs `epoch` = the committed epoch (else
-`409 epoch_mismatch`). One open feed per partition: a new `begin` abandons an
-open, uncommitted one. `put`, `delete`, `checkpoint` and `commit` without an
-open feed: `409 no_open_feed`. `n` must strictly increase within an epoch
-(`409 checkpoint_not_increasing`). Before a partition's first commit its
-state is `building`.
+**Feed rules.** `full` needs `epoch` ≥ every epoch begun so far, committed
+or abandoned (else `409 epoch_regressed`); `delta` needs `epoch` = the
+committed epoch (else `409 epoch_mismatch`). One open feed per partition:
+every `begin`, even one that is then refused, abandons an open, uncommitted
+one. `put`, `delete`, `checkpoint` and `commit` without an open feed:
+`409 no_open_feed`. `n` must strictly increase within an epoch, counted from
+the last commit (`409 checkpoint_not_increasing`). Before a partition's first
+commit its state is `building`.
+
+**Abandoning a delta after a checkpoint.** A `delta` writes into the serving
+index in place, and a checkpoint makes its writes durable there; they cannot
+be taken back. So when a `delta` that checkpointed is abandoned (by a new
+`begin`), the partition keeps serving its last commit (queries, coverage
+`asOf` and `status` all report that commit, never the abandoned writes), and
+it refuses `delta` with `409 epoch_mismatch` until a `full` feed commits. The
+host recovers as contract §2.2 rule 2 describes for a lost feed: a `full`
+resync with the same epoch, whose checkpoints count from the committed `n`
+(so resending the abandoned checkpoint number is accepted). A `delta`
+abandoned before any checkpoint leaves nothing behind and needs no resync.
 
 **Size cap.** A `put` body is capped at **10,485,760 bytes** (10 MiB), Kwiry's
 `MAX_FILE_BYTES` for files it reads from disk, which matches the contract's
 per-note rule. A `Content-Length` over the cap is answered `413 too_large`
 before any body byte is read; a body without a length is read only up to the
 cap. Either way the id is recorded as excluded with reason
-`over_transport_cap`. `maxNoteBytes` is the same 10 MiB: everything that
+`over_transport_cap`. With no open feed there is nothing to record it in, so
+an over-cap `put` gets the same `409 no_open_feed` as any other `put`. `maxNoteBytes` is the same 10 MiB: everything that
 arrives is prepared and searched unless the preparation itself excludes it.
 
 **query** — `POST /v1/query`:
@@ -159,8 +177,9 @@ arrives is prepared and searched unless the preparation itself excludes it.
  "partial":{"frontmatter_not_extracted":12},"indexBytes":398000000}
 ```
 
-`notes` counts notes the serving index holds (fully or partly searchable),
-including writes of an open delta feed. `excluded` counts accepted notes that
+`status` reports the last commit, like `asOf`: `notes` counts the notes it
+holds (fully or partly searchable); writes of an open or abandoned feed are
+not counted. `excluded` counts accepted notes that
 are not searchable, by reason: `over_transport_cap`, `unsupported_format`
 (path extension Kwiry does not read), `no_extractable_text`, `unreadable`,
 `quarantined` (a per-source budget), `invalid_source`. `partial` (an addition
@@ -183,8 +202,10 @@ returned as refs. An unknown partition answers `state: "unavailable"`.
 
 ## Tests and measurements
 
-- Socket test: `cargo test -j 2 -p kwiry --test provider_helper` drives the
-  whole wire above, including every refusal listed.
+- Socket tests: `cargo test -j 2 -p kwiry --test provider_helper` drive the
+  whole wire above, including every refusal listed, recovery from an
+  abandoned delta checkpoint, data-directory permissions and a chunked body
+  over the cap.
 - Store tests: `cargo test -j 2 -p kwiry-core --lib provider::`.
 - Measurement driver: `bench/provider-helper/drive.py` (feed time, index size,
   peak RSS, query p50/p95 over the `bench/scale-62k` query set, one-edit and
