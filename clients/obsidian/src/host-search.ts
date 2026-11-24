@@ -218,7 +218,7 @@ export function hostInvalidationMessage(reason: string | null): { message: strin
 }
 
 const limitDimensions: Readonly<Record<string, string>> = {
-  queryBytes: "query bytes", queryTerms: "query terms", pageItems: "items per page",
+  requestBytes: "request bytes", queryBytes: "query bytes", queryTerms: "query terms", pageItems: "items per page",
   replyBytes: "reply bytes", requests: "requests", concurrency: "concurrent requests",
   deadlineMs: "milliseconds per request",
 };

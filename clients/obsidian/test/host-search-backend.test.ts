@@ -159,6 +159,15 @@ describe("search v1 lookup", () => {
   });
 
   it.each([
+    ["requestBytes", 65_536, "protocol", "Host search reached a limit. Maximum: 65536 request bytes, set by default."],
+    ["queryBytes", 11, "workspace", "Host search reached a limit. Maximum: 11 query bytes, set by this workspace."],
+    ["a-future-dimension", 3, "protocol", "Host search reached a limit. The limit is set by default."],
+  ])("names the %s limit dimension in fixed wording", (dimension, maximum, origin, message) => {
+    expect(hostSearchFailure({ code: "limited", family: "limited", limit: { dimension, maximum, origin } }))
+      .toEqual({ action: "keep", message });
+  });
+
+  it.each([
     ["access", false], ["workspace", false], ["lifecycle", false], ["withdrawn", true], [null, true], ["future", true],
   ])("invalidation reason %s detaches=%s", (reason, detach) => {
     expect(hostInvalidationMessage(reason).detach).toBe(detach);

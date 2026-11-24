@@ -199,11 +199,104 @@ export function decodeLocalIndexing(snapshot: unknown): LocalIndexingState {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Page memory of the local indexing policy (H-2 across plugin restarts)
+
+/// Key of this page's policy memory on `window`. Disabling and enabling this
+/// plugin, or reloading it, evaluates its module again but keeps the window, so
+/// an answer held per instance would be lost and the new instance would read a
+/// page whose slot was withdrawn as one that never had a slot. Memory only: it
+/// is never stored anywhere, and a real page load starts without it.
+export const PAGE_POLICY_MEMORY_KEY = Symbol.for("kwiry-search/local-indexing-page-memory");
+
+/// Installed only when a slot is first seen, so its presence alone means "this
+/// page had a slot". It is a permanent, hidden, read-only property holding a
+/// frozen record whose answer lives in a closure: once installed, no other code
+/// can remove or replace it, or change the answer except through `note`.
+///
+/// Why another plugin's writes can only make this plugin stricter: the memory is
+/// read only when no slot is present, where the alternative is "ungoverned", the
+/// loosest state. Any value at the key (one put there before this plugin, a
+/// getter, a throwing read, a malformed record) reads as governed with the
+/// memory-only default. A remembered answer is read back through a fixed decoding
+/// in which anything but `memory_only` reads as refused. So the most a hostile
+/// write can do is replace a remembered `refuse` with `memory_only` (through
+/// `note`, or by taking the key first), which installing a fake slot already
+/// does. No write can make a page that had a slot read as ungoverned.
+function installPageMemory(realm: object): void {
+  try {
+    if (Reflect.getOwnPropertyDescriptor(realm, PAGE_POLICY_MEMORY_KEY) !== undefined) return;
+    let last: LocalIndexingState | null = null;
+    const memory = Object.freeze({
+      answer: (): LocalIndexingState | null => last,
+      note: (state: unknown): void => {
+        const kept = keepableAnswer(state);
+        if (kept) last = kept;
+      },
+    });
+    Reflect.defineProperty(realm, PAGE_POLICY_MEMORY_KEY, {
+      value: memory, enumerable: false, writable: false, configurable: false,
+    });
+  } catch {
+    // A realm that refuses the property keeps only this instance's memory.
+  }
+}
+
+/// `null`: no slot was ever seen in this page. Otherwise the answer that stands
+/// while no slot is present: the page's last answer, or the memory-only default.
+function readPageMemory(realm: object): LocalIndexingState | null {
+  let found: PropertyDescriptor | undefined;
+  try {
+    found = Reflect.getOwnPropertyDescriptor(realm, PAGE_POLICY_MEMORY_KEY);
+  } catch {
+    return POLICY_DEFAULT_STATE;
+  }
+  if (found === undefined) return null;
+  try {
+    const memory = record(found.value);
+    const answer: unknown = memory?.answer;
+    if (!memory || typeof answer !== "function") return POLICY_DEFAULT_STATE;
+    const last: unknown = Reflect.apply(answer, memory, []);
+    if (last === null || last === undefined) return POLICY_DEFAULT_STATE;
+    return keepableAnswer(last) ?? { kind: "refused", decidedBy: "protocol", limited: false };
+  } catch {
+    return POLICY_DEFAULT_STATE;
+  }
+}
+
+function notePageMemory(realm: object, state: LocalIndexingState): void {
+  try {
+    const memory = record(Reflect.getOwnPropertyDescriptor(realm, PAGE_POLICY_MEMORY_KEY)?.value);
+    const note: unknown = memory?.note;
+    if (memory && typeof note === "function") Reflect.apply(note, memory, [state]);
+  } catch {
+    // A foreign value at the key already reads as governed; nothing to write.
+  }
+}
+
+/// A fresh frozen copy of a governed answer, or null. Only a string deciding
+/// level is kept; any other value reads as "policy" either way.
+function keepableAnswer(value: unknown): LocalIndexingState | null {
+  try {
+    const answer = record(value);
+    if (!answer) return null;
+    const { kind, decidedBy, limited } = answer;
+    const level = typeof decidedBy === "string" ? decidedBy : null;
+    if (kind === "memory_only") return Object.freeze({ kind, decidedBy: level });
+    if (kind === "refused") return Object.freeze({ kind, decidedBy: level, limited: limited === true });
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /// Follows the local indexing answer for as long as the plugin runs: looks at
 /// start, again whenever `refresh` is called (the provider-arrived event), and
 /// listens to the policy subscription and invalidation hook while a policy
 /// service is offered. Holds no slot object; holds the policy service only to
-/// tell a new provider's service from the one it already follows.
+/// tell a new provider's service from the one it already follows. Once a slot
+/// was seen in this page, the page memory above carries its last answer to every
+/// later instance of this plugin in the page.
 export class LocalIndexingWatch {
   private stateValue: LocalIndexingState = { kind: "ungoverned" };
   private service: Readonly<Record<string, unknown>> | null = null;
@@ -227,15 +320,17 @@ export class LocalIndexingWatch {
     if (this.disposed) return;
     const found = lookupHostService("policy", 1, this.realm);
     if (found.kind === "no_host") {
-      // Once a slot was seen in this page (for example a provider that later
-      // withdrew), the last answer stands until the next start.
-      if (!this.governed) this.set({ kind: "ungoverned" });
+      // A page whose slot was withdrawn is not a page that never had one: its
+      // last answer stands for the rest of the page, across restarts (H-2).
+      this.set(this.remembered() ?? { kind: "ungoverned" });
       return;
     }
     this.governed = true;
+    installPageMemory(this.realm);
     if (found.kind === "without_service") {
       this.unfollow();
-      this.set(POLICY_DEFAULT_STATE);
+      // A slot's default is its answer: a later withdrawal keeps it.
+      this.answer(POLICY_DEFAULT_STATE);
       return;
     }
     if (found.service === this.service) return;
@@ -269,7 +364,7 @@ export class LocalIndexingWatch {
       // the rest of the page, even across a resync that left the state pending.
       // The contract's default applies only when no answer ever arrived.
       if (reason === "withdrawn") {
-        if (this.stateValue.kind === "pending") this.set(this.lastAnswer ?? POLICY_DEFAULT_STATE);
+        if (this.stateValue.kind === "pending") this.set(this.remembered() ?? POLICY_DEFAULT_STATE);
         return;
       }
       this.set({ kind: "pending" });
@@ -317,9 +412,19 @@ export class LocalIndexingWatch {
     for (const dispose of disposers) dispose();
   }
 
+  /// The answer that stands while no slot is present: the page memory's, else
+  /// this instance's own (in a realm that refused the memory), else null when
+  /// no slot was ever seen.
+  private remembered(): LocalIndexingState | null {
+    const page = readPageMemory(this.realm);
+    if (page !== null) return page;
+    return this.governed ? this.lastAnswer ?? POLICY_DEFAULT_STATE : null;
+  }
+
   private answer(state: LocalIndexingState): void {
     if (this.disposed) return;
     this.lastAnswer = state;
+    notePageMemory(this.realm, state);
     this.set(state);
   }
 
