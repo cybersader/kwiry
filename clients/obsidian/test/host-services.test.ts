@@ -81,7 +81,7 @@ describe("slot lookup: three situations", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps the slot key and event name in one module, marked provisional", () => {
+  it("keeps the slot key and event name in one module, marked frozen", () => {
     const owners: string[] = [];
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -93,7 +93,7 @@ describe("slot lookup: three situations", () => {
     walk(SRC);
     expect(owners).toEqual([`${SRC}host-services.ts`]);
     const source = readFileSync(`${SRC}host-services.ts`, "utf8");
-    expect(source).toContain("PROVISIONAL");
+    expect(source).toContain("FROZEN");
     expect(HOST_AVAILABLE_EVENT).toBe(`${HOST_SLOT_KEY}:available`);
   });
 });
