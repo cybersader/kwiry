@@ -87,7 +87,7 @@ const HYBRID_CANDIDATES: usize = 100;
 /// Reciprocal-rank-fusion constant (the daemon's figure).
 const RRF_K: f64 = 60.0;
 /// Notes embedded and written per vector-file transaction during a full feed.
-const EMBED_NOTES_PER_BATCH: usize = 32;
+const EMBED_NOTES_PER_BATCH: usize = 64;
 
 /// Why the store refused a call. The wire adapter maps each to its contract
 /// token and HTTP status; the store knows neither.
@@ -1847,14 +1847,9 @@ fn embed_notes(
         spans.push((note, texts.len(), chunk_texts.len()));
         texts.extend(chunk_texts);
     }
-    let embedded = if texts.is_empty() {
-        Vec::new()
-    } else {
-        embedder
-            .embed_passages(&texts)
-            .map_err(ProviderError::internal)?
-    };
-    if embedded.len() != texts.len() || embedded.iter().any(|v| v.len() != dimensions) {
+    let total = texts.len();
+    let embedded = embed_by_length(embedder, texts)?;
+    if embedded.len() != total || embedded.iter().any(|v| v.len() != dimensions) {
         return Err(ProviderError::internal(
             "the embedder returned the wrong number or width of vectors",
         ));
@@ -1867,6 +1862,37 @@ fn embed_notes(
             vectors: embedded[start..start + count].to_vec(),
         })
         .collect())
+}
+
+/// Embeds `texts` in order of length and returns the vectors in the original
+/// order. The model pads each batch to its longest text, so grouping texts of
+/// similar length saves most of the padding work.
+fn embed_by_length(
+    embedder: &mut dyn Embedder,
+    mut texts: Vec<String>,
+) -> ProviderResult<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut order: Vec<usize> = (0..texts.len()).collect();
+    order.sort_by_key(|&index| texts[index].len());
+    let sorted: Vec<String> = order
+        .iter()
+        .map(|&index| std::mem::take(&mut texts[index]))
+        .collect();
+    let vectors = embedder
+        .embed_passages(&sorted)
+        .map_err(ProviderError::internal)?;
+    if vectors.len() != texts.len() {
+        return Err(ProviderError::internal(
+            "the embedder returned the wrong number of vectors",
+        ));
+    }
+    let mut out = vec![Vec::new(); texts.len()];
+    for (vector, index) in vectors.into_iter().zip(order) {
+        out[index] = vector;
+    }
+    Ok(out)
 }
 
 fn chunk_texts(served: &Served, path: &str) -> ProviderResult<Vec<String>> {

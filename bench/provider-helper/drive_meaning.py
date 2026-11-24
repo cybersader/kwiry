@@ -201,7 +201,9 @@ def main():
         for index, (path, data) in enumerate(notes[:: max(1, len(notes) // 5)][:5]):
             marker = f"zqmeaningmarker{index}x"
             sentence = "A violet heron balances seven paper lanterns above the frozen canal"
-            edited = data + f"\n\n{marker} {sentence}.\n".encode()
+            # Its own heading section, so it becomes its own chunk (and vector),
+            # as a real added paragraph under a new heading would.
+            edited = data + f"\n\n## Violet heron\n\n{marker} {sentence}.\n".encode()
             version = drive.hashlib.sha256(edited).hexdigest()
             ident = drive.item_id(path)
             n += 1
