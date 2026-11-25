@@ -1934,7 +1934,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "serde_path_to_error",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "sqlite-vec",
  "subtle",
  "tantivy",
@@ -1962,7 +1962,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
 ]
