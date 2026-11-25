@@ -953,7 +953,7 @@ async fn shutdown_manager(manager: ManagerHandle, task: tokio::task::JoinHandle<
     Ok(())
 }
 
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await

@@ -10,6 +10,7 @@
 /clients/obsidian/rust/kwiry-obsidian-wasm/pkg/
 *.tmp
 *.log
+__pycache__/
 
 # Private / machine-specific — never publish (owner rule 2026-07-20)
 /.claude/
