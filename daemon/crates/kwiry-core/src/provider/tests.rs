@@ -143,7 +143,10 @@ fn provider_feeds_become_visible_only_at_commit() {
     let refused = store.checkpoint("p", 2).unwrap_err();
     assert_eq!(refused.code, ProviderErrorCode::CheckpointNotIncreasing);
     let mismatch = store.put("p", "e", &hex_sha256(b"other"), "e.md", b"body");
-    assert_eq!(mismatch.unwrap_err().code, ProviderErrorCode::VersionMismatch);
+    assert_eq!(
+        mismatch.unwrap_err().code,
+        ProviderErrorCode::VersionMismatch
+    );
     store.exclude_over_transport_cap("p", "huge").unwrap();
     store.checkpoint("p", 3).unwrap();
     store.commit("p").unwrap();
@@ -177,7 +180,10 @@ fn provider_feeds_become_visible_only_at_commit() {
             .code,
         ProviderErrorCode::EpochRegressed
     );
-    assert_eq!(store.delete("p", "z").unwrap_err().code, ProviderErrorCode::NoOpenFeed);
+    assert_eq!(
+        store.delete("p", "z").unwrap_err().code,
+        ProviderErrorCode::NoOpenFeed
+    );
 
     store.retire("p").unwrap();
     assert_eq!(state(&store, "p").0, ProviderState::Unavailable);

@@ -14,9 +14,9 @@ use fastembed::{
     InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
 };
 
-use super::{ProviderError, ProviderResult, hex_sha256};
 #[cfg(test)]
 use super::ProviderErrorCode;
+use super::{ProviderError, ProviderResult, hex_sha256};
 use crate::error::{Error, Result};
 use crate::semantic::{Embedder, EmbeddingProfile};
 
