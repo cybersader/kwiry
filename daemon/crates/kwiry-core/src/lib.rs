@@ -166,13 +166,17 @@ pub use policy::{
     active_extraction_policy, active_format_identities, extraction_policy_fingerprint,
     extraction_profile_for, extractor_version_for, format_identity_fingerprint,
 };
+#[cfg(feature = "semantic-onnx")]
+pub use provider::{PINNED_MODEL_FILES, PINNED_MODEL_REVISION, load_pinned_embedder};
 #[cfg(feature = "native")]
 pub use provider::{
-    PROVIDER_MAX_ID_BYTES, PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT,
-    PROVIDER_MAX_PARTITION_BYTES, PROVIDER_MAX_PATH_BYTES, PROVIDER_MAX_QUERY_PARTITIONS,
+    PROVIDER_MATCHER, PROVIDER_MATCHER_UNICODE_VERSION, PROVIDER_MAX_ID_BYTES,
+    PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT, PROVIDER_MAX_PARTITION_BYTES,
+    PROVIDER_MAX_PATH_BYTES, PROVIDER_MAX_QUERY_PARTITIONS, PROVIDER_MAX_TERMS,
     PROVIDER_OVER_TRANSPORT_CAP, ProviderAsOf, ProviderCoverage, ProviderError, ProviderErrorCode,
-    ProviderFeedMode, ProviderQueryOutcome, ProviderReference, ProviderResult, ProviderState,
-    ProviderStatus, ProviderStore, hex_sha256,
+    ProviderFeedMode, ProviderKind, ProviderKindStatus, ProviderMode, ProviderQuery,
+    ProviderQueryOutcome, ProviderReference, ProviderResult, ProviderState, ProviderStatus,
+    ProviderStore, hex_sha256,
 };
 #[cfg(feature = "portable")]
 pub use query::{

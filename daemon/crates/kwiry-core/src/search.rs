@@ -309,13 +309,13 @@ fn live_collection_length(searchers: &[Searcher], field: Field) -> tantivy::Resu
 /// documents, and a single request builds a `Bm25Weight` for every term in
 /// every one of the seven boosted fields at every stage of the ladder, so
 /// without the cache one query would rescan the index dozens of times.
-struct AuthorizedStatistics {
+pub(crate) struct AuthorizedStatistics {
     searchers: Vec<Searcher>,
     collection_lengths: std::cell::RefCell<HashMap<Field, u64>>,
 }
 
 impl AuthorizedStatistics {
-    fn new(searchers: Vec<Searcher>) -> Self {
+    pub(crate) fn new(searchers: Vec<Searcher>) -> Self {
         Self {
             searchers,
             collection_lengths: std::cell::RefCell::new(HashMap::new()),

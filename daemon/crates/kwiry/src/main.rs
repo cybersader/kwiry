@@ -105,6 +105,15 @@ enum Command {
         /// this user and not group- or world-writable.
         #[arg(long, value_name = "PATH")]
         socket: PathBuf,
+        /// Directory holding the pinned embedding model files (see
+        /// docs/provider-helper-trial.md). With it, `semantic` and `hybrid`
+        /// are offered; a missing or different file refuses to start. The
+        /// model is never downloaded.
+        #[arg(long, value_name = "DIR")]
+        model_dir: Option<PathBuf>,
+        /// ONNX threads for background embedding (default: all CPUs).
+        #[arg(long, value_name = "N", requires = "model_dir")]
+        embed_threads: Option<usize>,
     },
     /// Search the lexical index.
     Search {
@@ -301,12 +310,24 @@ async fn main() -> Result<()> {
             std::process::exit(checkroom::run(cli.config, cli.data_dir, &args))
         }
         #[cfg(unix)]
-        Command::ProviderHelper { socket } => {
+        Command::ProviderHelper {
+            socket,
+            model_dir,
+            embed_threads,
+        } => {
             // Independent of the daemon's config and data root on purpose.
             let data_dir = cli
                 .data_dir
                 .ok_or_else(|| anyhow!("provider-helper requires --data-dir"))?;
-            return provider_helper::run(socket, data_dir).await;
+            return provider_helper::run(
+                socket,
+                data_dir,
+                provider_helper::ModelOptions {
+                    model_dir,
+                    embed_threads,
+                },
+            )
+            .await;
         }
         command => command,
     };

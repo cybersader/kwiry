@@ -25,7 +25,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::serve::IncomingStream;
-use kwiry_core::{PROVIDER_MAX_ITEM_BYTES, ProviderError, ProviderErrorCode, ProviderStore};
+use kwiry_core::{
+    PROVIDER_MATCHER, PROVIDER_MAX_ITEM_BYTES, ProviderError, ProviderErrorCode, ProviderQuery,
+    ProviderStore,
+};
 use serde_json::{Value, json};
 use tokio::net::UnixListener;
 
@@ -33,8 +36,10 @@ use tokio::net::UnixListener;
 pub(crate) mod wire {
     use axum::http::StatusCode;
     use kwiry_core::{
-        PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT, PROVIDER_MAX_QUERY_PARTITIONS, ProviderAsOf,
-        ProviderErrorCode, ProviderFeedMode, ProviderQueryOutcome, ProviderState, ProviderStatus,
+        PROVIDER_MATCHER, PROVIDER_MATCHER_UNICODE_VERSION, PROVIDER_MAX_ITEM_BYTES,
+        PROVIDER_MAX_LIMIT, PROVIDER_MAX_QUERY_PARTITIONS, ProviderAsOf, ProviderErrorCode,
+        ProviderFeedMode, ProviderKind, ProviderKindStatus, ProviderMode, ProviderQueryOutcome,
+        ProviderState, ProviderStatus,
     };
     use serde::Deserialize;
     use serde_json::{Value, json};
@@ -56,19 +61,33 @@ pub(crate) mod wire {
 
     /// Largest JSON request body (§2.3: a 4,096-byte query plus 128 terms fits).
     pub const MAX_JSON_BODY_BYTES: usize = 65_536;
-    /// Search modes this helper offers. Anything else is `mode_unavailable`.
+    /// Search modes. `semantic` and `hybrid` are offered only with a loaded
+    /// model; anything not offered is `mode_unavailable`.
     pub const LEXICAL: &str = "lexical";
+    pub const SEMANTIC: &str = "semantic";
+    pub const HYBRID: &str = "hybrid";
     pub const DEFAULT_DEADLINE_MS: u64 = 10_000;
     pub const MAX_DEADLINE_MS: u64 = 60_000;
 
-    pub fn hello() -> Value {
+    pub fn retrieval(semantic: bool) -> Vec<&'static str> {
+        if semantic {
+            vec![LEXICAL, SEMANTIC, HYBRID]
+        } else {
+            vec![LEXICAL]
+        }
+    }
+
+    pub fn hello(semantic: bool) -> Value {
         let engine = crate::engine::engine();
+        let (major, minor, patch) = PROVIDER_MATCHER_UNICODE_VERSION;
         json!({
             "contract": CONTRACT,
             "name": env!("CARGO_PKG_NAME"),
             "version": engine.version,
             "capabilities": {
-                "retrieval": [LEXICAL],
+                "retrieval": retrieval(semantic),
+                "matchers": [PROVIDER_MATCHER],
+                "matcherUnicodeVersion": format!("{major}.{minor}.{patch}"),
                 "ordering": "relevance",
                 "maxLimit": PROVIDER_MAX_LIMIT,
                 "maxPartitions": PROVIDER_MAX_QUERY_PARTITIONS,
@@ -84,6 +103,32 @@ pub(crate) mod wire {
     pub struct BeginBody {
         pub epoch: u64,
         pub mode: String,
+    }
+
+    pub fn search_mode(mode: &str) -> Option<ProviderMode> {
+        match mode {
+            LEXICAL => Some(ProviderMode::Lexical),
+            SEMANTIC => Some(ProviderMode::Semantic),
+            HYBRID => Some(ProviderMode::Hybrid),
+            _ => None,
+        }
+    }
+
+    pub fn mode_name(mode: ProviderMode) -> &'static str {
+        match mode {
+            ProviderMode::Lexical => LEXICAL,
+            ProviderMode::Semantic => SEMANTIC,
+            ProviderMode::Hybrid => HYBRID,
+        }
+    }
+
+    /// The coverage `mode` of one kind of index (a `hybrid` answer reports
+    /// a lexical and a semantic entry for every partition).
+    pub fn kind_name(kind: ProviderKind) -> &'static str {
+        match kind {
+            ProviderKind::Lexical => LEXICAL,
+            ProviderKind::Semantic => SEMANTIC,
+        }
     }
 
     pub fn feed_mode(mode: &str) -> Option<ProviderFeedMode> {
@@ -112,16 +157,31 @@ pub(crate) mod wire {
         pub mode: Option<String>,
     }
 
+    /// The host's matcher tokens of `q.text`: a plain list (draft v1) or
+    /// `{"matcher": "current-body-words-v1", "list": [...]}` (draft v2).
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    pub enum Terms {
+        List(Vec<String>),
+        Named(NamedTerms),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct NamedTerms {
+        pub matcher: String,
+        pub list: Vec<String>,
+    }
+
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields, rename_all = "camelCase")]
     pub struct QueryBody {
         pub partitions: Vec<String>,
         pub q: Question,
-        /// `current-body-words-v1` tokens, a hint. This helper ranks on
-        /// `q.text` with its own analyser and does not use them.
+        /// Authoritative for the lexical recall obligation. Absent or empty:
+        /// derived from `q.text` with the same matcher.
         #[serde(default)]
-        #[allow(dead_code)]
-        pub terms: Vec<String>,
+        pub terms: Option<Terms>,
         pub limit: usize,
         /// Absolute Unix time in milliseconds.
         #[serde(default)]
@@ -132,6 +192,7 @@ pub(crate) mod wire {
     pub const FORBIDDEN: &str = "forbidden";
     pub const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
     pub const MODE_UNAVAILABLE: &str = "mode_unavailable";
+    pub const MATCHER_UNAVAILABLE: &str = "matcher_unavailable";
 
     /// The contract's status and token for a store refusal.
     pub fn refusal(code: ProviderErrorCode) -> (StatusCode, &'static str) {
@@ -148,6 +209,7 @@ pub(crate) mod wire {
                 (StatusCode::UNPROCESSABLE_ENTITY, "version_mismatch")
             }
             ProviderErrorCode::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
+            ProviderErrorCode::ModeUnavailable => (StatusCode::BAD_REQUEST, MODE_UNAVAILABLE),
             ProviderErrorCode::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             ProviderErrorCode::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
@@ -177,7 +239,7 @@ pub(crate) mod wire {
             .coverage
             .iter()
             .map(|c| {
-                json!({"partition": c.partition, "mode": LEXICAL, "state": state(c.state), "asOf": as_of(c.as_of)})
+                json!({"partition": c.partition, "mode": kind_name(c.kind), "state": state(c.state), "asOf": as_of(c.as_of)})
             })
             .collect();
         let refs: Vec<_> = outcome
@@ -185,17 +247,30 @@ pub(crate) mod wire {
             .iter()
             .map(|r| json!({"partition": r.partition, "id": r.id, "version": r.version}))
             .collect();
-        json!({"mode": LEXICAL, "coverage": coverage, "refs": refs})
+        json!({"mode": mode_name(outcome.mode), "coverage": coverage, "refs": refs})
     }
 
     pub fn status_reply(status: &ProviderStatus) -> Value {
-        json!({
+        let mut reply = json!({
             "state": state(status.state),
             "asOf": as_of(status.as_of),
             "notes": status.notes,
             "excluded": status.excluded,
             "partial": status.partial,
             "indexBytes": status.index_bytes,
+        });
+        // Present only when an embedding model is loaded.
+        if let Some(semantic) = &status.semantic {
+            reply["semantic"] = kind_status(semantic);
+        }
+        reply
+    }
+
+    fn kind_status(status: &ProviderKindStatus) -> Value {
+        json!({
+            "state": state(status.state),
+            "asOf": as_of(status.as_of),
+            "pendingNotes": status.pending_notes,
         })
     }
 
@@ -216,20 +291,25 @@ impl Connected<IncomingStream<'_, UnixListener>> for PeerUid {
     }
 }
 
-pub(crate) async fn run(socket: PathBuf, data_dir: PathBuf) -> Result<()> {
-    // Everything this mode writes (index files, the marker, the socket) is
-    // for this user only. The helper is its own process, so the mask is set
-    // once, before the first file is created.
+/// Embedding model options. Without `model_dir` the helper is lexical only.
+pub(crate) struct ModelOptions {
+    pub model_dir: Option<PathBuf>,
+    pub embed_threads: Option<usize>,
+}
+
+pub(crate) async fn run(socket: PathBuf, data_dir: PathBuf, model: ModelOptions) -> Result<()> {
+    // Everything this mode writes (index files, vector files, the marker,
+    // the socket) is for this user only. The helper is its own process, so
+    // the mask is set once, before the first file is created.
     // SAFETY: umask only swaps the process file-mode mask.
     unsafe { libc::umask(0o077) };
-    let store = tokio::task::spawn_blocking(move || ProviderStore::open(&data_dir))
-        .await?
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let store = tokio::task::spawn_blocking(move || open_store(&data_dir, model)).await??;
     let listener = bind_socket(&socket)?;
     eprintln!(
-        "provider helper (experimental) pid {} listening on {}",
+        "provider helper (experimental) pid {} listening on {} (retrieval: {})",
         std::process::id(),
-        socket.display()
+        socket.display(),
+        wire::retrieval(store.semantic_enabled()).join(", ")
     );
     let service = router(Arc::new(store)).into_make_service_with_connect_info::<PeerUid>();
     let result = axum::serve(listener, service)
@@ -237,6 +317,33 @@ pub(crate) async fn run(socket: PathBuf, data_dir: PathBuf) -> Result<()> {
         .await;
     let _ = std::fs::remove_file(&socket);
     result.context("provider helper server failed")
+}
+
+/// Opens the store. With a model directory, every pinned model file must be
+/// there and byte-identical, or the helper refuses to start: it never
+/// downloads a model and never silently drops to lexical only.
+fn open_store(data_dir: &Path, model: ModelOptions) -> Result<ProviderStore> {
+    let anyhow = |error: ProviderError| anyhow::anyhow!("{error}");
+    let Some(model_dir) = model.model_dir else {
+        return ProviderStore::open(data_dir).map_err(anyhow);
+    };
+    #[cfg(feature = "semantic-onnx")]
+    {
+        let index = kwiry_core::load_pinned_embedder(&model_dir, model.embed_threads)
+            .map_err(anyhow)
+            .context("semantic search refused")?;
+        // Queries embed a few words; a small thread count keeps them off the
+        // cores the background worker is using.
+        let query = kwiry_core::load_pinned_embedder(&model_dir, Some(2))
+            .map_err(anyhow)
+            .context("semantic search refused")?;
+        ProviderStore::open_with_semantic(data_dir, query, index).map_err(anyhow)
+    }
+    #[cfg(not(feature = "semantic-onnx"))]
+    {
+        let _ = (model_dir, model.embed_threads, data_dir);
+        bail!("--model-dir needs a build with the semantic-onnx feature")
+    }
 }
 
 /// Binds the socket with mode 0600, in a directory that only the current user
@@ -403,8 +510,8 @@ fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> std::result::Result<T, 
     serde_json::from_slice(body).map_err(|_| bad_request())
 }
 
-async fn hello() -> Response {
-    axum::Json(wire::hello()).into_response()
+async fn hello(State(store): State<Store>) -> Response {
+    axum::Json(wire::hello(store.semantic_enabled())).into_response()
 }
 
 async fn begin(
@@ -510,17 +617,33 @@ async fn query(State(store): State<Store>, body: Bytes) -> WireResult {
     let wire::QueryBody {
         partitions,
         q,
+        terms,
         limit,
         deadline_ms,
-        ..
     } = parse(&body)?;
-    if q.mode.as_deref().unwrap_or(wire::LEXICAL) != wire::LEXICAL {
+    let offered = wire::retrieval(store.semantic_enabled());
+    let requested = q.mode.as_deref().unwrap_or(wire::LEXICAL);
+    let Some(mode) = wire::search_mode(requested).filter(|_| offered.contains(&requested)) else {
         // Never a silent switch to another kind of search.
-        return Err(WireError::from_response(failure(
-            StatusCode::BAD_REQUEST,
-            wire::MODE_UNAVAILABLE,
+        return Err(WireError::from_response(refuse(
+            ProviderErrorCode::ModeUnavailable,
         )));
+    };
+    let terms = match terms {
+        None => None,
+        Some(wire::Terms::List(list)) => Some(list),
+        Some(wire::Terms::Named(named)) => {
+            if named.matcher != PROVIDER_MATCHER {
+                return Err(WireError::from_response(failure(
+                    StatusCode::BAD_REQUEST,
+                    wire::MATCHER_UNAVAILABLE,
+                )));
+            }
+            Some(named.list)
+        }
     }
+    // An empty list carries no terms: derive them from the text.
+    .filter(|list| !list.is_empty());
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64);
@@ -535,7 +658,15 @@ async fn query(State(store): State<Store>, body: Bytes) -> WireResult {
     }
     let text = q.text;
     let search = blocking(
-        move || store.query(&partitions, &text, limit),
+        move || {
+            store.ask(&ProviderQuery {
+                partitions: &partitions,
+                text: &text,
+                mode,
+                terms: terms.as_deref(),
+                limit,
+            })
+        },
         |outcome| wire::query_reply(&outcome),
     );
     match tokio::time::timeout(Duration::from_millis(budget_ms), search).await {
@@ -577,7 +708,100 @@ fn percent_decode(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::percent_decode;
+    use kwiry_core::{
+        ProviderAsOf, ProviderCoverage, ProviderKind, ProviderKindStatus, ProviderMode,
+        ProviderQueryOutcome, ProviderReference, ProviderState, ProviderStatus,
+    };
+    use serde_json::json;
+
+    use super::{percent_decode, wire};
+
+    #[test]
+    fn hybrid_reply_states_each_partition_per_kind() {
+        let entry = |kind, state, as_of| ProviderCoverage {
+            partition: "p".to_owned(),
+            kind,
+            state,
+            as_of,
+        };
+        let as_of = Some(ProviderAsOf { epoch: 1, n: 2 });
+        let older = Some(ProviderAsOf { epoch: 1, n: 1 });
+        let reply = wire::query_reply(&ProviderQueryOutcome {
+            mode: ProviderMode::Hybrid,
+            coverage: vec![
+                entry(ProviderKind::Lexical, ProviderState::Ready, as_of),
+                entry(ProviderKind::Semantic, ProviderState::Building, older),
+            ],
+            refs: vec![ProviderReference {
+                partition: "p".to_owned(),
+                id: "a".to_owned(),
+                version: "v".to_owned(),
+            }],
+        });
+        assert_eq!(
+            reply,
+            json!({"mode": "hybrid", "refs": [{"partition": "p", "id": "a", "version": "v"}], "coverage": [
+                {"partition": "p", "mode": "lexical", "state": "ready", "asOf": {"epoch": 1, "n": 2}},
+                {"partition": "p", "mode": "semantic", "state": "building", "asOf": {"epoch": 1, "n": 1}},
+            ]})
+        );
+    }
+
+    #[test]
+    fn status_reply_names_the_semantic_kind_only_with_a_model() {
+        let mut status = ProviderStatus {
+            state: ProviderState::Ready,
+            as_of: Some(ProviderAsOf { epoch: 1, n: 2 }),
+            notes: 3,
+            excluded: Default::default(),
+            partial: Default::default(),
+            index_bytes: 10,
+            semantic: None,
+        };
+        let lexical_only = wire::status_reply(&status);
+        assert!(lexical_only.get("semantic").is_none());
+        assert_eq!(lexical_only["asOf"], json!({"epoch": 1, "n": 2}));
+        status.semantic = Some(ProviderKindStatus {
+            state: ProviderState::Building,
+            as_of: None,
+            pending_notes: 3,
+        });
+        assert_eq!(
+            wire::status_reply(&status)["semantic"],
+            json!({"state": "building", "asOf": null, "pendingNotes": 3})
+        );
+    }
+
+    #[test]
+    fn terms_accept_the_v1_list_and_the_v2_named_form() {
+        let parse =
+            |body: serde_json::Value| -> wire::QueryBody { serde_json::from_value(body).unwrap() };
+        let v1 =
+            parse(json!({"partitions": ["p"], "q": {"text": "a"}, "terms": ["a"], "limit": 1}));
+        assert!(matches!(v1.terms, Some(wire::Terms::List(list)) if list == ["a"]));
+        let v2 = parse(json!({"partitions": ["p"], "q": {"text": "a"},
+            "terms": {"matcher": "current-body-words-v1", "list": ["a"]}, "limit": 1}));
+        assert!(matches!(v2.terms, Some(wire::Terms::Named(named)) if named.list == ["a"]));
+        assert!(
+            serde_json::from_value::<wire::QueryBody>(
+                json!({"partitions": ["p"], "q": {"text": "a"},
+                "terms": {"matcher": "x", "list": [], "extra": 1}, "limit": 1})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            wire::hello(false)["capabilities"]["retrieval"],
+            json!(["lexical"])
+        );
+        assert_eq!(
+            wire::hello(true)["capabilities"]["retrieval"],
+            json!(["lexical", "semantic", "hybrid"])
+        );
+        assert_eq!(
+            wire::hello(true)["capabilities"]["matchers"],
+            json!(["current-body-words-v1"])
+        );
+    }
 
     #[test]
     fn percent_decode_handles_utf8_and_refuses_bad_escapes() {

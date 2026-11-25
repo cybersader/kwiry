@@ -151,7 +151,7 @@ impl Embedder for FastembedEmbedder {
 }
 
 /// Registers sqlite-vec for all connections opened by this process.
-fn register_sqlite_vec() {
+pub(crate) fn register_sqlite_vec() {
     use std::sync::Once;
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| unsafe {
