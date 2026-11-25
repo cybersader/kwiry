@@ -400,6 +400,27 @@ fn lexical_answers_meet_the_superset_rule_under_the_limit() {
 }
 
 #[test]
+fn blank_ranking_text_still_searches_authoritative_terms() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ProviderStore::open(dir.path()).unwrap();
+    feed(
+        &store,
+        "p",
+        &[("a", "a.md", "quokka"), ("b", "b.md", "otter")],
+    );
+    let answer = ask(
+        &store,
+        &["p"],
+        " \t\n",
+        ProviderMode::Lexical,
+        Some(&["quokka".to_owned()]),
+        1,
+    );
+    assert_eq!(answer.refs.len(), 1);
+    assert_eq!(answer.refs[0].id, "a");
+}
+
+#[test]
 fn lexical_obligation_counts_only_the_asked_partitions() {
     let dir = tempfile::tempdir().unwrap();
     let store = ProviderStore::open(dir.path()).unwrap();
@@ -847,6 +868,157 @@ fn embedding_backlog_coalesces_commits_while_indexer_is_blocked() {
     let a = answer.refs.iter().find(|r| r.id == "a").unwrap();
     assert_eq!(a.version, hex_sha256(b"quokka version 12"));
     assert!(answer.refs.iter().any(|r| r.id == "c"));
+}
+
+#[test]
+fn lexical_commit_finishes_during_a_paused_semantic_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = semantic_store(dir.path());
+    feed(&store, "p", &[("a", "a.md", "quokka")]);
+    caught_up(&store, "p");
+    store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
+    store.delete("p", "a").unwrap();
+    store.checkpoint("p", 2).unwrap();
+
+    let partition = store.known("p").unwrap().unwrap();
+    let snapshot = read(&partition.semantic).snapshot.clone().unwrap();
+    std::thread::scope(|scope| {
+        let (entered, scanning) = mpsc::sync_channel(0);
+        let (resume, paused) = mpsc::channel();
+        *lock(&snapshot.before_scan) = Some((entered, paused));
+        let (committed, done) = mpsc::channel();
+        let reader = scope.spawn(|| ordered(&store, &["p"], "quokka", ProviderMode::Semantic, 1));
+        scanning.recv_timeout(Duration::from_secs(10)).unwrap();
+        let store = &store;
+        scope.spawn(move || committed.send(store.commit("p")).unwrap());
+        let during_scan = done.recv_timeout(Duration::from_secs(10));
+        resume.send(()).unwrap();
+        assert_eq!(
+            during_scan
+                .expect("commit blocked behind semantic scan")
+                .unwrap()
+                .n,
+            2
+        );
+        assert!(
+            reader.join().unwrap().is_empty(),
+            "returned the deleted note"
+        );
+    });
+}
+
+#[test]
+fn pending_notes_counts_distinct_ids_across_running_and_queued_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, entered, resume) = paused_indexer(dir.path());
+    feed(
+        &store,
+        "p",
+        &[("a", "a.md", "quokka"), ("b", "b.md", "otter")],
+    );
+    entered.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
+    put(&store, "p", "a", "a.md", "quokka edit");
+    store.delete("p", "b").unwrap();
+    put(&store, "p", "c", "c.md", "wombat");
+    store.checkpoint("p", 2).unwrap();
+    let latest = store.commit("p").unwrap();
+    assert_eq!(
+        store.status("p").unwrap().semantic.unwrap().pending_notes,
+        3
+    );
+
+    resume.send(true).unwrap();
+    // caught_up also asserts that pendingNotes is zero.
+    assert_eq!(caught_up(&store, "p").as_of, Some(latest));
+}
+
+#[test]
+fn embedding_worker_panic_marks_running_and_queued_partitions_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, entered, resume) = paused_indexer(dir.path());
+    feed(&store, "running", &[("a", "a.md", "quokka")]);
+    entered.recv_timeout(Duration::from_secs(10)).unwrap();
+    for p in ["queued1", "queued2"] {
+        feed(&store, p, &[("a", "a.md", "quokka")]);
+        assert_eq!(store.status(p).unwrap().semantic.unwrap().pending_notes, 1);
+    }
+    resume.send(false).unwrap();
+    let queue = &store.semantic.as_ref().unwrap().jobs;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !queue.failed.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "worker panic not recorded");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(lock(&queue.work).is_empty());
+    // A new full feed cannot resurrect a dead worker.
+    feed(&store, "later", &[("a", "a.md", "quokka")]);
+    let partitions = ["running", "queued1", "queued2", "later"];
+    for p in partitions {
+        let status = store.status(p).unwrap();
+        assert_eq!(status.state, ProviderState::Ready);
+        let semantic = status.semantic.unwrap();
+        assert_eq!(semantic.state, ProviderState::Unavailable);
+        assert_eq!(semantic.as_of, None);
+        assert_eq!(semantic.pending_notes, 0);
+        let partition = store.known(p).unwrap().unwrap();
+        assert!(lock(&partition.pending).by_id.is_empty());
+    }
+    let answer = ask(
+        &store,
+        &partitions,
+        "quokka",
+        ProviderMode::Semantic,
+        None,
+        5,
+    );
+    assert!(answer.refs.is_empty());
+    assert!(
+        answer
+            .coverage
+            .iter()
+            .all(|c| c.state == ProviderState::Unavailable)
+    );
+    assert_eq!(ids(&store, &partitions, "quokka").len(), 4);
+}
+
+struct PausedPassages {
+    inner: HashEmbedder,
+    gate: Option<(mpsc::Sender<()>, mpsc::Receiver<bool>)>,
+}
+
+impl Embedder for PausedPassages {
+    fn profile(&self) -> &crate::semantic::EmbeddingProfile {
+        self.inner.profile()
+    }
+
+    fn embed_passages(&mut self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+        if let Some((entered, resume)) = self.gate.take() {
+            entered.send(()).unwrap();
+            assert!(resume.recv().unwrap(), "injected worker panic");
+        }
+        self.inner.embed_passages(texts)
+    }
+
+    fn embed_query(&mut self, text: &str) -> crate::Result<Vec<f32>> {
+        self.inner.embed_query(text)
+    }
+}
+
+fn paused_indexer(dir: &Path) -> (ProviderStore, mpsc::Receiver<()>, mpsc::Sender<bool>) {
+    let (entered, running) = mpsc::channel();
+    let (resume, paused) = mpsc::channel();
+    let store = ProviderStore::open_with_semantic(
+        dir,
+        Box::new(HashEmbedder::new()),
+        Box::new(PausedPassages {
+            inner: HashEmbedder::new(),
+            gate: Some((entered, paused)),
+        }),
+    )
+    .unwrap();
+    (store, running, resume)
 }
 
 #[test]

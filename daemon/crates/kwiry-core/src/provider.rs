@@ -72,6 +72,8 @@ pub const PROVIDER_MAX_TERMS: usize = 128;
 /// The body-words matcher this provider honours for the lexical recall
 /// obligation.
 pub const PROVIDER_MATCHER: &str = body_words::MATCHER_VERSION;
+/// Unicode data used for the matcher's NFD, not its pinned category/fold tables.
+pub const PROVIDER_MATCHER_UNICODE_VERSION: (u8, u8, u8) = unicode_normalization::UNICODE_VERSION;
 /// Exclusion reason for a note refused by the transport before its body was
 /// read.
 pub const PROVIDER_OVER_TRANSPORT_CAP: &str = "over_transport_cap";
@@ -780,6 +782,8 @@ impl Writes {
 /// A read connection to one complete vector file.
 struct VectorSnapshot {
     read: Mutex<Connection>,
+    #[cfg(test)]
+    before_scan: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
 }
 
 /// The semantic kind of a partition: the vector file queries read and the
@@ -881,10 +885,10 @@ enum EmbedWork {
 }
 
 impl EmbedWork {
-    fn notes(&self) -> usize {
+    fn visit_ids(&self, mut visit: impl FnMut(&str)) {
         match self {
-            Self::Full(notes) => notes.len(),
-            Self::Delta(changes) => changes.len(),
+            Self::Full(notes) => notes.keys().for_each(|id| visit(id)),
+            Self::Delta(changes) => changes.keys().for_each(|id| visit(id)),
         }
     }
 }
@@ -900,7 +904,24 @@ struct EmbedJob {
 #[derive(Default)]
 struct PendingNotes {
     base: u64,
-    count: usize,
+    /// One entry per affected id; a running job and a queued job can overlap.
+    by_id: HashMap<String, usize>,
+}
+
+impl PendingNotes {
+    fn add(&mut self, work: &EmbedWork) {
+        work.visit_ids(|id| *self.by_id.entry(id.to_owned()).or_default() += 1);
+    }
+
+    fn remove(&mut self, work: &EmbedWork) {
+        work.visit_ids(|id| {
+            let count = self.by_id.get_mut(id).expect("settling a pending id");
+            *count -= 1;
+            if *count == 0 {
+                self.by_id.remove(id);
+            }
+        });
+    }
 }
 
 impl EmbedJob {
@@ -908,7 +929,7 @@ impl EmbedJob {
     fn settle(&self) {
         let mut pending = lock(&self.partition.pending);
         if pending.base == self.base {
-            pending.count -= self.work.notes();
+            pending.remove(&self.work);
         }
     }
 
@@ -918,7 +939,25 @@ impl EmbedJob {
     }
 }
 
-type EmbedQueue = Mutex<VecDeque<EmbedJob>>;
+#[derive(Default)]
+struct EmbedQueue {
+    work: Mutex<VecDeque<EmbedJob>>,
+    /// Terminal failure of the only worker. Set while holding `work`, so
+    /// enqueue cannot leave work behind after failure cleanup.
+    failed: AtomicBool,
+}
+
+impl EmbedQueue {
+    fn fail(&self, queue: &mut VecDeque<EmbedJob>, running: Option<&EmbedJob>) {
+        self.failed.store(true, Ordering::Release);
+        if let Some(job) = running {
+            lock(&job.partition.pending).by_id.clear();
+        }
+        for job in queue.drain(..) {
+            lock(&job.partition.pending).by_id.clear();
+        }
+    }
+}
 
 /// The loaded embedding model: one instance answers queries, another (owned
 /// by the background worker) embeds commits, so a long feed never delays a
@@ -1239,11 +1278,11 @@ impl ProviderStore {
             *view = View::default();
             *write_lock(&partition.semantic) = SemanticState::default();
             if let Some(semantic) = &self.semantic {
-                lock(&semantic.jobs).retain(|job| !Arc::ptr_eq(&job.partition, &partition));
+                lock(&semantic.jobs.work).retain(|job| !Arc::ptr_eq(&job.partition, &partition));
             }
             let mut pending = lock(&partition.pending);
             pending.base = u64::MAX;
-            pending.count = 0;
+            pending.by_id.clear();
         }
         *writes = Writes::default();
         let _ = fs::remove_dir_all(&partition.dir);
@@ -1333,7 +1372,7 @@ impl ProviderStore {
                     query = Some(self.embed_query(question.text)?);
                 }
                 let Some(answer) =
-                    Self::semantic_once(&pinned, query.as_ref().and_then(|q| q.as_deref()), depth)?
+                    self.semantic_once(&pinned, query.as_ref().and_then(|q| q.as_deref()), depth)?
                 else {
                     continue;
                 };
@@ -1412,29 +1451,36 @@ impl ProviderStore {
         }
         // Keep acquisition order independent of the caller's partition order.
         pinned.sort_unstable_by(|(_, left), (_, right)| left.owner.cmp(&right.owner));
-        if text.trim().is_empty() || pinned.is_empty() {
+        if pinned.is_empty() {
             return Ok(Some((coverage, Vec::new())));
         }
-        let targets: Vec<_> = pinned
-            .iter()
-            .map(|(_, served)| PinnedSearcher {
-                index: &served.index,
-                fields: &served.fields,
-                searcher: &served.searcher,
-            })
-            .collect();
-        // Rank the plan's whole candidate window, then keep the best chunk of
-        // each note, so `limit` notes survive the per-note collapse.
-        let outcome = search_pinned_with_quality(
-            &targets,
-            text,
-            MAX_TOTAL_CANDIDATES,
-            &SearchFilters::default(),
-        )
-        .map_err(|error| match error {
-            crate::Error::Query(message) => ProviderError::bad(message),
-            other => ProviderError::internal(other),
-        })?;
+        // Blank ranking text supplies no extra candidates, but never skips
+        // the host's authoritative terms.
+        let hits = if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            let targets: Vec<_> = pinned
+                .iter()
+                .map(|(_, served)| PinnedSearcher {
+                    index: &served.index,
+                    fields: &served.fields,
+                    searcher: &served.searcher,
+                })
+                .collect();
+            // Rank the plan's whole candidate window, then keep the best chunk of
+            // each note, so `limit` notes survive the per-note collapse.
+            search_pinned_with_quality(
+                &targets,
+                text,
+                MAX_TOTAL_CANDIDATES,
+                &SearchFilters::default(),
+            )
+            .map_err(|error| match error {
+                crate::Error::Query(message) => ProviderError::bad(message),
+                other => ProviderError::internal(other),
+            })?
+            .hits
+        };
         let matches = all_terms_matches(&pinned, terms)?;
         let views: Vec<_> = pinned
             .iter()
@@ -1452,7 +1498,7 @@ impl ProviderStore {
         // Kwiry's order, one entry per note (its best chunk).
         let mut seen = HashSet::new();
         let mut ranked: Vec<(Arc<ProviderReference>, Score)> = Vec::new();
-        for hit in outcome.hits {
+        for hit in hits {
             if !seen.insert((hit.vault_id.clone(), hit.path.clone())) {
                 continue;
             }
@@ -1482,7 +1528,7 @@ impl ProviderStore {
             .semantic
             .as_ref()
             .ok_or_else(ProviderError::mode_unavailable)?;
-        if text.trim().is_empty() {
+        if text.trim().is_empty() || semantic.jobs.failed.load(Ordering::Acquire) {
             return Ok(None);
         }
         let vector = lock(&semantic.query_embedder)
@@ -1495,10 +1541,15 @@ impl ProviderStore {
     }
 
     fn semantic_once(
+        &self,
         partitions: &[QueryPartition<'_>],
         query: Option<&[f32]>,
         limit: usize,
     ) -> ProviderResult<Option<KindAnswer>> {
+        let semantic = self
+            .semantic
+            .as_ref()
+            .ok_or_else(ProviderError::mode_unavailable)?;
         let mut coverage = Vec::with_capacity(partitions.len());
         let mut hits: Vec<(vectors::NoteHit, Arc<ProviderReference>)> = Vec::new();
         for pin in partitions {
@@ -1511,35 +1562,52 @@ impl ProviderStore {
                 });
                 continue;
             };
-            // Both locks are held for the search, so the refs, the state and
-            // `asOf` describe the same vector file and the same lexical commit.
-            let view = read(&partition.view);
-            if !pin.matches(&view) {
-                return Ok(None);
-            }
-            let state = read(&partition.semantic);
-            let base = partition.full_seq.load(Ordering::Acquire);
-            let (kind_state, as_of) =
-                semantic_state(pin.served.as_ref().map(|s| s.as_of), base, &state);
+            let lexical = pin.served.as_ref().map(|s| s.as_of);
+            let (snapshot, (kind_state, as_of)) = {
+                let view = read(&partition.view);
+                if !pin.matches(&view) {
+                    return Ok(None);
+                }
+                let state = read(&partition.semantic);
+                (
+                    state.snapshot.clone(),
+                    semantic.coverage(partition, lexical, &state),
+                )
+            };
             coverage.push(ProviderCoverage {
                 partition: pin.name.to_owned(),
                 kind: ProviderKind::Semantic,
                 state: kind_state,
                 as_of,
             });
-            let (Some(query), Some(snapshot), Some(_)) = (query, &state.snapshot, as_of) else {
+            let (Some(query), Some(snapshot), Some(_)) = (query, snapshot, as_of) else {
                 continue;
             };
-            let conn = lock(&snapshot.read);
-            // Only vectors computed from the bytes the lexical commit holds
-            // now: a note edited since its embedding is left out, never
-            // returned with a version its vectors do not describe.
-            let current = |id: &str, version: &str| {
-                view.by_id
-                    .get(id)
-                    .is_some_and(|reference| reference.version == version)
+            // Neither publication lock is held while queuing for SQLite or
+            // computing distances. Check each id under a short view read.
+            let nearest = {
+                let conn = lock(&snapshot.read);
+                #[cfg(test)]
+                if let Some((entered, resume)) = lock(&snapshot.before_scan).take() {
+                    entered.send(()).unwrap();
+                    resume.recv().unwrap();
+                }
+                vectors::nearest_notes(&conn, query, limit, |id, version| {
+                    let view = read(&partition.view);
+                    pin.matches(&view) && view.by_id.get(id).is_some_and(|r| r.version == version)
+                })
             };
-            for hit in vectors::nearest_notes(&conn, query, limit, current)? {
+            // A lexical commit or a vector publication since we pinned the
+            // coverage can invalidate the scan (including a retired file).
+            // Only resolve ids or propagate SQLite errors from a valid scan.
+            let view = read(&partition.view);
+            if !pin.matches(&view)
+                || semantic.coverage(partition, lexical, &read(&partition.semantic))
+                    != (kind_state, as_of)
+            {
+                return Ok(None);
+            }
+            for hit in nearest? {
                 if let Some(reference) = view.by_id.get(&hit.id) {
                     hits.push((hit, Arc::clone(reference)));
                 }
@@ -1579,14 +1647,16 @@ impl ProviderStore {
         let view = read(&partition.view);
         let as_of = view.served.as_ref().map(|s| s.as_of);
         let (notes, excluded, partial) = view.counts.clone();
-        let semantic = self.semantic.as_ref().map(|_| {
-            let semantic = read(&partition.semantic);
+        let semantic = self.semantic.as_ref().map(|semantic| {
+            let vectors = read(&partition.semantic);
+            let pending = lock(&partition.pending);
             let base = partition.full_seq.load(Ordering::Acquire);
-            let (state, kind_as_of) = semantic_state(as_of, base, &semantic);
+            let failed = semantic.jobs.failed.load(Ordering::Acquire);
+            let (state, kind_as_of) = semantic_state(as_of, base, &vectors, failed);
             ProviderKindStatus {
                 state,
                 as_of: kind_as_of,
-                pending_notes: lock(&partition.pending).count,
+                pending_notes: if failed { 0 } else { pending.by_id.len() },
             }
         });
         drop(view);
@@ -1639,8 +1709,11 @@ fn semantic_state(
     lexical: Option<ProviderAsOf>,
     base: u64,
     state: &SemanticState,
+    worker_failed: bool,
 ) -> (ProviderState, Option<ProviderAsOf>) {
-    if state.base != base || lexical.is_none() {
+    if worker_failed {
+        (ProviderState::Unavailable, None)
+    } else if state.base != base || lexical.is_none() {
         (ProviderState::Building, None)
     } else if state.failed {
         (ProviderState::Unavailable, None)
@@ -1669,11 +1742,28 @@ fn delta_work(changes: Vec<RefChange>) -> EmbedWork {
 }
 
 impl SemanticShared {
+    fn coverage(
+        &self,
+        partition: &Partition,
+        lexical: Option<ProviderAsOf>,
+        state: &SemanticState,
+    ) -> (ProviderState, Option<ProviderAsOf>) {
+        semantic_state(
+            lexical,
+            partition.full_seq.load(Ordering::Acquire),
+            state,
+            self.jobs.failed.load(Ordering::Acquire),
+        )
+    }
+
     /// Never waits for passage embedding or a vector transaction. The view
     /// lock pairs pending accounting with the lexical commit that queued it.
     fn enqueue(&self, mut job: EmbedJob, live: &Generation) {
         let partition = Arc::clone(&job.partition);
-        let mut queue = lock(&self.jobs);
+        let mut queue = lock(&self.jobs.work);
+        if self.jobs.failed.load(Ordering::Acquire) {
+            return;
+        }
         let queued = queue
             .iter()
             .position(|old| Arc::ptr_eq(&old.partition, &partition));
@@ -1681,14 +1771,14 @@ impl SemanticShared {
         if pending.base != job.base {
             *pending = PendingNotes {
                 base: job.base,
-                count: 0,
+                by_id: HashMap::new(),
             };
         }
         if let Some(index) = queued
             && let Some(previous) = queue.remove(index)
             && previous.base == job.base
         {
-            pending.count -= previous.work.notes();
+            pending.remove(&previous.work);
             if let EmbedWork::Delta(changes) = job.work {
                 job.work = match previous.work {
                     EmbedWork::Full(mut notes) => {
@@ -1712,19 +1802,14 @@ impl SemanticShared {
         {
             job.work = EmbedWork::Full(live.searchable_notes());
         }
-        pending.count += job.work.notes();
+        pending.add(&job.work);
         let index = queued.unwrap_or(queue.len());
         queue.insert(index, job);
-        // Full is fine: the worker already has a wakeup. Disconnected can
-        // only happen if the embedding thread exited unexpectedly.
+        drop(pending);
+        // Full is fine: the worker already has a wakeup. If it disconnected,
+        // no partition's backlog can be processed.
         if self.wake.try_send(()) == Err(mpsc::TrySendError::Disconnected(())) {
-            pending.count = 0;
-            queue.retain(|job| !Arc::ptr_eq(&job.partition, &partition));
-            drop(pending);
-            drop(queue);
-            let mut state = write_lock(&partition.semantic);
-            state.base = partition.full_seq.load(Ordering::Acquire);
-            state.failed = true;
+            self.jobs.fail(&mut queue, None);
         }
     }
 }
@@ -1932,21 +2017,29 @@ fn embed_worker(
 ) {
     while wake.recv().is_ok() {
         loop {
-            let Some(job) = lock(jobs).pop_front() else {
+            let Some(job) = lock(&jobs.work).pop_front() else {
                 break;
             };
-            // `true` means the job already settled while publishing coverage.
-            let result = run_job(&job, embedder.as_mut(), dimensions);
-            if !matches!(result, Ok(true)) {
-                let mut state = write_lock(&job.partition.semantic);
-                if let Err(error) = result
-                    && !job.moot()
-                {
-                    eprintln!("provider helper: embedding failed: {}", error.detail);
-                    state.base = job.base;
-                    state.failed = true;
+            // Catch a panic only to retire the lane and account for the lost
+            // work. Never reuse the embedder or its writer after unwinding.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // `true` means the job already settled while publishing coverage.
+                let result = run_job(&job, embedder.as_mut(), dimensions);
+                if !matches!(result, Ok(true)) {
+                    let mut state = write_lock(&job.partition.semantic);
+                    if let Err(error) = result
+                        && !job.moot()
+                    {
+                        eprintln!("provider helper: embedding failed: {}", error.detail);
+                        state.base = job.base;
+                        state.failed = true;
+                    }
+                    job.settle();
                 }
-                job.settle();
+            }));
+            if result.is_err() {
+                jobs.fail(&mut lock(&jobs.work), Some(&job));
+                return;
             }
         }
     }
@@ -1998,6 +2091,8 @@ fn run_job(job: &EmbedJob, embedder: &mut dyn Embedder, dimensions: usize) -> Pr
                 *state = SemanticState {
                     snapshot: Some(Arc::new(VectorSnapshot {
                         read: Mutex::new(reader),
+                        #[cfg(test)]
+                        before_scan: Mutex::new(None),
                     })),
                     as_of: Some(job.served.as_of),
                     base: job.base,

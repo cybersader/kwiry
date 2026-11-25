@@ -99,7 +99,8 @@ top of that ranking:
 (`"terms": {"matcher": "current-body-words-v1", "list": ["quokka"]}`); any
 other matcher is refused with `400 matcher_unavailable`. Absent or empty, the
 terms are derived from `q.text` with the same matcher. Kwiry still ranks on
-`q.text` with its own analyser.
+`q.text` with its own analyser; blank ranking text supplies no extra
+candidates but does not skip the supplied terms.
 
 The matcher is a port of the partner's `sync-core/src/search-match.ts`
 (OpenClast commit `5eefd8bf`): the eligible body is the text after an initial
@@ -109,10 +110,20 @@ point dropped, using the partner's per-line and bounded NFD segmentation;
 words are maximal runs of `L*`/`Nd`. General categories and
 folding use the partner's generated Unicode 15.1 tables
 (`daemon/crates/kwiry-core/src/provider/unicode_tables.rs`, Unicode License v3,
-`LICENSE-UNICODE` beside it); NFD uses `unicode-normalization`. Words over 240
-bytes are indexed and asked for by digest so neither side drops them. A note
-that is not UTF-8 owes no body words (the host's matcher cannot read it
-either).
+`LICENSE-UNICODE` beside it); NFD uses `unicode-normalization`. The helper
+reports those **NFD** tables in `hello.capabilities.matcherUnicodeVersion`
+(currently `17.0.0`), separately from the matcher id. The partner design calls
+for a startup matcher and Unicode check (§4), but §2.2 and §2.7 specify no
+host Unicode version in a request or versioned matcher id. The helper cannot
+reject a mismatch at the wire boundary. Do not pair the trial with a host
+unless its confirm matcher's NFD Unicode version is verified equal (compare
+version components, treating a missing patch as zero). For example,
+`aͅ᫏b` tokenizes to `['aι', 'b']` on 15.1 and `['a', 'ιb']` on 17.0
+with the same matcher id.
+
+Words over 240 bytes are indexed and asked for by digest so neither side
+drops them. A note that is not UTF-8 owes no body words (the host's matcher
+cannot read it either).
 
 ### Semantic and hybrid
 
@@ -138,8 +149,13 @@ and every commit is also embedded:
   `building` at the last fully embedded commit of the current full feed,
   or at `null` with no semantic refs until that feed has vectors. On an
   embedding failure, the current generation is `unavailable`; a new `full`
-  feed is needed to recover. Semantic answers exclude vectors whose note
-  version does not match the lexical snapshot.
+  feed is needed to recover. If the sole worker exits unexpectedly, all
+  semantic coverage becomes `unavailable`, outstanding work is discarded,
+  and the helper must restart to resume embedding. Lexical stays available.
+  Semantic answers exclude vectors whose note version does not match the
+  lexical snapshot. Scans do not hold the lexical view while waiting for
+  SQLite or scoring; they retry if lexical or semantic publication changes
+  the snapshot they read.
 - **semantic:** the query is embedded once; each asked partition scans its
   eligible notes and ranks by best chunk (cosine-equivalent L2 on normalized
   vectors), then `id` bytes, before cutting at the limit. The per-partition
@@ -151,7 +167,8 @@ and every commit is also embedded:
   entries per partition: `mode: "lexical"` and `mode: "semantic"`. The
   recall obligation is a lexical rule and does not apply to `hybrid`.
 - **status** adds `"semantic": {"state", "asOf", "pendingNotes"}` when a model
-  is loaded.
+  is loaded. `pendingNotes` counts distinct note ids with outstanding work
+  across running and queued jobs, including pending deletions.
 
 ### Partition scoping (why an unasked partition cannot influence a result)
 
@@ -241,7 +258,7 @@ store.
 
 | Call | Route | Request → reply |
 |---|---|---|
-| hello | `GET /v1/hello` | → `{"contract":"search-provider/1","name":"kwiry","version":"0.1.0","capabilities":{"retrieval":["lexical"],"matchers":["current-body-words-v1"],"ordering":"relevance","maxLimit":200,"maxPartitions":64,"maxNoteBytes":10485760},"experimental":true,"build":{"commit":"<sha or null>","target":"x86_64-unknown-linux-gnu/release"}}` (`retrieval` is `["lexical","semantic","hybrid"]` with a model loaded) |
+| hello | `GET /v1/hello` | → `{"contract":"search-provider/1","name":"kwiry","version":"0.1.0","capabilities":{"retrieval":["lexical"],"matchers":["current-body-words-v1"],"matcherUnicodeVersion":"17.0.0","ordering":"relevance","maxLimit":200,"maxPartitions":64,"maxNoteBytes":10485760},"experimental":true,"build":{"commit":"<sha or null>","target":"x86_64-unknown-linux-gnu/release"}}` (`retrieval` is `["lexical","semantic","hybrid"]` with a model loaded) |
 | begin | `POST /v1/partitions/{p}/begin` | `{"epoch":1,"mode":"full"\|"delta"}` → `{}` |
 | put | `PUT /v1/partitions/{p}/items/{id}` | raw bytes, `Content-Type: application/octet-stream`, `Provider-Item-Version: <64 hex>`, `Provider-Item-Path: <percent-encoded>` → `{}` |
 | delete | `DELETE /v1/partitions/{p}/items/{id}` | → `{}` |

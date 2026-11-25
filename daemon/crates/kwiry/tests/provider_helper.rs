@@ -229,6 +229,11 @@ fn provider_helper_serves_the_contract_over_a_unix_socket() {
     assert_eq!(status, 200);
     assert_eq!(hello["contract"], "search-provider/1");
     assert_eq!(hello["capabilities"]["retrieval"], json!(["lexical"]));
+    assert_eq!(
+        hello["capabilities"]["matchers"],
+        json!(["current-body-words-v1"])
+    );
+    assert_eq!(hello["capabilities"]["matcherUnicodeVersion"], "17.0.0");
     assert_eq!(hello["capabilities"]["maxLimit"], 200);
     assert_eq!(hello["capabilities"]["maxPartitions"], 64);
     assert_eq!(hello["capabilities"]["maxNoteBytes"], 10_485_760);

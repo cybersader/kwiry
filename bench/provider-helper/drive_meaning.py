@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -78,6 +79,74 @@ def rss_kib(pid):
     return int(match.group(1)) if match else 0
 
 
+@contextmanager
+def managed_helper(command, stderr):
+    """Own the helper's process group, including cancellation during launch."""
+    helper = None
+    cancelled = None
+    interruptible = False
+    stop = threading.Event()
+
+    def signal_group(sig):
+        if helper is not None:
+            try:
+                os.killpg(helper.pid, sig)
+            except ProcessLookupError:
+                pass
+
+    def cancel(sig, _frame):
+        nonlocal cancelled, interruptible
+        if cancelled is None:
+            cancelled = sig
+        signal_group(sig)
+        if interruptible:
+            interruptible = False
+            raise SystemExit(128 + cancelled)
+
+    def guard():
+        while not stop.wait(0.5):
+            if drive.mem_available_kib() < drive.MIN_AVAILABLE_KIB:
+                log("MemAvailable under 4 GiB: killing the helper")
+                signal_group(signal.SIGKILL)
+                helper.wait()
+                os._exit(3)
+
+    previous = {sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        try:
+            helper = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=stderr,
+                                      start_new_session=True)
+            interruptible = True
+            if cancelled is not None:
+                signal_group(cancelled)
+                raise SystemExit(128 + cancelled)
+            threading.Thread(target=guard, daemon=True).start()
+            yield helper
+        finally:
+            interruptible = False
+            stop.set()
+            if helper is not None:
+                if cancelled is None:
+                    try:
+                        # Let /usr/bin/time reap the helper and write its log.
+                        os.kill(drive.helper_pid(helper.pid), signal.SIGTERM)
+                    except (OSError, IndexError, ValueError):
+                        signal_group(signal.SIGTERM)
+                try:
+                    helper.wait(timeout=60 if cancelled is None else 5)
+                except subprocess.TimeoutExpired:
+                    signal_group(signal.SIGKILL)
+                    helper.wait()
+                if cancelled is not None:
+                    # The timing wrapper can exit before its child does.
+                    signal_group(signal.SIGKILL)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        if cancelled is not None:
+            raise SystemExit(128 + cancelled)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--kwiry", required=True, type=Path)
@@ -107,27 +176,8 @@ def main():
                "--socket", sock_path, "--model-dir", str(args.model_dir)]
     if args.embed_threads:
         command += ["--embed-threads", str(args.embed_threads)]
-    with (args.work / "helper.err").open("wb") as stderr:
-        helper = subprocess.Popen(["/usr/bin/time", "-v", "-o", str(time_log), *command],
-                                  stdout=subprocess.DEVNULL, stderr=stderr,
-                                  start_new_session=True)
-
-    def signal_group(sig):
-        try:
-            os.killpg(helper.pid, sig)
-        except ProcessLookupError:
-            pass
-    stop = threading.Event()
-
-    def guard():
-        while not stop.wait(0.5):
-            if drive.mem_available_kib() < drive.MIN_AVAILABLE_KIB:
-                log("MemAvailable under 4 GiB: killing the helper")
-                signal_group(signal.SIGKILL)
-                os._exit(3)
-
-    threading.Thread(target=guard, daemon=True).start()
-    try:
+    timed_command = ["/usr/bin/time", "-v", "-o", str(time_log), *command]
+    with (args.work / "helper.err").open("wb") as stderr, managed_helper(timed_command, stderr) as helper:
         if drive.wait_until(lambda: os.path.exists(sock_path), 120, 0.05) is None:
             raise SystemExit("helper did not start")
         pid = drive.helper_pid(helper.pid)
@@ -252,17 +302,6 @@ def main():
         assert status == 200, body
         hwm = re.search(r"VmHWM:\s+(\d+) kB", Path(f"/proc/{pid}/status").read_text())
         results["vmhwm_kib"] = int(hwm.group(1)) if hwm else None
-    finally:
-        stop.set()
-        try:
-            os.kill(drive.helper_pid(helper.pid), signal.SIGTERM)
-        except (OSError, IndexError, ValueError):
-            signal_group(signal.SIGTERM)
-        try:
-            helper.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            signal_group(signal.SIGKILL)
-            helper.wait()
     rss = re.search(r"Maximum resident set size \(kbytes\): (\d+)", time_log.read_text())
     results["peak_rss_kib"] = int(rss.group(1)) if rss else None
     log(f"peak RSS {results['peak_rss_kib']} KiB")

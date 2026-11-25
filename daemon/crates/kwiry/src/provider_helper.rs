@@ -36,10 +36,10 @@ use tokio::net::UnixListener;
 pub(crate) mod wire {
     use axum::http::StatusCode;
     use kwiry_core::{
-        PROVIDER_MATCHER, PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT,
-        PROVIDER_MAX_QUERY_PARTITIONS, ProviderAsOf, ProviderErrorCode, ProviderFeedMode,
-        ProviderKind, ProviderKindStatus, ProviderMode, ProviderQueryOutcome, ProviderState,
-        ProviderStatus,
+        PROVIDER_MATCHER, PROVIDER_MATCHER_UNICODE_VERSION, PROVIDER_MAX_ITEM_BYTES,
+        PROVIDER_MAX_LIMIT, PROVIDER_MAX_QUERY_PARTITIONS, ProviderAsOf, ProviderErrorCode,
+        ProviderFeedMode, ProviderKind, ProviderKindStatus, ProviderMode, ProviderQueryOutcome,
+        ProviderState, ProviderStatus,
     };
     use serde::Deserialize;
     use serde_json::{Value, json};
@@ -79,6 +79,7 @@ pub(crate) mod wire {
 
     pub fn hello(semantic: bool) -> Value {
         let engine = crate::engine::engine();
+        let (major, minor, patch) = PROVIDER_MATCHER_UNICODE_VERSION;
         json!({
             "contract": CONTRACT,
             "name": env!("CARGO_PKG_NAME"),
@@ -86,6 +87,7 @@ pub(crate) mod wire {
             "capabilities": {
                 "retrieval": retrieval(semantic),
                 "matchers": [PROVIDER_MATCHER],
+                "matcherUnicodeVersion": format!("{major}.{minor}.{patch}"),
                 "ordering": "relevance",
                 "maxLimit": PROVIDER_MAX_LIMIT,
                 "maxPartitions": PROVIDER_MAX_QUERY_PARTITIONS,

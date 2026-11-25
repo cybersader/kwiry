@@ -35,6 +35,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: daemon
+      - name: Test provider benchmark cancellation
+        run: python3 -IB bench/provider-helper/test_drive_meaning.py -v
       - name: Ensure GDB is available for the reader barrier
         run: command -v gdb || (sudo apt-get update && sudo apt-get install -y gdb)
       - name: Local daemon quality gate

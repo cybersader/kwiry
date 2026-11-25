@@ -317,6 +317,14 @@ mod tests {
     }
 
     #[test]
+    fn short_witness_requires_matching_nfd_unicode_versions() {
+        // Exact OpenClast 5eefd8bf tokenizer on Unicode 15.1 gives ["aι", "b"].
+        // Unicode 17 gives the formerly unassigned U+1ACF a combining class
+        // that moves it before U+0345, so the surviving separator moves too.
+        assert_eq!(words("a\u{345}\u{1acf}b"), ["a", "ιb"]);
+    }
+
+    #[test]
     fn long_words_use_a_digest_on_both_sides() {
         let long = "a".repeat(300);
         let indexed = words(&long);

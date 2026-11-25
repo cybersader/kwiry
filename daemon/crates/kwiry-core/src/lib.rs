@@ -170,12 +170,13 @@ pub use policy::{
 pub use provider::{PINNED_MODEL_FILES, PINNED_MODEL_REVISION, load_pinned_embedder};
 #[cfg(feature = "native")]
 pub use provider::{
-    PROVIDER_MATCHER, PROVIDER_MAX_ID_BYTES, PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT,
-    PROVIDER_MAX_PARTITION_BYTES, PROVIDER_MAX_PATH_BYTES, PROVIDER_MAX_QUERY_PARTITIONS,
-    PROVIDER_MAX_TERMS, PROVIDER_OVER_TRANSPORT_CAP, ProviderAsOf, ProviderCoverage, ProviderError,
-    ProviderErrorCode, ProviderFeedMode, ProviderKind, ProviderKindStatus, ProviderMode,
-    ProviderQuery, ProviderQueryOutcome, ProviderReference, ProviderResult, ProviderState,
-    ProviderStatus, ProviderStore, hex_sha256,
+    PROVIDER_MATCHER, PROVIDER_MATCHER_UNICODE_VERSION, PROVIDER_MAX_ID_BYTES,
+    PROVIDER_MAX_ITEM_BYTES, PROVIDER_MAX_LIMIT, PROVIDER_MAX_PARTITION_BYTES,
+    PROVIDER_MAX_PATH_BYTES, PROVIDER_MAX_QUERY_PARTITIONS, PROVIDER_MAX_TERMS,
+    PROVIDER_OVER_TRANSPORT_CAP, ProviderAsOf, ProviderCoverage, ProviderError, ProviderErrorCode,
+    ProviderFeedMode, ProviderKind, ProviderKindStatus, ProviderMode, ProviderQuery,
+    ProviderQueryOutcome, ProviderReference, ProviderResult, ProviderState, ProviderStatus,
+    ProviderStore, hex_sha256,
 };
 #[cfg(feature = "portable")]
 pub use query::{
