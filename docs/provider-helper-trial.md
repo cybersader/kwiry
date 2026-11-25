@@ -55,7 +55,7 @@ about 375 MiB per edit at 62,000 notes — and would dominate one-edit timings):
   the committed index keeps serving until `commit` swaps the new one in, so
   every id not put since the `begin` is gone.
 - `begin(delta)` changes the committed index in place.
-- `checkpoint(n)` makes the writes so far durable (one Tantivy commit);
+- `checkpoint(n)` makes the writes so far durable in both Tantivy indexes;
   `commit` makes everything up to the last checkpoint visible (reader reload
   and a swap of the path → reference map). Writes after the last checkpoint
   are dropped at commit.
@@ -105,7 +105,8 @@ The matcher is a port of the partner's `sync-core/src/search-match.ts`
 (OpenClast commit `5eefd8bf`): the eligible body is the text after an initial
 YAML block (`---` … `---`/`...`, BOM ignored for detection, unclosed block =
 no body); folding is NFD, full default case folding, then every `M*` code
-point dropped; words are maximal runs of `L*`/`Nd`. General categories and
+point dropped, using the partner's per-line and bounded NFD segmentation;
+words are maximal runs of `L*`/`Nd`. General categories and
 folding use the partner's generated Unicode 15.1 tables
 (`daemon/crates/kwiry-core/src/provider/unicode_tables.rs`, Unicode License v3,
 `LICENSE-UNICODE` beside it); NFD uses `unicode-normalization`. Words over 240
@@ -118,31 +119,35 @@ either).
 With `--model-dir`, hello declares `retrieval: ["lexical","semantic","hybrid"]`
 and every commit is also embedded:
 
-- **Storage, per partition:** one SQLite file with a sqlite-vec `vec0` table
-  per partition (`vectors-<n>-<suffix>.sqlite` beside the lexical index),
-  holding each note's chunk vectors with its id and the version (SHA-256 of
-  the exact bytes) they were computed from. Chunk texts are the ones the
-  lexical commit stored (heading breadcrumb + content, as the daemon embeds
-  them), so nothing is held in memory between put and embedding.
-- **Background embedding:** a commit returns as soon as the lexical side is
-  visible. One worker thread then embeds it, in commit order: a `full` commit
-  into a fresh vector file that replaces the old one when complete, a `delta`
-  as one transaction on the current file. A later `full` commit or a retire
-  makes queued work moot.
+- **Storage, per partition:** one SQLite file with chunk vectors scored with
+  sqlite-vec (`vectors-<full-sequence>-<suffix>.sqlite` beside the lexical
+  index). It ties each note's vectors to its id and the version (SHA-256 of
+  the exact bytes) they were computed from. The worker reads chunk text from
+  the lexical snapshot (heading breadcrumb + content, as the daemon embeds
+  them); it needs no passage text queued by the feed.
+- **Background embedding:** a lexical commit does not wait for embedding.
+  One worker handles one running job and at most one queued job per
+  partition. It coalesces pending changes at the latest commit and rebuilds
+  from that snapshot if more than 4,096 distinct changes accumulate. Passage
+  batches hold at most 128 chunks and 1 MiB of text, except that a larger
+  single chunk runs alone. A `full` build publishes a fresh file only when
+  complete; a `delta` streams into a single SQLite transaction. A later
+  `full` commit or a retire makes earlier work moot.
 - **State per kind:** the semantic kind is `ready` only when its vectors hold
-  exactly the lexical kind's committed `asOf`; while embedding lags it is
-  `building` with `asOf` = the last commit embedded completely (`null` before
-  the first); after an embedding failure it is `unavailable` until a `full`
-  feed embeds completely. A semantic answer never returns a note whose vectors
-  describe bytes the lexical commit no longer holds: such notes are left out
-  (honest lag), never returned with a stale version.
-- **semantic:** the query is embedded once; each asked partition's own file
-  answers with its nearest notes (best chunk, cosine-equivalent L2 on
-  normalized vectors); the per-partition answers are merged by distance, ties
-  by `id` bytes.
+  exactly the lexical kind's committed `asOf`. While embedding lags, it is
+  `building` at the last fully embedded commit of the current full feed,
+  or at `null` with no semantic refs until that feed has vectors. On an
+  embedding failure, the current generation is `unavailable`; a new `full`
+  feed is needed to recover. Semantic answers exclude vectors whose note
+  version does not match the lexical snapshot.
+- **semantic:** the query is embedded once; each asked partition scans its
+  eligible notes and ranks by best chunk (cosine-equivalent L2 on normalized
+  vectors), then `id` bytes, before cutting at the limit. The per-partition
+  answers are merged by the same order.
 - **hybrid:** reciprocal-rank fusion (`rrf_fuse`, k = 60, the daemon's
   formula) of the lexical answer and the semantic answer at note level, each
-  up to max(`limit`, 100) deep. Ties by `id` bytes. `coverage` holds two
+  up to max(`limit`, 100) deep. Both legs use the same lexical snapshot; if it
+  changes between the legs, both retry. Ties by `id` bytes. `coverage` holds two
   entries per partition: `mode: "lexical"` and `mode: "semantic"`. The
   recall obligation is a lexical rule and does not apply to `hybrid`.
 - **status** adds `"semantic": {"state", "asOf", "pendingNotes"}` when a model
@@ -181,7 +186,8 @@ revision `ea104dacec62c0de699686887e3f920caeb4f3e3` of
 | `special_tokens_map.json` | `special_tokens_map.json` | `b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3` |
 | `tokenizer_config.json` | `tokenizer_config.json` | `9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3` |
 
-An operator fetches them once on a connected machine, for example
+The model is not bundled in the helper or the repository. The operator
+fetches the five files on a connected machine, for example
 `curl -fL -o model.onnx https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/ea104dacec62c0de699686887e3f920caeb4f3e3/onnx/model.onnx`
 (and the same for the other four), checks the hashes, and copies the
 directory. A missing, unreadable or different file makes the helper **refuse
@@ -192,19 +198,19 @@ Two model instances are loaded: one for queries (2 ONNX threads), one owned
 by the background worker (`--embed-threads`, default all CPUs the process may
 use), so a long feed never queues a query behind a passage batch.
 
-**Build-time download.** The `semantic-onnx` feature links ONNX Runtime
-statically through `ort-sys` with its `download-binaries` feature, which
-downloads a prebuilt `libonnxruntime.a` **at build time** (cached under
-`~/.cache/ort.pyke.io/dfbin/<target>/<hash>/`, where `<hash>` pins the
-archive's SHA-256). To build offline, either pre-populate that cache from a
-connected build of the same `ort-sys` version (2.0.0-rc.12) — a cache hit is
-used without any download — or point `ORT_LIB_LOCATION` at a directory holding
-a `libonnxruntime.a` (for example a copy of the cached one, or a local ONNX
-Runtime build). Do **not** set `CARGO_NET_OFFLINE`, `ORT_SKIP_DOWNLOAD` or
-`ORT_OFFLINE` for a semantic build: `ort-sys` then skips linking ONNX Runtime
-altogether and the link fails with `undefined symbol: OrtGetApiBase` (seen
-while building this change). Nothing is downloaded at run time. A lexical-only build (`--no-default-features`) has no
-ONNX Runtime at all and refuses `--model-dir`.
+**Build-time download.** `semantic-onnx` enables fastembed's
+`ort-download-binaries-rustls-tls`. A connected build can download a prebuilt
+ONNX Runtime archive via `ort-sys` (2.0.0-rc.12), independently of the model
+files. To preprovision an offline build, cache the locked Cargo dependencies
+and copy the matching target's extracted ONNX Runtime from a connected build
+(`~/.cache/ort.pyke.io/dfbin/<target>/<archive-sha256>/`). Set
+`ORT_LIB_LOCATION` to the directory containing its `libonnxruntime.a` before
+building with `cargo --offline` (or `CARGO_NET_OFFLINE=true`). `ort-sys` checks
+that explicit library path before its offline/skip-download switch; setting
+only the switch skips its cache lookup and can leave `OrtGetApiBase` unlinked.
+Without that switch, a matching pre-populated cache also avoids the download.
+The helper downloads nothing at run time. A lexical-only `kwiry` build
+(`--no-default-features`) has no ONNX Runtime and refuses `--model-dir`.
 
 ## Identity, versions and partitions
 
@@ -263,7 +269,11 @@ it refuses `delta` with `409 epoch_mismatch` until a `full` feed commits. The
 host recovers as contract §2.2 rule 2 describes for a lost feed: a `full`
 resync with the same epoch, whose checkpoints count from the committed `n`
 (so resending the abandoned checkpoint number is accepted). A `delta`
-abandoned before any checkpoint leaves nothing behind and needs no resync.
+abandoned before any checkpoint leaves nothing behind and needs no resync,
+unless a checkpoint failed. If either index fails a checkpoint, the helper
+cannot know whether both persisted the same writes. It refuses to publish
+or to take another delta on that generation, and keeps serving the last
+commit until a full resync succeeds.
 
 **Size cap.** A `put` body is capped at **10,485,760 bytes** (10 MiB), Kwiry's
 `MAX_FILE_BYTES` for files it reads from disk, which matches the contract's

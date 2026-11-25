@@ -140,13 +140,37 @@ fn push_folded_without_marks(ch: char, out: &mut String) {
     }
 }
 
-/// `current-body-words-v1` folding: NFD, full default case fold, drop `M*`.
+/// Match the partner's bounded NFD pieces, including its UTF-16 length
+/// threshold and cuts within runs of non-starters. A new Unicode mark may
+/// survive our pinned category table, so cutting at the same point matters.
 pub(crate) fn fold_for_match(text: &str) -> String {
+    const FOLD_MARK_RUN_PIECE: usize = 64;
+    const FOLD_PIECE_UNITS: usize = 4096;
+
     let mut out = String::with_capacity(text.len());
-    for ch in text.nfd() {
-        push_folded_without_marks(ch, &mut out);
+    let mut start = 0;
+    let mut units = 0;
+    let mut run = 0;
+    for (offset, ch) in text.char_indices() {
+        let cp = u32::from(ch);
+        let stable = ch.is_ascii() || is_letter(cp) || is_digit(cp);
+        if offset > start && (if stable { units >= FOLD_PIECE_UNITS } else { run >= FOLD_MARK_RUN_PIECE }) {
+            fold_piece(&text[start..offset], &mut out);
+            start = offset;
+            units = 0;
+            run = 0;
+        }
+        run = if stable { 0 } else { run + 1 };
+        units += ch.len_utf16();
     }
+    fold_piece(&text[start..], &mut out);
     out
+}
+
+fn fold_piece(piece: &str, out: &mut String) {
+    for ch in piece.nfd() {
+        push_folded_without_marks(ch, out);
+    }
 }
 
 /// Maximal runs of `L*` or `Nd` code points in already folded text.
@@ -211,8 +235,14 @@ pub(crate) fn note_words(bytes: &[u8]) -> Option<Vec<String>> {
     let Some(body) = eligible_body(text) else {
         return Some(Vec::new());
     };
-    let folded = fold_for_match(body);
-    Some(word_tokens(&folded).map(index_word).collect())
+    // The partner folds each line separately, so earlier lines do not
+    // shift the UTF-16 boundary of the piece containing a word.
+    let mut words = Vec::new();
+    for line in body.split(['\r', '\n']) {
+        let folded = fold_for_match(line);
+        words.extend(word_tokens(&folded).map(index_word));
+    }
+    Some(words)
 }
 
 /// The distinct folded words of a query text, first occurrence first, in
@@ -268,6 +298,16 @@ mod tests {
         assert_eq!(words("--- \nnot yaml\n---\nz"), ["not", "yaml", "z"]);
         assert_eq!(words("text\n---\nmore\n---\n"), ["text", "more"]);
         assert_eq!(note_words(b"\xff\xfe"), None);
+    }
+
+    #[test]
+    fn matches_openclast_at_the_non_starter_split() {
+        // OpenClast 5eefd8bf matchBody(parseQuery("aι"), body) is true.
+        // U+0897 has a nonzero combining class in newer Unicode, but is
+        // not a mark in the partner's pinned Unicode 15.1 category table.
+        let body = format!("a{}\u{345}\u{897}b", "\u{301}".repeat(63));
+        assert_eq!(words(&body), ["aι", "b"]);
+        assert_eq!(query_words("aι"), ["aι"]);
     }
 
     #[test]

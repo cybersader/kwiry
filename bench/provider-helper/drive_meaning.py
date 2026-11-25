@@ -107,15 +107,23 @@ def main():
                "--socket", sock_path, "--model-dir", str(args.model_dir)]
     if args.embed_threads:
         command += ["--embed-threads", str(args.embed_threads)]
-    helper = subprocess.Popen(["/usr/bin/time", "-v", "-o", str(time_log), *command],
-                              stdout=subprocess.DEVNULL, stderr=open(args.work / "helper.err", "wb"))
+    with (args.work / "helper.err").open("wb") as stderr:
+        helper = subprocess.Popen(["/usr/bin/time", "-v", "-o", str(time_log), *command],
+                                  stdout=subprocess.DEVNULL, stderr=stderr,
+                                  start_new_session=True)
+
+    def signal_group(sig):
+        try:
+            os.killpg(helper.pid, sig)
+        except ProcessLookupError:
+            pass
     stop = threading.Event()
 
     def guard():
         while not stop.wait(0.5):
             if drive.mem_available_kib() < drive.MIN_AVAILABLE_KIB:
                 log("MemAvailable under 4 GiB: killing the helper")
-                helper.send_signal(signal.SIGKILL)
+                signal_group(signal.SIGKILL)
                 os._exit(3)
 
     threading.Thread(target=guard, daemon=True).start()
@@ -249,11 +257,11 @@ def main():
         try:
             os.kill(drive.helper_pid(helper.pid), signal.SIGTERM)
         except (OSError, IndexError, ValueError):
-            helper.send_signal(signal.SIGTERM)
+            signal_group(signal.SIGTERM)
         try:
             helper.wait(timeout=60)
         except subprocess.TimeoutExpired:
-            helper.kill()
+            signal_group(signal.SIGKILL)
             helper.wait()
     rss = re.search(r"Maximum resident set size \(kbytes\): (\d+)", time_log.read_text())
     results["peak_rss_kib"] = int(rss.group(1)) if rss else None

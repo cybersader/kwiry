@@ -2,7 +2,7 @@
 //! Per-partition vector files for the provider's `semantic` and `hybrid`
 //! modes (trial only).
 //!
-//! Each partition owns its own SQLite file with a sqlite-vec `vec0` table.
+//! Each partition owns its own SQLite file with vectors scored by sqlite-vec.
 //! Nothing is shared between partitions: a nearest-neighbour search opens
 //! exactly the files of the partitions it was asked about, so vectors of any
 //! other partition can neither be candidates nor change an order. Distance
@@ -12,18 +12,14 @@
 //! A note's vectors are stored with its id and the version (SHA-256 of the
 //! exact bytes) they were computed from.
 
-use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use zerocopy::IntoBytes;
 
 use super::{ProviderError, ProviderResult};
 
-/// sqlite-vec's largest `k` for one KNN query.
-const KNN_MAX: usize = 4096;
-
-fn sql(error: rusqlite::Error) -> ProviderError {
+fn sql(error: impl std::fmt::Display) -> ProviderError {
     ProviderError::internal(format!("vector store: {error}"))
 }
 
@@ -40,158 +36,155 @@ pub(super) fn open(path: &Path, dimensions: usize) -> ProviderResult<Connection>
              version TEXT NOT NULL
          );
          CREATE TABLE IF NOT EXISTS chunks (
-             rowid INTEGER PRIMARY KEY,
-             slot INTEGER NOT NULL
+             slot INTEGER NOT NULL,
+             embedding BLOB NOT NULL CHECK(length(embedding) = {bytes})
          );
-         CREATE INDEX IF NOT EXISTS chunks_slot ON chunks (slot);
-         CREATE VIRTUAL TABLE IF NOT EXISTS vectors USING vec0(embedding float[{dimensions}]);"
+         CREATE INDEX IF NOT EXISTS chunks_slot ON chunks (slot);",
+        bytes = dimensions * std::mem::size_of::<f32>(),
     ))
     .map_err(sql)?;
     Ok(conn)
 }
 
-/// A note's vectors: one per chunk.
-pub(super) struct NoteVectors {
-    pub id: String,
-    pub version: String,
-    pub vectors: Vec<Vec<f32>>,
+pub(super) fn begin(conn: &mut Connection) -> ProviderResult<Transaction<'_>> {
+    conn.transaction().map_err(sql)
 }
 
-/// Applies one batch of changes in one transaction: every id in `remove`
-/// and every id in `upsert` loses its old vectors first.
-pub(super) fn apply(
-    conn: &mut Connection,
-    remove: &[String],
-    upsert: &[NoteVectors],
-) -> ProviderResult<()> {
-    let tx = conn.transaction().map_err(sql)?;
-    for id in remove.iter().chain(upsert.iter().map(|note| &note.id)) {
-        tx.execute(
-            "DELETE FROM vectors WHERE rowid IN
-                 (SELECT c.rowid FROM chunks c JOIN notes n ON n.slot = c.slot WHERE n.id = ?1)",
-            [id],
-        )
-        .map_err(sql)?;
-        tx.execute(
-            "DELETE FROM chunks WHERE slot IN (SELECT slot FROM notes WHERE id = ?1)",
-            [id],
-        )
-        .map_err(sql)?;
-        tx.execute("DELETE FROM notes WHERE id = ?1", [id])
-            .map_err(sql)?;
-    }
-    for note in upsert {
-        if note.vectors.is_empty() {
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO notes (id, version) VALUES (?1, ?2)",
-            (&note.id, &note.version),
-        )
-        .map_err(sql)?;
-        let slot = tx.last_insert_rowid();
-        for vector in &note.vectors {
-            tx.execute("INSERT INTO chunks (slot) VALUES (?1)", [slot])
-                .map_err(sql)?;
-            let rowid = tx.last_insert_rowid();
-            tx.execute(
-                "INSERT INTO vectors (rowid, embedding) VALUES (?1, ?2)",
-                (rowid, vector.as_bytes()),
-            )
-            .map_err(sql)?;
-        }
-    }
+pub(super) fn commit(tx: Transaction<'_>) -> ProviderResult<()> {
     tx.commit().map_err(sql)
 }
 
-pub(super) fn chunk_count(conn: &Connection) -> ProviderResult<usize> {
-    conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| {
-        row.get::<_, i64>(0)
-    })
-    .map(|count| count as usize)
-    .map_err(sql)
+pub(super) fn remove_note(tx: &Transaction<'_>, id: &str) -> ProviderResult<()> {
+    tx.prepare_cached("DELETE FROM chunks WHERE slot = (SELECT slot FROM notes WHERE id = ?1)")
+        .and_then(|mut statement| statement.execute([id])).map_err(sql)?;
+    tx.prepare_cached("DELETE FROM notes WHERE id = ?1")
+        .and_then(|mut statement| statement.execute([id])).map_err(sql)?;
+    Ok(())
+}
+
+pub(super) fn replace_note(tx: &Transaction<'_>, id: &str, version: &str) -> ProviderResult<i64> {
+    remove_note(tx, id)?;
+    tx.prepare_cached("INSERT INTO notes (id, version) VALUES (?1, ?2)")
+        .and_then(|mut statement| statement.insert((id, version))).map_err(sql)
+}
+
+pub(super) fn insert_chunks(
+    tx: &Transaction<'_>,
+    chunks: impl Iterator<Item = (i64, Vec<f32>)>,
+) -> ProviderResult<()> {
+    let mut statement = tx.prepare_cached("INSERT INTO chunks (slot, embedding) VALUES (?1, ?2)").map_err(sql)?;
+    for (slot, vector) in chunks {
+        statement.execute((slot, vector.as_bytes())).map_err(sql)?;
+    }
+    Ok(())
 }
 
 /// One note's best (smallest) chunk distance.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct NoteHit {
     pub id: String,
-    pub version: String,
     pub distance: f64,
 }
 
-/// The `want` nearest notes of this one file that `keep` accepts, by best
-/// chunk distance, ties by id bytes. Widens the chunk window until it has
-/// `want` notes or has seen every chunk (or reached sqlite-vec's `k` limit).
+/// Exact scan of this partition: for each eligible note, score all of its
+/// chunks and consider only its minimum distance. Cut after the note-level
+/// comparison, including id, with no chunk window to hide notes or ties.
 pub(super) fn nearest_notes(
     conn: &Connection,
     query: &[f32],
     want: usize,
     keep: impl Fn(&str, &str) -> bool,
 ) -> ProviderResult<Vec<NoteHit>> {
-    let total = chunk_count(conn)?;
-    if total == 0 || want == 0 {
-        return Ok(Vec::new());
+    let mut best: Vec<NoteHit> = Vec::with_capacity(want);
+    if want == 0 {
+        return Ok(best);
     }
-    let mut k = (want * 4).clamp(1, KNN_MAX).min(total);
-    let mut statement = conn
-        .prepare_cached(
-            "SELECT n.id, n.version, v.distance
-             FROM vectors v
-             JOIN chunks c ON c.rowid = v.rowid
-             JOIN notes n ON n.slot = c.slot
-             WHERE v.embedding MATCH ?1 AND v.k = ?2",
-        )
-        .map_err(sql)?;
-    loop {
-        let mut best: HashMap<String, NoteHit> = HashMap::new();
-        let rows = statement
-            .query_map((query.as_bytes(), k as i64), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, f64>(2)?,
-                ))
-            })
-            .map_err(sql)?;
-        for row in rows {
-            let (id, version, distance) = row.map_err(sql)?;
-            if !keep(&id, &version) {
-                continue;
+    let mut notes = conn.prepare_cached("SELECT slot, id, version FROM notes").map_err(sql)?;
+    let mut distance = conn.prepare_cached(
+        "SELECT MIN(vec_distance_L2(embedding, ?1)) FROM chunks WHERE slot = ?2"
+    ).map_err(sql)?;
+    let mut rows = notes.query([]).map_err(sql)?;
+    while let Some(row) = rows.next().map_err(sql)? {
+        let id = row.get_ref(1).map_err(sql)?.as_str().map_err(sql)?;
+        let version = row.get_ref(2).map_err(sql)?.as_str().map_err(sql)?;
+        if !keep(id, version) {
+            continue;
+        }
+        let slot: i64 = row.get(0).map_err(sql)?;
+        let Some(distance) = distance.query_row((query.as_bytes(), slot), |row| row.get::<_, Option<f64>>(0)).map_err(sql)? else {
+            continue;
+        };
+        let position = best.partition_point(|hit| {
+            hit.distance.total_cmp(&distance).then_with(|| hit.id.as_bytes().cmp(id.as_bytes())).is_lt()
+        });
+        if position < want {
+            if best.len() == want {
+                best.pop();
             }
-            best.entry(id.clone())
-                .and_modify(|hit| hit.distance = hit.distance.min(distance))
-                .or_insert(NoteHit {
-                    id,
-                    version,
-                    distance,
-                });
+            best.insert(position, NoteHit { id: id.into(), distance });
         }
-        if best.len() >= want || k >= total || k >= KNN_MAX {
-            let mut hits: Vec<_> = best.into_values().collect();
-            sort_hits(&mut hits);
-            hits.truncate(want);
-            return Ok(hits);
-        }
-        k = (k * 4).min(KNN_MAX).min(total);
     }
-}
-
-pub(super) fn sort_hits(hits: &mut [NoteHit]) {
-    hits.sort_by(|left, right| {
-        left.distance
-            .total_cmp(&right.distance)
-            .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
-    });
+    Ok(best)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    struct NoteVectors {
+        id: String,
+        version: String,
+        vectors: Vec<Vec<f32>>,
+    }
+
+    fn apply(conn: &mut Connection, remove: &[String], upsert: &[NoteVectors]) -> ProviderResult<()> {
+        let tx = begin(conn)?;
+        for id in remove {
+            remove_note(&tx, id)?;
+        }
+        for note in upsert {
+            let slot = replace_note(&tx, &note.id, &note.version)?;
+            insert_chunks(&tx, note.vectors.iter().cloned().map(|v| (slot, v)))?;
+        }
+        commit(tx)
+    }
+
     fn unit(values: &[f32]) -> Vec<f32> {
         let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
         values.iter().map(|v| v / norm).collect()
+    }
+
+    #[test]
+    fn nearest_notes_breaks_ties_before_limiting() {
+        let mut ids = ["z", "y", "x", "w", "a"];
+        // Put the winning id at every insertion position, independent of
+        // which chunk SQLite happens to prefer in an equal-distance window.
+        for _ in 0..ids.len() {
+            let conn = &mut open(Path::new(":memory:"), 2).unwrap();
+            let notes = ids.map(|id| NoteVectors {
+                id: id.into(),
+                version: "1".into(),
+                vectors: vec![vec![1.0, 0.0]],
+            });
+            apply(conn, &[], &notes).unwrap();
+            let hits = nearest_notes(conn, &[1.0, 0.0], 1, |_, _| true).unwrap();
+            assert_eq!(hits[0].id, "a", "insertion order: {ids:?}");
+            ids.rotate_left(1);
+        }
+    }
+
+    #[test]
+    fn nearest_notes_reaches_current_notes_beyond_the_chunk_cap() {
+        let conn = &mut open(Path::new(":memory:"), 2).unwrap();
+        let notes = [("stale", "old", 4096), ("close", "1", 4096), ("far", "1", 1)]
+            .map(|(id, version, chunks)| NoteVectors {
+                id: id.into(),
+                version: version.into(),
+                vectors: vec![if id == "far" { vec![0.0, 1.0] } else { vec![1.0, 0.0] }; chunks],
+            });
+        apply(conn, &[], &notes).unwrap();
+        let hits = nearest_notes(conn, &[1.0, 0.0], 2, |_, version| version == "1").unwrap();
+        assert_eq!(hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(), ["close", "far"]);
     }
 
     #[test]
@@ -232,8 +225,9 @@ mod tests {
         .unwrap();
         let hits = nearest_notes(&conn, &unit(&[1.0, 0.0]), 5, |_, _| true).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!((hits[0].id.as_str(), hits[0].version.as_str()), ("b", "2"));
-        assert_eq!(chunk_count(&conn).unwrap(), 1);
+        assert_eq!(hits[0].id, "b");
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
         assert!(
             nearest_notes(&conn, &unit(&[1.0, 0.0]), 5, |_, version| version == "1")
                 .unwrap()

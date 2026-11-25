@@ -25,10 +25,10 @@ mod pinned_model;
 mod unicode_tables;
 mod vectors;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, mpsc};
 
 use rusqlite::Connection;
@@ -86,8 +86,12 @@ const QUERY_ATTEMPTS: usize = 4;
 const HYBRID_CANDIDATES: usize = 100;
 /// Reciprocal-rank-fusion constant (the daemon's figure).
 const RRF_K: f64 = 60.0;
-/// Notes embedded and written per vector-file transaction during a full feed.
-const EMBED_NOTES_PER_BATCH: usize = 64;
+/// Bound both the number and total bytes of passage texts per model call
+/// (one unusually large chunk can occupy a batch by itself).
+const EMBED_CHUNKS_PER_BATCH: usize = 128;
+const EMBED_BYTES_PER_BATCH: usize = 1 << 20;
+/// Cap queued delta bookkeeping, independent of how many commits arrive.
+const EMBED_MAX_PENDING_CHANGES: usize = 4096;
 
 /// Why the store refused a call. The wire adapter maps each to its contract
 /// token and HTTP status; the store knows neither.
@@ -284,6 +288,8 @@ struct WordsIndex {
     reader: IndexReader,
     slot: Field,
     words: Field,
+    #[cfg(test)]
+    fail_commit: bool,
 }
 
 impl WordsIndex {
@@ -313,7 +319,18 @@ impl WordsIndex {
             reader,
             slot,
             words,
+            #[cfg(test)]
+            fail_commit: false,
         })
+    }
+
+    fn commit(&mut self) -> ProviderResult<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_commit) {
+            return Err(ProviderError::internal("injected body-words commit failure"));
+        }
+        self.writer.commit().map_err(ProviderError::internal)?;
+        Ok(())
     }
 
     fn add(&mut self, slot: u64, words: &[String]) -> ProviderResult<()> {
@@ -361,6 +378,7 @@ struct Generation {
     epoch: u64,
     /// Last checkpoint taken on this index.
     n: u64,
+    poisoned: bool,
     index: Index,
     fields: Fields,
     source_key: Field,
@@ -406,6 +424,7 @@ impl Generation {
             owner: owner_tag(partition),
             epoch,
             n,
+            poisoned: false,
             index,
             fields,
             source_key,
@@ -510,11 +529,12 @@ impl Generation {
 
     /// Makes the writes so far durable as checkpoint `n` (not yet visible).
     fn checkpoint(&mut self, n: u64) -> ProviderResult<()> {
+        // The two durable commits cannot be made as one transaction. Even an
+        // error from the first writer may mean it changed durable state.
+        self.poisoned = true;
         self.writer.commit().map_err(ProviderError::internal)?;
-        self.words
-            .writer
-            .commit()
-            .map_err(ProviderError::internal)?;
+        self.words.commit()?;
+        self.poisoned = false;
         self.n = n;
         self.undo.clear();
         self.checkpointed_refs.append(&mut self.pending_refs);
@@ -551,6 +571,8 @@ impl Generation {
     /// Reloads the readers onto the last checkpoint and returns what a query
     /// should see, plus the reference changes that came with it.
     fn publish(&mut self) -> ProviderResult<(Served, Vec<RefChange>)> {
+        self.check_usable()?;
+        self.poisoned = true;
         self.rollback()?;
         self.reader.reload().map_err(ProviderError::internal)?;
         self.words
@@ -570,19 +592,30 @@ impl Generation {
                 n: self.n,
             },
         };
+        self.poisoned = false;
         Ok((served, std::mem::take(&mut self.checkpointed_refs)))
     }
 
+    fn check_usable(&self) -> ProviderResult<()> {
+        if self.poisoned {
+            return Err(ProviderError::new(
+                ProviderErrorCode::EpochMismatch,
+                "index state is ambiguous; a full feed is required",
+            ));
+        }
+        Ok(())
+    }
+
     /// Every searchable note: `(id, version, path)`.
-    fn searchable_notes(&self) -> Vec<NoteKey> {
+    fn searchable_notes(&self) -> BTreeMap<String, NoteKey> {
         self.notes
             .iter()
             .filter(|(_, record)| record.searchable())
-            .map(|(id, record)| NoteKey {
+            .map(|(id, record)| (id.clone(), NoteKey {
                 id: id.clone(),
                 version: record.version.clone(),
                 path: record.path.clone(),
-            })
+            }))
             .collect()
     }
 
@@ -706,13 +739,12 @@ impl Writes {
             }
             None => {
                 if let Some(live) = self.live.as_mut() {
-                    if self
-                        .committed
-                        .is_some_and(|committed| live.n != committed.n)
-                    {
+                    if live.poisoned || self.committed.is_some_and(|committed| live.n != committed.n) {
                         self.needs_full = true;
+                    } else if let Err(error) = live.rollback() {
+                        self.needs_full = true;
+                        return Err(error);
                     }
-                    live.rollback()?;
                 }
             }
         }
@@ -720,16 +752,13 @@ impl Writes {
     }
 
     fn target(&mut self) -> ProviderResult<&mut Generation> {
-        match &mut self.feed {
-            Some(Feed {
-                staging: Some(staging),
-                ..
-            }) => Ok(staging),
-            Some(Feed { staging: None, .. }) => {
-                self.live.as_mut().ok_or_else(ProviderError::no_open_feed)
-            }
-            None => Err(ProviderError::no_open_feed()),
-        }
+        let target = match &mut self.feed {
+            Some(Feed { staging: Some(staging), .. }) => Some(staging),
+            Some(Feed { staging: None, .. }) => self.live.as_mut(),
+            None => None,
+        }.ok_or_else(ProviderError::no_open_feed)?;
+        target.check_usable()?;
+        Ok(target)
     }
 }
 
@@ -744,6 +773,8 @@ struct VectorSnapshot {
 struct SemanticState {
     snapshot: Option<Arc<VectorSnapshot>>,
     as_of: Option<ProviderAsOf>,
+    /// Full generation of these vectors (or of the failure below).
+    base: u64,
     /// Embedding failed; the kind is `unavailable` until the next full feed
     /// embeds completely.
     failed: bool,
@@ -765,8 +796,8 @@ struct Partition {
     /// Sequence number of the latest committed full feed.
     full_seq: AtomicU64,
     retired: AtomicBool,
-    /// Notes committed lexically and not yet embedded.
-    pending: AtomicUsize,
+    /// Outstanding notes in the current full generation, including the running job.
+    pending: Mutex<PendingNotes>,
 }
 
 fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
@@ -789,7 +820,7 @@ impl Partition {
             vector_writer: Mutex::new(None),
             full_seq: AtomicU64::new(0),
             retired: AtomicBool::new(false),
-            pending: AtomicUsize::new(0),
+            pending: Mutex::new(PendingNotes::default()),
         }
     }
 
@@ -805,6 +836,22 @@ impl Partition {
 /// A partial answer: coverage of one kind and its ordered references.
 type KindAnswer = (Vec<ProviderCoverage>, Vec<Arc<ProviderReference>>);
 
+struct QueryPartition<'a> {
+    name: &'a str,
+    partition: Option<Arc<Partition>>,
+    served: Option<Arc<Served>>,
+}
+
+impl QueryPartition<'_> {
+    fn matches(&self, view: &View) -> bool {
+        match (&self.served, &view.served) {
+            (Some(pinned), Some(current)) => Arc::ptr_eq(pinned, current),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
 /// `(id, version, path)` of one note.
 #[derive(Debug, Clone)]
 struct NoteKey {
@@ -814,56 +861,49 @@ struct NoteKey {
 }
 
 enum EmbedWork {
-    /// Embed every note of a full commit into a fresh vector file.
-    Full(Vec<NoteKey>),
-    /// Apply one delta commit to the current vector file.
-    Delta {
-        remove: Vec<String>,
-        upsert: Vec<NoteKey>,
-    },
+    Full(BTreeMap<String, NoteKey>),
+    Delta(BTreeMap<String, Option<NoteKey>>),
 }
 
 impl EmbedWork {
     fn notes(&self) -> usize {
         match self {
             Self::Full(notes) => notes.len(),
-            Self::Delta { remove, upsert } => remove.len() + upsert.len(),
+            Self::Delta(changes) => changes.len(),
         }
     }
 }
 
-/// One commit to embed. Texts are read from `served`, the lexical snapshot
-/// of that same commit, so nothing is kept in memory between put and embed.
+/// Latest lexical snapshot and net work needed to reach it.
 struct EmbedJob {
     partition: Arc<Partition>,
     served: Arc<Served>,
-    as_of: ProviderAsOf,
-    /// The full feed this job belongs to; a later full feed makes it moot.
     base: u64,
     work: EmbedWork,
-    settled: AtomicBool,
+}
+
+#[derive(Default)]
+struct PendingNotes {
+    base: u64,
+    count: usize,
 }
 
 impl EmbedJob {
-    /// Removes this job's notes from the pending count, once. Called under
-    /// the semantic write lock where the job publishes, so a reader never
-    /// sees `ready` at this commit with this job's notes still pending.
+    /// Called under the semantic write lock on publish, or on failure/cancel.
     fn settle(&self) {
-        if !self.settled.swap(true, Ordering::AcqRel) {
-            let count = self.work.notes();
-            let _ = self.partition.pending.fetch_update(
-                Ordering::AcqRel,
-                Ordering::Acquire,
-                |pending| Some(pending.saturating_sub(count)),
-            );
+        let mut pending = lock(&self.partition.pending);
+        if pending.base == self.base {
+            pending.count -= self.work.notes();
         }
     }
 
     fn moot(&self) -> bool {
         self.partition.retired.load(Ordering::Acquire)
-            || self.base < self.partition.full_seq.load(Ordering::Acquire)
+            || self.base != self.partition.full_seq.load(Ordering::Acquire)
     }
 }
+
+type EmbedQueue = Mutex<VecDeque<EmbedJob>>;
 
 /// The loaded embedding model: one instance answers queries, another (owned
 /// by the background worker) embeds commits, so a long feed never delays a
@@ -871,7 +911,9 @@ impl EmbedJob {
 struct SemanticShared {
     dimensions: usize,
     query_embedder: Mutex<Box<dyn Embedder>>,
-    jobs: mpsc::Sender<EmbedJob>,
+    jobs: Arc<EmbedQueue>,
+    /// A single wakeup is enough: the worker drains the queue before sleeping.
+    wake: mpsc::SyncSender<()>,
 }
 
 /// The push-fed store: every partition the host has begun and not retired.
@@ -912,10 +954,12 @@ impl ProviderStore {
         }
         let dimensions = query_embedder.profile().dimensions;
         let partitions_dir = prepare_data_dir(data_dir)?;
-        let (jobs, receiver) = mpsc::channel();
+        let jobs = Arc::new(EmbedQueue::default());
+        let worker_jobs = Arc::clone(&jobs);
+        let (wake, receiver) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("provider-embed".to_owned())
-            .spawn(move || embed_worker(receiver, index_embedder, dimensions))
+            .spawn(move || embed_worker(&worker_jobs, receiver, index_embedder, dimensions))
             .map_err(ProviderError::internal)?;
         Ok(Self {
             partitions_dir,
@@ -924,6 +968,7 @@ impl ProviderStore {
                 dimensions,
                 query_embedder: Mutex::new(query_embedder),
                 jobs,
+                wake,
             }),
         })
     }
@@ -1085,70 +1130,67 @@ impl ProviderStore {
         let partition = self.feeding(name)?;
         let mut writes = partition.lock();
         let feed = writes.feed.take().ok_or_else(ProviderError::no_open_feed)?;
-        let (served, work) = match feed.mode {
-            ProviderFeedMode::Delta => {
-                let live = writes
-                    .live
-                    .as_mut()
-                    .ok_or_else(ProviderError::no_open_feed)?;
-                let (served, changes) = live.publish()?;
-                let served = Arc::new(served);
-                let counts = live.status_counts();
-                let mut view = partition
-                    .view
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                view.apply(&changes);
-                view.served = Some(Arc::clone(&served));
-                view.counts = counts;
-                drop(view);
-                (served, delta_work(&changes))
-            }
-            ProviderFeedMode::Full => {
-                let mut staging = feed
-                    .staging
-                    .ok_or_else(|| ProviderError::internal("full feed without an index"))?;
-                let (served, changes) = staging.publish()?;
-                let served = Arc::new(served);
-                let mut view = View {
-                    served: Some(Arc::clone(&served)),
-                    counts: staging.status_counts(),
-                    ..View::default()
-                };
-                view.apply(&changes);
-                *partition
-                    .view
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = view;
-                let work = EmbedWork::Full(staging.searchable_notes());
-                if let Some(previous) = writes.live.replace(staging) {
-                    let dir = previous.dir.clone();
-                    drop(previous);
+        let full = feed.mode == ProviderFeedMode::Full;
+        let ((served, refs), previous) = if full {
+            let mut staging = feed
+                .staging
+                .ok_or_else(|| ProviderError::internal("full feed without an index"))?;
+            let result = match staging.publish() {
+                Ok(result) => result,
+                Err(error) => {
+                    let dir = staging.dir.clone();
+                    drop(staging);
                     let _ = fs::remove_dir_all(dir);
+                    return Err(error);
                 }
-                writes.needs_full = false;
-                (served, work)
+            };
+            // Keep the previous generation's files until after swapping the view.
+            let previous = writes.live.replace(staging);
+            writes.needs_full = false;
+            (result, previous)
+        } else {
+            let live = writes.live.as_mut().ok_or_else(ProviderError::no_open_feed)?;
+            match live.publish() {
+                Ok(result) => (result, None),
+                Err(error) => {
+                    writes.needs_full = true;
+                    return Err(error);
+                }
             }
         };
         let as_of = served.as_of;
-        writes.committed = Some(as_of);
-        if let Some(semantic) = &self.semantic {
-            let base = match work {
-                EmbedWork::Full(_) => partition.full_seq.fetch_add(1, Ordering::AcqRel) + 1,
-                EmbedWork::Delta { .. } => partition.full_seq.load(Ordering::Acquire),
-            };
-            partition.pending.fetch_add(work.notes(), Ordering::AcqRel);
-            let job = EmbedJob {
-                partition: Arc::clone(&partition),
-                served,
-                as_of,
-                base,
-                work,
-                settled: AtomicBool::new(false),
-            };
-            if semantic.jobs.send(job).is_err() {
-                write_lock(&partition.semantic).failed = true;
+        let served = Arc::new(served);
+        let live = writes.live.as_ref().expect("a successful publish has a live index");
+        let counts = live.status_counts();
+        {
+            let mut view = write_lock(&partition.view);
+            if full {
+                *view = View::default();
             }
+            view.apply(&refs);
+            view.served = Some(Arc::clone(&served));
+            view.counts = counts;
+            if let Some(semantic) = &self.semantic {
+                let base = if full {
+                    partition.full_seq.fetch_add(1, Ordering::AcqRel) + 1
+                } else {
+                    partition.full_seq.load(Ordering::Acquire)
+                };
+                let work = if full {
+                    EmbedWork::Full(live.searchable_notes())
+                } else {
+                    delta_work(refs)
+                };
+                semantic.enqueue(EmbedJob {
+                    partition: Arc::clone(&partition), served, base, work,
+                }, live);
+            }
+        }
+        writes.committed = Some(as_of);
+        if let Some(previous) = previous {
+            let dir = previous.dir.clone();
+            drop(previous);
+            let _ = fs::remove_dir_all(dir);
         }
         Ok(as_of)
     }
@@ -1165,11 +1207,17 @@ impl ProviderStore {
         };
         partition.retired.store(true, Ordering::Release);
         let mut writes = partition.lock();
-        *partition
-            .view
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = View::default();
-        *write_lock(&partition.semantic) = SemanticState::default();
+        {
+            let mut view = write_lock(&partition.view);
+            *view = View::default();
+            *write_lock(&partition.semantic) = SemanticState::default();
+            if let Some(semantic) = &self.semantic {
+                lock(&semantic.jobs).retain(|job| !Arc::ptr_eq(&job.partition, &partition));
+            }
+            let mut pending = lock(&partition.pending);
+            pending.base = u64::MAX;
+            pending.count = 0;
+        }
         *writes = Writes::default();
         let _ = fs::remove_dir_all(&partition.dir);
         Ok(())
@@ -1236,40 +1284,39 @@ impl ProviderStore {
             None => body_words::query_words(question.text),
         };
         let mode = question.mode;
-        let (coverage, refs) = match mode {
-            ProviderMode::Lexical => self.lexical(names, question.text, &terms, limit)?,
-            ProviderMode::Semantic => self.semantic(names, question.text, limit)?,
-            ProviderMode::Hybrid => {
-                let depth = limit.clamp(HYBRID_CANDIDATES, PROVIDER_MAX_LIMIT);
-                let (lexical_coverage, lexical) =
-                    self.lexical(names, question.text, &terms, depth)?;
-                let (semantic_coverage, semantic) = self.semantic(names, question.text, depth)?;
-                let coverage = lexical_coverage
-                    .into_iter()
-                    .zip(semantic_coverage)
-                    .flat_map(|(lexical, semantic)| [lexical, semantic])
-                    .collect();
-                (coverage, fuse(lexical, semantic, limit))
-            }
-        };
-        Ok(ProviderQueryOutcome {
-            mode,
-            coverage,
-            refs: refs.into_iter().map(|r| (*r).clone()).collect(),
-        })
-    }
-
-    fn lexical(
-        &self,
-        names: &[String],
-        text: &str,
-        terms: &[String],
-        limit: usize,
-    ) -> ProviderResult<KindAnswer> {
+        let depth = if mode == ProviderMode::Hybrid { limit.max(HYBRID_CANDIDATES) } else { limit };
+        let mut query = None;
         for _ in 0..QUERY_ATTEMPTS {
-            if let Some(answer) = self.lexical_once(names, text, terms, limit)? {
-                return Ok(answer);
-            }
+            let pinned = self.pin(names);
+            let lexical = if mode != ProviderMode::Semantic {
+                let Some(answer) = Self::lexical_once(&pinned, question.text, &terms, depth)? else {
+                    continue;
+                };
+                Some(answer)
+            } else { None };
+            let semantic = if mode != ProviderMode::Lexical {
+                if query.is_none() {
+                    query = Some(self.embed_query(question.text)?);
+                }
+                let Some(answer) = Self::semantic_once(&pinned, query.as_ref().and_then(|q| q.as_deref()), depth)? else {
+                    continue;
+                };
+                Some(answer)
+            } else { None };
+            let (coverage, refs) = match (lexical, semantic) {
+                (Some((lexical_coverage, lexical)), Some((semantic_coverage, semantic))) => {
+                    let coverage = lexical_coverage.into_iter().zip(semantic_coverage)
+                        .flat_map(|(lexical, semantic)| [lexical, semantic]).collect();
+                    (coverage, fuse(lexical, semantic, limit))
+                }
+                (Some(answer), None) | (None, Some(answer)) => answer,
+                (None, None) => unreachable!("every query has a retrieval leg"),
+            };
+            return Ok(ProviderQueryOutcome {
+                mode,
+                coverage,
+                refs: refs.into_iter().map(|r| (*r).clone()).collect(),
+            });
         }
         Err(ProviderError::new(
             ProviderErrorCode::Unavailable,
@@ -1277,35 +1324,45 @@ impl ProviderStore {
         ))
     }
 
-    /// One attempt; `None` when a commit landed between the search and the
+    fn pin<'a>(&self, names: &'a [String]) -> Vec<QueryPartition<'a>> {
+        let partitions: Vec<_> = {
+            let map = self.map();
+            names.iter().map(|name| map.get(name).cloned()).collect()
+        };
+        names.iter().zip(partitions).map(|(name, partition)| {
+            let served = partition.as_ref().and_then(|p| p.served());
+            QueryPartition { name, partition, served }
+        }).collect()
+    }
+
+    /// One attempt; `None` when a commit landed between the search and its
     /// reference lookup, so the hits cannot be paired with one `asOf`.
     fn lexical_once(
-        &self,
-        names: &[String],
+        partitions: &[QueryPartition<'_>],
         text: &str,
         terms: &[String],
         limit: usize,
     ) -> ProviderResult<Option<KindAnswer>> {
-        let mut coverage = Vec::with_capacity(names.len());
+        let mut coverage = Vec::with_capacity(partitions.len());
         let mut pinned = Vec::new();
-        for name in names {
-            let partition = self.map().get(name).cloned();
-            let served = partition.as_ref().and_then(|p| p.served());
-            let state = match (&partition, &served) {
+        for pin in partitions {
+            let state = match (&pin.partition, &pin.served) {
                 (_, Some(_)) => ProviderState::Ready,
                 (Some(_), None) => ProviderState::Building,
                 (None, None) => ProviderState::Unavailable,
             };
             coverage.push(ProviderCoverage {
-                partition: name.clone(),
+                partition: pin.name.to_owned(),
                 kind: ProviderKind::Lexical,
                 state,
-                as_of: served.as_ref().map(|s| s.as_of),
+                as_of: pin.served.as_ref().map(|s| s.as_of),
             });
-            if let (Some(partition), Some(served)) = (partition, served) {
-                pinned.push((partition, served));
+            if let (Some(partition), Some(served)) = (&pin.partition, &pin.served) {
+                pinned.push((Arc::clone(partition), Arc::clone(served)));
             }
         }
+        // Keep acquisition order independent of the caller's partition order.
+        pinned.sort_unstable_by(|(_, left), (_, right)| left.owner.cmp(&right.owner));
         if text.trim().is_empty() || pinned.is_empty() {
             return Ok(Some((coverage, Vec::new())));
         }
@@ -1371,29 +1428,25 @@ impl ProviderStore {
         Ok(Some((coverage, superset_order(ranked, all_terms, limit))))
     }
 
-    fn semantic(&self, names: &[String], text: &str, limit: usize) -> ProviderResult<KindAnswer> {
-        let semantic = self
-            .semantic
-            .as_ref()
-            .ok_or_else(ProviderError::mode_unavailable)?;
-        let query = if text.trim().is_empty() {
-            None
-        } else {
-            let vector = lock(&semantic.query_embedder)
-                .embed_query(text)
-                .map_err(ProviderError::internal)?;
-            if vector.len() != semantic.dimensions {
-                return Err(ProviderError::internal("query vector has the wrong width"));
-            }
-            Some(vector)
-        };
-        let mut coverage = Vec::with_capacity(names.len());
+    fn embed_query(&self, text: &str) -> ProviderResult<Option<Vec<f32>>> {
+        let semantic = self.semantic.as_ref().ok_or_else(ProviderError::mode_unavailable)?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let vector = lock(&semantic.query_embedder).embed_query(text).map_err(ProviderError::internal)?;
+        if vector.len() != semantic.dimensions {
+            return Err(ProviderError::internal("query vector has the wrong width"));
+        }
+        Ok(Some(vector))
+    }
+
+    fn semantic_once(partitions: &[QueryPartition<'_>], query: Option<&[f32]>, limit: usize) -> ProviderResult<Option<KindAnswer>> {
+        let mut coverage = Vec::with_capacity(partitions.len());
         let mut hits: Vec<(vectors::NoteHit, Arc<ProviderReference>)> = Vec::new();
-        for name in names {
-            let partition = self.map().get(name).cloned();
-            let Some(partition) = partition else {
+        for pin in partitions {
+            let Some(partition) = &pin.partition else {
                 coverage.push(ProviderCoverage {
-                    partition: name.clone(),
+                    partition: pin.name.to_owned(),
                     kind: ProviderKind::Semantic,
                     state: ProviderState::Unavailable,
                     as_of: None,
@@ -1403,15 +1456,19 @@ impl ProviderStore {
             // Both locks are held for the search, so the refs, the state and
             // `asOf` describe the same vector file and the same lexical commit.
             let view = read(&partition.view);
+            if !pin.matches(&view) {
+                return Ok(None);
+            }
             let state = read(&partition.semantic);
-            let (kind_state, as_of) = semantic_state(view.served.as_ref().map(|s| s.as_of), &state);
+            let base = partition.full_seq.load(Ordering::Acquire);
+            let (kind_state, as_of) = semantic_state(pin.served.as_ref().map(|s| s.as_of), base, &state);
             coverage.push(ProviderCoverage {
-                partition: name.clone(),
+                partition: pin.name.to_owned(),
                 kind: ProviderKind::Semantic,
                 state: kind_state,
                 as_of,
             });
-            let (Some(query), Some(snapshot), false) = (&query, &state.snapshot, state.failed)
+            let (Some(query), Some(snapshot), Some(_)) = (query, &state.snapshot, as_of)
             else {
                 continue;
             };
@@ -1439,10 +1496,10 @@ impl ProviderStore {
                 .then_with(|| left_ref.partition.cmp(&right_ref.partition))
         });
         hits.truncate(limit);
-        Ok((
+        Ok(Some((
             coverage,
             hits.into_iter().map(|(_, reference)| reference).collect(),
-        ))
+        )))
     }
 
     pub fn status(&self, name: &str) -> ProviderResult<ProviderStatus> {
@@ -1461,18 +1518,20 @@ impl ProviderStore {
                 }),
             });
         };
-        let (as_of, (notes, excluded, partial)) = {
-            let view = read(&partition.view);
-            (view.served.as_ref().map(|s| s.as_of), view.counts.clone())
-        };
+        let view = read(&partition.view);
+        let as_of = view.served.as_ref().map(|s| s.as_of);
+        let (notes, excluded, partial) = view.counts.clone();
         let semantic = self.semantic.as_ref().map(|_| {
-            let (state, kind_as_of) = semantic_state(as_of, &read(&partition.semantic));
+            let semantic = read(&partition.semantic);
+            let base = partition.full_seq.load(Ordering::Acquire);
+            let (state, kind_as_of) = semantic_state(as_of, base, &semantic);
             ProviderKindStatus {
                 state,
                 as_of: kind_as_of,
-                pending_notes: partition.pending.load(Ordering::Acquire),
+                pending_notes: lock(&partition.pending).count,
             }
         });
+        drop(view);
         Ok(ProviderStatus {
             state: if as_of.is_some() {
                 ProviderState::Ready
@@ -1516,16 +1575,18 @@ fn prepare_data_dir(data_dir: &Path) -> ProviderResult<PathBuf> {
     Ok(partitions_dir)
 }
 
-/// Semantic state of a partition whose lexical kind is at `lexical`:
-/// `ready` only when the vectors hold that very commit; while embedding
-/// lags, `building` at the last commit embedded completely.
+/// Classify coverage against the lexical snapshot under the view lock.
+/// A previous full build (in particular a prior epoch) is not valid coverage.
 fn semantic_state(
     lexical: Option<ProviderAsOf>,
+    base: u64,
     state: &SemanticState,
 ) -> (ProviderState, Option<ProviderAsOf>) {
-    if state.failed {
+    if state.base != base || lexical.is_none() {
+        (ProviderState::Building, None)
+    } else if state.failed {
         (ProviderState::Unavailable, None)
-    } else if state.as_of.is_some() && state.as_of == lexical {
+    } else if state.as_of == lexical {
         (ProviderState::Ready, state.as_of)
     } else {
         (ProviderState::Building, state.as_of)
@@ -1533,24 +1594,67 @@ fn semantic_state(
 }
 
 /// The net effect of one delta commit, per id (the last change wins).
-fn delta_work(changes: &[RefChange]) -> EmbedWork {
-    let mut last: BTreeMap<&str, &RefChange> = BTreeMap::new();
-    for change in changes {
-        last.insert(&change.id, change);
-    }
-    let mut remove = Vec::new();
-    let mut upsert = Vec::new();
-    for (id, change) in last {
-        match &change.reference {
-            Some(reference) => upsert.push(NoteKey {
-                id: id.to_owned(),
-                version: reference.version.clone(),
-                path: change.path.clone(),
-            }),
-            None => remove.push(id.to_owned()),
+fn delta_work(changes: Vec<RefChange>) -> EmbedWork {
+    EmbedWork::Delta(changes.into_iter().map(|change| {
+        let key = change.reference.map(|reference| NoteKey {
+            id: change.id.clone(),
+            version: reference.version.clone(),
+            path: change.path,
+        });
+        (change.id, key)
+    }).collect())
+}
+
+impl SemanticShared {
+    /// Never waits for passage embedding or a vector transaction. The view
+    /// lock pairs pending accounting with the lexical commit that queued it.
+    fn enqueue(&self, mut job: EmbedJob, live: &Generation) {
+        let partition = Arc::clone(&job.partition);
+        let mut queue = lock(&self.jobs);
+        let queued = queue.iter().position(|old| Arc::ptr_eq(&old.partition, &partition));
+        let mut pending = lock(&partition.pending);
+        if pending.base != job.base {
+            *pending = PendingNotes { base: job.base, count: 0 };
+        }
+        if let Some(index) = queued
+            && let Some(previous) = queue.remove(index)
+            && previous.base == job.base
+        {
+            pending.count -= previous.work.notes();
+            if let EmbedWork::Delta(changes) = job.work {
+                job.work = match previous.work {
+                    EmbedWork::Full(mut notes) => {
+                        for (id, change) in changes {
+                            if let Some(note) = change { notes.insert(id, note); }
+                            else { notes.remove(&id); }
+                        }
+                        EmbedWork::Full(notes)
+                    }
+                    EmbedWork::Delta(mut earlier) => {
+                        earlier.extend(changes);
+                        EmbedWork::Delta(earlier)
+                    }
+                };
+            }
+        }
+        if matches!(&job.work, EmbedWork::Delta(changes) if changes.len() > EMBED_MAX_PENDING_CHANGES) {
+            job.work = EmbedWork::Full(live.searchable_notes());
+        }
+        pending.count += job.work.notes();
+        let index = queued.unwrap_or(queue.len());
+        queue.insert(index, job);
+        // Full is fine: the worker already has a wakeup. Disconnected can
+        // only happen if the embedding thread exited unexpectedly.
+        if self.wake.try_send(()) == Err(mpsc::TrySendError::Disconnected(())) {
+            pending.count = 0;
+            queue.retain(|job| !Arc::ptr_eq(&job.partition, &partition));
+            drop(pending);
+            drop(queue);
+            let mut state = write_lock(&partition.semantic);
+            state.base = partition.full_seq.load(Ordering::Acquire);
+            state.failed = true;
         }
     }
-    EmbedWork::Delta { remove, upsert }
 }
 
 /// Lexical answer under the recall obligation.
@@ -1637,7 +1741,8 @@ fn fuse(
     let key =
         |reference: &ProviderReference| format!("{}\u{1f}{}", reference.partition, reference.id);
     let mut by_key: HashMap<String, Arc<ProviderReference>> = HashMap::new();
-    // Lexical refs first, so a note in both keeps the lexical commit's version.
+    // Both legs resolve against the same lexical commit, so overlap has the
+    // same version in both lists.
     for reference in semantic.iter().chain(lexical.iter()) {
         by_key.insert(key(reference), Arc::clone(reference));
     }
@@ -1746,122 +1851,155 @@ impl SegmentCollector for SlotSegmentCollector {
     }
 }
 
-/// The background embedding worker: one job per commit, in commit order.
+/// One worker, draining one coalesced job per partition in queue order.
 fn embed_worker(
-    jobs: mpsc::Receiver<EmbedJob>,
+    jobs: &EmbedQueue,
+    wake: mpsc::Receiver<()>,
     mut embedder: Box<dyn Embedder>,
     dimensions: usize,
 ) {
-    while let Ok(job) = jobs.recv() {
-        if let Err(error) = run_job(&job, embedder.as_mut(), dimensions)
-            && !job.moot()
-        {
-            eprintln!("provider helper: embedding failed: {}", error.detail);
-            write_lock(&job.partition.semantic).failed = true;
+    while wake.recv().is_ok() {
+        loop {
+            let Some(job) = lock(jobs).pop_front() else { break };
+            // `true` means the job already settled while publishing coverage.
+            let result = run_job(&job, embedder.as_mut(), dimensions);
+            if !matches!(result, Ok(true)) {
+                let mut state = write_lock(&job.partition.semantic);
+                if let Err(error) = result && !job.moot() {
+                    eprintln!("provider helper: embedding failed: {}", error.detail);
+                    state.base = job.base;
+                    state.failed = true;
+                }
+                job.settle();
+            }
         }
-        // Idempotent: a job that published settled its count there already.
-        job.settle();
     }
 }
 
-fn run_job(job: &EmbedJob, embedder: &mut dyn Embedder, dimensions: usize) -> ProviderResult<()> {
+/// Unpublished full builds can fail or be superseded at any point.
+struct StagedVectors(PathBuf);
+
+impl Drop for StagedVectors {
+    fn drop(&mut self) {
+        if !self.0.as_os_str().is_empty() {
+            remove_vector_file(&self.0);
+        }
+    }
+}
+
+fn run_job(job: &EmbedJob, embedder: &mut dyn Embedder, dimensions: usize) -> ProviderResult<bool> {
     if job.moot() {
-        return Ok(());
+        return Ok(false);
+    }
+    {
+        let state = read(&job.partition.semantic);
+        // Only a new full feed (a different base) can recover a failure.
+        if state.base == job.base && state.failed {
+            return Ok(false);
+        }
     }
     match &job.work {
         EmbedWork::Full(notes) => {
-            let path =
-                job.partition
-                    .dir
-                    .join(format!("vectors-{}-{}.sqlite", job.base, unique_suffix()));
-            let mut conn = vectors::open(&path, dimensions)?;
-            for batch in notes.chunks(EMBED_NOTES_PER_BATCH) {
-                if job.moot() {
-                    drop(conn);
-                    remove_vector_file(&path);
-                    return Ok(());
-                }
-                let upsert = embed_notes(&job.served, batch, embedder, dimensions)?;
-                vectors::apply(&mut conn, &[], &upsert)?;
+            let mut staged = StagedVectors(job.partition.dir.join(format!("vectors-{}-{}.sqlite", job.base, unique_suffix())));
+            let mut conn = vectors::open(&staged.0, dimensions)?;
+            let tx = vectors::begin(&mut conn)?;
+            if !embed_notes(job, &tx, notes.values(), embedder, dimensions)? {
+                return Ok(false);
             }
-            let reader = vectors::open(&path, dimensions)?;
+            vectors::commit(tx)?;
+            let reader = vectors::open(&staged.0, dimensions)?;
             let mut writer = lock(&job.partition.vector_writer);
             {
                 let mut state = write_lock(&job.partition.semantic);
                 if job.moot() {
-                    drop(state);
-                    drop(conn);
-                    drop(reader);
-                    remove_vector_file(&path);
-                    return Ok(());
+                    return Ok(false);
                 }
                 job.settle();
                 *state = SemanticState {
-                    snapshot: Some(Arc::new(VectorSnapshot {
-                        read: Mutex::new(reader),
-                    })),
-                    as_of: Some(job.as_of),
+                    snapshot: Some(Arc::new(VectorSnapshot { read: Mutex::new(reader) })),
+                    as_of: Some(job.served.as_of),
+                    base: job.base,
                     failed: false,
                 };
             }
+            let path = std::mem::take(&mut staged.0);
             if let Some(previous) = writer.replace(VectorWriter { path, conn }) {
                 let old = previous.path.clone();
                 drop(previous);
                 remove_vector_file(&old);
             }
-            Ok(())
+            Ok(true)
         }
-        EmbedWork::Delta { remove, upsert } => {
-            if read(&job.partition.semantic).failed {
-                return Ok(());
-            }
-            let upsert = embed_notes(&job.served, upsert, embedder, dimensions)?;
+        EmbedWork::Delta(changes) => {
             let mut writer = lock(&job.partition.vector_writer);
-            let writer = writer
-                .as_mut()
-                .ok_or_else(|| ProviderError::internal("a delta arrived before any full feed"))?;
+            let writer = writer.as_mut().ok_or_else(|| ProviderError::internal("a delta arrived before any full feed"))?;
+            let tx = vectors::begin(&mut writer.conn)?;
+            for (id, change) in changes {
+                if change.is_none() {
+                    vectors::remove_note(&tx, id)?;
+                }
+            }
+            if !embed_notes(job, &tx, changes.values().filter_map(Option::as_ref), embedder, dimensions)? {
+                return Ok(false);
+            }
+            // While passages are embedded, WAL readers still see the last
+            // transaction. Hold the semantic lock only for publication.
             let mut state = write_lock(&job.partition.semantic);
             if job.moot() {
-                return Ok(());
+                return Ok(false);
             }
-            vectors::apply(&mut writer.conn, remove, &upsert)?;
+            vectors::commit(tx)?;
             job.settle();
-            state.as_of = Some(job.as_of);
-            Ok(())
+            state.as_of = Some(job.served.as_of);
+            Ok(true)
         }
     }
 }
 
-/// Embeds every chunk of `notes`, reading the chunk texts the lexical
-/// commit stored (heading breadcrumb + content, as the daemon embeds them).
-fn embed_notes(
-    served: &Served,
-    notes: &[NoteKey],
+fn embed_notes<'a>(
+    job: &EmbedJob,
+    tx: &rusqlite::Transaction<'_>,
+    notes: impl Iterator<Item = &'a NoteKey>,
     embedder: &mut dyn Embedder,
     dimensions: usize,
-) -> ProviderResult<Vec<vectors::NoteVectors>> {
-    let mut texts = Vec::new();
-    let mut spans = Vec::with_capacity(notes.len());
+) -> ProviderResult<bool> {
+    let mut texts = Vec::with_capacity(EMBED_CHUNKS_PER_BATCH);
+    let mut slots = Vec::with_capacity(EMBED_CHUNKS_PER_BATCH);
+    let mut bytes = 0;
     for note in notes {
-        let chunk_texts = chunk_texts(served, &note.path)?;
-        spans.push((note, texts.len(), chunk_texts.len()));
-        texts.extend(chunk_texts);
+        if job.moot() {
+            return Ok(false);
+        }
+        let slot = vectors::replace_note(tx, &note.id, &note.version)?;
+        for address in chunk_addresses(&job.served, &note.path)? {
+            let text = chunk_text(&job.served, address)?;
+            if !texts.is_empty() && (texts.len() == EMBED_CHUNKS_PER_BATCH || bytes + text.len() > EMBED_BYTES_PER_BATCH) {
+                if job.moot() { return Ok(false); }
+                embed_batch(tx, embedder, dimensions, &mut texts, &mut slots)?;
+                bytes = 0;
+            }
+            bytes += text.len();
+            texts.push(text);
+            slots.push(slot);
+        }
     }
-    let total = texts.len();
-    let embedded = embed_by_length(embedder, texts)?;
-    if embedded.len() != total || embedded.iter().any(|v| v.len() != dimensions) {
-        return Err(ProviderError::internal(
-            "the embedder returned the wrong number or width of vectors",
-        ));
+    if job.moot() { return Ok(false); }
+    embed_batch(tx, embedder, dimensions, &mut texts, &mut slots)?;
+    Ok(true)
+}
+
+fn embed_batch(
+    tx: &rusqlite::Transaction<'_>,
+    embedder: &mut dyn Embedder,
+    dimensions: usize,
+    texts: &mut Vec<String>,
+    slots: &mut Vec<i64>,
+) -> ProviderResult<()> {
+    let embedded = embed_by_length(embedder, std::mem::take(texts))?;
+    if embedded.iter().any(|v| v.len() != dimensions) {
+        return Err(ProviderError::internal("the embedder returned the wrong width of vectors"));
     }
-    Ok(spans
-        .into_iter()
-        .map(|(note, start, count)| vectors::NoteVectors {
-            id: note.id.clone(),
-            version: note.version.clone(),
-            vectors: embedded[start..start + count].to_vec(),
-        })
-        .collect())
+    vectors::insert_chunks(tx, slots.drain(..).zip(embedded))
 }
 
 /// Embeds `texts` in order of length and returns the vectors in the original
@@ -1895,7 +2033,7 @@ fn embed_by_length(
     Ok(out)
 }
 
-fn chunk_texts(served: &Served, path: &str) -> ProviderResult<Vec<String>> {
+fn chunk_addresses(served: &Served, path: &str) -> ProviderResult<Vec<tantivy::DocAddress>> {
     let query = TermQuery::new(
         Term::from_field_text(
             served.source_key,
@@ -1910,25 +2048,18 @@ fn chunk_texts(served: &Served, path: &str) -> ProviderResult<Vec<String>> {
         .into_iter()
         .collect();
     addresses.sort();
-    addresses
-        .into_iter()
-        .map(|address| {
-            let document: TantivyDocument = served
-                .searcher
-                .doc(address)
-                .map_err(ProviderError::internal)?;
-            let heading: Vec<String> = document
-                .get_first(served.fields.heading_path)
-                .and_then(|value| value.as_str())
-                .and_then(|value| serde_json::from_str(value).ok())
-                .unwrap_or_default();
-            let content = document
-                .get_first(served.fields.content)
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            Ok(embedding_text(&heading, content))
-        })
-        .collect()
+    Ok(addresses)
+}
+
+fn chunk_text(served: &Served, address: tantivy::DocAddress) -> ProviderResult<String> {
+    let document: TantivyDocument = served.searcher.doc(address).map_err(ProviderError::internal)?;
+    let heading: Vec<String> = document.get_first(served.fields.heading_path)
+        .and_then(|value| value.as_str())
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default();
+    let content = document.get_first(served.fields.content)
+        .and_then(|value| value.as_str()).unwrap_or_default();
+    Ok(embedding_text(&heading, content))
 }
 
 fn remove_vector_file(path: &Path) {
