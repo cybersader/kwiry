@@ -327,7 +327,9 @@ impl WordsIndex {
     fn commit(&mut self) -> ProviderResult<()> {
         #[cfg(test)]
         if std::mem::take(&mut self.fail_commit) {
-            return Err(ProviderError::internal("injected body-words commit failure"));
+            return Err(ProviderError::internal(
+                "injected body-words commit failure",
+            ));
         }
         self.writer.commit().map_err(ProviderError::internal)?;
         Ok(())
@@ -611,11 +613,16 @@ impl Generation {
         self.notes
             .iter()
             .filter(|(_, record)| record.searchable())
-            .map(|(id, record)| (id.clone(), NoteKey {
-                id: id.clone(),
-                version: record.version.clone(),
-                path: record.path.clone(),
-            }))
+            .map(|(id, record)| {
+                (
+                    id.clone(),
+                    NoteKey {
+                        id: id.clone(),
+                        version: record.version.clone(),
+                        path: record.path.clone(),
+                    },
+                )
+            })
             .collect()
     }
 
@@ -739,7 +746,11 @@ impl Writes {
             }
             None => {
                 if let Some(live) = self.live.as_mut() {
-                    if live.poisoned || self.committed.is_some_and(|committed| live.n != committed.n) {
+                    if live.poisoned
+                        || self
+                            .committed
+                            .is_some_and(|committed| live.n != committed.n)
+                    {
                         self.needs_full = true;
                     } else if let Err(error) = live.rollback() {
                         self.needs_full = true;
@@ -753,10 +764,14 @@ impl Writes {
 
     fn target(&mut self) -> ProviderResult<&mut Generation> {
         let target = match &mut self.feed {
-            Some(Feed { staging: Some(staging), .. }) => Some(staging),
+            Some(Feed {
+                staging: Some(staging),
+                ..
+            }) => Some(staging),
             Some(Feed { staging: None, .. }) => self.live.as_mut(),
             None => None,
-        }.ok_or_else(ProviderError::no_open_feed)?;
+        }
+        .ok_or_else(ProviderError::no_open_feed)?;
         target.check_usable()?;
         Ok(target)
     }
@@ -1149,7 +1164,10 @@ impl ProviderStore {
             writes.needs_full = false;
             (result, previous)
         } else {
-            let live = writes.live.as_mut().ok_or_else(ProviderError::no_open_feed)?;
+            let live = writes
+                .live
+                .as_mut()
+                .ok_or_else(ProviderError::no_open_feed)?;
             match live.publish() {
                 Ok(result) => (result, None),
                 Err(error) => {
@@ -1160,7 +1178,10 @@ impl ProviderStore {
         };
         let as_of = served.as_of;
         let served = Arc::new(served);
-        let live = writes.live.as_ref().expect("a successful publish has a live index");
+        let live = writes
+            .live
+            .as_ref()
+            .expect("a successful publish has a live index");
         let counts = live.status_counts();
         {
             let mut view = write_lock(&partition.view);
@@ -1181,9 +1202,15 @@ impl ProviderStore {
                 } else {
                     delta_work(refs)
                 };
-                semantic.enqueue(EmbedJob {
-                    partition: Arc::clone(&partition), served, base, work,
-                }, live);
+                semantic.enqueue(
+                    EmbedJob {
+                        partition: Arc::clone(&partition),
+                        served,
+                        base,
+                        work,
+                    },
+                    live,
+                );
             }
         }
         writes.committed = Some(as_of);
@@ -1284,29 +1311,43 @@ impl ProviderStore {
             None => body_words::query_words(question.text),
         };
         let mode = question.mode;
-        let depth = if mode == ProviderMode::Hybrid { limit.max(HYBRID_CANDIDATES) } else { limit };
+        let depth = if mode == ProviderMode::Hybrid {
+            limit.max(HYBRID_CANDIDATES)
+        } else {
+            limit
+        };
         let mut query = None;
         for _ in 0..QUERY_ATTEMPTS {
             let pinned = self.pin(names);
             let lexical = if mode != ProviderMode::Semantic {
-                let Some(answer) = Self::lexical_once(&pinned, question.text, &terms, depth)? else {
+                let Some(answer) = Self::lexical_once(&pinned, question.text, &terms, depth)?
+                else {
                     continue;
                 };
                 Some(answer)
-            } else { None };
+            } else {
+                None
+            };
             let semantic = if mode != ProviderMode::Lexical {
                 if query.is_none() {
                     query = Some(self.embed_query(question.text)?);
                 }
-                let Some(answer) = Self::semantic_once(&pinned, query.as_ref().and_then(|q| q.as_deref()), depth)? else {
+                let Some(answer) =
+                    Self::semantic_once(&pinned, query.as_ref().and_then(|q| q.as_deref()), depth)?
+                else {
                     continue;
                 };
                 Some(answer)
-            } else { None };
+            } else {
+                None
+            };
             let (coverage, refs) = match (lexical, semantic) {
                 (Some((lexical_coverage, lexical)), Some((semantic_coverage, semantic))) => {
-                    let coverage = lexical_coverage.into_iter().zip(semantic_coverage)
-                        .flat_map(|(lexical, semantic)| [lexical, semantic]).collect();
+                    let coverage = lexical_coverage
+                        .into_iter()
+                        .zip(semantic_coverage)
+                        .flat_map(|(lexical, semantic)| [lexical, semantic])
+                        .collect();
                     (coverage, fuse(lexical, semantic, limit))
                 }
                 (Some(answer), None) | (None, Some(answer)) => answer,
@@ -1329,10 +1370,18 @@ impl ProviderStore {
             let map = self.map();
             names.iter().map(|name| map.get(name).cloned()).collect()
         };
-        names.iter().zip(partitions).map(|(name, partition)| {
-            let served = partition.as_ref().and_then(|p| p.served());
-            QueryPartition { name, partition, served }
-        }).collect()
+        names
+            .iter()
+            .zip(partitions)
+            .map(|(name, partition)| {
+                let served = partition.as_ref().and_then(|p| p.served());
+                QueryPartition {
+                    name,
+                    partition,
+                    served,
+                }
+            })
+            .collect()
     }
 
     /// One attempt; `None` when a commit landed between the search and its
@@ -1429,18 +1478,27 @@ impl ProviderStore {
     }
 
     fn embed_query(&self, text: &str) -> ProviderResult<Option<Vec<f32>>> {
-        let semantic = self.semantic.as_ref().ok_or_else(ProviderError::mode_unavailable)?;
+        let semantic = self
+            .semantic
+            .as_ref()
+            .ok_or_else(ProviderError::mode_unavailable)?;
         if text.trim().is_empty() {
             return Ok(None);
         }
-        let vector = lock(&semantic.query_embedder).embed_query(text).map_err(ProviderError::internal)?;
+        let vector = lock(&semantic.query_embedder)
+            .embed_query(text)
+            .map_err(ProviderError::internal)?;
         if vector.len() != semantic.dimensions {
             return Err(ProviderError::internal("query vector has the wrong width"));
         }
         Ok(Some(vector))
     }
 
-    fn semantic_once(partitions: &[QueryPartition<'_>], query: Option<&[f32]>, limit: usize) -> ProviderResult<Option<KindAnswer>> {
+    fn semantic_once(
+        partitions: &[QueryPartition<'_>],
+        query: Option<&[f32]>,
+        limit: usize,
+    ) -> ProviderResult<Option<KindAnswer>> {
         let mut coverage = Vec::with_capacity(partitions.len());
         let mut hits: Vec<(vectors::NoteHit, Arc<ProviderReference>)> = Vec::new();
         for pin in partitions {
@@ -1461,15 +1519,15 @@ impl ProviderStore {
             }
             let state = read(&partition.semantic);
             let base = partition.full_seq.load(Ordering::Acquire);
-            let (kind_state, as_of) = semantic_state(pin.served.as_ref().map(|s| s.as_of), base, &state);
+            let (kind_state, as_of) =
+                semantic_state(pin.served.as_ref().map(|s| s.as_of), base, &state);
             coverage.push(ProviderCoverage {
                 partition: pin.name.to_owned(),
                 kind: ProviderKind::Semantic,
                 state: kind_state,
                 as_of,
             });
-            let (Some(query), Some(snapshot), Some(_)) = (query, &state.snapshot, as_of)
-            else {
+            let (Some(query), Some(snapshot), Some(_)) = (query, &state.snapshot, as_of) else {
                 continue;
             };
             let conn = lock(&snapshot.read);
@@ -1595,14 +1653,19 @@ fn semantic_state(
 
 /// The net effect of one delta commit, per id (the last change wins).
 fn delta_work(changes: Vec<RefChange>) -> EmbedWork {
-    EmbedWork::Delta(changes.into_iter().map(|change| {
-        let key = change.reference.map(|reference| NoteKey {
-            id: change.id.clone(),
-            version: reference.version.clone(),
-            path: change.path,
-        });
-        (change.id, key)
-    }).collect())
+    EmbedWork::Delta(
+        changes
+            .into_iter()
+            .map(|change| {
+                let key = change.reference.map(|reference| NoteKey {
+                    id: change.id.clone(),
+                    version: reference.version.clone(),
+                    path: change.path,
+                });
+                (change.id, key)
+            })
+            .collect(),
+    )
 }
 
 impl SemanticShared {
@@ -1611,10 +1674,15 @@ impl SemanticShared {
     fn enqueue(&self, mut job: EmbedJob, live: &Generation) {
         let partition = Arc::clone(&job.partition);
         let mut queue = lock(&self.jobs);
-        let queued = queue.iter().position(|old| Arc::ptr_eq(&old.partition, &partition));
+        let queued = queue
+            .iter()
+            .position(|old| Arc::ptr_eq(&old.partition, &partition));
         let mut pending = lock(&partition.pending);
         if pending.base != job.base {
-            *pending = PendingNotes { base: job.base, count: 0 };
+            *pending = PendingNotes {
+                base: job.base,
+                count: 0,
+            };
         }
         if let Some(index) = queued
             && let Some(previous) = queue.remove(index)
@@ -1625,8 +1693,11 @@ impl SemanticShared {
                 job.work = match previous.work {
                     EmbedWork::Full(mut notes) => {
                         for (id, change) in changes {
-                            if let Some(note) = change { notes.insert(id, note); }
-                            else { notes.remove(&id); }
+                            if let Some(note) = change {
+                                notes.insert(id, note);
+                            } else {
+                                notes.remove(&id);
+                            }
                         }
                         EmbedWork::Full(notes)
                     }
@@ -1637,7 +1708,8 @@ impl SemanticShared {
                 };
             }
         }
-        if matches!(&job.work, EmbedWork::Delta(changes) if changes.len() > EMBED_MAX_PENDING_CHANGES) {
+        if matches!(&job.work, EmbedWork::Delta(changes) if changes.len() > EMBED_MAX_PENDING_CHANGES)
+        {
             job.work = EmbedWork::Full(live.searchable_notes());
         }
         pending.count += job.work.notes();
@@ -1860,12 +1932,16 @@ fn embed_worker(
 ) {
     while wake.recv().is_ok() {
         loop {
-            let Some(job) = lock(jobs).pop_front() else { break };
+            let Some(job) = lock(jobs).pop_front() else {
+                break;
+            };
             // `true` means the job already settled while publishing coverage.
             let result = run_job(&job, embedder.as_mut(), dimensions);
             if !matches!(result, Ok(true)) {
                 let mut state = write_lock(&job.partition.semantic);
-                if let Err(error) = result && !job.moot() {
+                if let Err(error) = result
+                    && !job.moot()
+                {
                     eprintln!("provider helper: embedding failed: {}", error.detail);
                     state.base = job.base;
                     state.failed = true;
@@ -1900,7 +1976,11 @@ fn run_job(job: &EmbedJob, embedder: &mut dyn Embedder, dimensions: usize) -> Pr
     }
     match &job.work {
         EmbedWork::Full(notes) => {
-            let mut staged = StagedVectors(job.partition.dir.join(format!("vectors-{}-{}.sqlite", job.base, unique_suffix())));
+            let mut staged = StagedVectors(job.partition.dir.join(format!(
+                "vectors-{}-{}.sqlite",
+                job.base,
+                unique_suffix()
+            )));
             let mut conn = vectors::open(&staged.0, dimensions)?;
             let tx = vectors::begin(&mut conn)?;
             if !embed_notes(job, &tx, notes.values(), embedder, dimensions)? {
@@ -1916,7 +1996,9 @@ fn run_job(job: &EmbedJob, embedder: &mut dyn Embedder, dimensions: usize) -> Pr
                 }
                 job.settle();
                 *state = SemanticState {
-                    snapshot: Some(Arc::new(VectorSnapshot { read: Mutex::new(reader) })),
+                    snapshot: Some(Arc::new(VectorSnapshot {
+                        read: Mutex::new(reader),
+                    })),
                     as_of: Some(job.served.as_of),
                     base: job.base,
                     failed: false,
@@ -1932,14 +2014,22 @@ fn run_job(job: &EmbedJob, embedder: &mut dyn Embedder, dimensions: usize) -> Pr
         }
         EmbedWork::Delta(changes) => {
             let mut writer = lock(&job.partition.vector_writer);
-            let writer = writer.as_mut().ok_or_else(|| ProviderError::internal("a delta arrived before any full feed"))?;
+            let writer = writer
+                .as_mut()
+                .ok_or_else(|| ProviderError::internal("a delta arrived before any full feed"))?;
             let tx = vectors::begin(&mut writer.conn)?;
             for (id, change) in changes {
                 if change.is_none() {
                     vectors::remove_note(&tx, id)?;
                 }
             }
-            if !embed_notes(job, &tx, changes.values().filter_map(Option::as_ref), embedder, dimensions)? {
+            if !embed_notes(
+                job,
+                &tx,
+                changes.values().filter_map(Option::as_ref),
+                embedder,
+                dimensions,
+            )? {
                 return Ok(false);
             }
             // While passages are embedded, WAL readers still see the last
@@ -1973,8 +2063,13 @@ fn embed_notes<'a>(
         let slot = vectors::replace_note(tx, &note.id, &note.version)?;
         for address in chunk_addresses(&job.served, &note.path)? {
             let text = chunk_text(&job.served, address)?;
-            if !texts.is_empty() && (texts.len() == EMBED_CHUNKS_PER_BATCH || bytes + text.len() > EMBED_BYTES_PER_BATCH) {
-                if job.moot() { return Ok(false); }
+            if !texts.is_empty()
+                && (texts.len() == EMBED_CHUNKS_PER_BATCH
+                    || bytes + text.len() > EMBED_BYTES_PER_BATCH)
+            {
+                if job.moot() {
+                    return Ok(false);
+                }
                 embed_batch(tx, embedder, dimensions, &mut texts, &mut slots)?;
                 bytes = 0;
             }
@@ -1983,7 +2078,9 @@ fn embed_notes<'a>(
             slots.push(slot);
         }
     }
-    if job.moot() { return Ok(false); }
+    if job.moot() {
+        return Ok(false);
+    }
     embed_batch(tx, embedder, dimensions, &mut texts, &mut slots)?;
     Ok(true)
 }
@@ -1997,7 +2094,9 @@ fn embed_batch(
 ) -> ProviderResult<()> {
     let embedded = embed_by_length(embedder, std::mem::take(texts))?;
     if embedded.iter().any(|v| v.len() != dimensions) {
-        return Err(ProviderError::internal("the embedder returned the wrong width of vectors"));
+        return Err(ProviderError::internal(
+            "the embedder returned the wrong width of vectors",
+        ));
     }
     vectors::insert_chunks(tx, slots.drain(..).zip(embedded))
 }
@@ -2052,13 +2151,19 @@ fn chunk_addresses(served: &Served, path: &str) -> ProviderResult<Vec<tantivy::D
 }
 
 fn chunk_text(served: &Served, address: tantivy::DocAddress) -> ProviderResult<String> {
-    let document: TantivyDocument = served.searcher.doc(address).map_err(ProviderError::internal)?;
-    let heading: Vec<String> = document.get_first(served.fields.heading_path)
+    let document: TantivyDocument = served
+        .searcher
+        .doc(address)
+        .map_err(ProviderError::internal)?;
+    let heading: Vec<String> = document
+        .get_first(served.fields.heading_path)
         .and_then(|value| value.as_str())
         .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or_default();
-    let content = document.get_first(served.fields.content)
-        .and_then(|value| value.as_str()).unwrap_or_default();
+    let content = document
+        .get_first(served.fields.content)
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
     Ok(embedding_text(&heading, content))
 }
 

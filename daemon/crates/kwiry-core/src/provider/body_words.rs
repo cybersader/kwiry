@@ -154,7 +154,13 @@ pub(crate) fn fold_for_match(text: &str) -> String {
     for (offset, ch) in text.char_indices() {
         let cp = u32::from(ch);
         let stable = ch.is_ascii() || is_letter(cp) || is_digit(cp);
-        if offset > start && (if stable { units >= FOLD_PIECE_UNITS } else { run >= FOLD_MARK_RUN_PIECE }) {
+        if offset > start
+            && (if stable {
+                units >= FOLD_PIECE_UNITS
+            } else {
+                run >= FOLD_MARK_RUN_PIECE
+            })
+        {
             fold_piece(&text[start..offset], &mut out);
             start = offset;
             units = 0;

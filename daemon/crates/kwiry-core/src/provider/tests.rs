@@ -651,7 +651,11 @@ fn hybrid_retries_if_an_edit_and_delete_land_between_legs() {
         Box::new(HashEmbedder::new()),
     )
     .unwrap();
-    feed(&store, "p", &[("a", "a.md", "quokka old"), ("b", "b.md", "quokka habitat")]);
+    feed(
+        &store,
+        "p",
+        &[("a", "a.md", "quokka old"), ("b", "b.md", "quokka habitat")],
+    );
     caught_up(&store, "p");
     let (answer, latest) = std::thread::scope(|scope| {
         let query = scope.spawn(|| ask(&store, &["p"], "quokka", ProviderMode::Hybrid, None, 5));
@@ -668,7 +672,12 @@ fn hybrid_retries_if_an_edit_and_delete_land_between_legs() {
     assert_eq!(answer.refs.len(), 1, "deleted note leaked: {answer:?}");
     assert_eq!(answer.refs[0].id, "a");
     assert_eq!(answer.refs[0].version, hex_sha256(b"quokka new"));
-    assert!(answer.coverage.iter().all(|kind| kind.as_of == Some(latest)));
+    assert!(
+        answer
+            .coverage
+            .iter()
+            .all(|kind| kind.as_of == Some(latest))
+    );
 }
 
 struct PausedQuery {
@@ -728,12 +737,21 @@ fn ambiguous_words_checkpoint_requires_a_full_rebuild() {
     put(&store, "p", "a", "a.md", "badger");
     let partition = store.feeding("p").unwrap();
     partition.lock().target().unwrap().words.fail_commit = true;
-    assert_eq!(store.checkpoint("p", 2).unwrap_err().code, ProviderErrorCode::Internal);
+    assert_eq!(
+        store.checkpoint("p", 2).unwrap_err().code,
+        ProviderErrorCode::Internal
+    );
     let publish_refused = store.commit("p").is_err();
     assert_eq!(store.status("p").unwrap().as_of, Some(first));
     assert_eq!(ids(&store, &["p"], "quokka"), ["p/a"]);
     assert!(ids(&store, &["p"], "badger").is_empty());
-    assert_eq!(store.begin("p", 1, ProviderFeedMode::Delta).unwrap_err().code, ProviderErrorCode::EpochMismatch);
+    assert_eq!(
+        store
+            .begin("p", 1, ProviderFeedMode::Delta)
+            .unwrap_err()
+            .code,
+        ProviderErrorCode::EpochMismatch
+    );
     assert!(publish_refused, "an ambiguous generation can still publish");
 
     store.begin("p", 1, ProviderFeedMode::Full).unwrap();
@@ -755,7 +773,10 @@ fn lexical_recalls_split_terms_after_a_full_candidate_window() {
         let path = format!("body-{n}.md");
         put(&store, "p", &path, &path, "quokka quokka quokka quokka");
     }
-    let target = format!("# first\n\nquokka\n\n# second\n\na{}\u{345}\u{897}b", "\u{301}".repeat(63));
+    let target = format!(
+        "# first\n\nquokka\n\n# second\n\na{}\u{345}\u{897}b",
+        "\u{301}".repeat(63)
+    );
     put(&store, "p", "target", "target.md", &target);
     store.checkpoint("p", 1).unwrap();
     store.commit("p").unwrap();
@@ -763,15 +784,29 @@ fn lexical_recalls_split_terms_after_a_full_candidate_window() {
     let served = p.served().unwrap();
     assert_eq!(chunk_addresses(&served, "target.md").unwrap().len(), 2);
     let outcome = search_pinned_with_quality(
-        &[PinnedSearcher { index: &served.index, fields: &served.fields, searcher: &served.searcher }],
-        "quokka", MAX_TOTAL_CANDIDATES, &SearchFilters::default(),
-    ).unwrap();
+        &[PinnedSearcher {
+            index: &served.index,
+            fields: &served.fields,
+            searcher: &served.searcher,
+        }],
+        "quokka",
+        MAX_TOTAL_CANDIDATES,
+        &SearchFilters::default(),
+    )
+    .unwrap();
     assert_eq!(outcome.hits.len(), MAX_TOTAL_CANDIDATES);
     assert!(outcome.hits.iter().all(|hit| hit.path != "target.md"));
     // The host's terms are authoritative even when Kwiry's ranking text
     // retrieves a completely different window of candidates.
     let terms = names(&["quokka", "aι"]);
-    let answer = ask(&store, &["p"], "quokka", ProviderMode::Lexical, Some(&terms), 1);
+    let answer = ask(
+        &store,
+        &["p"],
+        "quokka",
+        ProviderMode::Lexical,
+        Some(&terms),
+        1,
+    );
     assert_eq!(answer.refs[0].id, "target");
 }
 
@@ -781,7 +816,14 @@ fn embedding_backlog_coalesces_commits_while_indexer_is_blocked() {
     let gate = Arc::new(Mutex::new(()));
     let store = gated_store(dir.path(), &gate);
     let closed = gate.lock().unwrap();
-    feed(&store, "p", &[("a", "a.md", "initial quokka"), ("b", "b.md", "to be deleted")]);
+    feed(
+        &store,
+        "p",
+        &[
+            ("a", "a.md", "initial quokka"),
+            ("b", "b.md", "to be deleted"),
+        ],
+    );
     let partition = store.known("p").unwrap().unwrap();
     let mut latest = None;
     for n in 2..=12 {
@@ -814,13 +856,19 @@ fn embedding_large_delta_limits_passages_per_call() {
     let store = ProviderStore::open_with_semantic(
         dir.path(),
         Box::new(HashEmbedder::new()),
-        Box::new(RecordingEmbedder { inner: HashEmbedder::new(), batches: Arc::clone(&batches) }),
-    ).unwrap();
+        Box::new(RecordingEmbedder {
+            inner: HashEmbedder::new(),
+            batches: Arc::clone(&batches),
+        }),
+    )
+    .unwrap();
     feed(&store, "p", &[("a", "a.md", "quokka before the edit")]);
     caught_up(&store, "p");
     lock(&batches).clear();
 
-    let large = (0..260).map(|n| format!("## Section {n}\n\nquokka habitat\n\n")).collect::<String>();
+    let large = (0..260)
+        .map(|n| format!("## Section {n}\n\nquokka habitat\n\n"))
+        .collect::<String>();
     store.begin("p", 1, ProviderFeedMode::Delta).unwrap();
     put(&store, "p", "a", "a.md", &large);
     store.checkpoint("p", 2).unwrap();
@@ -829,7 +877,10 @@ fn embedding_large_delta_limits_passages_per_call() {
 
     let batches = lock(&batches);
     assert_eq!(batches.iter().sum::<usize>(), 260);
-    assert!(batches.iter().all(|&size| size <= 128), "unbounded passage batches: {batches:?}");
+    assert!(
+        batches.iter().all(|&size| size <= 128),
+        "unbounded passage batches: {batches:?}"
+    );
     let answer = ask(&store, &["p"], "quokka", ProviderMode::Semantic, None, 5);
     assert_eq!(answer.refs[0].version, hex_sha256(large.as_bytes()));
 }
@@ -858,8 +909,12 @@ fn gated_store(dir: &Path, gate: &Arc<Mutex<()>>) -> ProviderStore {
     ProviderStore::open_with_semantic(
         dir,
         Box::new(HashEmbedder::new()),
-        Box::new(GatedEmbedder { inner: HashEmbedder::new(), gate: Arc::clone(gate) }),
-    ).unwrap()
+        Box::new(GatedEmbedder {
+            inner: HashEmbedder::new(),
+            gate: Arc::clone(gate),
+        }),
+    )
+    .unwrap()
 }
 
 /// An embedder whose passage batches wait on a gate the test holds.

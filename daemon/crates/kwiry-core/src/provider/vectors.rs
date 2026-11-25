@@ -56,23 +56,28 @@ pub(super) fn commit(tx: Transaction<'_>) -> ProviderResult<()> {
 
 pub(super) fn remove_note(tx: &Transaction<'_>, id: &str) -> ProviderResult<()> {
     tx.prepare_cached("DELETE FROM chunks WHERE slot = (SELECT slot FROM notes WHERE id = ?1)")
-        .and_then(|mut statement| statement.execute([id])).map_err(sql)?;
+        .and_then(|mut statement| statement.execute([id]))
+        .map_err(sql)?;
     tx.prepare_cached("DELETE FROM notes WHERE id = ?1")
-        .and_then(|mut statement| statement.execute([id])).map_err(sql)?;
+        .and_then(|mut statement| statement.execute([id]))
+        .map_err(sql)?;
     Ok(())
 }
 
 pub(super) fn replace_note(tx: &Transaction<'_>, id: &str, version: &str) -> ProviderResult<i64> {
     remove_note(tx, id)?;
     tx.prepare_cached("INSERT INTO notes (id, version) VALUES (?1, ?2)")
-        .and_then(|mut statement| statement.insert((id, version))).map_err(sql)
+        .and_then(|mut statement| statement.insert((id, version)))
+        .map_err(sql)
 }
 
 pub(super) fn insert_chunks(
     tx: &Transaction<'_>,
     chunks: impl Iterator<Item = (i64, Vec<f32>)>,
 ) -> ProviderResult<()> {
-    let mut statement = tx.prepare_cached("INSERT INTO chunks (slot, embedding) VALUES (?1, ?2)").map_err(sql)?;
+    let mut statement = tx
+        .prepare_cached("INSERT INTO chunks (slot, embedding) VALUES (?1, ?2)")
+        .map_err(sql)?;
     for (slot, vector) in chunks {
         statement.execute((slot, vector.as_bytes())).map_err(sql)?;
     }
@@ -99,10 +104,12 @@ pub(super) fn nearest_notes(
     if want == 0 {
         return Ok(best);
     }
-    let mut notes = conn.prepare_cached("SELECT slot, id, version FROM notes").map_err(sql)?;
-    let mut distance = conn.prepare_cached(
-        "SELECT MIN(vec_distance_L2(embedding, ?1)) FROM chunks WHERE slot = ?2"
-    ).map_err(sql)?;
+    let mut notes = conn
+        .prepare_cached("SELECT slot, id, version FROM notes")
+        .map_err(sql)?;
+    let mut distance = conn
+        .prepare_cached("SELECT MIN(vec_distance_L2(embedding, ?1)) FROM chunks WHERE slot = ?2")
+        .map_err(sql)?;
     let mut rows = notes.query([]).map_err(sql)?;
     while let Some(row) = rows.next().map_err(sql)? {
         let id = row.get_ref(1).map_err(sql)?.as_str().map_err(sql)?;
@@ -111,17 +118,29 @@ pub(super) fn nearest_notes(
             continue;
         }
         let slot: i64 = row.get(0).map_err(sql)?;
-        let Some(distance) = distance.query_row((query.as_bytes(), slot), |row| row.get::<_, Option<f64>>(0)).map_err(sql)? else {
+        let Some(distance) = distance
+            .query_row((query.as_bytes(), slot), |row| row.get::<_, Option<f64>>(0))
+            .map_err(sql)?
+        else {
             continue;
         };
         let position = best.partition_point(|hit| {
-            hit.distance.total_cmp(&distance).then_with(|| hit.id.as_bytes().cmp(id.as_bytes())).is_lt()
+            hit.distance
+                .total_cmp(&distance)
+                .then_with(|| hit.id.as_bytes().cmp(id.as_bytes()))
+                .is_lt()
         });
         if position < want {
             if best.len() == want {
                 best.pop();
             }
-            best.insert(position, NoteHit { id: id.into(), distance });
+            best.insert(
+                position,
+                NoteHit {
+                    id: id.into(),
+                    distance,
+                },
+            );
         }
     }
     Ok(best)
@@ -137,7 +156,11 @@ mod tests {
         vectors: Vec<Vec<f32>>,
     }
 
-    fn apply(conn: &mut Connection, remove: &[String], upsert: &[NoteVectors]) -> ProviderResult<()> {
+    fn apply(
+        conn: &mut Connection,
+        remove: &[String],
+        upsert: &[NoteVectors],
+    ) -> ProviderResult<()> {
         let tx = begin(conn)?;
         for id in remove {
             remove_note(&tx, id)?;
@@ -176,15 +199,29 @@ mod tests {
     #[test]
     fn nearest_notes_reaches_current_notes_beyond_the_chunk_cap() {
         let conn = &mut open(Path::new(":memory:"), 2).unwrap();
-        let notes = [("stale", "old", 4096), ("close", "1", 4096), ("far", "1", 1)]
-            .map(|(id, version, chunks)| NoteVectors {
-                id: id.into(),
-                version: version.into(),
-                vectors: vec![if id == "far" { vec![0.0, 1.0] } else { vec![1.0, 0.0] }; chunks],
-            });
+        let notes = [
+            ("stale", "old", 4096),
+            ("close", "1", 4096),
+            ("far", "1", 1),
+        ]
+        .map(|(id, version, chunks)| NoteVectors {
+            id: id.into(),
+            version: version.into(),
+            vectors: vec![
+                if id == "far" {
+                    vec![0.0, 1.0]
+                } else {
+                    vec![1.0, 0.0]
+                };
+                chunks
+            ],
+        });
         apply(conn, &[], &notes).unwrap();
         let hits = nearest_notes(conn, &[1.0, 0.0], 2, |_, version| version == "1").unwrap();
-        assert_eq!(hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(), ["close", "far"]);
+        assert_eq!(
+            hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            ["close", "far"]
+        );
     }
 
     #[test]
@@ -226,7 +263,9 @@ mod tests {
         let hits = nearest_notes(&conn, &unit(&[1.0, 0.0]), 5, |_, _| true).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "b");
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(count, 1);
         assert!(
             nearest_notes(&conn, &unit(&[1.0, 0.0]), 5, |_, version| version == "1")
